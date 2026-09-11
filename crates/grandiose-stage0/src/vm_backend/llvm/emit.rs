@@ -736,6 +736,11 @@ impl<'a, 'p> Body<'a, 'p> {
                 let value = self.value(format!("load i8, ptr {flag}, align 1"));
                 self.store_scalar(*dst, &value)?;
             }
+            I::DerefIsInitialized { dst, reference } => {
+                self.argument_slot(0, &self.pointer(*reference), &format!("%init{reference}"));
+                self.callable_action(10, *reference, &self.pointer(*dst));
+                self.mark(*dst, &[], true);
+            }
             I::Borrow {
                 dst,
                 src,

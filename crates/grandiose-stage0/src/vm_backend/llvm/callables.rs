@@ -189,6 +189,15 @@ impl<'a> CallableContext<'a> {
                 let holes = unsafe { self.holes(&plan.frame_layouts[function as usize].paths[*src as usize], flags)? };
                 target.replace_native_initialization(&fields, &holes)
             }
+            (10, I::DerefIsInitialized { reference, .. }) => {
+                let VmValue::Reference { target, fields, .. } =
+                    (unsafe { self.reference(function, *reference, slots)? }) else { unreachable!() };
+                // This observes the existing referent's shell, not the live
+                // handle flag or a payload read. Logical zero-byte fields keep
+                // their own paths even when their machine pointers coincide.
+                unsafe { result.write(u8::from(target.native_initialized(&fields, false))); }
+                Ok(())
+            }
             _ => Err(invalid("generated reference action does not match its checked instruction")),
         }
     }
@@ -250,7 +259,7 @@ unsafe extern "C" fn action(
                     layout.write(result, value, budget)?;
                     Ok(())
                 }
-                4..=7 => domain.reference_action(context, operation, function, pc, slots, result),
+                4..=7 | 10 => domain.reference_action(context, operation, function, pc, slots, result),
                 8 => {
                     let key = domain.module.plan().functions.get(function as usize).ok_or_else(|| invalid("unknown raw reference body"))?;
                     let body = &domain.module.plan().program.program.functions[key];

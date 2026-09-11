@@ -72,7 +72,7 @@ impl Binding {
             Self::Choice(choices)
         }
     }
-    fn has_capability(&self) -> bool {
+    pub(super) fn has_capability(&self) -> bool {
         match self {
             Self::Contract(_) => true,
             Self::Closure(closure) => closure.captures.values().any(Self::has_capability),

@@ -17,6 +17,90 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn callable_stores_transfer_only_through_checked_outside_frame_destinations() {
+    for body in [
+        "pub fn main(slot:&mut Callback,replacement:Callback) {*slot=replacement;}",
+        "pub fn main(slot:&mut (Callback,i64),replacement:Callback) {slot.0=replacement;}",
+        "pub fn main(slot:&mut Callback,replacement:Callback) {let target=slot; *target=replacement;}",
+        "struct Slot {callback:Callback} pub fn main(slot:&mut Slot,replacement:Callback) {slot.callback=replacement;}",
+        "pub fn main(slot:&mut Callback,replacement:Callback) {let task=move(slot,replacement){*slot=replacement;}; task();}",
+    ] {
+        let (core, signatures) = core_and_signatures_for("callable-store-boundary@0.1.0",
+            &format!("type Callback=(i64)->i64; {body}"));
+        assert!(core.diagnostics.is_empty(), "{body}: {:?}", core.diagnostics);
+        assert!(core.validate().is_empty(), "{body}: {:?}", core.validate());
+        let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+        assert!(flow.diagnostics.is_empty(), "{body}: {:?}", flow.diagnostics);
+        let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
+        assert!(uses.diagnostics.is_empty(), "{body}: {:?}", uses.diagnostics);
+        assert!(uses.callable_escapes.iter().any(|escape| escape.name == "replacement"
+            && escape.required == Some(Quantity::ONCE)
+            && escape.boundary == grandiose_stage0::CallableEscapeBoundary::Assignment), "{body}: {uses:?}");
+    }
+}
+
+#[test]
+fn callable_store_transfer_evidence_rejects_a_changed_destination() {
+    let (mut core, signatures) = core_and_signatures_for("callable-store-stale@0.1.0",
+        "type Callback=(i64)->i64; pub fn main(slot:&mut Callback,replacement:Callback) {*slot=replacement;}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    let CoreKind::Assign { place, .. } = &mut core.expressions.iter_mut().find(|expression|
+        matches!(expression.kind, CoreKind::Assign { .. })).unwrap().kind else { unreachable!() };
+    let CorePlace::Deref { ty, .. } = place else { panic!("dereference destination") };
+    *place = CorePlace::Local { name:"replacement".into(), ty:ty.clone() };
+    let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
+    assert!(!uses.diagnostics.is_empty());
+    assert!(uses.callable_escapes.is_empty());
+}
+
+#[test]
+fn callable_store_destinations_execute_after_acquiring_their_rhs() {
+    let (core, signatures) = core_and_signatures_for("callable-store-destination@0.1.0",
+        "type Callback=(i64)->i64;
+         pub fn main(slot:&mut Callback,replacement:Callback,get:Callback) {
+             *{get(0); slot}=replacement;
+         }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
+    assert!(uses.diagnostics.is_empty(), "{uses:?}");
+    assert!(uses.callable_uses.iter().any(|usage| usage.name == "get" && usage.actual == Quantity::ONCE), "{uses:?}");
+}
+
+#[test]
+fn callable_stores_cannot_erase_preceding_invocation_demand() {
+    for destination in [
+        "pub fn main(slot:&mut Callback,replacement:Callback) {replacement(0); *slot=replacement;}",
+        "pub fn main(replacement:Callback) {let mut slot:Callback=first; let target = &mut slot; replacement(0); *target=replacement;}",
+    ] {
+        let (core, signatures) = core_and_signatures_for("callable-store-demand@0.1.0", &format!(
+            "type Callback=(i64)->i64; fn first(value:i64)->i64 {{42}} {destination}"));
+        assert!(core.diagnostics.is_empty(), "{destination}: {:?}", core.diagnostics);
+        let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+        assert!(flow.diagnostics.is_empty(), "{destination}: {:?}", flow.diagnostics);
+        let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
+        assert!(uses.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{destination}: {uses:?}");
+    }
+}
+
+#[test]
+fn callable_stores_into_tracked_locals_do_not_also_count_as_outgoing_transfers() {
+    let (core, signatures) = core_and_signatures_for("callable-store-local@0.1.0",
+        "type Callback=(i64)->i64; fn first(value:i64)->i64 {42}
+         pub fn main(replacement:Callback) -> i64 {let mut slot:Callback=first; slot=replacement; slot(0)}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    let flow = PlaceFlow::analyze_with_interface(&core, &signatures);
+    assert!(flow.diagnostics.is_empty(), "{:?}", flow.diagnostics);
+    let uses = UseFlow::analyze_with_interface(&core, &flow, &signatures);
+    assert!(uses.diagnostics.is_empty(), "{uses:?}");
+    assert!(!uses.callable_escapes.iter().any(|escape|
+        escape.boundary == grandiose_stage0::CallableEscapeBoundary::Assignment), "{uses:?}");
+}
+
+#[test]
 fn assignment_callable_views_preserve_the_acquired_value_contract() {
     for (ty, initial, replacement) in [
         ("Callback", "first", "second"),

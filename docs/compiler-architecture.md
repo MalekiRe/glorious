@@ -2316,3 +2316,27 @@ helper-mutation case still has its source callable-transfer obligation. Projecte
 and referent view refinements remain conservative, as do dynamic interleavings;
 computed factory lifetime and the broader native-handler acceptance gates remain
 open. Executable and runtime generations do not change.
+
+## Checked outgoing assignment boundaries
+
+The existing PlaceFlow assignment transition produces the ownership boundary
+from actual reference targets, using the same resolved destinations for store
+validation and resident-origin updates. Retained lifetime debt is not destination
+authority. Repeated occurrences must agree, and the full typed-body seal binds
+the resulting product. UseFlow consumes positive outside-frame evidence for a
+callable assignment transfer, after RHS acquisition and destination evaluation.
+Tracked direct local storage retains its resident accounting. Unrepresented
+local/unknown storage of quantity capabilities rejects; general local-reference
+resident tracking remains an explicit integration obligation.
+
+Native referent initialization probes use the existing authenticated reference
+and backing initialization tree. They inspect the selected shell without reading
+payload or confusing same-address zero-sized fields. No second initialization
+map or callable-specific storage exception is introduced.
+
+Cache 161 verifies source transfer boundaries, destination order, stale evidence
+and combined-demand rejection, plus factory-callable replacement through fresh/
+decoded VM and native/mixed O0/O2. A VM/native probe test covers move-out, disjoint
+zero-sized fields and restoration. Native ABI becomes 19. The original helper
+mutation still fails writable-callable referent ABI validation; mutable reference
+invariance remains enforced. This is not complete native-handler acceptance.

@@ -373,6 +373,19 @@ fn prepared_receiver_keeps_captures_before_argument_replacement() {
 }
 
 #[test]
+fn stored_factory_callable_can_be_replaced_by_a_checked_helper() {
+    candidate("type Callback=(i64)->i64;
+        fn make(answer:i64) -> Callback {(value:i64)->i64 {answer}}
+        fn replace(slot:&mut Callback,replacement:Callback) {*slot=replacement;}
+        pub fn main() -> i64 {
+            let mut callback=make(0);
+            let replacement=make(42);
+            replace(&mut callback,replacement);
+            callback(0)
+        }");
+}
+
+#[test]
 fn owned_receiver_acquisition_precedes_writable_exposure_of_its_storage() {
     candidate("fn expose<T>(slot:&mut T) -> i64 {0}
         pub fn main() -> i64 {

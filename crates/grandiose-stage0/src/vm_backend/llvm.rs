@@ -22,7 +22,7 @@ pub use layout::{LlvmTarget, NativeTypeLayout, NativeTypeShape};
 pub use load::{LlvmCompileOptions, LlvmNativeModule};
 
 /// New native-module format. It is independent of portable bytecode encoding.
-pub const LLVM_NATIVE_ABI_GENERATION: u32 = 18;
+pub const LLVM_NATIVE_ABI_GENERATION: u32 = 19;
 pub const LLVM_CONTROL_CONVENTION: &str = "grandiose:shared-resumable-frames-v1";
 /// Initial stack-backed native activations impose this additional explicit
 /// resident-storage ceiling until the shared heap-frame convention is enabled.
@@ -478,6 +478,49 @@ mod tests {
                 let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
                 assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
             }
+        }
+    }
+
+    #[test]
+    fn native_reference_probes_observe_holes_in_distinct_zero_sized_fields() {
+        let entry = DefKey(Digest::of_bytes(b"native-reference-initialization-probes"));
+        let tuple = VmType::Tuple(vec![VmType::Unit, VmType::Unit]);
+        let reference = VmType::Reference { unique: true, referent: Box::new(VmType::Unit) };
+        let function = VmFunction {
+            definition: entry, safety: crate::Safety::Safe, unsafe_execution: false,
+            nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+            registers: vec![VmType::Unit, VmType::Unit, tuple, reference.clone(), reference,
+                VmType::Unit, VmType::Bool, VmType::Bool, VmType::Bool, VmType::I64],
+            instructions: vec![
+                I::DeclareResult { result: VmType::I64, returns: true },
+                I::ConstUnit { dst: 0 }, I::ConstUnit { dst: 1 },
+                I::MakeTupleOwned { dst: 2, fields: vec![0,1] },
+                I::Borrow { dst: 3, src: 2, fields: vec![0], unique: true, reborrow: false },
+                I::Borrow { dst: 4, src: 2, fields: vec![1], unique: true, reborrow: false },
+                I::DerefMove { dst: 5, reference: 3 },
+                I::DerefIsInitialized { dst: 6, reference: 3 },
+                I::BranchBool { condition: 6, then_target: 16, else_target: 9 },
+                I::DerefIsInitialized { dst: 7, reference: 4 },
+                I::BranchBool { condition: 7, then_target: 11, else_target: 16 },
+                I::DerefStore { reference: 3, src: 5 },
+                I::DerefIsInitialized { dst: 8, reference: 3 },
+                I::BranchBool { condition: 8, then_target: 14, else_target: 16 },
+                I::ConstI64 { dst: 9, value: 42 }, I::Return { value: 9 }, I::Trap,
+            ],
+        };
+        let mut candidate = CandidateVmProgram { schema: crate::STAGE0_VM_SCHEMA,
+            runtime_manifest: None, host_capabilities: vec![], entry, functions: [(entry,function)].into(),
+            callable_environments: Default::default(), fingerprint: Digest::of_bytes(b"unsealed") };
+        candidate.fingerprint = candidate.computed_fingerprint();
+        let verified = verify_program(candidate).unwrap();
+        assert_eq!(verified.run_i64().unwrap(), 42);
+        assert_eq!(crate::decode_and_verify_program(&verified.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        let ir = LlvmIrProgram::lower_partitioned(verified, Digest::of_bytes(b"native-reference-initialization-test"),
+            LlvmTarget::host().unwrap(), Default::default()).unwrap();
+        for optimization in [0,2] {
+            // SAFETY: execute only this locally authored and verified graph.
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
         }
     }
 

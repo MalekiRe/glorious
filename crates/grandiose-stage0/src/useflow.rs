@@ -715,18 +715,23 @@ impl Analyzer<'_> {
                 if self.continuations.is_abrupt(value) {
                     return summary;
                 }
-                // Assignment stores a capability beyond this expression's
-                // direct invocation site. Until place summaries model the
-                // destination's exact callable contract, treat it as an
-                // opaque transfer rather than silently dropping a must-use
-                // obligation.
                 let replacement = self.binding_for_value(value, environment);
+                let (destination, returns) = self.assignment_destination(&place, environment);
+                let summary = self.compose(expression.span, summary, destination);
+                if !returns { return summary; }
+                if self.ownership.assignment_boundary(id) == crate::placeflow::AssignmentBoundary::OutsideFrame {
+                    let transferred = self.escape_evaluated_as(value, &replacement, &place.ty(), CallableEscapeBoundary::Assignment);
+                    return self.compose(expression.span, summary, transferred);
+                }
                 if let Some(place_fact) = self.assignment_place_fact(expression.span) {
                     let previous =
                         self.binding_at_place(&place, &place_fact, expression.span, environment);
                     self.record_overwrite(&previous, place_fact, expression.span);
                 }
-                self.assign_binding(&place, replacement, environment);
+                if !self.assign_binding(&place, replacement.clone(), environment) && replacement.has_capability() {
+                    self.error(expression.span, "G5013",
+                        "callable assignment destination is not represented in the quantity storage state");
+                }
                 summary
             }
             CoreKind::Borrow { unique, value } => {
@@ -1686,25 +1691,36 @@ impl Analyzer<'_> {
         }
     }
 
+    fn assignment_destination(&mut self, place: &CorePlace, environment: &mut Environment) -> (Summary, bool) {
+        match place {
+            CorePlace::Field { base, .. } => self.assignment_destination(base, environment),
+            CorePlace::Deref { reference, .. } => {
+                let summary = self.expression(*reference, environment);
+                (summary, !self.continuations.is_abrupt(*reference))
+            }
+            CorePlace::Local { .. } | CorePlace::Error => (Summary::default(), true),
+        }
+    }
+
     fn assign_binding(
         &mut self,
         place: &CorePlace,
         replacement: Binding,
         environment: &mut Environment,
-    ) {
+    ) -> bool {
         match place {
             CorePlace::Local { name, .. } => {
                 environment.bindings.insert(name.clone(), replacement);
+                true
             }
             CorePlace::Field { base, index, .. } => {
                 let mut aggregate = self.existing_binding_at_place(base, environment);
                 if let Binding::Aggregate(fields) = &mut aggregate {
                     fields.insert(*index, replacement);
-                    self.assign_binding(base, aggregate, environment);
-                }
+                    self.assign_binding(base, aggregate, environment)
+                } else { false }
             }
-            CorePlace::Deref { .. } => {}
-            CorePlace::Error => {}
+            CorePlace::Deref { .. } | CorePlace::Error => false,
         }
     }
 

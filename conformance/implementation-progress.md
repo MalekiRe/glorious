@@ -5,6 +5,31 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 161: checked outgoing stores and native referent probes
+
+PlaceFlow publishes a checked assignment boundary from the actual reference
+targets used by its existing store transition. Retained lifetime loans alone
+cannot authorize an outgoing transfer. UseFlow consumes that boundary, evaluates
+computed destinations after acquiring the RHS, and accounts for callable
+transfers into caller-owned storage. Direct local stores keep their tracked
+resident; an unrepresented local/unknown store of a quantity capability rejects
+instead of silently dropping its obligation. Full local-reference resident
+tracking remains open. The product is bound to the existing typed-body evidence.
+
+Five source checks cover outgoing whole/field/aliased/captured destinations,
+computed destination order, combined invocation/transfer rejection, tracked local
+stores and stale evidence. A producer check distinguishes targets from retained
+loans. The factory-callable replacement gate passes fresh/decoded VM and native/
+mixed O0/O2 execution. Native `DerefIsInitialized` now authenticates the existing
+reference and queries its referent's initialization shell. A focused VM/native
+test preserves distinct moved-out and restored zero-sized field identities.
+
+The original helper-mutation regression advances past quantity checking but
+still fails G7042: writable callable storage exposes a stronger resident referent
+than the helper's declared ABI. Mutable reference invariance is not weakened.
+Computed-factory lifetime and the remaining native-handler gates are still open.
+Native ABI generation is 19; bytecode and verifier generations are unchanged.
+
 ## Cache 160: executed resident permissions for storage views
 
 The retained ownership quantity equations now distinguish a slot's whole-lifetime

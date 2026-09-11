@@ -32,6 +32,35 @@ struct AssignmentOrigins {
     keys: BTreeSet<String>,
     exact: bool,
     unknown_local: bool,
+    boundary: AssignmentBoundary,
+}
+
+/// A checked store's ownership boundary. Retained lifetime loans do not
+/// establish its destination: outside-frame transfer needs actual targets.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AssignmentBoundary {
+    Local,
+    OutsideFrame,
+    Unknown,
+}
+
+impl AssignmentOrigins {
+    fn referent(origins: ReferenceOrigins) -> Self {
+        let Some(targets) = origins.targets else {
+            return Self { keys: BTreeSet::new(), exact: false,
+                unknown_local: origins.loans.is_empty() || origins.loans.iter().any(|loan| !loan.indirect && !loan.external),
+                boundary: AssignmentBoundary::Unknown };
+        };
+        let boundary = if !targets.is_empty() && targets.iter().all(|loan| loan.indirect || loan.external) {
+            AssignmentBoundary::OutsideFrame
+        } else if !targets.is_empty() && targets.iter().all(|loan| !loan.indirect && !loan.external) {
+            AssignmentBoundary::Local
+        } else { AssignmentBoundary::Unknown };
+        let precise = targets.iter().all(|loan| loan.capture_path.is_empty() && !loan.indirect && !loan.external);
+        let keys = targets.into_iter().filter(|loan| !loan.indirect && !loan.external)
+            .map(|loan| loan.resident_key(&[])).collect::<BTreeSet<_>>();
+        Self { exact: precise && keys.len() == 1, keys, unknown_local: false, boundary }
+    }
 }
 
 impl Projection {
@@ -200,6 +229,23 @@ mod reference_origin_tests {
         ProjectionLoan { place: Projection { root: root.into(), fields: vec![] },
             capture_path: vec![], unique: true, owner: None,
             partitions: BTreeMap::new(), indirect: false, external: false }
+    }
+
+    #[test]
+    fn callable_store_boundaries_need_targets_not_retained_loans() {
+        let local = loan("local");
+        let mut caller = loan("caller");
+        caller.indirect = true;
+        let mut origins = ReferenceOrigins::known(BTreeSet::from([caller.clone()]));
+        origins.loans.insert(local.clone());
+        assert_eq!(AssignmentOrigins::referent(origins.clone()).boundary, AssignmentBoundary::OutsideFrame);
+        origins.targets = None;
+        assert_eq!(AssignmentOrigins::referent(origins).boundary, AssignmentBoundary::Unknown);
+        assert_eq!(AssignmentOrigins::referent(ReferenceOrigins::known(BTreeSet::new())).boundary, AssignmentBoundary::Unknown);
+        let mut origins = ReferenceOrigins::known(BTreeSet::from([local]));
+        assert_eq!(AssignmentOrigins::referent(origins.clone()).boundary, AssignmentBoundary::Local);
+        origins.join(ReferenceOrigins::known(BTreeSet::from([caller])));
+        assert_eq!(AssignmentOrigins::referent(origins).boundary, AssignmentBoundary::Unknown);
     }
 
     #[test]
@@ -697,6 +743,7 @@ pub struct PlaceFlow {
     /// Call-specific receiver loans checked across strict argument evaluation.
     /// Absence requires ordinary owned acquisition; syntax cannot grant a view.
     invocation_receivers: BTreeMap<CoreId, InvocationAcquisition>,
+    checked_assignments: BTreeMap<CoreId, AssignmentBoundary>,
     minimum_suspensions: Vec<minimum::MinimumSuspension>,
     /// Frozen per-callable loan/resource products from this exact Core arena.
     /// Escape and lowering share these; a closure body never borrows the
@@ -743,6 +790,10 @@ pub struct PlaceFlow {
     pub diagnostics: Vec<FlowDiagnostic>,
 }
 impl PlaceFlow {
+    pub(crate) fn assignment_boundary(&self, assignment: CoreId) -> AssignmentBoundary {
+        self.checked_assignments.get(&assignment).copied().unwrap_or(AssignmentBoundary::Unknown)
+    }
+
     pub(crate) fn invocation_acquisition(&self, call: CoreId) -> Option<InvocationAcquisition> {
         self.invocation_receivers.get(&call).copied()
     }
@@ -923,6 +974,7 @@ impl PlaceFlow {
             projection_loans: vec![],
             checked_borrows: BTreeMap::new(),
             invocation_receivers: BTreeMap::new(),
+            checked_assignments: BTreeMap::new(),
             receiver_budget: std::rc::Rc::new(std::cell::Cell::new(body.expressions.len().saturating_mul(8).max(64))),
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
@@ -1023,6 +1075,7 @@ impl PlaceFlow {
             resumption_transfers: None,
             checked_borrows: a.checked_borrows,
             invocation_receivers: a.invocation_receivers,
+            checked_assignments: a.checked_assignments,
             minimum_suspensions: a.minimum_suspensions,
             closure_flows: BTreeMap::new(),
             continuations: Some(continuations.clone()),
@@ -1090,6 +1143,7 @@ struct Analyzer<'a> {
     projection_loans: Vec<ProjectionLoan>,
     checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
     invocation_receivers: BTreeMap<CoreId, InvocationAcquisition>,
+    checked_assignments: BTreeMap<CoreId, AssignmentBoundary>,
     /// Alternatives share work accounting even when their state is rolled
     /// back. Nested conflicting prefixes must not expand exponentially.
     receiver_budget: std::rc::Rc<std::cell::Cell<usize>>,
@@ -1855,6 +1909,7 @@ impl Analyzer<'_> {
                 self.event(FlowEventKind::Initialize(binding), e.span)
             }
             CoreKind::Assign { place, value } => {
+                let previous_errors = self.diagnostics.len();
                 // The destination is evaluated after the RHS, but its local
                 // references must keep their loans alive while the RHS is
                 // evaluated.  Otherwise `*parent = rhs` could prematurely
@@ -1902,8 +1957,17 @@ impl Analyzer<'_> {
                         self.use_projected_deref_reference(*reference, &fields, e.span, true);
                     }
                 }
-                self.assign_place(&place, e.span);
-                self.record_assigned_reference_origin(&place, &input);
+                let destinations = self.place_origin_keys(&place);
+                self.assign_place(&place, destinations.as_ref(), e.span);
+                if self.diagnostics.len() == previous_errors {
+                    let boundary = destinations.as_ref().map_or(AssignmentBoundary::Unknown, |origins| origins.boundary);
+                    self.checked_assignments.entry(id).and_modify(|previous| {
+                        if *previous != boundary { *previous = AssignmentBoundary::Unknown; }
+                    }).or_insert(boundary);
+                    if let Some(destinations) = destinations {
+                        self.record_assigned_reference_origin(destinations, &input);
+                    }
+                }
                 self.release_minimum_owners(&BTreeSet::from([input.owner.clone()]));
                 self.release_evaluated_operands(&[input], e.span);
             }
@@ -4417,11 +4481,8 @@ impl Analyzer<'_> {
         }
     }
 
-    fn record_assigned_reference_origin(&mut self, place: &CorePlace, input: &invocations::EvaluatedOperand) {
+    fn record_assigned_reference_origin(&mut self, destinations: AssignmentOrigins, input: &invocations::EvaluatedOperand) {
         let value = input.expression;
-        let Some(destinations) = self.place_origin_keys(place) else {
-            return;
-        };
         if destinations.unknown_local {
             let empty = ElaboratedInterface::default();
             if !crate::core::tail::tail_owned_type(self.signatures.unwrap_or(&empty),
@@ -4487,24 +4548,18 @@ impl Analyzer<'_> {
         match place {
             CorePlace::Local { name, .. } => Some(AssignmentOrigins {
                 keys: BTreeSet::from([self.resolve_name(name)]), exact: true, unknown_local: false,
+                boundary: AssignmentBoundary::Local,
             }),
             CorePlace::Field { base, index, .. } => {
                 let base = self.place_origin_keys(base)?;
                 Some(AssignmentOrigins { keys: base.keys.into_iter().map(|key|
-                    projection_key(&key, &[*index])).collect(), exact: base.exact, unknown_local: base.unknown_local })
+                    projection_key(&key, &[*index])).collect(), exact: base.exact, unknown_local: base.unknown_local,
+                    boundary: base.boundary })
             }
             CorePlace::Deref { reference, .. } => {
                 // Preserve all represented local destinations. Type-grouped
                 // captured residents do not identify a single physical slot.
-                let origins = self.reference_origins_from_value(*reference);
-                let Some(targets) = origins.targets else {
-                    return Some(AssignmentOrigins { keys: BTreeSet::new(), exact: false,
-                        unknown_local: origins.loans.is_empty() || origins.loans.iter().any(|loan| !loan.indirect && !loan.external) });
-                };
-                let precise = targets.iter().all(|loan| loan.capture_path.is_empty() && !loan.indirect && !loan.external);
-                let places = targets.into_iter().filter(|loan| !loan.indirect && !loan.external)
-                    .map(|loan| loan.resident_key(&[])).collect::<BTreeSet<_>>();
-                Some(AssignmentOrigins { exact: precise && places.len() == 1, keys: places, unknown_local: false })
+                Some(AssignmentOrigins::referent(self.reference_origins_from_value(*reference)))
             }
             CorePlace::Error => None,
         }
@@ -4712,7 +4767,7 @@ impl Analyzer<'_> {
         }
     }
 
-    fn assign_place(&mut self, place: &CorePlace, span: Span) {
+    fn assign_place(&mut self, place: &CorePlace, destinations: Option<&AssignmentOrigins>, span: Span) {
         // A reborrow suspends the *reference carrier* as well as access to
         // the backing referent.  It is not enough to reject `*parent = ...`:
         // replacing `holder.loan` (or the aggregate containing it) while
@@ -4726,8 +4781,8 @@ impl Analyzer<'_> {
         // preserving disjoint sibling updates.  Only a live projection loan
         // may trigger the error: NLL release of the child before this store
         // deliberately reopens the carrier for a new reference.
-        if let Some(carrier) = self.place_origin_keys(place).and_then(|origins|
-            origins.keys.into_iter().find(|carrier| self.live_reborrow_descends_from(carrier)))
+        if let Some(carrier) = destinations.and_then(|origins|
+            origins.keys.iter().find(|carrier| self.live_reborrow_descends_from(carrier)))
         {
             self.error(
                 span,
