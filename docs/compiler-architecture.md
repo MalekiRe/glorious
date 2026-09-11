@@ -2996,3 +2996,29 @@ still encounters an unresolved inference-region projection before sealing and
 remains an active source failure. No source inference cell is made rigid by
 this correction, and no runtime reference identity, wire format or executable
 ownership permission changes.
+
+## Parametric associated results before caller-region sealing
+
+Cache 188 extends the shared type, effect-row and constant projection normalizer
+to prove results that are independent of an unresolved caller-region choice.
+It abstracts the caller's lifetime inference cells into distinct slots in one
+fresh owned binder, carries the exact lexical trait, outlives, associated-equality,
+quantified and callable-environment context through the same capture-avoiding
+region transformation, and uses ordinary scoped projection selection. A proven
+result is opened back into the exact original inference cells. Existing outer
+binders shift and return; nested callable-bound regions are not captured.
+
+This is parametric normalization, not source inference: it neither solves nor
+defaults a caller's lifetime, head type, row or constant variable. A static-only
+implementation or a missing outlives premise leaves the original projection
+deferred. Failed universal proof does not refute a possible later concrete
+choice. Escaped binders and placeholders gain no admission. Query tables remain
+isolated while the recursive projection stack and spent solver budget remain
+part of the enclosing query; opening cannot publish the temporary binder.
+
+Core field reads, dereference, writable access and reborrowing now receive the
+selected reference shape before body-region sealing. They continue to check
+the producer's actual lifetime and shared/unique authority through their
+existing rules. There is no delayed-dereference guess, premature region seal or
+additional source/Core fact walker. This closes the direct associated-field
+dereference failure above without changing executable proofs, encoding or ABI.

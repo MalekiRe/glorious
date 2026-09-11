@@ -381,6 +381,41 @@ pub struct TraitSolver {
 #[derive(Clone, Copy)]
 enum UseEvidence { Declared, Resident }
 
+/// A parametric query abstracts only caller-owned lifetime inference cells.
+/// Other unsolved kinds remain unsolved; existing region binders shift without
+/// capture. A successful result is opened back into the very same cells.
+#[derive(Default)]
+struct ParametricRegions {
+    inputs: Vec<Lifetime>,
+    indices: BTreeMap<Lifetime, u32>,
+}
+
+impl ParametricRegions {
+    fn abstract_argument(&mut self, value: GenericArgument, outer_depth: u32) -> Option<GenericArgument> {
+        crate::types::regions::map_argument_regions(value, &mut |region, depth| {
+            let cutoff = depth.checked_add(outer_depth)?;
+            Some(match region {
+                Lifetime::Infer(_) => {
+                    let index = if let Some(index) = self.indices.get(&region) { *index } else {
+                        let index = u32::try_from(self.inputs.len()).ok()?;
+                        self.inputs.push(region);
+                        self.indices.insert(region, index);
+                        index
+                    };
+                    Lifetime::Bound { depth: cutoff, index }
+                }
+                Lifetime::Bound { depth, index } if depth >= cutoff =>
+                    Lifetime::Bound { depth: depth.checked_add(1)?, index },
+                region => region,
+            })
+        })
+    }
+
+    fn open(&self, value: GenericArgument) -> Option<GenericArgument> {
+        crate::types::regions::open_argument(value, |index| self.inputs.get(index as usize).copied())
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum AssociatedItemKind {
     Type,
@@ -1750,6 +1785,56 @@ impl TraitSolver {
         self.normalize_type_projections_in_hrtb(value, active, &[])
     }
 
+    /// A lifetime-dependent head may have a result valid for every choice of
+    /// its unresolved regions. Prove that under a fresh owned binder, retaining
+    /// the exact lexical predicates, then restore the caller's original cells.
+    /// Failure is not refutation of the eventual caller choice: a static-only
+    /// implementation, for example, must stay deferred until inference decides.
+    /// This never solves a caller type, lifetime, row or constant variable.
+    fn normalize_parametric_regions(&mut self, value: GenericArgument, active: &mut Vec<Digest>,
+        hrtb_binders: &[u32]) -> Option<GenericArgument> {
+        if self.steps >= self.limits.max_steps || self.quantified_depth >= self.limits.max_depth {
+            return None;
+        }
+        let mut regions = ParametricRegions::default();
+        let abstracted = regions.abstract_argument(value.clone(), 0)?;
+        if regions.inputs.is_empty() { return None; }
+        let mut invalid = false;
+        let contract = crate::signature::AssociatedItemContract {
+            where_bounds: self.lexical_assumptions.iter().map(|goal|
+                (goal.subject.clone(), goal.relation.clone())).collect(),
+            where_outlives: self.lexical_outlives.as_ref().clone(),
+            type_bindings: self.assumed_type_bindings.as_ref().clone(),
+            effect_bindings: self.assumed_effect_bindings.as_ref().clone(),
+        }.map_terms(|argument| regions.abstract_argument(argument.clone(), 0)
+            .unwrap_or_else(|| { invalid = true; argument }));
+        let universal = self.lexical_universal.iter().map(|bound| bound.map_terms(|argument|
+            regions.abstract_argument(argument.clone(), 1).unwrap_or_else(|| { invalid = true; argument })))
+            .collect::<Vec<_>>();
+        let environments = self.callable_environments.iter().map(|environment|
+            match regions.abstract_argument(GenericArgument::Type(environment.clone()), 0) {
+                Some(GenericArgument::Type(value)) => value,
+                _ => { invalid = true; environment.clone() },
+            }).collect::<Vec<_>>();
+        if invalid { return None; }
+        let mut binders = vec![u32::try_from(regions.inputs.len()).ok()?];
+        binders.extend_from_slice(hrtb_binders);
+        let mut scoped = self.fresh_query();
+        scoped.lexical_assumptions = Arc::new(contract.where_bounds.into_iter().map(|(subject, relation)|
+            TraitGoal { subject, relation }).collect());
+        scoped.lexical_outlives = Arc::new(contract.where_outlives);
+        scoped.assumed_type_bindings = Arc::new(contract.type_bindings);
+        scoped.assumed_effect_bindings = Arc::new(contract.effect_bindings);
+        scoped.lexical_universal = Arc::new(universal);
+        scoped.callable_environments = environments;
+        scoped.quantified_depth += 1;
+        scoped.steps = self.steps + 1;
+        let normalized = scoped.normalize_trait_argument_in_hrtb(abstracted, active, &binders);
+        self.steps = self.steps.max(scoped.steps);
+        let result = regions.open(normalized.ok()?)?;
+        (result != value).then_some(result)
+    }
+
     /// HRTB-aware form of type projection normalization. `hrtb_binders` is
     /// ordered from the innermost callable outwards and is used solely to
     /// decide whether a bound item argument is rigidly scoped or escaped.
@@ -1816,6 +1901,10 @@ impl TraitSolver {
                 let concrete = projection_is_concrete_in_hrtb_scope(&projection, hrtb_binders);
                 let Type::Projection { subject, trait_definition, trait_arguments, item_arguments, .. } = &projection else { unreachable!() };
                 if !concrete && !projection_application_is_selectable(subject, *trait_definition, trait_arguments, item_arguments, hrtb_binders) {
+                    if let Some(GenericArgument::Type(normalized)) = self.normalize_parametric_regions(
+                        GenericArgument::Type(projection.clone()), active, hrtb_binders) {
+                        return Ok(normalized);
+                    }
                     return Ok(projection);
                 }
                 let residual = projection.clone();
@@ -2350,6 +2439,14 @@ impl TraitSolver {
                 && projection.trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders))
                 && projection.item_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
             if !concrete && !projection_application_is_selectable(&projection.subject, projection.trait_definition, &projection.trait_arguments, &projection.item_arguments, hrtb_binders) {
+                let input = GenericArgument::EffectRow(EffectRow { effects: Default::default(),
+                    tails: Default::default(), projections: vec![projection.clone()] });
+                if let Some(GenericArgument::EffectRow(normalized)) = self.normalize_parametric_regions(input, active, hrtb_binders) {
+                    result.effects.extend(normalized.effects);
+                    result.projections.extend(normalized.projections);
+                    result.tails.extend(normalized.tails);
+                    continue;
+                }
                 result.projections.push(projection);
                 continue;
             }
@@ -3124,13 +3221,7 @@ impl TraitSolver {
                 let concrete = projection_is_concrete_in_hrtb_scope(&subject, hrtb_binders)
                     && trait_arguments.iter().all(|argument| generic_argument_is_concrete_in_hrtb_scope(argument, hrtb_binders));
                 if !concrete && !projection_application_is_selectable(&subject, trait_definition, &trait_arguments, &[], hrtb_binders) {
-                    return Ok(GenericArgument::ConstProjection {
-                        subject,
-                        trait_definition,
-                        trait_arguments,
-                        name,
-                        kind,
-                    });
+                    return Ok(self.normalize_parametric_regions(residual.clone(), active, hrtb_binders).unwrap_or(residual));
                 }
                 let goal = TraitGoal {
                     relation: ElaboratedTraitReference {
@@ -4786,6 +4877,85 @@ mod tests {
         let Type::Callable { safety, .. } = &mut unsafe_callable else { unreachable!() };
         *safety = crate::Safety::Unsafe;
         assert_eq!(solver.normalize_effect_row(projected_row(unsafe_callable.clone())).unwrap(), projected_row(unsafe_callable));
+    }
+
+    #[test]
+    fn parametric_region_projections_preserve_type_row_and_const_inputs() {
+        let source = "trait Family { type Item; type Effects: EffectRow; const Width: u32; }
+            struct Plain<'a> {} struct Restricted<'a> {} struct Mixed<T,'a> {}
+            impl<'a> Family for Plain<'a> { type Item = &'a mut i64; type Effects = {}; const Width = 7; }
+            impl Family for Restricted<'static> { type Item = &'static i64; type Effects = {}; const Width = 9; }
+            impl<T,'a> Family for Mixed<T,'a> { type Item = T; type Effects = {}; const Width = 11; }";
+        let package = crate::PackageKey("parametric-projection-regions@0.1.0".into());
+        let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/lib.glorious"), source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        let key = |name: &str| interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap().key;
+        let lifetime = Lifetime::Infer(crate::types::LifetimeInferVar(0));
+        let subject = |name, region| Type::Nominal { definition: key(name), arguments: vec![GenericArgument::Lifetime(region)] };
+        let projected = |subject| Type::Projection { subject: Box::new(subject), trait_definition: key("Family"),
+            trait_arguments: vec![], name: "Item".into(), item_generic_kinds: vec![], item_arguments: vec![] };
+        let row = |subject| EffectRow { effects: Default::default(), tails: Default::default(), projections: vec![crate::EffectRowProjection {
+            subject: Box::new(subject), trait_definition: key("Family"), trait_arguments: vec![], name: "Effects".into(),
+            item_generic_kinds: vec![], item_arguments: vec![] }] };
+        let constant = |subject| GenericArgument::ConstProjection { subject: Box::new(subject), trait_definition: key("Family"),
+            trait_arguments: vec![], name: "Width".into(), kind: crate::ConstKind::U32 };
+        let mut solver = TraitSolver::new(&signatures);
+        assert_eq!(solver.normalize_type(projected(subject("Plain", lifetime))).unwrap(), Type::Reference {
+            lifetime, mutability: crate::Mutability::Unique, referent: Box::new(Type::Scalar(ScalarType::I64)),
+        });
+        assert_eq!(solver.normalize_effect_row(row(subject("Plain", lifetime))).unwrap(), EffectRow::empty());
+        assert_eq!(solver.normalize_generic_argument(constant(subject("Plain", lifetime))).unwrap(), GenericArgument::ConstInteger(7u32.into()));
+        let restricted = subject("Restricted", lifetime);
+        assert_eq!(solver.normalize_type(projected(restricted.clone())).unwrap(), projected(restricted.clone()));
+        assert_eq!(solver.normalize_effect_row(row(restricted.clone())).unwrap(), row(restricted.clone()));
+        assert_eq!(solver.normalize_generic_argument(constant(restricted.clone())).unwrap(), constant(restricted));
+        assert_eq!(solver.normalize_type(projected(subject("Restricted", Lifetime::Static))).unwrap(), Type::Reference {
+            lifetime: Lifetime::Static, mutability: crate::Mutability::Shared, referent: Box::new(Type::Scalar(ScalarType::I64)),
+        });
+        let mixed = Type::Nominal { definition: key("Mixed"), arguments: vec![
+            GenericArgument::Type(Type::Infer(crate::types::InferVar(0))), GenericArgument::Lifetime(lifetime)] };
+        assert_eq!(solver.normalize_type(projected(mixed.clone())).unwrap(), projected(mixed.clone()));
+        assert_eq!(solver.normalize_effect_row(row(mixed.clone())).unwrap(), row(mixed.clone()));
+        assert_eq!(solver.normalize_generic_argument(constant(mixed.clone())).unwrap(), constant(mixed));
+    }
+
+    #[test]
+    fn parametric_region_projection_preserves_lexical_and_outer_binder_relations() {
+        let source = "trait Family { type Item; } struct Conditional<'a,'b> {}
+            impl<'a,'b> Family for Conditional<'a,'b> where 'a: 'b { type Item = (&'a i64, &'b i64); }";
+        let package = crate::PackageKey("parametric-projection-context@0.1.0".into());
+        let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/lib.glorious"), source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        let key = |name: &str| interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap().key;
+        let first = Lifetime::Infer(crate::types::LifetimeInferVar(0));
+        let second = Lifetime::Infer(crate::types::LifetimeInferVar(1));
+        let projected = |a, b| Type::Projection {
+            subject: Box::new(Type::Nominal { definition: key("Conditional"), arguments: vec![
+                GenericArgument::Lifetime(a), GenericArgument::Lifetime(b)] }),
+            trait_definition: key("Family"), trait_arguments: vec![], name: "Item".into(),
+            item_generic_kinds: vec![], item_arguments: vec![],
+        };
+        let reference = |lifetime| Type::Reference { lifetime, mutability: crate::Mutability::Shared,
+            referent: Box::new(Type::Scalar(ScalarType::I64)) };
+        let mut solver = TraitSolver::new(&signatures);
+        assert_eq!(solver.normalize_type(projected(first, second)).unwrap(), projected(first, second));
+        assert_eq!(solver.normalize_type(projected(first, first)).unwrap(), Type::Tuple(vec![reference(first), reference(first)]));
+        solver.set_outlives_assumptions(vec![crate::OutlivesPredicate::Region { longer: first, shorter: second }]);
+        assert_eq!(solver.normalize_type(projected(first, second)).unwrap(), Type::Tuple(vec![reference(first), reference(second)]));
+        solver.set_outlives_assumptions(vec![]);
+        assert_eq!(solver.normalize_type(projected(first, second)).unwrap(), projected(first, second));
+        let outer = Lifetime::Bound { depth: 0, index: 0 };
+        solver.set_outlives_assumptions(vec![crate::OutlivesPredicate::Region { longer: outer, shorter: second }]);
+        assert_eq!(solver.normalize_type_in_region_binder(projected(outer, second), 1).unwrap(),
+            Type::Tuple(vec![reference(outer), reference(second)]));
+        assert_eq!(solver.normalize_type(projected(outer, second)).unwrap(), projected(outer, second),
+            "abstracting an inference cell cannot supply a missing outer binder");
     }
 
     #[test]

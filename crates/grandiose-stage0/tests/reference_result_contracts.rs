@@ -87,6 +87,47 @@ fn associated_nominal_inferred_lifetime_field_dereference() {
 }
 
 #[test]
+fn inferred_associated_references_preserve_unique_access_and_reborrows() {
+    let prefix = "#![no_std]
+        trait Items { type Item; }
+        struct Borrowed<'a> {} impl<'a> Items for Borrowed<'a> { type Item = &'a mut i64; }
+        struct Carrier<I> where I: Items { item: <I as Items>::Item }
+        fn wrap<'a>(item: &'a mut i64) -> Carrier<Borrowed<'a>> { Carrier { item: item } }";
+    for body in [
+        "*result.item = 42; *result.item",
+        "{ let alias = &mut *result.item; *alias = 42; }; *result.item",
+    ] {
+        accepts(&format!("{prefix} pub fn main() -> i64 {{ let mut value = 0; let result = wrap(&mut value); {body} }}"));
+    }
+}
+
+#[test]
+fn inferred_associated_references_cannot_invent_write_or_static_authority() {
+    let prefix = "#![no_std]
+        trait Items { type Item; }
+        struct Borrowed<'a> {} impl<'a> Items for Borrowed<'a> { type Item = &'a i64; }
+        struct Carrier<I> where I: Items { item: <I as Items>::Item }
+        fn wrap<'a>(item: &'a i64) -> Carrier<Borrowed<'a>> { Carrier { item: item } }";
+    for body in [
+        "*result.item = 0; *result.item",
+        "let alias = &mut *result.item; *alias = 0; *result.item",
+    ] {
+        for optimization in ["0", "2"] {
+            let source = format!("{prefix} pub fn main() -> i64 {{ let value = 42; let result = wrap(&value); {body} }}");
+            let failure = StageZeroCompiler::new().compile(request(&source, optimization)).expect_err("shared associated references cannot become writable");
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4141"), "{:?}", failure.diagnostics());
+        }
+    }
+    for optimization in ["0", "2"] {
+        let source = format!("{prefix}
+            fn escape() -> &'static i64 {{ let value = 42; let result = wrap(&value); &(*result.item) }}
+            pub fn main() -> i64 {{ *escape() }}");
+        let failure = StageZeroCompiler::new().compile(request(&source, optimization)).expect_err("opening a parametric query cannot extend a local loan");
+        assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5017" | "G4304")), "{:?}", failure.diagnostics());
+    }
+}
+
+#[test]
 fn associated_nominal_callable_fields_keep_their_invocation_obligations() {
     let prefix = "#![no_std]
         trait Items { type Item; }

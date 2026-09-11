@@ -5,6 +5,41 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Parametric projections with unresolved caller regions
+
+Cache 188 closes the remaining direct associated-field dereference failure
+preserved below. The shared type, effect-row and constant projection normalizer
+now proves lifetime-parametric results under a fresh explicit binder and opens
+them back into the caller's exact inference cells. Lexical predicates and
+enclosing binders survive the query; no lifetime is solved, defaulted to static
+or sealed early. Head type/constant/row inference remains ineligible. A
+static-only implementation or an absent prerequisite leaves a projection
+deferred rather than refuting its eventual concrete caller choice.
+
+All **36 reference-result tests pass** in the final cache-188 build. This
+includes all 34 preserved cases, with the formerly failing direct dereference
+unchanged, and two new safety/composition tests. Unique associated fields support
+both direct writes and scoped reborrows through fresh/decoded VM execution at
+O0/O2. Shared associated fields still reject writes and unique reborrows with
+G4141; returning a local loan through the normalized field as static still
+rejects. Existing generated-code cases in this suite also remain green.
+
+The focused projection run passes all 23 then-present checks; a subsequent
+two-test parametric run passes both new tests, adding one further distinct
+check. They cover exact lifetime-cell restoration across type/row/constant
+results, static-only deferral, unchanged head-type inference, reflexive and
+explicit outlives premises, enclosing binder restoration, removal of lexical
+evidence and refusal to invent an absent outer scope. All seven associated-
+binding integration tests also pass, including GAT reference/reborrow/escape
+and lexical-equality composition. The final reference suite takes 0.25 seconds
+after compilation; no test budget, source annotation or rejection assertion
+was relaxed.
+
+The iterator raw-backed mandatory-tail provenance failure and isolated I/O
+timeout are not rerun or claimed solved here. Full compiler conformance,
+finished standard library and the subsequent new self-hosted compiler remain
+unfinished.
+
 ## Bound region scope in selected reference contracts
 
 Cache 187 closes the borrowed associated-field factory failure preserved by
