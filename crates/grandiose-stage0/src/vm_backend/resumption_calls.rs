@@ -5,8 +5,8 @@
 //! outgoing value relation. Consumers instantiate that relation with actual
 //! live handler tokens. Unknown or recursive obligations publish no proof.
 //! Finite branch histories preserve invocation and disposal order, including
-//! repeated and aliased inputs. Helper-local active delimiters remain an
-//! explicit unsupported obligation, not an erased part of a call trace.
+//! repeated and aliased inputs. Local resumption returns compose through the
+//! same finite trace product, rather than erasing a helper's active delimiter.
 
 use super::*;
 use super::resumption_values::InputPath;
@@ -58,6 +58,16 @@ pub(super) struct Invocation {
 pub(super) enum Event {
     Invoke { input: InputPath, invocation: Invocation },
     Dispose { input: InputPath },
+    /// Producer-local dependency, eliminated before publishing an invocation
+    /// contract. Its body is observed by the ordinary control worklist.
+    LocalResume(ReturnSite),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+pub(super) struct ReturnSite { pc: u32, handler: u32 }
+
+impl ReturnSite {
+    pub(super) fn completes(self, handler: u32) -> bool { self.handler == handler }
 }
 
 /// Alternatives join by union; events within an alternative never commute.
@@ -105,9 +115,107 @@ pub(super) struct Contract {
     observed: Paths,
     normal: Paths,
     pub(super) result: ResumptionValue,
+    tracking: bool,
+    local: BTreeMap<ReturnSite, LocalTrace>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct LocalTrace { observed: Paths, normal: Paths }
+
 impl Contract {
+    pub(super) fn new(tracking: bool) -> Self { Self { tracking, ..Self::default() } }
+
+    fn observe(&mut self, state: &VerifierState) -> Result<(), VmArtifactError> {
+        if state.resumption_return_sites.is_empty() {
+            self.observed.join(&state.resumption_paths)?;
+        } else {
+            for site in &state.resumption_return_sites {
+                self.local.get_mut(site).ok_or(VmArtifactError::HandlerResumeUnavailable)?
+                    .observed.join(&state.resumption_paths)?;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn completed(&mut self, state: &VerifierState, handler: Option<u32>) -> Result<(), VmArtifactError> {
+        for site in &state.resumption_return_sites {
+            if handler.is_none_or(|handler| site.completes(handler)) {
+                self.local.get_mut(site).ok_or(VmArtifactError::HandlerResumeUnavailable)?
+                    .normal.join(&state.resumption_paths)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve the trace grammar only after the executable worklist closes.
+    /// Missing dependencies, recursive expansion and exhausted finite bounds
+    /// reject; a registered body with no return has no normal continuation.
+    pub(super) fn finish(mut self) -> Result<Self, VmArtifactError> {
+        if !self.tracking { return Ok(self); }
+        fn product(left: &Paths, right: &Paths) -> Result<Paths, VmArtifactError> {
+            let mut result = Paths::default();
+            for before in &left.0 {
+                for after in &right.0 {
+                    if before.len().saturating_add(after.len()) > Paths::MAX_EVENTS {
+                        return Err(VmArtifactError::HandlerResumeUnavailable);
+                    }
+                    let path = before.iter().chain(after).cloned().collect();
+                    result.join(&Paths(vec![path]))?;
+                }
+            }
+            Ok(result)
+        }
+        fn sequence(events: &[Event], local: &BTreeMap<ReturnSite, LocalTrace>,
+            active: &mut BTreeSet<ReturnSite>, cache: &mut BTreeMap<ReturnSite, LocalTrace>,
+        ) -> Result<LocalTrace, VmArtifactError> {
+            let mut trace = LocalTrace { normal: Paths::entry(), ..Default::default() };
+            for event in events {
+                if trace.normal.0.is_empty() { break; }
+                let step = if let Event::LocalResume(site) = event {
+                    if let Some(trace) = cache.get(site) { trace.clone() }
+                    else {
+                        if active.len() >= Paths::MAX_EVENTS || !active.insert(*site) {
+                            return Err(VmArtifactError::HandlerResumeUnavailable);
+                        }
+                        let source = local.get(site).ok_or(VmArtifactError::HandlerResumeUnavailable)?;
+                        let trace = resolve(source, local, active, cache)?;
+                        active.remove(site);
+                        cache.insert(*site, trace.clone());
+                        trace
+                    }
+                } else {
+                    let paths = Paths(vec![vec![event.clone()]]);
+                    LocalTrace { observed: paths.clone(), normal: paths }
+                };
+                trace.observed.join(&product(&trace.normal, &step.observed)?)?;
+                trace.normal = product(&trace.normal, &step.normal)?;
+            }
+            Ok(trace)
+        }
+        fn resolve(source: &LocalTrace, local: &BTreeMap<ReturnSite, LocalTrace>,
+            active: &mut BTreeSet<ReturnSite>, cache: &mut BTreeMap<ReturnSite, LocalTrace>,
+        ) -> Result<LocalTrace, VmArtifactError> {
+            let mut result = LocalTrace::default();
+            for events in &source.observed.0 {
+                let trace = sequence(events, local, active, cache)?;
+                result.observed.join(&trace.observed)?;
+                result.observed.join(&trace.normal)?;
+            }
+            for events in &source.normal.0 {
+                let trace = sequence(events, local, active, cache)?;
+                result.observed.join(&trace.observed)?;
+                result.normal.join(&trace.normal)?;
+            }
+            Ok(result)
+        }
+        let trace = resolve(&LocalTrace { observed: self.observed, normal: self.normal },
+            &self.local, &mut BTreeSet::new(), &mut BTreeMap::new())?;
+        self.observed = trace.observed;
+        self.normal = trace.normal;
+        self.local.clear();
+        Ok(self)
+    }
+
     pub(super) fn returned(&mut self, paths: &Paths, result: &ResumptionValue) -> Result<(), VmArtifactError> {
         self.result = if self.normal.0.is_empty() { result.clone() } else { self.result.join(result) };
         self.normal.join(paths)?;
@@ -201,9 +309,8 @@ pub(super) fn validate(functions: &BTreeMap<DefKey, VmFunction>, proofs: &mut ta
 }
 
 pub(super) fn record(event: Event, states: &mut VerifierState, contract: &mut Contract) -> Result<(), VmArtifactError> {
-    if !states.handlers.is_empty() { return Err(VmArtifactError::HandlerResumeUnavailable); }
     states.resumption_paths.append(event)?;
-    contract.observed.join(&states.resumption_paths)?;
+    contract.observe(states)?;
     Ok(())
 }
 
@@ -217,7 +324,10 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
         for path in &paths.0 {
             let mut branch = states.clone();
             for event in path {
-                let input = match event { Event::Invoke { input, .. } | Event::Dispose { input } => input };
+                let input = match event {
+                    Event::Invoke { input, .. } | Event::Dispose { input } => input,
+                    Event::LocalResume(_) => return Err(VmArtifactError::HandlerResumeUnavailable),
+                };
                 let value = inputs.get(input.input as usize).ok_or(VmArtifactError::HandlerResumeUnavailable)?.project(&input.fields);
                 match event {
                     Event::Dispose { .. } => cancel(&value, &mut branch, observed)?,
@@ -227,10 +337,11 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
                         ResumptionValue::Token(id) => {
                             let index = branch.handlers.iter().rposition(|frame| frame.id == id)
                                 .ok_or(VmArtifactError::HandlerResumeUnavailable)?;
-                            resume(function, pc, index, invocation, &mut branch, incoming, worklist)?;
+                            resume(function, pc, index, invocation, &mut branch, observed, incoming, worklist)?;
                         }
                         _ => return Err(VmArtifactError::HandlerResumeUnavailable),
                     },
+                    Event::LocalResume(_) => return Err(VmArtifactError::HandlerResumeUnavailable),
                 }
             }
             if returns { propagate_state(&mut merged, &mut merge_worklist, 0, &branch)?; }
@@ -249,7 +360,7 @@ pub(super) fn apply(function: &VmFunction, pc: usize, inputs: &[ResumptionValue]
 /// same transition for one event on one represented path. Only normal paths
 /// rejoin the caller; reachable non-returning prefixes are audited separately.
 pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation: &Invocation,
-    states: &mut VerifierState,
+    states: &mut VerifierState, contract: &mut Contract,
     incoming: &mut VerifierIncoming, worklist: &mut VerifierWorklist,
 ) -> Result<(), VmArtifactError> {
     let frame = states.handlers.get(index).ok_or(VmArtifactError::HandlerResumeUnavailable)?;
@@ -260,6 +371,8 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
         return Err(VmArtifactError::ResultType { expected: frame.resume_type.clone(), found: invocation.parameter.clone() });
     }
     let continuations = frame.continuations.clone();
+    let site = ReturnSite { pc: pc as u32, handler: frame.id };
+    if contract.tracking { contract.local.entry(site).or_default(); }
     let resumption_return_result = vec![(frame.id, invocation.result.clone())];
     let mut resumed_handlers = states.handlers[..index].to_vec();
     resumed_handlers.extend_from_slice(&states.handlers[index + 1..]);
@@ -276,6 +389,10 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
             return Err(VmArtifactError::HandlerStateMismatch);
         }
         let mut resumed = continuation.restore(states, handlers)?;
+        if contract.tracking {
+            resumed.resumption_paths = Paths::entry();
+            resumed.resumption_return_sites = BTreeSet::from([site]);
+        }
         resumed.resuming = true;
         resumed.resumption_return_handler_ids = resumption_return_handler_ids;
         resumed.resumption_return_result = resumption_return_result.clone();
@@ -285,6 +402,7 @@ pub(super) fn resume(function: &VmFunction, pc: usize, index: usize, invocation:
     if matches!(states.handlers[index].continuation, VmContinuationPolicy::Optional | VmContinuationPolicy::Consume) {
         states.handlers[index].continuations.clear();
     }
+    if contract.tracking { record(Event::LocalResume(site), states, contract)?; }
     let _ = (function, pc);
     Ok(())
 }
@@ -315,6 +433,49 @@ pub(super) fn cancel(value: &ResumptionValue, states: &mut VerifierState, observ
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input_event(index: u32) -> Event {
+        Event::Invoke { input: InputPath { input: index, fields: vec![] },
+            invocation: Invocation { parameter: VmType::I64, result: VmType::I64 } }
+    }
+
+    #[test]
+    fn local_returns_compose_ordered_input_events_and_keep_nonreturning_prefixes() {
+        let site = ReturnSite { pc: 7, handler: 3 };
+        let path = vec![input_event(0), Event::LocalResume(site), input_event(2)];
+        let mut contract = Contract::new(true);
+        contract.observed = Paths(vec![path.clone()]);
+        contract.normal = Paths(vec![path]);
+        contract.local.insert(site, LocalTrace {
+            observed: Paths(vec![vec![input_event(1)]]),
+            normal: Paths(vec![vec![input_event(1)]]),
+        });
+        let complete = contract.clone().finish().unwrap();
+        assert_eq!(complete.normal, Paths(vec![vec![input_event(0), input_event(1), input_event(2)]]));
+        assert!(complete.observed.0.contains(&vec![input_event(0), input_event(1)]));
+        assert!(!complete.observed.0.contains(&vec![input_event(1)]), "the preceding invocation cannot disappear");
+        contract.local.get_mut(&site).unwrap().normal = Paths::default();
+        let terminal = contract.finish().unwrap();
+        assert!(terminal.normal.0.is_empty());
+        assert!(terminal.observed.0.contains(&vec![input_event(0), input_event(1)]));
+        assert!(terminal.observed.0.iter().flatten().all(|event| event != &input_event(2)),
+            "an abandoned local return cannot authorize its caller suffix");
+    }
+
+    #[test]
+    fn local_return_dependencies_reject_missing_cycles_and_expansion_limits() {
+        let site = ReturnSite { pc: 7, handler: 3 };
+        let mut contract = Contract::new(true);
+        contract.normal = Paths(vec![vec![Event::LocalResume(site)]]);
+        assert!(contract.clone().finish().is_err());
+        contract.local.insert(site, LocalTrace {
+            normal: Paths(vec![vec![Event::LocalResume(site)]]), ..Default::default()
+        });
+        assert!(contract.clone().finish().is_err());
+        contract.local.get_mut(&site).unwrap().normal = Paths(vec![vec![input_event(0); Paths::MAX_EVENTS]]);
+        contract.normal = Paths(vec![vec![Event::LocalResume(site), Event::LocalResume(site)]]);
+        assert!(contract.finish().is_err());
+    }
 
     #[test]
     fn joined_replay_budgets_require_every_path_to_admit_the_next_invocation() {

@@ -7,7 +7,7 @@
 
 use std::{
     borrow::Borrow,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     ops::{Deref, DerefMut},
     sync::Arc,
@@ -6277,6 +6277,7 @@ impl VerifierContinuation {
     fn saved_state(&self, context: &VerifierState, handlers: Vec<VerifierHandlerFrame>) -> VerifierState {
         VerifierState {
             resumption_paths: context.resumption_paths.clone(),
+            resumption_return_sites: context.resumption_return_sites.clone(),
             last_instruction: context.last_instruction,
             registers: self.registers.clone(),
             may_initialized: self.may_initialized.clone(),
@@ -6312,6 +6313,9 @@ impl VerifierContinuation {
 struct VerifierState {
     /// Ordered capability executions retain separate normal alternatives.
     resumption_paths: resumption_calls::Paths,
+    /// Local trace dependencies being audited by this returning continuation.
+    /// They are function-local identities, not a second runtime handler stack.
+    resumption_return_sites: BTreeSet<resumption_calls::ReturnSite>,
     /// Addresses exposed on any executed predecessor. Unlike resident
     /// initialization this history cannot be reset by moving or killing a slot.
     address_exposed: Vec<bool>,
@@ -6613,7 +6617,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     entry_behaviors: Option<&[tail_provenance::CallableBehavior]>, transfer_proofs: &tail_provenance::TransferProofs,
 ) -> Result<VerifiedFunctionControl, VmArtifactError> {
     let mut call_input_behaviors = BTreeMap::new();
-    let mut resumption_contract = resumption_calls::Contract::default();
+    let mut resumption_contract = resumption_calls::Contract::new(transfer_proofs.symbolic_resumption_inputs);
     let mut outward_operations = effect_calls::Footprint::default();
     // `decode_artifact` checks these invariants while reading bytes, but a
     // candidate can also be assembled directly by an embedding host. Keep
@@ -6705,6 +6709,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     if let Some(entry) = incoming.first_mut() {
         entry.insert(VerifierContext::default(), VerifierState {
             resumption_paths: resumption_calls::Paths::entry(),
+            resumption_return_sites: BTreeSet::new(),
             // Captures lend existing environment slots. Explicit arguments
             // establish the callee's owned parameter slots; references they
             // contain expose their referents, not these new handle locations.
@@ -8079,6 +8084,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if !states.resumption_return_result.is_empty() {
+                    resumption_contract.completed(&states, Some(frame.id))?;
                     for (_, expected) in states.resumption_return_result.iter()
                         .filter(|(brand, _)| *brand == frame.id) {
                         expect_type(function, *value, expected.clone())?;
@@ -8172,7 +8178,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     states.registers[*value as usize] = Some(false);
                 }
                 resumption_calls::resume(function, pc, index, &resumption_calls::Invocation { parameter: found, result },
-                    &mut states, &mut incoming, &mut worklist)?;
+                    &mut states, &mut resumption_contract, &mut incoming, &mut worklist)?;
                 write(&mut states, *dst)?;
             }
             VmInstruction::CaptureResumption { dst } => {
@@ -9256,6 +9262,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
+                    resumption_contract.completed(&states, None)?;
                     continue;
                 }
                 if !states.handlers.is_empty() {
@@ -9331,6 +9338,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
     }
     if check_return_flag { label_dispatch::check_opaque_tail_frontier(function, opaque_label_targets)?; }
     effect_calls::check(function, &outward_operations, transfer_proofs)?;
+    let resumption_contract = resumption_contract.finish()?;
     if returned.is_some() || trapped || matches!(declared_result, Some((_, false))) {
         Ok(VerifiedFunctionControl { resumption_contract, outward_operations, call_input_behaviors, returns: returned.is_some(), result_independent,
             result_destruction_preserving, preserves_frame_memory, preserves_independent_frame_memory,
@@ -9727,6 +9735,9 @@ fn propagate_state(
             // An arm cannot erase authority carried on another predecessor.
             changed |= join_verifier_facts(&mut existing.labels, &state.labels, |left, right| left || right);
             changed |= existing.resumption_paths.join(&state.resumption_paths)?;
+            for site in &state.resumption_return_sites {
+                changed |= existing.resumption_return_sites.insert(*site);
+            }
             if existing.pending_leave != state.pending_leave && existing.pending_leave.take().is_some() {
                 changed = true;
             }
@@ -9756,7 +9767,15 @@ fn seed_call_handlers(
                 before.id != after.id || before.invocations != after.invocations) {
             return Err(VmArtifactError::HandlerResumeUnavailable);
         }
+        let symbolic_receiver = receiver.is_some_and(|receiver|
+            matches!(suspended.resumptions[receiver as usize], ResumptionValue::Input(_)));
+        if !symbolic_receiver && suspended.resumption_paths != returned.resumption_paths {
+            return Err(VmArtifactError::HandlerResumeUnavailable);
+        }
         let mut clause = suspended.clone();
+        // Invoking this input precedes every operation it can perform. For
+        // a general helper, a may-effect set supplies no such event ordering.
+        if symbolic_receiver { clause.resumption_paths = returned.resumption_paths.clone(); }
         let mut references = ReferenceOriginSet::Empty;
         let mut labels = false;
         let mut control = false;
@@ -10438,7 +10457,7 @@ fn retain_resumption(registers: &RuntimeRegisters, handlers: &[RuntimeHandlerFra
     };
     let VmValue::Resumption { frame: id, .. } = &value else { return Err(VmArtifactError::HandlerResumeUnavailable); };
     if !handlers.iter().any(|frame| frame.id == *id && frame.continuation.is_replay()
-        && frame.suspended.pending().is_some_and(|branch| branch.remaining_replays > 0)) {
+        && frame.suspended.pending().is_some()) {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
     Ok(value)
@@ -10491,10 +10510,7 @@ enum ReferenceTarget {
 #[derive(Clone)]
 struct RuntimeHandlerFrame {
     id: u64,
-    /// Dynamic call-stack depth of the function that installed this frame.
-    /// It remains visible to deeper ordinary calls, but its clause always
-    /// executes in this owning frame.
-    call_depth: usize,
+    scope: RuntimeHandlerScope,
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
@@ -10502,9 +10518,59 @@ struct RuntimeHandlerFrame {
     continuation: VmContinuationPolicy,
     target: u32,
     owned_payloads: bool,
-    /// Source allocations and SSA carriers already outside this delimiter.
-    shared_registers: BTreeMap<u32, Option<u64>>,
     suspended: RuntimeSuspension,
+}
+
+#[derive(Clone, Default)]
+struct RuntimeActivation(Arc<()>);
+
+impl RuntimeActivation {
+    fn same(&self, other: &Self) -> bool { Arc::ptr_eq(&self.0, &other.0) }
+}
+
+/// The allocation/authority frontier outside a delimiter at installation.
+/// An ordinary caller can itself be a clause view of a suspended execution:
+/// its protected roots are not owned by that clause merely because the view
+/// retains their carriers. Replay and cancellation consume this same frontier.
+#[derive(Clone)]
+struct RuntimeHandlerScope {
+    owner: RuntimeActivation,
+    shared_frames: Vec<(RuntimeActivation, BTreeMap<u32, Option<u64>>)>,
+    outside_pending: Vec<Arc<Cell<u32>>>,
+}
+
+impl RuntimeHandlerScope {
+    fn new(registers: &RuntimeRegisters, callers: &[RuntimeProgramCaller], handlers: &[RuntimeHandlerFrame],
+        owner_shared: BTreeMap<u32, Option<u64>>, budget: &mut ExecutionBudget,
+    ) -> Result<Self, VmArtifactError> {
+        budget.reserve_value("handler storage frontier", callers.len() + 1)?;
+        let mut shared_frames = Vec::with_capacity(callers.len() + 1);
+        for frame in callers.iter().map(|caller| &caller.registers).chain([registers]) {
+            let mut shared = if frame.activation.same(&registers.activation) { owner_shared.clone() }
+                else { replay::shared_registers(frame, true, &[], budget)? };
+            for handler in handlers {
+                budget.tick()?;
+                if handler.scope.owner.same(&frame.activation) && handler.suspended.pending().is_some() {
+                    let outer = handler.scope.shared_for(frame).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                    shared.retain(|local, _| replay::shared(frame, *local, outer));
+                }
+            }
+            shared_frames.push((frame.activation.clone(), shared));
+        }
+        budget.reserve_value("outer continuation authorities", handlers.len())?;
+        let outside_pending = handlers.iter().filter_map(|handler|
+            handler.suspended.pending().map(|saved| saved.remaining_uses.clone())).collect();
+        Ok(Self { owner: registers.activation.clone(), shared_frames, outside_pending })
+    }
+
+    fn shared_for(&self, registers: &RuntimeRegisters) -> Option<&BTreeMap<u32, Option<u64>>> {
+        self.shared_frames.iter().find_map(|(activation, shared)|
+            activation.same(&registers.activation).then_some(shared))
+    }
+
+    fn owns_pending(&self, saved: &RuntimeContinuation) -> bool {
+        !self.outside_pending.iter().any(|outside| Arc::ptr_eq(outside, &saved.remaining_uses))
+    }
 }
 
 /// SSA temporaries are restored with a continuation; live source storage is
@@ -10513,6 +10579,7 @@ struct RuntimeHandlerFrame {
 /// storage captured by an older snapshot.
 #[derive(Clone, Default)]
 struct RuntimeRegisters {
+    activation: RuntimeActivation,
     values: Vec<Option<VmValue>>,
     /// Non-owning, invocation-only carriers produced by PrepareInvocation.
     /// The verifier forbids every other transport. Snapshots retain this
@@ -10789,30 +10856,34 @@ enum RuntimeSuspension {
     Active,
     /// A clause owns this pending original continuation and its use budget.
     Pending(RuntimeContinuation),
-    /// The final replay consumed the original. The clause still has to close
+    /// The final use consumed the original. The clause still has to close
     /// its delimiter, but there is no abandoned snapshot to destroy.
     Replayed,
 }
 
 impl RuntimeSuspension {
     fn is_active(&self) -> bool { matches!(self, Self::Active) }
+    fn is_spent(&self) -> bool {
+        matches!(self, Self::Replayed)
+            || matches!(self, Self::Pending(saved) if saved.remaining_uses.get() == 0)
+    }
     fn pending(&self) -> Option<&RuntimeContinuation> {
-        if let Self::Pending(saved) = self { Some(saved) } else { None }
+        if let Self::Pending(saved) = self && saved.remaining_uses.get() != 0 { Some(saved) } else { None }
     }
     fn pending_mut(&mut self) -> Option<&mut RuntimeContinuation> {
-        if let Self::Pending(saved) = self { Some(saved) } else { None }
+        if let Self::Pending(saved) = self && saved.remaining_uses.get() != 0 { Some(saved) } else { None }
     }
     fn take_pending(&mut self) -> Option<RuntimeContinuation> {
-        if !matches!(self, Self::Pending(_)) { return None; }
-        let Self::Pending(saved) = std::mem::replace(self, Self::Active) else { unreachable!() };
+        self.pending()?.remaining_uses.set(0);
+        let Self::Pending(saved) = std::mem::replace(self, Self::Replayed) else { unreachable!() };
         Some(saved)
     }
 }
 
 impl RuntimeHandlerFrame {
     fn take_canceled_continuation(&mut self) -> Result<Option<RuntimeContinuation>, VmArtifactError> {
+        if self.suspended.is_spent() { return Ok(None); }
         match (&self.suspended, self.continuation) {
-            (RuntimeSuspension::Replayed, VmContinuationPolicy::Replay { .. }) => Ok(None),
             (RuntimeSuspension::Pending(_), VmContinuationPolicy::Optional | VmContinuationPolicy::Terminal) =>
                 Ok(self.suspended.take_pending()),
             _ => Err(VmArtifactError::HandlerResumeUnavailable),
@@ -10827,11 +10898,15 @@ struct RuntimeContinuation {
     registers: RuntimeRegisters,
     performed: RuntimePerformed,
     above: Vec<RuntimeHandlerFrame>,
+    /// Returning-resumption edges crossed by this performance, in stack
+    /// order. These saved clause paths are part of the protected computation,
+    /// not ordinary callers of the selected operation clause.
+    above_returns: Vec<RuntimeResumptionReturn>,
     pending_leave: Option<PendingLeave>,
-    /// A replayable performance starts with the exact source-declared count.
-    /// The owning delimiter decrements this only when it issues a snapshot.
-    /// The last use takes this original and leaves a spent delimiter marker.
-    remaining_replays: u32,
+    /// Ordinary execution snapshots share the original's remaining authority.
+    /// Restoring an older clause view must not resurrect a consumed use. Only
+    /// checked replay duplication creates independent branch authority.
+    remaining_uses: Arc<Cell<u32>>,
     /// Standalone artifacts have one execution frame. Programs additionally
     /// retain the complete caller/callee path, so a performance may cross an
     /// ordinary call and still resume at its original instruction.
@@ -10865,17 +10940,19 @@ fn synchronize_saved_source_storage(
         saved.synchronize_source_storage(current);
         return;
     };
-    for (saved_caller, current_caller) in saved_program.callers.iter_mut().zip(current_callers) {
-        saved_caller.registers.synchronize_source_storage(&current_caller.registers);
+    for saved in saved_program.callers.iter_mut().map(|caller| &mut caller.registers).chain([saved]) {
+        if let Some(current) = current_callers.iter().map(|caller| &caller.registers).chain([current])
+            .find(|current| current.activation.same(&saved.activation)) {
+            saved.synchronize_source_storage(current);
+        }
     }
-    match saved_program.callers.len().cmp(&current_callers.len()) {
-        std::cmp::Ordering::Equal => saved.synchronize_source_storage(current),
-        std::cmp::Ordering::Less => {
-            saved.synchronize_source_storage(&current_callers[saved_program.callers.len()].registers);
-        }
-        std::cmp::Ordering::Greater => {
-            saved_program.callers[current_callers.len()].registers.synchronize_source_storage(current);
-        }
+}
+
+fn synchronize_return_source_storage(
+    returns: &mut [RuntimeResumptionReturn], current: &RuntimeRegisters, callers: &[RuntimeProgramCaller],
+) {
+    for pending in returns {
+        synchronize_saved_source_storage(&mut pending.registers, pending.program.as_mut(), current, callers);
     }
 }
 
@@ -10883,6 +10960,7 @@ fn synchronize_saved_source_storage(
 /// from ordinary function calls: resumption return restores the handler
 /// environment captured immediately before the transfer, including the
 /// retained replay snapshot.
+#[derive(Clone)]
 struct RuntimeResumptionReturn {
     pc: usize,
     dst: u32,
@@ -10899,6 +10977,77 @@ struct RuntimeResumptionReturn {
     /// an inner operation has cancelled. Only frames restored for this exact
     /// continuation are permitted to cross the clause-return edge.
     resumed_handler_ids: Vec<u64>,
+}
+
+/// A view of an actual ordinary call path. Dynamic handlers can outlive a
+/// switch to another such path; their owner is resolved by activation identity,
+/// never by reusing a depth in the currently executing branch.
+#[derive(Clone, Copy)]
+struct RuntimeBranch<'a> {
+    definition: DefKey,
+    registers: &'a RuntimeRegisters,
+    callers: &'a [RuntimeProgramCaller],
+}
+
+impl<'a> RuntimeBranch<'a> {
+    fn owner(self, owner: &RuntimeActivation) -> Option<Self> {
+        if self.registers.activation.same(owner) { return Some(self); }
+        self.callers.iter().enumerate().find_map(|(index, caller)| {
+            caller.registers.activation.same(owner).then_some(Self {
+                definition: caller.definition, registers: &caller.registers,
+                callers: &self.callers[..index],
+            })
+        })
+    }
+}
+
+struct RuntimeHandlerOwner<'a> {
+    branch: RuntimeBranch<'a>,
+    handlers: Option<&'a [RuntimeHandlerFrame]>,
+}
+
+impl RuntimeHandlerOwner<'_> {
+    fn clause_frames(&self, id: u64, current: &[RuntimeHandlerFrame], budget: &mut ExecutionBudget)
+        -> Result<Option<Vec<RuntimeHandlerFrame>>, VmArtifactError>
+    {
+        let Some(frames) = self.handlers else { return Ok(None); };
+        if !current.iter().any(|frame| frame.id == id) { return Err(VmArtifactError::HandlerStateMismatch); }
+        let index = frames.iter().position(|frame| frame.id == id)
+            .ok_or(VmArtifactError::HandlerStateMismatch)?;
+        budget.reserve_value("handler clause context", index + 1)?;
+        Ok(Some(frames[..=index].to_vec()))
+    }
+}
+
+fn handler_owner_branch<'a>(
+    owner: &RuntimeActivation,
+    current: RuntimeBranch<'a>,
+    returns: &'a [RuntimeResumptionReturn],
+) -> Option<RuntimeHandlerOwner<'a>> {
+    current.owner(owner).map(|branch| RuntimeHandlerOwner { branch, handlers: None })
+        .or_else(|| returns.iter().rev().find_map(|pending| {
+        let saved = pending.program.as_ref()?;
+        RuntimeBranch { definition: saved.definition, registers: &pending.registers,
+            callers: &saved.callers }.owner(owner)
+            .map(|branch| RuntimeHandlerOwner { branch, handlers: Some(&pending.handlers) })
+    }))
+}
+
+fn take_crossed_resumption_returns(
+    returns: &mut Vec<RuntimeResumptionReturn>,
+    above: &[RuntimeHandlerFrame],
+    budget: &mut ExecutionBudget,
+) -> Result<Vec<RuntimeResumptionReturn>, VmArtifactError> {
+    // The selected delimiter itself is excluded. A deep re-performance of
+    // that same handler must leave its older return edge below the new one.
+    for (index, pending) in returns.iter().enumerate() {
+        budget.tick()?;
+        if above.iter().any(|frame| frame.id == pending.handler_id) {
+            budget.reserve_value("crossed resumption returns", returns.len() - index)?;
+            return Ok(returns.split_off(index));
+        }
+    }
+    Ok(Vec::new())
 }
 
 #[derive(Clone)]
@@ -11819,22 +11968,26 @@ fn transfer_to_ancestor_frame(
     Ok(value)
 }
 
-// A resumption may be invoked through helpers in the clause. Translate back
-// through the installing frame, then into the original suspended call chain;
-// source and destination can be siblings, not just adjacent frames.
-fn transfer_to_resumed_frame(
+// Translate through the actual common ancestor of the two execution paths.
+// A handler's installing frame need not belong to the resumed call path.
+fn transfer_between_frames(
     value: VmValue,
-    registers: &[Option<VmValue>],
+    registers: &RuntimeRegisters,
     callers: &[RuntimeProgramCaller],
-    handler_depth: usize,
-    destination_depth: usize,
+    destination: &RuntimeRegisters,
+    destination_callers: &[RuntimeProgramCaller],
     budget: &mut ExecutionBudget,
 ) -> Result<VmValue, VmArtifactError> {
-    if destination_depth < handler_depth {
-        return Err(VmArtifactError::HandlerStateMismatch);
+    let mut common = 0usize;
+    for (source, destination) in callers.iter().map(|caller| &caller.registers).chain([registers])
+        .zip(destination_callers.iter().map(|caller| &caller.registers).chain([destination])) {
+        budget.tick()?;
+        if !source.activation.same(&destination.activation) { break; }
+        common += 1;
     }
-    let mut value = transfer_to_ancestor_frame(value, registers, callers, handler_depth, budget)?;
-    for _ in handler_depth..destination_depth {
+    let common_owner = common.checked_sub(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+    let mut value = transfer_to_ancestor_frame(value, registers, callers, common_owner, budget)?;
+    for _ in common_owner..destination_callers.len() {
         budget.tick()?;
         value = transfer_call_frame_value(&value, &[], &[], UniqueReferenceTransfer::IntoCallee)?;
     }
@@ -14166,6 +14319,7 @@ fn execute_in_float_profile(
                         limit: budget.limits.max_retained_continuations,
                     });
                 }
+                let above_returns = take_crossed_resumption_returns(&mut resumption_returns, &above, budget)?;
                 let frame = &mut handlers[index];
                 if frame.owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
                 if frame.payload_destinations.len() != values.len() {
@@ -14196,8 +14350,9 @@ fn execute_in_float_profile(
                         payloads: Some(values),
                     },
                     above,
+                    above_returns,
                     pending_leave: None,
-                    remaining_replays: frame.continuation.replay_uses().unwrap_or(0),
+                    remaining_uses: Arc::new(Cell::new(frame.continuation.replay_uses().unwrap_or(1))),
                     program: None,
                 });
                 pc = frame.target as usize;
@@ -14234,13 +14389,15 @@ fn execute_in_float_profile(
                         limit: budget.limits.max_handler_depth,
                     });
                 }
+                let shared = replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?;
+                let scope = RuntimeHandlerScope::new(&registers, &[], &handlers, shared, budget)?;
                 handlers.push(RuntimeHandlerFrame {
                     id: {
                         let id = next_handler_id;
                         next_handler_id = next_handler_id.saturating_add(1);
                         id
                     },
-                    call_depth: 0,
+                    scope,
                     effect,
                     effect_arguments,
                     operation,
@@ -14248,13 +14405,12 @@ fn execute_in_float_profile(
                     continuation,
                     target,
                     owned_payloads,
-                    shared_registers: replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?,
                     suspended: RuntimeSuspension::Active,
                 })
             }
             VmInstruction::CompleteHandler { value } => {
                 let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
-                if !frame.suspended.is_active() {
+                if !frame.suspended.is_active() && !frame.suspended.is_spent() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
@@ -14276,7 +14432,7 @@ fn execute_in_float_profile(
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
                 };
-                if !frame.suspended.is_active() {
+                if !frame.suspended.is_active() && !frame.suspended.is_spent() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
             }
@@ -14298,6 +14454,7 @@ fn execute_in_float_profile(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                frame.suspended = RuntimeSuspension::Active;
                 if frame.owned_payloads {
                     registers.retire_call_arguments(&[value]);
                 }
@@ -14306,11 +14463,14 @@ fn execute_in_float_profile(
                     dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     ..
                 } = continuation;
                 saved_registers.synchronize_source_storage(&registers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &[]);
                 if let Some(leave) = pending_leave {
+                    resumption_returns.extend(above_returns);
                     registers = saved_registers;
                     handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
@@ -14320,6 +14480,7 @@ fn execute_in_float_profile(
                 registers[dst as usize] = Some(resumed);
                 registers.native_write(dst);
                 handlers.extend(above);
+                resumption_returns.extend(above_returns);
                 pc = target;
                 continue;
             }
@@ -14333,7 +14494,6 @@ fn execute_in_float_profile(
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let replaying = frame.continuation.is_replay();
                 let continuation = replay::resume(frame, &mut next_storage_id, budget, true)?;
                 budget.reserve_allocation(registers.len())?;
                 // The clause snapshot must not retain the carrier just
@@ -14346,10 +14506,12 @@ fn execute_in_float_profile(
                     dst: continuation_dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     ..
                 } = continuation;
                 saved_registers.synchronize_source_storage(&registers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &[]);
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -14375,9 +14537,8 @@ fn execute_in_float_profile(
                 // protected `UninstallHandler` can run. The clause snapshot
                 // above retains the suspended continuation for the next use.
                 handlers = active_handlers;
-                if replaying {
-                    handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
-                }
+                handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
+                resumption_returns.extend(above_returns);
                 handlers.extend(above);
                 registers = saved_registers;
                 registers[continuation_dst as usize] = Some(resumed);
@@ -14411,6 +14572,7 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 let continuation = replay::resume(&mut handlers[index], &mut next_storage_id, budget, false)?;
+                handlers[index].suspended = RuntimeSuspension::Active;
                 if handlers[index].owned_payloads {
                     registers.retire_call_arguments(&[value]);
                 }
@@ -14424,11 +14586,14 @@ fn execute_in_float_profile(
                     dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     ..
                 } = continuation;
                 saved_registers.synchronize_source_storage(&registers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &[]);
                 if let Some(leave) = pending_leave {
+                    resumption_returns.extend(above_returns);
                     registers = saved_registers;
                     handlers.extend(above);
                     pc = complete_pending_leave(&mut registers, &mut handlers, leave, budget)?;
@@ -14438,6 +14603,7 @@ fn execute_in_float_profile(
                 registers[dst as usize] = Some(resumed);
                 registers.native_write(dst);
                 handlers.extend(above);
+                resumption_returns.extend(above_returns);
                 pc = target;
                 continue;
             }
@@ -14455,6 +14621,7 @@ fn execute_in_float_profile(
                 let Some(continuation) = declined.suspended.take_pending() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                declined.suspended = RuntimeSuspension::Active;
                 let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
                     frame.suspended.is_active()
@@ -14472,6 +14639,8 @@ fn execute_in_float_profile(
                 let mut crossed = handlers.split_off(index + 1);
                 crossed.push(declined);
                 crossed.extend(continuation.above.clone());
+                let mut above_returns = take_crossed_resumption_returns(&mut resumption_returns, &crossed, budget)?;
+                above_returns.extend(continuation.above_returns);
                 let frame = &mut handlers[index];
                 if frame.payload_destinations.len() != payloads.len() {
                     return Err(VmArtifactError::CallArity {
@@ -14495,8 +14664,9 @@ fn execute_in_float_profile(
                     registers: continuation.registers,
                     performed: continuation.performed,
                     above: crossed,
+                    above_returns,
                     pending_leave: continuation.pending_leave,
-                    remaining_replays: continuation.remaining_replays,
+                    remaining_uses: Arc::new(Cell::new(frame.continuation.replay_uses().unwrap_or(1))),
                     program: None,
                 });
                 pc = frame.target as usize;
@@ -14507,9 +14677,6 @@ fn execute_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 frame.take_canceled_continuation()?;
-                if frame.continuation == VmContinuationPolicy::Terminal {
-                    resumption_returns.clear();
-                }
             }
             VmInstruction::Copy { dst, src } => {
                 registers.copy_into(dst, src, budget)?;
@@ -15678,8 +15845,7 @@ fn abandon_program_handlers(
         budget.tick()?;
         let mut frame = handlers.pop().expect("checked handler suffix");
         if let Some(suspended) = frame.suspended.take_pending() {
-            abandon_program_continuation(program, suspended, frame.call_depth,
-                frame.owned_payloads.then_some(frame.shared_registers),
+            abandon_program_continuation(program, suspended, frame.scope, frame.owned_payloads,
                 current, current_callers, depth, budget, host)?;
         }
     }
@@ -15693,64 +15859,70 @@ fn abandon_program_handlers(
 /// a destructor never observes an already-ended ancestor loan.
 fn abandon_program_continuation(
     program: &CandidateVmProgram,
-    mut suspended: RuntimeContinuation,
-    owner_depth: usize,
-    retained_outer: Option<BTreeMap<u32, Option<u64>>>,
+    suspended: RuntimeContinuation,
+    scope: RuntimeHandlerScope,
+    owned: bool,
     current: &mut RuntimeRegisters,
     current_callers: &mut [RuntimeProgramCaller],
     depth: u32,
     budget: &mut ExecutionBudget,
     host: &mut Option<&mut dyn VmHost>,
 ) -> Result<(), VmArtifactError> {
-    synchronize_saved_source_storage(&mut suspended.registers, suspended.program.as_mut(), current, current_callers);
-    let saved = suspended.program.as_ref().ok_or(VmArtifactError::HandlerStateMismatch)?;
-    if owner_depth > current_callers.len() || saved.callers.len() < owner_depth {
-        return Err(VmArtifactError::HandlerStateMismatch);
+    enum Work {
+        Continuation(RuntimeContinuation, RuntimeHandlerScope, bool),
+        Return(RuntimeResumptionReturn, RuntimeHandlerScope, bool),
+        Path(RuntimeRegisters, RuntimeProgramContinuation, RuntimeHandlerScope, bool),
     }
-    // Explicit postorder traversal: deeply nested retained handlers must not
-    // recurse on the Rust stack. Every visited edge and saved path is charged.
-    budget.reserve_value("abandoned continuation paths", 1)?;
+    // The currently suspended execution ends before the clause paths to which
+    // it would have returned. Pending inner continuations end before their
+    // retaining frame. Ordinary caller depth is only a coordinate in each path.
     budget.reserve_allocation(1)?;
-    let mut pending = vec![(suspended, owner_depth, retained_outer)];
-    while let Some((parent, _, _)) = pending.last_mut() {
-        if let Some(mut frame) = parent.above.pop() {
-            budget.tick()?;
-            if let Some(mut child) = frame.suspended.take_pending() {
-                let parent_program = parent.program.as_ref().ok_or(VmArtifactError::HandlerStateMismatch)?;
-                synchronize_saved_source_storage(&mut child.registers, child.program.as_mut(),
-                    &parent.registers, &parent_program.callers);
-                if frame.call_depth > parent_program.callers.len()
-                    || child.program.as_ref().is_none_or(|saved| saved.callers.len() < frame.call_depth) {
-                    return Err(VmArtifactError::HandlerStateMismatch);
+    let mut pending = vec![Work::Continuation(suspended, scope, owned)];
+    while let Some(work) = pending.pop() {
+        budget.tick()?;
+        let (frames, scope) = match work {
+            Work::Continuation(saved, scope, owned) => {
+                budget.reserve_value("abandoned continuation paths", pending.len() + saved.above_returns.len() + saved.above.len() + 1)?;
+                for returned in saved.above_returns {
+                    pending.push(Work::Return(returned, scope.clone(), owned));
                 }
-                budget.reserve_value("abandoned continuation paths", pending.len() + 1)?;
-                budget.reserve_allocation(1)?;
-                pending.push((child, frame.call_depth,
-                    frame.owned_payloads.then_some(frame.shared_registers)));
+                pending.push(Work::Path(saved.registers,
+                    saved.program.ok_or(VmArtifactError::HandlerStateMismatch)?, scope.clone(), owned));
+                (saved.above, scope)
             }
-            continue;
-        }
-        let (mut finished, owner_depth, retained_outer) = pending.pop().expect("checked pending path");
-        let saved = finished.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
-        while saved.callers.len() > owner_depth {
+            Work::Return(saved, scope, owned) => {
+                budget.reserve_value("abandoned clause paths", pending.len() + saved.handlers.len() + 1)?;
+                pending.push(Work::Path(saved.registers,
+                    saved.program.ok_or(VmArtifactError::HandlerStateMismatch)?, scope.clone(), owned));
+                (saved.handlers, scope)
+            }
+            Work::Path(mut registers, mut saved, scope, owned) => {
+                synchronize_saved_source_storage(&mut registers, Some(&mut saved), current, current_callers);
+                loop {
+                    budget.tick()?;
+                    if let Some(outer) = scope.shared_for(&registers) {
+                        if owned {
+                            destroy_program_frame_except(program, saved.definition, &mut registers,
+                                &mut saved.callers, None, Some(outer), depth, budget, host)?;
+                        }
+                    } else {
+                        destroy_program_frame(program, saved.definition, &mut registers,
+                            &mut saved.callers, None, depth, budget, host)?;
+                    }
+                    synchronize_abandoned_source_storage(&registers, &saved.callers, current, current_callers);
+                    let Some(caller) = saved.callers.pop() else { break; };
+                    saved.definition = caller.definition;
+                    registers = caller.registers;
+                }
+                continue;
+            }
+        };
+        for mut frame in frames {
             budget.tick()?;
-            destroy_program_frame(program, saved.definition, &mut finished.registers,
-                &mut saved.callers, None, depth, budget, host)?;
-            let caller = saved.callers.pop().ok_or(VmArtifactError::HandlerStateMismatch)?;
-            saved.definition = caller.definition;
-            finished.registers = caller.registers;
-        }
-        if let Some(outer) = &retained_outer {
-            destroy_program_frame_except(program, saved.definition, &mut finished.registers,
-                &mut saved.callers, None, Some(outer), depth, budget, host)?;
-        }
-        if let Some((parent, _, _)) = pending.last_mut() {
-            let parent_program = parent.program.as_mut().ok_or(VmArtifactError::HandlerStateMismatch)?;
-            synchronize_abandoned_source_storage(&finished.registers, &saved.callers,
-                &mut parent.registers, &mut parent_program.callers);
-        } else {
-            synchronize_abandoned_source_storage(&finished.registers, &saved.callers,
-                current, current_callers);
+            if frame.suspended.pending().is_some_and(|saved| scope.owns_pending(saved))
+                && let Some(child) = frame.suspended.take_pending() {
+                pending.push(Work::Continuation(child, frame.scope, frame.owned_payloads));
+            }
         }
     }
     Ok(())
@@ -15764,14 +15936,11 @@ fn synchronize_abandoned_source_storage(
 ) {
     // Propagate checked writes performed by cleanup through retained caller
     // loans. SSA temporaries stay private; source storage uses activation IDs.
-    let owner_depth = saved_callers.len();
-    if owner_depth == current_callers.len() {
-        current.synchronize_source_storage(saved);
-    } else {
-        current_callers[owner_depth].registers.synchronize_source_storage(saved);
-    }
-    for (current, saved) in current_callers.iter_mut().zip(saved_callers) {
-        current.registers.synchronize_source_storage(&saved.registers);
+    for current in current_callers.iter_mut().map(|caller| &mut caller.registers).chain([current]) {
+        if let Some(saved) = saved_callers.iter().map(|caller| &caller.registers).chain([saved])
+            .find(|saved| saved.activation.same(&current.activation)) {
+            current.synchronize_source_storage(saved);
+        }
     }
 }
 
@@ -16703,11 +16872,12 @@ fn execute_program_in_float_profile(
                         limit: budget.limits.max_retained_continuations,
                     });
                 }
-                let owner_depth = handlers[index].call_depth;
                 if handlers[index].owned_payloads != owned_payloads { return Err(VmArtifactError::HandlerStateMismatch); }
-                if owner_depth > callers.len() {
-                    return Err(VmArtifactError::HandlerStateMismatch);
-                }
+                let owner = handler_owner_branch(&handlers[index].scope.owner,
+                    RuntimeBranch { definition, registers: &registers, callers: &callers }, &resumption_returns)
+                    .ok_or(VmArtifactError::HandlerStateMismatch)?;
+                let clause_handlers = owner.clause_frames(handlers[index].id, &handlers, budget)?;
+                let owner = owner.branch;
                 let payload_destinations = handlers[index].payload_destinations.clone();
                 let handler_target = handlers[index].target;
                 if payload_destinations.len() != values.len() {
@@ -16716,29 +16886,29 @@ fn execute_program_in_float_profile(
                         found: values.len() as u32,
                     });
                 }
-                budget.reserve_allocation(registers.len())?;
-                if owned_payloads { registers.retire_call_arguments(arguments); }
-                let saved = registers.clone();
-                let continuation_program = RuntimeProgramContinuation {
-                    definition,
-                    callers: callers.clone(),
-                };
                 budget.reserve_value("handler clause payload", values.len())?;
                 let clause_values = values.iter().cloned().map(|value| {
-                    transfer_to_ancestor_frame(value, &registers, &callers, owner_depth, budget)
+                    transfer_between_frames(value, &registers, &callers, owner.registers, owner.callers, budget)
                 }).collect::<Result<Vec<_>, _>>()?;
-                // A matching ancestor owns the handler clause. Discard the
-                // active callee path from live execution only after storing
-                // it in the continuation; `Resume` restores it below.
-                if owner_depth < callers.len() {
-                    let owner = callers
-                        .get(owner_depth)
-                        .cloned()
-                        .ok_or(VmArtifactError::HandlerStateMismatch)?;
-                    definition = owner.definition;
-                    registers = owner.registers;
-                    callers.truncate(owner_depth);
+                budget.reserve_allocation(registers.len())?;
+                budget.reserve_value("handler owner path", owner.callers.len())?;
+                let owner_definition = owner.definition;
+                let mut owner_registers = owner.registers.clone();
+                let owner_callers = owner.callers.to_vec();
+                if owned_payloads {
+                    registers.retire_call_arguments(arguments);
+                    if owner_registers.activation.same(&registers.activation) {
+                        owner_registers = registers.clone();
+                    }
                 }
+                let saved = registers.clone();
+                let continuation_program = RuntimeProgramContinuation { definition, callers };
+                let above_returns = take_crossed_resumption_returns(&mut resumption_returns, &above, budget)?;
+                definition = owner_definition;
+                registers = owner_registers;
+                callers = owner_callers;
+                if let Some(clause_handlers) = clause_handlers { handlers = clause_handlers; }
+                let index = handlers.len() - 1;
                 for (destination, value) in payload_destinations.iter().zip(clause_values)
                 {
                     registers[*destination as usize] = Some(value);
@@ -16755,8 +16925,9 @@ fn execute_program_in_float_profile(
                         payloads: Some(values),
                     },
                     above,
+                    above_returns,
                     pending_leave: None,
-                    remaining_replays: handlers[index].continuation.replay_uses().unwrap_or(0),
+                    remaining_uses: Arc::new(Cell::new(handlers[index].continuation.replay_uses().unwrap_or(1))),
                     program: Some(continuation_program),
                 });
                 pc = handler_target as usize;
@@ -16793,13 +16964,15 @@ fn execute_program_in_float_profile(
                         limit: budget.limits.max_handler_depth,
                     });
                 }
+                let shared = replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?;
+                let scope = RuntimeHandlerScope::new(&registers, &callers, &handlers, shared, budget)?;
                 handlers.push(RuntimeHandlerFrame {
                     id: {
                         let id = next_handler_id;
                         next_handler_id = next_handler_id.saturating_add(1);
                         id
                     },
-                    call_depth: callers.len(),
+                    scope,
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -16807,13 +16980,12 @@ fn execute_program_in_float_profile(
                     continuation: *continuation,
                     target: *target,
                     owned_payloads,
-                    shared_registers: replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?,
                     suspended: RuntimeSuspension::Active,
                 });
             }
             VmInstruction::CompleteHandler { value } => {
                 let frame = handlers.last().ok_or(VmArtifactError::HandlerStackUnderflow)?;
-                if !frame.suspended.is_active() || frame.call_depth != callers.len() {
+                if (!frame.suspended.is_active() && !frame.suspended.is_spent()) || !frame.scope.owner.same(&registers.activation) {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 if resumption_returns.last().is_some_and(|pending| {
@@ -16821,6 +16993,8 @@ fn execute_program_in_float_profile(
                 }) {
                     let result = registers.copy_value(*value, budget)?;
                     let mut pending = resumption_returns.pop().expect("checked pending resumption");
+                    let result = transfer_between_frames(result, &registers, &callers, &pending.registers,
+                        pending.program.as_ref().map(|saved| saved.callers.as_slice()).unwrap_or(&[]), budget)?;
                     synchronize_saved_source_storage(&mut pending.registers, pending.program.as_mut(), &registers, &callers);
                     let saved_program = pending.program.ok_or(VmArtifactError::HandlerStateMismatch)?;
                     let expected = register_type(
@@ -16842,7 +17016,7 @@ fn execute_program_in_float_profile(
                 let Some(frame) = handlers.pop() else {
                     return Err(VmArtifactError::HandlerStackUnderflow);
                 };
-                if !frame.suspended.is_active() {
+                if !frame.suspended.is_active() && !frame.suspended.is_spent() {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
             }
@@ -16864,11 +17038,12 @@ fn execute_program_in_float_profile(
                 let Some(continuation) = continuation else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
-                let resumed = transfer_to_resumed_frame(
-                    resumed, &registers, &callers, frame.call_depth,
-                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                let resumed = transfer_between_frames(
+                    resumed, &registers, &callers, &continuation.registers,
+                    continuation.program.as_ref().map(|program| program.callers.as_slice()).unwrap_or(&[]),
                     budget,
                 )?;
+                frame.suspended = RuntimeSuspension::Active;
                 if frame.owned_payloads {
                     registers.retire_call_arguments(&[*value]);
                 }
@@ -16877,12 +17052,15 @@ fn execute_program_in_float_profile(
                     dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     mut program,
                     ..
                 } = continuation;
                 synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &callers);
                 if let Some(program) = program {
+                    resumption_returns.extend(above_returns);
                     definition = program.definition;
                     callers = program.callers;
                 }
@@ -16909,12 +17087,11 @@ fn execute_program_in_float_profile(
                 if frame.continuation == VmContinuationPolicy::Terminal {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
-                let replaying = frame.continuation.is_replay();
                 let continuation = replay::resume(frame, &mut next_storage_id, budget, true)?;
                 budget.reserve_allocation(registers.len())?;
-                let resumed = transfer_to_resumed_frame(
-                    resumed, &registers, &callers, frame.call_depth,
-                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                let resumed = transfer_between_frames(
+                    resumed, &registers, &callers, &continuation.registers,
+                    continuation.program.as_ref().map(|program| program.callers.as_slice()).unwrap_or(&[]),
                     budget,
                 )?;
                 if frame.owned_payloads || consumes_arguments {
@@ -16925,11 +17102,13 @@ fn execute_program_in_float_profile(
                     dst: continuation_dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     mut program,
                     ..
                 } = continuation;
                 synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &callers);
                 if pending_leave.is_some() {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
@@ -16955,10 +17134,9 @@ fn execute_program_in_float_profile(
                     resumed_handler_ids,
                 });
                 handlers = active_handlers;
-                if replaying {
-                    handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
-                }
+                handlers.last_mut().expect("active frame exists").suspended = RuntimeSuspension::Active;
                 handlers.extend(above);
+                resumption_returns.extend(above_returns);
                 if let Some(program) = program {
                     definition = program.definition;
                     callers = program.callers;
@@ -17002,9 +17180,10 @@ fn execute_program_in_float_profile(
                 // the continuation's original deep-frame suffix.
                 abandon_program_handlers(program, &mut handlers, index + 1,
                     &mut registers, &mut callers, depth, budget, host)?;
-                let resumed = transfer_to_resumed_frame(
-                    resumed, &registers, &callers, handlers[index].call_depth,
-                    continuation.program.as_ref().map(|program| program.callers.len()).unwrap_or(callers.len()),
+                handlers[index].suspended = RuntimeSuspension::Active;
+                let resumed = transfer_between_frames(
+                    resumed, &registers, &callers, &continuation.registers,
+                    continuation.program.as_ref().map(|program| program.callers.as_slice()).unwrap_or(&[]),
                     budget,
                 )?;
                 if handlers[index].owned_payloads {
@@ -17015,12 +17194,15 @@ fn execute_program_in_float_profile(
                     dst,
                     registers: mut saved_registers,
                     above,
+                    mut above_returns,
                     pending_leave,
                     mut program,
                     ..
                 } = continuation;
                 synchronize_saved_source_storage(&mut saved_registers, program.as_mut(), &registers, &callers);
+                synchronize_return_source_storage(&mut above_returns, &registers, &callers);
                 if let Some(program) = program {
+                    resumption_returns.extend(above_returns);
                     definition = program.definition;
                     callers = program.callers;
                 }
@@ -17051,6 +17233,7 @@ fn execute_program_in_float_profile(
                 let Some(continuation) = declined.suspended.take_pending() else {
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
+                declined.suspended = RuntimeSuspension::Active;
                 let payloads = continuation.performed.payloads.as_ref().ok_or(VmArtifactError::HandlerResumeUnavailable)?;
                 let Some(index) = handlers.iter().rposition(|frame| {
                     frame.suspended.is_active()
@@ -17068,7 +17251,6 @@ fn execute_program_in_float_profile(
                 let mut crossed = handlers.split_off(index + 1);
                 crossed.push(declined);
                 crossed.extend(continuation.above.clone());
-                let owner_depth = handlers[index].call_depth;
                 let payload_destinations = handlers[index].payload_destinations.clone();
                 let handler_target = handlers[index].target;
                 if payload_destinations.len() != payloads.len() {
@@ -17081,29 +17263,30 @@ fn execute_program_in_float_profile(
                 let continuation_program = continuation.program.clone();
                 let original_callers = continuation_program.as_ref()
                     .map(|program| program.callers.as_slice()).unwrap_or(&[]);
+                let original_definition = continuation_program.as_ref().map_or(definition, |program| program.definition);
+                let owner = handler_owner_branch(&handlers[index].scope.owner,
+                    RuntimeBranch { definition: original_definition, registers: &continuation.registers, callers: original_callers },
+                    &continuation.above_returns)
+                    .or_else(|| handler_owner_branch(&handlers[index].scope.owner,
+                        RuntimeBranch { definition, registers: &registers, callers: &callers }, &resumption_returns))
+                    .ok_or(VmArtifactError::HandlerStateMismatch)?;
+                let clause_handlers = owner.clause_frames(handlers[index].id, &handlers, budget)?;
+                let owner = owner.branch;
                 budget.reserve_value("forwarded clause payload", payloads.len())?;
                 let clause_values = payloads.iter().cloned().map(|value| {
-                    transfer_to_ancestor_frame(value, &continuation.registers, original_callers, owner_depth, budget)
+                    transfer_between_frames(value, &continuation.registers, original_callers, owner.registers, owner.callers, budget)
                 }).collect::<Result<Vec<_>, _>>()?;
-                if let Some(program) = &continuation_program {
-                    if owner_depth > program.callers.len() {
-                        return Err(VmArtifactError::HandlerStateMismatch);
-                    }
-                    if owner_depth < program.callers.len() {
-                        let owner = program
-                            .callers
-                            .get(owner_depth)
-                            .cloned()
-                            .ok_or(VmArtifactError::HandlerStateMismatch)?;
-                        definition = owner.definition;
-                        registers = owner.registers;
-                        callers = program.callers[..owner_depth].to_vec();
-                    } else {
-                        registers = continuation.registers.clone();
-                    }
-                } else {
-                    registers = continuation.registers.clone();
-                }
+                budget.reserve_value("forwarded handler owner path", owner.callers.len())?;
+                let owner_definition = owner.definition;
+                let owner_registers = owner.registers.clone();
+                let owner_callers = owner.callers.to_vec();
+                let mut above_returns = take_crossed_resumption_returns(&mut resumption_returns, &crossed, budget)?;
+                above_returns.extend(continuation.above_returns);
+                definition = owner_definition;
+                registers = owner_registers;
+                callers = owner_callers;
+                if let Some(clause_handlers) = clause_handlers { handlers = clause_handlers; }
+                let index = handlers.len() - 1;
                 for (destination, payload) in payload_destinations
                     .iter()
                     .zip(clause_values)
@@ -17117,8 +17300,9 @@ fn execute_program_in_float_profile(
                     registers: continuation.registers,
                     performed: continuation.performed,
                     above: crossed,
+                    above_returns,
                     pending_leave: continuation.pending_leave,
-                    remaining_replays: continuation.remaining_replays,
+                    remaining_uses: Arc::new(Cell::new(handlers[index].continuation.replay_uses().unwrap_or(1))),
                     program: continuation_program,
                 });
                 pc = handler_target as usize;
@@ -17129,12 +17313,8 @@ fn execute_program_in_float_profile(
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 };
                 if let Some(suspended) = frame.take_canceled_continuation()? {
-                    abandon_program_continuation(program, suspended, frame.call_depth,
-                        frame.owned_payloads.then_some(frame.shared_registers),
+                    abandon_program_continuation(program, suspended, frame.scope, frame.owned_payloads,
                         &mut registers, &mut callers, depth, budget, host)?;
-                }
-                if frame.continuation == VmContinuationPolicy::Terminal {
-                    resumption_returns.clear();
                 }
             }
             VmInstruction::Copy { dst, src } => {
@@ -17851,11 +18031,10 @@ fn execute_program_in_float_profile(
             VmInstruction::TailCallOwned { callee, arguments } => {
                 // Enclosing callers' handlers keep their original depth.
                 // Only a delimiter owned by the ending activation is illegal.
-                if handlers.iter().any(|handler| handler.call_depth >= callers.len())
+                if handlers.iter().any(|handler| handler.scope.owner.same(&registers.activation))
                     || registers.capture_environment.is_some()
                     || resumption_returns.last().is_some_and(|pending|
-                        pending.program.as_ref().is_some_and(|saved|
-                            saved.definition == definition && saved.callers.len() == callers.len())) {
+                        pending.registers.activation.same(&registers.activation)) {
                     return Err(VmArtifactError::HandlerStillActive);
                 }
                 let target = program.functions.get(callee)
@@ -17991,8 +18170,7 @@ fn execute_program_in_float_profile(
                         if let Some(frame) = handlers.iter_mut().find(|frame| frame.id == id)
                             && frame.continuation == VmContinuationPolicy::Optional
                             && let Some(suspended) = frame.suspended.take_pending() {
-                            abandon_program_continuation(program, suspended, frame.call_depth,
-                                frame.owned_payloads.then(|| frame.shared_registers.clone()),
+                            abandon_program_continuation(program, suspended, frame.scope.clone(), frame.owned_payloads,
                                 &mut registers, &mut callers, depth, budget, host)?;
                         }
                         registers[*dst as usize] = Some(VmValue::Unit);
@@ -18316,15 +18494,16 @@ fn execute_program_in_float_profile(
                 // clause. This is not an exit from the owning frame, so its
                 // capture loan remains installed until its actual return.
                 if let Some(return_to_clause) = resumption_returns.last()
-                    && (callers.len() == return_floor
-                        || return_to_clause.program.as_ref().is_some_and(|saved|
-                            saved.definition == definition && saved.callers.len() == callers.len())) {
+                    && return_to_clause.handlers.iter().any(|handler|
+                        handler.id == return_to_clause.handler_id && handler.scope.owner.same(&registers.activation)) {
                     if handlers.iter().any(|handler|
                         !return_to_clause.resumed_handler_ids.contains(&handler.id)) {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
                     let mut return_to_clause = resumption_returns.pop()
                         .expect("checked clause-return frame exists");
+                    let value = transfer_between_frames(value, &registers, &callers, &return_to_clause.registers,
+                        return_to_clause.program.as_ref().map(|saved| saved.callers.as_slice()).unwrap_or(&[]), budget)?;
                     synchronize_saved_source_storage(&mut return_to_clause.registers,
                         return_to_clause.program.as_mut(), &registers, &callers);
                     if let Some(program) = return_to_clause.program {
@@ -18345,7 +18524,7 @@ fn execute_program_in_float_profile(
                     // may make its ordinary return ill-formed.
                     if handlers
                         .iter()
-                        .any(|handler| handler.call_depth == callers.len())
+                        .any(|handler| handler.scope.owner.same(&registers.activation))
                     {
                         return Err(VmArtifactError::HandlerStillActive);
                     }
@@ -18971,7 +19150,9 @@ mod tests {
 
     #[test]
     fn ordinary_call_frame_translation_checks_scope_and_work_limits() {
-        let callers = vec![tail_caller(VmValue::I64(42)); 3];
+        let callers = (0..3).map(|_| tail_caller(VmValue::I64(42))).collect::<Vec<_>>();
+        let registers = RuntimeRegisters::default();
+        let destination = RuntimeRegisters::default();
         let reference = VmValue::Reference {
             target: ReferenceTarget::Caller { caller_depth: 1, register: 1 },
             fields: Arc::from([]), unique: false, referent: VmType::I64,
@@ -18981,14 +19162,16 @@ mod tests {
             unsafe_execution: false,
             limits: VmExecutionLimits::default(), instructions: 0, allocated_elements: 0,
         };
-        let sibling = transfer_to_resumed_frame(reference.clone(), &[], &callers, 1, 2, &mut budget).unwrap();
+        let sibling = transfer_between_frames(reference.clone(), &registers, &callers,
+            &destination, &callers[..2], &mut budget).unwrap();
         assert!(matches!(sibling, VmValue::Reference {
             target: ReferenceTarget::Caller { caller_depth: 0, register: 1 }, ..
         }));
-        assert_eq!(budget.instructions, 3);
+        assert_eq!(budget.instructions, 6, "three identity comparisons and three call edges");
         assert!(matches!(transfer_to_ancestor_frame(reference.clone(), &[], &callers, 4, &mut budget),
             Err(VmArtifactError::HandlerStateMismatch)));
-        assert!(matches!(transfer_to_resumed_frame(reference.clone(), &[], &callers, 2, 1, &mut budget),
+        assert!(matches!(transfer_between_frames(reference.clone(), &registers, &callers,
+            &destination, &[], &mut budget),
             Err(VmArtifactError::HandlerStateMismatch)));
         budget.limits.max_instructions = budget.instructions;
         assert!(matches!(transfer_to_ancestor_frame(reference, &[], &callers, 1, &mut budget),

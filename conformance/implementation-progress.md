@@ -5,6 +5,40 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 169: helper-local delimiters and owned resumption branches
+
+The existing executable verifier closes local resumption trace dependencies
+before publishing ordered helper contracts. Normal paths and nonreturning
+prefixes remain distinct; missing, cyclic and oversized dependencies reject.
+Helper-local handlers no longer require source inlining or an unordered summary.
+
+The shared VM/native runtime identifies owning activations across saved call
+paths and retains the resumption-return edges crossed by a performance. Dispatch
+restores the selected owner's clause context. Payload/result transport follows
+the actual common call ancestor, preserving existing backing homes. Ordinary
+snapshots share one performance budget; checked replay creates independent
+internal authority while preserving aliases and outside pending obligations.
+Spent one-shot clauses remain outside their serviced delimiter.
+
+One installation-time storage frontier now supplies both replay and cancellation.
+A caller's clause view does not own its suspended protected roots. Returned
+clause paths participate in copying, source-storage synchronization and ordered
+cleanup. Terminal cancellation discards only the crossed return paths, not an
+unrelated enclosing resumption return.
+
+The complete handler-reentry gate passes **75/75**, including fresh/decoded VM,
+all-native and both mixed directions at O0/O2 with zero measured resident-entry
+allocations and copied bytes. New cases cover local delimiters, cross-branch
+performance/forwarding/replay/cancellation, once-only protected Drop, unique
+payload mutation and one-shot clause forwarding. Six replay/storage tests,
+17 helper-contract tests and actual-path reference-translation checks pass.
+
+This closes these preserved failures, not the whole native-handler milestone:
+retained-control limit accounting and local-label transfer composition remain
+under acceptance review. General guarded source analysis and full compiler/
+library/self-hosted conformance remain separate obligations. Cache is 169,
+verifier 51 and native ABI 20/control convention v2; bytecode 75/schema 119 remain.
+
 ## Cache 168: shared helper-performance input provenance
 
 Callable-control now supplies complete may-performance payload projections from

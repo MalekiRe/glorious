@@ -2550,3 +2550,44 @@ storage. Focused producer checks cover captured inputs, branch alternatives,
 pending resumption suffixes, limits and alias invalidation. This completes this
 source provenance boundary, not general guarded resumption analysis or the whole
 native-handler admission audit. Executable formats and native ABI are unchanged.
+
+## Helper-local delimiters and owned runtime branches
+
+The executable verifier's ordered capability product retains producer-local
+resumption trace dependencies while auditing a helper's local handlers. Closing
+the worklist expands those dependencies before publication. Returning paths
+compose in order; nonreturning paths preserve only executed prefixes. Missing
+dependencies, cycles and finite expansion limits reject. No raw local trace
+reference or incomplete event set can become a caller contract. Ordinary helper
+frames remain executable; source inlining is not this admission proof.
+
+The shared runtime distinguishes a logical owning activation from its coordinate
+in an ordinary call path. A performance can cross returning-resumption edges and
+enter a helper's saved clause path. Its continuation retains exactly those crossed
+edges; resuming restores them in order after the new clause-return edge. Dispatch
+selects the real owner's clause context, and payload/result transport uses the
+two paths' actual common ancestor. Source homes, native reference authority and
+logical initialization remain the existing storage representation.
+
+Every ordinary snapshot of one performance shares its remaining invocation
+authority. Consuming the original invalidates older clause views without making
+them active effect delimiters. Checked replay duplicates internal authority with
+one rebasing map, preserving aliases across retained clause paths; outside
+pending obligations remain shared. Final use still transfers the original.
+
+Handler installation publishes the runtime's outside-storage frontier from the
+existing protected-owner partition and actual caller views. A clause view is
+not ownership of the protected roots retained by its pending continuation.
+Replay and cancellation consume this same frontier across all captured call and
+clause paths. Shared source synchronization matches activation and allocation
+identities, never an unrelated frame at the same numeric depth. Cleanup walks
+the retained paths in execution-return order and consumes pending authority once.
+Terminal cancellation preserves unrelated enclosing return edges.
+
+Cache 169, verifier 51 and native ABI 20/control convention v2 verify all 75
+handler-reentry tests through fresh/decoded VM and native/mixed O0/O2 execution.
+Focused checks cover local trace closure, missing/cyclic evidence, shared versus
+copied budgets, actual-path reference transport, protected Drop and payload
+mutation. Bytecode 75/schema 119 are unchanged. Retained-control limits and local
+label-transfer composition remain under milestone review; this checkpoint does
+not claim general guarded source analysis or full compiler/library conformance.

@@ -99,6 +99,125 @@ fn ordinary_helpers_transport_and_invoke_the_same_resumption_authority() {
 }
 
 #[test]
+fn ordinary_resumption_helpers_preserve_their_local_handler_delimiters() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Local { [1,1] local() -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            handle { let value=Local::local(); task(value) } {
+                Local::local() with next => next(40)
+            }
+        }
+        pub fn main() -> i64 { handle Ask::ask() {
+            Ask::ask() with k => inside(k) + 2
+        } }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_handle_effects_from_the_resumed_caller() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log(value:i64) -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={Log}> {
+            handle task(40) { Log::log(value) with next => next(value + 2) }
+        }
+        fn leaf() -> i64 / Log { handle {
+            let value=Ask::ask(); Log::log(value)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { handle leaf() { Log::log(value) => 99 } }");
+}
+
+#[test]
+fn terminal_inner_handlers_preserve_the_enclosing_resumption_return() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Stop { stop() -> !; }
+        pub fn main() -> i64 { handle {
+            let value=Ask::ask(); handle Stop::stop() { Stop::stop() => value }
+        } { Ask::ask() with k => k(40) + 2 } }");
+}
+
+#[test]
+fn consumed_one_shot_clauses_forward_their_own_later_effects() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { handle {
+            handle Ask::ask() { Ask::ask() with k => k(10) + Ask::ask() }
+        } { Ask::ask() => 32 } }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_cancel_the_resumed_callers_branch() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Log { [0,1] log(value:i64) -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={Log}> {
+            handle task(40) { Log::log(value) with next => 42 }
+        }
+        fn leaf() -> i64 / Log { handle {
+            let value=Ask::ask(); Log::log(value)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { handle leaf() { Log::log(value) => 99 } }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_cancel_protected_owners_in_the_resumed_caller() {
+    candidate("use std::*;
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Ask { [1,1] ask() -> i64; }
+        effect Log { [0,1] log(value:i64) -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={Log}> {
+            handle task(40) { Log::log(value) with next => 41 }
+        }
+        fn leaf(target:&mut i64) -> i64 / Log { handle {
+            let owner=Probe { target: target }; let value=Ask::ask(); Log::log(value)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { let mut count=0;
+            let result=handle leaf(&mut count) { Log::log(value) => 99 }; result + count
+        }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_mutate_payloads_from_the_resumed_caller() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Touch { [1,1] touch(value:&mut i64) -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={Touch}> {
+            handle task(0) { Touch::touch(value) with next => {
+                *value = *value + 2; next(*value)
+            } }
+        }
+        fn leaf(target:&mut i64) -> i64 / Touch { handle {
+            let ignored=Ask::ask(); Touch::touch(target)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { let mut value=40;
+            handle leaf(&mut value) { Touch::touch(value) => 99 }
+        }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_forward_from_the_resumed_callers_branch() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Log { [1,1] log(value:i64) -> i64; }
+        fn inside<F>(task:F) -> i64 / Log where F:Fn<(i64,),Output=i64,Effects={Log}> {
+            handle task(40) { Log::log(0) with next => next(0) }
+        }
+        fn leaf() -> i64 / Log { handle {
+            let value=Ask::ask(); Log::log(value)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { handle leaf() { Log::log(value) => value + 2 } }");
+}
+
+#[test]
+fn ordinary_resumption_helpers_replay_the_resumed_callers_branch() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        effect Log { [2,2] log(value:i64) -> i64; }
+        fn inside<F>(task:F) -> i64 where F:Fn<(i64,),Output=i64,Effects={Log}> {
+            handle task(40) { Log::log(value) with next => next(20) + next(22) }
+        }
+        fn leaf() -> i64 / Log { handle {
+            let value=Ask::ask(); Log::log(value)
+        } { Ask::ask() with k => inside(k) } }
+        pub fn main() -> i64 { handle leaf() { Log::log(value) with next => next(1) + next(98) } }");
+}
+
+#[test]
 fn ordinary_helpers_return_resumption_products_to_their_live_owner() {
     candidate("effect Ask { [1,1] ask() -> i64; }
         fn keep<T>(value:T) -> T { value }

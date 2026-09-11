@@ -19,21 +19,20 @@ pub(super) fn resume(frame: &mut RuntimeHandlerFrame, next_storage_id: &mut u64,
     }
     // A non-returning snapshot transfer cannot abandon remaining required
     // invocations. Only the final original can leave the clause permanently.
-    if !returns_to_clause && original.remaining_replays != 1 {
+    if !returns_to_clause && original.remaining_uses.get() != 1 {
         return Err(VmArtifactError::HandlerResumeUnavailable);
     }
-    match original.remaining_replays {
+    match original.remaining_uses.get() {
         0 => Err(VmArtifactError::HandlerResumeUnavailable),
         1 => {
             let original = frame.suspended.take_pending().expect("checked pending original");
-            if returns_to_clause { frame.suspended = RuntimeSuspension::Replayed; }
             Ok(original)
         }
         _ => {
             let snapshot = if frame.owned_payloads {
-                fork(original, frame.call_depth, &frame.shared_registers, next_storage_id, budget)?
+                fork(original, &frame.scope, next_storage_id, budget)?
             } else { original.clone() };
-            frame.suspended.pending_mut().expect("checked pending original").remaining_replays -= 1;
+            original.remaining_uses.set(original.remaining_uses.get() - 1);
             Ok(snapshot)
         }
     }
@@ -268,45 +267,84 @@ impl Duplication<'_> {
     }
 }
 
-fn shallow_continuation(original: &RuntimeContinuation, budget: &mut ExecutionBudget)
+fn shallow_handler(frame: &RuntimeHandlerFrame, scope: &RuntimeHandlerScope) -> RuntimeHandlerFrame {
+    RuntimeHandlerFrame {
+        id: frame.id, scope: frame.scope.clone(), effect: frame.effect,
+        effect_arguments: frame.effect_arguments.clone(), operation: frame.operation,
+        payload_destinations: frame.payload_destinations.clone(), continuation: frame.continuation,
+        target: frame.target, owned_payloads: frame.owned_payloads,
+        suspended: if frame.suspended.is_spent() { RuntimeSuspension::Replayed }
+            else if frame.suspended.pending().is_some_and(|saved| !scope.owns_pending(saved)) {
+                frame.suspended.clone()
+            } else { RuntimeSuspension::Active },
+    }
+}
+
+fn shallow_continuation(original: &RuntimeContinuation, scope: &RuntimeHandlerScope,
+    authorities: &mut BTreeMap<usize, Arc<Cell<u32>>>, budget: &mut ExecutionBudget)
     -> Result<RuntimeContinuation, VmArtifactError>
 {
     budget.reserve_value("replayed handler suffix", original.above.len())?;
+    budget.reserve_value("replayed resumption returns", original.above_returns.len())?;
+    let authority = Arc::as_ptr(&original.remaining_uses) as usize;
+    let remaining_uses = authorities.entry(authority)
+        .or_insert_with(|| Arc::new(Cell::new(original.remaining_uses.get()))).clone();
     Ok(RuntimeContinuation {
         target: original.target, dst: original.dst, registers: original.registers.clone(),
         performed: original.performed.clone(), pending_leave: original.pending_leave.clone(),
-        remaining_replays: original.remaining_replays, program: original.program.clone(),
-        above: original.above.iter().map(|frame| RuntimeHandlerFrame {
-            id: frame.id, call_depth: frame.call_depth, effect: frame.effect,
-            effect_arguments: frame.effect_arguments.clone(), operation: frame.operation,
-            payload_destinations: frame.payload_destinations.clone(), continuation: frame.continuation,
-            target: frame.target, owned_payloads: frame.owned_payloads,
-            shared_registers: frame.shared_registers.clone(),
-            suspended: if matches!(frame.suspended, RuntimeSuspension::Replayed) {
-                RuntimeSuspension::Replayed
-            } else { RuntimeSuspension::Active },
-        }).collect(),
+        remaining_uses, program: original.program.clone(),
+        above: original.above.iter().map(|frame| shallow_handler(frame, scope)).collect(),
+        above_returns: original.above_returns.iter().map(|pending| {
+            budget.reserve_value("replayed clause handlers", pending.handlers.len())?;
+            Ok(RuntimeResumptionReturn {
+                pc: pending.pc, dst: pending.dst, handler_id: pending.handler_id,
+                registers: pending.registers.clone(), program: pending.program.clone(),
+                resumed_handler_ids: pending.resumed_handler_ids.clone(),
+                handlers: pending.handlers.iter().map(|frame| shallow_handler(frame, scope)).collect(),
+            })
+        }).collect::<Result<_, VmArtifactError>>()?,
     })
+}
+
+fn registers(saved: &RuntimeContinuation) -> impl Iterator<Item = &RuntimeRegisters> {
+    saved.program.iter().flat_map(|program| program.callers.iter().map(|caller| &caller.registers))
+        .chain([&saved.registers])
+        .chain(saved.above_returns.iter().flat_map(|pending| {
+            pending.program.iter().flat_map(|program| program.callers.iter().map(|caller| &caller.registers))
+                .chain([&pending.registers])
+        }))
+}
+
+fn registers_mut(saved: &mut RuntimeContinuation) -> impl Iterator<Item = &mut RuntimeRegisters> {
+    saved.program.iter_mut().flat_map(|program| program.callers.iter_mut().map(|caller| &mut caller.registers))
+        .chain([&mut saved.registers])
+        .chain(saved.above_returns.iter_mut().flat_map(|pending| {
+            pending.program.iter_mut().flat_map(|program| program.callers.iter_mut().map(|caller| &mut caller.registers))
+                .chain([&mut pending.registers])
+        }))
 }
 
 pub(super) fn fork(
     original: &RuntimeContinuation,
-    owner_depth: usize,
-    outer: &BTreeMap<u32, Option<u64>>,
+    scope: &RuntimeHandlerScope,
     next_storage_id: &mut u64,
     budget: &mut ExecutionBudget,
 ) -> Result<RuntimeContinuation, VmArtifactError> {
     // Flatten and rebuild iteratively so nesting retained handlers does not
     // turn a checked replay into unbounded Rust-stack recursion.
-    let mut nodes = vec![(original, shallow_continuation(original, budget)?, None)];
+    let mut authorities = BTreeMap::new();
+    let mut nodes = vec![(original, shallow_continuation(original, scope, &mut authorities, budget)?, None)];
     let mut index = 0;
     while index < nodes.len() {
         let source = nodes[index].0;
-        for (handler, frame) in source.above.iter().enumerate() {
-            if let Some(saved) = frame.suspended.pending() {
+        let handlers = source.above.iter().enumerate().map(|(handler, frame)| (None, handler, frame))
+            .chain(source.above_returns.iter().enumerate().flat_map(|(pending, saved)|
+                saved.handlers.iter().enumerate().map(move |(handler, frame)| (Some(pending), handler, frame))));
+        for (pending, handler, frame) in handlers {
+            if let Some(saved) = frame.suspended.pending() && scope.owns_pending(saved) {
                 budget.reserve_value("replayed continuation paths", nodes.len() + 1)?;
-                let copied = shallow_continuation(saved, budget)?;
-                nodes.push((saved, copied, Some((index, handler))));
+                let copied = shallow_continuation(saved, scope, &mut authorities, budget)?;
+                nodes.push((saved, copied, Some((index, pending, handler))));
             }
         }
         index += 1;
@@ -319,51 +357,45 @@ pub(super) fn fork(
     };
     let empty = BTreeMap::new();
     for (_, fork, _) in &nodes {
-        let depth = fork.program.as_ref().map_or(0, |program| program.callers.len());
-        if owner_depth > depth { return Err(VmArtifactError::HandlerStateMismatch); }
-        if let Some(program) = &fork.program {
-            for (index, caller) in program.callers.iter().enumerate().skip(owner_depth) {
-                duplication.allocate_registers(&caller.registers,
-                    if index == owner_depth { outer } else { &empty })?;
-            }
+        for registers in registers(fork) {
+            duplication.allocate_registers(registers, scope.shared_for(registers).unwrap_or(&empty))?;
         }
-        duplication.allocate_registers(&fork.registers,
-            if depth == owner_depth { outer } else { &empty })?;
     }
     // Allocate missing loan destinations only after every owned callable has
     // been discovered. Missing destinations belong to outer, shared callables;
     // this branch owns a detached copy of their in-flight capture slots.
     for (_, fork, _) in &nodes {
-        if let Some(program) = &fork.program {
-            for caller in program.callers.iter().skip(owner_depth + 1) {
-                duplication.allocate_capture_loan(&caller.registers)?;
+        for registers in registers(fork) {
+            let outer = scope.shared_for(registers).unwrap_or(&empty);
+            if registers.capture_environment.as_ref().is_some_and(|environment|
+                (0..environment.len()).any(|local| !shared(registers, local as u32, outer))) {
+                duplication.allocate_capture_loan(registers)?;
             }
-        }
-        if fork.program.as_ref().is_some_and(|program| program.callers.len() > owner_depth) {
-            duplication.allocate_capture_loan(&fork.registers)?;
         }
     }
     for (_, fork, _) in &mut nodes {
-        let depth = fork.program.as_ref().map_or(0, |program| program.callers.len());
-        if let Some(program) = &mut fork.program {
-            for (index, caller) in program.callers.iter_mut().enumerate().skip(owner_depth) {
-                duplication.copy_registers(&mut caller.registers,
-                    if index == owner_depth { outer } else { &empty })?;
-            }
+        for registers in registers_mut(fork) {
+            duplication.copy_registers(registers, scope.shared_for(registers).unwrap_or(&empty))?;
         }
-        duplication.copy_registers(&mut fork.registers,
-            if depth == owner_depth { outer } else { &empty })?;
     }
     for (_, fork, _) in &mut nodes {
-        for handler in &mut fork.above {
-            for brand in handler.shared_registers.values_mut().flatten() {
-                if let Some(copied) = duplication.brands.get(brand) { *brand = *copied; }
+        for handler in fork.above.iter_mut().chain(fork.above_returns.iter_mut().flat_map(|pending| &mut pending.handlers)) {
+            for (_, shared) in &mut handler.scope.shared_frames {
+                for brand in shared.values_mut().flatten() {
+                    if let Some(copied) = duplication.brands.get(brand) { *brand = *copied; }
+                }
+            }
+            for outside in &mut handler.scope.outside_pending {
+                if let Some(copied) = authorities.get(&(Arc::as_ptr(outside) as usize)) { *outside = copied.clone(); }
             }
         }
     }
     while let Some((_, fork, parent)) = nodes.pop() {
-        if let Some((parent, handler)) = parent {
-            nodes[parent].1.above[handler].suspended = RuntimeSuspension::Pending(fork);
+        if let Some((parent, pending, handler)) = parent {
+            let destination = if let Some(pending) = pending {
+                &mut nodes[parent].1.above_returns[pending].handlers[handler]
+            } else { &mut nodes[parent].1.above[handler] };
+            destination.suspended = RuntimeSuspension::Pending(fork);
         } else { return Ok(fork); }
     }
     Err(VmArtifactError::HandlerStateMismatch)
@@ -372,6 +404,76 @@ pub(super) fn fork(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn empty_continuation(registers: RuntimeRegisters) -> RuntimeContinuation {
+        RuntimeContinuation {
+            target: 0, dst: 0, registers,
+            performed: RuntimePerformed { effect: DefKey(Digest::of_bytes(b"branch-authority")),
+                effect_arguments: vec![], operation: 0, payloads: None },
+            above: vec![], above_returns: vec![], pending_leave: None,
+            remaining_uses: Arc::new(Cell::new(2)), program: None,
+        }
+    }
+
+    #[test]
+    fn replay_preserves_budget_aliases_across_saved_clause_paths() {
+        for outside in [false, true] {
+            let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false,
+                limits: Default::default(), instructions: 0, allocated_elements: 0 };
+            let child = empty_continuation(RuntimeRegisters::default());
+            let child_scope = RuntimeHandlerScope::new(&child.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
+            let frame = RuntimeHandlerFrame {
+                id: 1, scope: child_scope, effect: child.performed.effect, effect_arguments: vec![], operation: 0,
+                payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
+                target: 0, owned_payloads: true, suspended: RuntimeSuspension::Pending(child),
+            };
+            let mut original = empty_continuation(RuntimeRegisters::default());
+            let mut scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
+            let original_authority = frame.suspended.pending().unwrap().remaining_uses.clone();
+            if outside { scope.outside_pending.push(original_authority.clone()); }
+            original.above.push(frame.clone());
+            original.above_returns.push(RuntimeResumptionReturn {
+                pc: 0, dst: 0, handler_id: 1, registers: RuntimeRegisters::default(),
+                handlers: vec![frame], program: None, resumed_handler_ids: vec![1],
+            });
+            let mut copied = fork(&original, &scope, &mut 0, &mut budget).unwrap();
+            let above = copied.above[0].suspended.pending().unwrap();
+            let returned = copied.above_returns[0].handlers[0].suspended.pending().unwrap();
+            assert!(Arc::ptr_eq(&above.remaining_uses, &returned.remaining_uses));
+            assert_eq!(Arc::ptr_eq(&above.remaining_uses, &original_authority), outside);
+            copied.above[0].suspended.take_pending().unwrap();
+            assert!(copied.above_returns[0].handlers[0].suspended.take_pending().is_none());
+            assert_eq!(original_authority.get(), if outside { 0 } else { 2 });
+        }
+    }
+
+    #[test]
+    fn a_clause_view_does_not_own_its_suspended_protected_roots() {
+        let mut budget = ExecutionBudget { native_memory: NativeMemory::default(), unsafe_execution: false,
+            limits: Default::default(), instructions: 0, allocated_elements: 0 };
+        let registers = RuntimeRegisters { values: vec![Some(VmValue::Unit); 2],
+            source_storage: BTreeMap::from([(0, 10), (1, 11)]), ..Default::default() };
+        let shared = BTreeMap::from([(1, Some(11))]);
+        let scope = RuntimeHandlerScope::new(&registers, &[], &[], shared, &mut budget).unwrap();
+        let original = empty_continuation(registers.clone());
+        let frame = RuntimeHandlerFrame {
+            id: 1, scope, effect: original.performed.effect, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], continuation: VmContinuationPolicy::Consume,
+            target: 0, owned_payloads: true, suspended: RuntimeSuspension::Pending(original.clone()),
+        };
+        let helper = RuntimeRegisters::default();
+        let caller = RuntimeProgramCaller { definition: original.performed.effect, registers: registers.clone(),
+            pc: 0, return_destination: 0 };
+        let inner = RuntimeHandlerScope::new(&helper, &[caller], &[frame], BTreeMap::new(), &mut budget).unwrap();
+        assert!(inner.owner.same(&helper.activation));
+        let outer = inner.shared_for(&registers).unwrap();
+        assert!(!outer.contains_key(&0));
+        assert_eq!(outer[&1], Some(11));
+        assert!(!inner.owns_pending(&original));
+        let mut next_performance = original.clone();
+        next_performance.remaining_uses = Arc::new(Cell::new(1));
+        assert!(inner.owns_pending(&next_performance), "a new performance of the same delimiter is new authority");
+    }
 
     #[test]
     fn suspended_prepared_receivers_rebase_to_their_owner_without_copying_it() {
@@ -395,8 +497,9 @@ mod tests {
             let retained = shared_registers(&registers, true, if outer_owner { &[] } else { &[0] }, &mut budget).unwrap();
             let original = RuntimeContinuation { target: 0, dst: 0, registers,
                 performed: RuntimePerformed { effect: definition, effect_arguments: vec![], operation: 0, payloads: None },
-                above: vec![], pending_leave: None, remaining_replays: 2, program: None };
-            let copied = fork(&original, 0, &retained, &mut 0, &mut budget).unwrap();
+                above: vec![], above_returns: vec![], pending_leave: None, remaining_uses: Arc::new(Cell::new(2)), program: None };
+            let scope = RuntimeHandlerScope::new(&original.registers, &[], &[], retained, &mut budget).unwrap();
+            let copied = fork(&original, &scope, &mut 0, &mut budget).unwrap();
             let VmValue::Callable { captures: copied_owner, .. } = copied.registers.values[0].as_ref().unwrap() else { panic!() };
             let VmValue::Callable { captures: copied_view, .. } = copied.registers.values[1].as_ref().unwrap() else { panic!() };
             assert!(Arc::ptr_eq(copied_owner, copied_view));
@@ -424,12 +527,13 @@ mod tests {
                 source_storage: BTreeMap::from([(0, 7)]), ..Default::default()
             },
             performed: RuntimePerformed { effect: definition, effect_arguments: vec![], operation: 0, payloads: None },
-            above: vec![], pending_leave: None, remaining_replays: 3, program: None,
+            above: vec![], above_returns: vec![], pending_leave: None, remaining_uses: Arc::new(Cell::new(3)), program: None,
         };
+        let scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::new(), &mut budget).unwrap();
         let mut frame = RuntimeHandlerFrame {
-            id: 1, call_depth: 0, effect: definition, effect_arguments: vec![], operation: 0,
+            id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 3 },
-            target: 2, owned_payloads: true, shared_registers: BTreeMap::new(),
+            target: 2, owned_payloads: true,
             suspended: RuntimeSuspension::Pending(original),
         };
         let mut next_storage_id = 7;
@@ -444,20 +548,27 @@ mod tests {
             assert!(!Arc::ptr_eq(copied_home, &home));
             copied_home.clear(&[]);
             assert!(home.is_initialized(&[]));
-            assert_eq!(frame.suspended.pending().unwrap().remaining_replays, remaining);
+            assert_eq!(frame.suspended.pending().unwrap().remaining_uses.get(), remaining);
             assert!(frame.take_canceled_continuation().is_err());
         }
         let allocated_before = budget.allocated_elements;
         let mut tail_frame = frame.clone();
+        // This is a separate execution scenario, not an ordinary snapshot:
+        // ordinary clause snapshots must share and consume the same authority.
+        tail_frame.suspended.pending_mut().unwrap().remaining_uses = Arc::new(Cell::new(1));
         let tail_use = resume(&mut tail_frame, &mut next_storage_id, &mut budget, false).unwrap();
         assert!(Arc::ptr_eq(&tail_use.registers.native_homes[&0], &home));
-        assert!(tail_frame.suspended.is_active());
+        assert!(tail_frame.suspended.is_spent());
+        let mut older_view = frame.clone();
         let final_use = resume(&mut frame, &mut next_storage_id, &mut budget, true).unwrap();
         assert!(Arc::ptr_eq(&final_use.registers.native_homes[&0], &home));
         assert_eq!(final_use.registers.source_storage[&0], 7);
         assert_eq!(budget.allocated_elements, allocated_before, "consuming the original must not allocate a replay copy");
         assert!(matches!(frame.suspended, RuntimeSuspension::Replayed));
         assert!(!frame.suspended.is_active(), "a spent clause must not handle its own effects");
+        assert!(older_view.suspended.is_spent());
+        assert!(older_view.suspended.take_pending().is_none());
+        assert!(older_view.take_canceled_continuation().unwrap().is_none());
         assert!(resume(&mut frame, &mut next_storage_id, &mut budget, true).is_err());
         assert!(frame.take_canceled_continuation().unwrap().is_none(), "final cleanup must not destroy the original again");
     }
@@ -531,21 +642,24 @@ mod tests {
                 payloads: None,
             },
             above: vec![],
+            above_returns: vec![],
             pending_leave: None,
-            remaining_replays: 2,
+            remaining_uses: Arc::new(Cell::new(2)),
             program: None,
         };
+        let inner_scope = RuntimeHandlerScope::new(&original.registers, &[], &[], BTreeMap::from([(1, Some(2))]), &mut budget).unwrap();
         original.above.push(RuntimeHandlerFrame {
-            id: 1, call_depth: 0, effect: original.performed.effect,
+            id: 1, scope: inner_scope, effect: original.performed.effect,
             effect_arguments: vec![], operation: 0, payload_destinations: vec![],
             continuation: VmContinuationPolicy::Replay { uses: 2 }, target: 0,
-            owned_payloads: true, shared_registers: BTreeMap::from([(1, Some(2))]),
+            owned_payloads: true,
             suspended: RuntimeSuspension::Pending(original.clone()),
         });
-        let copied = fork(&original, 0, &outer, &mut 2, &mut budget).unwrap();
+        let scope = RuntimeHandlerScope::new(&original.registers, &[], &[], outer, &mut budget).unwrap();
+        let copied = fork(&original, &scope, &mut 2, &mut budget).unwrap();
         assert!(Arc::ptr_eq(&copied.registers.native_homes[&0], &outer_home));
         let copied_inner = &copied.registers.native_homes[&1];
-        assert_eq!(copied.above[0].shared_registers[&1], Some(copied.registers.source_storage[&1]));
+        assert_eq!(copied.above[0].scope.shared_for(&copied.registers).unwrap()[&1], Some(copied.registers.source_storage[&1]));
         assert!(Arc::ptr_eq(&copied.above[0].suspended.pending().unwrap().registers.native_homes[&1], copied_inner));
         assert!(!Arc::ptr_eq(copied_inner, &inner));
         assert_ne!(
@@ -609,7 +723,7 @@ mod tests {
                 performed: RuntimePerformed {
                     effect: definition, effect_arguments: vec![], operation: 0, payloads: None,
                 },
-                above: vec![], pending_leave: None, remaining_replays: 2,
+                above: vec![], above_returns: vec![], pending_leave: None, remaining_uses: Arc::new(Cell::new(2)),
                 program: Some(RuntimeProgramContinuation {
                     definition,
                     callers: vec![RuntimeProgramCaller {
@@ -628,7 +742,9 @@ mod tests {
                 }),
             };
             let outer = if outer_callable { BTreeMap::from([(0, Some(1))]) } else { BTreeMap::new() };
-            let mut copied = fork(&original, 0, &outer, &mut 1, &mut budget).unwrap();
+            let scope = RuntimeHandlerScope::new(&original.program.as_ref().unwrap().callers[0].registers,
+                &[], &[], outer, &mut budget).unwrap();
+            let mut copied = fork(&original, &scope, &mut 1, &mut budget).unwrap();
             let loan = copied.registers.capture_environment.clone().unwrap();
             assert!(!Arc::ptr_eq(&loan, &environment));
             assert_eq!(copied.registers.detached_captures, outer_callable);
@@ -643,9 +759,9 @@ mod tests {
             restored.clear(&[]);
             assert!(home.is_initialized(&[]));
             let mut frame = RuntimeHandlerFrame {
-                id: 1, call_depth: 0, effect: definition, effect_arguments: vec![], operation: 0,
+                id: 1, scope, effect: definition, effect_arguments: vec![], operation: 0,
                 payload_destinations: vec![], continuation: VmContinuationPolicy::Replay { uses: 2 },
-                target: 0, owned_payloads: true, shared_registers: outer,
+                target: 0, owned_payloads: true,
                 suspended: RuntimeSuspension::Pending(original),
             };
             let snapshot = resume(&mut frame, &mut 1, &mut budget, true).unwrap();
