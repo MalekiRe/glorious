@@ -32,8 +32,8 @@ pub const STAGE0_PROGRAM_MAGIC: [u8; 8] = *b"G0VP\r\n\x1a\n";
 // protected ownership partition for all owned handler policies.
 // Schema 118 carries checked replay-handle transport independently of Copy.
 // Schema 119 distinguishes receiver preparation and its consuming invocation.
-// Schema 120 names retained and exited handler installations on label edges.
-pub const STAGE0_VM_SCHEMA: u32 = 120;
+// Schema 121 distinguishes clause-owned roots from continuation-owned roots.
+pub const STAGE0_VM_SCHEMA: u32 = 121;
 /// Static process-boundary decoding caps, enforced before vector allocation.
 pub const STAGE0_MAX_DECODE_FUNCTIONS: u64 = 1 << 16;
 pub const STAGE0_MAX_DECODE_REGISTERS: u64 = 1 << 20;

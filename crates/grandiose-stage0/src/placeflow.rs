@@ -319,6 +319,10 @@ struct PatternBindingTransfer {
 struct ReferenceSnapshot {
     origins: ReferenceOrigins,
     ancestors: BTreeSet<String>,
+    /// Evaluated input carriers may still be live on a suspension edge. The
+    /// exact saved loans authenticate those transient ancestors on install;
+    /// a retired or replaced temporary cannot supply deferred authority.
+    input_loans: Vec<ProjectionLoan>,
 }
 
 enum PatternValue<'a> {
@@ -2099,9 +2103,9 @@ impl Analyzer<'_> {
                 let inputs = self.visit_sequence(&arguments, live_after);
                 if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
                     self.record_handler_invocation_inputs(id, None, &inputs);
+                    self.check_minimum_suspension(&effect, operation, e.span);
                     self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin, &BTreeSet::new());
                     self.pending_results.insert(id);
-                    self.check_minimum_suspension(&effect, operation, e.span);
                 }
                 self.release_evaluated_operands(&inputs, e.span);
             }
@@ -2125,13 +2129,13 @@ impl Analyzer<'_> {
                 self.enter_handler_frame(computation, &clauses);
                 self.visit_pattern_subject(computation, &inside_handler, e.span);
                 let handler = self.handler_frames.pop().expect("active handler frame");
-                if !self.normal_continuation { return; }
+                let computation_returns = self.normal_continuation;
                 let incoming_state = self.capture_continuation();
                 let incoming = incoming_state.states.clone();
                 let incoming_refinements = self.refinements.clone();
                 let incoming_minimum = self.minimum_states.clone();
                 let mut exits = vec![];
-                if self.minimum_handler_completes_normally(computation, &clauses) {
+                if computation_returns && self.minimum_handler_completes_normally(computation, &clauses) {
                     // The unhandled normal edge transfers the computation's
                     // result to the handler expression, just as a returning
                     // clause does. Retain its loan aliases in that same edge's
@@ -2140,7 +2144,16 @@ impl Analyzer<'_> {
                     exits.push(self.capture_continuation());
                 }
                 for (clause_index, clause) in clauses.into_iter().enumerate() {
-                    self.restore_continuation(&incoming_state);
+                    let mut inputs = handler.suspensions.iter().filter(|suspension|
+                        suspension.effect == clause.effect && suspension.operation == clause.operation)
+                        .map(|suspension| suspension.input.clone()).collect::<Vec<_>>();
+                    let observed = !inputs.is_empty();
+                    if computation_returns { inputs.push(incoming_state.clone()); }
+                    if inputs.is_empty() { inputs.push(handler.entry.clone()); }
+                    let input_roots = inputs.iter().flat_map(|state| &state.states)
+                        .map(|(name, state)| (name.clone(), *state)).collect();
+                    self.restore_continuation(&inputs[0]);
+                    if inputs.len() > 1 { self.join_continuation_states(&inputs, &input_roots, clause.span); }
                     self.refinements = incoming_refinements.clone();
                     self.minimum_states = self.minimum_clause_inputs(&handler, &clause, &incoming_minimum);
                     let transfers = handler.payloads[clause_index].clone();
@@ -2179,7 +2192,7 @@ impl Analyzer<'_> {
                     // but neither its payload nor continuation identity may
                     // become an outer post-state fact.
                     self.end_scope(clause.span);
-                    if self.normal_continuation { exits.push(self.capture_continuation()); }
+                    if self.normal_continuation && (observed || computation_returns) { exits.push(self.capture_continuation()); }
                 }
                 self.normal_continuation = !exits.is_empty();
                 if self.normal_continuation {
@@ -2448,14 +2461,14 @@ impl Analyzer<'_> {
     fn finish_invocation_inputs(&mut self, callee: CoreId, callable: &invocations::Value, arguments: &[invocations::EvaluatedOperand], call: CoreId, span: Span) {
         self.record_invocation_stores(callee, callable, arguments, call);
         self.record_handler_invocation_inputs(call, Some(callable), arguments);
+        if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
+        else { self.check_minimum_call_suspensions(call, span); }
         let CoreKind::Call { reference_origin, .. } = self.body.expression(call).kind.clone() else { unreachable!("invocation inputs"); };
         let returned = self.resolve_invocation_returns(call, callable, arguments);
         let empty = BTreeSet::new();
         let noncapturing = returned.as_ref().map_or(&empty, |returned| &returned.noncapturing_callables);
         self.record_call_reference_origin(&Self::result_owner(call), call, arguments, reference_origin, noncapturing);
         self.pending_results.insert(call);
-        if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
-        else { self.check_minimum_call_suspensions(call, span); }
         self.apply_invocation_control(call, callable, arguments, span, returned);
     }
 
@@ -3685,7 +3698,11 @@ impl Analyzer<'_> {
                 .map(|key| (format!("{name}{}", &key[source.len()..]), self.origin_snapshot(key)))
                 .collect::<Vec<_>>();
             for (destination, origins) in aliases {
-                self.install_resident_snapshot(&destination, origins, id, retain_carrier);
+                // A materialized result is an evaluated carrier, not a
+                // source slot being copied. While it is still resident its
+                // loan is an ancestor of this acquisition. Retirement
+                // flattens that temporary edge to the upstream source debt.
+                self.install_reference_snapshot(&destination, origins, id);
             }
             return;
         }
@@ -4290,12 +4307,18 @@ impl Analyzer<'_> {
     }
 
     fn snapshot_reference_transfer(&self, origins: ReferenceOrigins) -> ReferenceSnapshot {
+        let input_ancestors = origins.loans.iter().filter_map(|loan| loan.owner.as_ref())
+            .flat_map(|owner| self.reference_ancestors(owner)).collect::<BTreeSet<_>>();
+        let input_loans = self.projection_loans.iter().filter(|loan| loan.owner.as_ref().is_some_and(|owner|
+            input_ancestors.contains(owner) && !self.origin_has_been_moved(owner)
+                && self.bindings.get(owner.split('.').next().expect("resident root")).is_none()))
+            .cloned().collect();
         let ancestors = origins.loans.iter().filter_map(|loan| loan.owner.as_ref()).flat_map(|owner|
             self.reference_ancestors(owner).into_iter().filter(|ancestor|
                 ancestor != owner && !self.origin_has_been_moved(ancestor)
                     && self.bindings.get(ancestor.split('.').next().expect("resident root")).is_some())
                 .collect::<BTreeSet<_>>()).collect();
-        ReferenceSnapshot { origins, ancestors }
+        ReferenceSnapshot { origins, ancestors, input_loans }
     }
 
     fn install_refinement_bindings(&mut self, refinement: &crate::core::CoreRefinementBranch) {
@@ -4365,7 +4388,9 @@ impl Analyzer<'_> {
                 // Physical targets and source ancestry were acquired together.
                 let origins = snapshot.origins.map(|loan| ProjectionLoan { owner: None, ..loan });
                 self.install_resident_snapshot(&destination, origins, transfer.value, false);
-                self.reborrow_parents.entry(destination).or_default().extend(snapshot.ancestors);
+                let retained_inputs = snapshot.input_loans.into_iter().filter(|loan|
+                    self.projection_loans.contains(loan)).filter_map(|loan| loan.owner);
+                self.reborrow_parents.entry(destination).or_default().extend(snapshot.ancestors.into_iter().chain(retained_inputs));
             }
         }
         self.release_vacated_reference_loans(self.body.expression(self.body.root).span);

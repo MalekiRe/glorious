@@ -5,6 +5,43 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 172: suspension inputs and distinct dynamic clause storage
+
+The existing handler input product now retains ownership snapshots at executed
+suspensions, including exact resumptions before a later label leave. Cancellation
+minimum-use states project that same product. Open rows retain conservative
+clause inputs without inventing payload provenance. Evaluated temporary loan
+ancestry is authenticated when deferred payload transfers are installed; moved
+inputs and escaping local payload reborrows still reject.
+
+Cleanup publishes protected and per-clause owning roots from its existing frozen
+definition/scope/control inventory. Runtime MIR, VM LIR and bytecode preserve
+these roots. Every dynamic clause entry starts fresh clause storage, retaining
+older returning clauses' original homes. The verifier likewise forgets prior
+clause initialization on performance, forwarding and helper-dispatch edges.
+Crossed label-return cleanup owns these clause locals while preserving unrelated
+outer storage. Ownership is not inferred from a register's current contents.
+
+The full handler-reentry gate passes **86/86**, with no exclusions: fresh and
+decoded VM, native and both mixed directions at O0/O2. This includes the former
+clause-Drop failure, helper performance before label exit, terminal payload
+reborrowing, and distinct local Drop/storage under deep re-entry. Two inventory/
+Runtime checks and two bytecode ownership/initialization checks pass. Three
+native integration checks pass, including backing-address/mutation identity,
+all-VM selection and the 1,000-iteration bounded mixed handler/tail cycle.
+Measured generated resident-entry allocations and copied bytes remain zero.
+
+The wider reference check passes **40/40**. Other wider suites are not green:
+borrowed temporaries pass 5/7 (a changed diagnostic expectation and a destroyed
+native callable environment); minimum-use passes 43/51, with generic/label
+source-admission failures. A follow-up of its cancellation test passes the exact
+handler case before reaching an unresolved generic observer row. These results
+are not a full compiler baseline or full guarded source-resource acceptance.
+
+Cache is 172, verifier 53, bytecode 77/schema 121 and native ABI 22/control v4.
+The remaining native-handler admission audit and documentation update follow
+this verified integrated checkpoint.
+
 ## Cache 171: exact lexical handler exits
 
 The existing Cleanup label prefix now reaches Runtime MIR, frozen control

@@ -3,14 +3,21 @@
 use super::*;
 type Inventory = BTreeSet<ControlValue>;
 
+pub(crate) struct HandlerStorageRoots {
+    /// Protected graph roots, including outer owners consumed after resume.
+    pub continuation: BTreeSet<ControlValue>,
+    /// Fresh owning roots for each dynamically entered clause, in clause order.
+    /// Outer lexical storage is shared, never reallocated as a clause local.
+    pub clauses: Vec<BTreeSet<ControlValue>>,
+}
+
 impl CleanupMir {
-    /// Roots owned by the protected computation, including outer bindings
-    /// explicitly consumed within it. Mere borrowed access keeps outer storage
-    /// shared; lexical allocation time alone does not determine capture mode.
-    pub(crate) fn continuation_owned_roots(&self, handler: ControlHandlerId) -> BTreeSet<ControlValue> {
+    /// Partition protected and clause graph ownership using frozen definitions,
+    /// scopes and control exits. Mere borrowed access keeps outer storage shared;
+    /// lexical allocation time alone does not determine capture mode.
+    pub(crate) fn handler_storage_roots(&self, handler: ControlHandlerId) -> HandlerStorageRoots {
         let delimiter = &self.handlers[handler.0 as usize];
-        let mut roots = BTreeSet::new();
-        let mut pending = self
+        let entries = self
             .blocks
             .iter()
             .filter_map(|block| match &block.terminator.control {
@@ -22,43 +29,7 @@ impl CleanupMir {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        let mut visited = BTreeSet::new();
-        let mut resumed = Vec::new();
-        while let Some(target) = pending.pop() {
-            if !visited.insert(target) {
-                continue;
-            }
-            let block = &self.blocks[target.0 as usize];
-            // Clause storage is lexically below the delimiter too, but it
-            // does not belong to the suspended computation. Select actual
-            // definitions on the protected graph before classifying roots.
-            for value in block.parameters.iter().copied().chain(block.instructions.iter().map(|instruction| instruction.destination)) {
-                let owner = &self.owners[value.0 as usize];
-                if self.frame_owner(owner) && !self.aliases.contains_key(&value)
-                    && self.below_scope(owner, delimiter.scope) {
-                    roots.insert(value);
-                }
-            }
-            if matches!(&block.terminator.control,
-                CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
-                    | ControlTransfer::FinishClause { handler: exited, .. }) if *exited == handler)
-            {
-                continue;
-            }
-            let suspends = match &block.terminator.control {
-                CleanupControl::Transfer(ControlTransfer::Perform { effect, operation, .. }) =>
-                    delimiter.clauses.iter().any(|clause| clause.effect == *effect && clause.operation == *operation),
-                CleanupControl::Invoke { callee, .. } => match &self.values[callee.0 as usize].ty {
-                    Type::Callable { effects, .. } => delimiter.clauses.iter().any(|clause| effects.effects.contains(&clause.effect)),
-                    _ => false,
-                },
-                _ => false,
-            };
-            if suspends {
-                resumed.extend(block.terminator.successors.iter().map(|edge| edge.target));
-            }
-            pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
-        }
+        let (mut roots, mut resumed) = self.handler_region_roots(handler, entries);
         // Only consumption in a resumed suffix requires duplication of an
         // outer owner. Consuming it before suspension, or in the selected
         // clause rather than its continuation, does not capture that owner.
@@ -79,15 +50,63 @@ impl CleanupMir {
                     }
                 }
             }
-            if matches!(&block.terminator.control,
-                CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
-                    | ControlTransfer::FinishClause { handler: exited, .. }) if *exited == handler)
-            {
-                continue;
-            }
+            if self.exits_handler_region(&block.terminator.control, handler) { continue; }
             resumed.extend(block.terminator.successors.iter().map(|edge| edge.target));
         }
-        roots
+        HandlerStorageRoots {
+            continuation: roots,
+            clauses: delimiter.clauses.iter().map(|clause|
+                self.handler_region_roots(handler, vec![clause.entry]).0).collect(),
+        }
+    }
+
+    fn exits_handler_region(&self, control: &CleanupControl, handler: ControlHandlerId) -> bool {
+        match control {
+            CleanupControl::Transfer(ControlTransfer::CompleteHandler { handler: exited, .. }
+                | ControlTransfer::FinishClause { handler: exited, .. }) => *exited == handler,
+            CleanupControl::Transfer(ControlTransfer::Leave { label, .. }) =>
+                !self.labels[label.0 as usize].handler_prefix.iter().any(|(retained, _)| *retained == handler),
+            _ => false,
+        }
+    }
+
+    fn handler_region_roots(&self, handler: ControlHandlerId, mut pending: Vec<ControlBlockId>)
+        -> (BTreeSet<ControlValue>, Vec<ControlBlockId>) {
+        let delimiter = &self.handlers[handler.0 as usize];
+        let mut roots = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut resumed = Vec::new();
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target) {
+                continue;
+            }
+            let block = &self.blocks[target.0 as usize];
+            // Sibling storage can be lexically below the delimiter too.
+            // Select actual definitions on this region's graph before
+            // classifying roots, and stop at exits to enclosing labels.
+            for value in block.parameters.iter().copied().chain(block.instructions.iter().map(|instruction| instruction.destination)) {
+                let owner = &self.owners[value.0 as usize];
+                if self.frame_owner(owner) && !self.aliases.contains_key(&value)
+                    && self.below_scope(owner, delimiter.scope) {
+                    roots.insert(value);
+                }
+            }
+            if self.exits_handler_region(&block.terminator.control, handler) { continue; }
+            let suspends = match &block.terminator.control {
+                CleanupControl::Transfer(ControlTransfer::Perform { effect, operation, .. }) =>
+                    delimiter.clauses.iter().any(|clause| clause.effect == *effect && clause.operation == *operation),
+                CleanupControl::Invoke { callee, .. } => match &self.values[callee.0 as usize].ty {
+                    Type::Callable { effects, .. } => delimiter.clauses.iter().any(|clause| effects.effects.contains(&clause.effect)),
+                    _ => false,
+                },
+                _ => false,
+            };
+            if suspends {
+                resumed.extend(block.terminator.successors.iter().map(|edge| edge.target));
+            }
+            pending.extend(block.terminator.successors.iter().map(|edge| edge.target));
+        }
+        (roots, resumed)
     }
     fn apply_writes(&self, state: &mut Inventory, writes: &[FlagTransition]) {
         for write in writes {

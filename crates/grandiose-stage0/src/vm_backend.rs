@@ -865,6 +865,7 @@ pub enum VmInstruction {
         continuation: VmContinuationPolicy,
         target: u32,
         continuation_owned: Vec<u32>,
+        clause_owned: Vec<u32>,
     },
     ClaimEffectPayloads { payloads: Vec<u32> },
     /// Install one lexical handler frame. The frame is active while its
@@ -1292,7 +1293,7 @@ impl VmInstruction {
             Self::Perform { dst, effect, effect_arguments, operation, arguments } =>
                 Self::PerformOwned { dst, effect, effect_arguments, operation, arguments },
             Self::InstallHandler { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target } =>
-                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target, continuation_owned: vec![] },
+                Self::InstallHandlerOwned { effect, effect_arguments, operation, payload_destinations, resume_type, continuation, target, continuation_owned: vec![], clause_owned: vec![] },
             value => value,
         }
     }
@@ -6175,6 +6176,7 @@ struct VerifierHandlerFrame {
     /// continuation.
     id: u32,
     outside_handlers: Vec<u32>,
+    clause_owned: Vec<u32>,
     effect: DefKey,
     effect_arguments: Vec<VmGenericArgument>,
     operation: u32,
@@ -6447,6 +6449,17 @@ struct VerifierContext {
 }
 
 impl VerifierState {
+    fn enter_clause(&mut self, roots: &[u32]) {
+        for root in roots {
+            self.retire_value(*root);
+            let index = *root as usize;
+            // Source allocations are already live but empty. SSA residents
+            // have no predecessor definition in this new clause activation.
+            self.registers[index] = self.source_storage[index].then_some(false);
+            self.address_exposed[index] = false;
+        }
+    }
+
     fn retire_value(&mut self, register: u32) {
         tail_provenance::invalidate_referent_storage(self, register);
         let index = register as usize;
@@ -7945,6 +7958,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         });
                     }
                     let saved = states.clone();
+                    states.enter_clause(&frame.clause_owned);
                     for ((destination, argument), value) in frame.payload_destinations.iter().zip(arguments).zip(&payload_values)
                     {
                         same_type(function, *destination, *argument)?;
@@ -8026,12 +8040,13 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if matches!(continuation, VmContinuationPolicy::Replay { uses } if *uses < 2) {
                     return Err(VmArtifactError::HandlerStateMismatch);
                 }
-                if let VmInstruction::InstallHandlerOwned { continuation_owned, .. } = instruction {
-                    if continuation_owned.windows(2).any(|pair| pair[0] >= pair[1])
-                    {
-                        return Err(VmArtifactError::HandlerStateMismatch);
+                if let VmInstruction::InstallHandlerOwned { continuation_owned, clause_owned, .. } = instruction {
+                    for roots in [continuation_owned, clause_owned] {
+                        if roots.windows(2).any(|pair| pair[0] >= pair[1]) {
+                            return Err(VmArtifactError::HandlerStateMismatch);
+                        }
+                        for root in roots { register_type(function, *root)?; }
                     }
-                    for root in continuation_owned { register_type(function, *root)?; }
                 }
                 validate_vm_type(resume_type)?;
                 // Source `!` is represented by the VM's Unit leaf. A
@@ -8061,6 +8076,10 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 states.handlers.push(VerifierHandlerFrame {
                     id: pc as u32,
                     outside_handlers: states.handlers.iter().map(|frame| frame.id).collect(),
+                    clause_owned: match instruction {
+                        VmInstruction::InstallHandlerOwned { clause_owned, .. } => clause_owned.clone(),
+                        _ => vec![],
+                    },
                     effect: *effect,
                     effect_arguments: effect_arguments.clone(),
                     operation: *operation,
@@ -8077,6 +8096,9 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 });
                 if *continuation == VmContinuationPolicy::Terminal {
                     let mut audit = states.clone();
+                    if let VmInstruction::InstallHandlerOwned { clause_owned, .. } = instruction {
+                        audit.enter_clause(clause_owned);
+                    }
                     for payload in payload_destinations {
                         write(&mut audit, *payload)?;
                         if matches!(instruction, VmInstruction::InstallHandlerOwned { .. }) {
@@ -8365,6 +8387,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     if continuation.origin == VerifierContinuationOrigin::CallReturn {
                         forwarded.retire_value(continuation.dst);
                     }
+                    forwarded.enter_clause(&outer.clause_owned);
                     for ((destination, argument), value) in outer
                         .payload_destinations
                         .iter()
@@ -9818,6 +9841,7 @@ fn seed_call_handlers(
         // In particular, decoded clause code must not consume a result that
         // exists only after the suspended callee completes.
         clause.retire_value(dst);
+        clause.enter_clause(&frame.clause_owned);
         clause.handlers.truncate(index + 1);
         let mut payloads = vec![];
         for destination in &frame.payload_destinations {
@@ -9870,6 +9894,7 @@ fn merge_handler_states(
     for (left, right) in existing.iter_mut().zip(incoming) {
         if left.id != right.id
             || left.outside_handlers != right.outside_handlers
+            || left.clause_owned != right.clause_owned
             || left.effect != right.effect
             || left.effect_arguments != right.effect_arguments
             || left.operation != right.operation
@@ -10565,11 +10590,33 @@ impl RuntimeActivation {
 struct RuntimeHandlerScope {
     owner: RuntimeActivation,
     outside_handlers: Vec<u64>,
+    clause_owned: Vec<u32>,
     shared_frames: Vec<(RuntimeActivation, BTreeMap<u32, Option<u64>>)>,
     outside_pending: Vec<Arc<Cell<u32>>>,
 }
 
 impl RuntimeHandlerScope {
+    /// Enter a new dynamic clause activation using the frozen owning roots.
+    /// Saved clause paths retain their existing homes; this view acquires
+    /// fresh lexical storage and never destroys another path's residents.
+    fn enter_clause(&mut self, registers: &mut RuntimeRegisters, next_storage_id: &mut u64,
+        budget: &mut ExecutionBudget) -> Result<(), VmArtifactError> {
+        let shared = self.shared_frames.iter_mut().find_map(|(activation, shared)|
+            activation.same(&self.owner).then_some(shared)).ok_or(VmArtifactError::HandlerStateMismatch)?;
+        for local in &self.clause_owned {
+            budget.tick()?;
+            registers.values[*local as usize] = None;
+            registers.prepared_receivers.remove(local);
+            registers.native_homes.remove(local);
+            if let Some(brand) = registers.source_storage.get_mut(local) {
+                *next_storage_id = next_storage_id.checked_add(1).ok_or(VmArtifactError::HandlerStateMismatch)?;
+                *brand = *next_storage_id;
+                shared.insert(*local, Some(*brand));
+            }
+        }
+        Ok(())
+    }
+
     fn new(registers: &RuntimeRegisters, callers: &[RuntimeProgramCaller], handlers: &[RuntimeHandlerFrame],
         owner_shared: BTreeMap<u32, Option<u64>>, budget: &mut ExecutionBudget,
     ) -> Result<Self, VmArtifactError> {
@@ -10591,7 +10638,19 @@ impl RuntimeHandlerScope {
         let outside_pending = handlers.iter().filter_map(|handler|
             handler.suspended.pending().map(|saved| saved.remaining_uses.clone())).collect();
         Ok(Self { owner: registers.activation.clone(), outside_handlers: handlers.iter().map(|frame| frame.id).collect(),
-            shared_frames, outside_pending })
+            clause_owned: vec![], shared_frames, outside_pending })
+    }
+
+    /// Clause locals are shared with a running continuation, but are owned
+    /// by the saved clause path when that return edge itself is abandoned.
+    fn for_clause_exit(&self) -> Self {
+        let mut scope = self.clone();
+        for (activation, shared) in &mut scope.shared_frames {
+            if activation.same(&scope.owner) {
+                shared.retain(|local, _| scope.clause_owned.binary_search(local).is_err());
+            }
+        }
+        scope
     }
 
     fn shared_for(&self, registers: &RuntimeRegisters) -> Option<&BTreeMap<u32, Option<u64>>> {
@@ -13597,6 +13656,10 @@ fn execute_in_float_profile(
             VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.clone(),
             _ => vec![],
         };
+        let clause_owned = match &instruction {
+            VmInstruction::InstallHandlerOwned { clause_owned, .. } => clause_owned.clone(),
+            _ => vec![],
+        };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.pending().is_some_and(|continuation| continuation.performed.payloads.is_some()))
             && !allowed_before_payload_claim(&instruction) {
             return Err(VmArtifactError::HandlerStateMismatch);
@@ -14424,6 +14487,7 @@ fn execute_in_float_profile(
                 budget.reserve_allocation(registers.len())?;
                 if owned_payloads { registers.retire_call_arguments(&arguments); }
                 let saved = registers.clone();
+                frame.scope.enter_clause(&mut registers, &mut next_storage_id, budget)?;
                 for (destination, value) in frame
                     .payload_destinations
                     .iter()
@@ -14484,7 +14548,8 @@ fn execute_in_float_profile(
                     });
                 }
                 let shared = replay::shared_registers(&registers, owned_payloads, &continuation_owned, budget)?;
-                let scope = RuntimeHandlerScope::new(&registers, &[], &handlers, shared, budget)?;
+                let mut scope = RuntimeHandlerScope::new(&registers, &[], &handlers, shared, budget)?;
+                scope.clause_owned = clause_owned;
                 handlers.push(RuntimeHandlerFrame {
                     installation: pc as u32,
                     id: {
@@ -14749,6 +14814,7 @@ fn execute_in_float_profile(
                 }
                 budget.reserve_allocation(continuation.registers.len())?;
                 registers = continuation.registers.clone();
+                frame.scope.enter_clause(&mut registers, &mut next_storage_id, budget)?;
                 for (destination, payload) in frame
                     .payload_destinations
                     .iter()
@@ -15968,7 +16034,7 @@ fn abandon_program_handler_exit(
     let abandoned = crossed.into_iter().map(|returned| {
         let frame = handlers.iter().find(|frame| frame.id == returned.handler_id)
             .ok_or(VmArtifactError::HandlerStateMismatch)?;
-        Ok(Abandonment::Return(returned, frame.scope.clone(), frame.owned_payloads))
+        Ok(Abandonment::Return(returned, frame.scope.for_clause_exit(), frame.owned_payloads))
     }).collect::<Result<Vec<_>, VmArtifactError>>()?;
     abandon_program_handlers(program, handlers, retained_depth, current, current_callers, depth, budget, host)?;
     abandon_program_paths(program, abandoned, current, current_callers, depth, budget, host)
@@ -16174,6 +16240,10 @@ fn execute_program_in_float_profile(
         let owned_payloads = matches!(instruction, VmInstruction::PerformOwned { .. } | VmInstruction::InstallHandlerOwned { .. });
         let continuation_owned = match instruction {
             VmInstruction::InstallHandlerOwned { continuation_owned, .. } => continuation_owned.as_slice(),
+            _ => &[],
+        };
+        let clause_owned = match instruction {
+            VmInstruction::InstallHandlerOwned { clause_owned, .. } => clause_owned.as_slice(),
             _ => &[],
         };
         if handlers.last().is_some_and(|frame| frame.owned_payloads && frame.suspended.pending().is_some_and(|continuation| continuation.performed.payloads.is_some()))
@@ -17035,6 +17105,7 @@ fn execute_program_in_float_profile(
                 callers = owner_callers;
                 if let Some(clause_handlers) = clause_handlers { handlers = clause_handlers; }
                 let index = handlers.len() - 1;
+                handlers[index].scope.enter_clause(&mut registers, &mut next_storage_id, budget)?;
                 for (destination, value) in payload_destinations.iter().zip(clause_values)
                 {
                     registers[*destination as usize] = Some(value);
@@ -17092,7 +17163,8 @@ fn execute_program_in_float_profile(
                     });
                 }
                 let shared = replay::shared_registers(&registers, owned_payloads, continuation_owned, budget)?;
-                let scope = RuntimeHandlerScope::new(&registers, &callers, &handlers, shared, budget)?;
+                let mut scope = RuntimeHandlerScope::new(&registers, &callers, &handlers, shared, budget)?;
+                scope.clause_owned = clause_owned.to_vec();
                 handlers.push(RuntimeHandlerFrame {
                     installation: pc as u32,
                     id: {
@@ -17419,6 +17491,7 @@ fn execute_program_in_float_profile(
                 callers = owner_callers;
                 if let Some(clause_handlers) = clause_handlers { handlers = clause_handlers; }
                 let index = handlers.len() - 1;
+                handlers[index].scope.enter_clause(&mut registers, &mut next_storage_id, budget)?;
                 for (destination, payload) in payload_destinations
                     .iter()
                     .zip(clause_values)

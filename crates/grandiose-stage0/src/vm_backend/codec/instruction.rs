@@ -385,10 +385,12 @@ pub(super) fn encode_instruction(value: &VmInstruction, output: &mut Vec<u8>) {
                 VmContinuationPolicy::Optional => output.push(3),
             }
             output.extend_from_slice(&target.to_le_bytes());
-            if let VmInstruction::InstallHandlerOwned { continuation_owned, .. } = value {
-                output.extend_from_slice(&(continuation_owned.len() as u64).to_le_bytes());
-                for root in continuation_owned {
-                    output.extend_from_slice(&root.to_le_bytes());
+            if let VmInstruction::InstallHandlerOwned { continuation_owned, clause_owned, .. } = value {
+                for roots in [continuation_owned, clause_owned] {
+                    output.extend_from_slice(&(roots.len() as u64).to_le_bytes());
+                    for root in roots {
+                        output.extend_from_slice(&root.to_le_bytes());
+                    }
                 }
             }
         }

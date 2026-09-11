@@ -711,7 +711,7 @@ fn owned_effect_candidate(forward: bool) -> CandidateVmArtifact {
     let install = |payload, target| VmInstruction::InstallHandlerOwned {
         effect, effect_arguments: vec![], operation: 0, payload_destinations: vec![payload],
         resume_type: VmType::I64, continuation: VmContinuationPolicy::Consume, target,
-        continuation_owned: vec![],
+        continuation_owned: vec![], clause_owned: vec![],
     };
     let instructions = if forward {
         vec![
@@ -816,6 +816,45 @@ fn owned_packet_pattern_facts_survive_forwarding_but_not_forged_branching() {
 }
 
 #[test]
+fn handler_storage_rejects_noncanonical_and_absent_clause_roots() {
+    for roots in [vec![0, 0], vec![1, 0], vec![u32::MAX]] {
+        let mut candidate = owned_effect_candidate(false);
+        let VmInstruction::InstallHandlerOwned { clause_owned, .. } = &mut candidate.function.instructions[1]
+            else { panic!("owned installation"); };
+        *clause_owned = roots;
+        candidate.fingerprint = candidate.computed_fingerprint();
+        assert!(verify_vm(candidate.clone()).is_err());
+        assert!(decode_and_verify_artifact(&encode_artifact(&candidate)).is_err());
+    }
+}
+
+#[test]
+fn handler_storage_does_not_inherit_initialization_into_a_new_clause_activation() {
+    let mut candidate = owned_effect_candidate(false);
+    let VmInstruction::InstallHandlerOwned { effect, .. } = candidate.function.instructions[1] else { panic!() };
+    candidate.function.registers = vec![VmType::I64, VmType::I64];
+    candidate.function.instructions = vec![
+        VmInstruction::ConstI64 { dst: 0, value: 42 },
+        VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
+            payload_destinations: vec![], resume_type: VmType::I64,
+            continuation: VmContinuationPolicy::Consume, target: 6, continuation_owned: vec![], clause_owned: vec![] },
+        VmInstruction::PerformOwned { dst: 1, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
+        VmInstruction::CompleteHandler { value: 1 },
+        VmInstruction::UninstallHandler,
+        VmInstruction::Return { value: 1 },
+        VmInstruction::ClaimEffectPayloads { payloads: vec![] },
+        VmInstruction::Resume { value: 0 },
+    ];
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert_eq!(verify_vm(candidate.clone()).unwrap().run_i64().unwrap(), 42);
+    let VmInstruction::InstallHandlerOwned { clause_owned, .. } = &mut candidate.function.instructions[1] else { panic!() };
+    *clause_owned = vec![0];
+    candidate.fingerprint = candidate.computed_fingerprint();
+    assert!(matches!(verify_vm(candidate.clone()), Err(VmArtifactError::ReadBeforeWrite { register: 0 })));
+    assert!(decode_and_verify_artifact(&encode_artifact(&candidate)).is_err());
+}
+
+#[test]
 fn owned_effect_packets_cross_ordinary_calls_without_reviving_either_outgoing_carrier() {
     let candidate = owned_effect_candidate(false);
     let mut entry = candidate.function;
@@ -878,7 +917,7 @@ fn owned_resumption_return_does_not_restore_its_outgoing_argument() {
     candidate.function.instructions = vec![
         VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![], clause_owned: vec![] },
         VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
         VmInstruction::CompleteHandler { value: 0 },
         VmInstruction::UninstallHandler,
@@ -935,7 +974,7 @@ fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments()
     candidate.function.instructions = vec![
         VmInstruction::InstallHandlerOwned { effect, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 5, continuation_owned: vec![], clause_owned: vec![] },
         VmInstruction::PerformOwned { dst: 0, effect, effect_arguments: vec![], operation: 0, arguments: vec![] },
         VmInstruction::CompleteHandler { value: 0 },
         VmInstruction::UninstallHandler,
@@ -944,7 +983,7 @@ fn captured_resumption_calls_restore_intervening_handlers_and_retire_arguments()
         VmInstruction::CaptureResumption { dst: 4 },
         VmInstruction::InstallHandlerOwned { effect: inner, effect_arguments: vec![], operation: 0,
             payload_destinations: vec![], resume_type: VmType::I64,
-            continuation: VmContinuationPolicy::Consume, target: 17, continuation_owned: vec![] },
+            continuation: VmContinuationPolicy::Consume, target: 17, continuation_owned: vec![], clause_owned: vec![] },
         VmInstruction::ConstI64 { dst: 1, value: 42 },
         VmInstruction::CallIndirectOwned { dst: 2, callee: 4, arguments: vec![1] },
         VmInstruction::IsInitialized { dst: 3, base: 1, fields: vec![] },

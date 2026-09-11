@@ -63,7 +63,7 @@ fn replay_outer_consumption_is_classified_from_the_resumed_suffix() {
         let source = format!("effect Tick {{ [2, 2] tick() -> i64; }} pub fn main(value: i64) -> i64 {{ handle {{ {computation} }} {{ Tick::tick() with k => {{ let first = k(0); k(0) }} }} }}");
         let body = fixture(&source);
         assert_eq!(body.handlers.len(), 1);
-        assert_eq!(body.continuation_owned_roots(ControlHandlerId(0)).contains(&body.parameters[0]), captured,
+        assert_eq!(body.handler_storage_roots(ControlHandlerId(0)).continuation.contains(&body.parameters[0]), captured,
             "only consuming the outer owner after suspension captures it: {computation}");
     }
 }
@@ -73,11 +73,30 @@ fn continuation_ownership_excludes_sibling_clause_storage() {
     let body = fixture("effect Ask { [0,1] ask() -> i64; }
         pub fn main() -> i64 { handle { let protected = 42; Ask::ask(); protected }
             { Ask::ask() with _ => { let clause_local = 42; clause_local } } }");
-    let roots = body.continuation_owned_roots(ControlHandlerId(0));
+    let storage = body.handler_storage_roots(ControlHandlerId(0));
     for (name, owned) in [("protected", true), ("clause_local", false)] {
         let binding = body.source_flow.bindings.iter().find(|binding| binding.spelling == name).unwrap();
         let value = body.source_bindings[&binding.origin];
-        assert_eq!(roots.contains(&value), owned, "{name}");
+        assert_eq!(storage.continuation.contains(&value), owned, "{name}");
+        assert_eq!(storage.clauses[0].contains(&value), !owned, "{name}");
+    }
+}
+
+#[test]
+fn handler_storage_excludes_label_successors_and_outer_bindings() {
+    let body = fixture("effect Ask { [1,1] ask() -> i64; }
+        pub fn main(outer:i64) -> i64 {
+            let result = @done:i64 { handle { let protected=Ask::ask(); @done(protected); 0 }
+                { Ask::ask() with k => { let clause_local=outer; k(clause_local) } } };
+            let later=result; later
+        }");
+    let storage = body.handler_storage_roots(ControlHandlerId(0));
+    for (name, continuation, clause) in [("outer", false, false), ("protected", true, false),
+        ("clause_local", false, true), ("later", false, false)] {
+        let binding = body.source_flow.bindings.iter().find(|binding| binding.spelling == name).unwrap();
+        let value = body.source_bindings[&binding.origin];
+        assert_eq!(storage.continuation.contains(&value), continuation, "continuation: {name}");
+        assert_eq!(storage.clauses[0].contains(&value), clause, "clause: {name}");
     }
 }
 

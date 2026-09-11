@@ -1853,6 +1853,9 @@ pub enum RuntimeOperation {
         continuation: MirContinuationPolicy,
         target: MirBlockId,
         continuation_owned: Vec<MirLocal>,
+        /// Fresh owning roots on every dynamic entry to this clause. Shared
+        /// with its running continuation, owned on abandonment of its return.
+        clause_owned: Vec<MirLocal>,
     },
     ClaimEffectPayloads { payloads: Vec<MirLocal> },
     UninstallHandler,
@@ -2604,6 +2607,7 @@ impl RuntimeOperation {
                 continuation,
                 target,
                 continuation_owned: vec![],
+                clause_owned: vec![],
             },
             crate::MirInstruction::ClaimEffectPayloads { payloads } => Self::ClaimEffectPayloads { payloads },
             crate::MirInstruction::UninstallHandler => Self::UninstallHandler,

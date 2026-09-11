@@ -36,9 +36,18 @@ pub(super) struct HandlerFrame {
     pub(super) clauses: Vec<crate::core::CoreHandlerClause>,
     /// None is an unobserved/unsupported input relation, not an empty payload.
     pub(super) payloads: Vec<Option<Vec<PatternBindingTransfer>>>,
+    pub(super) entry: ContinuationState,
+    pub(super) suspensions: Vec<HandlerSuspension>,
     operations: Vec<(crate::EffectInstance, u32, Quantity)>,
     retained: BTreeSet<String>,
-    cancellations: Vec<(crate::EffectInstance, u32, Vec<MinimumDisposition>)>,
+}
+
+#[derive(Clone)]
+pub(super) struct HandlerSuspension {
+    pub(super) effect: crate::EffectInstance,
+    pub(super) operation: u32,
+    pub(super) input: ContinuationState,
+    can_cancel: bool,
 }
 
 /// A generic call's cancellation requirement, with owner-relative paths.
@@ -204,9 +213,10 @@ impl Analyzer<'_> {
             computation,
             clauses: clauses.to_vec(),
             payloads: vec![None; clauses.len()],
+            entry: self.capture_continuation(),
+            suspensions: vec![],
             operations,
             retained: self.minimum_bindings.keys().cloned().collect(),
-            cancellations: vec![],
         });
     }
 
@@ -217,12 +227,17 @@ impl Analyzer<'_> {
         completed: &[MinimumDisposition],
     ) -> Vec<MinimumDisposition> {
         let cancelled = handler
-            .cancellations
+            .suspensions
             .iter()
-            .filter(|(effect, operation, _)| {
-                effect == &clause.effect && *operation == clause.operation
+            .filter(|suspension| {
+                suspension.can_cancel && suspension.effect == clause.effect && suspension.operation == clause.operation
             })
-            .flat_map(|(_, _, states)| states.iter().cloned())
+            .flat_map(|suspension| suspension.input.minimum.iter().cloned())
+            .map(|mut state| {
+                state.transferred.retain(|place| handler.retained.contains(&place.root));
+                state.opened.retain(|place, _| handler.retained.contains(&place.root));
+                state
+            })
             .collect::<Vec<_>>();
         if cancelled.is_empty() {
             return completed.to_vec();
@@ -250,12 +265,13 @@ impl Analyzer<'_> {
         operation: u32,
         span: Span,
     ) {
-        let handler = self.handler_frames.iter().rev().find(|handler| {
+        let handler_index = self.handler_frames.iter().rposition(|handler| {
             handler
                 .operations
                 .iter()
                 .any(|(handled, selected, _)| handled == effect && *selected == operation)
         });
+        let handler = handler_index.map(|index| &self.handler_frames[index]);
         let can_cancel = handler.map_or_else(
             || {
                 self.signatures
@@ -277,39 +293,23 @@ impl Analyzer<'_> {
                     })
             },
         );
-        if !can_cancel {
-            return;
-        }
-        let abandoned = self
+        if can_cancel {
+            let abandoned = self
             .minimum_bindings
             .keys()
             .filter(|owner| handler.is_none_or(|handler| !handler.retained.contains(*owner)))
             .cloned()
             .collect::<BTreeSet<_>>();
-        self.check_minimum_scope(&abandoned, span);
-        if let Some(handler) = self.handler_frames.iter_mut().rev().find(|handler| {
-            handler
-                .operations
-                .iter()
-                .any(|(handled, selected, _)| handled == effect && *selected == operation)
-        }) {
-            let states = self
-                .minimum_states
-                .iter()
-                .cloned()
-                .map(|mut state| {
-                    state
-                        .transferred
-                        .retain(|place| handler.retained.contains(&place.root));
-                    state
-                        .opened
-                        .retain(|place, _| handler.retained.contains(&place.root));
-                    state
-                })
-                .collect();
-            handler
-                .cancellations
-                .push((effect.clone(), operation, states));
+            self.check_minimum_scope(&abandoned, span);
+        }
+        // Every executed suspension supplies clause input, including exact
+        // resumptions whose protected suffix later leaves a lexical label.
+        // Cancellation disposition is a projection of this same snapshot.
+        if let Some(index) = handler_index {
+            let input = self.capture_continuation();
+            self.handler_frames[index].suspensions.push(HandlerSuspension {
+                effect: effect.clone(), operation, input, can_cancel,
+            });
         }
     }
 
@@ -327,6 +327,21 @@ impl Analyzer<'_> {
         let CoreKind::Call { invocation, .. } = &self.body.expression(call).kind else { unreachable!() };
         let effects = invocation.effects.clone();
         if !effects.tails.is_empty() || !effects.projections.is_empty() {
+            // An unresolved row can reach any enclosing clause. Retain its
+            // actual input state without inventing payload provenance or
+            // discharging the conditional cancellation obligation below.
+            let input = self.capture_continuation();
+            let mut selected = BTreeSet::new();
+            for handler in self.handler_frames.iter_mut().rev() {
+                for (effect, operation, usage) in &handler.operations {
+                    if !effects.effects.contains(effect) && selected.insert((effect.clone(), *operation)) {
+                        handler.suspensions.push(HandlerSuspension {
+                            effect: effect.clone(), operation: *operation, input: input.clone(),
+                            can_cancel: !usage.requires_positive_use(),
+                        });
+                    }
+                }
+            }
             // An open row is a conditional contract, not permission to lose
             // an owner. Preserve each guarded residual state for the closed
             // instance to discharge before any executable is admitted.

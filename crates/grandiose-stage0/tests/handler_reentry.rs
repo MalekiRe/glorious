@@ -224,6 +224,48 @@ fn local_label_exit_cleans_the_crossed_returning_clause_path_once() {
 }
 
 #[test]
+fn deep_reentry_keeps_each_clause_local_owner_and_cleanup_distinct() {
+    candidate(r#"use std::*;
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Ask { [1,1] ask(value:i64) -> i64; }
+        pub fn main() -> i64 { handle { let first=Ask::ask(20); first + Ask::ask(20) }
+            { Ask::ask(value) with k => {
+                let mut count=0;
+                let result={ let owner=Probe { target: &mut count }; k(value) };
+                result + count
+            } }
+        }"#);
+}
+
+#[test]
+fn abrupt_protected_suffix_does_not_restore_a_previously_moved_clause_input() {
+    let source = "effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { let owner = () -> i64 { 42 };
+            @done:i64 { handle { let consumed = move owner; let value=Ask::ask(); @done(value); 0 }
+                { Ask::ask() with k => k(owner()) } }
+        }";
+    let error = StageZeroCompiler::new().compile(request(source)).err().expect("moved clause input must reject");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code.starts_with("G50")), "{error:?}");
+}
+
+#[test]
+fn helper_performance_before_a_label_exit_preserves_the_clause_input() {
+    candidate(r#"use std::*;
+        struct Probe<'a> { target: &'a mut i64 }
+        impl<'a> Use<[0,1]> for Probe<'a> {}
+        impl<'a> Drop for Probe<'a> { drop(&mut self) -> { *self.target = *self.target + 1; } }
+        effect Ask { [1,1] ask() -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask() }
+        pub fn main() -> i64 { let mut count=0;
+            let result = @done:i64 { handle { let value=leaf(); @done(value); 0 }
+                { Ask::ask() with k => { let owner=Probe { target: &mut count }; k(41) + 100 } } };
+            result + count
+        }"#);
+}
+
+#[test]
 fn terminal_inner_handlers_preserve_the_enclosing_resumption_return() {
     candidate("effect Ask { [1,1] ask() -> i64; }
         effect Stop { stop() -> !; }
@@ -999,6 +1041,15 @@ fn helper_payload_reborrows_cannot_escape_their_callers_local_storage() {
         pub fn main() -> i64 { 42 }";
     let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
     assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5013"), "{error:?}");
+}
+
+#[test]
+fn terminal_helper_payloads_reborrow_their_live_evaluated_input() {
+    candidate("effect Touch { touch(value:&mut i64) -> !; }
+        fn leaf(value:&mut i64) -> ! / Touch { Touch::touch(value) }
+        pub fn main() -> i64 { let mut local=0; handle leaf(&mut local) {
+            Touch::touch(payload) => { let child = &mut *payload; *child=42; 0 }
+        }; local }");
 }
 
 #[test]

@@ -190,10 +190,11 @@ pub(super) fn lower_function(source: &RuntimeMir) -> Result<VmLirFunction, VmArt
                     | RuntimeOperation::MakeRecord { .. } | RuntimeOperation::MakeEnum { .. }) {
                     instruction = instruction.with_owned_aggregate();
                 }
-                if let (RuntimeOperation::InstallHandler { continuation_owned, .. },
-                    VmInstruction::InstallHandlerOwned { continuation_owned: machine, .. }) = (operation, &mut instruction)
+                if let (RuntimeOperation::InstallHandler { continuation_owned, clause_owned, .. },
+                    VmInstruction::InstallHandlerOwned { continuation_owned: machine, clause_owned: clause, .. }) = (operation, &mut instruction)
                 {
                     *machine = continuation_owned.iter().map(|local| local.0).collect();
+                    *clause = clause_owned.iter().map(|local| local.0).collect();
                 }
                 Ok(instruction)
             })

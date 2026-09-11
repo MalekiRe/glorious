@@ -180,6 +180,8 @@ impl CleanupMir {
         // Preserve the source handler identity through its clause expansion.
         // Freezing remaps these builder identities together with the leaves.
         let mut next_handler_site = 0u32;
+        let handler_storage = (0..self.handlers.len()).map(|index|
+            self.handler_storage_roots(ControlHandlerId(index as u32))).collect::<Vec<_>>();
         let handler_sites = self.handlers.iter().map(|handler| {
             handler.clauses.iter().map(|_| {
                 let site = crate::MirHandlerSiteId(next_handler_site);
@@ -1039,7 +1041,9 @@ impl CleanupMir {
                                     resume_type,
                                     continuation,
                                     target: MirBlockId(clause.entry.0),
-                                    continuation_owned: self.continuation_owned_roots(*handler).into_iter().map(local)
+                                    continuation_owned: handler_storage[handler.0 as usize].continuation.iter().copied().map(local)
+                                        .collect::<BTreeSet<_>>().into_iter().collect(),
+                                    clause_owned: handler_storage[handler.0 as usize].clauses[clause_index].iter().copied().map(local)
                                         .collect::<BTreeSet<_>>().into_iter().collect(),
                                 });
                             }

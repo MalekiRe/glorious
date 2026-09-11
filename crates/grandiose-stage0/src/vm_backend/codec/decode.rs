@@ -1178,10 +1178,13 @@ impl<'a> Decoder<'a> {
                         roots.push(self.u32()?);
                     }
                     let mut instruction = instruction.with_owned_effect_payloads();
-                    if let VmInstruction::InstallHandlerOwned { continuation_owned, .. } =
+                    if let VmInstruction::InstallHandlerOwned { continuation_owned, clause_owned, .. } =
                         &mut instruction
                     {
                         *continuation_owned = roots;
+                        let count = self.count("clause-owned roots", MAX_DECODE_REGISTERS)?;
+                        clause_owned.reserve(count);
+                        for _ in 0..count { clause_owned.push(self.u32()?); }
                     }
                     Ok(instruction)
                 } else {

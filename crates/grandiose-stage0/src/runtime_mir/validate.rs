@@ -200,8 +200,9 @@ impl RuntimeMir {
                 // Their lexical environment is captured at installation;
                 // dispatch defines the explicit payload destinations.
                 match instruction {
-                    RuntimeOperation::InstallHandler { target, payload_destinations, .. } => {
+                    RuntimeOperation::InstallHandler { target, payload_destinations, clause_owned, .. } => {
                         let mut entry_live = live.clone();
+                        for root in clause_owned { entry_live[root.0 as usize] = false; }
                         for payload in payload_destinations {
                             entry_live[payload.0 as usize] = true;
                         }
@@ -1802,14 +1803,16 @@ impl RuntimeMir {
             continuation,
             target,
             continuation_owned,
+            clause_owned,
             ..
         } = instruction
         {
-            if continuation_owned.windows(2).any(|pair| pair[0] >= pair[1])
-            {
-                return Err("MIR continuation ownership roots are not canonical".into());
+            for roots in [continuation_owned, clause_owned] {
+                if roots.windows(2).any(|pair| pair[0] >= pair[1]) {
+                    return Err("MIR handler ownership roots are not canonical".into());
+                }
+                for root in roots { self.local_type(*root)?; }
             }
-            for root in continuation_owned { self.local_type(*root)?; }
             if matches!(continuation, MirContinuationPolicy::Replay { uses } if *uses < 2) {
                 return Err("MIR replay handler has fewer than two exact uses".into());
             }

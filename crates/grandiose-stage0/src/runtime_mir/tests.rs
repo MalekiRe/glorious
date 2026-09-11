@@ -24,6 +24,19 @@ const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
 const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
 
 #[test]
+fn handler_storage_rejects_noncanonical_and_absent_clause_roots() {
+    let body = fixture(PERFORM);
+    for roots in [vec![MirLocal(0), MirLocal(0)], vec![MirLocal(1), MirLocal(0)], vec![MirLocal(u32::MAX)]] {
+        let mut forged = body.clone();
+        let op = forged.blocks.iter_mut().flat_map(|block| &mut block.instructions)
+            .find(|op| matches!(op, RuntimeOperation::InstallHandler { .. })).unwrap();
+        let RuntimeOperation::InstallHandler { clause_owned, .. } = op else { unreachable!() };
+        *clause_owned = roots;
+        assert!(forged.validate().is_err());
+    }
+}
+
+#[test]
 fn prepared_nominal_label_retains_its_brand_without_address_authority() {
     let mut body = fixture("pub fn main(target: (i64) -> !) -> ! { target(42) }");
     let brand = crate::LabelBrand { owner: body.definition, label: 0 };

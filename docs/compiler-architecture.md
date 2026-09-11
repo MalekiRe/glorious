@@ -2648,3 +2648,41 @@ active source failure: ownership currently skips a handler clause when the
 protected computation eventually transfers to a label, despite its earlier
 performance. That source suspension-input boundary remains to be repaired;
 this checkpoint does not claim full native-handler or language acceptance.
+
+## Executed suspension inputs and dynamic clause ownership
+
+PlaceFlow's existing handler input product retains the complete ownership state
+at an executed suspension, before any future result is materialized. Exact-use
+performances supply inputs even when the protected suffix later leaves a label.
+Cancellation minimum-use states are a projection of the same snapshots. An
+unresolved call row conservatively retains possible enclosing clause inputs;
+it neither supplies payload provenance nor discharges conditional obligations.
+Unobserved clauses are still checked, but cannot publish an invented exit.
+Returning protected states remain conservative post-resumption alternatives.
+
+Evaluated result carriers keep their temporary ancestor relation until retirement.
+Deferred pattern transfers retain exact live input loans alongside source ancestry;
+installation authenticates those loans against the restored state. Retired or
+replaced temporary names alone grant no reborrow permission. The original payload
+escape regression still reaches the source escape rejection.
+
+Cleanup's existing ownership inventory publishes protected roots and per-clause
+owning roots from frozen definition, scope and exit facts. It stops at handler
+completion and labels outside the delimiter. Runtime MIR, VM LIR and bytecode
+carry that one product; their receiving checks reject absent and noncanonical
+roots. The executable verifier starts clause roots uninitialized on every
+performance, helper dispatch and forwarding edge, without erasing the saved
+continuation's facts.
+
+The shared runtime uses those roots to start a distinct dynamic clause allocation.
+An older returning clause retains its own homes and allocation brands; entering
+the same clause again neither overwrites nor destroys those residents. The
+installation storage frontier records the current clause's shared homes while its
+continuation runs. Abandoning that clause's return edge consumes its clause-owned
+roots, not unrelated outer storage. This extends the existing frame/ownership
+contract rather than guessing ownership from whether a register is initialized.
+
+Cache 172, verifier 53, bytecode 77/schema 121 and native ABI 22/control v4 name
+these contracts. Source and executable checks cover stale input loans, moved
+inputs, fresh clause initialization, selective label cleanup and deep clause
+re-entry. Complete guarded source-resource analysis remains a separate obligation.
