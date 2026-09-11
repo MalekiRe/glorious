@@ -93,3 +93,24 @@ the runtime/target audit obligations above, and remain in the repair pass.
 The earlier compiler draft is retained in `formal/lean` as reference. The
 new specification does not import it. Unrelated Stage0 working-tree changes
 were left untouched.
+
+## Executable source bindings and ordinary origins
+
+`lake build GloriousLanguage.SourceChecks` passes (24 jobs). Parameter
+elaboration now returns an ordered pattern plan consumed by named and anonymous
+function bodies. A checked theorem shows that the plan's formal list is exactly
+the incoming parameter list. Call and tail-call typing use the context after
+callee and argument evaluation. Closure contexts cannot invent ambient locals;
+function bodies reset unsafe permission and establish their own signatures.
+Named exits must be present for named functions and absent for anonymous ones.
+
+Ordinary expression, argument, statement, clause and operation nesting now
+threads AST child positions. Member inventories relate declarations in order,
+and unnamed fields use forward source indices. Focused positive/negative checks
+cover plan order, impossible empty-source parameters, capture-context authority,
+argument locals and a closure nested in a block's call argument.
+
+Synthetic operator regrouping still needs origin-preserving elaboration;
+contextual capture alternatives, generic/default/associated inference and
+handler continuation-pattern binding remain audit obligations. This checkpoint
+does not claim complete source adequacy or update the runtime/target debt above.

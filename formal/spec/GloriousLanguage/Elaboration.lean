@@ -243,6 +243,26 @@ structure BindingCode where
 def sequence (bindings : List BindingCode) (next : Code) : Code :=
   bindings.foldr (fun binding rest => .evaluate binding.localSlot binding.value rest) next
 
+def BindingContext (context : Typing.Context) (bindings : List BindingCode) : Typing.Context :=
+  bindings.foldl (fun current binding => current.bind binding.localSlot) context
+
+/-- Parameter names are introduced by the same executable pattern plan that
+deconstructs the incoming formal. A name alone is not a runtime binding. -/
+def parameterPrologue (plans : List (Local × Pattern)) (body : Code) : Code :=
+  plans.foldr (fun (formal,pattern) rest => .choose ⟨formal.id,[]⟩ [.clause pattern rest]) body
+
+def FunctionContext (context : Context) (signature : Signature) (locals : List Local) : Context :=
+  { context with typed := { context.typed with
+      static := { context.typed.static with
+        binders := context.typed.static.binders ++ signature.generics,
+        assumptions := signature.constraints ++ context.typed.static.assumptions,
+        unsafeAllowed := false },
+      locals := locals, effects := signature.effects } }
+
+def NamedFunctionContext (context : Context) (function : Function) (name : String) (exitLabel : Identity) : Context :=
+  let inner := FunctionContext { context with names := [], capturePlaces := [] } function.signature function.parameters
+  { inner with namedLabels := [(name,exitLabel)], typed := { inner.typed with labels := [(exitLabel,.rigid exitLabel .region 0,function.signature.result)] } }
+
 def AtomCode (localSlot : Local) (atom : Atom) : Code := .bind localSlot atom (.result ⟨localSlot.id,[]⟩)
 
 def SignatureReceiver (program : Kernel.Program) (context : Context) (type : Term)
@@ -294,10 +314,13 @@ def CapturesResolved (program : Kernel.Program) (context : Context) (sources : L
   (captures.map (·.formal)).Nodup
 
 def ExtendsWithCaptures (outer inner : Context) (sources : List Source.Expr) (captures : List Local) : Prop :=
-  inner.capturePlaces = sources.zip captures ∧ inner.typed.static.module = outer.typed.static.module ∧
-  inner.typed.static.unsafeAllowed = false ∧ inner.namedLabels = outer.namedLabels
+  inner = { outer with names := [], capturePlaces := sources.zip captures, typed := { outer.typed with locals := captures, static := { outer.typed.static with unsafeAllowed := false } } }
 
 inductive SourceItemName : Source.Declaration → String → Namespace → Prop where
+  | function {head body} : SourceItemName (.function head body) head.name .value
+  | structure {name generics fields record requirements} : SourceItemName (.structure name generics fields record requirements) name .type
+  | enumeration {name generics variants requirements} : SourceItemName (.enumeration name generics variants requirements) name .type
+  | alias {name generics value} : SourceItemName (.alias name generics value) name .type
   | trait {name generics requirements members unsafeAllowed} : SourceItemName (.trait name generics requirements members unsafeAllowed) name .trait
   | effect {name generics requirements operations} : SourceItemName (.effect name generics requirements operations) name .effect
   | associated {name generics kind requirements value} : SourceItemName (.associated name generics kind requirements value) name .type
@@ -308,6 +331,10 @@ inductive SourceItemName : Source.Declaration → String → Namespace → Prop 
   | fixity {kind precedence operator target} : SourceItemName (.fixity kind precedence operator target) operator .value
   | implementation {generics trait self requirements members unsafeAllowed negative name} :
       SourceItemName (.implementation generics trait self requirements members unsafeAllowed negative) name .trait
+  | visible {visibility source name nameSpace} : SourceItemName source name nameSpace →
+      SourceItemName (.visible visibility source) name nameSpace
+  | attributed {attributes source name nameSpace} : SourceItemName source name nameSpace →
+      SourceItemName (.attributed attributes source) name nameSpace
 
 def AttributeContract (attributes : List Source.Attribute) (definition : Definition) : Prop :=
   (∀ annotationEntry ∈ attributes, match annotationEntry with
@@ -323,10 +350,10 @@ def AttributeContract (attributes : List Source.Attribute) (definition : Definit
       data.representation = .glorious) ∧ (Source.Attribute.nonExhaustive ∉ attributes → data.nonExhaustive = false))
 
 def MemberIdentities (program : Kernel.Program) (context : Context) (members : List Source.Declaration) (ids : List DeclId) : Prop :=
-  ids.Nodup ∧ ids.length = members.length ∧
-  ∀ id ∈ ids, ∃ declaration, program.declarations.lookup id = some declaration ∧
-    (∃ member ∈ members, SourceItemName member declaration.header.name declaration.header.nameSpace) ∧
-    declaration.header.module = context.typed.static.module
+  ids.Nodup ∧ ListRel (fun member id => ∃ declaration,
+    program.declarations.lookup id = some declaration ∧
+    SourceItemName member declaration.header.name declaration.header.nameSpace ∧
+    declaration.header.module = context.typed.static.module) members ids
 
 mutual
   inductive Expression (program : Kernel.Program) : Context → Source.Expr → Term → Code → Prop where
@@ -367,11 +394,11 @@ mutual
     | labelName {context name id region type localSlot} : (name,id) ∈ context.namedLabels → (id,region,type) ∈ context.typed.labels →
         Fresh context localSlot → localSlot.type = .label (.rigid id .brand 0) region type →
         Expression program context (.labelName name) localSlot.type (AtomCode localSlot (.label id))
-    | tuple {context expressions types bindings places result} : Arguments program context expressions types bindings places →
+    | tuple {context expressions types bindings places result} : Arguments program { context with itemIndex := 0 } expressions types bindings places →
         Fresh context result → result.type = .tuple types →
         Expression program context (.tuple expressions) result.type (sequence bindings (AtomCode result (.construct result.type none places)))
     | array {context expressions element bindings places result} :
-        Arguments program context expressions (List.replicate expressions.length element) bindings places → Fresh context result →
+        Arguments program { context with itemIndex := 0 } expressions (List.replicate expressions.length element) bindings places → Fresh context result →
         result.type = .array element (.constant (.integer false .pointer expressions.length)) →
         Expression program context (.array expressions) result.type (sequence bindings (AtomCode result (.construct result.type none places)))
     | constructor {context path sourceOwners sourceItems sources header data variant arguments substitution types bindings places result} :
@@ -379,24 +406,27 @@ mutual
         TypeExpressions program context (sourceOwners ++ sourceItems) (data.generics.map (·.kind)) arguments →
         Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
         (∀ field ∈ variant.fields, Visible field.header context.typed.static.module) →
-        Arguments program context sources types bindings places → Fresh context result → result.type = .nominal data.header.id arguments →
+        Arguments program { context with itemIndex := 1 } sources types bindings places → Fresh context result → result.type = .nominal data.header.id arguments →
         Expression program context (.call (.name path sourceOwners sourceItems) sources) result.type
           (sequence bindings (AtomCode result (.construct result.type (some header.id) places)))
     | call {context source arguments callee calleeCode access signature bindings places result environment} :
         Fresh context callee → SignatureReceiver program context callee.type access signature →
-        Expression program context source callee.type calleeCode →
-        Arguments program { context with typed := context.typed.bind callee, contextual := signature :: context.contextual }
+        Expression program (context.child 0) source callee.type calleeCode →
+        Arguments program { context with typed := context.typed.bind callee, contextual := signature :: context.contextual, itemIndex := 1 }
           arguments signature.parameters bindings places → Fresh context result → result.type = signature.result →
-        Typing.InvocationType program.declarations context.typed ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩ →
+        Typing.InvocationType program.declarations (BindingContext (context.typed.bind callee) bindings)
+          ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩ →
         Expression program context (.call source arguments) result.type
           (.evaluate callee calleeCode (sequence bindings (.invoke result ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩ (.result ⟨result.id,[]⟩))))
     | tail {context source arguments callee calleeCode access signature bindings places result environment} :
-        Fresh context callee → SignatureReceiver program context callee.type access signature → Expression program context source callee.type calleeCode →
-        Arguments program { context with typed := context.typed.bind callee, contextual := signature :: context.contextual }
+        Fresh context callee → SignatureReceiver program context callee.type access signature → Expression program (context.child 0) source callee.type calleeCode →
+        Arguments program { context with typed := context.typed.bind callee, contextual := signature :: context.contextual, itemIndex := 1 }
           arguments signature.parameters bindings places → Subtype program.declarations context.typed.static signature.result result →
+        Typing.InvocationType program.declarations (BindingContext (context.typed.bind callee) bindings)
+          ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩ →
         Expression program context (.tail source arguments) result
           (.evaluate callee calleeCode (sequence bindings (.tail ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩)))
-    | block {context statements result type code scope} : Block program context statements result type code →
+    | block {context statements result type code scope} : Block program { context with itemIndex := 0 } statements result type code →
         Expression program context (.block statements result) type (.scope scope code)
     | contextualBlock {context statements result expected signature function captures localSlot} :
         IsContextual program context expected signature →
@@ -410,25 +440,25 @@ mutual
     | clauses {context arms signature function captures localSlot} :
         Closure program context (.clauses arms) signature function captures → Fresh context localSlot → localSlot.type = .callable function.declaration [] →
         Expression program context (.clauses arms) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
-    | ownedCapture {context places source signature function captures localSlot} : Closure program context source signature function captures →
+    | ownedCapture {context places source signature function captures localSlot} : Closure program (context.child places.length) source signature function captures →
         (∀ source ∈ places, ∃ place type mutable capture,
           PlaceExpression program context source place type mutable ∧ capture ∈ captures ∧ capture.place = place ∧ capture.mode = .own) →
         Fresh context localSlot → localSlot.type = .callable function.declaration [] →
         Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
     | label {context name annotation body type brand region code} :
         (annotation = none ∨ ∃ source, annotation = some source ∧ TypeExpression program context source .type type) →
-        Expression program { context with namedLabels := (name,brand) :: context.namedLabels, typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
+        Expression program { (context.child 0) with namedLabels := (name,brand) :: context.namedLabels, typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
         Expression program context (.label name annotation body) type (.scope region (.label brand region type code))
     | test {context subject sourcePattern subjectLocal subjectCode type pattern names patternId result nextType} :
-        Fresh context subjectLocal → subjectLocal.type = type → Expression program context subject type subjectCode →
+        Fresh context subjectLocal → subjectLocal.type = type → Expression program (context.child 0) subject type subjectCode →
         PatternExpression program context sourcePattern type .shared pattern names → Fresh context result → result.type = nextType →
         (∃ carrier arguments, program.declarations.input.manifest.testCarrier = some carrier ∧ nextType = .nominal carrier.declaration arguments) →
         Expression program context (.test subject sourcePattern) nextType
           (.evaluate subjectLocal subjectCode (.test result ⟨subjectLocal.id,[]⟩ pattern patternId (.result ⟨result.id,[]⟩)))
-    | handle {context source arms computation input handler result identity} : Handler program context arms input handler →
-        Expression program context source input computation → handler.result = result →
+    | handle {context source arms computation input handler result identity} : Handler program { context with itemIndex := 1 } arms input handler →
+        Expression program (context.child 0) source input computation → handler.result = result →
         Expression program context (.handle source arms) result (.handle identity computation handler)
-    | unsafeAllowed {context source type body} : Expression program { context with typed := { context.typed with static := { context.typed.static with unsafeAllowed := true } } } source type body →
+    | unsafeAllowed {context source type body} : Expression program { (context.child 0) with typed := { context.typed with static := { context.typed.static with unsafeAllowed := true } } } source type body →
         Expression program context (.unsafeBlock source) type (.unsafeScope body)
     | operators {context first rest grouped type code} : Grouped program.declarations context.typed.static.module first rest grouped →
         Expression program context grouped type code → Expression program context (.operators first rest) type code
@@ -441,56 +471,65 @@ mutual
   inductive Arguments (program : Kernel.Program) : Context → List Source.Expr → List Term → List BindingCode → List Place → Prop where
     | nil {context} : Arguments program context [] [] [] []
     | cons {context source sources type types localSlot code rest places} : Fresh context localSlot → localSlot.type = type →
-        Expression program context source type code →
-        Arguments program { context with typed := context.typed.bind localSlot } sources types rest places →
+        Expression program (context.child context.itemIndex) source type code →
+        Arguments program { context with typed := context.typed.bind localSlot, itemIndex := context.itemIndex+1 } sources types rest places →
         Arguments program context (source :: sources) (type :: types) (⟨localSlot,code⟩ :: rest) (⟨localSlot.id,[]⟩ :: places)
 
   inductive Block (program : Kernel.Program) : Context → List Source.Statement → Option Source.Expr → Term → Code → Prop where
-    | result {context source type code} : Expression program context source type code → Block program context [] (some source) type code
+    | result {context source type code} : Expression program (context.child context.itemIndex) source type code → Block program context [] (some source) type code
     | unit {context localSlot} : Fresh context localSlot → localSlot.type = .unit →
         Block program context [] none .unit (AtomCode localSlot (.constant (.constantTuple [])))
     | bind {context mutable sourcePattern annotation source rest result type localSlot initializer pattern names body resultType} :
-        Fresh context localSlot → localSlot.type = type → Expression program context source type initializer →
+        Fresh context localSlot → localSlot.type = type → Expression program ((context.child context.itemIndex).child 0) source type initializer →
         (annotation = none ∨ ∃ sourceType, annotation = some sourceType ∧ TypeExpression program context sourceType .type type) →
         PatternExpression program context sourcePattern type .owned pattern names → (∀ entry ∈ names, entry.2.mutable = mutable) →
-        Block program (BindNames context names) rest result resultType body →
+        Block program { (BindNames context names) with itemIndex := context.itemIndex+1 } rest result resultType body →
         Typing.PatternCoverage program type [.clause pattern body] →
         Block program context (.bind mutable sourcePattern annotation source :: rest) result resultType
           (.evaluate localSlot initializer (.choose ⟨localSlot.id,[]⟩ [.clause pattern body]))
     | assign {context destination source rest result type localSlot initializer place body resultType} :
-        Fresh context localSlot → localSlot.type = type → Expression program context source type initializer →
-        PlaceExpression program context destination place type true → Block program context rest result resultType body →
+        Fresh context localSlot → localSlot.type = type → Expression program ((context.child context.itemIndex).child 0) source type initializer →
+        PlaceExpression program context destination place type true → Block program { context with itemIndex := context.itemIndex+1 } rest result resultType body →
         Block program context (.assign destination source :: rest) result resultType
           (.evaluate localSlot initializer (.assign place ⟨localSlot.id,[]⟩ body))
     | discard {context source rest result localSlot initializer body resultType} : Fresh context localSlot →
-        Expression program context source localSlot.type initializer → Block program context rest result resultType body →
+        Expression program ((context.child context.itemIndex).child 0) source localSlot.type initializer →
+        Block program { context with itemIndex := context.itemIndex+1 } rest result resultType body →
         Block program context (.discard source :: rest) result resultType (.evaluate localSlot initializer (.discard ⟨localSlot.id,[]⟩ body))
-    | item {context declaration rest result body type} : Declaration program context declaration →
-        Block program context rest result type body → Block program context (.item declaration :: rest) result type body
+    | item {context declaration rest result body type} : Declaration program ((context.child context.itemIndex).child 0) declaration →
+        Block program { context with itemIndex := context.itemIndex+1 } rest result type body →
+        Block program context (.item declaration :: rest) result type body
 
   inductive Closure (program : Kernel.Program) : Context → Source.Expr → Signature → Function → List Capture → Prop where
-    | function {context head body signature function captures sources inner parameterNames bodyCode declaration} :
+    | function {context head body signature function captures sources inner parameterNames plans bodyCode declaration} :
         Head program context head signature → function.signature = signature → program.function function.declaration = some function →
+        function.namedExit = none →
         program.declarations.function function.declaration = some declaration → declaration.header.sourceVisible = false →
         declaration.origin = .source context.origin →
         CapturesResolved program context sources captures function.captures → ExtendsWithCaptures context inner sources function.captures →
-        Parameters program inner head.parameters function.parameters parameterNames →
-        Expression program (BindNames inner parameterNames) body signature.result bodyCode → function.body = bodyCode →
+        Parameters program (FunctionContext inner signature (function.captures ++ function.parameters))
+          head.parameters function.parameters parameterNames plans →
+        Expression program ((BindNames (FunctionContext inner signature (function.captures ++ function.parameters)) parameterNames).child 0)
+          body signature.result bodyCode → function.body = parameterPrologue plans bodyCode →
         Contracts.ResourceAdmission program function → Closure program context (.function head body) signature function captures
     | clauses {context arms signature function captures sources inner code declaration} : function.signature = signature →
+        function.namedExit = none →
         program.function function.declaration = some function → program.declarations.function function.declaration = some declaration →
         declaration.header.sourceVisible = false → CapturesResolved program context sources captures function.captures →
         declaration.origin = .source context.origin →
         ExtendsWithCaptures context inner sources function.captures →
-        PatternCallable program inner arms signature function.parameters code → function.body = code →
+        PatternCallable program (FunctionContext inner signature (function.captures ++ function.parameters))
+          arms signature function.parameters code → function.body = code →
         Contracts.ResourceAdmission program function → Closure program context (.clauses arms) signature function captures
     | block {context statements result signature function captures sources inner body declaration} : function.signature = signature →
+        function.namedExit = none →
         program.function function.declaration = some function → program.declarations.function function.declaration = some declaration →
         declaration.header.sourceVisible = false → CapturesResolved program context sources captures function.captures →
         declaration.origin = .source context.origin →
         ExtendsWithCaptures context inner sources function.captures →
         (∀ parameter ∈ function.parameters, ∃ principal, PrincipalOf program.declarations parameter.type principal ∧ principal.MayDiscard) →
-        Block program inner statements result signature.result body → function.body = body →
+        Block program (FunctionContext inner signature (function.captures ++ function.parameters))
+          statements result signature.result body → function.body = body →
         Contracts.ResourceAdmission program function → Closure program context (.block statements result) signature function captures
 
   inductive PatternCallable (program : Kernel.Program) : Context → List (Source.Pattern × Source.Expr) → Signature → List Local → Code → Prop where
@@ -506,8 +545,9 @@ mutual
   inductive PatternArms (program : Kernel.Program) : Context → List (Source.Pattern × Source.Expr) → Term → Term → List Arm → Prop where
     | nil {context input output} : PatternArms program context [] input output []
     | cons {context sourcePattern sourceBody rest input output pattern names body arms} :
-        PatternExpression program context sourcePattern input .owned pattern names → Expression program (BindNames context names) sourceBody output body →
-        PatternArms program context rest input output arms →
+        PatternExpression program context sourcePattern input .owned pattern names →
+        Expression program ((BindNames context names).child context.itemIndex) sourceBody output body →
+        PatternArms program { context with itemIndex := context.itemIndex+1 } rest input output arms →
         PatternArms program context ((sourcePattern,sourceBody) :: rest) input output (.clause pattern body :: arms)
 
   inductive Handler (program : Kernel.Program) : Context → List Source.HandlerArm → Term → Kernel.Handler → Prop where
@@ -520,8 +560,9 @@ mutual
       Context → List Source.HandlerArm → Term → Term → List Arm → List OperationArm → Prop where
     | nil {context input output} : HandlerArms program context [] input output [] []
     | completion {context sourcePattern sourceBody rest input output pattern names body completion operations} :
-        PatternExpression program context sourcePattern input .owned pattern names → Expression program (BindNames context names) sourceBody output body →
-        HandlerArms program context rest input output completion operations →
+        PatternExpression program context sourcePattern input .owned pattern names →
+        Expression program (((BindNames context names).child context.itemIndex).child 0) sourceBody output body →
+        HandlerArms program { context with itemIndex := context.itemIndex+1 } rest input output completion operations →
         HandlerArms program context (.completion sourcePattern sourceBody :: rest) input output (.clause pattern body :: completion) operations
     | operation {context path sourceArguments sourcePatterns sourceBody rest input output header operation arguments signature
         patterns names continuation body completion operations bodyResult} :
@@ -530,9 +571,9 @@ mutual
         Typing.CallSignature program.declarations context.typed.static header.id arguments signature →
         PatternExpressions program context sourcePatterns (signature.parameters ++ continuation.toList.map Local.type) .owned
           patterns names →
-        Expression program (BindNames context names) sourceBody bodyResult body →
+        Expression program (((BindNames context names).child context.itemIndex).child 0) sourceBody bodyResult body →
         Typing.OperationArmsType program context.typed [.clause header.id arguments [] (patterns.take signature.parameters.length) continuation body] output →
-        HandlerArms program context rest input output completion operations →
+        HandlerArms program { context with itemIndex := context.itemIndex+1 } rest input output completion operations →
         HandlerArms program context (.operation path sourceArguments sourcePatterns sourceBody :: rest) input output completion
           (.clause header.id arguments [] (patterns.take signature.parameters.length) continuation body :: operations)
 
@@ -546,12 +587,18 @@ mutual
         Predicates program extended source.requirements requirements →
         Head program context source ⟨binders,parameters,result,effects,requirements,source.unsafeAllowed⟩
 
-  inductive Parameters (program : Kernel.Program) : Context → List Source.Parameter → List Local → List (String × Local) → Prop where
-    | nil {context} : Parameters program context [] [] []
-    | cons {context source rest localSlot type pattern names locals more} : TypeExpression program context source.type .type type → localSlot.type = type →
+  inductive Parameters (program : Kernel.Program) :
+      Context → List Source.Parameter → List Local → List (String × Local) → List (Local × Pattern) → Prop where
+    | nil {context} : Parameters program context [] [] [] []
+    | cons {context source rest localSlot type pattern names locals more plans} : TypeExpression program context source.type .type type → localSlot.type = type →
+        localSlot ∈ context.typed.locals →
         PatternExpression program context source.pattern type .owned pattern names →
-        Parameters program (BindNames context names) rest locals more →
-        Parameters program context (source :: rest) (localSlot :: locals) (names ++ more)
+        Typing.PatternType program.declarations context.typed.static pattern type .owned (names.map Prod.snd) →
+        Typing.PatternCoverage program type [.clause pattern .abort] →
+        (names.map (·.2.id)).Nodup →
+        (∀ name localSlot, (name,localSlot) ∈ names → ∀ other, (name,other) ∉ more) →
+        Parameters program (BindNames context names) rest locals more plans →
+        Parameters program context (source :: rest) (localSlot :: locals) (names ++ more) ((localSlot,pattern) :: plans)
 
   inductive Generics (program : Kernel.Program) : Context → List Source.Generic → List Binder → Context → Prop where
     | nil {context} : Generics program context [] [] context
@@ -642,11 +689,14 @@ mutual
     | item {context source definition} : ItemHeader program context source definition → DeclarationHeader program context source definition
 
   inductive DeclarationBody (program : Kernel.Program) : Context → Source.Declaration → Definition → Prop where
-    | function {context head source definition function names inner code} :
+    | function {context head source definition function names inner code plans exitLabel} :
         program.function definition.header.id = some function → definition.origin = .source context.origin →
-        Parameters program context head.parameters function.parameters names →
-        inner = { (BindNames context names) with namedLabels := (head.name,function.namedExit.getD 0) :: context.namedLabels, typed := { (BindNames context names).typed with effects := function.signature.effects, labels := (function.namedExit.getD 0,.rigid (function.namedExit.getD 0) .region 0,function.signature.result) :: context.typed.labels } } →
-        Expression program (inner.child 0) source function.signature.result code → function.body = code → function.signature = definition.signature →
+        function.namedExit = some exitLabel → function.captures = [] →
+        Parameters program (NamedFunctionContext context function head.name exitLabel)
+          head.parameters function.parameters names plans →
+        inner = BindNames (NamedFunctionContext context function head.name exitLabel) names →
+        Expression program (inner.child 0) source function.signature.result code →
+        function.body = parameterPrologue plans code → function.signature = definition.signature →
         DeclarationBody program context (.function head (some source)) (.function definition)
     | bodyless {context head definition} :
         ((∃ trait, definition.origin = .traitMember trait ∧ context.owner = some trait) ∨ definition.origin = .foreign ∨
@@ -666,12 +716,14 @@ mutual
   inductive SourceFields (program : Kernel.Program) : Context → List Source.Field → List FieldDefinition → Prop where
     | nil {context} : SourceFields program context [] []
     | cons {context source rest field fields type} : TypeExpression program context source.type .type type → field.type = type →
-        field.header.visibility = source.visibility → field.header.name = source.name.getD (toString fields.length) →
-        SourceFields program context rest fields → SourceFields program context (source :: rest) (field :: fields)
+        field.header.visibility = source.visibility → field.header.name = source.name.getD (toString context.itemIndex) →
+        SourceFields program { context with itemIndex := context.itemIndex+1 } rest fields →
+        SourceFields program context (source :: rest) (field :: fields)
 
   inductive SourceVariants (program : Kernel.Program) : Context → List Source.Variant → List VariantDefinition → Prop where
     | nil {context} : SourceVariants program context [] []
-    | cons {context source rest variant variants} : source.name = variant.header.name → SourceFields program context source.fields variant.fields →
+    | cons {context source rest variant variants} : source.name = variant.header.name →
+        SourceFields program { context with itemIndex := 0 } source.fields variant.fields →
         SourceVariants program context rest variants → SourceVariants program context (source :: rest) (variant :: variants)
 
   inductive ItemHeader (program : Kernel.Program) : Context → Source.Declaration → Definition → Prop where
@@ -697,7 +749,7 @@ mutual
         ItemBody program context (.constant name generics sourceType sourceValue) (.constant definition)
     | global {context name sourceType sourceValue definition type code} :
         (∃ annotation, sourceType = some annotation ∧ TypeExpression program context annotation .type type) → definition.type = type →
-        Expression program context sourceValue type code → definition.initializer = context.origin →
+        Expression program (context.child 0) sourceValue type code → definition.initializer = (context.child 0).origin →
         ItemBody program context (.global name sourceType sourceValue) (.global definition)
     | import {context tree definition} : definition.tree = tree → definition.prelude = false →
         ItemBody program context (.import tree) (.import definition)
@@ -737,6 +789,7 @@ mutual
     | nil {context family} : SourceOperations program context family [] []
     | cons {context family source rest id ids definition binders inner parameters result constraints} :
         program.declarations.operation id = some definition → definition.header.name = source.name → definition.family = family →
+        (id,(context.child context.itemIndex).origin) ∈ program.declarations.origins →
         Generics program context source.generics binders inner →
         TypeExpressions program inner source.payload (List.replicate source.payload.length .type) parameters →
         TypeExpression program inner source.result .type result → Predicates program inner source.requirements constraints →
@@ -744,7 +797,8 @@ mutual
           .row [.effect family (context.typed.static.binders.map (fun binder => .parameter binder.id binder.kind))] [],constraints,false⟩ →
         ((result = .bottom ∧ source.quantity = none ∧ definition.terminal = true ∧ definition.quantity = none) ∨
           (result ≠ .bottom ∧ definition.terminal = false ∧ definition.quantity = some (source.quantity.getD ⟨1,some 1⟩))) →
-        SourceOperations program context family rest ids → SourceOperations program context family (source :: rest) (id :: ids)
+        SourceOperations program { context with itemIndex := context.itemIndex+1 } family rest ids →
+        SourceOperations program context family (source :: rest) (id :: ids)
 
   inductive StructuralConstant (program : Kernel.Program) : Context → Source.Expr → Term → Term → Prop where
     | literal {context source type value} : LiteralConstant program.declarations.input.target source (some type) value type →
@@ -777,5 +831,10 @@ mutual
     | inferred {context argumentTuple output effects} : Kinding program.declarations context.typed.static output .type →
         Kinding program.declarations context.typed.static effects .row → FnArguments program context [argumentTuple] argumentTuple output effects
 end
+
+theorem Parameters.formals {program : Kernel.Program} {context sources locals names plans}
+    (checked : Parameters program context sources locals names plans) : plans.map Prod.fst = locals := by
+  induction sources generalizing context locals names plans <;> cases checked <;> simp_all
+  solve_by_elim
 
 end Glorious.Language.Elaboration
