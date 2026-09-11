@@ -5,6 +5,23 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 159: callable input views through stored products
+
+Assignment and MIR Store validation consume the same directional callable input
+view as ordinary argument checking. Owned tuple and array fields retain that
+view; references are not traversed. Acquired values retain their original
+invocation contracts, and the destination cannot acquire stronger invocation,
+receiver, safety or lifetime authority. The former Core-local view producer is
+removed in favor of the shared type rule.
+
+The preserved whole-tuple receiver replacement passes fresh/decoded VM and
+native/mixed O0/O2 execution. Source checks cover direct, tuple and fixed-array
+assignments while retaining distinct source/destination quantities. Directional
+store tests reject reversed quantities, referent coercion and stronger receiver
+or safety permissions. Helper-mediated receiver replacement still exposes its
+quantity/initialization failure; computed-factory lifetime and the remaining
+native-handler acceptance obligations are unchanged. Runtime formats do not change.
+
 ## Cache 158: checked invocation acquisition
 
 Receiver preparation consumes PlaceFlow's call-specific storage-retention proof,

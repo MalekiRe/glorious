@@ -19,6 +19,13 @@ pub(crate) fn same_body_storage(left: &Type, right: &Type) -> bool {
     matches!((erase(left), erase(right)), (Some(left), Some(right)) if left == right)
 }
 
+/// A store consumes a directional callable input view, just like argument
+/// transfer. Keep the acquired value's contract intact, and independently
+/// compare every other stored type component modulo closed body regions.
+pub(crate) fn accepts_body_storage(destination: &Type, source: &Type) -> bool {
+    same_body_storage(destination, &super::CallableContract::invocation_input_view(destination, source.clone()))
+}
+
 /// Move a caller-owned argument beneath `amount` additional scopes. Regions
 /// bound inside the argument keep their identity; only its free bound regions
 /// move. Overflow is rejected instead of wrapping into a different binder.
@@ -188,6 +195,36 @@ mod tests {
         let Type::Callable { contract, .. } = &mut changed else { unreachable!() };
         contract.shared_receiver = true;
         assert!(!same_body_storage(&callable, &changed));
+    }
+
+    #[test]
+    fn stored_callable_input_views_are_directional_and_do_not_coerce_referents() {
+        let once = Type::Callable { contract: Default::default(), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![Type::Unit], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let mut reusable = once.clone();
+        let Type::Callable { invocation, .. } = &mut reusable else { unreachable!() };
+        *invocation = Quantity::UNRESTRICTED;
+        for wrap in [
+            (|ty| ty) as fn(Type) -> Type,
+            |ty| Type::Tuple(vec![ty, Type::Unit]),
+            |ty| Type::FixedArray { element: Box::new(ty), length: Box::new(GenericArgument::ConstInteger(2.into())) },
+        ] {
+            assert!(accepts_body_storage(&wrap(once.clone()), &wrap(reusable.clone())));
+            assert!(!accepts_body_storage(&wrap(reusable.clone()), &wrap(once.clone())));
+        }
+        for mutability in [Mutability::Shared, Mutability::Unique] {
+            let wrap = |ty| Type::Reference { mutability, lifetime: Lifetime::Elided, referent: Box::new(ty) };
+            assert!(!accepts_body_storage(&wrap(once.clone()), &wrap(reusable.clone())));
+        }
+        let mut stronger = once.clone();
+        let Type::Callable { contract, .. } = &mut stronger else { unreachable!() };
+        contract.shared_receiver = true;
+        assert!(!accepts_body_storage(&stronger, &reusable));
+        let mut unsafe_value = reusable.clone();
+        let Type::Callable { safety, .. } = &mut unsafe_value else { unreachable!() };
+        *safety = Safety::Unsafe;
+        assert!(!accepts_body_storage(&once, &unsafe_value));
     }
 
     fn region(depth: u32, index: u32) -> GenericArgument {

@@ -2267,3 +2267,23 @@ cancellation counterpart rejects. These failures are not reclassified as
 passes. General borrowed resumption invocation, guarded resource interleavings,
 mandatory-tail fusion, foreign control and full performance acceptance remain
 open. Verifier 49, bytecode 75/schema 119 and native ABI 18 are unchanged.
+
+## Directional stored callable inputs
+
+The callable type product owns the directional invocation input view previously
+local to Core call checking. Assignment and both MIR Store validators consume
+that same rule. Owned tuple and array products propagate the input view while
+reference handles retain their unchanged referent contract. Type comparison
+still checks all other components, including closed-body versus rigid regions,
+receiver authority, effects and safety. A comparison view does not rewrite the
+acquired value's quantity or weaken the destination's declared ABI.
+
+Cache 159 repairs the preserved whole-tuple receiver replacement through fresh/
+decoded VM and native/mixed O0/O2. Source tests retain distinct acquired and
+destination callable quantities through direct, tuple and fixed-array stores;
+receiving rule tests reject reversed or strengthened permissions and referent
+coercion. Helper-mediated receiver replacement still requires a correction to
+resident quantity and initialization, not a runtime keepalive. Computed factory
+lifetime, general borrowed resumption invocation, guarded interleavings,
+mandatory-tail fusion, foreign control and full performance acceptance remain
+open. Executable and runtime generations do not change.

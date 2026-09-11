@@ -17,6 +17,35 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn assignment_callable_views_preserve_the_acquired_value_contract() {
+    for (ty, initial, replacement) in [
+        ("Callback", "first", "second"),
+        ("(Callback,i64)", "(first,1)", "(second,0)"),
+        ("[Callback;2]", "[first,first]", "[second,second]"),
+    ] {
+        let core = core_for("assignment-callable-view@0.1.0", &format!(
+            "type Callback=(i64)->i64; fn first(value:i64)->i64 {{42}} fn second(value:i64)->i64 {{0}}
+             pub fn main() {{let mut saved:{ty}={initial}; saved={replacement};}}"));
+        assert!(core.diagnostics.is_empty(), "{ty}: {:?}", core.diagnostics);
+        assert!(core.validate().is_empty(), "{ty}: {:?}", core.validate());
+        let (place, value) = core.expressions.iter().find_map(|expression| match &expression.kind {
+            CoreKind::Assign { place, value } => Some((place, core.expression(*value))), _ => None,
+        }).unwrap();
+        fn callable_leaf(ty: &Type) -> Quantity {
+            match ty {
+                Type::Callable { invocation, .. } => *invocation,
+                Type::Tuple(fields) => callable_leaf(&fields[0]),
+                Type::FixedArray { element, .. } => callable_leaf(element),
+                _ => panic!("unexpected product {ty:?}"),
+            }
+        }
+        let CorePlace::Local { ty, .. } = place else { panic!("local destination") };
+        assert_eq!(callable_leaf(ty), Quantity::ONCE);
+        assert_eq!(callable_leaf(&value.ty), Quantity::UNRESTRICTED);
+    }
+}
+
+#[test]
 fn trailing_statements_discard_results_before_contextual_block_typechecking() {
     for source in [
         "fn value() -> i64 { 42 } pub fn main() { value(); }",

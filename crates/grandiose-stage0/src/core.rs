@@ -4497,7 +4497,7 @@ impl Elaborator<'_> {
                 };
                 let expected = self.inference.resolve_type_structure(label.result.clone());
                 let value = self.expression_expected(value, Some(expected.clone()));
-                let value_type = Self::weaken_nested_callable_invocations(&expected,
+                let value_type = crate::CallableContract::invocation_input_view(&expected,
                     self.expressions[value.0 as usize].ty.clone());
                 if self
                     .inference
@@ -5312,64 +5312,6 @@ impl Elaborator<'_> {
         }
         value
     }
-
-    /// Apply the same one-way callable view through a nominal type argument.
-    /// This matters for `Box<(T) -> U>`-style source records: inference may
-    /// first construct the record with a reusable named function, then later
-    /// pass it to a parameter whose instantiated field is one-shot.
-    fn weaken_nested_callable_invocations(required: &Type, provided: Type) -> Type {
-        if crate::types::label::payload(&provided).is_some() { return provided; }
-        match (required, provided) {
-            (
-                Type::Callable {
-                    invocation: required,
-                    ..
-                },
-                Type::Callable { contract,
-                    safety,
-                    lifetime_binders,
-                    parameters,
-                    result,
-                    effects,
-                    invocation: provided,
-                },
-            ) if provided.contains(*required) => Type::Callable { contract,
-                safety,
-                lifetime_binders,
-                parameters,
-                result,
-                effects,
-                invocation: *required,
-            },
-            (
-                Type::Nominal {
-                    definition: required_definition,
-                    arguments: required_arguments,
-                },
-                Type::Nominal {
-                    definition: provided_definition,
-                    arguments: provided_arguments,
-                },
-            ) if required_definition == &provided_definition
-                && required_arguments.len() == provided_arguments.len() => Type::Nominal {
-                definition: provided_definition,
-                arguments: required_arguments
-                    .iter()
-                    .zip(provided_arguments)
-                    .map(|(required, provided)| match (required, provided) {
-                        (GenericArgument::Type(required), GenericArgument::Type(provided)) => {
-                            GenericArgument::Type(Self::weaken_nested_callable_invocations(
-                                required, provided,
-                            ))
-                        }
-                        (_, provided) => provided,
-                    })
-                    .collect(),
-            },
-            (_, provided) => provided,
-        }
-    }
-
     fn borrow_expected(&mut self, unique: bool, value: ExprId, expected: Option<Type>, span: Span) -> CoreId {
         // Explicit borrowing supplies the reference constructor; only its
         // referent supplies context to the operand. Never turn the expected
@@ -8501,6 +8443,9 @@ impl Elaborator<'_> {
 
     fn unify_input_lifetimes(&mut self, expected: Type, actual: Type, span: Span) -> Result<Type, ()> {
         self.queue_callable_abi_erasure(expected.clone(), actual.clone(), span);
+        let expected = self.inference.resolve_type_structure(expected);
+        let actual = crate::CallableContract::invocation_input_view(&expected,
+            self.inference.resolve_type_structure(actual));
         self.unify_rigid_lifetimes_after_inference(expected, actual, span, true, LifetimeMode::InstantiateBound)
     }
 
@@ -10930,7 +10875,7 @@ impl Elaborator<'_> {
         let resident_parameters = parameters.clone();
         for (parameter, argument) in parameters.into_iter().zip(&arguments) {
             let raw_actual = self.expressions[argument.0 as usize].ty.clone();
-            let actual = Self::weaken_nested_callable_invocations(
+            let actual = crate::CallableContract::invocation_input_view(
                 &parameter,
                 self.inference.zonk(raw_actual.clone()).unwrap_or(raw_actual),
             );

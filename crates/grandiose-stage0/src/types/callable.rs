@@ -61,6 +61,72 @@ mod abi_refinement_tests {
 }
 
 impl CallableContract {
+    /// Apply the same one-way callable view through owned value products and
+    /// nominal type arguments. References are deliberately not traversed:
+    /// replacing a value is not permission to weaken writable referent storage.
+    /// This matters for `Box<(T) -> U>`-style source records: inference may
+    /// first construct the record with a reusable named function, then later
+    /// pass it to a parameter whose instantiated field is one-shot.
+    pub(crate) fn invocation_input_view(required: &Type, provided: Type) -> Type {
+        if crate::types::label::payload(&provided).is_some() { return provided; }
+        match (required, provided) {
+            (Type::Tuple(required), Type::Tuple(provided)) if required.len() == provided.len() =>
+                Type::Tuple(required.iter().zip(provided).map(|(required, provided)|
+                    Self::invocation_input_view(required, provided)).collect()),
+            (Type::Array(required), Type::Array(provided)) => Type::Array(Box::new(
+                Self::invocation_input_view(required, *provided))),
+            (Type::FixedArray { element: required, .. }, Type::FixedArray { element: provided, length }) =>
+                Type::FixedArray { element: Box::new(Self::invocation_input_view(required, *provided)), length },
+            (
+                Type::Callable {
+                    invocation: required,
+                    ..
+                },
+                Type::Callable { contract,
+                    safety,
+                    lifetime_binders,
+                    parameters,
+                    result,
+                    effects,
+                    invocation: provided,
+                },
+            ) if provided.contains(*required) => Type::Callable { contract,
+                safety,
+                lifetime_binders,
+                parameters,
+                result,
+                effects,
+                invocation: *required,
+            },
+            (
+                Type::Nominal {
+                    definition: required_definition,
+                    arguments: required_arguments,
+                },
+                Type::Nominal {
+                    definition: provided_definition,
+                    arguments: provided_arguments,
+                },
+            ) if required_definition == &provided_definition
+                && required_arguments.len() == provided_arguments.len() => Type::Nominal {
+                definition: provided_definition,
+                arguments: required_arguments
+                    .iter()
+                    .zip(provided_arguments)
+                    .map(|(required, provided)| match (required, provided) {
+                        (GenericArgument::Type(required), GenericArgument::Type(provided)) => {
+                            GenericArgument::Type(Self::invocation_input_view(
+                                required, provided,
+                            ))
+                        }
+                        (_, provided) => provided,
+                    })
+                    .collect(),
+            },
+            (_, provided) => provided,
+        }
+    }
+
     /// A sealed resident environment owns its captures, independently of the
     /// invocation interval of each callable value. An erased callable (and a
     /// resumption, whose environment is not a capture layout) retains its
