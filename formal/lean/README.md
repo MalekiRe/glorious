@@ -1,11 +1,17 @@
 # Executable Lean semantics — in progress
 
 **Current working draft:** a mandatory, request-indexed whole-compiler proof
-attempt is wired into the implementation and driver. Its theorem bodies and
-proposed specifications have not verified. See
+attempt is wired into the implementation and driver. The general compiler-phase
+proofs still fail, and parts of the proposed specifications remain incomplete. See
 [`DRAFT.md`](DRAFT.md). The implemented/proved boundary below describes the
 earlier verified checkpoint, not the unverified whole-compiler draft. Draft code
 does not establish any additional conformance or end-to-end acceptance yet.
+
+Within that draft, the shared substitution producer is now kernel-checked:
+successful substitution follows the declarative structural rules and preserves
+the outer kind. All existing Lean semantic consumers use it. The focused
+substitution and receiving-register repair gates are recorded in `DRAFT.md`;
+neither makes the whole compiler a verified executable.
 
 This is the beginning of the executable formal reference requested for
 Glorious. It is **not full language conformance, a completed compiler, or a

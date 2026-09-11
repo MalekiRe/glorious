@@ -97,15 +97,6 @@ structure AnalysisCorrect (input : CoreProgram) (entry : DeclId) (analyzed : Ana
     ∃ function ∈ analyzed.functions, ∃ position projections,
       (path, position, projections) ∈ function.referenceReturns
 
-theorem substitute_sound (fuel : Nat) (arguments : Substitution) (before after : Term)
-    (accepted : substitute fuel arguments before = .ok after) : Substitutes arguments before after := by
-  induction fuel generalizing before after with
-  | zero => simp [substitute, reject] at accepted
-  | succ fuel ih =>
-    cases before <;> simp [substitute] at accepted
-    all_goals first | exact Substitutes.free (by simpa [lookup] using accepted)
-                    | apply Substitutes.node <;> simp_all [SameHead, Term.children, Term.mapChildren]
-
 theorem normalize_sound (program : Program) (inference : Inference) (fuel : Nat)
     (before after : Term) (accepted : normalize program inference fuel [] before = .ok after) :
     Equal program before after := by

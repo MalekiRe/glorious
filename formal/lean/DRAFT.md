@@ -15,7 +15,7 @@ No unchecked alternate compiler path or admitted theorem is supplied.
 
 The first repair pass made the seven specification modules build, including
 the trace-composition, invariant, and basic move/copy/loan lemmas. The general
-phase theorems in `Proof/Passes` still fail, so the public compiler does not
+compiler-phase theorems in `Proof/Passes` still fail, so the public compiler does not
 build. Several proposed specifications also
 remain incomplete: the source grammar does not yet cover all declarations or
 expressions; target instruction rules do not yet cover all emitted operations;
@@ -92,3 +92,25 @@ lowerer with typed Core. Its artifact passed fresh/decoded VM verification and
 executed successfully. Deliberately malformed live-flag and parameter-layout
 variants were rejected. This is a receiving-boundary check, not a successful
 run of the still-unbuilt certified source compiler.
+
+The substitution producer is now repaired and kernel-checked. Its independent
+ordered, simultaneous substitution relation lives in `Semantics/TermRelations`,
+below normalization. The old unchecked implementation is removed: the public
+`substitute` used by normalization, traits, elaboration, specialization, layout,
+and lowering projects the proof-producing implementation. The shared existing
+child traversal has a general structure/order-preservation theorem; no second
+term walker computes substitution evidence. Every successful replacement has
+the parameter's declared kind; a wrong-kind first binding rejects rather than
+falling through to a later entry. The general `Spec.substitute_sound` and
+`substitute_kind` theorems now check and the failed duplicate proof is removed
+from `Proof/Passes`.
+
+`lake build Glorious.Semantics.Normalize Glorious.Proof.Static
+Glorious.Semantics.Lower` passed (23 targets), and
+`lake env lean -DwarningAsError=true tests/Substitution.lean` passed. These
+kernel-reduced regressions cover every term constructor, mixed kinds, nested
+lifetime mismatches, ordered duplicate bindings, free parameters, simultaneous
+replacement, exhausted budgets, and the real constraint/signature consumers.
+The printed theorem dependencies contain only Lean's standard logical axioms.
+This proves the structural substitution boundary, not global kinding under a
+declaration context, normalization, inference, or whole-compiler preservation.

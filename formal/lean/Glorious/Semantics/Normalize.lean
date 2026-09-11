@@ -1,15 +1,6 @@
-import Glorious.Semantics.Model
+import Glorious.Semantics.TermRelations
 
 namespace Glorious.Semantics
-
-abbrev Substitution := List (Id × Term)
-
-def substitute : Nat → Substitution → Term → Check Term
-  | 0, _, _ => reject .resourceLimit "substitution depth exhausted"
-  | fuel + 1, substitutions, term =>
-    match term with
-    | .param id _ => return (lookup id substitutions).getD term
-    | _ => term.mapChildrenM (substitute fuel substitutions)
 
 def bindArguments (binders : List Binder) (arguments : List Term) : Check Substitution := do
   require (binders.length == arguments.length) .kindMismatch "generic argument arity differs"

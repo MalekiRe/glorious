@@ -8,20 +8,6 @@ namespace Glorious.Semantics.Spec
 
 abbrev Context := List Binder
 
-def SameHead (a b : Term) : Prop :=
-  a.mapChildren (fun _ => .unit) = b.mapChildren (fun _ => .unit)
-
-inductive Substitutes (arguments : List (Id × Term)) : Term → Term → Prop where
-  | parameter {identity kind value} (selected : (identity, value) ∈ arguments)
-      (kinded : value.kind = kind) : Substitutes arguments (.param identity kind) value
-  | free {identity kind} (absent : ∀ value, (identity, value) ∉ arguments) :
-      Substitutes arguments (.param identity kind) (.param identity kind)
-  | node {before after}
-      (notParameter : ∀ identity kind, before ≠ .param identity kind)
-      (head : SameHead before after)
-      (children : Glorious.Proof.Forall₂ (Substitutes arguments) before.children after.children) :
-      Substitutes arguments before after
-
 def Instantiates (binders : List Binder) (arguments : List Term)
     (substitution : List (Id × Term)) : Prop :=
   Glorious.Proof.Forall₂ (fun binder argument => binder.kind = argument.kind) binders arguments ∧
