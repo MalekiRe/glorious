@@ -20,6 +20,149 @@ struct Fixture {
 }
 
 #[test]
+fn exact_mutations_share_ordered_storage_across_scopes_aliases_and_calls() {
+    for source in [
+        "fn main() -> i64 { let mut value = 0; { value = 42; }; value }",
+        "fn main() -> i64 { let mut value = (0, 1); let alias = &mut value; { alias.0 = 42; }; value.0 }",
+        "fn set(value: &mut i64) { *value = 42; } fn main() -> i64 { let mut value = 0; set(&mut value); value }",
+        "fn set(value: &mut (i64,i64)) { value.0 = 42; } fn main() -> i64 { let mut value = (0,1); set(&mut value); value.0 }",
+        "fn main() -> i64 { let mut value = 0; @done: () { value = 42; @done(()) }; value }",
+        "fn main() -> i64 { let mut value = 0; { let mut value = 1; value = 7; }; value = 42; value }",
+        "fn main() -> i64 { let mut value = (0,1); let alias = &mut value.0; *alias = 42; value.0 }",
+        "fn main() -> i64 { let mut value = 0; let task = () -> () { value = 42; }; task(); value }",
+    ] {
+        let fixture = Fixture::new(&format!("#![no_std] {source}"));
+        let inputs = fixture.inputs();
+        let summaries = derive_control_summaries(&inputs, Default::default());
+        let main = summaries.get(CallableBrand::Named(fixture.names["main"])).unwrap();
+        assert!(ControlCallCoverage::Alternatives(main.alternatives()).is_complete(), "{source}: {main:?}");
+        assert!(main.alternatives().iter().all(|path| matches!(&path.outcome,
+            ControlOutcome::Return(ControlValue { shape: ControlValueShape::Literal(value), .. }) if value == "42")),
+            "{source}: {main:?}");
+        assert!(!ControlCallCoverage::Alternatives(main.alternatives()).storage_read_only(None));
+        assert!(ControlCallCoverage::Alternatives(main.alternatives()).without_performance(None));
+    }
+}
+
+#[test]
+fn mutation_does_not_rewrite_frozen_strict_invocation_inputs() {
+    let fixture = Fixture::new("#![no_std]
+        fn old(value:i64) -> i64 { 42 } fn new(value:i64) -> i64 { 7 }
+        fn first(value:i64, ignored:i64) -> i64 { value }
+        fn receiver() -> i64 { let mut task = old; task({ task = new; 0 }) }
+        fn argument() -> i64 { let mut value = 42; first(value, { value = 7; 0 }) }
+        fn aggregate() -> i64 { let mut value = 42; (value, { value = 7; 0 }).0 }");
+    let summaries = derive_control_summaries(&fixture.inputs(), Default::default());
+    for name in ["receiver", "argument", "aggregate"] {
+        let summary = summaries.get(CallableBrand::Named(fixture.names[name])).unwrap();
+        assert!(ControlCallCoverage::Alternatives(summary.alternatives()).is_complete(), "{summary:?}");
+        assert!(summary.alternatives().iter().all(|path| matches!(&path.outcome,
+            ControlOutcome::Return(ControlValue { shape: ControlValueShape::Literal(value), .. }) if value == "42")),
+            "{name}: {summary:?}");
+    }
+}
+
+#[test]
+fn partial_store_revokes_whole_value_forwarding_but_preserves_untouched_fields() {
+    let fixture = Fixture::new("#![no_std]
+        fn change<'a>(pair:(&'a i64,&'a i64), next:&'a i64) -> (&'a i64,&'a i64) {
+            let mut result = pair; result.0 = next; result
+        }
+        fn main<'a>(left:&'a i64, middle:&'a i64, right:&'a i64) -> (&'a i64,&'a i64) {
+            change((left,middle),right)
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["main"];
+    let bound = summaries.bind(&inputs).unwrap();
+    let body = bound.body(owner).unwrap();
+    let call = body.get(fixture.call_to(owner, fixture.names["change"])).unwrap();
+    assert!(call.normal && !call.unknown, "{call:?}");
+    assert_eq!(call.returns.len(), 1);
+    let payloads::PayloadSource::Aggregate(fields) = &call.returns[0].source else { panic!("{call:?}"); };
+    assert_eq!(fields[0].source, payloads::PayloadSource::Argument { index: 1, path: vec![] });
+    assert_eq!(fields[1].source, payloads::PayloadSource::Argument { index: 0, path: vec![1] });
+}
+
+#[test]
+fn changed_storage_is_not_the_assignment_expression_result() {
+    let mut fixture = Fixture::new("#![no_std]
+        fn second(unit:(), pair:(i64,i64)) -> (i64,i64) { pair }
+        fn main() -> (i64,i64) {
+            let mut pair = (0,7); let unit = { pair.0 = 42; }; second(unit,pair)
+        }");
+    // Core assignment itself produces Unit. Exercise that valid receiving
+    // representation directly, without the parser's separate trailing Unit.
+    let body = fixture.bodies.get_mut(&fixture.names["main"]).unwrap();
+    let assignment = body.expressions.iter().position(|expression|
+        matches!(expression.kind, CoreKind::Assign { .. })).unwrap();
+    for expression in &mut body.expressions {
+        if let CoreKind::Let { name, value } = &mut expression.kind && name == "unit" {
+            *value = CoreId(assignment as u32);
+        }
+    }
+    assert!(body.validate().is_empty());
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["main"];
+    let body = bound.body(owner).unwrap();
+    let call = body.get(fixture.call_to(owner, fixture.names["second"])).unwrap();
+    assert_eq!(call.returns[0].source, payloads::PayloadSource::Argument { index: 1, path: vec![] });
+}
+
+#[test]
+fn mutation_alternatives_keep_branch_guards_and_unresolved_aliases_remain_unknown() {
+    let fixture = Fixture::new("#![no_std]
+        fn branch(flag:i64) -> i64 { let mut value = 0; handle flag { 0 => { value = 42; }, _ => { value = 7; } }; value }
+        fn opaque(left:&mut i64, right:&mut i64) -> i64 { *left = 42; *right }");
+    let summaries = derive_control_summaries(&fixture.inputs(), Default::default());
+    let branch = summaries.get(CallableBrand::Named(fixture.names["branch"])).unwrap();
+    assert!(ControlCallCoverage::Alternatives(branch.alternatives()).is_complete(), "{branch:?}");
+    assert_eq!(branch.alternatives().len(), 2);
+    let values = branch.alternatives().iter().map(|path| {
+        assert!(!path.guards.is_empty());
+        let ControlOutcome::Return(ControlValue { shape: ControlValueShape::Literal(value), .. }) = &path.outcome else {
+            panic!("{path:?}");
+        };
+        value.as_str()
+    }).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(values, ["42", "7"].into_iter().collect());
+    let opaque = summaries.get(CallableBrand::Named(fixture.names["opaque"])).unwrap();
+    assert!(!ControlCallCoverage::Alternatives(opaque.alternatives()).is_complete());
+    assert!(!ControlCallCoverage::Alternatives(opaque.alternatives()).without_performance(None));
+}
+
+#[test]
+fn strong_mutation_requires_known_capture_identity_and_cleanup() {
+    let fixture = Fixture::new("#![no_std]
+        struct Probe { value:i64 } impl Use<[0,1]> for Probe {} impl Drop for Probe { drop(&mut self) -> {} }
+        fn cleanup() -> i64 { let mut value = Probe { value:0 }; value = Probe { value:42 }; value.value }
+        fn captured() -> i64 { let mut value = 0; let task = move(value) { value = 42; value }; task() }");
+    let summaries = derive_control_summaries(&fixture.inputs(), Default::default());
+    for name in ["cleanup", "captured"] {
+        let summary = summaries.get(CallableBrand::Named(fixture.names[name])).unwrap();
+        assert!(!ControlCallCoverage::Alternatives(summary.alternatives()).is_complete(), "{name}: {summary:?}");
+    }
+}
+
+#[test]
+fn ordered_storage_queries_are_charged_to_the_existing_work_budget() {
+    let fixture = Fixture::new("#![no_std] fn main() -> i64 { let mut value = 0; value = 7; value = 42; value }");
+    let inputs = fixture.inputs();
+    let full = derive_control_summaries(&inputs, Default::default());
+    let full = full.get(CallableBrand::Named(fixture.names["main"])).unwrap();
+    let ControlOutcome::Return(value) = &full.alternatives()[0].outcome else { panic!("{full:?}"); };
+    let state = State { locals: BTreeMap::new(), guards: vec![],
+        events: full.alternatives()[0].events.clone(), outcome: full.alternatives()[0].outcome.clone() };
+    let mut steps = 0;
+    assert_eq!(state.load(value.clone(), &mut steps, 0), Err(ControlUnknown::Limit));
+    let limited = derive_control_summaries(&inputs, ControlSummaryLimits { max_steps: 1, ..Default::default() });
+    assert!(!ControlCallCoverage::Alternatives(limited.get(CallableBrand::Named(fixture.names["main"])).unwrap()
+        .alternatives()).is_complete());
+}
+
+#[test]
 fn read_only_storage_contract_requires_complete_sealed_execution() {
     let fixture = Fixture::new("#![no_std] struct Slot<'a> { value: &'a i64 } fn get<'a>(slot: &mut Slot<'a>) -> &'a i64 { slot.value } fn set<'a>(slot: &mut Slot<'a>, value: &'a i64) { slot.value = value; } fn main<'a>(slot: &mut Slot<'a>, value: &'a i64) -> &'a i64 { set(slot, value); get(slot) }");
     let inputs = fixture.inputs();
@@ -228,9 +371,9 @@ fn stored_reference_liveness_follows_live_aliases_into_ordinary_and_captured_sto
 
 #[test]
 fn unobserved_branded_calls_require_the_whole_sealed_constructor_contract() {
-    let fixture = Fixture::new("#![no_std] fn inspect<T>(value:T) -> () {
-        let task = move (value) { &value }; let mut marker = 0;
-        marker = 1; let result = (&task)(); ()
+    let fixture = Fixture::new("#![no_std] fn inspect<T>(value:T, marker:&mut i64) -> () {
+        let task = move (value) { &value };
+        *marker = 1; let result = (&task)(); ()
     }");
     let owner = fixture.names["inspect"];
     let body = &fixture.bodies[&owner];
@@ -633,14 +776,14 @@ fn symbolic_input_referents_supply_a_getter_contract_after_mutation() {
         struct Slot<'a> { value: &'a i64 }
         struct Carrier<'a,'b> { target: &'b mut Slot<'a> }
         fn get<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> { &mut *carrier.target }
-        fn after<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>) -> &'c mut Slot<'a> {
-            let mut marker = 0; marker = 1; get(carrier)
+        fn after<'a,'b,'c>(carrier: &'c mut Carrier<'a,'b>, marker: &mut i64) -> &'c mut Slot<'a> {
+            *marker = 1; get(carrier)
         }");
     let inputs = fixture.inputs();
     let summaries = derive_control_summaries(&inputs, Default::default());
     let owner = fixture.names["after"];
     assert!(summaries.get(CallableBrand::Named(owner)).unwrap().alternatives.iter()
-        .any(|alternative| matches!(alternative.outcome, ControlOutcome::Unknown(ControlUnknown::Unsupported("mutation")))));
+        .any(|alternative| matches!(alternative.outcome, ControlOutcome::Unknown(ControlUnknown::Unsupported("unresolved mutation destination")))));
     let call = fixture.call_to(owner, fixture.names["get"]);
     let bound = summaries.bind(&inputs).unwrap();
     let control = bound.body(owner).unwrap();

@@ -5,6 +5,29 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 154: exact storage writes in shared control execution
+
+The existing callable-control log now carries ordered exact assignments. Place
+reads resolve those writes through storage identity, including helper and scope
+boundaries; frozen invocation operands are not reread. Partial updates revoke
+the aggregate's old forwarding origin and preserve untouched field provenance.
+Read-only and no-performance consumers classify the same store event differently.
+Unknown destinations, field shapes, cleanup and owned-capture copy identity do
+not acquire strong-update permission, and storage queries use the normal budget.
+
+The nonperforming local-writer/linear-owner regression passes fresh/decoded VM
+and native O0/O2, with real cancellation rejection retained. Removing the source
+change reproduces its G5024 failure. The control run passed 26 tests and failed
+eight older generic-effect fixtures at G4155; those same eight failures reproduced
+on the baseline. A subsequent focused receiving-Core check passes for distinct
+changed-storage versus assignment-result identity. No failing test is ignored or
+counted as a passing full-suite gate.
+
+This does not finish prepared-receiver ownership or loan retention during strict
+arguments. Both owned-receiver replacement execution regressions remain active,
+as do the other native-handler acceptance requirements. Cache 154 changes;
+verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 153: normalized callable joins
 
 Core resolves a value and both retained join operands in the same inference

@@ -1051,6 +1051,26 @@ fn unused_effect_permissions_do_not_invent_owner_cancellation() {
 }
 
 #[test]
+fn exact_storage_mutations_do_not_invent_algebraic_cancellation() {
+    let body = "effect Ask { [0,1] ask() -> i64; }
+        fn write(value:&mut i64) { *value = 42; }
+        fn quiet() -> i64 / Ask { let mut value = 0; { write(&mut value); }; value }
+        pub fn main() -> i64 { handle {
+            let value = Token {}; quiet(); consume(value)
+        } { Ask::ask() with _ => 0 } }";
+    accepts(body);
+    accepts_native(body);
+    rejects("effect Ask { [0,1] ask() -> i64; }
+        fn choose(flag:Flag) -> i64 / Ask {
+            let mut value = 0; value = 42;
+            handle flag { Flag::Yes => value, Flag::No => Ask::ask() }
+        }
+        pub fn main() -> i64 { handle {
+            let value = Token {}; choose(Flag::No); consume(value)
+        } { Ask::ask() with _ => 0 } }");
+}
+
+#[test]
 fn observed_cancellation_cannot_hide_behind_a_returning_sibling() {
     rejects("effect Ask { [0,1] ask() -> i64; }
         fn choose(flag: Flag) -> i64 / Ask {

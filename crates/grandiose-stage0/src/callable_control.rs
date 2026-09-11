@@ -67,6 +67,9 @@ pub enum ControlOrigin {
     /// An implicit lexical proof input, never a resident environment field.
     LabelCapture(LabelBrand),
     Produced(ControlSite),
+    /// The changed storage product is distinct from an assignment's Unit
+    /// expression result, even though both arise at the same execution site.
+    Stored(ControlSite),
     Field {
         base: Box<ControlOrigin>,
         index: u32,
@@ -110,6 +113,10 @@ impl ControlValue {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlStorage {
     Slot { site: ControlSite, name: String },
+    /// Formation owns this environment slot. Its invocation identity after
+    /// source Copy/Move still requires the receiver acquisition contract;
+    /// source-level aliases alone cannot authorize a strong mutation here.
+    OwnedCapture { site: ControlSite, index: u32 },
     Field { base: Box<ControlStorage>, index: u32 },
     /// The referent of a typed symbolic input reference is not the slot
     /// holding its handle. Consumers instantiate this identity through the
@@ -117,6 +124,24 @@ pub enum ControlStorage {
     /// Keep the symbolic payload indirect: this storage enum inhabits every
     /// recursive evaluator value, including values with no referent identity.
     Referent { reference: Box<ControlOrigin>, ty: Box<Type> },
+}
+
+impl ControlStorage {
+    fn strong_destination(&self) -> bool {
+        match self {
+            Self::Slot { .. } => true,
+            Self::Field { base, .. } => base.strong_destination(),
+            Self::OwnedCapture { .. } | Self::Referent { .. } => false,
+        }
+    }
+
+    fn path_from(&self, ancestor: &Self) -> Option<Vec<u32>> {
+        if self == ancestor { return Some(vec![]); }
+        let Self::Field { base, index } = self else { return None; };
+        let mut path = base.path_from(ancestor)?;
+        path.push(*index);
+        Some(path)
+    }
 }
 
 fn resident(mut value: ControlValue, storage: ControlStorage) -> ControlValue {
@@ -175,6 +200,11 @@ pub enum ControlGuard {
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlEvent {
+    /// Strict RHS and destination evaluation have completed. The destination
+    /// is an exact storage identity, not the origin of its previous contents.
+    /// Readers apply these ordered replacements only when loading a place;
+    /// already evaluated invocation inputs remain frozen values.
+    Store { site: ControlSite, destination: ControlStorage, value: ControlValue },
     /// An evaluated resident may require source-selected or opaque cleanup.
     /// This is a coverage gap for storage effects, not an observed Drop call
     /// or a claim about whether the value is consumed on this path.
@@ -267,7 +297,7 @@ impl ControlCallCoverage<'_> {
     fn storage_read_only(&self, invocation: Option<&ControlSite>) -> bool {
         self.events_satisfy(invocation, |event| match event {
             ControlEvent::Borrow { .. } | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
-            ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
+            ControlEvent::Store { .. } | ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
         })
     }
 
@@ -278,7 +308,7 @@ impl ControlCallCoverage<'_> {
             ControlEvent::Perform { .. } => false,
             // Source destruction cannot perform outward algebraic effects.
             // Its unknown writes remain a separate storage-proof obligation.
-            ControlEvent::UnresolvedCleanup { .. } | ControlEvent::Borrow { .. }
+            ControlEvent::Store { .. } | ControlEvent::UnresolvedCleanup { .. } | ControlEvent::Borrow { .. }
             | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
         }) && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
             !matches!(path.outcome, ControlOutcome::TerminalOperation { .. } | ControlOutcome::Cancellation)))
@@ -288,7 +318,7 @@ impl ControlCallCoverage<'_> {
         self.is_complete() && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
             path.events.iter().filter(|event| {
                 let site = match event {
-                    ControlEvent::Borrow { site, .. } | ControlEvent::Invoke { site, .. }
+                    ControlEvent::Store { site, .. } | ControlEvent::Borrow { site, .. } | ControlEvent::Invoke { site, .. }
                     | ControlEvent::Transfer { site, .. } | ControlEvent::Perform { site, .. }
                     | ControlEvent::UnresolvedCleanup { site } => site,
                 };
@@ -963,6 +993,59 @@ struct State {
     outcome: ControlOutcome,
 }
 impl State {
+    /// The execution log is the storage authority. Lexical bindings and
+    /// reference handles retain identities; their embedded contents are
+    /// formation snapshots, not a second mutable storage environment.
+    fn load(&self, mut value: ControlValue, steps: &mut usize, limit: usize) -> Result<ControlValue, ControlUnknown> {
+        fn replace(current: &mut ControlValue, site: &ControlSite, destination: &ControlStorage, value: &ControlValue,
+            steps: &mut usize, limit: usize) -> Result<(), ControlUnknown> {
+            *steps = steps.saturating_add(1);
+            if *steps > limit { return Err(ControlUnknown::Limit); }
+            let Some(storage) = &current.storage else { return Ok(()); };
+            if let Some(path) = storage.path_from(destination) {
+                let mut replacement = value.clone();
+                for index in path {
+                    replacement = project(&replacement, index, &current.ty);
+                }
+                *current = resident(replacement, storage.clone());
+            } else if destination.path_from(storage).is_some() {
+                match &mut current.shape {
+                    ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
+                    | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => {
+                        for field in fields { replace(field, site, destination, value, steps, limit)?; }
+                        // A changed aggregate is not the old input value.
+                        // Preserve each unaffected field's provenance, but
+                        // revoke the ancestor's whole-value forwarding path.
+                        let mut root = destination;
+                        while let ControlStorage::Field { base, .. } = root { root = base; }
+                        current.origin = storage.path_from(root).unwrap_or_default().into_iter()
+                            .fold(ControlOrigin::Stored(site.clone()), |base, index|
+                                ControlOrigin::Field { base: Box::new(base), index });
+                    }
+                    // Reference referents and callable capture storage are
+                    // separate owners. Loading a handle does not load them.
+                    _ => {}
+                }
+            }
+            Ok(())
+        }
+        for event in &self.events {
+            *steps = steps.saturating_add(1);
+            if *steps > limit { return Err(ControlUnknown::Limit); }
+            if let ControlEvent::Store { site, destination, value: replacement } = event {
+                replace(&mut value, site, destination, replacement, steps, limit)?;
+            }
+        }
+        Ok(value)
+    }
+
+    fn load_outcome(&mut self, value: ControlValue, steps: &mut usize, limit: usize) {
+        self.outcome = match self.load(value, steps, limit) {
+            Ok(value) => ControlOutcome::Return(value),
+            Err(reason) => ControlOutcome::Unknown(reason),
+        };
+    }
+
     fn alternative(&self) -> ControlAlternative {
         ControlAlternative {
             guards: self.guards.clone(),
@@ -1447,7 +1530,7 @@ impl Analyzer<'_, '_> {
             CoreKind::Local(name) => {
                 return match state.locals.get(&name).cloned() {
                     Some(value) => {
-                        state.outcome = ControlOutcome::Return(value);
+                        state.load_outcome(value, &mut self.steps, self.limits.max_steps);
                         vec![state]
                     }
                     None => vec![state.stop(ControlUnknown::InvalidCore(frame.owner))],
@@ -1503,21 +1586,21 @@ impl Analyzer<'_, '_> {
                 result.shape = ControlValueShape::Label(target.clone());
             }
             CoreKind::Closure { environment, body, .. } => {
-                let Some(captures) = environment
-                    .captures
-                    .iter()
-                    .enumerate()
-                    .map(|(index, capture)| state.locals.get(&capture.name).cloned().map(|value| {
-                        match crate::capture_formation::CaptureFormation::new(capture).source() {
-                            crate::capture_formation::CaptureSource::Borrow(_) => value,
-                            crate::capture_formation::CaptureSource::Copy | crate::capture_formation::CaptureSource::Move =>
-                                resident(value, ControlStorage::Slot { site: frame.site(id), name: format!("$capture.{index}") }),
-                        }
-                    }))
-                    .collect::<Option<Vec<_>>>()
-                else {
-                    return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
-                };
+                let mut captures = vec![];
+                for (index, capture) in environment.captures.iter().enumerate() {
+                    let Some(value) = state.locals.get(&capture.name).cloned() else {
+                        return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
+                    };
+                    let value = match state.load(value, &mut self.steps, self.limits.max_steps) {
+                        Ok(value) => value,
+                        Err(reason) => return vec![state.stop(reason)],
+                    };
+                    captures.push(match crate::capture_formation::CaptureFormation::new(capture).source() {
+                        crate::capture_formation::CaptureSource::Borrow(_) => value,
+                        crate::capture_formation::CaptureSource::Copy | crate::capture_formation::CaptureSource::Move =>
+                            resident(value, ControlStorage::OwnedCapture { site: frame.site(id), index: index as u32 }),
+                    });
+                }
                 result.shape = ControlValueShape::Callable {
                     brand: CallableBrand::Closure(environment.brand),
                     generic_arguments: frame.generic_arguments.clone(),
@@ -1623,7 +1706,8 @@ impl Analyzer<'_, '_> {
                     states = self.cap(states);
                 }
                 for state in &mut states {
-                    // Local shadowing is scoped. Mutation is conservatively unsupported below.
+                    // Restore lexical bindings, not storage contents. Ordered
+                    // Store events survive scope exit, including outer transfers.
                     state.locals = old.clone();
                 }
                 return states;
@@ -1657,7 +1741,7 @@ impl Analyzer<'_, '_> {
                     .map(|mut state| {
                         if state.running() {
                             if let ControlValueShape::Borrow(value) = state.value().shape {
-                                state.outcome = ControlOutcome::Return(*value);
+                                state.load_outcome(*value, &mut self.steps, self.limits.max_steps);
                             } else {
                                 return state
                                     .stop(ControlUnknown::Unsupported("opaque dereference"));
@@ -1907,13 +1991,32 @@ impl Analyzer<'_, '_> {
                     state,
                 );
             }
-            CoreKind::Assign { .. } => {
-                return self.stop_unvisited(
-                    frame,
-                    id,
-                    state,
-                    ControlUnknown::Unsupported("mutation"),
-                );
+            CoreKind::Assign { place, value } => {
+                let mut output = vec![];
+                for state in self.eval(frame, value, state) {
+                    if !state.running() { output.push(state); continue; }
+                    let value = state.value();
+                    for mut state in self.place(frame, &place, state) {
+                        if state.running() {
+                            let previous = state.value();
+                            let Some(destination) = previous.storage.filter(ControlStorage::strong_destination) else {
+                                output.push(state.stop(ControlUnknown::Unsupported("unresolved mutation destination")));
+                                continue;
+                            };
+                            if !self.cleanup_trivial(frame, &previous.ty,
+                                matches!(&previous.shape, ControlValueShape::Callable { captures, .. } if captures.is_empty())) {
+                                output.push(state.stop(ControlUnknown::Unsupported("mutation cleanup")));
+                                continue;
+                            }
+                            state.events.push(ControlEvent::Store {
+                                site: frame.site(id), destination, value: value.clone(),
+                            });
+                            state.outcome = ControlOutcome::Return(result.clone());
+                        }
+                        output.push(state);
+                    }
+                }
+                return self.cap(output);
             }
             CoreKind::Handle { computation, .. } => {
                 // Interpret the protected computation with the same ordered
@@ -2004,6 +2107,48 @@ impl Analyzer<'_, '_> {
         }
         states
     }
+    fn place(&mut self, frame: &Frame, place: &crate::CorePlace, mut state: State) -> Vec<State> {
+        if !state.running() { return vec![state]; }
+        self.steps = self.steps.saturating_add(1);
+        if self.steps > self.limits.max_steps { return vec![state.stop(ControlUnknown::Limit)]; }
+        match place {
+            crate::CorePlace::Local { name, .. } => {
+                let Some(value) = state.locals.get(name).cloned() else {
+                    return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
+                };
+                state.load_outcome(value, &mut self.steps, self.limits.max_steps);
+                vec![state]
+            }
+            crate::CorePlace::Deref { reference, .. } => self.eval(frame, *reference, state)
+                .into_iter().map(|mut state| {
+                    if state.running() {
+                        let ControlValueShape::Borrow(value) = state.value().shape else {
+                            return state.stop(ControlUnknown::Unsupported("opaque mutation dereference"));
+                        };
+                        state.load_outcome(*value, &mut self.steps, self.limits.max_steps);
+                    }
+                    state
+                }).collect(),
+            crate::CorePlace::Field { base, index, ty, .. } => self.place(frame, base, state)
+                .into_iter().map(|mut state| {
+                    if state.running() {
+                        let value = state.value();
+                        let fields = match &value.shape {
+                            ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
+                            | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => fields,
+                            _ => return state.stop(ControlUnknown::Unsupported("opaque mutation field")),
+                        };
+                        if fields.get(*index as usize).is_none() {
+                            return state.stop(ControlUnknown::InvalidCore(frame.owner));
+                        }
+                        state.outcome = ControlOutcome::Return(project(&value, *index, &frame.ty(ty.clone())));
+                    }
+                    state
+                }).collect(),
+            crate::CorePlace::Error => vec![state.stop(ControlUnknown::InvalidCore(frame.owner))],
+        }
+    }
+
     fn invoke(
         &mut self,
         frame: &Frame,

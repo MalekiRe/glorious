@@ -2115,3 +2115,40 @@ generic/quantified callback checks and wrong receiver/post-state rejection pass.
 The 31-test borrowed-callable run had 27 passes and four failures; each failure
 also reproduced with this normalization change removed. Their cancellation and
 residual-predicate expectations remain active and are not claimed as solved.
+
+## Ordered exact storage replacements
+
+The shared callable-control evaluator now represents checked exact assignments
+in its existing ordered execution log. RHS acquisition precedes destination
+evaluation. Local bindings and reference handles retain storage identity;
+place reads apply the log, while already evaluated operands keep their original
+value snapshots. Writes survive lexical binding restoration, helper return and
+local-label transfer. Branch alternatives retain their separate guards and logs.
+No independent Core mutation walker or second mutable storage graph is added.
+
+A partial replacement invalidates whole-aggregate forwarding provenance without
+erasing untouched field origins. The changed resident has an origin distinct
+from the assignment expression's Unit result. Existing return-payload consumers
+therefore project updated fields rather than forwarding the original aggregate.
+Read-only coverage classifies every store as a write; performance-absence coverage
+can distinguish a represented write from an algebraic suspension. Minimum-use
+checking consumes that same complete execution proof.
+
+Symbolic referent aliases, opaque field shapes, unproved replacement cleanup and
+owned-capture identity across source Copy/Move remain unresolved. Owned environment
+slots are typed identities rather than ordinary lexical slots; a source alias
+cannot authorize a strong update of that environment. Storage-log queries charge
+the existing bounded control work budget and publish unknown on exhaustion.
+
+Cache 154 fixes the false cancellation rejection for a nonperforming helper that
+mutates exact local storage. Its fresh/decoded VM and native O0/O2 gate passes,
+and an actually performing alternative still rejects. Control tests cover scopes,
+aliases, helpers, borrowed captures, guards, transfers, strict input snapshots,
+partial-result provenance and conservative unsupported destinations. Eight older
+control tests still fail at source G4155 before this analysis; all eight reproduced
+with this change removed. Receiver acquisition/lifetime across argument replacement
+is still open: an ordered write fact is not itself a loan-retention or ownership
+proof. General borrowed resumption invocation, helper-local symbolic delimiters,
+foreign-control admission, mandatory-tail fusion and full zero-marshalling/
+performance acceptance also remain open. Executable and runtime generations do
+not change.
