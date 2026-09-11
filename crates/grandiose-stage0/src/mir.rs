@@ -4578,10 +4578,10 @@ impl MirLowering {
         // ownership boundaries. A failed contract is a diagnostic, never a
         // request to retry lowering against a different source shape.
         let lowered = (|| -> Result<_, MirDiagnostic> {
-            let facts = flow.continuations_for(body).map_err(|error| MirDiagnostic {
+            flow.continuations_for(body).map_err(|error| MirDiagnostic {
                 code: error.code, message: error.message,
             })?;
-            let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_continuations(definition, body, facts)
+            let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_resources(definition, body, flow)
                 .map_err(|error| MirDiagnostic {
                     code: "G6000", message: format!("invalid Evaluation MIR: {error:?}"),
                 })?;

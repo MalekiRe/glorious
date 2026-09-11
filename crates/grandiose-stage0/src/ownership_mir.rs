@@ -312,8 +312,7 @@ impl OwnershipMir {
         if body.recovered || !body.diagnostics.is_empty() || !body.validate().is_empty() {
             return Err(OwnershipError("cannot lower invalid Typed Core".into()));
         }
-        let facts = flow.continuations_for(body).map_err(|error| OwnershipError(error.message))?;
-        let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_continuations(definition, body, facts)
+        let evaluation = crate::evaluation_mir::EvaluationMir::lower_with_resources(definition, body, flow)
             .map_err(|error| OwnershipError(format!("invalid Evaluation MIR: {error:?}")))?;
         let control = ControlMir::lower(&evaluation).map_err(|error| OwnershipError(format!("invalid Control MIR: {error:?}")))?;
         let closure_flows = flow.closure_flows().iter().map(|(brand, child)|

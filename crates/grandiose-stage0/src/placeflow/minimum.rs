@@ -30,6 +30,7 @@ pub(super) struct MinimumBinding {
     scope: SourceStorageScopeId,
 }
 
+#[derive(Clone)]
 pub(super) struct HandlerFrame {
     pub(super) computation: CoreId,
     pub(super) clauses: Vec<crate::core::CoreHandlerClause>,

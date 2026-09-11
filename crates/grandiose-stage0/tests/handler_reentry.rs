@@ -373,6 +373,33 @@ fn prepared_receiver_keeps_captures_before_argument_replacement() {
 }
 
 #[test]
+fn owned_receiver_acquisition_precedes_helper_mutation_of_its_storage() {
+    candidate("type Callback=(i64)->i64;
+        fn first(value:i64) -> i64 {42}
+        fn second(value:i64) -> i64 {0}
+        fn replace(slot:&mut Callback, replacement:Callback) -> i64 {
+            *slot=replacement; 0
+        }
+        pub fn main() -> i64 {
+            let first=42; let second=0;
+            let mut callback:(i64)->i64=(value:i64)->i64 {first};
+            let replacement:(i64)->i64=(value:i64)->i64 {second};
+            callback(replace(&mut callback,replacement))
+        }");
+}
+
+#[test]
+fn owned_field_receiver_acquisition_precedes_parent_replacement() {
+    candidate("type Callback=(i64)->i64;
+        fn first(value:i64) -> i64 {42}
+        fn second(value:i64) -> i64 {0}
+        pub fn main() -> i64 {
+            let mut saved:(Callback,i64)=(first,1);
+            saved.0({saved=(second,0); 0})
+        }");
+}
+
+#[test]
 fn repeated_owned_receiver_invocation_preserves_mutable_capture_storage() {
     candidate("pub fn main() -> i64 {
         let mut count = 19;

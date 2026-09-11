@@ -27,10 +27,34 @@ fn callable_initializers_and_reads_share_their_resolved_value_join() {
     let [EvaluationOperand::Value(value)] = binding.operands.as_slice() else { panic!("binding input") };
     let initializer = instructions.iter().find(|instruction| instruction.value == *value).unwrap();
     assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_none()));
-    let receiver = instructions.iter().find(|instruction|
-        matches!(instruction.operation, Op::PrepareInvocation)).unwrap();
+    let call = instructions.iter().find(|instruction| matches!(&instruction.operation,
+        Op::Call(contract) if !contract.prepared_receiver)).unwrap();
+    let EvaluationOperand::Value(value) = call.operands[0] else { panic!("receiver input") };
+    let receiver = instructions.iter().find(|instruction| instruction.value == value).unwrap();
+    assert!(matches!(receiver.operation, Op::AcquireValue));
     assert_eq!(initializer.ty, receiver.ty);
     grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
+}
+
+#[test]
+fn receiver_storage_retention_uses_checked_projection_overlap() {
+    for (field, prepared) in [(0, false), (1, true)] {
+        let mir = normalize(&format!("fn first(value:i64) -> i64 {{42}}
+            fn second(value:i64) -> i64 {{0}}
+            pub fn main() -> i64 {{
+                let callback:(i64)->i64=first;
+                let mut saved=(callback,callback);
+                saved.0({{saved.{field}=callback; 0}})
+            }}"));
+        let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
+        let call = instructions.iter().find(|instruction| matches!(instruction.operation, Op::Call(_))).unwrap();
+        assert!(matches!(&call.operation, Op::Call(contract) if contract.prepared_receiver == prepared), "{field}: {call:?}");
+        let EvaluationOperand::Value(value) = call.operands[0] else { panic!("receiver input") };
+        let receiver = instructions.iter().find(|instruction| instruction.value == value).unwrap();
+        assert_eq!(matches!(receiver.operation, Op::PrepareInvocation), prepared);
+        assert!(prepared || matches!(receiver.operation, Op::AcquireValue));
+        grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
+    }
 }
 
 #[test]

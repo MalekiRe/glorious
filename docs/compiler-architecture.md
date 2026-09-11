@@ -2231,3 +2231,39 @@ addressing and non-callable preparation. This repairs the receiving type contrac
 not owned callable acquisition across argument replacement, general borrowed
 resumption invocation, mandatory-tail fusion or complete native-handler and
 full-conformance acceptance. Executable formats and runtime ABI are unchanged.
+
+## Checked invocation acquisition
+
+Evaluation MIR no longer grants an invocation-only carrier because the callee
+looks like a place. PlaceFlow publishes the receiver acquisition selected by
+its existing loan transitions. A retained owned receiver keeps its source
+storage live across every strict argument. That retention is not a source
+`&F` coercion and does not supply borrowed Fn permission or change invocation
+quantity. The original receiver contract remains authoritative.
+
+Receiver retention is an alternative in that same source solver. Its complete
+state is committed only when the argument transitions preserve the proposed
+storage loan; otherwise ordinary owned acquisition must satisfy the existing
+Copy/move rules. Alternative work has a shared structural budget which does not
+roll back, and exhaustion rejects. Shared Core calls with inconsistent selected
+acquisitions reject instead of publishing a permission from one occurrence for
+another. Lifted bodies consume their own resource product, not their parent's
+receiver choices. The full typed input fingerprint binds these facts to lowering.
+
+Cache 158 fixes the two preserved native receiver-replacement failures, while
+repeated mutable capture invocation and field-receiver replay retain their
+existing environments. No runtime pinning or unconditional source Copy is added;
+existing acquisition, invocation, quantity and cleanup operations implement the
+selected result. Evaluation tests distinguish overlapping from disjoint field
+replacement and retain the resolved callable value type on owned acquisition.
+
+This is not complete receiver or native-handler acceptance. The computed-field
+factory still retains a conservative callable-result loan on its input. New
+active tests expose tuple callable replacement typing and helper-stored callable
+quantity/initialization failures. A borrowed-callable integration run reports
+27 passes and four expected-rejection failures; the unused generic cancellation
+case also reproduces with the previous receiver logic, while its executed
+cancellation counterpart rejects. These failures are not reclassified as
+passes. General borrowed resumption invocation, guarded resource interleavings,
+mandatory-tail fusion, foreign control and full performance acceptance remain
+open. Verifier 49, bytecode 75/schema 119 and native ABI 18 are unchanged.

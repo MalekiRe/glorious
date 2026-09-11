@@ -115,7 +115,7 @@ fn reject_library_cancellation(source: &str, dependencies: &[&str]) {
         // demonstrating that quantified callback selection is no longer the
         // blocker. The small positive fixtures above execute both artifacts.
         let diagnostics = StageZeroCompiler::new().compile(request)
-            .expect_err("generic library callbacks still need cancellation-safe owner contracts").diagnostics();
+            .err().expect("generic library callbacks still need cancellation-safe owner contracts").diagnostics();
         assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5024"), "O{level}: {diagnostics:#?}");
         assert!(!diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G4198" | "G4147" | "G4169")), "O{level}: {diagnostics:#?}");
     }
@@ -560,7 +560,7 @@ fn written_callable_abis_cannot_erase_residual_invocation_predicates() {
             let source = format!("trait Marker {{}} fn checked<T>(value: T) -> T where {predicate} {{ value }} {boundary}");
             for level in ["0", "2"] {
                 let diagnostics = StageZeroCompiler::new().compile(request(&source, level))
-                    .expect_err("an ABI must retain or prove the callable's invocation predicates").diagnostics();
+                    .err().unwrap_or_else(|| panic!("an ABI must retain or prove the callable's invocation predicates: {source}")).diagnostics();
                 assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G4143"), "{diagnostics:#?}");
                 assert!(!diagnostics.iter().any(|diagnostic| diagnostic.code == "G4198"), "{diagnostics:#?}");
             }
@@ -610,7 +610,7 @@ fn borrowed_callback_effects_cannot_bypass_linear_cancellation_checks() {
     "#] {
         for level in ["0", "2"] {
             let diagnostics = StageZeroCompiler::new().compile(request(&format!("{prelude}{body}"), level))
-                .expect_err("borrowed callback cancellation must retain linear obligations").diagnostics();
+                .err().unwrap_or_else(|| panic!("borrowed callback cancellation must retain linear obligations: {body}")).diagnostics();
             assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G5024"), "{diagnostics:#?}");
         }
     }

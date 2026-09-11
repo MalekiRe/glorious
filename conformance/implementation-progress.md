@@ -5,6 +5,29 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 158: checked invocation acquisition
+
+Receiver preparation consumes PlaceFlow's call-specific storage-retention proof,
+including the strict argument transitions. A failed retention alternative uses
+ordinary owned acquisition through the existing Copy/move rules. The source
+solver, not an additional syntax walk or runtime keepalive, makes that choice.
+Search work is bounded across rollback, and lifted bodies use their own facts.
+
+Both preserved owned-receiver replacement regressions now pass fresh/decoded VM,
+native and mixed-engine O0/O2 execution. Mutable captured state and field replay
+remain intact. Evaluation coverage checks overlapping/disjoint projections and
+the type of the acquired callable. An integration run passed 55 existing handler
+tests; the computed-field factory lifetime test remains failing. Two new active
+nested replacement tests expose tuple callable typing and helper-stored callable
+quantity/initialization obligations. These are remaining work, not acceptance.
+
+The borrowed-callable run reports 27 passes and four expected-rejection failures.
+The unused generic cancellation case also fails its rejection expectation with
+the previous receiver logic; the actually executed cancellation case rejects.
+The other failures remain recorded pending investigation. Native-handler,
+mandatory-tail, foreign-control and full performance acceptance remain open.
+Only cache generation changes; executable formats and the runtime ABI do not.
+
 ## Cache 157: prepared nominal label invocation
 
 Runtime MIR preparation uses the existing nominal label Fn authority, preserving

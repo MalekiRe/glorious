@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[derive(Clone)]
 pub(super) struct LabelBoundary {
     pub id: CoreId,
     pub brand: crate::LabelBrand,

@@ -580,6 +580,12 @@ pub(crate) struct CheckedBorrow {
     pub temporary: Option<CoreId>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InvocationAcquisition {
+    Owned,
+    Retained,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
 enum BorrowSite {
     Expression(CoreId),
@@ -688,6 +694,9 @@ pub struct PlaceFlow {
     resource_input: Option<crate::Digest>,
     resumption_transfers: Option<std::sync::Arc<crate::useflow::ResumptionTransfers>>,
     checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
+    /// Call-specific receiver loans checked across strict argument evaluation.
+    /// Absence requires ordinary owned acquisition; syntax cannot grant a view.
+    invocation_receivers: BTreeMap<CoreId, InvocationAcquisition>,
     minimum_suspensions: Vec<minimum::MinimumSuspension>,
     /// Frozen per-callable loan/resource products from this exact Core arena.
     /// Escape and lowering share these; a closure body never borrows the
@@ -734,6 +743,10 @@ pub struct PlaceFlow {
     pub diagnostics: Vec<FlowDiagnostic>,
 }
 impl PlaceFlow {
+    pub(crate) fn invocation_acquisition(&self, call: CoreId) -> Option<InvocationAcquisition> {
+        self.invocation_receivers.get(&call).copied()
+    }
+
     pub(crate) fn install_resumption_transfers(&mut self, product: std::sync::Arc<crate::useflow::ResumptionTransfers>)
         -> Result<(), &'static str>
     {
@@ -909,6 +922,8 @@ impl PlaceFlow {
                             == crate::resolution::language_drop_trait_definition()))),
             projection_loans: vec![],
             checked_borrows: BTreeMap::new(),
+            invocation_receivers: BTreeMap::new(),
+            receiver_budget: std::rc::Rc::new(std::cell::Cell::new(body.expressions.len().saturating_mul(8).max(64))),
             reborrow_parents: BTreeMap::new(),
             reference_origins: BTreeMap::new(),
             capture_types: BTreeMap::new(),
@@ -1007,6 +1022,7 @@ impl PlaceFlow {
             resource_input: Some(resource_input.unwrap_or_else(|| body.semantic_fingerprint())),
             resumption_transfers: None,
             checked_borrows: a.checked_borrows,
+            invocation_receivers: a.invocation_receivers,
             minimum_suspensions: a.minimum_suspensions,
             closure_flows: BTreeMap::new(),
             continuations: Some(continuations.clone()),
@@ -1051,6 +1067,7 @@ struct LogicalFlow {
     regions: regions::RegionGraph<BTreeSet<ProjectionLoan>>,
 }
 
+#[derive(Clone)]
 struct Analyzer<'a> {
     normal_continuation: bool,
     label_continuations: Vec<control::LabelBoundary>,
@@ -1072,6 +1089,10 @@ struct Analyzer<'a> {
     /// entries are mirrored in `states` for the legacy compact summary.
     projection_loans: Vec<ProjectionLoan>,
     checked_borrows: BTreeMap<BorrowSite, CheckedBorrow>,
+    invocation_receivers: BTreeMap<CoreId, InvocationAcquisition>,
+    /// Alternatives share work accounting even when their state is rolled
+    /// back. Nested conflicting prefixes must not expand exponentially.
+    receiver_budget: std::rc::Rc<std::cell::Cell<usize>>,
     /// Child reference binding -> suspended parent binding.  This is kept
     /// separate from the loan identity because a child may end nonlexically
     /// while the parent loan remains available again.
@@ -1980,14 +2001,14 @@ impl Analyzer<'_> {
                         }
                         let mut during_call = live_after.clone();
                         during_call.insert(owner.clone());
-                        let inputs = self.visit_call_operands(callee, &arguments, &during_call);
+                        let inputs = self.visit_call_operands(id, callee, &arguments, &during_call);
                         if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, &inputs[0].operand.value, &inputs[1..], id, e.span); }
                         self.release_evaluated_operands(&inputs, e.span);
                         self.release_owner_loans(&owner, e.span);
                         self.ephemeral_borrow_owner = previous;
                         self.nonretaining_call_owner = previous_capture;
                     } else {
-                        let inputs = self.visit_call_operands(callee, &arguments, live_after);
+                        let inputs = self.visit_call_operands(id, callee, &arguments, live_after);
                         if operands_complete && self.normal_continuation { self.finish_invocation_inputs(callee, &inputs[0].operand.value, &inputs[1..], id, e.span); }
                         self.release_evaluated_operands(&inputs, e.span);
                     }
@@ -2277,8 +2298,19 @@ impl Analyzer<'_> {
         self.release_dead_loans(live_after, e.span);
     }
 
-    fn visit_call_operands(&mut self, callee: CoreId, arguments: &[CoreId], live_after: &BTreeSet<String>) -> Vec<invocations::EvaluatedOperand> {
+    fn record_invocation_receiver(&mut self, call: CoreId, acquisition: InvocationAcquisition) {
+        if self.invocation_receivers.insert(call, acquisition).is_some_and(|previous| previous != acquisition) {
+            self.error(self.body.expression(call).span, "G5016",
+                "a shared Core call requires distinct receiver acquisition at its strict occurrences".into());
+        }
+    }
+
+    fn visit_call_operands(&mut self, call: CoreId, callee: CoreId, arguments: &[CoreId], live_after: &BTreeSet<String>) -> Vec<invocations::EvaluatedOperand> {
         if matches!(self.body.expression(callee).ty, Type::Reference { .. }) {
+            if matches!(self.body.expression(callee).kind,
+                CoreKind::Local(_) | CoreKind::Resumption { .. } | CoreKind::Field { .. } | CoreKind::Deref(_)) {
+                self.record_invocation_receiver(call, InvocationAcquisition::Retained);
+            }
             let mut during_arguments = live_after.clone();
             for argument in arguments { self.collect_local_uses(*argument, &mut during_arguments); }
             self.visit_reference_handle(callee, &during_arguments);
@@ -2303,6 +2335,47 @@ impl Analyzer<'_> {
             }
             inputs
         } else {
+            if matches!(self.body.expression(callee).kind,
+                    CoreKind::Local(_) | CoreKind::Resumption { .. } | CoreKind::Field { .. } | CoreKind::Deref(_)) {
+                // Receiver selection is a loan-solving alternative, not a
+                // lowering retry. Run the same source transitions with the
+                // proposed loan; commit the complete state only if all strict
+                // arguments preserve it. Otherwise ordinary owned acquisition
+                // must satisfy the existing move/Copy and quantitative rules.
+                let budget = self.receiver_budget.get();
+                if budget == 0 {
+                    self.error(self.body.expression(callee).span, "G5016",
+                        "invocation receiver retention exceeded its structural proof budget".into());
+                    let values = std::iter::once(callee).chain(arguments.iter().copied()).collect::<Vec<_>>();
+                    return self.visit_sequence(&values, live_after);
+                }
+                self.receiver_budget.set(budget - 1);
+                let mut candidate = self.clone();
+                let errors = candidate.diagnostics.len();
+                let span = self.body.expression(callee).span;
+                let mut during_arguments = live_after.clone();
+                for argument in arguments { candidate.collect_local_uses(*argument, &mut during_arguments); }
+                candidate.visit_reference_handle(callee, &during_arguments);
+                if candidate.normal_continuation {
+                    let receiver = candidate.retain_evaluated_operand(callee, false);
+                    // This retains the source storage; it does not coerce F
+                    // to &F or grant borrowed Fn permission. Invocation still
+                    // uses the original receiver contract and quantity lane.
+                    if !candidate.reborrow_place(callee, false, span, receiver.owner.clone()) {
+                        candidate.borrow_place(callee, false, span, Some(receiver.owner.clone()));
+                    }
+                    let mut receiver_live = live_after.clone();
+                    receiver_live.insert(receiver.owner.clone());
+                    let mut inputs = vec![receiver];
+                    inputs.extend(candidate.visit_sequence(arguments, &receiver_live));
+                    if candidate.diagnostics.len() == errors {
+                        candidate.record_invocation_receiver(call, InvocationAcquisition::Retained);
+                        *self = candidate;
+                        return inputs;
+                    }
+                }
+            }
+            self.record_invocation_receiver(call, InvocationAcquisition::Owned);
             let values = std::iter::once(callee).chain(arguments.iter().copied()).collect::<Vec<_>>();
             self.visit_sequence(&values, live_after)
         }

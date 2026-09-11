@@ -304,19 +304,30 @@ pub struct EvaluationError(pub String);
 
 impl EvaluationMir {
     pub fn lower(definition: DefKey, body: &TypedBody) -> Result<Self, EvaluationError> {
-        Self::lower_checked(definition, body, None)
+        let flow = crate::PlaceFlow::analyze(body);
+        Self::lower_checked(definition, body, None, &flow)
     }
 
+    #[cfg(test)]
     pub(crate) fn lower_with_continuations(
         definition: DefKey, body: &TypedBody,
         facts: &crate::core_continuations::CoreContinuations,
     ) -> Result<Self, EvaluationError> {
         facts.bind(body).map_err(|error| EvaluationError(error.message))?;
-        Self::lower_checked(definition, body, Some(facts))
+        let flow = crate::PlaceFlow::analyze(body);
+        Self::lower_checked(definition, body, Some(facts), &flow)
+    }
+
+    pub(crate) fn lower_with_resources(
+        definition: DefKey, body: &TypedBody, flow: &crate::PlaceFlow,
+    ) -> Result<Self, EvaluationError> {
+        let facts = flow.continuations_for(body).map_err(|error| EvaluationError(error.message))?;
+        Self::lower_checked(definition, body, Some(facts), flow)
     }
 
     fn lower_checked(definition: DefKey, body: &TypedBody,
         facts: Option<&crate::core_continuations::CoreContinuations>,
+        flow: &crate::PlaceFlow,
     ) -> Result<Self, EvaluationError> {
         if body.recovered || !body.diagnostics.is_empty() {
             return Err(EvaluationError(
@@ -329,6 +340,8 @@ impl EvaluationMir {
         let mut builder = Builder {
             body,
             facts,
+            flow,
+            root_flow: flow,
             regions: vec![],
             next_value: 0,
             active: BTreeSet::new(),
@@ -854,6 +867,8 @@ mod tests {
 struct Builder<'a> {
     body: &'a TypedBody,
     facts: Option<&'a crate::core_continuations::CoreContinuations>,
+    flow: &'a crate::PlaceFlow,
+    root_flow: &'a crate::PlaceFlow,
     regions: Vec<EvaluationRegion>,
     next_value: u32,
     active: BTreeSet<CoreId>,
@@ -1249,8 +1264,8 @@ impl Builder<'_> {
                 let direct_label = !mandatory_tail && arguments.len() == 1
                     && self.facts.and_then(|facts| facts.invocation(source))
                         .and_then(|invocation| invocation.direct_label()).is_some();
-                let prepared_receiver = !direct_label && matches!(self.body.expression(callee).kind,
-                    CoreKind::Local(_) | CoreKind::Resumption { .. } | CoreKind::Field { .. } | CoreKind::Deref(_));
+                let prepared_receiver = !direct_label && self.flow.invocation_acquisition(source)
+                    == Some(crate::placeflow::InvocationAcquisition::Retained);
                 operands = if prepared_receiver {
                     let place = self.borrowed_place(callee, sequence)?;
                     let value = self.emit(callee, self.body.expression(callee).ty.clone(),
@@ -1356,11 +1371,13 @@ impl Builder<'_> {
                 parameters,
                 environment,
                 body,
-            } => Op::Closure {
-                callable,
-                parameters,
-                environment,
-                body: self.region(body)?,
+            } => {
+                let previous = self.flow;
+                self.flow = self.root_flow.closure_flows().get(&environment.brand)
+                    .ok_or_else(|| EvaluationError("closure has no checked ownership product".into()))?;
+                let region = self.region(body);
+                self.flow = previous;
+                Op::Closure { callable, parameters, environment, body: region? }
             },
             CoreKind::Handle {
                 computation,
