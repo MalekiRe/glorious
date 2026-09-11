@@ -20,6 +20,102 @@ struct Fixture {
 }
 
 #[test]
+fn performance_inputs_require_a_complete_tail_frontier_not_just_a_first_observation() {
+    let fixture = Fixture::new("#![no_std]
+        effect Touch { [1,1] touch(value:&mut i64) -> i64; }
+        fn leaf(first:&mut i64, second:&mut i64) -> i64 / Touch { *first=1; Touch::touch(second) }
+        fn relay(first:&mut i64, second:&mut i64) -> i64 / Touch { leaf(first,second) }
+        fn suffix(first:&mut i64, second:&mut i64) -> i64 / Touch {
+            Touch::touch(first); Touch::touch(second)
+        }
+        fn consume(value:i64, input:&mut i64) -> i64 / Touch { Touch::touch(input) }
+        fn pending(first:&mut i64, second:&mut i64) -> i64 / Touch {
+            consume(Touch::touch(first),second)
+        }
+        fn choice(first:&mut i64, second:&mut i64, flag:i64) -> i64 / Touch {
+            handle flag { 0 => Touch::touch(first), _ => Touch::touch(second) }
+        }
+        fn pending_choice(first:&mut i64, second:&mut i64) -> i64 / Touch {
+            handle Touch::touch(first) { 0 => Touch::touch(second), _ => 0 }
+        }
+        fn select(first:&mut i64, second:&mut i64) -> i64 / Touch {
+            relay(first,second); suffix(first,second); pending(first,second);
+            choice(first,second,0); pending_choice(first,second)
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["select"];
+    let bound = summaries.bind(&inputs).unwrap();
+    let control = bound.body(owner).unwrap();
+    let relay = control.get(fixture.call_to(owner, fixture.names["relay"])).unwrap();
+    assert!(relay.unknown, "tail payload coverage must not grant normal-return authority");
+    let performances = relay.performances.as_ref().expect("complete tail performance inputs");
+    assert_eq!(performances.len(), 1);
+    let payloads::PayloadSource::Aggregate(fields) = &performances[0].payload.source else { panic!("payload tuple"); };
+    fn input(payload: &InvocationPayload) -> Option<u32> {
+        match &payload.source {
+            payloads::PayloadSource::Argument { index, .. } => Some(*index),
+            payloads::PayloadSource::Reborrow { input: payload, .. } => input(payload),
+            _ => None,
+        }
+    }
+    assert_eq!(input(&fields[0]), Some(1), "{:?}", fields[0]);
+    let choice = control.get(fixture.call_to(owner, fixture.names["choice"])).unwrap().performances.as_ref().unwrap();
+    assert_eq!(choice.iter().map(|performance| {
+        let payloads::PayloadSource::Aggregate(fields) = &performance.payload.source else { panic!("payload tuple"); };
+        input(&fields[0]).unwrap()
+    }).collect::<std::collections::BTreeSet<_>>(), [0,1].into());
+    for name in ["suffix", "pending", "pending_choice"] {
+        assert!(control.get(fixture.call_to(owner, fixture.names[name])).unwrap().performances.is_none(),
+            "{name}: omitted reentry cannot inherit the first observed payload");
+    }
+    let limited = derive_control_summaries(&inputs, ControlSummaryLimits { max_steps: 1, ..Default::default() });
+    let bound = limited.bind(&inputs).unwrap();
+    assert!(bound.body(owner).unwrap().get(fixture.call_to(owner, fixture.names["relay"])).unwrap().performances.is_none());
+}
+
+#[test]
+fn tail_performance_payloads_project_the_same_captured_invocation_inputs() {
+    let fixture = Fixture::new("#![no_std]
+        effect Touch { [1,1] touch(value:&mut i64) -> i64; }
+        fn captured(value:&mut i64) -> i64 / Touch {
+            let task=move(value) { Touch::touch(value) }; task()
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let owner = fixture.names["captured"];
+    let body = &fixture.bodies[&owner];
+    let call = body.expressions.iter().enumerate().find_map(|(index, expression)|
+        matches!(expression.kind, CoreKind::Call { .. }).then_some(CoreId(index as u32))).unwrap();
+    let bound = summaries.bind(&inputs).unwrap();
+    let control = bound.body(owner).unwrap();
+    let performances = control.get(call).unwrap().performances.as_ref().unwrap();
+    let payloads::PayloadSource::Aggregate(fields) = &performances[0].payload.source else { panic!("payload tuple"); };
+    let source = match &fields[0].source {
+        payloads::PayloadSource::Reborrow { input, .. } => &input.source,
+        source => source,
+    };
+    assert!(matches!(source, payloads::PayloadSource::Capture { .. }), "{source:?}");
+}
+
+#[test]
+fn weak_scalar_stores_invalidate_alias_guards_without_equating_distinct_inputs() {
+    let fixture = Fixture::new("#![no_std]
+        fn write(marker:&mut i64, first:&i64, second:&i64) -> (i64,i64,i64) {
+            let before = *first; *marker = 42; (before,*first,*second)
+        }");
+    let summaries = derive_control_summaries(&fixture.inputs(), Default::default());
+    let summary = summaries.get(CallableBrand::Named(fixture.names["write"])).unwrap();
+    let [path] = summary.alternatives() else { panic!("{summary:?}"); };
+    let ControlOutcome::Return(ControlValue { shape: ControlValueShape::Tuple(values), .. }) = &path.outcome else { panic!("{path:?}"); };
+    assert!(!matches!(values[0].origin, ControlOrigin::Invalidated { .. }), "strict snapshots precede the write");
+    assert!(values[1..].iter().all(|value| matches!(value.origin, ControlOrigin::Invalidated { .. })
+        && matches!(value.shape, ControlValueShape::Unknown)));
+    assert_ne!(values[0].origin, values[1].origin, "pre-write guards cannot constrain later reads");
+    assert_ne!(values[1].origin, values[2].origin, "possibly aliased inputs are not proven equal");
+}
+
+#[test]
 fn borrowed_receiver_obligations_require_complete_isolated_resident_evidence() {
     let mut fixture = Fixture::new("#![no_std]
         type Callback=(i64)->i64;
@@ -247,8 +343,12 @@ fn mutation_alternatives_keep_branch_guards_and_unresolved_aliases_remain_unknow
     }).collect::<std::collections::BTreeSet<_>>();
     assert_eq!(values, ["42", "7"].into_iter().collect());
     let opaque = summaries.get(CallableBrand::Named(fixture.names["opaque"])).unwrap();
-    assert!(!ControlCallCoverage::Alternatives(opaque.alternatives()).is_complete());
-    assert!(!ControlCallCoverage::Alternatives(opaque.alternatives()).without_performance(None));
+    assert!(ControlCallCoverage::Alternatives(opaque.alternatives()).is_complete());
+    assert!(ControlCallCoverage::Alternatives(opaque.alternatives()).without_performance(None));
+    assert!(opaque.alternatives().iter().all(|path| matches!(&path.outcome,
+        ControlOutcome::Return(ControlValue { shape: ControlValueShape::Unknown,
+            origin: ControlOrigin::Invalidated { .. }, .. }))),
+        "a weak scalar store must not equate an unknown alias to its RHS: {opaque:?}");
 }
 
 #[test]
@@ -527,10 +627,14 @@ fn stored_reference_liveness_follows_live_aliases_into_ordinary_and_captured_sto
 
 #[test]
 fn unobserved_branded_calls_require_the_whole_sealed_constructor_contract() {
-    let fixture = Fixture::new("#![no_std] fn inspect<T>(value:T, marker:&mut i64) -> () {
-        let task = move (value) { &value };
-        *marker = 1; let result = (&task)(); ()
-    }");
+    for (parameter, assignment, observed) in [
+        ("marker:&mut i64", "*marker=1", true),
+        ("marker:&mut (i64,i64)", "*marker=(1,2)", false),
+    ] {
+    let fixture = Fixture::new(&format!("#![no_std] fn inspect<T>(value:T, {parameter}) -> () {{
+        let task = move (value) {{ &value }};
+        {assignment}; let result = (&task)(); ()
+    }}"));
     let owner = fixture.names["inspect"];
     let body = &fixture.bodies[&owner];
     let inputs = fixture.inputs();
@@ -541,8 +645,9 @@ fn unobserved_branded_calls_require_the_whole_sealed_constructor_contract() {
         let CoreKind::Call { callee, .. } = expression.kind else { return None; };
         Some((CoreId(index as u32), expression, callee))
     }).unwrap();
-    assert!(summaries.get(CallableBrand::Named(owner)).unwrap().invocation_evidence()
-        .all(|(site, _)| site.location.expression != id), "mutation remains unobserved");
+    assert_eq!(summaries.get(CallableBrand::Named(owner)).unwrap().invocation_evidence()
+        .any(|(site, _)| site.location.expression == id), observed,
+        "scalar invalidation is observed; unsupported aggregate mutation retains its gap");
     let invocation = bound.declared_call_control(body, call, labels).unwrap();
     assert!(invocation.normal && !invocation.unknown && invocation.declared_function.is_none());
     assert!(matches!(&invocation.returns[0].source, payloads::PayloadSource::BorrowCapture {
@@ -559,6 +664,7 @@ fn unobserved_branded_calls_require_the_whole_sealed_constructor_contract() {
     let mut stale = body.clone();
     stale.expressions[body.root.0 as usize].ty = Type::Never;
     assert!(bound.declared_call_control(&stale, call, labels).is_none(), "stale defining bodies reject");
+    }
 }
 
 #[test]
@@ -940,7 +1046,8 @@ fn symbolic_input_referents_supply_a_getter_contract_after_mutation() {
     let summaries = derive_control_summaries(&inputs, Default::default());
     let owner = fixture.names["after"];
     assert!(summaries.get(CallableBrand::Named(owner)).unwrap().alternatives.iter()
-        .any(|alternative| matches!(alternative.outcome, ControlOutcome::Unknown(ControlUnknown::Unsupported("unresolved mutation destination")))));
+        .any(|alternative| matches!(alternative.outcome, ControlOutcome::Unknown(_))),
+        "a scalar write must not grant exact contents to a possibly aliased carrier");
     let call = fixture.call_to(owner, fixture.names["get"]);
     let bound = summaries.bind(&inputs).unwrap();
     let control = bound.body(owner).unwrap();

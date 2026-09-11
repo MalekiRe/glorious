@@ -762,6 +762,29 @@ fn shared_payloads_keep_their_original_owner_across_resumed_helpers() {
 }
 
 #[test]
+fn mutable_aggregate_payloads_keep_helper_input_provenance() {
+    candidate("effect Touch { [1,1] touch(value:(&mut i64,i64)) -> i64; }
+        fn leaf(value:&mut i64) -> i64 / Touch { Touch::touch((value,2)) }
+        fn relay(value:&mut i64) -> i64 / Touch { leaf(value) }
+        fn checked(value:&mut i64, amount:i64) -> i64 { *value = *value + amount; *value }
+        pub fn main() -> i64 { let mut value=40; handle relay(&mut value) {
+            Touch::touch((payload,amount)) with k => { let result=checked(payload,amount); k(result) }
+        } }");
+}
+
+#[test]
+fn helper_payload_reborrows_cannot_escape_their_callers_local_storage() {
+    let source = "effect Touch { touch(value:&mut i64) -> !; }
+        fn leaf(value:&mut i64) -> ! / Touch { Touch::touch(value) }
+        fn leak() -> &mut i64 { let mut local=42; handle leaf(&mut local) {
+            Touch::touch(payload) => &mut *payload
+        } }
+        pub fn main() -> i64 { 42 }";
+    let error = StageZeroCompiler::new().compile(request(source)).unwrap_err();
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5013"), "{error:?}");
+}
+
+#[test]
 fn returning_resumptions_use_the_clauses_current_outer_handlers() {
     candidate("effect Ask { [1,1] ask() -> i64; } effect Log { [1,1] log(value:i64) -> i64; }
         fn leaf() -> i64 / Log { handle { let answer = Ask::ask(); Log::log(answer) } {

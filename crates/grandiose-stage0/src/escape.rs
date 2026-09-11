@@ -106,6 +106,7 @@ impl EscapeFlow {
             loan_flow: flow,
             values: ValueEnvironment::default(),
             labels: vec![],
+            handler_inputs: vec![],
             control_captures: BTreeMap::new(),
             diagnostics: vec![],
         };
@@ -337,8 +338,14 @@ struct Analyzer<'a> {
     loan_flow: &'a PlaceFlow,
     values: ValueEnvironment,
     labels: Vec<LabelBoundary>,
+    handler_inputs: Vec<HandlerInputs>,
     control_captures: BTreeMap<EnvironmentBrand, BTreeSet<ControlBrand>>,
     diagnostics: Vec<EscapeDiagnostic>,
+}
+
+struct HandlerInputs {
+    computation: CoreId,
+    payloads: Vec<(crate::EffectInstance, u32, Value)>,
 }
 
 impl Analyzer<'_> {
@@ -697,6 +704,7 @@ impl Analyzer<'_> {
                 if values.len() == arguments.len() && arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
                     self.record_invocation_stores(id, callee, callable.clone(), &arguments, &values, expression.span);
                     self.record_invocation_exits(id, &callable, &values, expression.span);
+                    self.record_handler_inputs(id, &callable, &values, expression.span);
                 }
                 if mandatory_tail {
                     for (argument, value) in arguments.iter().zip(&values) {
@@ -726,12 +734,14 @@ impl Analyzer<'_> {
                 // split.  This gives every matching handler binder the exact
                 // borrowed/external value that crossed the suspension rather
                 // than re-evaluating argument Core in each arm.
+                self.handler_inputs.push(HandlerInputs { computation, payloads: vec![] });
                 let performed = self.performed_value(computation);
                 let computed = match &performed {
                     Some(PerformedValue::Invoked { result, .. }) => result.clone().unwrap_or(Value::None),
                     Some(PerformedValue::PrefixExit) => Value::None,
                     None => self.value(computation),
                 };
+                let invoked = self.handler_inputs.pop().expect("protected computation inputs");
                 let incoming = self.values.clone();
                 // A handler may complete normally without selecting an
                 // operation arm, so the computation is one of its dynamic
@@ -749,6 +759,16 @@ impl Analyzer<'_> {
                     } else {
                         for (name, _) in &clause.bindings {
                             self.values.remove(name);
+                        }
+                        let payloads = invoked.payloads.iter().filter(|(effect, operation, _)|
+                            *effect == clause.effect && *operation == clause.operation)
+                            .map(|(_, _, value)| value.clone()).collect::<Vec<_>>();
+                        if !payloads.is_empty() {
+                            let payload = join(payloads);
+                            for (index, pattern) in clause.patterns.iter().enumerate() {
+                                self.bind_pattern_value(pattern,
+                                    value_at_path(&payload, &[index as u32]).unwrap_or(Value::None));
+                            }
                         }
                     }
                     let resumption = if let crate::core::CoreHandlerResumption::Explicit { id, name, .. } = &clause.resumption {

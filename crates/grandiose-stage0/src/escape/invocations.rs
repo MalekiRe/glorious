@@ -203,6 +203,18 @@ mod tests {
 }
 
 impl Analyzer<'_> {
+    pub(super) fn record_handler_inputs(&mut self, call: CoreId, callable: &Value, arguments: &[Value], span: Span) {
+        if !self.handler_inputs.iter().any(|frame| frame.computation == call) { return; }
+        let Some(performances) = self.continuations.invocation(call).and_then(|control| control.performances.clone()) else { return; };
+        let payloads = performances.into_iter().map(|performance| {
+            let value = self.invocation_payload(&performance.payload, callable, arguments, span);
+            (performance.effect, performance.operation, value)
+        }).collect::<Vec<_>>();
+        for frame in &mut self.handler_inputs {
+            if frame.computation == call { frame.payloads = payloads.clone(); }
+        }
+    }
+
     pub(super) fn record_label_exit(&mut self, brand: crate::LabelBrand, value: Value, span: Span) {
         let value = self.resolved_value(&value);
         if let Some(label) = self

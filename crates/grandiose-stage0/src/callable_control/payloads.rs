@@ -103,6 +103,25 @@ pub(crate) enum ResolvedPayload<V> {
     Unknown(Type),
 }
 
+impl<V: Clone> ResolvedPayload<V> {
+    /// Project a represented payload leaf without recovering its source Core.
+    /// Unknown fields stay unknown; an absent variant field is positively empty.
+    pub(crate) fn inputs_at<D: PayloadInputs<Value = V>>(&self, path: &[u32], domain: &D) -> Option<Vec<V>> {
+        match self {
+            Self::Inputs { values, .. } => values.iter().map(|value| domain.project(value, path)).collect(),
+            Self::Aggregate(fields) | Self::Variant(fields) => {
+                let (first, rest) = path.split_first()?;
+                match fields.get(*first as usize) {
+                    Some(field) => field.inputs_at(rest, domain),
+                    None if matches!(self, Self::Variant(_)) => Some(vec![]),
+                    None => None,
+                }
+            }
+            _ => None,
+        }
+    }
+}
+
 pub(crate) trait PayloadInputs {
     type Value: Clone;
     fn project(&self, value: &Self::Value, path: &[u32]) -> Option<Self::Value>;

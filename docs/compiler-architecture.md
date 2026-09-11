@@ -2517,3 +2517,36 @@ but clears helper-performed clause bindings, so a checked unique reborrow has no
 incoming payload snapshot. The test remains active. Its address and mutation
 assertions have not passed and complete shared-handler storage acceptance remains
 open. Cache 167, verifier 50, bytecode 75/schema 119 and native ABI 19 are unchanged.
+
+## Evaluated helper-performance payloads
+
+The sealed callable-control relation now projects operation payloads from the
+same evaluated explicit/captured inputs as ordinary returns and label transfers.
+Its performance coverage is distinct from normal-return coverage. A resumable
+operation at a proved tail frontier retains its input relation, but does not
+prove what the handler or resumption returns. Skipped suffixes, pending invocations
+or pattern decisions, opaque execution and limits revoke that frontier. Complete
+branch alternatives retain every possible payload, not only the first observed
+performance. Terminal performances consume the same relation.
+
+PlaceFlow acquires these payload snapshots before releasing invocation inputs;
+EscapeFlow acquires them at the same evaluated call boundary. Both bind handler
+patterns from the published product. The old PlaceFlow inference from separately
+declared operation lifetimes is removed: unrelated lifetime indices cannot supply
+a referent identity. Unknown performance coverage still supplies no borrow proof.
+
+The existing ordered storage evaluator also represents scalar writes through
+symbolic input references. These are weak writes: later possibly aliased reads
+lose known contents and prior guards, without acquiring the RHS or equating
+distinct inputs. Already evaluated operands and local reference handles retain
+their identities. Reference-containing external writes and unresolved cleanup
+retain their existing conservative boundary.
+
+Cache 168 closes the unique-payload address/mutation regression in fresh/decoded
+VM, native and both mixed directions at O0/O2, with zero measured resident-entry
+allocations and copied bytes. The full handler-reentry gate passes 66/66, including
+nested aggregate payload reborrows and rejection of helper payloads escaping local
+storage. Focused producer checks cover captured inputs, branch alternatives,
+pending resumption suffixes, limits and alias invalidation. This completes this
+source provenance boundary, not general guarded resumption analysis or the whole
+native-handler admission audit. Executable formats and native ABI are unchanged.

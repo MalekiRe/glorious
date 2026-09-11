@@ -371,8 +371,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 156 publishes handler payload provenance from those evaluated inputs.
 // Cache 157 validates prepared labels through their intrinsic Fn authority.
 // Cache 159 shares directional callable input views with assignment and stores.
-// Cache 167 projects owned callable joins and validates structural resident storage.
-pub const STAGE0_CACHE_GENERATION: u32 = 167;
+// Cache 168 shares evaluated helper-performance payloads and scalar alias invalidation.
+pub const STAGE0_CACHE_GENERATION: u32 = 168;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

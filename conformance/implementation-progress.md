@@ -5,6 +5,30 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 168: shared helper-performance input provenance
+
+Callable-control now supplies complete may-performance payload projections from
+evaluated explicit/captured inputs, separately from normal-return coverage. Tail
+performances and complete choices retain their inputs; unvisited resumed suffixes,
+pending calls/decisions and analysis limits do not acquire that coverage. PlaceFlow
+and EscapeFlow consume this same product while positional input snapshots remain
+live. The displaced declaration-lifetime reconstruction in PlaceFlow is removed.
+Scalar writes through symbolic references invalidate possibly aliased contents
+and guards without installing a known RHS or equating different inputs.
+
+The preserved address/mutation regression passes fresh/decoded VM, all-native and
+both mixed directions at O0/O2, with zero resident-entry allocations/copied bytes.
+The full handler-reentry suite passes **66/66**, without ignored tests, including
+new mutable aggregate payload transport and local escape rejection. Focused
+producer tests cover explicit/captured inputs, branch coverage, pending suffixes,
+limits, weak-write alias identities and unchanged frozen operand snapshots.
+
+The broader callable-control unit run also encountered existing direct-Core
+fixtures rejected with G4155 during elaboration, before this analysis. This is
+not a claim that the entire compiler unit suite passes. Native-handler admission
+and the remaining milestone acceptance audit continue. Cache is 168; verifier 50,
+bytecode 75/schema 119 and native ABI 19 are unchanged.
+
 ## Native resident-entry measurements (cache 167)
 
 Native and mixed profiling now expose the existing allocation owners' backing

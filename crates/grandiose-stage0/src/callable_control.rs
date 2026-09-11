@@ -70,6 +70,9 @@ pub enum ControlOrigin {
     /// The changed storage product is distinct from an assignment's Unit
     /// expression result, even though both arise at the same execution site.
     Stored(ControlSite),
+    /// An unknown external write changes this input's contents without
+    /// equating it to another possibly aliased input or to the written RHS.
+    Invalidated { site: Box<ControlSite>, previous: Box<ControlOrigin> },
     Field {
         base: Box<ControlOrigin>,
         index: u32,
@@ -127,6 +130,13 @@ pub enum ControlStorage {
 }
 
 impl ControlStorage {
+    fn external_resident(&self) -> bool {
+        match self {
+            Self::Referent { .. } => true,
+            Self::Field { base, .. } => base.external_resident(),
+            Self::Slot { .. } | Self::OwnedCapture { .. } => false,
+        }
+    }
     fn strong_destination(&self) -> bool {
         match self {
             Self::Slot { .. } => true,
@@ -201,7 +211,9 @@ pub enum ControlGuard {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlEvent {
     /// Strict RHS and destination evaluation have completed. The destination
-    /// is an exact storage identity, not the origin of its previous contents.
+    /// is a storage identity, not the origin of its previous contents. A
+    /// symbolic external destination invalidates possibly aliased reads; it
+    /// never installs the RHS as an exact referent value.
     /// Readers apply these ordered replacements only when loading a place;
     /// already evaluated invocation inputs remain frozen values.
     Store { site: ControlSite, destination: ControlStorage, value: ControlValue },
@@ -243,6 +255,10 @@ pub enum ControlUnknown {
     OpaqueCall,
     /// No complete invocation observation exists for the requested site.
     UnobservedCall,
+    /// Control after resumption remains unresolved, but this performance is
+    /// the last executable action in every traversed frame. Any skipped
+    /// suffix or unsupported wrapper revokes this narrower payload coverage.
+    TailResumableOperation(ControlSite),
     Unsupported(&'static str),
     Limit,
 }
@@ -595,6 +611,9 @@ pub(crate) struct InvocationControl {
     pub unknown: bool,
     pub transfers: Vec<InvocationTransfer>,
     pub returns: Vec<InvocationPayload>,
+    /// Complete may-performance inputs, independent of normal-return control.
+    /// None retains an unvisited performance path, not an empty payload set.
+    pub performances: Option<Vec<InvocationPerformance>>,
     /// Positively complete absence of storage writes in this invocation.
     /// Unknown control/effects never acquire this permission.
     storage_read_only: bool,
@@ -611,6 +630,13 @@ pub(crate) struct InvocationTransfer {
     /// None denotes a label supplied from outside this independently checked
     /// body. It is not an invented local destination.
     pub target: Option<LabelBrand>,
+    pub payload: InvocationPayload,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct InvocationPerformance {
+    pub effect: EffectInstance,
+    pub operation: u32,
     pub payload: InvocationPayload,
 }
 
@@ -867,6 +893,7 @@ impl BoundControlSummaries<'_> {
             if let Some(mut control) = self.declared_call_control(&body, expression, seal.labels.as_ref()?) {
                 if let Some(observed) = calls.get_mut(&id) {
                     observed.declared_function = control.declared_function;
+                    observed.performances = control.performances.clone();
                     if !observed.unknown { continue; }
                 }
                 // A complete abstract callee contract can settle coverage,
@@ -946,6 +973,31 @@ impl BoundControlSummaries<'_> {
             ..Default::default()
         };
         if summary.alternatives.is_empty() { control.unknown = true; }
+        if !summary.alternatives.is_empty() && summary.alternatives.iter().all(|path| matches!(path.outcome,
+            ControlOutcome::Return(_) | ControlOutcome::LabelExit { .. }
+            | ControlOutcome::TerminalOperation { .. } | ControlOutcome::RuntimeTrap
+            | ControlOutcome::Divergence | ControlOutcome::Unknown(ControlUnknown::TailResumableOperation(_)))) {
+            let mut performances = vec![];
+            for path in &summary.alternatives {
+                for event in &path.events {
+                    let ControlEvent::Perform { effect, operation, arguments, .. } = event else { continue; };
+                    let mut effect = effect.clone();
+                    let mut payload = InvocationPayload {
+                        ty: Type::Tuple(arguments.iter().map(|value| value.ty.clone()).collect()),
+                        source: payloads::PayloadSource::Aggregate(arguments.iter().map(|value|
+                            self.contract_payload(value, summary, &receiver_path, callable_ty)).collect()),
+                    };
+                    if let Some(arguments) = &substitutions {
+                        payload.instantiate_types(arguments);
+                        effect.arguments = effect.arguments.into_iter().map(|argument|
+                            crate::signature::substitute_trait_generic_argument(argument, arguments)).collect();
+                    }
+                    let performance = InvocationPerformance { effect, operation: *operation, payload };
+                    if !performances.contains(&performance) { performances.push(performance); }
+                }
+            }
+            control.performances = Some(performances);
+        }
         for path in &summary.alternatives {
             match &path.outcome {
                 ControlOutcome::LabelExit { target: ControlLabelTarget::Symbolic(ControlOrigin::Parameter(parameter)), value } => {
@@ -1065,6 +1117,16 @@ impl State {
             *steps = steps.saturating_add(1);
             if *steps > limit { return Err(ControlUnknown::Limit); }
             let Some(storage) = &current.storage else { return Ok(()); };
+            if !destination.strong_destination() && storage.external_resident() {
+                // Distinct symbolic inputs may alias. Invalidate the loaded
+                // contents (and their guards), not reference handles resident
+                // in local slots or already evaluated operand snapshots.
+                current.origin = ControlOrigin::Invalidated {
+                    site: Box::new(site.clone()), previous: Box::new(current.origin.clone()),
+                };
+                current.shape = ControlValueShape::Unknown;
+                return Ok(());
+            }
             if let Some(path) = storage.path_from(destination) {
                 let mut replacement = value.clone();
                 for index in path {
@@ -1118,6 +1180,11 @@ impl State {
     }
     fn running(&self) -> bool {
         matches!(self.outcome, ControlOutcome::Return(_))
+    }
+    fn revoke_tail_performance(&mut self) {
+        if matches!(self.outcome, ControlOutcome::Unknown(ControlUnknown::TailResumableOperation(_))) {
+            self.outcome = ControlOutcome::Unknown(ControlUnknown::Unsupported("resumable operation continuation"));
+        }
     }
     fn coverage_gap(&self) -> Option<ControlUnknown> {
         match &self.outcome {
@@ -1555,6 +1622,7 @@ impl Analyzer<'_, '_> {
     }
     fn eval(&mut self, frame: &Frame, id: CoreId, mut state: State) -> Vec<State> {
         if !state.running() {
+            state.revoke_tail_performance();
             if let Some(reason) = state.coverage_gap() {
                 self.unvisited(frame, id, &reason);
             }
@@ -1582,7 +1650,20 @@ impl Analyzer<'_, '_> {
                 state.events.push(ControlEvent::UnresolvedCleanup { site: evaluation.site(id) });
             }
         }
-        let output = self.eval_inner(&evaluation, id, state);
+        let mut output = self.eval_inner(&evaluation, id, state);
+        for state in &mut output {
+            if let ControlOutcome::Unknown(ControlUnknown::TailResumableOperation(site)) = &state.outcome {
+                let preserved = self.bodies[&frame.owner].body.expressions.get(id.0 as usize).is_some_and(|expression|
+                    match &expression.kind {
+                        CoreKind::Perform { .. } => *site == evaluation.site(id),
+                        CoreKind::Block(_) | CoreKind::Move(_) | CoreKind::Label { .. }
+                        | CoreKind::Completion { refinement_test: None, .. } => true,
+                        CoreKind::Call { .. } | CoreKind::Constant { .. } => site.calls.contains(&evaluation.site(id).location),
+                        _ => false,
+                    });
+                if !preserved { state.revoke_tail_performance(); }
+            }
+        }
         self.evaluating.pop();
         output
     }
@@ -1928,8 +2009,9 @@ impl Analyzer<'_, '_> {
                     ],
                     &rows,
                 );
-                for state in self.eval(frame, computation, state) {
+                for mut state in self.eval(frame, computation, state) {
                     if !state.running() {
+                        state.revoke_tail_performance();
                         if let Some(reason) = state.coverage_gap() {
                             for clause in &clauses {
                                 self.unvisited(frame, clause.body, &reason);
@@ -2029,9 +2111,7 @@ impl Analyzer<'_, '_> {
                                     operation,
                                 }
                             } else {
-                                ControlOutcome::Unknown(ControlUnknown::Unsupported(
-                                    "resumable operation",
-                                ))
+                                ControlOutcome::Unknown(ControlUnknown::TailResumableOperation(frame.site(id)))
                             };
                         }
                         state
@@ -2072,7 +2152,9 @@ impl Analyzer<'_, '_> {
                     for mut state in self.place(frame, &place, state) {
                         if state.running() {
                             let previous = state.value();
-                            let Some(destination) = previous.storage.filter(ControlStorage::strong_destination) else {
+                            let scalar_write = matches!(previous.ty, Type::Scalar(_) | Type::Unit);
+                            let Some(destination) = previous.storage.filter(|storage|
+                                storage.strong_destination() || (scalar_write && storage.external_resident())) else {
                                 output.push(state.stop(ControlUnknown::Unsupported("unresolved mutation destination")));
                                 continue;
                             };

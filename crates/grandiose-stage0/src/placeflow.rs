@@ -2098,7 +2098,7 @@ impl Analyzer<'_> {
                 );
                 let inputs = self.visit_sequence(&arguments, live_after);
                 if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
-                    self.record_handler_invocation_inputs(id, &inputs);
+                    self.record_handler_invocation_inputs(id, None, &inputs);
                     self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin, &BTreeSet::new());
                     self.pending_results.insert(id);
                     self.check_minimum_suspension(&effect, operation, e.span);
@@ -2447,7 +2447,7 @@ impl Analyzer<'_> {
 
     fn finish_invocation_inputs(&mut self, callee: CoreId, callable: &invocations::Value, arguments: &[invocations::EvaluatedOperand], call: CoreId, span: Span) {
         self.record_invocation_stores(callee, callable, arguments, call);
-        self.record_handler_invocation_inputs(call, arguments);
+        self.record_handler_invocation_inputs(call, Some(callable), arguments);
         let CoreKind::Call { reference_origin, .. } = self.body.expression(call).kind.clone() else { unreachable!("invocation inputs"); };
         let returned = self.resolve_invocation_returns(call, callable, arguments);
         let empty = BTreeSet::new();
@@ -4143,7 +4143,7 @@ impl Analyzer<'_> {
         BTreeSet::from([ProjectionLoan::external(call, fields, mutability)])
     }
 
-    fn record_handler_invocation_inputs(&mut self, computation: CoreId, arguments: &[invocations::EvaluatedOperand]) {
+    fn record_handler_invocation_inputs(&mut self, computation: CoreId, callable: Option<&invocations::Value>, arguments: &[invocations::EvaluatedOperand]) {
         // The existing handler analysis relates a direct protected invocation
         // to its clauses. Publish that relation while its actual inputs still
         // exist, not after finishing the protected computation. General nested
@@ -4153,7 +4153,7 @@ impl Analyzer<'_> {
             .map(|(index, frame)| (index, frame.clauses.clone())).collect::<Vec<_>>();
         for (index, clauses) in targets {
             let payloads = clauses.iter().map(|clause|
-                self.handler_payload_transfers(computation, clause, arguments)).collect();
+                self.handler_payload_transfers(computation, clause, callable, arguments)).collect();
             self.handler_frames[index].payloads = payloads;
         }
     }
@@ -4166,6 +4166,7 @@ impl Analyzer<'_> {
         &self,
         computation: CoreId,
         clause: &crate::core::CoreHandlerClause,
+        callable: Option<&invocations::Value>,
         arguments: &[invocations::EvaluatedOperand],
     ) -> Option<Vec<PatternBindingTransfer>> {
         let CoreKind::Perform {
@@ -4174,7 +4175,7 @@ impl Analyzer<'_> {
             ..
         } = self.body.expression(computation).kind.clone()
         else {
-            return self.call_handler_payload_transfers(computation, clause, arguments);
+            return self.call_handler_payload_transfers(computation, clause, callable?, arguments);
         };
         if effect != clause.effect || operation != clause.operation {
             return None;
@@ -4186,46 +4187,21 @@ impl Analyzer<'_> {
         }).collect())
     }
 
-    /// An indirect callee's sealed effect row carries the same declaration
-    /// regions as its parameters, including higher-ranked binders. Relate the
-    /// operation payload to those parameters before consulting actual loans;
-    /// never infer its backing storage from the handler binder's spelling or
-    /// the caller's erased local lifetimes.
+    /// Consume the same sealed performance-input relation as escape checking.
+    /// A stopped first performance cannot cover an unvisited resumed suffix.
     fn call_handler_payload_transfers(
         &self, computation: CoreId, clause: &crate::core::CoreHandlerClause,
+        callable: &invocations::Value,
         arguments: &[invocations::EvaluatedOperand],
     ) -> Option<Vec<PatternBindingTransfer>> {
         let signatures = self.signatures?;
-        let CoreKind::Call { invocation, .. } = &self.body.expression(computation).kind else {
-            return None;
-        };
-        let Type::Callable { parameters, effects, .. } = &invocation.declaration else {
-            return None;
-        };
-        if !effects.tails.is_empty() || !effects.projections.is_empty() {
-            return None;
-        }
-        let Some(crate::ElaboratedHeader::Effect(declaration)) =
-            signatures.definitions.get(&clause.effect.definition) else { return None; };
-        let operation = declaration.operations.get(clause.operation as usize)?;
-        let mut paths = vec![];
-        let matching = effects.effects.iter().filter(|effect| effect.definition == clause.effect.definition).collect::<Vec<_>>();
-        if matching.is_empty() { return None; }
-        for effect in matching {
-            let Ok((_, operation)) = signatures.instantiate_effect_operation_generic(
-                effect.definition, &effect.arguments, &[], &operation.name,
-            ) else { return None; };
-            let origin = crate::core::callable_reference_origin_from_contract(
-                signatures, parameters, &Type::Tuple(operation.signature.parameters),
-            );
-            match origin {
-                CallReferenceOrigin::Paths(incoming) | CallReferenceOrigin::Partial(incoming) => paths.extend(incoming),
-                CallReferenceOrigin::None | CallReferenceOrigin::External => {},
-                // A callee-local or otherwise unproven payload cannot be
-                // promoted to one of the known caller regions.
-                CallReferenceOrigin::Opaque | CallReferenceOrigin::Unsafe => return None,
-            }
-        }
+        let performances = self.continuations.invocation(computation)?.performances.as_ref()?;
+        let arguments = arguments.iter().map(|argument| argument.operand.value.clone()).collect::<Vec<_>>();
+        let payloads = performances.iter().filter(|performance|
+            performance.effect == clause.effect && performance.operation == clause.operation)
+            .map(|performance| crate::callable_control::resolve_payload(&performance.payload, callable, &arguments, self))
+            .collect::<Vec<_>>();
+        if payloads.is_empty() { return None; }
         let mut transfers = vec![];
         for (payload, pattern) in clause.patterns.iter().enumerate() {
             let mut binders = vec![];
@@ -4236,26 +4212,27 @@ impl Analyzer<'_> {
                 if crate::core::reference_leaf_paths(signatures, ty, &mut vec![], &mut leaves).is_err() {
                     continue;
                 }
-                let regions = leaves.iter().map(|(leaf, _)| {
-                    let mut source = fields.clone();
-                    source.extend_from_slice(leaf);
-                    let regions = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
-                        .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
-                            self.pattern_value_origins(&PatternValue::Acquired(argument), &path.argument_fields).0)).collect();
-                    (leaf.clone(), regions)
-                }).collect();
-                let aliases = leaves.into_iter().map(|(leaf, ty)| {
+                let mut regions = vec![];
+                let mut aliases = vec![];
+                for (leaf, ty) in leaves {
                     let mut source = fields.clone();
                     source.extend_from_slice(&leaf);
-                    let loans = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
-                        .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
-                            self.pattern_value_origins(&PatternValue::Acquired(argument), &path.argument_fields).1.loans))
-                        .map(|mut loan| {
-                            loan.unique = matches!(ty, Type::Reference { mutability: crate::Mutability::Unique, .. });
-                            loan
-                        }).collect();
-                    (leaf, self.snapshot_reference_transfer(ReferenceOrigins::unknown(loans)))
-                }).collect();
+                    let mut incoming_regions = BTreeSet::new();
+                    let mut origins = ReferenceOrigins::empty();
+                    for payload in &payloads {
+                        for input in payload.inputs_at(&source, self)? {
+                            let (regions, incoming) = self.invocation_reference_origins(&input);
+                            incoming_regions.extend(regions);
+                            origins.join(incoming);
+                        }
+                    }
+                    let origins = origins.map(|mut loan| {
+                        loan.unique = matches!(ty, Type::Reference { mutability: crate::Mutability::Unique, .. });
+                        loan
+                    });
+                    regions.push((leaf.clone(), incoming_regions));
+                    aliases.push((leaf, self.snapshot_reference_transfer(origins)));
+                }
                 transfers.push(PatternBindingTransfer {
                     name, value: computation, moved: None, borrowed_move: false, aliases, regions,
                 });
