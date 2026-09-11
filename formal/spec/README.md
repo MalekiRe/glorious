@@ -7,11 +7,11 @@ algorithms. Source-owned libraries are arbitrary programs using the same
 language rules as application code. Machine and foreign boundaries are
 explicit contracts.
 
-Status: initial whole-specification draft, in its Lean-check and semantic
-repair pass. The combined boundary gate through `Contracts`, `ABI`,
-`BasicChecks` and `ExecutionChecks` passes (24 build jobs). Source elaboration
-still fails to check; origins, the aggregate and full `Checks` remain pending.
-No full build or full-language conformance result is claimed. See `DRAFT.md`.
+Status: initial whole-specification draft, in its semantic repair pass.
+The first complete `lake build` passes (30 build jobs), including source
+elaboration, origins, the aggregate and `Checks`, with warnings as errors
+and implicit identifier creation disabled. This is not a full-language
+conformance result. See `DRAFT.md` for checked gates and remaining defects.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
 

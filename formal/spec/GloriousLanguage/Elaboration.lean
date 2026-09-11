@@ -214,7 +214,7 @@ mutual
         TypeExpressions program context sourceArguments (data.generics.map (·.kind)) arguments → Instantiates data.generics arguments substitution →
         ListRel (Substitutes substitution) (variant.fields.map (·.type)) types → (fields.map Prod.fst).Nodup →
         ordered.length = variant.fields.length →
-        (∀ index field, variant.fields[index]? = some field →
+        (∀ (index : Nat) (field : FieldDefinition), variant.fields[index]? = some field →
           ((∃ pattern, (field.header.name,pattern) ∈ fields ∧ ordered[index]? = some pattern ∧ Visible field.header context.typed.static.module) ∨
             (remainder = true ∧ (∀ pattern, (field.header.name,pattern) ∉ fields) ∧ ordered[index]? = some .wildcard))) →
         (∀ name pattern, (name,pattern) ∈ fields → ∃ field ∈ variant.fields, field.header.name = name) →
@@ -340,7 +340,7 @@ mutual
         binding ∈ program.declarations.input.manifest.bindings → binding.primitive = some primitive →
         Fresh context localSlot → localSlot.type = binding.signature.result →
         Expression program context (.literal literal) localSlot.type
-          (AtomCode localSlot (.primitive binding.declaration [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) byte)))] []))
+          (AtomCode localSlot (.primitive binding.declaration [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] []))
     | unit {context localSlot} : Fresh context localSlot → localSlot.type = .unit →
         Expression program context .unit .unit (AtomCode localSlot (.constant (.constantTuple [])))
     | localSlot {context source place type mutable localSlot} : PlaceExpression program context source place type mutable →
@@ -701,10 +701,11 @@ mutual
         ItemBody program context (.global name sourceType sourceValue) (.global definition)
     | import {context tree definition} : definition.tree = tree → definition.prelude = false →
         ItemBody program context (.import tree) (.import definition)
-    | module {context name members definition} : definition.header.name = name →
-        ((members = none ∧ definition.inline = false) ∨ ∃ declarations, members = some declarations ∧ definition.inline = true ∧
-          Declarations program { context with typed := { context.typed with static := { context.typed.static with module := definition.module } } } declarations) →
-        ItemBody program context (.module name members) (.module definition)
+    | externalModule {context name definition} : definition.header.name = name → definition.inline = false →
+        ItemBody program context (.module name none) (.module definition)
+    | inlineModule {context name declarations definition} : definition.header.name = name → definition.inline = true →
+        Declarations program { context with typed := { context.typed with static := { context.typed.static with module := definition.module } } } declarations →
+        ItemBody program context (.module name (some declarations)) (.module definition)
     | fixity {context kind precedence operator target definition header} : definition.kind = kind → definition.precedence = precedence →
         definition.operator = operator → Qualified program.declarations context.typed.static.module .value (target.getD [operator]) header →
         definition.target = header.id → ItemBody program context (.fixity kind precedence operator target) (.fixity definition)
@@ -751,15 +752,21 @@ mutual
     | unit {context} : StructuralConstant program context .unit .unit (.constantTuple [])
     | alias {context path sourceArguments type value} : ConstantAlias program context path sourceArguments value type →
         StructuralConstant program context (.name path sourceArguments []) type value
-    | tuple {context sources types values} : ListRel (fun source pair => StructuralConstant program context source pair.1 pair.2) sources (types.zip values) →
-        types.length = values.length → StructuralConstant program context (.tuple sources) (.tuple types) (.constantTuple values)
+    | tuple {context sources types values} : StructuralConstants program context sources types values →
+        StructuralConstant program context (.tuple sources) (.tuple types) (.constantTuple values)
     | constructor {context path sourceArguments sources header data variant arguments substitution types values} :
         Qualified program.declarations context.typed.static.module .value path header → program.declarations.Constructor header.id data variant →
         TypeExpressions program context sourceArguments (data.generics.map (·.kind)) arguments → Instantiates data.generics arguments substitution →
         ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
-        ListRel (fun source pair => StructuralConstant program context source pair.1 pair.2) sources (types.zip values) → types.length = values.length →
+        StructuralConstants program context sources types values →
         StructuralConstant program context (.call (.name path sourceArguments []) sources) (.nominal data.header.id arguments)
           (.constantConstructor header.id arguments values)
+
+  inductive StructuralConstants (program : Kernel.Program) : Context → List Source.Expr → List Term → List Term → Prop where
+    | nil {context} : StructuralConstants program context [] [] []
+    | cons {context source sources type types value values} : StructuralConstant program context source type value →
+        StructuralConstants program context sources types values →
+        StructuralConstants program context (source :: sources) (type :: types) (value :: values)
 
   inductive FnArguments (program : Kernel.Program) : Context → List Source.TypeExpr → Source.TypeExpr → Term → Term → Prop where
     | explicit {context argumentTuple sourceOutput sourceEffects output effects} : TypeExpression program context sourceOutput .type output →

@@ -44,9 +44,9 @@ mutual
 end
 
 def Node.children : Node → List Node
-  | .declaration declaration => declarationChildren declaration
-  | .expression expression => expressionChildren expression
-  | .statement statement => statementChildren statement
+  | .declaration item => declarationChildren item
+  | .expression source => expressionChildren source
+  | .statement source => statementChildren source
   | .handlerArm (.completion _ body) | .handlerArm (.operation _ _ _ body) => [.expression body]
   | .operation _ => []
 
@@ -87,7 +87,7 @@ def SourceEntity (node : Node) (definition : Definition) : Prop :=
       source.undecorated = .constant constant.header.name generics type value
   | .declaration source, .global global => ∃ type value, source.undecorated = .global global.header.name type value
   | .declaration source, .module module => ∃ members, source.undecorated = .module module.header.name members
-  | .declaration source, .import import => source.undecorated = .import import.tree
+  | .declaration source, .import imported => source.undecorated = .import imported.tree
   | .declaration source, .fixity fixity => ∃ target, source.undecorated = .fixity fixity.kind fixity.precedence fixity.operator target
   | .expression _, .environment environment => environment.header.sourceVisible = false
   | _, _ => False

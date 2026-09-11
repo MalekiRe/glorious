@@ -76,6 +76,20 @@ incorrectly erased as zero-byte proof values; their real field encoding still
 needs integration. These checked definitions and local proofs are not a
 type-soundness, complete-language, compiler or library-conformance result.
 
+## First complete Lean check
+
+`lake build` passes all 30 jobs, including `Elaboration`, `Origins`,
+`Specification` and `Checks`. Recursive module elaboration and structural
+constant lists now use explicit positive companion rules. Regression proofs
+use the actual principal restriction relation and check both directions;
+Unicode and quantity checks unfold their specified predicates.
+
+This establishes a checked draft, not semantic completeness. In particular,
+parameter patterns currently lack their executable binding prologue, call-site
+typing uses the pre-argument context, and nested source origins are not threaded
+through all expression rules. Those are actual integration defects, alongside
+the runtime/target audit obligations above, and remain in the repair pass.
+
 The earlier compiler draft is retained in `formal/lean` as reference. The
 new specification does not import it. Unrelated Stage0 working-tree changes
 were left untouched.

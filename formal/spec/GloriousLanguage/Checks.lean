@@ -8,13 +8,18 @@ namespace Glorious.Language.Checks
 
 example : Quantity.SurfaceResumption ⟨0,some 1⟩ := by left; rfl
 example : Quantity.SurfaceResumption ⟨2,some 2⟩ := by right; exact ⟨2,by decide,by decide,rfl⟩
-example : ¬ (Quantity.mk 2 (some 2)).Contains 1 := by decide
+example : ¬ (Quantity.mk 2 (some 2)).Contains 1 := by simp [Quantity.Contains]
 example : ¬ Quantity.SurfaceResumption ⟨0,none⟩ := by
   intro permitted
   rcases permitted with equal | ⟨n,_,_,equal⟩ <;> cases equal
 
-example : Principal.duplicable.permits .affine := by decide
-example : ¬ Principal.linear.MayDiscard := by decide
+example : Principal.affine.Restricts .duplicable := by
+  simp [Principal.Restricts, Principal.Permits]
+example : ¬ Principal.duplicable.Restricts .affine := by
+  intro restriction
+  have impossible := restriction 2 trivial
+  simp [Principal.Permits] at impossible
+example : ¬ Principal.exact.MayDiscard := Principal.exact_not_discardable
 
 private def unitValue : Value := .resident 1 .unit .unit true []
 private def holed : Value := .resident 0 (.tuple [.unit]) .tuple true [none]
@@ -25,7 +30,7 @@ example : ¬ holed.Initialized := by
   have complete := (initialized [] holed .root).2 none (by simp [holed, Value.fields])
   cases complete
 
-example {program : Language.Program} {before after : World} {id loan}
+example {before after : World} {id loan}
     (found : before.loans.get id = some loan) (hole : ¬ before.Initialized loan.referent) :
     ¬ EndsLoan before id after := hole_cannot_end found hole
 
@@ -44,10 +49,10 @@ example : Source.TypeSyntax [.symbol "(",.symbol "(",.symbol ")",.symbol ",",.sy
 example : "if" ∉ Source.reserved ∧ "loop" ∉ Source.reserved ∧ "return" ∉ Source.reserved ∧ "true" ∉ Source.reserved :=
   Source.ordinary_control_names
 
-example : ¬ Source.UnicodeScalar 0xd800 := by decide
+example : ¬ Source.UnicodeScalar 0xd800 := by simp [Source.UnicodeScalar]
 example : Source.Encodes 0x1f600 [0xf0,0x9f,0x98,0x80] := by
   exact .four (by decide) (by decide) (by decide) (by decide) (by decide) (by decide)
-    (by decide) (by decide) rfl (by decide) (by decide)
+    (by decide) (by decide) rfl (by decide) (by simp [Source.UnicodeScalar])
 
 example : Memory.integerBytes .little 4 0x12345678 = [0x78,0x56,0x34,0x12] := by decide
 example : Memory.integerBytes .big 4 0x12345678 = [0x12,0x34,0x56,0x78] := by decide
