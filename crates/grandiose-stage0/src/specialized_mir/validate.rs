@@ -624,6 +624,19 @@ mod tests {
     }
 
     #[test]
+    fn closed_quantity_evidence_binds_entry_and_parameter_inputs() {
+        let original = fixture("pub fn main<T>(value:T) -> T {value}", callable_argument(false));
+        let proof = original.quantity_proof.as_ref().unwrap();
+        assert!(proof.matches(&original));
+        let mut body = original.clone();
+        body.entry = ControlBlockId(u32::MAX);
+        assert!(!proof.matches(&body));
+        body = original.clone();
+        body.parameters.clear();
+        assert!(!proof.matches(&body));
+    }
+
+    #[test]
     fn closed_writable_exposure_keeps_the_declared_resident_bound() {
         let body = fixture("fn expose<T>(value:&mut T) {} pub fn main<T>(value:T) -> (T,) { let mut saved=(value,); expose(&mut saved); saved }", callable_argument(true));
         let root = body.loans.iter().find(|loan| loan.unique).unwrap().place.root();

@@ -617,7 +617,7 @@ impl OwnershipMir {
             };
             value_places.insert(instruction.destination, place);
         }
-        let mut quantity_rules = quantities::Rules::produce(&control, &value_places, declared_quantities);
+        let mut quantity_rules = quantities::Rules::produce(&control, &value_places, &owners, declared_quantities)?;
         quantity_rules.solve(&mut owners, &quantity_rules.declared, &quantity_rules.declared)?;
         let ControlMir {
             definition,

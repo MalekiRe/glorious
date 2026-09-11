@@ -5,6 +5,33 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 160: executed resident permissions for storage views
+
+The retained ownership quantity equations now distinguish a slot's whole-lifetime
+guarantee from the resident available at each executed use of a whole-slot view.
+The existing Control CFG supplies reaching definitions, ordered replacement and
+writable exposure. Every use of a deferred view contributes a constraint; its
+earlier Read instruction is not an acquired snapshot. Joins intersect permission,
+unknown state supplies none, and dynamic control edges retain the conservative
+whole-storage constraint. Specialization closes the same equations, and ownership
+validation now binds their exact input before accepting point-sensitive evidence.
+
+A receiver acquired before writable exposure passes fresh/decoded VM and native/
+mixed O0/O2 execution. The focused ownership checks preserve whole-slot/field
+replacement restrictions, reject permission recovered after exposure or a branch
+join, and reject reordered operations carrying stale acquisition evidence.
+The existing hand-built branch-edge fixture now supplies a matching declared-only
+quantity product; its conditional move and invalid-inventory assertions are unchanged.
+All 32 selected ownership checks, five closed-quantity checks and eight selected
+receiver execution gates pass. Both open and closed dependency seals include the
+entry block and parameter inputs used by the reaching-resident solution.
+
+The preserved helper-mutation case still requires source quantity transfer through
+its dereference store. This change does not certify that case, computed-factory
+lifetime, general borrowed resumption invocation, guarded interleavings, mandatory
+tail fusion, foreign control or complete performance acceptance. Reference/field
+view refinements remain conservative. Executable and runtime formats do not change.
+
 ## Cache 159: callable input views through stored products
 
 Assignment and MIR Store validation consume the same directional callable input

@@ -7,6 +7,8 @@ use super::*;
 pub(super) struct Proof {
     source: DefKey,
     instance: InstanceKey,
+    entry: ControlBlockId,
+    parameters: Vec<ControlValue>,
     values: Vec<ControlValueDecl>,
     owners: Vec<Owner>,
     loans: Vec<Loan>,
@@ -20,6 +22,7 @@ impl Proof {
     pub(super) fn seal(body: &SpecializedMir) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
             source: body.source_definition, instance: body.instance.clone(),
+            entry: body.entry, parameters: body.parameters.clone(),
             values: body.values.clone(), owners: body.owners.clone(), loans: body.loans.clone(),
             blocks: body.blocks.clone(), captures: body.closures.iter().map(|closure| closure.environment.clone()).collect(),
         })
@@ -27,6 +30,7 @@ impl Proof {
 
     pub(super) fn matches(&self, body: &SpecializedMir) -> bool {
         self.source == body.source_definition && self.instance == body.instance
+            && self.entry == body.entry && self.parameters == body.parameters
             && self.values == body.values && self.owners == body.owners
             && self.loans == body.loans && self.blocks == body.blocks
             && self.captures.len() == body.closures.len()

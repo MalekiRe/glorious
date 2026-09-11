@@ -11,11 +11,48 @@ enum Rule {
     Environment(Vec<(ControlValue, crate::CaptureMode)>),
 }
 
+/// Inputs to the resident at an executed use of a storage view. Constructor
+/// evidence is separate from the whole-lifetime guarantee of its storage slot.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ResidentInput {
+    Initial(ControlValue),
+    Value(ControlValue),
+    Declared(ControlValue),
+    Global(ControlValue),
+    Unknown,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct Residents {
+    values: BTreeMap<ControlValue, BTreeSet<ResidentInput>>,
+    exposed: BTreeSet<ControlValue>,
+}
+
+impl Residents {
+    fn join(&mut self, other: &Self) {
+        let keys = self.values.keys().chain(other.values.keys()).copied().collect::<BTreeSet<_>>();
+        for key in keys {
+            let left = self.values.entry(key).or_insert_with(|| BTreeSet::from([ResidentInput::Unknown]));
+            if let Some(right) = other.values.get(&key) { left.extend(right); }
+            else { left.insert(ResidentInput::Unknown); }
+        }
+        self.exposed.extend(&other.exposed);
+    }
+
+    fn expose(&mut self, root: ControlValue) {
+        self.exposed.insert(root);
+        self.values.entry(root).or_default().insert(ResidentInput::Declared(root));
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Rules {
     rules: Vec<Rule>,
     replacements: BTreeMap<ControlValue, Vec<ControlValue>>,
     exposed: BTreeSet<ControlValue>,
+    /// All executed uses of each whole-slot observation, not its earlier Read
+    /// instruction. A deferred view cannot retain a pre-replacement snapshot.
+    view_inputs: BTreeMap<ControlValue, BTreeSet<ResidentInput>>,
     /// Open lexical evidence remains valid when a closed query cannot improve
     /// it. It is not used as a substitute for a failed constraint solution.
     pub(super) declared: Vec<Option<Quantity>>,
@@ -25,6 +62,8 @@ pub(super) struct Rules {
 #[derive(Clone, Debug)]
 pub(super) struct Input {
     definition: DefKey,
+    entry: ControlBlockId,
+    parameters: Vec<ControlValue>,
     values: Vec<ControlValueDecl>,
     owners: Vec<Owner>,
     blocks: Vec<OwnershipBlock>,
@@ -48,15 +87,26 @@ pub(super) fn declared_quantity(
 }
 
 impl Rules {
+    #[cfg(test)]
+    pub(super) fn declared_test_graph(body: &OwnershipMir) -> Self {
+        // Hand-built CFG fixtures supply their declaration permissions; they
+        // cannot manufacture any reaching-resident/view refinements.
+        Self { rules: vec![Rule::Declared; body.owners.len()],
+            replacements: BTreeMap::new(), exposed: BTreeSet::new(), view_inputs: BTreeMap::new(),
+            declared: body.owners.iter().map(|owner| owner.quantity).collect(),
+            input: Some(Self::seal_input(body)) }
+    }
+
     pub(super) fn seal_input(body: &OwnershipMir) -> std::sync::Arc<Input> {
-        std::sync::Arc::new(Input { definition: body.definition,
+        std::sync::Arc::new(Input { definition: body.definition, entry: body.entry, parameters: body.parameters.clone(),
             values: body.values.clone(), owners: body.owners.clone(), blocks: body.blocks.clone(),
             loans: body.loans.clone(), aliases: body.aliases.clone(),
             captures: body.closures.iter().map(|closure| closure.environment.clone()).collect() })
     }
 
-    fn matches(&self, body: &OwnershipMir) -> bool {
+    pub(super) fn matches(&self, body: &OwnershipMir) -> bool {
         self.input.as_ref().is_some_and(|input| input.definition == body.definition
+            && input.entry == body.entry && input.parameters == body.parameters
             && input.values == body.values && input.owners == body.owners && input.blocks == body.blocks
             && input.loans == body.loans && input.aliases == body.aliases
             && input.captures.len() == body.closures.len()
@@ -70,10 +120,11 @@ impl Rules {
 
     pub(super) fn produce(
         control: &ControlMir, value_places: &BTreeMap<ControlValue, ControlPlace>,
-        declared: Vec<Option<Quantity>>,
-    ) -> Self {
+        owners: &[Owner], declared: Vec<Option<Quantity>>,
+    ) -> Result<Self, OwnershipError> {
         let mut result = Self { rules: vec![Rule::Declared; declared.len()],
-            replacements: BTreeMap::new(), exposed: BTreeSet::new(), declared, input: None };
+            replacements: BTreeMap::new(), exposed: BTreeSet::new(),
+            view_inputs: BTreeMap::new(), declared, input: None };
         for instruction in control.blocks().iter().flat_map(|block| &block.instructions) {
             result.rules[instruction.destination.0 as usize] = match &instruction.operation {
                 ControlOperation::Function { .. }
@@ -109,7 +160,107 @@ impl Rules {
                 _ => {}
             }
         }
-        result
+        let changed = result.replacements.keys().chain(&result.exposed).copied().collect();
+        result.view_inputs = Self::view_residents(control, value_places, owners, &changed)?;
+        Ok(result)
+    }
+
+    /// Project the existing Control CFG into finite reaching-resident rules.
+    /// This does not infer source ownership, reference targets or Copy traits.
+    /// Dynamic control edges retain the whole-storage guarantee because this
+    /// CFG does not describe every suspended/handler interleaving.
+    fn view_residents(control: &ControlMir, places: &BTreeMap<ControlValue, ControlPlace>, owners: &[Owner],
+        changed: &BTreeSet<ControlValue>)
+        -> Result<BTreeMap<ControlValue, BTreeSet<ResidentInput>>, OwnershipError>
+    {
+        let views = owners.iter().filter(|owner| owner.kind == OwnerKind::View)
+            .filter_map(|owner| match places.get(&owner.value) {
+                Some(ControlPlace::Local(root) | ControlPlace::Temporary(root)) if *root != owner.value && changed.contains(root) =>
+                    Some((owner.value, *root)),
+                _ => None,
+            }).collect::<BTreeMap<_, _>>();
+        if views.is_empty() { return Ok(BTreeMap::new()); }
+        let roots = views.values().copied().collect::<BTreeSet<_>>();
+        let mut entry = Residents::default();
+        for value in control.parameters().iter().filter(|value| roots.contains(value)) {
+            entry.values.insert(*value, BTreeSet::from([ResidentInput::Initial(*value)]));
+        }
+        let mut incoming = vec![None; control.blocks().len()];
+        incoming[control.entry().0 as usize] = Some(entry);
+        let mut pending = BTreeSet::from([control.entry()]);
+        let mut inputs: BTreeMap<ControlValue, BTreeSet<ResidentInput>> = BTreeMap::new();
+        let mut budget = control.values().len().saturating_add(1).saturating_pow(2)
+            .saturating_mul(control.blocks().len().saturating_add(1)).saturating_mul(4);
+        while let Some(block_id) = pending.pop_first() {
+            let block = &control.blocks()[block_id.0 as usize];
+            let mut state = incoming[block_id.0 as usize].clone().unwrap();
+            for value in block.parameters.iter().filter(|value| roots.contains(value)) {
+                state.values.insert(*value, BTreeSet::from([ResidentInput::Initial(*value)]));
+            }
+            let observe = |values: Vec<ControlValue>, state: &Residents,
+                inputs: &mut BTreeMap<ControlValue, BTreeSet<ResidentInput>>| {
+                for value in values {
+                    if let Some(root) = views.get(&value) {
+                        inputs.entry(value).or_default().extend(state.values.get(root).cloned()
+                            .unwrap_or_else(|| BTreeSet::from([ResidentInput::Unknown])));
+                    }
+                }
+            };
+            for instruction in &block.instructions {
+                budget = budget.checked_sub(1).ok_or_else(||
+                    OwnershipError("resident view constraints exhausted their control budget".into()))?;
+                observe(instruction.operation.inputs(), &state, &mut inputs);
+                match &instruction.operation {
+                    ControlOperation::Capability(ControlCapabilityOperation::Assign { place, value }) => {
+                        let place = resolve_place(place.clone(), places);
+                        if let Some(root) = structural_storage_root(&place, control.values()).filter(|root| roots.contains(root)) {
+                            if matches!(place, ControlPlace::Local(_) | ControlPlace::Temporary(_)) {
+                                state.values.insert(root, BTreeSet::from([ResidentInput::Value(*value)]));
+                            } else {
+                                state.values.entry(root).or_insert_with(|| BTreeSet::from([ResidentInput::Unknown]))
+                                    .insert(ResidentInput::Value(*value));
+                            }
+                            if state.exposed.contains(&root) { state.expose(root); }
+                        }
+                    }
+                    ControlOperation::Capability(ControlCapabilityOperation::Borrow { place, unique: true }) => {
+                        if let Some(root) = local_storage_root(&resolve_place(place.clone(), places)).filter(|root| roots.contains(root)) {
+                            state.expose(root);
+                        }
+                    }
+                    ControlOperation::Capability(ControlCapabilityOperation::Closure { closure, captures }) => {
+                        for (value, capture) in captures.iter().zip(&control.closures()[closure.0 as usize].environment.captures) {
+                            if capture.mode == crate::CaptureMode::UniqueBorrow
+                                && let Some(root) = local_storage_root(places.get(value).unwrap_or(&ControlPlace::Local(*value)))
+                                    .filter(|root| roots.contains(root)) {
+                                state.expose(root);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+                if roots.contains(&instruction.destination) && owners[instruction.destination.0 as usize].kind != OwnerKind::View {
+                    state.values.insert(instruction.destination, BTreeSet::from([ResidentInput::Initial(instruction.destination)]));
+                    if state.exposed.contains(&instruction.destination) { state.expose(instruction.destination); }
+                }
+            }
+            observe(block.terminator.inputs(), &state, &mut inputs);
+            if matches!(block.terminator, ControlTerminator::Transfer(_)) {
+                for (root, resident) in &mut state.values { resident.insert(ResidentInput::Global(*root)); }
+            }
+            for edge in block.terminator.edges() {
+                let next = &mut incoming[edge.target.0 as usize];
+                if let Some(previous) = next {
+                    let before = previous.clone();
+                    previous.join(&state);
+                    if *previous != before { pending.insert(edge.target); }
+                } else {
+                    *next = Some(state.clone());
+                    pending.insert(edge.target);
+                }
+            }
+        }
+        Ok(inputs)
     }
 
     pub(super) fn solve(&self, owners: &mut [Owner], seeds: &[Option<Quantity>],
@@ -130,6 +281,21 @@ impl Rules {
                     Rule::Product(fields) => product_quantity(fields.iter().copied(), owners),
                     Rule::Forward(source) => owners[source.0 as usize].quantity,
                     Rule::Environment(captures) => environment_quantity(captures, owners),
+                });
+            }
+            // The first solution is the value originally produced at each
+            // definition. Slot-wide replacement/exposure bounds follow below;
+            // a view's executed uses select the appropriate resident inputs.
+            let initial = quantities.clone();
+            for (view, inputs) in &self.view_inputs {
+                quantities[view.0 as usize] = inputs.iter().try_fold(Quantity::UNRESTRICTED, |quantity, input| {
+                    let next = match input {
+                        ResidentInput::Initial(value) => initial[value.0 as usize],
+                        ResidentInput::Value(value) | ResidentInput::Global(value) => owners[value.0 as usize].quantity,
+                        ResidentInput::Declared(value) => declared[value.0 as usize],
+                        ResidentInput::Unknown => None,
+                    }?;
+                    quantity.intersection(next).ok()
                 });
             }
             for (destination, values) in &self.replacements {

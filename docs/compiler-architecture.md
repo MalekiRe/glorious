@@ -2287,3 +2287,32 @@ resident quantity and initialization, not a runtime keepalive. Computed factory
 lifetime, general borrowed resumption invocation, guarded interleavings,
 mandatory-tail fusion, foreign control and full performance acceptance remain
 open. Executable and runtime generations do not change.
+
+## Executed resident permissions for storage views
+
+The retained ownership quantity product distinguishes an initial produced value,
+replacement residents, declared writable exposure and whole-storage constraints.
+For whole-slot observations of changing storage, the existing Control CFG derives
+the reaching resident at every executed use, not merely at the earlier Read.
+A deferred view used after replacement therefore cannot keep an old acquisition
+permission. Complete ordinary joins retain every possible resident; missing state
+has no permission. Dynamic control transfers conservatively retain the global
+storage constraint rather than infer unrepresented handler interleavings.
+
+The ordinary quantity fixed point solves these inputs with its existing products,
+capture equations and slot-wide replacement/exposure bounds. Storage owners retain
+their whole-lifetime guarantee while an earlier acquired value can retain stronger
+resident permission. Specialization closes this same product; no second Core walk,
+runtime pin or new Copy operation supplies the distinction. Ownership validation
+binds the exact receiving input, including operation order, before accepting the
+point-sensitive result. Source availability and runtime initialization checks
+remain independent requirements.
+
+Cache 160 admits the earlier scalar-capture receiver acquisition before writable
+exposure through fresh/decoded VM and native/mixed O0/O2. Post-exposure and joined
+reads retain their restricted permissions, earlier replacement/field negatives
+remain enforced, and reordered operations cannot reuse the proof. The preserved
+helper-mutation case still has its source callable-transfer obligation. Projected
+and referent view refinements remain conservative, as do dynamic interleavings;
+computed factory lifetime and the broader native-handler acceptance gates remain
+open. Executable and runtime generations do not change.

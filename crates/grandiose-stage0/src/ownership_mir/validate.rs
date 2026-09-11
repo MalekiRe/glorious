@@ -419,6 +419,9 @@ impl OwnershipMir {
         }
         self.validate_inventory()?;
         self.validate_owner_availability()?;
+        if !self.quantity_rules.matches(self) {
+            return Err(invalid("resident quantity constraints have stale ownership inputs"));
+        }
         Ok(())
     }
 
@@ -577,12 +580,61 @@ mod tests {
     }
 
     #[test]
+    fn a_receiver_acquired_before_writable_exposure_keeps_its_resident_permission() {
+        let mut mir = fixture("fn expose<T>(slot:&mut T) -> i64 {0}
+            pub fn main() -> i64 {let answer=42;
+                let mut callback:(i64)->i64=(value:i64)->i64 {answer};
+                callback(expose(&mut callback))}");
+        let root = local_storage_root(&mir.loans.iter().find(|loan| loan.unique).unwrap().place).unwrap();
+        assert_ne!(mir.owners[root.0 as usize].quantity, Some(Quantity::UNRESTRICTED));
+        let acquired = mir.blocks.iter().flat_map(|block| &block.instructions)
+            .find(|instruction| matches!(instruction.operation, OwnershipOperation::Transfer { value, mode: ValueTransfer::Copy }
+                if mir.canonical_owner(value) == OwnerId(root.0))).unwrap();
+        assert_eq!(mir.owners[acquired.destination.0 as usize].quantity, Some(Quantity::UNRESTRICTED));
+        let acquired = acquired.destination;
+        // The same typed graph and end-of-block inventory cannot reuse its
+        // earlier permission after moving writable exposure before acquisition.
+        let block = mir.blocks.iter_mut().find(|block|
+            block.instructions.iter().any(|instruction| instruction.destination == acquired)).unwrap();
+        let borrow = block.instructions.iter().position(|instruction|
+            matches!(instruction.operation, OwnershipOperation::Borrow(_))).unwrap();
+        let borrow = block.instructions.remove(borrow);
+        let acquisition = block.instructions.iter().position(|instruction| instruction.destination == acquired).unwrap();
+        block.instructions.insert(acquisition, borrow);
+        assert!(mir.validate().unwrap_err().0.contains("stale ownership inputs"));
+    }
+
+    #[test]
+    fn later_and_branch_joined_views_cannot_recover_pre_exposure_permission() {
+        for prefix in ["expose(&mut callback);", "handle flag {0 => expose(&mut callback), _ => 0};"] {
+            let mir = fixture(&format!("fn expose<T>(slot:&mut T) -> i64 {{0}}
+                pub fn main(flag:i64) -> i64 {{let answer=42;
+                    let mut callback:(i64)->i64=(value:i64)->i64 {{answer}};
+                    {prefix} let held=callback; held(0)}}"));
+            let root = local_storage_root(&mir.loans.iter().find(|loan| loan.unique).unwrap().place).unwrap();
+            let reads = mir.blocks.iter().flat_map(|block| &block.instructions)
+                .filter(|instruction| matches!(instruction.operation, OwnershipOperation::Read(value) if value == root))
+                .collect::<Vec<_>>();
+            assert!(!reads.is_empty());
+            assert!(reads.iter().all(|instruction|
+                mir.owners[instruction.destination.0 as usize].quantity != Some(Quantity::UNRESTRICTED)));
+        }
+    }
+
+    #[test]
     fn specialization_cannot_close_quantity_rules_after_ownership_input_mutation() {
         let mut mir = fixture("pub fn main(value:i64) -> i64 {value}");
         let signatures = ElaboratedInterface::default();
         let solver = crate::TraitSolver::new(&signatures);
         assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).is_ok());
+        let original = mir.clone();
         mir.owners[mir.parameters[0].0 as usize].quantity = Some(Quantity::ONCE);
+        assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).unwrap_err().0.contains("stale ownership inputs"));
+        mir = original.clone();
+        mir.entry = ControlBlockId(u32::MAX);
+        assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).unwrap_err().0.contains("stale ownership inputs"));
+        mir = original;
+        mir.parameters.clear();
         assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).unwrap_err().0.contains("stale ownership inputs"));
     }
 
@@ -968,6 +1020,7 @@ mod tests {
         ];
         mir.live_in = mir.compute_liveness();
         mir.elaborate_inventory();
+        mir.quantity_rules = quantities::Rules::declared_test_graph(&mir);
         mir.validate().unwrap();
         let [left, right] = mir.blocks[0].terminator.successors.as_slice() else {
             panic!("two successors");

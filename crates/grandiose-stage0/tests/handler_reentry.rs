@@ -373,6 +373,16 @@ fn prepared_receiver_keeps_captures_before_argument_replacement() {
 }
 
 #[test]
+fn owned_receiver_acquisition_precedes_writable_exposure_of_its_storage() {
+    candidate("fn expose<T>(slot:&mut T) -> i64 {0}
+        pub fn main() -> i64 {
+            let answer=42;
+            let mut callback:(i64)->i64=(value:i64)->i64 {answer};
+            callback(expose(&mut callback))
+        }");
+}
+
+#[test]
 fn owned_receiver_acquisition_precedes_helper_mutation_of_its_storage() {
     candidate("type Callback=(i64)->i64;
         fn first(value:i64) -> i64 {42}
