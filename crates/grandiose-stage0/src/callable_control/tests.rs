@@ -229,6 +229,44 @@ fn an_empty_body_does_not_prove_absent_cleanup_writes() {
 }
 
 #[test]
+fn callable_return_footprints_require_complete_owned_alternatives() {
+    use crate::resident_invocations::{CapturedInputs, Operand};
+    struct Domain;
+    impl PayloadInputs for Domain {
+        type Value = ();
+        fn project(&self, _: &(), _: &[u32]) -> Option<()> { None }
+        fn captures(&self, _: &Operand<()>) -> CapturedInputs<()> { CapturedInputs { operands: vec![], unresolved: true } }
+        fn reborrow(&self, _: &(), _: &[u32]) -> Option<()> { None }
+    }
+    impl ReferenceInputs for Domain { fn reference_known(&self, _: &()) -> bool { false } }
+    let function = |contract| Type::Callable { contract: Box::new(contract), safety: crate::Safety::Safe,
+        lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit), effects: crate::EffectRow::empty(),
+        invocation: crate::Quantity::ONCE };
+    let erased = function(crate::CallableContract::default());
+    let mut contract = crate::CallableContract::default();
+    contract.environment = Some(Box::new(Type::Unit));
+    let owned = function(contract.clone());
+    let result = Type::Tuple(vec![erased.clone()]);
+    let returned = |ty| InvocationPayload { ty: result.clone(), source: payloads::PayloadSource::Aggregate(vec![InvocationPayload::unknown(ty)]) };
+    let signatures = ElaboratedInterface::default();
+    let mut control = InvocationControl { normal: true, returns: vec![returned(owned.clone())], ..Default::default() };
+    let proof = |control: &InvocationControl| control.resolve_returns(&result, &signatures, &(), &[], &Domain).noncapturing_callables;
+    assert_eq!(proof(&control), std::collections::BTreeSet::from([vec![0]]));
+    control.unknown = true;
+    assert!(proof(&control).is_empty());
+    control.unknown = false;
+    control.returns.push(returned(erased));
+    assert!(proof(&control).is_empty(), "one opaque normal alternative retains hidden captures");
+    control.returns = vec![returned(owned)];
+    contract.captures.push(Type::Reference { mutability: crate::Mutability::Shared,
+        lifetime: crate::Lifetime::Generic(0), referent: Box::new(Type::Unit) });
+    control.returns.push(returned(function(contract)));
+    assert!(proof(&control).is_empty(), "a represented borrowed capture is not owned");
+    control.returns.clear();
+    assert!(proof(&control).is_empty(), "no return observations is not absence");
+}
+
+#[test]
 fn variant_reference_coverage_distinguishes_absence_from_unknown_alternatives() {
     use crate::resident_invocations::{CapturedInputs, Operand};
     struct Domain;

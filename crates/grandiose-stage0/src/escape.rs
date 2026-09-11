@@ -455,7 +455,7 @@ impl Analyzer<'_> {
                 self.record_invocation_exits(id, &Value::None, &[], expression.span);
                 if self.continuations.is_abrupt(id) { return Value::None; }
                 let (origin, shape) = crate::callable_declarations::value_reference_contract(self.signatures, &expression.ty);
-                self.invocation_result_value(id, &Value::None, vec![], origin, shape, BTreeMap::new())
+                self.invocation_result_value(id, &Value::None, vec![], origin, shape)
             }
             CoreKind::Resumption { id, .. } => Value::Control(ControlBrand::Resumption(id)),
             CoreKind::LabelValue { .. } => Value::Control(ControlBrand::Label(self.continuations.label_reference(id)
@@ -711,20 +711,7 @@ impl Analyzer<'_> {
                 if self.continuations.is_abrupt(id) {
                     return Value::None;
                 }
-                let callable_paths = crate::placeflow::regions::callable_result_paths(self.signatures, self.body.expression(callee));
-                let mut callable_values = BTreeMap::<Vec<u32>, (Vec<Value>, Vec<crate::resident_invocations::Operand<Value>>)>::new();
-                for path in callable_paths {
-                    let (Some(value), Some(argument)) = (values.get(path.argument as usize), arguments.get(path.argument as usize)) else { continue; };
-                    let Some(value) = self.reference_path_value(value, &path.argument_fields) else { continue; };
-                    let mut inputs = vec![];
-                    let _ = crate::core::input_reference_leaf_paths(self.signatures, &self.body.expression(*argument).ty, &mut inputs);
-                    let (footprint, captures) = callable_values.entry(path.result_fields).or_default();
-                    if let Some((_, ty)) = inputs.into_iter().find(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
-                        captures.push(crate::resident_invocations::Operand { ty, value: value.clone() });
-                    }
-                    footprint.push(value);
-                }
-                self.invocation_result_value(id, &callable, values, reference_origin, reference_shape, callable_values)
+                self.invocation_result_value(id, &callable, values, reference_origin, reference_shape)
             }
             CoreKind::Perform { .. } => match self.performed_value(id) {
                 Some(PerformedValue::Invoked { result, .. }) => result.unwrap_or(Value::None),
@@ -937,11 +924,27 @@ impl Analyzer<'_> {
     /// Ordinary calls and evaluated top-level values consume the same bound
     /// normal-result relation; neither reconstructs an initializer's Core.
     fn invocation_result_value(&mut self, id: CoreId, callable: &Value, values: Vec<Value>,
-        reference_origin: CallReferenceOrigin, reference_shape: CallReferenceShape,
-        callable_values: BTreeMap<Vec<u32>, (Vec<Value>, Vec<crate::resident_invocations::Operand<Value>>)>) -> Value {
+        reference_origin: CallReferenceOrigin, reference_shape: CallReferenceShape) -> Value {
         let expression = self.body.expression(id);
         let resolved = self.continuations.invocation(id).map(|control|
             control.resolve_returns(&expression.ty, self.signatures, callable, &values, self));
+        let mut callable_values = BTreeMap::<Vec<u32>, (Vec<Value>, Vec<crate::resident_invocations::Operand<Value>>)>::new();
+        if let CoreKind::Call { callee, arguments, .. } = &expression.kind {
+            let empty = BTreeSet::new();
+            let noncapturing = resolved.as_ref().map_or(&empty, |result| &result.noncapturing_callables);
+            for path in crate::placeflow::regions::callable_result_paths(self.signatures,
+                self.body.expression(*callee), noncapturing) {
+                let (Some(value), Some(argument)) = (values.get(path.argument as usize), arguments.get(path.argument as usize)) else { continue; };
+                let Some(value) = self.reference_path_value(value, &path.argument_fields) else { continue; };
+                let mut inputs = vec![];
+                let _ = crate::core::input_reference_leaf_paths(self.signatures, &self.body.expression(*argument).ty, &mut inputs);
+                let (footprint, captures) = callable_values.entry(path.result_fields).or_default();
+                if let Some((_, ty)) = inputs.into_iter().find(|(fields, _)| crate::core::reference_path_matches(fields, &path.argument_fields)) {
+                    captures.push(crate::resident_invocations::Operand { ty, value: value.clone() });
+                }
+                footprint.push(value);
+            }
+        }
         let references_complete = resolved.as_ref().is_some_and(|result| result.references.is_complete());
         let reference_paths = resolved.as_ref().into_iter().flat_map(|result| result.references.paths())
             .map(<[u32]>::to_vec).collect::<Vec<_>>();

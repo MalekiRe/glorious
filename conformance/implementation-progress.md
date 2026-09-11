@@ -5,6 +5,27 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 163: checked owned factory-result footprints
+
+The shared invocation return product records callable paths whose complete
+normal alternatives have positively owned capture footprints. Opaque outcomes,
+unrepresented return alternatives and borrowed captures supply no absence proof.
+PlaceFlow and EscapeFlow consume the same result relation before publishing
+possible factory captures. Only the hidden-capture fallback can be discharged:
+declared capture regions, forwarded residents, free result regions and explicit
+outlives obligations remain. PlaceFlow's duplicate result-path reconstruction is
+removed; reference-result coverage and callable footprint evidence remain distinct.
+
+A capture-free computed receiver with a checked store prefix passes fresh/
+decoded VM and native/mixed O0/O2. A corresponding factory that captures its
+input still rejects the conflicting strict-argument borrow. Producer and receiving
+rule tests cover unknown/mixed/absent returns and retained declared/forwarded debt.
+
+The original arithmetic-prefix computed receiver still fails G5006. Its control
+summary has missing-body outcomes at arithmetic calls, so complete return
+evidence is unavailable. The earlier-borrowed-receiver G4304 regression and the
+remaining native-handler gates are also open. Runtime generations do not change.
+
 ## Cache 162: writable callable resident alternatives
 
 Fresh unique borrowing of an owned callable place uses the writer's referent

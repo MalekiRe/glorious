@@ -2359,3 +2359,22 @@ the new earlier-borrowed-invocation regression still fails G4304 after a later
 helper replacement erases its refinement. That integration obligation, nominal
 storage refinements, computed-factory lifetime and full native-handler acceptance
 remain open. No executable or runtime ABI generation changes.
+
+## Owned factory-result footprints
+
+Complete normal-return alternatives in the existing invocation relation can
+prove a callable result's capture footprint owned. This is distinct from both
+physical-reference target coverage and absence of observed loans. Unknown
+control, missing return alternatives and borrowed captures do not establish it.
+PlaceFlow and EscapeFlow consume that same returned product before installing
+the fallback for possible hidden factory captures. Declared capture regions,
+forwarded callable residents, free result regions and explicit outlives debts
+remain independent obligations. The duplicate PlaceFlow result-path derivation
+is removed; no source-name exception or new Core walk supplies this evidence.
+
+Cache 163 verifies capture-free factory receiver acquisition through fresh/
+decoded VM and native/mixed O0/O2, while an actually captured input retains its
+strict-argument conflict. Unknown/mixed return and declared/forwarded-debt tests
+remain enforced. The original arithmetic-prefix receiver is still blocked by
+missing-body control outcomes, and point-sensitive borrowed receiver contracts
+and full native-handler acceptance remain open. Runtime generations are unchanged.

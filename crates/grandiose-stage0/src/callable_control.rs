@@ -20,7 +20,7 @@ mod tests;
 mod payloads;
 pub(crate) use payloads::PayloadInputs;
 pub(crate) use payloads::ReferenceInputs;
-pub(crate) use payloads::{InvocationPayload, ResolvedPayload, resolve_payload};
+pub(crate) use payloads::{InvocationPayload, ResolvedPayload, ResolvedReturns, resolve_payload};
 
 #[derive(Clone, Copy)]
 pub struct ControlBody<'a> {

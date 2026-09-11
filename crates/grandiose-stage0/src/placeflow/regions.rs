@@ -176,8 +176,9 @@ fn same_callable_abi(left: &crate::Type, right: &crate::Type) -> bool {
 /// Logical callable result forwarding is separate from checked reference
 /// provenance. A plain callable nominal argument still forwards the actual
 /// value's capture footprint; no environment address is exposed.
-pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr) -> Vec<crate::core::CallReferencePath> {
-    let crate::Type::Callable { parameters, result, .. } = &expression.ty else { return vec![]; };
+pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, expression: &crate::core::CoreExpr,
+    noncapturing: &BTreeSet<Vec<u32>>) -> Vec<crate::core::CallReferencePath> {
+    let crate::Type::Callable { parameters, result, contract: declaration, .. } = &expression.ty else { return vec![]; };
     if callable_paths(signatures, result, false).is_empty() { return vec![]; }
     let rigid = rigid_callable_signature(signatures, expression);
     let (parameters, result) = rigid.as_ref().map(|signature| (&signature.parameters, &signature.result)).unwrap_or((parameters, result));
@@ -204,7 +205,19 @@ pub(crate) fn callable_result_paths(signatures: &crate::ElaboratedInterface, exp
         // though its ABI mentions no region. In contrast, `pop<T> -> T`
         // forwards T's existing environment, not the short receiver borrow.
         // A known empty environment is positive noncapture evidence.
-        let unknown_factory = contract.environment.is_none() && (!matched || literal_results.as_ref()
+        // A body-derived owned capture footprint can settle only the hidden
+        // factory fallback. Explicit callable captures, forwarded residents,
+        // free result regions and declaration outlives predicates remain debts.
+        let mut free_region = false;
+        let regions_known = crate::types::regions::map_argument_regions(crate::GenericArgument::Type(result_ty.clone()), &mut |lifetime, depth| {
+            if lifetime != crate::Lifetime::Static
+                && !matches!(lifetime, crate::Lifetime::Bound { depth: bound, .. } if bound < depth) { free_region = true; }
+            Some(lifetime)
+        }).is_some();
+        let known_owned = noncapturing.contains(&result_fields) && regions_known && !free_region
+            && !declaration.has_residual() && declaration.body_regions.facts().is_empty()
+            && rigid.as_ref().is_none_or(|signature| signature.where_outlives.is_empty());
+        let unknown_factory = !known_owned && contract.environment.is_none() && (!matched || literal_results.as_ref()
             .is_none_or(|results| results.iter().any(|(path, _)| crate::core::reference_path_matches(path, &result_fields))));
         if !unknown_factory && captured_regions.is_empty() { continue; }
         for (argument, parameter) in parameters.iter().enumerate() {
@@ -419,6 +432,29 @@ mod tests {
         let created = parameter_relations(&signatures, &[carrier(crate::Mutability::Unique)], &[]);
         assert_eq!(created.reference_writes.len(), 1);
         assert!(created.reference_writes[0].sources.is_empty(), "a fresh static reference needs no incoming loan");
+    }
+
+    #[test]
+    fn owned_factory_evidence_cannot_erase_declared_or_forwarded_debt() {
+        use crate::{CallableContract, CoreExpr, CoreKind, EffectRow, Lifetime, Mutability, Quantity, Safety, Type};
+        let function = |parameters, result, contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters, result: Box::new(result), effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let reference = Type::Reference { mutability: Mutability::Unique, lifetime: Lifetime::Generic(0), referent: Box::new(Type::Unit) };
+        let callable = function(vec![], Type::Unit, CallableContract::default());
+        let mut factory = CoreExpr { kind: CoreKind::Local("factory".into()),
+            ty: function(vec![reference.clone()], callable.clone(), CallableContract::default()),
+            span: crate::Span { file: crate::FileKey(crate::Digest::of_bytes(b"factory-debt")), start: 0, end: 1 } };
+        let signatures = crate::ElaboratedInterface::default();
+        let absent = BTreeSet::from([vec![]]);
+        assert_eq!(callable_result_paths(&signatures, &factory, &BTreeSet::new()).len(), 1);
+        assert!(callable_result_paths(&signatures, &factory, &absent).is_empty());
+        let with_captures = function(vec![], Type::Unit, CallableContract { captures: vec![reference.clone()], ..Default::default() });
+        factory.ty = function(vec![reference.clone()], with_captures, CallableContract::default());
+        assert_eq!(callable_result_paths(&signatures, &factory, &absent).len(), 1, "declared capture regions survive");
+        factory.ty = function(vec![reference.clone()], function(vec![], reference, CallableContract::default()), CallableContract::default());
+        assert_eq!(callable_result_paths(&signatures, &factory, &absent).len(), 1, "free callable ABI regions survive");
+        factory.ty = function(vec![callable.clone()], callable, CallableContract::default());
+        assert_eq!(callable_result_paths(&signatures, &factory, &absent).len(), 1, "forwarded residents retain their full footprint");
     }
 
     #[test]

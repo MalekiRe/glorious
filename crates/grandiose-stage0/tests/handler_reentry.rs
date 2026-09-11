@@ -307,6 +307,23 @@ fn ordinary_generic_field_invocation_preserves_the_capture_environment() {
 }
 
 #[test]
+fn factory_receiver_captures_keep_their_input_loan_during_strict_arguments() {
+    let source = "fn receiver(count:&mut i64) -> ((i64)->i64,) {((value:i64)->i64 {*count},)}
+        fn argument(count:&mut i64) -> i64 {*count=0; 42}
+        pub fn main() -> i64 {let mut count=12; receiver(&mut count).0(argument(&mut count))}";
+    let error = StageZeroCompiler::new().compile(request(source)).err().expect("captured input must retain its loan");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5006"), "{:?}", error.diagnostics());
+}
+
+#[test]
+fn capture_free_factory_receiver_releases_its_input_before_strict_arguments() {
+    candidate("fn answer(value:i64) -> i64 {value}
+        fn receiver(count:&mut i64) -> ((i64)->i64,) {*count=12; (answer,)}
+        fn argument(count:&mut i64) -> i64 {handle *count {12=>42, _=>0}}
+        pub fn main() -> i64 {let mut count=0; receiver(&mut count).0(argument(&mut count))}");
+}
+
+#[test]
 fn computed_field_receiver_is_evaluated_once_before_its_arguments() {
     candidate("fn answer(value:i64) -> i64 { value }
         fn receiver(count:&mut i64) -> ((i64)->i64,) {

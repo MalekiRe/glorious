@@ -128,6 +128,9 @@ pub(crate) trait ReferenceInputs: PayloadInputs {
 pub(crate) struct ResolvedReturns<V> {
     pub payloads: Vec<ResolvedPayload<V>>,
     pub references: ReferenceCoverage,
+    /// Complete normal alternatives with a positively owned capture footprint.
+    /// This can discharge a possible hidden capture, not a declared region debt.
+    pub noncapturing_callables: std::collections::BTreeSet<Vec<u32>>,
 }
 
 /// Authenticated reference leaves wherever present in the represented normal
@@ -228,7 +231,36 @@ impl InvocationControl {
         }
         let complete = invocation_covered && shape_known && leaves.iter().all(|(path, ty)|
             matches!(ty, Type::Reference { lifetime: crate::Lifetime::Static, .. }) || paths.contains(path) || empty_paths.contains(path));
-        ResolvedReturns { payloads, references: ReferenceCoverage { paths, empty_paths, complete } }
+        fn owned_callable(signatures: &ElaboratedInterface, ty: &Type) -> bool {
+            matches!(ty, Type::Callable { contract, .. } if contract.environment.is_some()
+                && !contract.has_residual() && contract.body_regions.facts().is_empty()
+                && contract.captures.iter().all(|capture|
+                    crate::core::tail::tail_owned_type(signatures, capture, &mut vec![])))
+        }
+        fn noncapturing<V>(payload: &ResolvedPayload<V>, path: &[u32], signatures: &ElaboratedInterface) -> bool {
+            match payload {
+                ResolvedPayload::Aggregate(fields) | ResolvedPayload::Variant(fields) => {
+                    let Some((index, rest)) = path.split_first() else { return false; };
+                    if *index == crate::core::REFERENCE_PATH_ARRAY_ELEMENT {
+                        return !fields.is_empty() && fields.iter().all(|field| noncapturing(field, rest, signatures));
+                    }
+                    fields.get(*index as usize).is_some_and(|field| noncapturing(field, rest, signatures))
+                }
+                ResolvedPayload::Callable { ty, captures, .. } if path.is_empty() => owned_callable(signatures, ty)
+                    && captures.iter().all(|(ty, _)| crate::core::tail::tail_owned_type(signatures, ty, &mut vec![])),
+                ResolvedPayload::Unknown(ty) | ResolvedPayload::Inputs { ty, .. } => {
+                    let leaves = crate::placeflow::regions::callable_paths(signatures, ty, false);
+                    leaves.iter().any(|(fields, ty)| fields == path && owned_callable(signatures, ty))
+                }
+                _ => false,
+            }
+        }
+        let noncapturing_callables = if invocation_covered {
+            crate::placeflow::regions::callable_paths(signatures, result, false).into_iter()
+                .filter(|(path, _)| payloads.iter().all(|payload| noncapturing(payload, path, signatures)))
+                .map(|(path, _)| path).collect()
+        } else { Default::default() };
+        ResolvedReturns { payloads, references: ReferenceCoverage { paths, empty_paths, complete }, noncapturing_callables }
     }
 }
 

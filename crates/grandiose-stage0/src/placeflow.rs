@@ -1778,7 +1778,7 @@ impl Analyzer<'_> {
             | CoreKind::Error => {}
             CoreKind::Constant { .. } => {
                 self.preserve_expression_result(id, id);
-                self.apply_invocation_control(id, &invocations::Value::resident(&Self::result_owner(id)), &[], e.span);
+                self.apply_invocation_control(id, &invocations::Value::resident(&Self::result_owner(id)), &[], e.span, None);
             }
             CoreKind::Closure { environment, .. } => {
                 let owner = self.nonretaining_call_owner.clone();
@@ -2099,7 +2099,7 @@ impl Analyzer<'_> {
                 let inputs = self.visit_sequence(&arguments, live_after);
                 if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
                     self.record_handler_invocation_inputs(id, &inputs);
-                    self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin);
+                    self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin, &BTreeSet::new());
                     self.pending_results.insert(id);
                     self.check_minimum_suspension(&effect, operation, e.span);
                 }
@@ -2449,11 +2449,14 @@ impl Analyzer<'_> {
         self.record_invocation_stores(callee, callable, arguments, call);
         self.record_handler_invocation_inputs(call, arguments);
         let CoreKind::Call { reference_origin, .. } = self.body.expression(call).kind.clone() else { unreachable!("invocation inputs"); };
-        self.record_call_reference_origin(&Self::result_owner(call), call, arguments, reference_origin);
+        let returned = self.resolve_invocation_returns(call, callable, arguments);
+        let empty = BTreeSet::new();
+        let noncapturing = returned.as_ref().map_or(&empty, |returned| &returned.noncapturing_callables);
+        self.record_call_reference_origin(&Self::result_owner(call), call, arguments, reference_origin, noncapturing);
         self.pending_results.insert(call);
         if self.minimum_definitely_aborts(call) { self.minimum_states.clear(); }
         else { self.check_minimum_call_suspensions(call, span); }
-        self.apply_invocation_control(call, callable, arguments, span);
+        self.apply_invocation_control(call, callable, arguments, span, returned);
     }
 
     fn visit_sequence(&mut self, values: &[CoreId], live_after: &BTreeSet<String>) -> Vec<invocations::EvaluatedOperand> {
@@ -3653,18 +3656,6 @@ impl Analyzer<'_> {
         if changed { self.refresh_logical_loans(id); }
     }
 
-    fn resident_call_paths(&self, id: CoreId) -> Vec<crate::core::CallReferencePath> {
-        let mut paths = match &self.body.expression(id).kind {
-            CoreKind::Call { reference_origin, .. }
-            | CoreKind::Perform { reference_origin, .. } => reference_origin.paths().to_vec(),
-            _ => vec![],
-        };
-        if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(id).kind) {
-            paths.extend(regions::callable_result_paths(signatures, self.body.expression(*callee)));
-        }
-        paths
-    }
-
     fn refresh_logical_loans(&mut self, source: CoreId) {
         let aliases = self.logical.origins.iter().filter(|(owner, _)| !self.origin_has_been_moved(owner))
             .flat_map(|(owner, regions)| self.logical.regions.contents(regions).into_iter().flatten()
@@ -3703,7 +3694,7 @@ impl Analyzer<'_> {
                 let empty = ElaboratedInterface::default();
                 let (origin, _) = crate::callable_declarations::value_reference_contract(
                     self.signatures.unwrap_or(&empty), &self.body.expression(id).ty);
-                self.record_call_reference_origin(name, id, &[], origin);
+                self.record_call_reference_origin(name, id, &[], origin, &BTreeSet::new());
             }
             CoreKind::Move(value) => self.record_resident_reference_origins(name, value, retain_carrier),
             CoreKind::Block(values) => {
@@ -3791,11 +3782,18 @@ impl Analyzer<'_> {
         call: CoreId,
         arguments: &[invocations::EvaluatedOperand],
         origin: CallReferenceOrigin,
+        noncapturing: &BTreeSet<Vec<u32>>,
     ) {
         // Declared logical and callable result paths consume the same
         // positional residents as physical return and invocation-store rules.
         let empty = ElaboratedInterface::default();
         let signatures = self.signatures.unwrap_or(&empty);
+        let callable_results = match &self.body.expression(call).kind {
+            CoreKind::Call { callee, .. } => regions::callable_result_paths(signatures,
+                self.body.expression(*callee), noncapturing),
+            _ => vec![],
+        };
+        let resident_paths = origin.paths().iter().chain(&callable_results).collect::<Vec<_>>();
         let result_ty = &self.body.expression(call).ty;
         let mut leaves = vec![];
         let _ = crate::core::reference_leaf_paths(signatures, result_ty, &mut vec![], &mut leaves);
@@ -3803,7 +3801,7 @@ impl Analyzer<'_> {
         leaves.extend(callable_paths.iter().cloned());
         for (fields, _) in leaves {
             let callable = callable_paths.iter().any(|(path, _)| crate::core::reference_path_matches(path, &fields));
-            for path in self.resident_call_paths(call) {
+            for path in &resident_paths {
                 if !crate::core::reference_path_is_prefix(&path.result_fields, &fields) { continue; }
                 let Some(argument) = arguments.get(path.argument as usize) else { continue; };
                 // Capturing an owner's reference does not alias its data
@@ -3817,8 +3815,8 @@ impl Analyzer<'_> {
                 if !regions.is_empty() { self.logical.origins.entry(projection_key(result, &fields)).or_default().extend(regions); }
             }
         }
-        if let (Some(signatures), CoreKind::Call { callee, .. }) = (self.signatures, &self.body.expression(call).kind) {
-            for path in regions::callable_result_paths(signatures, self.body.expression(*callee)) {
+        if matches!(self.body.expression(call).kind, CoreKind::Call { .. }) {
+            for path in callable_results {
                 if let Some(argument) = arguments.get(path.argument as usize) {
                     let owner = projection_key(result, &path.result_fields);
                     let mut inputs = vec![];

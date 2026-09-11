@@ -13,12 +13,23 @@ pub(super) struct LabelBoundary {
 }
 
 impl Analyzer<'_> {
+    pub(super) fn resolve_invocation_returns(&self, call: CoreId, callable: &invocations::Value,
+        arguments: &[invocations::EvaluatedOperand])
+        -> Option<crate::callable_control::ResolvedReturns<invocations::Value>> {
+        let control = self.continuations.invocation(call)?;
+        let arguments = arguments.iter().map(|input| input.operand.value.clone()).collect::<Vec<_>>();
+        let empty = ElaboratedInterface::default();
+        Some(control.resolve_returns(&self.body.expression(call).ty, self.signatures.unwrap_or(&empty),
+            callable, &arguments, self))
+    }
+
     pub(super) fn apply_invocation_control(
         &mut self,
         call: CoreId,
         callable: &invocations::Value,
         arguments: &[invocations::EvaluatedOperand],
         span: Span,
+        returned: Option<crate::callable_control::ResolvedReturns<invocations::Value>>,
     ) {
         let reference_shape = match self.body.expression(call).kind.clone() {
             CoreKind::Call { reference_shape, .. } => reference_shape,
@@ -35,12 +46,12 @@ impl Analyzer<'_> {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
             return;
         };
+        let returned = returned.or_else(|| self.resolve_invocation_returns(call, callable, arguments))
+            .expect("selected invocation control");
         let arguments = arguments
             .iter()
             .map(|input| input.operand.value.clone())
             .collect::<Vec<_>>();
-        let empty = ElaboratedInterface::default();
-        let returned = control.resolve_returns(&result_ty, self.signatures.unwrap_or(&empty), callable, &arguments, self);
         if !returned.references.is_complete() {
             self.reject_opaque_reference_result(reference_shape, &result_ty, span, "call");
         }
