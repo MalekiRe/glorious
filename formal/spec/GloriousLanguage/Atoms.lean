@@ -41,11 +41,12 @@ inductive Captures (program : Kernel.Program) (context : Context) :
       Acquires program.declarations allocated authority false source destination middle →
       Captures program context middle rest addresses after →
       Captures program context before (capture :: rest) (destination :: addresses) after
-  | borrowed {before capture rest source authority destination allocated middle after addresses mode} :
+  | borrowed {before capture rest source authority destination allocated middle after addresses mode region referent} :
       (capture.mode = .shared ∧ mode = .shared ∨ capture.mode = .unique ∧ mode = .unique) →
+      capture.type = .reference mode (.runtimeRegion region) referent →
       ResolvesPlace before context.environment capture.place source authority →
       Temporary program context capture.type before destination allocated →
-      Borrows program.declarations allocated authority mode context.region source destination middle →
+      Borrows program.declarations allocated authority mode region source destination middle →
       Captures program context middle rest addresses after →
       Captures program context before (capture :: rest) (destination :: addresses) after
 
@@ -75,10 +76,10 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       AtomStep program before (some (if force then .move source destination else
         if (after.read source).isSome then .copy source destination else .move source destination))
         { before with world := after, task := .run context next }
-  | borrow {before context destination place mode lexicalRegion next source authority after} :
-      before.task = .atom context destination (.borrow place mode lexicalRegion) next →
+  | borrow {before context destination place mode region next source authority after} :
+      before.task = .atom context destination (.borrow place mode (.runtimeRegion region)) next →
       ResolvesPlace before.world context.environment place source authority →
-      Borrows program.declarations before.world authority mode context.region source destination after →
+      Borrows program.declarations before.world authority mode region source destination after →
       AtomStep program before (some (.borrow source before.world.nextLoan))
         { before with world := after, task := .run context next }
   | construct {before context destination type variant fields next sources residents head after} :
@@ -104,10 +105,10 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       program.declarations.operation id = some operation →
       NewValue program.declarations before.world destination (.callable id (family ++ item)) (.operation id (family ++ item)) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
-  | label {before context destination lexical next brand root after} :
-      before.task = .atom context destination (.label lexical) next → context.labels.get lexical = some brand →
+  | label {before context destination next brand root after} :
+      before.task = .atom context destination (.label (.runtimeBrand (.label brand))) next →
       before.world.root destination = some root →
-      (∃ region result, root.type = .label (.rigid brand .brand 0) region result) →
+      (∃ region result, root.type = .label (.runtimeBrand (.label brand)) region result) →
       NewValue program.declarations before.world destination root.type (.label brand) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
   | primitive {before context destination id arguments operands next binding addresses} :

@@ -33,10 +33,18 @@ def ScalarValue.type : ScalarValue → Scalar
   | .floating width _ => .floating width
   | .character _ => .character
 
+inductive RuntimeBrand where
+  | label (identity : Identity)
+  | resumption (identity : Identity)
+  | proof (identity : Identity)
+  deriving DecidableEq, BEq, Repr, Inhabited
+
 inductive Term where
   | parameter (binder : Identity) (kind : Kind)
   | variable (cell : Identity) (kind : Kind) (universeLevel : Nat)
   | rigid (binder : Identity) (kind : Kind) (universeLevel : Nat)
+  | runtimeRegion (identity : Identity)
+  | runtimeBrand (identity : RuntimeBrand)
   | unit | bottom | scalar (type : Scalar)
   | tuple (fields : List Term)
   | array (element length : Term)
@@ -63,7 +71,8 @@ inductive Term where
 
 def Term.kind : Term → Kind
   | .parameter _ k | .variable _ k _ | .rigid _ k _ | .projection _ _ _ _ k => k
-  | .staticRegion => .region
+  | .staticRegion | .runtimeRegion _ => .region
+  | .runtimeBrand _ => .brand
   | .effect .. => .effect
   | .row .. => .row
   | .constant .. | .constantTuple .. | .constantConstructor .. => .constant
@@ -134,6 +143,42 @@ def Term.substitute (substitution : Substitution) : Term → Term
       (arguments.map (Term.substitute substitution)) (fields.map (Term.substitute substitution))
   | term => term
 
+/-- Lexical scope names and concrete generative identities inhabit distinct
+constructors. Closing a caller's scope can never rename an already concrete
+region or brand supplied through a generic argument or capture. -/
+structure ScopeInstantiation where
+  regions : Table Identity := []
+  brands : Table RuntimeBrand := []
+  deriving Repr, Inhabited
+
+def ScopeInstantiation.term (scope : ScopeInstantiation) : Term → Term
+  | .rigid id .region 0 => ((scope.regions.get id).map Term.runtimeRegion).getD (.rigid id .region 0)
+  | .rigid id .brand 0 => ((scope.brands.get id).map Term.runtimeBrand).getD (.rigid id .brand 0)
+  | .tuple fields => .tuple (fields.map scope.term)
+  | .array a b => .array (scope.term a) (scope.term b)
+  | .reference mode a b => .reference mode (scope.term a) (scope.term b)
+  | .rawPointer mode a => .rawPointer mode (scope.term a)
+  | .nominal id arguments => .nominal id (arguments.map scope.term)
+  | .alias id arguments => .alias id (arguments.map scope.term)
+  | .callable id arguments => .callable id (arguments.map scope.term)
+  | .continuation a b c d quantity => .continuation (scope.term a) (scope.term b) (scope.term c) (scope.term d) quantity
+  | .label a b c => .label (scope.term a) (scope.term b) (scope.term c)
+  | .environment a b => .environment (scope.term a) (scope.term b)
+  | .available a b => .available (scope.term a) (scope.term b)
+  | .bindings a b arguments => .bindings (scope.term a) (scope.term b) (arguments.map scope.term)
+  | .effect id arguments => .effect id (arguments.map scope.term)
+  | .row instances tails => .row (instances.map scope.term) (tails.map scope.term)
+  | .projection trait member owners items kind => .projection trait member (owners.map scope.term) (items.map scope.term) kind
+  | .constantTuple fields => .constantTuple (fields.map scope.term)
+  | .constantConstructor id arguments fields => .constantConstructor id (arguments.map scope.term) (fields.map scope.term)
+  | term => term
+
+theorem ScopeInstantiation.kind (scope : ScopeInstantiation) (term : Term) : (scope.term term).kind = term.kind := by
+  cases term <;> try simp only [ScopeInstantiation.term, Term.kind]
+  rename_i id kind level
+  cases kind <;> cases level <;> simp only [ScopeInstantiation.term]
+  all_goals cases h : scope.regions.get id <;> cases k : scope.brands.get id <;> simp_all only [Option.map, Option.getD]
+
 /-- The checked graph of the single substitution operation. No substituted
 occurrence may change kind, even inside a type whose outer kind is unchanged. -/
 def Substitutes (substitution : Substitution) (before after : Term) : Prop :=
@@ -163,6 +208,21 @@ inductive Constraint where
   | runsIn (receiver access : Term) (arguments : List Term) (after : Term) (unsafeAllowed : Bool)
   | quantified (binders : List Binder) (requirements : List Constraint)
   deriving Repr, Inhabited
+
+def Constraint.mapTerms (f : Term → Term) : Constraint → Constraint
+  | .equal a b => .equal (f a) (f b)
+  | .outlives a b => .outlives (f a) (f b)
+  | .typeOutlives a b => .typeOutlives (f a) (f b)
+  | .rowIncludes a b => .rowIncludes (f a) (f b)
+  | .implements trait arguments negative => .implements trait (arguments.map f) negative
+  | .use type quantity => .use (f type) quantity
+  | .callable receiver arguments output effects unsafeAllowed =>
+      .callable (f receiver) (arguments.map f) (f output) (f effects) unsafeAllowed
+  | .runsIn receiver access arguments after unsafeAllowed =>
+      .runsIn (f receiver) (f access) (arguments.map f) (f after) unsafeAllowed
+  | .quantified binders requirements =>
+      .quantified (binders.map (fun binder => { binder with defaultValue := binder.defaultValue.map f }))
+        (requirements.map (Constraint.mapTerms f))
 
 def Constraint.substitute (substitution : Substitution) : Constraint → Constraint
   | .equal a b => .equal (a.substitute substitution) (b.substitute substitution)
@@ -208,6 +268,14 @@ structure Signature where
   constraints : List Constraint := []
   unsafeAllowed : Bool := false
   deriving Repr, Inhabited
+
+def Signature.close (signature : Signature) (scope : ScopeInstantiation) : Signature :=
+  { signature with
+    generics := signature.generics.map (fun binder => { binder with defaultValue := binder.defaultValue.map scope.term })
+    parameters := signature.parameters.map scope.term
+    result := scope.term signature.result
+    effects := scope.term signature.effects
+    constraints := signature.constraints.map (Constraint.mapTerms scope.term) }
 
 inductive Visibility where
   | privateScope | publicScope | package | parent

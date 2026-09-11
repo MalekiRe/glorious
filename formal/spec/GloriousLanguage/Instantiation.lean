@@ -28,6 +28,8 @@ def Pattern.mapTerms (f : Term → Term) : Pattern → Pattern
 
 def Atom.mapTerms (f : Term → Term) : Atom → Atom
   | .constant value => .constant (f value)
+  | .borrow source mode region => .borrow source mode (f region)
+  | .label brand => .label (f brand)
   | .construct type variant fields => .construct (f type) variant fields
   | .closure id arguments captures => .closure id (arguments.map f) (captures.map (Capture.mapTerms f))
   | .function id arguments => .function id (arguments.map f)
@@ -37,6 +39,13 @@ def Atom.mapTerms (f : Term → Term) : Atom → Atom
 
 def Invocation.instantiate (call : Invocation) (substitution : Substitution) : Invocation :=
   { call with signature := call.signature.instantiate substitution }
+
+/-- Only the selected clause's header is closed here. Its body remains lexical
+until execution enters it, including its fresh continuation binder. -/
+def OperationArm.closeHead (scope : ScopeInstantiation) : OperationArm → OperationArm
+  | .clause id family item patterns continuation body => .clause id
+      (family.map scope.term) (item.map scope.term) (patterns.map (Pattern.mapTerms scope.term))
+      continuation body
 
 mutual
   def Code.instantiate (substitution : Substitution) : Code → Code

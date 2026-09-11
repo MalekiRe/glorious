@@ -48,7 +48,7 @@ def Relocation.pointer (map : Relocation) (pointer : RawPointer) : RawPointer :=
     else pointer
 
 def Relocation.term (map : Relocation) : Term → Term
-  | .rigid id .region level => .rigid (map.region id) .region level
+  | .runtimeRegion id => .runtimeRegion (map.region id)
   | .tuple fields => .tuple (fields.map map.term)
   | .array a b => .array (map.term a) (map.term b)
   | .reference mode a b => .reference mode (map.term a) (map.term b)
@@ -128,7 +128,9 @@ def Relocation.context (map : Relocation) (context : Context) : Context :=
       authority := match binding.authority with | .owner => .owner | .loan id => .loan (map.loan id) })
     activation := map.activation context.activation
     scope := map.scope context.scope
-    region := map.region context.region }
+    region := map.region context.region
+    instantiation := { context.instantiation with
+      regions := context.instantiation.regions.map (fun (lexical,runtime) => (lexical,map.region runtime)) } }
 
 def Relocation.installed (map : Relocation) (handler : InstalledHandler) : InstalledHandler :=
   { handler with

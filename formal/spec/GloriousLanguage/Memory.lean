@@ -115,7 +115,7 @@ mutual
         EncodesFields program world runtime address (.bindings brand region types) 0 fields bytes →
         Encodes program world runtime address (.resident owner (.bindings brand region types) (.bindings id) true fields) layout bytes
     | proof {address value} : value.fields = [] → value.shellLive = true →
-        ((∃ brand region result, value.head = .label brand ∧ value.type = .label (.rigid brand .brand 0) region result) ∨
+        ((∃ brand region result, value.head = .label brand ∧ value.type = .label (.runtimeBrand (.label brand)) region result) ∨
          (∃ id brand region, value.head = .available id ∧ value.type = .available brand region)) →
         Encodes program world runtime address value ⟨0,1,[],0,0,[]⟩ []
 

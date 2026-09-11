@@ -26,6 +26,8 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
       Kinding program context (.quantity quantity) .quantity
   | parameter {binder} : binder ∈ context.binders → Kinding program context (.parameter binder.id binder.kind) binder.kind
   | rigid {id kind level} : level ≤ context.universeLevel → Kinding program context (.rigid id kind level) kind
+  | runtimeRegion {id} : Kinding program context (.runtimeRegion id) .region
+  | runtimeBrand {id} : Kinding program context (.runtimeBrand id) .brand
   | variable {id kind level} : level ≤ context.universeLevel → Kinding program context (.variable id kind level) kind
   | unit : Kinding program context .unit .type
   | bottom : Kinding program context .bottom .type

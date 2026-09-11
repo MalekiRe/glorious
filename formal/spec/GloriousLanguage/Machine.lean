@@ -13,7 +13,7 @@ structure Context where
   activation : Identity
   scope : Identity
   region : Identity
-  labels : Table Identity := []
+  instantiation : ScopeInstantiation := {}
   unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
@@ -22,6 +22,19 @@ def Context.static (context : Context) : Language.Context :=
 
 def Context.bind (context : Context) (localSlot : Local) (address : Address) (authority : Authority := .owner) : Context :=
   { context with environment := ⟨localSlot.id,address,authority⟩ :: context.environment.filter (fun entry => entry.localSlot != localSlot.id) }
+
+def Context.bindRegion (context : Context) (lexical runtime : Identity) : Context :=
+  { context with instantiation := { context.instantiation with regions := context.instantiation.regions.set lexical runtime } }
+
+def Context.bindBrand (context : Context) (lexical : Identity) (runtime : RuntimeBrand) : Context :=
+  { context with instantiation := { context.instantiation with brands := context.instantiation.brands.set lexical runtime } }
+
+def Context.term (context : Context) := context.instantiation.term
+
+def Context.local (context : Context) (localSlot : Local) := localSlot.mapTerms context.term
+
+def Context.invocation (context : Context) (call : Invocation) : Invocation :=
+  { call with signature := call.signature.close context.instantiation }
 
 structure InstalledHandler where
   identity : Identity
@@ -192,7 +205,9 @@ def EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
     BindsInputs program.declarations before.nextActivation before.world.nextRegion before.world.nextRegion
       withRegion inputs environment after ∧
     context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
-      (match function.namedExit with | none => [] | some label => [(label,before.nextBrand)]),false⟩ ∧
+      (match function.namedExit with
+       | none => {}
+       | some label => ⟨[(label,before.world.nextRegion)],[(label,.label before.nextBrand)]⟩),false⟩ ∧
     (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
 
 def FreshNamedFrame (function : Function) (caller : Context) (brand region : Identity) : List Frame :=
@@ -216,17 +231,18 @@ def ScheduledPattern (actions : PatternActions) : List PatternAction :=
   actions.shells ++ actions.bindings ++ actions.cleanup
 
 inductive LocalStep (program : Kernel.Program) : State → Option Event → State → Prop where
-  | evaluate {before context localSlot value next address allocated layout} :
-      before.task = .run context (.evaluate localSlot value next) →
+  | evaluate {before context lexical localSlot value next address allocated layout} :
+      before.task = .run context (.evaluate lexical value next) → localSlot = context.local lexical →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         localSlot.type layout localSlot.mutable address allocated →
       LocalStep program before (some (.allocate address))
         { before with world := allocated, task := .run context value, frames := .binding (context.bind localSlot address) address next :: before.frames }
-  | bind {before context localSlot atom next address allocated layout} : before.task = .run context (.bind localSlot atom next) →
+  | bind {before context lexical localSlot atom next address allocated layout} :
+      before.task = .run context (.bind lexical atom next) → localSlot = context.local lexical →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         localSlot.type layout localSlot.mutable address allocated →
       LocalStep program before (some (.allocate address))
-        { before with world := allocated, task := .atom (context.bind localSlot address) address atom next }
+        { before with world := allocated, task := .atom (context.bind localSlot address) address (atom.mapTerms context.term) next }
   | result {before context place address authority value kept after} : before.task = .run context (.result place) →
       ResolvesPlace before.world context.environment place address authority → before.world.Stores address value →
       Protect program context before.world address authority kept after →
@@ -244,12 +260,13 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
   | transfer {before source authority destination next after} : before.task = .transfer source authority destination next →
       Transfers before.world authority source destination after →
       LocalStep program before (some (.move source destination)) { before with world := after, task := next }
-  | invoke {before context result call next destination allocated layout} : before.task = .run context (.invoke result call next) →
+  | invoke {before context lexical result call next destination allocated layout} :
+      before.task = .run context (.invoke lexical call next) → result = context.local lexical →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         result.type layout result.mutable destination allocated →
-      LocalStep program before (some (.allocate destination)) { before with world := allocated, task := .apply context call false, frames := .binding (context.bind result destination) destination next :: before.frames }
+      LocalStep program before (some (.allocate destination)) { before with world := allocated, task := .apply context (context.invocation call) false, frames := .binding (context.bind result destination) destination next :: before.frames }
   | tailRequest {before context call} : before.task = .run context (.tail call) →
-      LocalStep program before none { before with task := .apply context call true }
+      LocalStep program before none { before with task := .apply context (context.invocation call) true }
   | call {before context call tail receiver authority id arguments function captures inputs consumed} :
       before.task = .apply context call tail →
       ResolvesPlace before.world context.environment call.callee receiver authority →
@@ -281,22 +298,22 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with task := .stopped value }
   | scope {before context identity body after inner} : before.task = .run context (.scope identity body) →
       FreshRegion before.world before.world.nextRegion after →
-      inner = { context with scope := before.world.nextRegion, region := before.world.nextRegion } →
+      inner = { context.bindRegion identity before.world.nextRegion with scope := before.world.nextRegion, region := before.world.nextRegion } →
       LocalStep program before none { before with world := after, task := .run inner body, frames := .scope context inner.scope inner.region :: before.frames }
   | scopeReturn {before context value outer scope region rest kept after roots} : before.task = .yield context value →
       before.frames = .scope outer scope region :: rest → Protect program outer before.world value .owner kept after →
       ScopeRoots after context.activation scope [] roots → Suspensible after roots →
       LocalStep program before none { before with world := after, task := .cleanup context roots (.closeRegion region (.yield outer kept)), frames := rest }
   | label {before context lexical region result body inner} : before.task = .run context (.label lexical region result body) →
-      inner = { context with labels := context.labels.set lexical before.nextBrand } →
-      LocalStep program before none { before with task := .run inner body, frames := .label context before.nextBrand context.region result :: before.frames, nextBrand := before.nextBrand+1 }
+      inner = (context.bindRegion region context.region).bindBrand lexical (.label before.nextBrand) →
+      LocalStep program before none { before with task := .run inner body, frames := .label context before.nextBrand context.region (inner.term result) :: before.frames, nextBrand := before.nextBrand+1 }
   | labelReturn {before context value outer brand region result rest} : before.task = .yield context value →
       before.frames = .label outer brand region result :: rest →
       LocalStep program before none { before with task := .yield outer value, frames := rest }
   | choose {before context subject arms address authority arm actions} : before.task = .run context (.choose subject arms) →
       ResolvesPlace before.world context.environment subject address authority →
       FirstArm program.declarations before.world address arms arm →
-      PatternPlan program.declarations before.world address authority .owned arm.pattern actions →
+      PatternPlan program.declarations before.world address authority .owned (arm.pattern.mapTerms context.term) actions →
       LocalStep program before none { before with task := .pattern context (ScheduledPattern actions) arm.body }
   | patternDone {before context body} : before.task = .pattern context [] body →
       LocalStep program before none { before with task := .run context body }
@@ -326,7 +343,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       before.task = .destroy context address authority next → before.world.Stores address value → value.shellLive = true →
       MayDispose program.declarations value → DropHook program.declarations value.type (some hook) →
       Instance program hook [] function → function.parameters.length = 1 → function.captures = [] →
-      Temporary program context (.reference .unique (.rigid context.region .region 0) value.type) before.world handle withHandle →
+      Temporary program context (.reference .unique (.runtimeRegion context.region) value.type) before.world handle withHandle →
       Borrows program.declarations withHandle authority .unique context.region address handle after → loan = withHandle.nextLoan →
       LocalStep program before (some (.hookEnter address hook)) { before with world := after, task := .enter { context with unsafeAllowed := false } function [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩] false, frames := .hook context address authority handle loan next :: before.frames }
   | hookReturned {before context result outer address authority handle loan next rest} : before.task = .yield context result →

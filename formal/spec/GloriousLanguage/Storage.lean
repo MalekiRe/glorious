@@ -302,7 +302,7 @@ inductive Borrows (program : Program) :
       before.Vacant destination →
       parent = (match authority with | .owner => none | .loan id => some id) →
       before.write destination (some (.resident before.nextOwner
-        (.reference mode (.rigid region .region 0) value.type) (.reference before.nextLoan) true [])) = some after →
+        (.reference mode (.runtimeRegion region) value.type) (.reference before.nextLoan) true [])) = some after →
       Borrows program before authority mode region referent destination
         { after with
           loans := before.loans.set before.nextLoan ⟨before.nextLoan,parent,referent,mode,region,true⟩

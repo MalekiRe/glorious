@@ -173,7 +173,7 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       StoresUnit program written destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
   | rawBorrow {before context destination binding type pointerAddress next pointer mode after} :
-      before.task = .primitive context destination binding [.reference mode (.rigid context.region .region 0) type] [pointerAddress] next →
+      before.task = .primitive context destination binding [.reference mode (.runtimeRegion context.region) type] [pointerAddress] next →
       binding.primitive = some .rawBorrow → PointerAt before.world pointerAddress pointer →
       RawBorrow program.declarations before.world pointer type mode context.region destination after →
       PrimitiveStep program before (some (.borrow ⟨pointer.allocation.getD 0,pointer.generation,[]⟩ before.world.nextLoan))

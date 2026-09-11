@@ -122,8 +122,9 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       AtomType program context (.acquire place force) type
   | borrow {place mode region type writable} : PlaceType program.declarations context place type writable →
       Addressable program.declarations context.static type →
+      WellKinded program.declarations context.static region .region →
       (mode = .unique → writable = true) →
-      AtomType program context (.borrow place mode region) (.reference mode (.rigid region .region 0) type)
+      AtomType program context (.borrow place mode region) (.reference mode region type)
   | construct {type variant fields fieldTypes head} : PlacesType program.declarations context fields fieldTypes →
       Execution.ConstructorHead program.declarations type variant fieldTypes head →
       WellKinded program.declarations context.static type .type → AtomType program context (.construct type variant fields) type
@@ -136,7 +137,7 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       CallSignature program.declarations context.static id (family ++ item) signature →
       AtomType program context (.operation id family item) (.callable id (family ++ item))
   | label {id region type} : (id,region,type) ∈ context.labels →
-      AtomType program context (.label id) (.label (.rigid id .brand 0) region type)
+      AtomType program context (.label (.rigid id .brand 0)) (.label (.rigid id .brand 0) region type)
   | primitive {id arguments operands binding substitution signature} : binding ∈ program.declarations.input.manifest.bindings →
       binding.declaration = id → Instantiates binding.signature.generics arguments substitution →
       signature = binding.signature.instantiate substitution → PlacesType program.declarations context operands signature.parameters →
@@ -157,6 +158,7 @@ mutual
         (match head with | .constructor id => some id | _ => none) types head →
         FieldsTyped program world fields types → ValueTyped program world (.resident owner type head live fields)
     | reference {owner mode region type id loan live} : world.loans.get id = some loan → loan.live = true → loan.mode = mode →
+        region = .runtimeRegion loan.region →
         (∃ value, world.Stores loan.referent value ∧ value.type = type) →
         ValueTyped program world (.resident owner (.reference mode region type) (.reference id) live [])
     | pointer {owner mode type pointer live} : pointer.address < 2^program.declarations.input.target.pointerBits →
@@ -167,12 +169,15 @@ mutual
     | operation {owner id arguments live operation signature} : Execution.OperationInstance program id arguments operation signature →
         ValueTyped program world (.resident owner (.callable id arguments) (.operation id arguments) live [])
     | label {owner brand region result live} : ValueTyped program world
-        (.resident owner (.label (.rigid brand .brand 0) region result) (.label brand) live [])
-    | continuation {owner type id live} : (∃ brand argument answer effects quantity, type = .continuation brand argument answer effects quantity) →
+        (.resident owner (.label (.runtimeBrand (.label brand)) region result) (.label brand) live [])
+    | continuation {owner type id live} : (∃ argument answer effects quantity,
+        type = .continuation (.runtimeBrand (.resumption id)) argument answer effects quantity) →
         ValueTyped program world (.resident owner type (.continuation id) live [])
     | available {owner brand region id live available} : world.availability.get id = some available → available.brand = brand →
+        brand = .runtimeBrand (.proof id) → region = .runtimeRegion available.region →
         ValueTyped program world (.resident owner (.available brand region) (.available id) live [])
     | bindings {owner brand region id live fields types pack} : world.bindings.get id = some pack → FieldsTyped program world fields types →
+        brand = .runtimeBrand (.proof id) → region = .runtimeRegion pack.region →
         fields.length = pack.fields.length → ValueTyped program world (.resident owner (.bindings brand region types) (.bindings id) live fields)
 
   inductive FieldsTyped (program : Kernel.Program) (world : World) : List (Option Value) → List Term → Prop where

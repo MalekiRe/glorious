@@ -160,3 +160,32 @@ This still does not prove snapshot simulation, global preservation/progress,
 or complete replayable-control coverage. In particular, the conservative
 label-frame replay restriction and lexical-to-runtime generative type closure
 remain actual adequacy work, not completed metatheorems.
+
+## Runtime scope instantiation
+
+`lake build` passes all 32 jobs. Lexical rigid names and concrete runtime
+regions/brands now have separate term constructors. Runtime brands distinguish
+labels, resumptions and proof tokens even when their numeric identities match.
+One scope-instantiation operation closes allocation types, atoms, invocation
+signatures, pattern bindings, handler captures and selected clause headers.
+Scope entry, named exits, labels, resumptions and proof-producing control rules
+bind their fresh identities through that operation. The old runtime label-only
+table is removed. A theorem proves scope instantiation preserves term kind.
+
+Borrow and label operands are terms, so ordinary generic instantiation reaches
+them. Borrow execution uses the stated concrete region, not the innermost
+allocation region; captured references likewise use their own region. Runtime
+value typing checks reference regions against loans and separates control-token
+brands. Snapshot relocation changes concrete regions and their scope mappings,
+never lexical binders. Source borrowing now consumes the current lexical scope
+instead of guessing an unrelated region. Focused propositions cover namespace
+separation, concrete-identity stability, closed runtime regions, relocation and
+rejection of unresolved lexical operands in executable atom rules.
+
+This completes an execution-boundary repair, not the whole generative-typing
+obligation. Anonymous closure elaboration still needs hidden region/brand
+arguments through the existing `Instantiates` relation and a fresh body scope;
+source continuation-pattern binding and proof-carrier type derivation are also
+incomplete. Runtime control authority, full snapshot simulation, source
+nonvacuity and global preservation/progress remain unproved. No compiler or
+library code or acceptance tests were changed or run.

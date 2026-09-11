@@ -67,7 +67,7 @@ inductive CopiesObservations (program : Kernel.Program) (context : Context) :
       CopiesObservations program context copied rest bindings loans after →
       CopiesObservations program context before ((localSlot,source,authority) :: rest) ((localSlot,destination) :: bindings) loans after
   | borrow {before localSlot source authority rest destination allocated borrowed bindings loans after value mode} :
-      before.Stores source value → localSlot.type = .reference mode (.rigid context.region .region 0) value.type →
+      before.Stores source value → localSlot.type = .reference mode (.runtimeRegion context.region) value.type →
       Temporary program context localSlot.type before destination allocated →
       Borrows program.declarations allocated authority mode context.region source destination borrowed →
       CopiesObservations program context borrowed rest bindings loans after →
@@ -78,7 +78,7 @@ def PacksBindings (program : Kernel.Program) (context : Context) (before : World
     (positive : Bool) (bindings : List (Local × Address)) (loans : List Identity)
     (pack : Address) (after : World) : Prop :=
   ∃ allocated created type,
-    type = .bindings (.rigid before.nextProof .brand 0) (.rigid context.region .region 0) (bindings.map (fun entry => entry.1.type)) ∧
+    type = .bindings (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion context.region) (bindings.map (fun entry => entry.1.type)) ∧
     Temporary program context type before pack allocated ∧
     NewValue program.declarations allocated pack type (.bindings before.nextProof) (bindings.map Prod.snd) created ∧
     after = { created with nextProof := before.nextProof+1, bindings := created.bindings.set before.nextProof ⟨before.nextProof,pattern,before.nextProof,positive,context.region, bindings.zipIdx.map (fun (entry,index) => (entry.1.id,pack.child index)),loans⟩ }
@@ -131,16 +131,18 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       Protect program outerContext before.world argument .owner kept after →
       AbandonedRoots after inner [kept.root] roots → Cancelable program.declarations after roots →
       ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield outerContext kept)) }
-  | reserve {before context localSlot brand places next addresses allocated destination after layout} :
-      before.task = .run context (.reserve localSlot brand places next) → Addresses before.world context.environment places addresses →
+  | reserve {before context lexical bound localSlot brand places next addresses allocated destination after layout} :
+      before.task = .run context (.reserve lexical brand places next) →
+      bound = context.bindBrand brand (.proof before.world.nextProof) → localSlot = bound.local lexical →
+      Addresses before.world context.environment places addresses →
       addresses.Nodup → (∀ a ∈ addresses, ∀ b ∈ addresses, a ≠ b → ¬ a.Overlaps b) →
       (∀ id available, before.world.availability.get id = some available → available.active = true →
         ∀ a ∈ available.reserved, ∀ b ∈ addresses, ¬ a.Overlaps b) →
-      localSlot.type = .available (.rigid brand .brand 0) (.rigid context.region .region 0) →
+      localSlot.type = .available (.runtimeBrand (.proof before.world.nextProof)) (.runtimeRegion context.region) →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region localSlot.type layout
         localSlot.mutable destination allocated →
       NewValue program.declarations allocated destination localSlot.type (.available before.world.nextProof) [] after →
-      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1, availability := after.availability.set before.world.nextProof ⟨before.world.nextProof,.rigid brand .brand 0,context.region,addresses,true⟩ }, task := .run (context.bind localSlot destination) next }
+      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1, availability := after.availability.set before.world.nextProof ⟨before.world.nextProof,.runtimeBrand (.proof before.world.nextProof),context.region,addresses,true⟩ }, task := .run (bound.bind localSlot destination) next }
   | available {before context destination id next source authority after} :
       before.task = .atom context destination (.available id) next →
       (∃ binding ∈ context.environment, binding.address = source ∧ binding.authority = authority ∧
@@ -174,24 +176,28 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       after = { before.world with availability := before.world.availability.set token { available with active := if call.receiver = .owned then false else true } } →
       ControlStep program before (some (.call id (captures ++ inputs)))
         { before with world := after, task := .enter context function (captures ++ inputs) tail }
-  | positiveTest {before context localSlot subject pattern patternId next source authority bindings destination allocated after layout} :
-      before.task = .run context (.test localSlot subject pattern patternId next) →
+  | positiveTest {before context lexical bound localSlot subject sourcePattern pattern patternId next source authority bindings destination allocated after layout} :
+      before.task = .run context (.test lexical subject sourcePattern patternId next) →
+      bound = context.bindBrand patternId (.proof before.world.nextProof) → localSlot = bound.local lexical →
+      pattern = sourcePattern.mapTerms bound.term →
       ResolvesPlace before.world context.environment subject source authority →
       Matches program.declarations before.world source pattern → ObservedBindings program before.world source authority pattern bindings →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         localSlot.type layout localSlot.mutable destination allocated →
-      TestResult program context allocated destination localSlot.type patternId true bindings after →
+      TestResult program bound allocated destination localSlot.type patternId true bindings after →
       ControlStep program before (some (.branch patternId true))
-        { before with world := after, task := .run (context.bind localSlot destination) next }
-  | negativeTest {before context localSlot subject pattern patternId next source authority destination allocated after layout} :
-      before.task = .run context (.test localSlot subject pattern patternId next) →
+        { before with world := after, task := .run (bound.bind localSlot destination) next }
+  | negativeTest {before context lexical bound localSlot subject sourcePattern pattern patternId next source authority destination allocated after layout} :
+      before.task = .run context (.test lexical subject sourcePattern patternId next) →
+      bound = context.bindBrand patternId (.proof before.world.nextProof) → localSlot = bound.local lexical →
+      pattern = sourcePattern.mapTerms bound.term →
       ResolvesPlace before.world context.environment subject source authority → before.world.Initialized source →
       Permitted before.world authority .shared source → ¬ Matches program.declarations before.world source pattern →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         localSlot.type layout localSlot.mutable destination allocated →
-      TestResult program context allocated destination localSlot.type patternId false [] after →
+      TestResult program bound allocated destination localSlot.type patternId false [] after →
       ControlStep program before (some (.branch patternId false))
-        { before with world := after, task := .run (context.bind localSlot destination) next }
+        { before with world := after, task := .run (bound.bind localSlot destination) next }
   | bindings {before context destination id next source authority after} : before.task = .atom context destination (.bindings id) next →
       (∃ binding ∈ context.environment, binding.address = source ∧ binding.authority = authority ∧
         ∃ value, before.world.Stores source value ∧ value.head = .bindings id) →
