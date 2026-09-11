@@ -1,4 +1,9 @@
-# Executable Lean semantics — in progress
+# Earlier executable compiler draft — reference
+
+This project is retained as reference. Current work is the independent
+[formal language specification](../spec/README.md), which does not import
+this implementation. The failed whole-compiler proof attempt below is not
+a completed proof or the foundation of that specification.
 
 **Current working draft:** a mandatory, request-indexed whole-compiler proof
 attempt is wired into the implementation and driver. The general compiler-phase
