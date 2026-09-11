@@ -122,17 +122,13 @@ def ObjectBytes (program : Language.Program) (world : World) (runtime : RuntimeA
       ∃ value, root.value = some value ∧ Encodes program world runtime ⟨id,root.generation,[]⟩ value root.layout bytes ∧
         ∀ offset, ¬ OccupiesByte program world id offset → bytes[offset]? = some none)
 
-def DisjointAllocation (world : World) (base size : Nat) : Prop :=
-  ∀ id root, world.roots.get id = some root → root.live = true →
-    size = 0 ∨ root.layout.size = 0 ∨ base+size ≤ root.base ∨ root.base+root.layout.size ≤ base
-
 inductive AllocatesBuffer (program : Language.Program) :
     World → Identity → Term → Nat → Nat → RawPointer → World → Prop where
   | fresh {before domain element count base elementLayout layout} :
       domain ∈ program.input.manifest.allocationDomains → LayoutOf program ⟨[],[],0,default,true⟩ element elementLayout →
       ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
       base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
-      DisjointAllocation before base layout.size →
+      DisjointStorage before base layout.size →
       AllocatesBuffer program before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
         { before with
           roots := before.roots.set before.nextRoot ⟨.allocation domain,0,before.nextRegion,base,layout,

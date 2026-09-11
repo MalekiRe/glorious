@@ -94,17 +94,21 @@ theorem Quantity.sequence_contains {a b : Quantity} {m n : Nat}
   rcases b with ⟨bl, bu⟩
   cases au <;> cases bu <;> simp_all [Contains, sequence] <;> omega
 
+variable {α β : Type}
+
 inductive ListRel (relation : α → β → Prop) : List α → List β → Prop where
   | nil : ListRel relation [] []
   | cons {a b as bs} : relation a b → ListRel relation as bs →
       ListRel relation (a :: as) (b :: bs)
 
-theorem ListRel.length_eq (related : ListRel relation as bs) : as.length = bs.length := by
+theorem ListRel.length_eq {relation : α → β → Prop} {as : List α} {bs : List β}
+    (related : ListRel relation as bs) : as.length = bs.length := by
   induction related with
   | nil => rfl
   | cons _ _ ih => simpa using congrArg Nat.succ ih
 
-theorem ListRel.append (left : ListRel relation as bs) (right : ListRel relation cs ds) :
+theorem ListRel.append {relation : α → β → Prop} {as cs : List α} {bs ds : List β}
+    (left : ListRel relation as bs) (right : ListRel relation cs ds) :
     ListRel relation (as ++ cs) (bs ++ ds) := by
   induction left with
   | nil => exact right
@@ -141,7 +145,7 @@ theorem Table.get_set_other (table : Table α) (key other : Identity) (value : �
       · simpa [set, erase, get, equalKey, equalOther, different, Ne.symm different] using ih
 
 inductive Failure where
-  | lexical | syntax | name | ambiguous | privacy | kind | type | coherence
+  | lexical | syntaxNode | name | ambiguous | privacy | kind | type | coherence
   | unresolved | unavailableBody | unsupportedRepresentation
   | ownership | initialization | borrow | escaping | unsafeContract
   | effect | resumption | tail | target | importContract
@@ -166,6 +170,8 @@ structure TransitionSystem (Event Result : Type) where
   step : State → Option Event → State → Prop
   final : State → Result → Prop
   invalid : State → Prop
+
+variable {Event Result : Type}
 
 namespace TransitionSystem
 
@@ -224,7 +230,8 @@ theorem Preserves.refl (system : TransitionSystem Event Result) : Preserves syst
   noNewDivergence events h := ⟨events, h, fun _ => Iff.rfl⟩
   safety := id
 
-theorem Preserves.trans (first : Preserves a b) (second : Preserves b c) : Preserves a c where
+theorem Preserves.trans {a b c : TransitionSystem Event Result}
+    (first : Preserves a b) (second : Preserves b c) : Preserves a c where
   prefixes trace := (first.prefixes trace).trans (second.prefixes trace)
   results trace result := (first.results trace result).trans (second.results trace result)
   divergence events h := by

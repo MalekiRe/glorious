@@ -110,7 +110,7 @@ inductive ByteQuoted (delimiter : Nat) : Text → List Nat → Prop where
   | basic {chars c rest values} : Escape chars c → c < 128 →
       ByteQuoted delimiter rest values → ByteQuoted delimiter (chars ++ rest) (c :: values)
   | byte {a b x y rest values} : Digit a x → Digit b y → x < 16 → y < 16 →
-      ByteQuoted delimiter rest values → ByteQuoted delimiter ([92,120,a,b] ++ rest) (16*x+y :: values)
+      ByteQuoted delimiter rest values → ByteQuoted delimiter ([92,120,a,b] ++ rest) ((16*x+y) :: values)
 
 inductive IntegerSuffix : Option Scalar → Text → Prop where
   | absent : IntegerSuffix none []
@@ -147,11 +147,11 @@ inductive SpellsToken : Token → Text → Prop where
       (∀ c ∈ text s, c ∈ text "+-%!<>=^~?") →
       s ∉ ["=","->","=>","<",">","!","+","-","%","==","!=","<=",">="] →
       SpellsToken (.symbol s) (text s)
-  | integer {base prefix chars digits suffix suffixChars} :
-      (base = 10 ∧ prefix = [] ∨ base = 2 ∧ prefix = text "0b" ∨
-       base = 8 ∧ prefix = text "0o" ∨ base = 16 ∧ prefix = text "0x") →
+  | integer {base prefixForm chars digits suffix suffixChars} :
+      (base = 10 ∧ prefixForm = [] ∨ base = 2 ∧ prefixForm = text "0b" ∨
+       base = 8 ∧ prefixForm = text "0o" ∨ base = 16 ∧ prefixForm = text "0x") →
       Digits base chars digits → IntegerSuffix suffix suffixChars →
-      SpellsToken (.literal (.integer ⟨base,digits,suffix⟩)) (prefix ++ chars ++ suffixChars)
+      SpellsToken (.literal (.integer ⟨base,digits,suffix⟩)) (prefixForm ++ chars ++ suffixChars)
   | float {wholeChars whole fractionChars fraction exponentChars exponent suffixChars suffix} :
       Digits 10 wholeChars whole →
       (fractionChars = [] ∧ fraction = [] ∨ ∃ chars, Digits 10 chars fraction ∧ fractionChars = 46 :: chars) →
@@ -194,7 +194,7 @@ structure LocatedToken where
   deriving Repr, Inhabited
 
 inductive Tokenizes (file : Identity) : Nat → List Nat → List LocatedToken → Prop where
-  | end {offset bytes chars} : Decodes bytes chars → Trivia chars → Tokenizes file offset bytes []
+  | done {offset bytes chars} : Decodes bytes chars → Trivia chars → Tokenizes file offset bytes []
   | finalComment {offset prefixBytes commentBytes prefixChars commentChars} :
       Decodes prefixBytes prefixChars → Trivia prefixChars → Decodes commentBytes commentChars →
       10 ∉ commentChars → 13 ∉ commentChars →
@@ -242,7 +242,7 @@ inductive Pattern where
 inductive Predicate where
   | equal (a b : TypeExpr)
   | outlives (a b : TypeExpr)
-  | bound (subject : TypeExpr) (trait : Path) (arguments : List TypeExpr) (unsafe : Bool) (negative : Bool)
+  | bound (subject : TypeExpr) (trait : Path) (arguments : List TypeExpr) (unsafeAllowed : Bool) (negative : Bool)
   | quantified (binders : List (String × Kind)) (requirements : List Predicate)
   deriving Repr, Inhabited
 
@@ -265,14 +265,14 @@ structure FunctionHead where
   result : TypeExpr := .unit
   effects : TypeExpr := .row [] []
   requirements : List Predicate := []
-  unsafe : Bool := false
+  unsafeAllowed : Bool := false
   cABI : Bool := false
   deriving Repr, Inhabited
 
 structure Field where
   name : Option String
   type : TypeExpr
-  visibility : Visibility := .private
+  visibility : Visibility := .privateScope
   deriving Repr, Inhabited
 
 structure Variant where
@@ -297,7 +297,7 @@ inductive ImportTree where
   deriving Repr, Inhabited
 
 inductive FixityKind where
-  | left | right | nonassoc | prefix
+  | left | right | nonassoc | prefixForm
   deriving DecidableEq, BEq, Repr, Inhabited
 
 inductive Attribute where
@@ -327,7 +327,7 @@ mutual
     | tail (callee : Expr) (arguments : List Expr)
     | unsafeBlock (body : Expr)
     | operators (first : Expr) (rest : List (String × Expr))
-    | prefix (operator : String) (operand : Expr)
+    | prefixForm (operator : String) (operand : Expr)
     deriving Repr, Inhabited
 
   inductive Statement where
@@ -349,9 +349,9 @@ mutual
     | enumeration (name : String) (generics : List Generic) (variants : List Variant)
         (requirements : List Predicate)
     | trait (name : String) (generics : List Generic) (requirements : List Predicate)
-        (members : List Declaration) (unsafe : Bool)
+        (members : List Declaration) (unsafeAllowed : Bool)
     | implementation (generics : List Generic) (trait : Option TypeExpr) (self : TypeExpr)
-        (requirements : List Predicate) (members : List Declaration) (unsafe negative : Bool)
+        (requirements : List Predicate) (members : List Declaration) (unsafeAllowed negative : Bool)
     | associated (name : String) (generics : List Generic) (kind : Kind)
         (requirements : List Predicate) (value : Option TypeExpr)
     | effect (name : String) (generics : List Generic) (requirements : List Predicate)
@@ -362,7 +362,7 @@ mutual
     | module (name : String) (inline : Option (List Declaration))
     | import (tree : ImportTree)
     | fixity (kind : FixityKind) (precedence : Nat) (operator : String) (target : Option Path)
-    | foreign (members : List Declaration) (unsafe : Bool)
+    | foreign (members : List Declaration) (unsafeAllowed : Bool)
     | visible (visibility : Visibility) (declaration : Declaration)
     | attributed (attributes : List Attribute) (declaration : Declaration)
     deriving Repr, Inhabited

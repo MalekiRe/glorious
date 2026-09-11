@@ -57,15 +57,15 @@ def Value.withFields (value : Value) (fields : List (Option Value)) : Value :=
 
 def Value.atPath : Value → List Nat → Option Value
   | value, [] => some value
-  | value, field :: rest => (value.fields[field]?).flatten >>= fun child => child.atPath rest
+  | value, field :: rest => (value.fields[field]?).join >>= fun child => child.atPath rest
 
 def Value.replace : Value → List Nat → Option Value → Option Value
   | _, [], value => value
   | parent, field :: rest, value => do
-    let child ← (parent.fields[field]?).flatten
-    let changed := child.replace rest value
+    let slot ← parent.fields[field]?
     if rest.isEmpty then some (parent.withFields (parent.fields.set field value)) else do
-      let changed ← changed
+      let child ← slot
+      let changed ← child.replace rest value
       some (parent.withFields (parent.fields.set field (some changed)))
 
 inductive ResidentAt : Value → List Nat → Value → Prop where
@@ -78,7 +78,7 @@ def Value.Initialized (value : Value) : Prop :=
     ∀ field ∈ resident.fields, field.isSome = true
 
 inductive Home where
-  | local (activation scope : Identity)
+  | localSlot (activation scope : Identity)
   | temporary (activation scope : Identity)
   | capture (owner : Identity)
   | suspended (continuation : Identity)
@@ -189,8 +189,7 @@ def Conflict (requested : Access) (existing : Mutability) : Prop :=
   requested ≠ .shared ∨ existing = .unique
 
 def Permitted (world : World) (authority : Authority) (requested : Access) (address : Address) : Prop :=
-  (∃ root, world.root address = some root ∧
-    (requested = .shared ∨ root.mutable = true ∨ requested = .owned)) ∧
+  (∃ root, world.root address = some root) ∧
   (match authority with
    | .owner => ∀ id loan, world.loans.get id = some loan → loan.live = true →
        address.Overlaps loan.referent → ¬ Conflict requested loan.mode
@@ -217,41 +216,51 @@ def World.WellFormed (world : World) : Prop :=
     left.live = true → right.live = true → left.referent.Overlaps right.referent →
     left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a)
 
-inductive CopyValue (program : Program) : Nat → Value → Nat → Value → Prop where
-  | resident {next owner type head fields copied finish} : PrincipalOf program type .duplicable →
-      CopyFields program (next+1) fields finish copied →
-      CopyValue program next (.resident owner type head true fields) finish (.resident next type head true copied)
+mutual
+  inductive CopyValue (program : Program) : Nat → Value → Nat → Value → Prop where
+    | resident {next owner type head fields copied finish} : PrincipalOf program type .duplicable →
+        CopyFields program (next+1) fields finish copied →
+        CopyValue program next (.resident owner type head true fields) finish (.resident next type head true copied)
 
-inductive CopyFields (program : Program) : Nat → List (Option Value) → Nat → List (Option Value) → Prop where
-  | nil {next} : CopyFields program next [] next []
-  | cons {next middle finish value copied rest copies} : CopyValue program next value middle copied →
-      CopyFields program middle rest finish copies → CopyFields program next (some value :: rest) finish (some copied :: copies)
+  inductive CopyFields (program : Program) : Nat → List (Option Value) → Nat → List (Option Value) → Prop where
+    | nil {next} : CopyFields program next [] next []
+    | cons {next middle finish value copied rest copies} : CopyValue program next value middle copied →
+        CopyFields program middle rest finish copies → CopyFields program next (some value :: rest) finish (some copied :: copies)
+end
 
-/-- Allocation introduces a storage home, never an initialized owner by fiat. -/
+def DisjointStorage (world : World) (base size : Nat) : Prop :=
+  ∀ id root, world.roots.get id = some root → root.live = true →
+    size = 0 ∨ root.layout.size = 0 ∨ base+size ≤ root.base ∨ root.base+root.layout.size ≤ base
+
+/-- Allocation introduces a storage home at a fresh, aligned physical extent,
+never an initialized owner. Zero-sized homes retain separate logical identity. -/
 inductive Allocates (program : Program) : World → Home → Identity → Term → Layout → Bool → Address → World → Prop where
-  | fresh {before home region type layout mutable} : region ∈ before.liveRegions → layout.Valid →
+  | fresh {before home region type layout mutable base} : region ∈ before.liveRegions → layout.Valid →
       layout.size ≤ program.input.target.maximumObjectBytes →
       (∃ context, LayoutOf program context type layout) →
+      0 < base → base % layout.alignment = 0 → base + layout.size < 2^program.input.target.pointerBits →
+      DisjointStorage before base layout.size →
       Allocates program before home region type layout mutable ⟨before.nextRoot,0,[]⟩
         { before with
           roots := before.roots.set before.nextRoot
-            ⟨home,0,region,0,layout,type,none,mutable,before.clock,true,List.replicate layout.size none⟩
+            ⟨home,0,region,base,layout,type,none,mutable,before.clock,true,List.replicate layout.size none⟩
           nextRoot := before.nextRoot+1
           clock := before.clock+1 }
-
-inductive NewValue (program : Program) : World → Address → Term → ValueHead → List Address → World → Prop where
-  | construct {before destination type head sources residents taken after} : before.Vacant destination →
-      ListRel (World.Stores before) sources residents →
-      (sources.map (fun address => (address.root,address.fields))).Nodup →
-      (∀ source ∈ sources, Permitted before .owner .owned source ∧ source ≠ destination) →
-      Clears before sources taken →
-      taken.write destination (some (.resident before.nextOwner type head true (residents.map some))) = some after →
-      NewValue program before destination type head sources { after with nextOwner := before.nextOwner+1 }
 
 inductive Clears : World → List Address → World → Prop where
   | nil {world} : Clears world [] world
   | cons {before address rest middle after} : before.write address none = some middle →
       Clears middle rest after → Clears before (address :: rest) after
+
+inductive NewValue (program : Program) : World → Address → Term → ValueHead → List Address → World → Prop where
+  | construct {before destination type head sources residents taken after} : before.Vacant destination →
+      ListRel (World.Stores before) sources residents →
+      (∀ resident ∈ residents, resident.Initialized) →
+      (sources.map (fun address => (address.root,address.fields))).Nodup →
+      (∀ source ∈ sources, Permitted before .owner .owned source ∧ source ≠ destination) →
+      Clears before sources taken →
+      taken.write destination (some (.resident before.nextOwner type head true (residents.map some))) = some after →
+      NewValue program before destination type head sources { after with nextOwner := before.nextOwner+1 }
 
 inductive Transfers : World → Authority → Address → Address → World → Prop where
   | move {before authority source destination value cleared after} :
@@ -335,23 +344,6 @@ def RawRange (program : Program) (world : World) (pointer : RawPointer) (length 
     pointer.address = root.base + pointer.offset ∧ pointer.offset + length ≤ root.layout.size ∧
     0 < alignment ∧ pointer.address % alignment = 0 ∧
     pointer.address + length < 2^program.input.target.pointerBits
-
-def DefinedBytes (world : World) (pointer : RawPointer) (count : Nat) (bytes : List Nat) : Prop :=
-  ∃ id root, pointer.allocation = some id ∧ world.roots.get id = some root ∧
-    root.live = true ∧ pointer.generation = root.generation ∧
-    root.bytes.drop pointer.offset |>.take count = bytes.map some ∧ bytes.length = count
-
-inductive RawBytesMove (program : Program) : World → RawPointer → RawPointer → Nat → World → Prop where
-  | move {before source destination count sourceId destinationId sourceRoot destinationRoot bytes} :
-      RawRange program before source count 1 → RawRange program before destination count 1 →
-      DefinedBytes before source count bytes → source.allocation = some sourceId → destination.allocation = some destinationId →
-      before.roots.get sourceId = some sourceRoot → before.roots.get destinationId = some destinationRoot →
-      sourceRoot.value = none → destinationRoot.value = none →
-      RawBytesMove program before source destination count
-        { before with roots := before.roots.set sourceId
-            { sourceRoot with bytes := sourceRoot.bytes.take source.offset ++ List.replicate count none ++ sourceRoot.bytes.drop (source.offset+count) }
-          |>.set destinationId { destinationRoot with bytes := destinationRoot.bytes.take destination.offset ++ bytes.map some ++
-            destinationRoot.bytes.drop (destination.offset+count) } }
 
 def FreshRegion (before : World) (region : Identity) (after : World) : Prop :=
   region = before.nextRegion ∧ after = { before with

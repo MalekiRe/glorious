@@ -1,6 +1,6 @@
 import GloriousLanguage.Target
 
-/-! One declaration inventory, supplied source closure, and least-fixed-point
+/-! One declaration inventory, supplied source closure, and grounded fixed-point
 resolution. Aliases and imports retain authority rather than duplicating it. -/
 namespace Glorious.Language
 
@@ -44,7 +44,7 @@ structure TraitDefinition where
   generics : List Binder
   requirements : List Constraint
   members : List DeclId
-  unsafe : Bool
+  unsafeAllowed : Bool
   relation : IntrinsicRelation
   deriving Repr, Inhabited
 
@@ -65,7 +65,7 @@ structure ImplDefinition where
   requirements : List Constraint
   associated : List (DeclId × Term)
   functions : List (DeclId × DeclId)
-  unsafe : Bool
+  unsafeAllowed : Bool
   negative : Bool
   deriving Repr, Inhabited
 
@@ -85,7 +85,7 @@ structure InvocationRelation where
   result : Term
   effects : Term
   after : Term
-  unsafe : Bool
+  unsafeAllowed : Bool
   deriving Repr, Inhabited
 
 structure FunctionDefinition where
@@ -251,76 +251,106 @@ inductive ImportSelection where
   deriving Repr, Inhabited
 
 inductive SelectsImport : Source.Path → Source.ImportTree → ImportSelection → Prop where
-  | named {prefix path rename name} :
+  | named {prefixForm path rename name} :
       name = rename.getD (path.getLastD "") → path ≠ [] →
-      SelectsImport prefix (.name path rename) (.explicit (prefix ++ path) name)
-  | glob {prefix path} : SelectsImport prefix (.glob path) (.glob (prefix ++ path))
-  | group {prefix path children child selection} : child ∈ children →
-      SelectsImport (prefix ++ path) child selection → SelectsImport prefix (.group path children) selection
+      SelectsImport prefixForm (.name path rename) (.explicit (prefixForm ++ path) name)
+  | glob {prefixForm path} : SelectsImport prefixForm (.glob path) (.glob (prefixForm ++ path))
+  | group {prefixForm path children child selection} : child ∈ children →
+      SelectsImport (prefixForm ++ path) child selection → SelectsImport prefixForm (.group path children) selection
 
-/-- Candidate provenance carries precedence but never argument types. Benign
-import cycles can have finite derivations from a real declaration; a cycle
-with no such base does not create a name. -/
+abbrev ResolutionChoice := ModuleId → Namespace → String → Header → Prop
+
+/- Finite derivations are grounded in declarations. A proposed resolution
+filters qualified uses, but cannot itself create a candidate. Selection and
+ambiguity are defined outside this positive inductive fixed point. -/
 mutual
-  inductive NameCandidate (program : Program) : ModuleId → Namespace → String → Nat → Header → Prop where
-    | declaration {module namespace name header} : program.Header header →
+  inductive NameCandidate (program : Program) (choice : ResolutionChoice) :
+      ModuleId → Namespace → String → Nat → Header → Prop where
+    | declaration {module nameSpace name header} : program.Header header →
         header.sourceVisible = true →
-        header.module = module → header.namespace = namespace → header.name = name →
-        NameCandidate program module namespace name 3 header
-    | explicit {module namespace name import path header} : Definition.import import ∈ program.declarations →
-        import.header.module = module → import.prelude = false →
-        SelectsImport [] import.tree (.explicit path name) → Qualified program module namespace path header →
-        Visible header module → NameCandidate program module namespace name 2 header
-    | glob {module namespace name import path target header rank} : Definition.import import ∈ program.declarations →
-        import.header.module = module → import.prelude = false → SelectsImport [] import.tree (.glob path) →
-        ModulePath program module path target → NameCandidate program target namespace name rank header →
-        Visible header module → NameCandidate program module namespace name 1 header
-    | prelude {module namespace name import path header package} : Definition.import import ∈ program.declarations →
-        import.header.module = module → import.prelude = true → package ∈ program.input.packages →
-        package.id = module.package → package.noPrelude = false →
-        SelectsImport [] import.tree (.explicit path name) → Qualified program module namespace path header →
-        Visible header module → NameCandidate program module namespace name 0 header
+        header.module = module → header.nameSpace = nameSpace → header.name = name →
+        NameCandidate program choice module nameSpace name 3 header
+    | explicit {module nameSpace name imported path header} : Definition.import imported ∈ program.declarations →
+        imported.header.module = module → imported.prelude = false →
+        SelectsImport [] imported.tree (.explicit path name) → QualifiedAt program choice module nameSpace path header →
+        Visible header module → NameCandidate program choice module nameSpace name 2 header
+    | glob {module nameSpace name imported path target header rank} : Definition.import imported ∈ program.declarations →
+        imported.header.module = module → imported.prelude = false → SelectsImport [] imported.tree (.glob path) →
+        ModulePathAt program choice module path target →
+        NameCandidate program choice target nameSpace name rank header → choice target nameSpace name header →
+        Visible header module → NameCandidate program choice module nameSpace name 1 header
+    | prelude {module nameSpace name imported path header package} : Definition.import imported ∈ program.declarations →
+        imported.header.module = module → imported.prelude = true → package ∈ program.input.packages →
+        package.id = module.package → package.noPrelude = false → package.noStd = false →
+        SelectsImport [] imported.tree (.explicit path name) → QualifiedAt program choice module nameSpace path header →
+        Visible header module → NameCandidate program choice module nameSpace name 0 header
+    | preludeGlob {module nameSpace name imported path target header rank package} :
+        Definition.import imported ∈ program.declarations → imported.header.module = module →
+        imported.prelude = true → package ∈ program.input.packages → package.id = module.package →
+        package.noPrelude = false → package.noStd = false → SelectsImport [] imported.tree (.glob path) →
+        ModulePathAt program choice module path target →
+        NameCandidate program choice target nameSpace name rank header → choice target nameSpace name header →
+        Visible header module → NameCandidate program choice module nameSpace name 0 header
     | effectOperation {module name rank effectHeader effect operation} :
-        NameCandidate program module .effect name rank effectHeader →
+        NameCandidate program choice module .effect name rank effectHeader →
         program.effect effectHeader.id = some effect → operation.header.id ∈ effect.operations →
         program.operation operation.header.id = some operation → Visible operation.header module →
-        NameCandidate program module .value operation.header.name rank operation.header
+        NameCandidate program choice module .value operation.header.name rank operation.header
 
-  inductive Resolves (program : Program) : ModuleId → Namespace → String → Header → Prop where
-    | selected {module namespace name rank header} : NameCandidate program module namespace name rank header →
-        (∀ otherRank other, NameCandidate program module namespace name otherRank other → otherRank ≤ rank) →
-        (∀ other, NameCandidate program module namespace name rank other → other.id = header.id) →
-        Resolves program module namespace name header
-
-  inductive Qualified (program : Program) : ModuleId → Namespace → Source.Path → Header → Prop where
-    | bare {module namespace name header} : Resolves program module namespace name header →
-        Qualified program module namespace [name] header
-    | member {module namespace prefix target name header} : ModulePath program module prefix target →
-        Resolves program target namespace name header → Visible header module →
-        Qualified program module namespace (prefix ++ [name]) header
-    | inherent {module path dataHeader member header} : Qualified program module .type path dataHeader →
+  inductive QualifiedAt (program : Program) (choice : ResolutionChoice) :
+      ModuleId → Namespace → Source.Path → Header → Prop where
+    | bare {module nameSpace name header rank} : NameCandidate program choice module nameSpace name rank header →
+        choice module nameSpace name header → QualifiedAt program choice module nameSpace [name] header
+    | member {module nameSpace prefixForm target name header rank} : ModulePathAt program choice module prefixForm target →
+        NameCandidate program choice target nameSpace name rank header → choice target nameSpace name header →
+        Visible header module → QualifiedAt program choice module nameSpace (prefixForm ++ [name]) header
+    | inherent {module path dataHeader member header} : QualifiedAt program choice module .type path dataHeader →
         program.Header header → header.module.package = dataHeader.id.package →
         (∃ function, program.function header.id = some function ∧ function.owner = some dataHeader.id) →
         header.name = member → Visible header module →
-        Qualified program module header.namespace (path ++ [member]) header
-    | operation {module path effectHeader effect operation name} : Qualified program module .effect path effectHeader →
+        QualifiedAt program choice module header.nameSpace (path ++ [member]) header
+    | operation {module path effectHeader effect operation name} : QualifiedAt program choice module .effect path effectHeader →
         program.effect effectHeader.id = some effect → operation.header.id ∈ effect.operations →
         program.operation operation.header.id = some operation → operation.header.name = name →
-        Visible operation.header module → Qualified program module .value (path ++ [name]) operation.header
+        Visible operation.header module → QualifiedAt program choice module .value (path ++ [name]) operation.header
 
-  inductive ModulePath (program : Program) : ModuleId → Source.Path → ModuleId → Prop where
-    | self {module} : ModulePath program module ["self"] module
-    | crate {module} : ModulePath program module ["crate"] ⟨module.package,[]⟩
-    | parent {module prefix parent} : module.path = prefix ++ [parent] →
-        ModulePath program module ["super"] ⟨module.package,prefix⟩
+  inductive ModulePathAt (program : Program) (choice : ResolutionChoice) : ModuleId → Source.Path → ModuleId → Prop where
+    | self {module} : ModulePathAt program choice module ["self"] module
+    | crate {module} : ModulePathAt program choice module ["crate"] ⟨module.package,[]⟩
+    | parent {module prefixForm parent} : module.path = prefixForm ++ [parent] →
+        ModulePathAt program choice module ["super"] ⟨module.package,prefixForm⟩
     | dependency {module package name id} : package ∈ program.input.packages → package.id = module.package →
-        (name,id) ∈ package.dependencies → ModulePath program module [normalizedPackageName name] ⟨id,[]⟩
-    | local {module name child} : Definition.module child ∈ program.declarations → child.parent = some module →
-        child.header.name = name → Visible child.header module → ModulePath program module [name] child.module
-    | descend {module prefix parent name child} : ModulePath program module prefix parent →
-        Definition.module child ∈ program.declarations → child.parent = some parent → child.header.name = name →
-        Visible child.header module → ModulePath program module (prefix ++ [name]) child.module
+        (name,id) ∈ package.dependencies → ModulePathAt program choice module [normalizedPackageName name] ⟨id,[]⟩
+    | resolved {module path header child} : QualifiedAt program choice module .type path header →
+        program.lookup header.id = some (.module child) → ModulePathAt program choice module path child.module
 end
+
+def SelectedCandidate (program : Program) (choice : ResolutionChoice)
+    (module : ModuleId) (nameSpace : Namespace) (name : String) (header : Header) : Prop :=
+  ∃ rank, NameCandidate program choice module nameSpace name rank header ∧
+    (∀ otherRank other, NameCandidate program choice module nameSpace name otherRank other → otherRank ≤ rank) ∧
+    (∀ other, NameCandidate program choice module nameSpace name rank other → other.id = header.id)
+
+def ResolutionModel (program : Program) (choice : ResolutionChoice) : Prop :=
+  ∀ module nameSpace name header,
+    choice module nameSpace name header ↔ SelectedCandidate program choice module nameSpace name header
+
+/-- There must be a grounded solution, and every solution must agree on the
+selected declaration. An inconsistent or underdetermined import closure is not
+permission to pick a source-order-dependent answer. -/
+def Resolves (program : Program) (module : ModuleId) (nameSpace : Namespace)
+    (name : String) (header : Header) : Prop :=
+  (∃ choice, ResolutionModel program choice) ∧
+    ∀ choice, ResolutionModel program choice → choice module nameSpace name header
+
+def Qualified (program : Program) (module : ModuleId) (nameSpace : Namespace)
+    (path : Source.Path) (header : Header) : Prop :=
+  (∃ choice, ResolutionModel program choice) ∧
+    ∀ choice, ResolutionModel program choice → QualifiedAt program choice module nameSpace path header
+
+def ModulePath (program : Program) (module : ModuleId) (path : Source.Path) (target : ModuleId) : Prop :=
+  (∃ choice, ResolutionModel program choice) ∧
+    ∀ choice, ResolutionModel program choice → ModulePathAt program choice module path target
 
 def SourceClosure (program : Program) : Prop :=
   program.input.WellFormed ∧
@@ -332,15 +362,14 @@ def SourceClosure (program : Program) : Prop :=
   (∀ module, Definition.module module ∈ program.declarations → module.parent = none →
     module.module.path = [] ∧ ∃ package ∈ program.input.packages, package.id = module.module.package ∧ package.root = module.file)
 
-theorem resolution_identity_unique {program : Program} {module namespace name left right}
-    (a : Resolves program module namespace name left) (b : Resolves program module namespace name right) :
+theorem resolution_identity_unique {program : Program} {module nameSpace name left right}
+    (a : Resolves program module nameSpace name left) (b : Resolves program module nameSpace name right) :
     left.id = right.id := by
-  cases a with
-  | selected candidate maximum unique =>
-    cases b with
-    | selected candidate' maximum' unique' =>
-      have ranks := Nat.le_antisymm (maximum _ _ candidate') (maximum' _ _ candidate)
-      subst ranks
-      exact (unique _ candidate').symm
+  obtain ⟨choice, model⟩ := a.1
+  obtain ⟨rank, candidate, maximum, unique⟩ := (model _ _ _ _).mp (a.2 choice model)
+  obtain ⟨rank', candidate', maximum', _⟩ := (model _ _ _ _).mp (b.2 choice model)
+  have ranks := Nat.le_antisymm (maximum _ _ candidate') (maximum' _ _ candidate)
+  subst rank'
+  exact (unique _ candidate').symm
 
 end Glorious.Language

@@ -78,8 +78,8 @@ mutual
 end
 
 inductive VisibilitySyntax : Tokens → Visibility → Prop where
-  | private : VisibilitySyntax [] .private
-  | public : VisibilitySyntax [w "pub"] .public
+  | privateScope : VisibilitySyntax [] .privateScope
+  | publicScope : VisibilitySyntax [w "pub"] .publicScope
   | package : VisibilitySyntax [w "pub",s "(",n "crate",s ")"] .package
   | parent : VisibilitySyntax [w "pub",s "(",n "super",s ")"] .parent
 
@@ -217,8 +217,8 @@ inductive FunctionHeadSyntax : Tokens → FunctionHead → Prop where
       ParametersSyntax parameterTokens parameters → ResultSyntax resultTokens result → EffectsSyntax effectTokens effects →
       FunctionHeadSyntax ([w "fn",s "("] ++ parameterTokens ++ [s ")"] ++ resultTokens ++ effectTokens)
         ⟨"",[],parameters,result,effects,[],false,false⟩
-  | unsafe {tokens head} : FunctionHeadSyntax tokens head → head.unsafe = false →
-      FunctionHeadSyntax (w "unsafe" :: tokens) { head with unsafe := true }
+  | unsafeAllowed {tokens head} : FunctionHeadSyntax tokens head → head.unsafeAllowed = false →
+      FunctionHeadSyntax (w "unsafe" :: tokens) { head with unsafeAllowed := true }
   | cABI {tokens head} : FunctionHeadSyntax tokens head → head.cABI = false →
       FunctionHeadSyntax ([w "extern",.literal (.string (text "C"))] ++ tokens) { head with cABI := true }
 
@@ -286,20 +286,20 @@ inductive AttributeSyntax : Tokens → Attribute → Prop where
   | integer {signed width spelling} : IntegerSuffix (some (.integer signed width)) (text spelling) →
       AttributeSyntax [n "repr",s "(",n spelling,s ")"] (.reprInteger signed width)
   | nonExhaustive : AttributeSyntax [n "non_exhaustive"] .nonExhaustive
-  | export {name} : AttributeSyntax [n "export_name",s "=",.literal (.string (text name))] (.exportName name)
+  | exportedName {name} : AttributeSyntax [n "export_name",s "=",.literal (.string (text name))] (.exportName name)
   | noStd : AttributeSyntax [n "no_std"] .noStd
   | noPrelude : AttributeSyntax [n "no_implicit_prelude"] .noPrelude
 
 inductive AttributesSyntax : Tokens → List Attribute → Prop where
   | nil : AttributesSyntax [] []
-  | attribute {first rest attribute attributes} : AttributeSyntax first attribute → AttributesSyntax rest attributes →
-      AttributesSyntax ([s "#",s "["] ++ first ++ [s "]"] ++ rest) (attribute :: attributes)
-  | inner {first rest attribute attributes} : AttributeSyntax first attribute → AttributesSyntax rest attributes →
-      (attribute = .noStd ∨ attribute = .noPrelude) →
-      AttributesSyntax ([s "#",s "!",s "["] ++ first ++ [s "]"] ++ rest) (attribute :: attributes)
+  | annotationEntry {first rest annotationEntry attributes} : AttributeSyntax first annotationEntry → AttributesSyntax rest attributes →
+      AttributesSyntax ([s "#",s "["] ++ first ++ [s "]"] ++ rest) (annotationEntry :: attributes)
+  | inner {first rest annotationEntry attributes} : AttributeSyntax first annotationEntry → AttributesSyntax rest attributes →
+      (annotationEntry = .noStd ∨ annotationEntry = .noPrelude) →
+      AttributesSyntax ([s "#",s "!",s "["] ++ first ++ [s "]"] ++ rest) (annotationEntry :: attributes)
 
 inductive Form where
-  | atom | postfix | prefix | full
+  | atom | postfix | prefixForm | full
   deriving DecidableEq, BEq, Repr, Inhabited
 
 def OperatorToken (token : Token) (operator : String) : Prop :=
@@ -347,25 +347,25 @@ mutual
         ExpressionSyntax .postfix (tokens ++ [s ".",token]) (.project subject (toString index))
     | test {subjectTokens subject patternTokens pattern} : ExpressionSyntax .postfix subjectTokens subject →
         PatternSyntax patternTokens pattern → ExpressionSyntax .postfix (subjectTokens ++ w "is" :: patternTokens) (.test subject pattern)
-    | postfix {tokens expression} : ExpressionSyntax .postfix tokens expression → ExpressionSyntax .prefix tokens expression
-    | prefix {token operator tokens operand} : OperatorToken token operator → ExpressionSyntax .prefix tokens operand →
-        ExpressionSyntax .prefix (token :: tokens) (.prefix operator operand)
-    | borrow {tokens place} : ExpressionSyntax .prefix tokens place → ExpressionSyntax .prefix (s "&" :: tokens) (.borrow .shared place)
-    | uniqueBorrow {tokens place} : ExpressionSyntax .prefix tokens place →
-        ExpressionSyntax .prefix (s "&" :: w "mut" :: tokens) (.borrow .unique place)
-    | dereference {tokens place} : ExpressionSyntax .prefix tokens place → ExpressionSyntax .prefix (s "*" :: tokens) (.dereference place)
-    | move {tokens place} : ExpressionSyntax .prefix tokens place → ExpressionSyntax .prefix (w "move" :: tokens) (.move place)
-    | unsafe {tokens body} : BlockExpressionSyntax tokens body → ExpressionSyntax .prefix (w "unsafe" :: tokens) (.unsafeBlock body)
+    | postfix {tokens expression} : ExpressionSyntax .postfix tokens expression → ExpressionSyntax .prefixForm tokens expression
+    | prefixForm {token operator tokens operand} : OperatorToken token operator → ExpressionSyntax .prefixForm tokens operand →
+        ExpressionSyntax .prefixForm (token :: tokens) (.prefixForm operator operand)
+    | borrow {tokens place} : ExpressionSyntax .prefixForm tokens place → ExpressionSyntax .prefixForm (s "&" :: tokens) (.borrow .shared place)
+    | uniqueBorrow {tokens place} : ExpressionSyntax .prefixForm tokens place →
+        ExpressionSyntax .prefixForm (s "&" :: w "mut" :: tokens) (.borrow .unique place)
+    | dereference {tokens place} : ExpressionSyntax .prefixForm tokens place → ExpressionSyntax .prefixForm (s "*" :: tokens) (.dereference place)
+    | move {tokens place} : ExpressionSyntax .prefixForm tokens place → ExpressionSyntax .prefixForm (w "move" :: tokens) (.move place)
+    | unsafeAllowed {tokens body} : BlockExpressionSyntax tokens body → ExpressionSyntax .prefixForm (w "unsafe" :: tokens) (.unsafeBlock body)
     | tail {tokens callee arguments} : ExpressionSyntax .postfix tokens (.call callee arguments) →
-        ExpressionSyntax .prefix (w "tail" :: tokens) (.tail callee arguments)
+        ExpressionSyntax .prefixForm (w "tail" :: tokens) (.tail callee arguments)
     | label {name annotationTokens annotation bodyTokens body} : OptionalTypeSyntax annotationTokens annotation →
         BlockExpressionSyntax bodyTokens body →
-        ExpressionSyntax .prefix (.label name :: annotationTokens ++ bodyTokens) (.label name annotation body)
+        ExpressionSyntax .prefixForm (.label name :: annotationTokens ++ bodyTokens) (.label name annotation body)
     | handle {computationTokens computation armTokens arms} : ExpressionSyntax .full computationTokens computation →
         HandlerArmsSyntax armTokens arms →
-        ExpressionSyntax .prefix (w "handle" :: computationTokens ++ s "{" :: armTokens ++ [s "}"]) (.handle computation arms)
-    | full {tokens expression} : ExpressionSyntax .prefix tokens expression → ExpressionSyntax .full tokens expression
-    | operators {firstTokens first restTokens rest} : ExpressionSyntax .prefix firstTokens first → OperatorTailSyntax restTokens rest → rest ≠ [] →
+        ExpressionSyntax .prefixForm (w "handle" :: computationTokens ++ s "{" :: armTokens ++ [s "}"]) (.handle computation arms)
+    | full {tokens expression} : ExpressionSyntax .prefixForm tokens expression → ExpressionSyntax .full tokens expression
+    | operators {firstTokens first restTokens rest} : ExpressionSyntax .prefixForm firstTokens first → OperatorTailSyntax restTokens rest → rest ≠ [] →
         ExpressionSyntax .full (firstTokens ++ restTokens) (.operators first rest)
 
   inductive ExpressionsSyntax : Tokens → List Expr → Prop where
@@ -377,7 +377,7 @@ mutual
   inductive OperatorTailSyntax : Tokens → List (String × Expr) → Prop where
     | nil : OperatorTailSyntax [] []
     | cons {token operator first rest expression expressions} : OperatorToken token operator →
-        ExpressionSyntax .prefix first expression → OperatorTailSyntax rest expressions →
+        ExpressionSyntax .prefixForm first expression → OperatorTailSyntax rest expressions →
         OperatorTailSyntax (token :: first ++ rest) ((operator,expression) :: expressions)
 
   inductive BlockSyntax : Tokens → List Statement → Option Expr → Prop where
@@ -496,14 +496,14 @@ mutual
     | fixity {kind word token precedence operatorToken operator targetTokens target} : NaturalToken token precedence →
         OperatorToken operatorToken operator →
         ((kind = .left ∧ word = "infixl") ∨ (kind = .right ∧ word = "infixr") ∨
-          (kind = .nonassoc ∧ word = "infix") ∨ (kind = .prefix ∧ word = "prefix")) →
+          (kind = .nonassoc ∧ word = "infix") ∨ (kind = .prefixForm ∧ word = "prefix")) →
         ((target = none ∧ targetTokens = []) ∨ ∃ path tokens, target = some path ∧ targetTokens = s "=" :: tokens ∧ PathSyntax tokens path) →
         DeclarationSyntax ([w word,token,operatorToken] ++ targetTokens ++ [s ";"]) (.fixity kind precedence operator target)
     | foreign {tokens members} : DeclarationsSyntax tokens members →
         DeclarationSyntax ([w "extern",.literal (.string (text "C")),s "{"] ++ tokens ++ [s "}"]) (.foreign members false)
     | unsafeForeign {tokens members} : DeclarationSyntax tokens (.foreign members false) →
         DeclarationSyntax (w "unsafe" :: tokens) (.foreign members true)
-    | visible {prefixTokens visibility tokens declaration} : VisibilitySyntax prefixTokens visibility → visibility ≠ .private →
+    | visible {prefixTokens visibility tokens declaration} : VisibilitySyntax prefixTokens visibility → visibility ≠ .privateScope →
         DeclarationSyntax tokens declaration → DeclarationSyntax (prefixTokens ++ tokens) (.visible visibility declaration)
     | attributes {attributeTokens attributes tokens declaration} : AttributesSyntax attributeTokens attributes → attributes ≠ [] →
         DeclarationSyntax tokens declaration → DeclarationSyntax (attributeTokens ++ tokens) (.attributed attributes declaration)

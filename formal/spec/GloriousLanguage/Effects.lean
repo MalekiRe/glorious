@@ -21,7 +21,7 @@ def ArmAccepts (program : Kernel.Program) (world : World) (context : Language.Co
 def SelectsOperation (program : Kernel.Program) (world : World) (handler : InstalledHandler)
     (operation : DeclId) (arguments : List Term) (payload : List Address) (arm : OperationArm) : Prop :=
   ∃ skipped rest,
-    handler.syntax.operations = skipped ++ arm :: rest ∧
+    handler.syntaxNode.operations = skipped ++ arm :: rest ∧
     ArmAccepts program world handler.environment.static operation arguments payload arm ∧
     ∀ earlier ∈ skipped, ¬ ArmAccepts program world handler.environment.static operation arguments payload earlier
 
@@ -49,9 +49,9 @@ def FrameOwns (frame : Frame) (root : Root) : Prop :=
   | _ => False
 
 def DelimitedRoots (world : World) (handler : InstalledHandler) (inner : List Frame)
-    (protected roots : List Identity) : Prop :=
+    (kept roots : List Identity) : Prop :=
   NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root,
-    world.roots.get id = some root ∧ root.live = true ∧ id ∉ protected ∧
+    world.roots.get id = some root ∧ root.live = true ∧ id ∉ kept ∧
     (OwnedByScope root handler.computation.activation handler.computation.scope ∨ ∃ frame ∈ inner, FrameOwns frame root)
 
 def SaveHomes (world : World) (roots : List Identity) (homes : Table Home) : Prop :=
@@ -73,15 +73,15 @@ inductive RetiresEmpty : World → List Address → World → Prop where
 def CaptureLocals (captures : List Capture) : List Local :=
   captures.map (fun capture => ⟨capture.formal,capture.type,false⟩)
 
-def Installs (program : Kernel.Program) (before : State) (outer : Context) (syntax : Handler)
+def Installs (program : Kernel.Program) (before : State) (outer : Context) (syntaxNode : Handler)
     (handler : InstalledHandler) (after : World) : Prop :=
   ∃ first second sources captured bindings bound disposed,
     FreshRegion before.world before.world.nextRegion first ∧ FreshRegion first first.nextRegion second ∧
-    Captures program outer second syntax.captures sources captured ∧
+    Captures program outer second syntaxNode.captures sources captured ∧
     BindsInputs program.declarations before.nextActivation before.world.nextRegion before.world.nextRegion captured
-      ((CaptureLocals syntax.captures).zip sources |>.map (fun (local,address) => ⟨.capture 0,local,address,.owner,.owned⟩)) bindings bound ∧
+      ((CaptureLocals syntaxNode.captures).zip sources |>.map (fun (localSlot,address) => ⟨.capture 0,localSlot,address,.owner,.owned⟩)) bindings bound ∧
     RetiresEmpty bound sources disposed ∧ after = disposed ∧
-    handler = ⟨before.nextHandler,syntax,
+    handler = ⟨before.nextHandler,syntaxNode,
       ⟨bindings,outer.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,outer.labels,false⟩,
       { outer with scope := first.nextRegion, region := first.nextRegion },outer⟩
 
@@ -114,12 +114,12 @@ def OperationInstance (program : Kernel.Program) (id : DeclId) (arguments : List
 
 def CreatesContinuation (program : Kernel.Program) (context : Context) (before : World)
     (id : Identity) (signature : Signature) (answer effects : Term) (quantity : Quantity)
-    (local : Local) (address : Address) (after : World) : Prop :=
+    (localSlot : Local) (address : Address) (after : World) : Prop :=
   ∃ allocated layout,
-    local.type = .continuation (.rigid id .brand 0) signature.result answer effects quantity ∧
-    Allocates program.declarations before (.local context.activation context.scope) context.region
-      local.type layout local.mutable address allocated ∧
-    NewValue program.declarations allocated address local.type (.continuation id) [] after
+    localSlot.type = .continuation (.rigid id .brand 0) signature.result answer effects quantity ∧
+    Allocates program.declarations before (.localSlot context.activation context.scope) context.region
+      localSlot.type layout localSlot.mutable address allocated ∧
+    NewValue program.declarations allocated address localSlot.type (.continuation id) [] after
 
 def ActiveObligation (suspension : Suspension) : Prop :=
   suspension.active = true ∧ suspension.original = true ∧
@@ -141,8 +141,8 @@ def SuspensionRegions (suspension : Suspension) : List Identity :=
     | _ => none) ++ [suspension.handler.computation.region]).eraseDups
 
 inductive EffectStep (program : Kernel.Program) : State → Option Event → State → Prop where
-  | install {before context id computation syntax handler after} :
-      before.task = .run context (.handle id computation syntax) → Installs program before context syntax handler after →
+  | install {before context id computation syntaxNode handler after} :
+      before.task = .run context (.handle id computation syntaxNode) → Installs program before context syntaxNode handler after →
       EffectStep program before none { before with world := after, task := .run handler.computation computation,
         frames := .handler handler true :: before.frames, nextActivation := before.nextActivation+1, nextHandler := before.nextHandler+1 }
   | operationCall {before context call receiver authority value id arguments operation signature payload} :
@@ -152,41 +152,41 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       signature = call.signature → Addresses before.world context.environment call.arguments payload →
       EffectStep program before (some (.perform id arguments)) { before with task := .perform context id arguments payload }
   | terminal {before context id arguments payload inner handler owns arm outer operation signature clause withRegion
-      protected moved roots actions} : before.task = .perform context id arguments payload →
+      kept moved roots actions} : before.task = .perform context id arguments payload →
       OperationInstance program id arguments operation signature → operation.terminal = true → arm.continuation = none →
       Routes program before id arguments payload inner handler owns arm outer → StartsClause before handler clause withRegion →
-      Protects program clause withRegion payload protected moved →
-      DelimitedRoots moved handler inner (protected.map Address.root) roots → Cancelable program.declarations moved roots →
-      PayloadPlan program.declarations moved protected arm.patterns actions →
+      Protects program clause withRegion payload kept moved →
+      DelimitedRoots moved handler inner (kept.map Address.root) roots → Cancelable program.declarations moved roots →
+      PayloadPlan program.declarations moved kept arm.patterns actions →
       EffectStep program before none { before with world := moved,
         task := .cleanup context roots (.closeRegion handler.computation.region (.pattern clause (ScheduledPattern actions) arm.body)),
         frames := .serviced handler none :: outer, nextActivation := before.nextActivation+1 }
   | suspend {before context id arguments payload inner handler owns arm outer operation signature quantity bound
-      clause withRegion protected moved roots homes local address created actions suspension} :
+      clause withRegion kept moved roots homes localSlot address created actions suspension} :
       before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →
       operation.terminal = false → operation.quantity = some quantity → quantity.upper = some bound →
-      arm.continuation = some local → Routes program before id arguments payload inner handler owns arm outer →
-      StartsClause before handler clause withRegion → Protects program clause withRegion payload protected moved →
-      DelimitedRoots moved handler inner (protected.map Address.root) roots →
+      arm.continuation = some localSlot → Routes program before id arguments payload inner handler owns arm outer →
+      StartsClause before handler clause withRegion → Protects program clause withRegion payload kept moved →
+      DelimitedRoots moved handler inner (kept.map Address.root) roots →
       SuspendPermission program moved roots quantity inner → SaveHomes moved roots homes →
       CreatesContinuation program clause (suspendRoots moved roots before.nextContinuation) before.nextContinuation
-        signature handler.syntax.result signature.effects quantity local address created →
-      PayloadPlan program.declarations created protected arm.patterns actions →
+        signature handler.syntaxNode.result signature.effects quantity localSlot address created →
+      PayloadPlan program.declarations created kept arm.patterns actions →
       suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with world := created,
-        task := .pattern (clause.bind local address) (ScheduledPattern actions) arm.body,
+        task := .pattern (clause.bind localSlot address) (ScheduledPattern actions) arm.body,
         frames := .serviced handler (some before.nextContinuation) :: outer,
         resumptions := before.resumptions.set before.nextContinuation suspension,
         nextContinuation := before.nextContinuation+1, nextActivation := before.nextActivation+1 }
   | suspendTailArm {before context id arguments payload inner handler owns arm outer operation signature quantity bound
-      clause withRegion protected moved roots homes actions suspension} :
+      clause withRegion kept moved roots homes actions suspension} :
       before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →
       operation.terminal = false → operation.quantity = some quantity → quantity.upper = some bound → quantity.Contains 1 →
       arm.continuation = none → Routes program before id arguments payload inner handler owns arm outer →
-      StartsClause before handler clause withRegion → Protects program clause withRegion payload protected moved →
-      DelimitedRoots moved handler inner (protected.map Address.root) roots →
+      StartsClause before handler clause withRegion → Protects program clause withRegion payload kept moved →
+      DelimitedRoots moved handler inner (kept.map Address.root) roots →
       SuspendPermission program moved roots quantity inner → SaveHomes moved roots homes →
-      PayloadPlan program.declarations moved protected arm.patterns actions →
+      PayloadPlan program.declarations moved kept arm.patterns actions →
       suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with
         world := suspendRoots moved roots before.nextContinuation,
@@ -202,65 +202,65 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
   | tailArmReturn {before context value caller id rest} : before.task = .yield context value →
       before.frames = .tailResume caller id :: rest →
       EffectStep program before none { before with task := .resume caller id value false, frames := rest }
-  | resumeLast {before caller id argument suspension after protected transferred} :
+  | resumeLast {before caller id argument suspension after kept transferred} :
       before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
       ActiveObligation suspension → suspension.remaining = 1 →
       after = restoreRoots before.world suspension.homes →
-      Protect program suspension.context after argument .owner protected transferred →
+      Protect program suspension.context after argument .owner kept transferred →
       EffectStep program before (some (.replay id true)) { before with world := transferred,
-        task := .yield suspension.context protected,
+        task := .yield suspension.context kept,
         frames := suspension.frames ++ [.handler suspension.handler false,.resumed caller] ++ before.frames,
         resumptions := before.resumptions.set id { suspension with remaining := 0, used := suspension.used+1, active := false } }
-  | resumeCopy {before caller id argument suspension map copied protected transferred} :
+  | resumeCopy {before caller id argument suspension map copied kept transferred} :
       before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
       ActiveObligation suspension → 1 < suspension.remaining → CopiesSnapshot program before suspension map copied →
-      Protect program (map.context suspension.context) copied.world argument .owner protected transferred →
+      Protect program (map.context suspension.context) copied.world argument .owner kept transferred →
       EffectStep program before (some (.replay id false)) { copied with world := transferred,
-        task := .yield (map.context suspension.context) protected,
+        task := .yield (map.context suspension.context) kept,
         frames := suspension.frames.map map.frame ++
           [.handler (map.installed suspension.handler) false,.resumed caller] ++ before.frames,
         resumptions := before.resumptions.set id { suspension with remaining := suspension.remaining-1, used := suspension.used+1 } }
-  | resumeReturns {before context value caller rest protected after roots} : before.task = .yield context value →
-      before.frames = .resumed caller :: rest → Protect program caller before.world value .owner protected after →
+  | resumeReturns {before context value caller rest kept after roots} : before.task = .yield context value →
+      before.frames = .resumed caller :: rest → Protect program caller before.world value .owner kept after →
       ScopeRoots after context.activation context.scope [] roots → Suspensible after roots →
       EffectStep program before none { before with world := after, frames := rest,
-        task := .cleanup context roots (.yield caller protected) }
-  | completionIdentity {before context value handler owns rest protected after roots} : before.task = .yield context value →
-      before.frames = .handler handler owns :: rest → handler.syntax.completion = [] →
-      Protect program handler.environment before.world value .owner protected after →
+        task := .cleanup context roots (.yield caller kept) }
+  | completionIdentity {before context value handler owns rest kept after roots} : before.task = .yield context value →
+      before.frames = .handler handler owns :: rest → handler.syntaxNode.completion = [] →
+      Protect program handler.environment before.world value .owner kept after →
       ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible after roots →
       EffectStep program before none { before with world := after,
-        task := .cleanup context roots (.closeRegion handler.computation.region (.yield handler.environment protected)),
+        task := .cleanup context roots (.closeRegion handler.computation.region (.yield handler.environment kept)),
         frames := .completion handler owns :: rest }
-  | completion {before context value handler owns rest protected after roots arm actions} : before.task = .yield context value →
+  | completion {before context value handler owns rest kept after roots arm actions} : before.task = .yield context value →
       before.frames = .handler handler owns :: rest →
-      Protect program handler.environment before.world value .owner protected after →
+      Protect program handler.environment before.world value .owner kept after →
       ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible after roots →
-      FirstArm program.declarations after protected handler.syntax.completion arm →
-      PatternPlan program.declarations after protected .owner .owned arm.pattern actions →
+      FirstArm program.declarations after kept handler.syntaxNode.completion arm →
+      PatternPlan program.declarations after kept .owner .owned arm.pattern actions →
       EffectStep program before none { before with world := after,
         task := .cleanup context roots (.closeRegion handler.computation.region
           (.pattern handler.environment (ScheduledPattern actions) arm.body)), frames := .completion handler owns :: rest }
-  | completedOwned {before context value handler rest protected after roots} : before.task = .yield context value →
+  | completedOwned {before context value handler rest kept after roots} : before.task = .yield context value →
       before.frames = .completion handler true :: rest →
-      Protect program handler.outer before.world value .owner protected after →
+      Protect program handler.outer before.world value .owner kept after →
       ActivationRoots after handler.environment.activation [] roots → Suspensible after roots →
       EffectStep program before none { before with world := after, frames := rest,
-        task := .cleanup handler.environment roots (.closeRegion handler.environment.region (.yield handler.outer protected)) }
+        task := .cleanup handler.environment roots (.closeRegion handler.environment.region (.yield handler.outer kept)) }
   | completedLent {before context value handler rest} : before.task = .yield context value →
       before.frames = .completion handler false :: rest →
       EffectStep program before none { before with frames := rest, task := .yield context value }
-  | serviced {before context value handler id rest protected after clauseRoots environmentRoots} :
+  | serviced {before context value handler id rest kept after clauseRoots environmentRoots} :
       before.task = .yield context value → before.frames = .serviced handler id :: rest →
       (∀ token suspension, id = some token → before.resumptions.get token = some suspension →
         suspension.quantity.Contains suspension.used ∧ suspension.active = false) →
-      Protect program handler.outer before.world value .owner protected after →
+      Protect program handler.outer before.world value .owner kept after →
       ActivationRoots after context.activation [] clauseRoots →
       ActivationRoots after handler.environment.activation [] environmentRoots →
       Suspensible after (clauseRoots ++ environmentRoots) →
       EffectStep program before none { before with world := after, frames := rest,
         task := .cleanup context clauseRoots (.closeRegion context.region
-          (.cleanup handler.environment environmentRoots (.closeRegion handler.environment.region (.yield handler.outer protected)))) }
+          (.cleanup handler.environment environmentRoots (.closeRegion handler.environment.region (.yield handler.outer kept)))) }
   | disposeContinuation {before context address authority next value id suspension cleared} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.head = .continuation id →
       Permitted before.world authority .owned address → before.resumptions.get id = some suspension →

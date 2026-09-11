@@ -33,7 +33,7 @@ mutual
     | .capture places body => places.map .expression ++ [.expression body]
     | .project source _ | .borrow _ source | .dereference source | .move source | .test source _ => [.expression source]
     | .handle computation arms => .expression computation :: arms.map .handlerArm
-    | .label _ _ body | .unsafeBlock body | .prefix _ body => [.expression body]
+    | .label _ _ body | .unsafeBlock body | .prefixForm _ body => [.expression body]
     | .operators first rest => .expression first :: rest.map (fun pair => .expression pair.2)
     | _ => []
 
@@ -74,12 +74,12 @@ def SourceEntity (node : Node) (definition : Definition) : Prop :=
       (∃ name generics fields record requirements, source.undecorated = .structure name generics fields record requirements ∧ data.header.name = name) ∨
       ∃ name generics variants requirements, source.undecorated = .enumeration name generics variants requirements ∧ data.header.name = name
   | .declaration source, .alias alias => ∃ generics value, source.undecorated = .alias alias.header.name generics value
-  | .declaration source, .trait trait => ∃ generics requirements members unsafe,
-      source.undecorated = .trait trait.header.name generics requirements members unsafe
+  | .declaration source, .trait trait => ∃ generics requirements members unsafeAllowed,
+      source.undecorated = .trait trait.header.name generics requirements members unsafeAllowed
   | .declaration source, .associated associated => ∃ generics kind requirements value,
       source.undecorated = .associated associated.header.name generics kind requirements value
-  | .declaration source, .implementation _ => ∃ generics trait self requirements members unsafe negative,
-      source.undecorated = .implementation generics trait self requirements members unsafe negative
+  | .declaration source, .implementation _ => ∃ generics trait self requirements members unsafeAllowed negative,
+      source.undecorated = .implementation generics trait self requirements members unsafeAllowed negative
   | .declaration source, .effect effect => ∃ generics requirements operations,
       source.undecorated = .effect effect.header.name generics requirements operations
   | .operation source, .operation operation => source.name = operation.header.name

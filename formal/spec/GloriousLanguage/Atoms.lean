@@ -115,7 +115,7 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       before.task = .atom context destination (.primitive id arguments operands) next →
       binding ∈ program.declarations.input.manifest.bindings → binding.declaration = id →
       Addresses before.world context.environment operands addresses →
-      (binding.signature.unsafe = true → context.unsafe = true) →
+      (binding.signature.unsafeAllowed = true → context.unsafeAllowed = true) →
       AtomStep program before none { before with task := .primitive context destination binding arguments addresses next }
 
 end Glorious.Language.Execution

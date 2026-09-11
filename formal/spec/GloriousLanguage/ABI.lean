@@ -111,14 +111,14 @@ def SharedABI (program : Kernel.Program) (runtime : RuntimeAddresses)
 /-- A crossing changes which engine executes, not the backing allocation or
 the concrete identity of an addressable argument. Ordinary source moves are
 accounted for separately by the common ownership transition. -/
-def ZeroMarshalling (from to : Engine Event Result)
-    (before : from.semantics.State) (after : to.semantics.State) (arguments : List InvocationInput) : Prop :=
-  from.backing before = to.backing after ∧
-  ∀ input ∈ arguments, from.home before input.storage = to.home after input.storage
+def ZeroMarshalling (sourceSide to : Engine Event Result)
+    (before : sourceSide.semantics.State) (after : to.semantics.State) (arguments : List InvocationInput) : Prop :=
+  sourceSide.backing before = to.backing after ∧
+  ∀ input ∈ arguments, sourceSide.home before input.storage = to.home after input.storage
 
 structure TailSite where
   function : DeclId
-  syntax : Identity
+  syntaxNode : Identity
   sourceActivation : Identity
   destination : Identity
   deriving Repr, Inhabited
@@ -137,7 +137,7 @@ structure TailEvidence (engine : Engine Event Result) where
 
 structure LabelSite where
   function : DeclId
-  syntax : Identity
+  syntaxNode : Identity
   brand : Identity
   destination : Identity
   deriving Repr, Inhabited
@@ -149,7 +149,7 @@ structure LabelFusion (engine : Engine Event Result) where
     ∀ address value source, engine.sourceState state source → source.world.Resident address value → value.head = .label site.brand →
       engine.home state address = none
   direct : ∀ before site, target before site → ∃ after, engine.directTransfer before site.destination after
-  unique : ∀ state a b, target state a → target state b → a.syntax = b.syntax → a.destination = b.destination
+  unique : ∀ state a b, target state a → target state b → a.syntaxNode = b.syntaxNode → a.destination = b.destination
 
 inductive WireScalar where
   | integer (signed : Bool) (width : Width) (magnitude : List Nat)

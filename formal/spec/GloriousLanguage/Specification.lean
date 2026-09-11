@@ -84,8 +84,8 @@ mutual
 
   inductive RevealsFields (world : World) : List (Option Value) → List PublicValue → Prop where
     | nil : RevealsFields world [] []
-    | cons {value values public publics} : Reveals world value public → RevealsFields world values publics →
-        RevealsFields world (some value :: values) (public :: publics)
+    | cons {value values publicScope publics} : Reveals world value publicScope → RevealsFields world values publics →
+        RevealsFields world (some value :: values) (publicScope :: publics)
 end
 
 inductive PublicEvent where
@@ -107,11 +107,11 @@ inductive Result where
   deriving Repr, Inhabited
 
 def Finished (program : Kernel.Program) (function : Function) (state : State) (result : Result) : Prop :=
-  (∃ address value public, state.task = .stopped address ∧ state.world.Stores address value ∧ Reveals state.world value public ∧ result = .returned public) ∨
+  (∃ address value publicScope, state.task = .stopped address ∧ state.world.Stores address value ∧ Reveals state.world value publicScope ∧ result = .returned publicScope) ∨
   (∃ reason, state.task = .fatal reason ∧ result = .fatal reason) ∨
-  (∃ context id arguments payload residents public,
+  (∃ context id arguments payload residents publicScope,
     state.task = .perform context id arguments payload ∧ Contracts.MayAwait program function state ∧
-    ListRel (World.Stores state.world) payload residents ∧ ListRel (Reveals state.world) residents public ∧ result = .outward id arguments public)
+    ListRel (World.Stores state.world) payload residents ∧ ListRel (Reveals state.world) residents publicScope ∧ result = .outward id arguments publicScope)
 
 def Semantics (program : Kernel.Program) (host : Foreign.Model) (function : Function) (inputs : List InvocationInput) :
     TransitionSystem PublicEvent Result where

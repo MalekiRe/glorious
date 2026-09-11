@@ -64,10 +64,10 @@ def Relocation.constraint (map : Relocation) : Constraint → Constraint
   | .rowIncludes a b => .rowIncludes (map.term a) (map.term b)
   | .implements trait arguments negative => .implements trait (arguments.map map.term) negative
   | .use type quantity => .use (map.term type) quantity
-  | .callable receiver arguments output effects unsafe =>
-      .callable (map.term receiver) (arguments.map map.term) (map.term output) (map.term effects) unsafe
-  | .runsIn receiver access arguments after unsafe =>
-      .runsIn (map.term receiver) (map.term access) (arguments.map map.term) (map.term after) unsafe
+  | .callable receiver arguments output effects unsafeAllowed =>
+      .callable (map.term receiver) (arguments.map map.term) (map.term output) (map.term effects) unsafeAllowed
+  | .runsIn receiver access arguments after unsafeAllowed =>
+      .runsIn (map.term receiver) (map.term access) (arguments.map map.term) (map.term after) unsafeAllowed
   | .quantified binders requirements => .quantified binders (requirements.map map.constraint)
 
 def Relocation.signature (map : Relocation) (signature : Signature) : Signature :=
@@ -80,22 +80,22 @@ def Relocation.signature (map : Relocation) (signature : Signature) : Signature 
 mutual
   def Relocation.code (map : Relocation) : Code → Code
     | .result value => .result value
-    | .bind local atom next => .bind (local.mapTerms map.term) (atom.mapTerms map.term) (map.code next)
-    | .evaluate local value next => .evaluate (local.mapTerms map.term) (map.code value) (map.code next)
+    | .bind localSlot atom next => .bind (localSlot.mapTerms map.term) (atom.mapTerms map.term) (map.code next)
+    | .evaluate localSlot value next => .evaluate (localSlot.mapTerms map.term) (map.code value) (map.code next)
     | .assign destination value next => .assign destination value (map.code next)
     | .discard value next => .discard value (map.code next)
-    | .invoke local call next => .invoke (local.mapTerms map.term)
+    | .invoke localSlot call next => .invoke (localSlot.mapTerms map.term)
         { call with signature := map.signature call.signature } (map.code next)
     | .tail call => .tail { call with signature := map.signature call.signature }
     | .scope id body => .scope id (map.code body)
     | .label brand region result body => .label brand region (map.term result) (map.code body)
     | .choose subject arms => .choose subject (arms.map map.arm)
     | .handle id computation handler => .handle id (map.code computation) (map.handlerSyntax handler)
-    | .test local subject pattern id next => .test (local.mapTerms map.term) subject (pattern.mapTerms map.term) id (map.code next)
+    | .test localSlot subject pattern id next => .test (localSlot.mapTerms map.term) subject (pattern.mapTerms map.term) id (map.code next)
     | .endLoan handle next => .endLoan handle (map.code next)
     | .unsafeScope body => .unsafeScope (map.code body)
     | .closeAvailable value next => .closeAvailable value (map.code next)
-    | .reserve local brand places next => .reserve (local.mapTerms map.term) brand places (map.code next)
+    | .reserve localSlot brand places next => .reserve (localSlot.mapTerms map.term) brand places (map.code next)
     | .abort => .abort
 
   def Relocation.arm (map : Relocation) : Arm → Arm
@@ -122,7 +122,7 @@ def Relocation.context (map : Relocation) (context : Context) : Context :=
 def Relocation.installed (map : Relocation) (handler : InstalledHandler) : InstalledHandler :=
   { handler with
     identity := map.handler handler.identity
-    syntax := map.handlerSyntax handler.syntax
+    syntaxNode := map.handlerSyntax handler.syntaxNode
     environment := map.context handler.environment
     computation := map.context handler.computation
     outer := map.context handler.outer }
@@ -139,7 +139,7 @@ def Relocation.frame (map : Relocation) : Frame → Frame
   | frame => frame
 
 def Relocation.home (map : Relocation) : Home → Home
-  | .local activation scope => .local (map.activation activation) (map.scope scope)
+  | .localSlot activation scope => .localSlot (map.activation activation) (map.scope scope)
   | .temporary activation scope => .temporary (map.activation activation) (map.scope scope)
   | home => home
 
@@ -177,9 +177,9 @@ def SnapshotMap (before : State) (suspension : Suspension) (map : Relocation) : 
   (∀ id, id ∈ map.loans ↔ ∃ loan, before.world.loans.get id = some loan ∧ loan.live = true ∧ loan.referent.root ∈ map.roots) ∧
   (∀ id, id ∈ map.regions ↔ ∃ rootId root, rootId ∈ map.roots ∧ before.world.roots.get rootId = some root ∧ root.region = id) ∧
   (∀ id, id ∈ map.activations ↔ ∃ rootId home scope, rootId ∈ map.roots ∧ suspension.homes.get rootId = some home ∧
-    (home = .local id scope ∨ home = .temporary id scope)) ∧
+    (home = .localSlot id scope ∨ home = .temporary id scope)) ∧
   (∀ id, id ∈ map.scopes ↔ ∃ rootId home activation, rootId ∈ map.roots ∧ suspension.homes.get rootId = some home ∧
-    (home = .local activation id ∨ home = .temporary activation id)) ∧
+    (home = .localSlot activation id ∨ home = .temporary activation id)) ∧
   (∀ id, id ∈ map.handlers ↔ ∃ handler owns, Frame.handler handler owns ∈ suspension.frames ∧ handler.identity = id)
 
 def Relocation.copyWorld (map : Relocation) (world : World) (homes : Table Home) : World :=

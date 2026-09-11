@@ -35,8 +35,8 @@ def ScalarValue.type : ScalarValue → Scalar
 
 inductive Term where
   | parameter (binder : Identity) (kind : Kind)
-  | variable (cell : Identity) (kind : Kind) (universe : Nat)
-  | rigid (binder : Identity) (kind : Kind) (universe : Nat)
+  | variable (cell : Identity) (kind : Kind) (universeLevel : Nat)
+  | rigid (binder : Identity) (kind : Kind) (universeLevel : Nat)
   | unit | bottom | scalar (type : Scalar)
   | tuple (fields : List Term)
   | array (element length : Term)
@@ -109,13 +109,36 @@ inductive Occurs : Term → Term → Prop where
 
 abbrev Substitution := Table Term
 
-inductive Substitutes (substitution : Substitution) : Term → Term → Prop where
-  | selected {id kind value} : substitution.get id = some value → value.kind = kind →
-      Substitutes substitution (.parameter id kind) value
-  | free {id kind} : substitution.get id = none →
-      Substitutes substitution (.parameter id kind) (.parameter id kind)
-  | node {a b} : (∀ id kind, a ≠ .parameter id kind) → SameHead a b →
-      ListRel (Substitutes substitution) a.children b.children → Substitutes substitution a b
+def Term.substitute (substitution : Substitution) : Term → Term
+  | .parameter id kind => (substitution.get id).getD (.parameter id kind)
+  | .tuple fields => .tuple (fields.map (Term.substitute substitution))
+  | .array a b => .array (a.substitute substitution) (b.substitute substitution)
+  | .reference mode a b => .reference mode (a.substitute substitution) (b.substitute substitution)
+  | .rawPointer mode a => .rawPointer mode (a.substitute substitution)
+  | .nominal id arguments => .nominal id (arguments.map (Term.substitute substitution))
+  | .alias id arguments => .alias id (arguments.map (Term.substitute substitution))
+  | .callable id arguments => .callable id (arguments.map (Term.substitute substitution))
+  | .continuation a b c d uses => .continuation (a.substitute substitution) (b.substitute substitution)
+      (c.substitute substitution) (d.substitute substitution) uses
+  | .label a b c => .label (a.substitute substitution) (b.substitute substitution) (c.substitute substitution)
+  | .environment a b => .environment (a.substitute substitution) (b.substitute substitution)
+  | .available a b => .available (a.substitute substitution) (b.substitute substitution)
+  | .bindings a b arguments => .bindings (a.substitute substitution) (b.substitute substitution)
+      (arguments.map (Term.substitute substitution))
+  | .effect id arguments => .effect id (arguments.map (Term.substitute substitution))
+  | .row instances tails => .row (instances.map (Term.substitute substitution)) (tails.map (Term.substitute substitution))
+  | .projection trait member owners items kind => .projection trait member
+      (owners.map (Term.substitute substitution)) (items.map (Term.substitute substitution)) kind
+  | .constantTuple fields => .constantTuple (fields.map (Term.substitute substitution))
+  | .constantConstructor id arguments fields => .constantConstructor id
+      (arguments.map (Term.substitute substitution)) (fields.map (Term.substitute substitution))
+  | term => term
+
+/-- The checked graph of the single substitution operation. No substituted
+occurrence may change kind, even inside a type whose outer kind is unchanged. -/
+def Substitutes (substitution : Substitution) (before after : Term) : Prop :=
+  before.kind = after.kind ∧ after = before.substitute substitution ∧
+  ∀ id kind value, Occurs (.parameter id kind) before → substitution.get id = some value → value.kind = kind
 
 structure Binder where
   id : Identity
@@ -141,17 +164,53 @@ inductive Constraint where
   | quantified (binders : List Binder) (requirements : List Constraint)
   deriving Repr, Inhabited
 
+def Constraint.substitute (substitution : Substitution) : Constraint → Constraint
+  | .equal a b => .equal (a.substitute substitution) (b.substitute substitution)
+  | .outlives a b => .outlives (a.substitute substitution) (b.substitute substitution)
+  | .typeOutlives a b => .typeOutlives (a.substitute substitution) (b.substitute substitution)
+  | .rowIncludes a b => .rowIncludes (a.substitute substitution) (b.substitute substitution)
+  | .implements trait arguments negative => .implements trait (arguments.map (Term.substitute substitution)) negative
+  | .use type quantity => .use (type.substitute substitution) quantity
+  | .callable receiver arguments output effects unsafeAllowed => .callable (receiver.substitute substitution)
+      (arguments.map (Term.substitute substitution)) (output.substitute substitution) (effects.substitute substitution) unsafeAllowed
+  | .runsIn receiver access arguments after unsafeAllowed => .runsIn (receiver.substitute substitution)
+      (access.substitute substitution) (arguments.map (Term.substitute substitution)) (after.substitute substitution) unsafeAllowed
+  | .quantified binders requirements =>
+      let restricted := substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1)))
+      .quantified (binders.map (fun binder => { binder with defaultValue := binder.defaultValue.map (Term.substitute restricted) }))
+        (requirements.map (Constraint.substitute restricted))
+
+/-- Bound declaration identities are globally fresh; checking this condition
+also rejects accidental capture in externally supplied substitutions. -/
+def Constraint.SubstitutionAdmissible (substitution : Substitution) : Constraint → Prop
+  | .equal a b | .outlives a b | .typeOutlives a b | .rowIncludes a b =>
+      Substitutes substitution a (a.substitute substitution) ∧ Substitutes substitution b (b.substitute substitution)
+  | .implements _ arguments _ => ∀ argument ∈ arguments, Substitutes substitution argument (argument.substitute substitution)
+  | .use type _ => Substitutes substitution type (type.substitute substitution)
+  | .callable receiver arguments output effects _ =>
+      ∀ term ∈ receiver :: output :: effects :: arguments, Substitutes substitution term (term.substitute substitution)
+  | .runsIn receiver access arguments after _ =>
+      ∀ term ∈ receiver :: access :: after :: arguments, Substitutes substitution term (term.substitute substitution)
+  | .quantified binders requirements =>
+      let restricted := substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1)))
+      (∀ entry ∈ restricted, ∀ binder ∈ binders, ¬ Occurs (.parameter binder.id binder.kind) entry.2) ∧
+      (∀ binder ∈ binders, ∀ value, binder.defaultValue = some value → Substitutes restricted value (value.substitute restricted)) ∧
+      ∀ requirement ∈ requirements, requirement.SubstitutionAdmissible restricted
+
+def SubstituteConstraint (substitution : Substitution) (before after : Constraint) : Prop :=
+  before.SubstitutionAdmissible substitution ∧ after = before.substitute substitution
+
 structure Signature where
   generics : List Binder := []
   parameters : List Term
   result : Term
   effects : Term := .row [] []
   constraints : List Constraint := []
-  unsafe : Bool := false
+  unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
 inductive Visibility where
-  | private | public | package | parent
+  | privateScope | publicScope | package | parent
   deriving DecidableEq, BEq, Repr, Inhabited
 
 inductive Namespace where
@@ -162,7 +221,7 @@ structure Header where
   id : DeclId
   module : ModuleId
   name : String
-  namespace : Namespace
+  nameSpace : Namespace
   visibility : Visibility
   span : Span
   sourceVisible : Bool := true
@@ -173,9 +232,9 @@ def Descendant (child parent : ModuleId) : Prop :=
 
 def Visible (header : Header) (requester : ModuleId) : Prop :=
   match header.visibility with
-  | .public => True
+  | .publicScope => True
   | .package => requester.package = header.module.package
-  | .private => Descendant requester header.module
+  | .privateScope => Descendant requester header.module
   | .parent => Descendant requester { header.module with path := header.module.path.dropLast }
 
 inductive RegionIncludes (assumptions : List Constraint) : Term → Term → Prop where
@@ -185,8 +244,8 @@ inductive RegionIncludes (assumptions : List Constraint) : Term → Term → Pro
   | trans {a b c} : RegionIncludes assumptions a b → RegionIncludes assumptions b c →
       RegionIncludes assumptions a c
 
-def NoLeak (universe : Nat) (term : Term) : Prop :=
-  ∀ id kind level, Occurs (.rigid id kind level) term → level ≤ universe
+def NoLeak (universeLevel : Nat) (term : Term) : Prop :=
+  ∀ id kind level, Occurs (.rigid id kind level) term → level ≤ universeLevel
 
 def Resolved (term : Term) : Prop :=
   (∀ id kind level, ¬ Occurs (.variable id kind level) term) ∧
@@ -205,9 +264,6 @@ theorem sameHead_kind {a b : Term} (same : SameHead a b) : a.kind = b.kind := by
 
 theorem substitution_kind {substitution : Substitution} {a b : Term}
     (proof : Substitutes substitution a b) : a.kind = b.kind := by
-  cases proof with
-  | selected _ kinded => exact kinded.symm
-  | free _ => rfl
-  | node _ same _ => exact sameHead_kind same
+  exact proof.1
 
 end Glorious.Language

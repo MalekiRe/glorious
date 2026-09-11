@@ -14,18 +14,18 @@ structure Context where
   scope : Identity
   region : Identity
   labels : Table Identity := []
-  unsafe : Bool := false
+  unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
 def Context.static (context : Context) : Language.Context :=
-  ⟨[],[],0,context.module,context.unsafe⟩
+  ⟨[],[],0,context.module,context.unsafeAllowed⟩
 
-def Context.bind (context : Context) (local : Local) (address : Address) (authority : Authority := .owner) : Context :=
-  { context with environment := ⟨local.id,address,authority⟩ :: context.environment.filter (fun entry => entry.local != local.id) }
+def Context.bind (context : Context) (localSlot : Local) (address : Address) (authority : Authority := .owner) : Context :=
+  { context with environment := ⟨localSlot.id,address,authority⟩ :: context.environment.filter (fun entry => entry.localSlot != localSlot.id) }
 
 structure InstalledHandler where
   identity : Identity
-  syntax : Handler
+  syntaxNode : Handler
   environment : Context
   computation : Context
   outer : Context
@@ -181,7 +181,7 @@ def EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
       withRegion inputs environment after ∧
     context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
       (match function.namedExit with | none => [] | some label => [(label,before.nextBrand)]),false⟩ ∧
-    (function.signature.unsafe = true → caller.unsafe = true)
+    (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
 
 def FreshNamedFrame (function : Function) (caller : Context) (brand region : Identity) : List Frame :=
   match function.namedExit with
@@ -206,22 +206,22 @@ def ScheduledPattern (actions : List PatternAction) : List PatternAction :=
   (actions.filter (fun action => match action with | .dispose .. => true | _ => false)).reverse
 
 inductive LocalStep (program : Kernel.Program) : State → Option Event → State → Prop where
-  | evaluate {before context local value next address allocated layout} :
-      before.task = .run context (.evaluate local value next) →
-      Allocates program.declarations before.world (.local context.activation context.scope) context.region
-        local.type layout local.mutable address allocated →
+  | evaluate {before context localSlot value next address allocated layout} :
+      before.task = .run context (.evaluate localSlot value next) →
+      Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
+        localSlot.type layout localSlot.mutable address allocated →
       LocalStep program before (some (.allocate address)) { before with world := allocated,
-        task := .run context value, frames := .binding (context.bind local address) address next :: before.frames }
-  | bind {before context local atom next address allocated layout} : before.task = .run context (.bind local atom next) →
-      Allocates program.declarations before.world (.local context.activation context.scope) context.region
-        local.type layout local.mutable address allocated →
+        task := .run context value, frames := .binding (context.bind localSlot address) address next :: before.frames }
+  | bind {before context localSlot atom next address allocated layout} : before.task = .run context (.bind localSlot atom next) →
+      Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
+        localSlot.type layout localSlot.mutable address allocated →
       LocalStep program before (some (.allocate address))
-        { before with world := allocated, task := .atom (context.bind local address) address atom next }
-  | result {before context place address authority value protected after} : before.task = .run context (.result place) →
+        { before with world := allocated, task := .atom (context.bind localSlot address) address atom next }
+  | result {before context place address authority value kept after} : before.task = .run context (.result place) →
       ResolvesPlace before.world context.environment place address authority → before.world.Stores address value →
-      Protect program context before.world address authority protected after →
-      LocalStep program before (some (.move address protected))
-        { before with world := after, task := .yield context protected }
+      Protect program context before.world address authority kept after →
+      LocalStep program before (some (.move address kept))
+        { before with world := after, task := .yield context kept }
   | discard {before context place next address authority} : before.task = .run context (.discard place next) →
       ResolvesPlace before.world context.environment place address authority →
       LocalStep program before none { before with task := .destroy context address authority (.run context next) }
@@ -236,7 +236,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       Transfers before.world authority source destination after →
       LocalStep program before (some (.move source destination)) { before with world := after, task := next }
   | invoke {before context result call next destination allocated layout} : before.task = .run context (.invoke result call next) →
-      Allocates program.declarations before.world (.local context.activation context.scope) context.region
+      Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region
         result.type layout result.mutable destination allocated →
       LocalStep program before (some (.allocate destination)) { before with world := allocated,
         task := .apply context call false, frames := .binding (context.bind result destination) destination next :: before.frames }
@@ -271,12 +271,12 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       before.frames = .binding caller destination next :: rest → Transfers before.world .owner value destination after →
       LocalStep program before (some (.move value destination))
         { before with world := after, task := .retire value.root (.run caller next), frames := rest }
-  | activationReturn {before context value outer activation region rest protected after roots} :
+  | activationReturn {before context value outer activation region rest kept after roots} :
       before.task = .yield context value → before.frames = .activation outer activation region :: rest →
-      context.activation = activation → Protect program outer before.world value .owner protected after →
+      context.activation = activation → Protect program outer before.world value .owner kept after →
       ActivationRoots after activation [] roots → Suspensible after roots →
       LocalStep program before none { before with world := after,
-        task := .cleanup context roots (.closeRegion region (.yield outer protected)), frames := rest }
+        task := .cleanup context roots (.closeRegion region (.yield outer kept)), frames := rest }
   | topReturn {before context value} : before.task = .yield context value → before.frames = [] →
       LocalStep program before none { before with task := .stopped value }
   | scope {before context identity body after inner} : before.task = .run context (.scope identity body) →
@@ -284,11 +284,11 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       inner = { context with scope := before.world.nextRegion, region := before.world.nextRegion } →
       LocalStep program before none { before with world := after, task := .run inner body,
         frames := .scope context inner.scope inner.region :: before.frames }
-  | scopeReturn {before context value outer scope region rest protected after roots} : before.task = .yield context value →
-      before.frames = .scope outer scope region :: rest → Protect program outer before.world value .owner protected after →
+  | scopeReturn {before context value outer scope region rest kept after roots} : before.task = .yield context value →
+      before.frames = .scope outer scope region :: rest → Protect program outer before.world value .owner kept after →
       ScopeRoots after context.activation scope [] roots → Suspensible after roots →
       LocalStep program before none { before with world := after,
-        task := .cleanup context roots (.closeRegion region (.yield outer protected)), frames := rest }
+        task := .cleanup context roots (.closeRegion region (.yield outer kept)), frames := rest }
   | label {before context lexical region result body inner} : before.task = .run context (.label lexical region result body) →
       inner = { context with labels := context.labels.set lexical before.nextBrand } →
       LocalStep program before none { before with task := .run inner body,
@@ -303,12 +303,12 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with task := .pattern context (ScheduledPattern actions) arm.body }
   | patternDone {before context body} : before.task = .pattern context [] body →
       LocalStep program before none { before with task := .run context body }
-  | patternBind {before context local address authority access rest body binding after} :
-      before.task = .pattern context (.bind local address authority access :: rest) body →
+  | patternBind {before context localSlot address authority access rest body binding after} :
+      before.task = .pattern context (.bind localSlot address authority access :: rest) body →
       BindsInput program.declarations context.activation context.scope context.region before.world
-        ⟨.argument 0,local,address,authority,access⟩ binding after →
+        ⟨.argument 0,localSlot,address,authority,access⟩ binding after →
       LocalStep program before none { before with world := after,
-        task := .pattern (context.bind local binding.address binding.authority) rest body }
+        task := .pattern (context.bind localSlot binding.address binding.authority) rest body }
   | patternShell {before context address authority rest body after} :
       before.task = .pattern context (.consumeShell address authority :: rest) body →
       Deconstructs program.declarations context.static before.world authority address after →
@@ -317,8 +317,8 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
   | patternDispose {before context address authority rest body} :
       before.task = .pattern context (.dispose address authority :: rest) body →
       LocalStep program before none { before with task := .destroy context address authority (.pattern context rest body) }
-  | unsafe {before context body} : before.task = .run context (.unsafeScope body) →
-      LocalStep program before none { before with task := .run { context with unsafe := true } body }
+  | unsafeAllowed {before context body} : before.task = .run context (.unsafeScope body) →
+      LocalStep program before none { before with task := .run { context with unsafeAllowed := true } body }
   | cleanupDone {before context next} : before.task = .cleanup context [] next →
       LocalStep program before none { before with task := next }
   | cleanupRoot {before context id roots next root} : before.task = .cleanup context (id :: roots) next →
@@ -334,7 +334,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       Temporary program context (.reference .unique (.rigid context.region .region 0) value.type) before.world handle withHandle →
       Borrows program.declarations withHandle authority .unique context.region address handle after → loan = withHandle.nextLoan →
       LocalStep program before (some (.hookEnter address hook)) { before with world := after,
-        task := .enter { context with unsafe := false } function
+        task := .enter { context with unsafeAllowed := false } function
           [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩] false,
         frames := .hook context address authority handle loan next :: before.frames }
   | hookReturned {before context result outer address authority handle loan next rest} : before.task = .yield context result →

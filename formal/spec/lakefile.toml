@@ -1,7 +1,7 @@
 name = "gloriousLanguage"
 version = "0.1.0"
 defaultTargets = ["GloriousLanguage"]
-moreLeanArgs = ["-DwarningAsError=true"]
+moreLeanArgs = ["-DwarningAsError=true", "-DautoImplicit=false"]
 
 [[lean_lib]]
 name = "GloriousLanguage"

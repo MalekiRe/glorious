@@ -7,10 +7,11 @@ algorithms. Source-owned libraries are arbitrary programs using the same
 language rules as application code. Machine and foreign boundaries are
 explicit contracts.
 
-Status: initial whole-specification draft, in its first Lean-check and
-semantic repair pass. `Foundation` now checks. The full build stops in `Terms`
-on reserved identifiers; downstream modules have not yet checked. No full
-build or full-language conformance result is claimed here. See `DRAFT.md`.
+Status: initial whole-specification draft, in its Lean-check and semantic
+repair pass. The focused gate through `Instantiation` and `BasicChecks` passes
+(12 build jobs), including declarations, static rules and storage. The full
+execution/elaboration aggregate has not yet checked. No full build or
+full-language conformance result is claimed here. See `DRAFT.md`.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
 

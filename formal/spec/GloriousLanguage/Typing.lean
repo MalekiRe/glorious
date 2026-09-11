@@ -16,8 +16,8 @@ structure Context where
   environment : Option Term := none
   deriving Repr, Inhabited
 
-def Context.bind (context : Context) (local : Local) : Context :=
-  { context with locals := local :: context.locals.filter (fun previous => previous.id != local.id) }
+def Context.bind (context : Context) (localSlot : Local) : Context :=
+  { context with locals := localSlot :: context.locals.filter (fun previous => previous.id != localSlot.id) }
 
 def FieldType (program : Language.Program) (context : Language.Context)
     (type : Term) (index : Nat) (field : Term) (visible : Bool) : Prop :=
@@ -35,10 +35,10 @@ inductive Projections (program : Language.Program) (context : Context) :
   | field {type mutable index rest field result writable} : FieldType program context.static type index field true →
       Projections program context field mutable rest result writable →
       Projections program context type mutable (.field index :: rest) result writable
-  | index {element length mutable local rest result writable} :
-      (∃ binding ∈ context.locals, binding.id = local ∧ binding.type = .scalar (.integer false .pointer)) →
+  | index {element length mutable localSlot rest result writable} :
+      (∃ binding ∈ context.locals, binding.id = localSlot ∧ binding.type = .scalar (.integer false .pointer)) →
       Projections program context element mutable rest result writable →
-      Projections program context (.array element length) mutable (.index local :: rest) result writable
+      Projections program context (.array element length) mutable (.index localSlot :: rest) result writable
   | dereference {mode region referent mutable rest result writable} :
       Projections program context referent (mode == .unique) rest result writable →
       Projections program context (.reference mode region referent) mutable (.dereference :: rest) result writable
@@ -46,7 +46,7 @@ inductive Projections (program : Language.Program) (context : Context) :
       Projections program context b mutable projections result writable → Projections program context a mutable projections result writable
 
 def PlaceType (program : Language.Program) (context : Context) (place : Place) (type : Term) (writable : Bool) : Prop :=
-  ∃ local, local ∈ context.locals ∧ local.id = place.local ∧ Projections program context local.type local.mutable place.projections type writable
+  ∃ localSlot, localSlot ∈ context.locals ∧ localSlot.id = place.localSlot ∧ Projections program context localSlot.type localSlot.mutable place.projections type writable
 
 def PlacesType (program : Language.Program) (context : Context) (places : List Place) (types : List Term) : Prop :=
   ListRel (fun place type => ∃ actual writable, PlaceType program context place actual writable ∧ Subtype program context.static actual type) places types
@@ -64,7 +64,7 @@ inductive InvocationType (program : Language.Program) (context : Context) : Invo
   | function {call id arguments writable signature} : PlaceType program context call.callee (.callable id arguments) writable →
       CallSignature program context.static id arguments signature → signature = call.signature →
       PlacesType program context call.arguments signature.parameters →
-      (signature.unsafe = true → context.static.unsafe = true) → RowSubset program context.static signature.effects context.effects →
+      (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) → RowSubset program context.static signature.effects context.effects →
       (call.receiver = .unique → writable = true) → InvocationType program context call
   | continuation {call brand argument answer effects quantity writable} :
       PlaceType program context call.callee (.continuation brand argument answer effects quantity) writable →
@@ -78,9 +78,9 @@ inductive InvocationType (program : Language.Program) (context : Context) : Invo
 mutual
   inductive PatternType (program : Language.Program) (context : Language.Context) : Pattern → Term → Access → List Local → Prop where
     | wildcard {type access} : PatternType program context .wildcard type access []
-    | bind {local type} : Equal program context local.type type → PatternType program context (.bind local) type .owned [local]
-    | borrowBind {local type mode region} : local.type = .reference mode region type → Kinding program context region .region →
-        PatternType program context (.bind local) type (if mode = .shared then .shared else .unique) [local]
+    | bind {localSlot type} : Equal program context localSlot.type type → PatternType program context (.bind localSlot) type .owned [localSlot]
+    | borrowBind {localSlot type mode region} : localSlot.type = .reference mode region type → Kinding program context region .region →
+        PatternType program context (.bind localSlot) type (if mode = .shared then .shared else .unique) [localSlot]
     | scalar {scalar access} : scalar.Valid program.input.target → (∀ width bits, scalar ≠ .floating width bits) →
         PatternType program context (.scalar scalar) (.scalar scalar.type) access []
     | unit {access} : PatternType program context .unit .unit access []
@@ -139,13 +139,13 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
   | primitive {id arguments operands binding substitution signature} : binding ∈ program.declarations.input.manifest.bindings →
       binding.declaration = id → Instantiates binding.signature.generics arguments substitution →
       signature = binding.signature.instantiate substitution → PlacesType program.declarations context operands signature.parameters →
-      (signature.unsafe = true → context.static.unsafe = true) →
+      (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) →
       RowSubset program.declarations context.static signature.effects context.effects →
       AtomType program context (.primitive id arguments operands) signature.result
-  | available {id brand region local} : local ∈ context.locals → local.id = id → local.type = .available brand region →
-      AtomType program context (.available id) local.type
-  | bindings {id brand region arguments local} : local ∈ context.locals → local.id = id → local.type = .bindings brand region arguments →
-      AtomType program context (.bindings id) local.type
+  | available {id brand region localSlot} : localSlot ∈ context.locals → localSlot.id = id → localSlot.type = .available brand region →
+      AtomType program context (.available id) localSlot.type
+  | bindings {id brand region arguments localSlot} : localSlot ∈ context.locals → localSlot.id = id → localSlot.type = .bindings brand region arguments →
+      AtomType program context (.bindings id) localSlot.type
 
 mutual
   inductive ValueTyped (program : Kernel.Program) (world : World) : Value → Prop where
@@ -195,18 +195,18 @@ mutual
   inductive CodeType (program : Kernel.Program) : Context → Code → Term → Prop where
     | result {context place actual result writable} : PlaceType program.declarations context place actual writable →
         Subtype program.declarations context.static actual result → CodeType program context (.result place) result
-    | bind {context local atom next result} : AtomType program context atom local.type →
-        CodeType program (context.bind local) next result → CodeType program context (.bind local atom next) result
-    | evaluate {context local code next result} : CodeType program context code local.type →
-        CodeType program (context.bind local) next result → CodeType program context (.evaluate local code next) result
+    | bind {context localSlot atom next result} : AtomType program context atom localSlot.type →
+        CodeType program (context.bind localSlot) next result → CodeType program context (.bind localSlot atom next) result
+    | evaluate {context localSlot code next result} : CodeType program context code localSlot.type →
+        CodeType program (context.bind localSlot) next result → CodeType program context (.evaluate localSlot code next) result
     | assign {context destination source next type writable result} : PlaceType program.declarations context destination type true →
         PlaceType program.declarations context source type writable → CodeType program context next result →
         CodeType program context (.assign destination source next) result
     | discard {context place next type writable result} : PlaceType program.declarations context place type writable →
         CodeType program context next result → CodeType program context (.discard place next) result
-    | invoke {context local call next result} : InvocationType program.declarations context call →
-        Subtype program.declarations context.static call.signature.result local.type → CodeType program (context.bind local) next result →
-        CodeType program context (.invoke local call next) result
+    | invoke {context localSlot call next result} : InvocationType program.declarations context call →
+        Subtype program.declarations context.static call.signature.result localSlot.type → CodeType program (context.bind localSlot) next result →
+        CodeType program context (.invoke localSlot call next) result
     | tail {context call result} : InvocationType program.declarations context call →
         Subtype program.declarations context.static call.signature.result result → CodeType program context (.tail call) result
     | scope {context id body result} : CodeType program context body result → CodeType program context (.scope id body) result
@@ -219,22 +219,22 @@ mutual
     | handler {context id computation handler input result} : HandlerType program context handler input result →
         CodeType program { context with effects := .row (HandledInstances handler) [context.effects] } computation input →
         CodeType program context (.handle id computation handler) result
-    | test {context local subject pattern id next type writable bindings result carrier arguments} :
+    | test {context localSlot subject pattern id next type writable bindings result carrier arguments} :
         PlaceType program.declarations context subject type writable →
         PatternType program.declarations context.static pattern type .shared bindings →
-        program.declarations.input.manifest.testCarrier = some carrier → local.type = .nominal carrier.declaration arguments →
-        CodeType program (context.bind local) next result → CodeType program context (.test local subject pattern id next) result
+        program.declarations.input.manifest.testCarrier = some carrier → localSlot.type = .nominal carrier.declaration arguments →
+        CodeType program (context.bind localSlot) next result → CodeType program context (.test localSlot subject pattern id next) result
     | endLoan {context handle next mode region type writable result} :
         PlaceType program.declarations context handle (.reference mode region type) writable →
         CodeType program context next result → CodeType program context (.endLoan handle next) result
-    | unsafe {context body result} : CodeType program { context with static := { context.static with unsafe := true } } body result →
+    | unsafeAllowed {context body result} : CodeType program { context with static := { context.static with unsafeAllowed := true } } body result →
         CodeType program context (.unsafeScope body) result
     | closeAvailable {context place next brand region writable result} :
         PlaceType program.declarations context place (.available brand region) writable → CodeType program context next result →
         CodeType program context (.closeAvailable place next) result
-    | reserve {context local brand places next types result region} : PlacesType program.declarations context places types →
-        local.type = .available (.rigid brand .brand 0) region → CodeType program (context.bind local) next result →
-        CodeType program context (.reserve local brand places next) result
+    | reserve {context localSlot brand places next types result region} : PlacesType program.declarations context places types →
+        localSlot.type = .available (.rigid brand .brand 0) region → CodeType program (context.bind localSlot) next result →
+        CodeType program context (.reserve localSlot brand places next) result
     | abort {context result} : CodeType program context .abort result
     | bottom {context code result} : CodeType program context code .bottom → CodeType program context code result
 
@@ -260,8 +260,8 @@ mutual
         ((operation.terminal = true ∧ continuation = none ∧ output = result) ∨
           (operation.terminal = false ∧ ∃ quantity, operation.quantity = some quantity ∧
             ((continuation = none ∧ quantity.Contains 1 ∧ output = signature.result) ∨
-              (∃ local brand, continuation = some local ∧
-                local.type = .continuation brand signature.result result signature.effects quantity ∧ output = result)))) →
+              (∃ localSlot brand, continuation = some localSlot ∧
+                localSlot.type = .continuation brand signature.result result signature.effects quantity ∧ output = result)))) →
         CodeType program { context with locals := bindings ++ continuation.toList ++ context.locals } body output →
         OperationArmsType program context rest result →
         OperationArmsType program context (.clause id family item patterns continuation body :: rest) result

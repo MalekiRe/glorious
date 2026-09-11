@@ -7,17 +7,17 @@ namespace Glorious.Language
 structure Context where
   binders : List Binder := []
   assumptions : List Constraint := []
-  universe : Nat := 0
+  universeLevel : Nat := 0
   module : ModuleId
-  unsafe : Bool := false
+  unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
 inductive Kinding (program : Program) (context : Context) : Term → Kind → Prop where
   | quantity {quantity} : (∀ upper, quantity.upper = some upper → quantity.lower ≤ upper) →
       Kinding program context (.quantity quantity) .quantity
   | parameter {binder} : binder ∈ context.binders → Kinding program context (.parameter binder.id binder.kind) binder.kind
-  | rigid {id kind level} : level ≤ context.universe → Kinding program context (.rigid id kind level) kind
-  | variable {id kind level} : level ≤ context.universe → Kinding program context (.variable id kind level) kind
+  | rigid {id kind level} : level ≤ context.universeLevel → Kinding program context (.rigid id kind level) kind
+  | variable {id kind level} : level ≤ context.universeLevel → Kinding program context (.variable id kind level) kind
   | unit : Kinding program context .unit .type
   | bottom : Kinding program context .bottom .type
   | scalar {scalar} : scalar.Valid program.input.target → Kinding program context (.scalar scalar) .type
@@ -52,7 +52,7 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
   | effect {id declaration arguments substitution} : program.effect id = some declaration →
       Instantiates declaration.generics arguments substitution →
       (∀ argument ∈ arguments, Kinding program context argument argument.kind) → Kinding program context (.effect id arguments) .effect
-  | row {instances tails} : (∀ instance ∈ instances, Kinding program context instance .effect) →
+  | row {instances tails} : (∀ instanceTerm ∈ instances, Kinding program context instanceTerm .effect) →
       (∀ tail ∈ tails, Kinding program context tail .row) → Kinding program context (.row instances tails) .row
   | projection {trait member declaration associated owners items ownerSub itemSub} :
       program.trait trait = some declaration → member ∈ declaration.members →
@@ -67,38 +67,12 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
       program.Constructor constructor data variant → Instantiates data.generics arguments substitution →
       fields.length = variant.fields.length → (∀ field ∈ fields, Kinding program context field .constant) →
       Kinding program context (.constantConstructor constructor arguments fields) .constant
-  | quantity {principal} : Kinding program context (.principal principal) .quantity
+  | principal {principal} : Kinding program context (.principal principal) .quantity
   | static : Kinding program context .staticRegion .region
-
-inductive SubstituteConstraint (substitution : Substitution) : Constraint → Constraint → Prop where
-  | equal {a b x y} : Substitutes substitution a x → Substitutes substitution b y →
-      SubstituteConstraint substitution (.equal a b) (.equal x y)
-  | outlives {a b x y} : Substitutes substitution a x → Substitutes substitution b y →
-      SubstituteConstraint substitution (.outlives a b) (.outlives x y)
-  | typeOutlives {a b x y} : Substitutes substitution a x → Substitutes substitution b y →
-      SubstituteConstraint substitution (.typeOutlives a b) (.typeOutlives x y)
-  | rows {a b x y} : Substitutes substitution a x → Substitutes substitution b y →
-      SubstituteConstraint substitution (.rowIncludes a b) (.rowIncludes x y)
-  | implementation {id before after negative} : ListRel (Substitutes substitution) before after →
-      SubstituteConstraint substitution (.implements id before negative) (.implements id after negative)
-  | use {before after quantity} : Substitutes substitution before after →
-      SubstituteConstraint substitution (.use before quantity) (.use after quantity)
-  | callable {r args out effects r' args' out' effects' unsafe} : Substitutes substitution r r' →
-      ListRel (Substitutes substitution) args args' → Substitutes substitution out out' →
-      Substitutes substitution effects effects' →
-      SubstituteConstraint substitution (.callable r args out effects unsafe) (.callable r' args' out' effects' unsafe)
-  | runsIn {r access args after r' access' args' after' unsafe} : Substitutes substitution r r' →
-      Substitutes substitution access access' → ListRel (Substitutes substitution) args args' →
-      Substitutes substitution after after' →
-      SubstituteConstraint substitution (.runsIn r access args after unsafe) (.runsIn r' access' args' after' unsafe)
-  | quantified {binders before after restricted} :
-      restricted = substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1))) →
-      ListRel (SubstituteConstraint restricted) before after →
-      SubstituteConstraint substitution (.quantified binders before) (.quantified binders after)
 
 /-- A capability equation is local. Recursive nominal derivation is specified
 below as its greatest solution, not an acyclic field walk or assumed Copy. -/
-inductive CapabilityEquation (program : Program) (assignment : Term → Principal) : Term → Principal → Prop where
+inductive CapabilityEquation (program : Program) (assignment : Term → Option Principal) : Term → Principal → Prop where
   | unit : CapabilityEquation program assignment .unit .duplicable
   | bottom : CapabilityEquation program assignment .bottom .duplicable
   | scalar {type} : CapabilityEquation program assignment (.scalar type) .duplicable
@@ -106,53 +80,60 @@ inductive CapabilityEquation (program : Program) (assignment : Term → Principa
   | shared {region type} : CapabilityEquation program assignment (.reference .shared region type) .duplicable
   | unique {region type} : CapabilityEquation program assignment (.reference .unique region type) .affine
   | label {brand region result} : CapabilityEquation program assignment (.label brand region result) .duplicable
-  | tuple {fields} : CapabilityEquation program assignment (.tuple fields) (Principal.fields (fields.map assignment))
+  | tuple {fields principals} : ListRel (fun field principal => assignment field = some principal) fields principals →
+      CapabilityEquation program assignment (.tuple fields) (Principal.fields principals)
   | emptyArray {element sign width} :
       CapabilityEquation program assignment (.array element (.constant (.integer sign width 0))) .duplicable
-  | array {element sign width length} : 0 < length →
-      CapabilityEquation program assignment (.array element (.constant (.integer sign width length))) (assignment element)
-  | alias {id declaration arguments substitution value} : program.alias id = some declaration →
+  | array {element sign width length principal} : 0 < length → assignment element = some principal →
+      CapabilityEquation program assignment (.array element (.constant (.integer sign width length))) principal
+  | alias {id declaration arguments substitution value principal} : program.alias id = some declaration →
       Instantiates declaration.generics arguments substitution → Substitutes substitution declaration.value value →
-      CapabilityEquation program assignment (.alias id arguments) (assignment value)
-  | nominal {id data arguments substitution fields marker structural principal} : program.data id = some data →
+      assignment value = some principal → CapabilityEquation program assignment (.alias id arguments) principal
+  | nominal {id data arguments substitution fields principals marker structural principal} : program.data id = some data →
       Instantiates data.generics arguments substitution →
       ListRel (Substitutes substitution) ((data.variants.flatMap (·.fields)).map (·.type)) fields →
+      ListRel (fun field capability => assignment field = some capability) fields principals →
       (data.quantitySource = none ∧ marker = .duplicable ∨
        ∃ source value, data.quantitySource = some source ∧ Substitutes substitution source value ∧
-         (value = .principal marker ∨ value.kind = .type ∧ marker = assignment value)) →
-      structural = (Principal.fields (fields.map assignment)).meet marker →
+         (value = .principal marker ∨ value.kind = .type ∧ assignment value = some marker)) →
+      structural = (Principal.fields principals).meet marker →
       (data.principalRestriction = none ∧ principal = structural ∨
        data.principalRestriction = some principal ∧ principal.Restricts structural) →
       (data.dropHook.isSome = true → principal.MayDiscard) →
       CapabilityEquation program assignment (.nominal id arguments) principal
-  | callable {id function arguments substitution captures} : program.function id = some function →
+  | callable {id function arguments substitution captures principals} : program.function id = some function →
       Instantiates function.signature.generics arguments substitution →
       ListRel (Substitutes substitution) function.captures captures →
-      CapabilityEquation program assignment (.callable id arguments) (Principal.fields (captures.map assignment))
-  | environment {definition brand region} : Definition.environment definition ∈ program.declarations →
+      ListRel (fun field capability => assignment field = some capability) captures principals →
+      CapabilityEquation program assignment (.callable id arguments) (Principal.fields principals)
+  | environment {definition brand region principals} : Definition.environment definition ∈ program.declarations →
       definition.brand = brand → definition.region = region →
-      CapabilityEquation program assignment (.environment brand region) (Principal.fields (definition.residents.map assignment))
-  | available {brand region} : CapabilityEquation program assignment (.available brand region)
-      (assignment (.environment brand region))
-  | bindings {brand region fields} : CapabilityEquation program assignment (.bindings brand region fields)
-      (Principal.fields (fields.map assignment))
+      ListRel (fun field capability => assignment field = some capability) definition.residents principals →
+      CapabilityEquation program assignment (.environment brand region) (Principal.fields principals)
+  | available {brand region principal} : assignment (.environment brand region) = some principal →
+      CapabilityEquation program assignment (.available brand region) principal
+  | bindings {brand region fields principals} :
+      ListRel (fun field capability => assignment field = some capability) fields principals →
+      CapabilityEquation program assignment (.bindings brand region fields) (Principal.fields principals)
   | optionalContinuation {brand argument answer effects} :
       CapabilityEquation program assignment (.continuation brand argument answer effects ⟨0,some 1⟩) .affine
   | exactContinuation {brand argument answer effects n} : 0 < n →
       CapabilityEquation program assignment (.continuation brand argument answer effects ⟨n,some n⟩) .exact
 
-def CapabilitySolution (program : Program) (assignment : Term → Principal) : Prop :=
-  ∀ context term, Kinding program context term .type → Closed term →
-    CapabilityEquation program assignment term (assignment term)
+/-- Absence is an explicit unknown, not an unconstrained principal. Every
+published answer, including one involving abstract regions or brands, must
+satisfy an equation; unsupported types cannot gain permission by omission. -/
+def CapabilitySolution (program : Program) (assignment : Term → Option Principal) : Prop :=
+  ∀ term principal, assignment term = some principal ↔ CapabilityEquation program assignment term principal
 
 structure CapabilityModel (program : Program) where
-  principal : Term → Principal
+  principal : Term → Option Principal
   equations : CapabilitySolution program principal
-  greatest : ∀ other, CapabilitySolution program other → ∀ context term,
-    Kinding program context term .type → Closed term → (other term).Restricts (principal term)
+  greatest : ∀ other, CapabilitySolution program other → ∀ term result,
+    other term = some result → ∃ selected, principal term = some selected ∧ result.Restricts selected
 
 def PrincipalOf (program : Program) (type : Term) (principal : Principal) : Prop :=
-  ∃ model : CapabilityModel program, model.principal type = principal
+  ∃ model : CapabilityModel program, model.principal type = some principal
 
 mutual
   inductive Equal (program : Program) (context : Context) : Term → Term → Prop where
@@ -199,7 +180,7 @@ mutual
         SelectsImpl program context trait arguments negative implementation substitution
 
   inductive RowMember (program : Program) (context : Context) : Term → Term → Prop where
-    | head {effect instances tails instance} : instance ∈ instances → Equal program context effect instance →
+    | head {effect instances tails instanceTerm} : instanceTerm ∈ instances → Equal program context effect instanceTerm →
         RowMember program context effect (.row instances tails)
     | tail {effect instances tails tail} : tail ∈ tails → RowMember program context effect tail →
         RowMember program context effect (.row instances tails)
@@ -211,7 +192,7 @@ mutual
         RowSubset program context required allowed
     | same {a b} : Equal program context a b → RowSubset program context a b
     | trans {a b c} : RowSubset program context a b → RowSubset program context b c → RowSubset program context a c
-    | instances {instances tails allowed} : (∀ instance ∈ instances, RowMember program context instance allowed) →
+    | instances {instances tails allowed} : (∀ instanceTerm ∈ instances, RowMember program context instanceTerm allowed) →
         (∀ tail ∈ tails, RowSubset program context tail allowed) → RowSubset program context (.row instances tails) allowed
 
   inductive TypeOutlives (program : Program) (context : Context) : Term → Term → Prop where
@@ -229,33 +210,36 @@ mutual
         TypeOutlives program context type region
     | equal {a b region} : Equal program context a b → TypeOutlives program context a region → TypeOutlives program context b region
 
-  inductive Entails (program : Program) : Context → Constraint → Prop where
-    | checkedCallable {context function relation substitution receiver arguments result effects} :
+  inductive Entails (program : Program) (context : Context) : Constraint → Prop where
+    | checkedCallable {function relation substitution receiver arguments result effects} :
         program.function function.header.id = some function → relation ∈ function.invocations →
         Substitutes substitution relation.receiver receiver → ListRel (Substitutes substitution) relation.arguments arguments →
         Substitutes substitution relation.result result → Substitutes substitution relation.effects effects →
-        Entails program context (.callable receiver arguments result effects relation.unsafe)
-    | checkedRunsIn {context function relation substitution receiver access arguments after} :
+        Entails program context (.callable receiver arguments result effects relation.unsafeAllowed)
+    | checkedRunsIn {function relation substitution receiver access arguments after} :
         program.function function.header.id = some function → relation ∈ function.invocations →
         Substitutes substitution relation.receiver receiver → Substitutes substitution relation.access access →
         ListRel (Substitutes substitution) relation.arguments arguments → Substitutes substitution relation.after after →
-        Entails program context (.runsIn receiver access arguments after relation.unsafe)
-    | assumed {context constraint} : constraint ∈ context.assumptions → Entails program context constraint
-    | equality {context a b} : Equal program context a b → Entails program context (.equal a b)
-    | outlives {context a b} : RegionIncludes context.assumptions a b → Entails program context (.outlives a b)
-    | typeOutlives {context type region} : TypeOutlives program context type region → Entails program context (.typeOutlives type region)
-    | rows {context allowed required} : RowSubset program context required allowed → Entails program context (.rowIncludes allowed required)
-    | implementation {context trait arguments negative implementation substitution} :
+        Entails program context (.runsIn receiver access arguments after relation.unsafeAllowed)
+    | assumed {constraint} : constraint ∈ context.assumptions → Entails program context constraint
+    | equality {a b} : Equal program context a b → Entails program context (.equal a b)
+    | outlives {a b} : RegionIncludes context.assumptions a b → Entails program context (.outlives a b)
+    | typeOutlives {type region} : TypeOutlives program context type region → Entails program context (.typeOutlives type region)
+    | rows {allowed required} : RowSubset program context required allowed → Entails program context (.rowIncludes allowed required)
+    | implementation {trait arguments negative implementation substitution} :
         SelectsImpl program context trait arguments negative implementation substitution →
         Entails program context (.implements trait arguments negative)
-    | use {context type quantity principal} : PrincipalOf program type principal → quantity.Request principal →
+    | use {type quantity principal} : PrincipalOf program type principal → quantity.Request principal →
         Entails program context (.use type quantity)
-    | quantified {context binders requirements} :
+    | quantified {binders requirements} :
         (∀ values substitution, Instantiates binders values substitution →
           (∀ value ∈ values, Kinding program context value value.kind) →
-          ∀ requirement ∈ requirements, ∃ instantiated,
-            SubstituteConstraint substitution requirement instantiated ∧ Entails program context instantiated) →
+          ∀ requirement ∈ requirements, EntailsSubstitution program context substitution requirement) →
         Entails program context (.quantified binders requirements)
+
+  inductive EntailsSubstitution (program : Program) (context : Context) : Substitution → Constraint → Prop where
+    | instantiated {substitution requirement result} : SubstituteConstraint substitution requirement result →
+        Entails program context result → EntailsSubstitution program context substitution requirement
 end
 
 def ConstraintsHold (program : Program) (context : Context) (substitution : Substitution)
@@ -327,56 +311,68 @@ def NominalVariance (program : Program) (data : DataDefinition) (parameter : Ide
       ∃ field ∈ fields, ParameterPosition program parameter field .contravariant
   | .invariant => True
 
-inductive Subtype (program : Program) (context : Context) : Term → Term → Prop where
-  | equal {a b} : Equal program context a b → Subtype program context a b
-  | bottom {type} : WellKinded program context type .type → Subtype program context .bottom type
-  | shared {long short a b} : RegionIncludes context.assumptions long short → Subtype program context a b →
-      Subtype program context (.reference .shared long a) (.reference .shared short b)
-  | unique {long short a b} : RegionIncludes context.assumptions long short → Equal program context a b →
-      Subtype program context (.reference .unique long a) (.reference .unique short b)
-  | tuple {a b} : ListRel (Subtype program context) a b → Subtype program context (.tuple a) (.tuple b)
-  | array {a b n m} : Subtype program context a b → Equal program context n m →
-      Subtype program context (.array a n) (.array b m)
-  | nominal {id data a b} : program.data id = some data → a.length = data.generics.length → b.length = a.length →
-      (∀ i binder x y, data.generics[i]? = some binder → a[i]? = some x → b[i]? = some y →
-        Equal program context x y ∨
-        (NominalVariance program data binder.id .covariant ∧ Subtype program context x y) ∨
-        (NominalVariance program data binder.id .contravariant ∧ Subtype program context y x) ∨
-        NominalVariance program data binder.id .unused) →
-      Subtype program context (.nominal id a) (.nominal id b)
+mutual
+  inductive Subtype (program : Program) (context : Context) : Term → Term → Prop where
+    | equal {a b} : Equal program context a b → Subtype program context a b
+    | bottom {type} : WellKinded program context type .type → Subtype program context .bottom type
+    | shared {long short a b} : RegionIncludes context.assumptions long short → Subtype program context a b →
+        Subtype program context (.reference .shared long a) (.reference .shared short b)
+    | unique {long short a b} : RegionIncludes context.assumptions long short → Equal program context a b →
+        Subtype program context (.reference .unique long a) (.reference .unique short b)
+    | tuple {a b} : ListRel (Subtype program context) a b → Subtype program context (.tuple a) (.tuple b)
+    | array {a b n m} : Subtype program context a b → Equal program context n m →
+        Subtype program context (.array a n) (.array b m)
+    | nominal {id data a b} : program.data id = some data → a.length = data.generics.length → b.length = a.length →
+        (∀ (i : Nat) (binder : Binder) (x y : Term), data.generics[i]? = some binder → a[i]? = some x → b[i]? = some y →
+          VarianceSubtype program context data binder.id x y) →
+        Subtype program context (.nominal id a) (.nominal id b)
 
-inductive LayoutOf (program : Program) (context : Context) : Term → Layout → Prop where
-  | unit : LayoutOf program context .unit ⟨0,1,[],0,0,[]⟩
-  | scalar {scalar} : scalar.Valid program.input.target →
-      LayoutOf program context (.scalar scalar) ⟨scalar.bytes program.input.target,
-        program.input.target.scalarAlignment scalar,[],0,0,[]⟩
-  | reference {mode region referent} :
-      LayoutOf program context (.reference mode region referent)
+  inductive VarianceSubtype (program : Program) (context : Context) : DataDefinition → Identity → Term → Term → Prop where
+    | equal {data parameter a b} : Equal program context a b → VarianceSubtype program context data parameter a b
+    | covariant {data parameter a b} : NominalVariance program data parameter .covariant → Subtype program context a b →
+        VarianceSubtype program context data parameter a b
+    | contravariant {data parameter a b} : NominalVariance program data parameter .contravariant → Subtype program context b a →
+        VarianceSubtype program context data parameter a b
+    | unused {data parameter a b} : NominalVariance program data parameter .unused → VarianceSubtype program context data parameter a b
+end
+
+mutual
+  inductive LayoutOf (program : Program) (context : Context) : Term → Layout → Prop where
+    | unit : LayoutOf program context .unit ⟨0,1,[],0,0,[]⟩
+    | scalar {scalar} : scalar.Valid program.input.target →
+        LayoutOf program context (.scalar scalar) ⟨scalar.bytes program.input.target,
+          program.input.target.scalarAlignment scalar,[],0,0,[]⟩
+    | reference {mode region referent} :
+        LayoutOf program context (.reference mode region referent)
+          ⟨program.input.target.pointerBits / 8,program.input.target.pointerBits / 8,[],0,0,[]⟩
+    | pointer {mode referent} : LayoutOf program context (.rawPointer mode referent)
         ⟨program.input.target.pointerBits / 8,program.input.target.pointerBits / 8,[],0,0,[]⟩
-  | pointer {mode referent} : LayoutOf program context (.rawPointer mode referent)
-      ⟨program.input.target.pointerBits / 8,program.input.target.pointerBits / 8,[],0,0,[]⟩
-  | tuple {fields layouts layout} : ListRel (LayoutOf program context) fields layouts → AggregateLayout layouts layout →
-      LayoutOf program context (.tuple fields) layout
-  | array {element sign width length elementLayout layout} : 0 ≤ length →
-      IntegerRange program.input.target false .pointer length → LayoutOf program context element elementLayout →
-      ArrayLayout elementLayout length.toNat layout →
-      LayoutOf program context (.array element (.constant (.integer sign width length))) layout
-  | nominal {id data arguments substitution variantTypes variantLayouts layout} : program.data id = some data →
-      data.representation = .glorious → Instantiates data.generics arguments substitution →
-      ListRel (fun variant types => ListRel (Substitutes substitution) (variant.fields.map (·.type)) types)
-        data.variants variantTypes →
-      ListRel (fun types layout => ∃ fields, ListRel (LayoutOf program context) types fields ∧ AggregateLayout fields layout)
-        variantTypes variantLayouts →
-      (data.isEnum = true ∧ EnumLayout variantLayouts layout ∨ data.isEnum = false ∧ variantLayouts = [layout]) →
-      layout.size ≤ program.input.target.maximumObjectBytes → LayoutOf program context (.nominal id arguments) layout
-  | transparent {id data arguments substitution variant fields types layouts distinguished layout} :
-      program.data id = some data → data.representation = .transparent → data.isEnum = false → data.variants = [variant] →
-      fields = variant.fields → Instantiates data.generics arguments substitution →
-      ListRel (Substitutes substitution) (fields.map (·.type)) types → ListRel (LayoutOf program context) types layouts →
-      layouts[distinguished]? = some layout →
-      (∀ i other, layouts[i]? = some other → i ≠ distinguished → other.size = 0 ∧ other.alignment ≤ layout.alignment) →
-      LayoutOf program context (.nominal id arguments) layout
-  | alias {a b layout} : Equal program context a b → LayoutOf program context a layout → LayoutOf program context b layout
+    | tuple {fields layouts layout} : ListRel (LayoutOf program context) fields layouts → AggregateLayout layouts layout →
+        LayoutOf program context (.tuple fields) layout
+    | array {element sign width length elementLayout layout} : 0 ≤ length →
+        IntegerRange program.input.target false .pointer length → LayoutOf program context element elementLayout →
+        ArrayLayout elementLayout length.toNat layout →
+        LayoutOf program context (.array element (.constant (.integer sign width length))) layout
+    | nominal {id data arguments substitution variantTypes variantLayouts layout} : program.data id = some data →
+        data.representation = .glorious → Instantiates data.generics arguments substitution →
+        ListRel (fun variant types => ListRel (Substitutes substitution) (variant.fields.map (·.type)) types)
+          data.variants variantTypes →
+        ListRel (FieldsHaveLayout program context) variantTypes variantLayouts →
+        (data.isEnum = true ∧ EnumLayout variantLayouts layout ∨ data.isEnum = false ∧ variantLayouts = [layout]) →
+        layout.size ≤ program.input.target.maximumObjectBytes → LayoutOf program context (.nominal id arguments) layout
+    | transparent {id data arguments substitution variant fields types layouts distinguished layout} :
+        program.data id = some data → data.representation = .transparent → data.isEnum = false → data.variants = [variant] →
+        fields = variant.fields → Instantiates data.generics arguments substitution →
+        ListRel (Substitutes substitution) (fields.map (·.type)) types → ListRel (LayoutOf program context) types layouts →
+        layouts[distinguished]? = some layout →
+        (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ distinguished → other.size = 0 ∧ other.alignment ≤ layout.alignment) →
+        LayoutOf program context (.nominal id arguments) layout
+    | alias {a b layout} : Equal program context a b → LayoutOf program context a layout → LayoutOf program context b layout
+
+  inductive FieldsHaveLayout (program : Program) (context : Context) : List Term → Layout → Prop where
+    | fields {types layouts layout} : ListRel (LayoutOf program context) types layouts → AggregateLayout layouts layout →
+        FieldsHaveLayout program context types layout
+end
 
 inductive CCompatible (program : Program) (context : Context) : Term → Layout → Prop where
   | scalar {scalar} : scalar ∈ program.input.target.cCompatibleScalars →
@@ -395,20 +391,19 @@ inductive CCompatible (program : Program) (context : Context) : Term → Layout 
       IntegerRange program.input.target sign width (Int.ofNat data.variants.length - 1) →
       CCompatible program context (.nominal id arguments)
         ⟨width.bits program.input.target/8,program.input.target.cScalarAlignment (.integer sign width),[],0,0,[]⟩
-  | transparent {type layout} : LayoutOf program context type layout →
-      (∃ id data arguments variant substitution types layouts index represented,
-        type = .nominal id arguments ∧ program.data id = some data ∧ data.representation = .transparent ∧
-        data.variants = [variant] ∧ Instantiates data.generics arguments substitution ∧
-        ListRel (Substitutes substitution) (variant.fields.map (·.type)) types ∧
-        ListRel (LayoutOf program context) types layouts ∧ types[index]? = some represented ∧
-        CCompatible program context represented layout ∧
-        ∀ i other, layouts[i]? = some other → i ≠ index → other.size = 0) →
-      CCompatible program context type layout
+  | transparent {id data arguments variant substitution types layouts index represented layout} :
+      LayoutOf program context (.nominal id arguments) layout → program.data id = some data →
+      data.representation = .transparent → data.variants = [variant] → Instantiates data.generics arguments substitution →
+      ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
+      ListRel (LayoutOf program context) types layouts → types[index]? = some represented →
+      CCompatible program context represented layout →
+      (∀ (i : Nat) (other : Layout), layouts[i]? = some other → i ≠ index → other.size = 0) →
+      CCompatible program context (.nominal id arguments) layout
   | alias {a b layout} : Equal program context a b → CCompatible program context a layout → CCompatible program context b layout
 
 def ImplLocal (program : Program) (implementation : ImplDefinition) : Prop :=
   implementation.trait.package = implementation.header.id.package ∨
-  ∃ self id arguments normalized,
+  ∃ (self : Term) (id : DeclId) (arguments : List Term) (normalized : Term),
     implementation.arguments.head? = some self ∧
     Equal program ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false⟩ self normalized ∧
     normalized = .nominal id arguments ∧ id.package = implementation.header.id.package
@@ -458,7 +453,7 @@ def DeclarationWellFormed (program : Program) : Definition → Prop
   | .implementation implementation => ImplLocal program implementation ∧
     ∃ trait, program.trait implementation.trait = some trait ∧
       (trait.relation = .ordinary ∨ trait.relation = .use ∨ trait.relation = .drop) ∧
-      (trait.unsafe = true → implementation.unsafe = true) ∧
+      (trait.unsafeAllowed = true → implementation.unsafeAllowed = true) ∧
       (implementation.associated.map Prod.fst).Nodup ∧ (implementation.functions.map Prod.fst).Nodup
   | .effect effect => (effect.generics.map (·.id)).Nodup ∧ effect.operations.Nodup ∧
     ∀ operation ∈ effect.operations, ∃ declaration, program.operation operation = some declaration ∧ declaration.family = effect.header.id
@@ -479,7 +474,7 @@ def ProgramWellFormed (program : Program) : Prop :=
   SourceClosure program ∧ (program.declarations.map (·.header.id)).Nodup ∧
   (∀ left right, program.Header left → program.Header right → left.id = right.id → left = right) ∧
   (∀ left right, program.Header left → program.Header right →
-    left.module = right.module → left.namespace = right.namespace → left.name = right.name → left.id = right.id) ∧
+    left.module = right.module → left.nameSpace = right.nameSpace → left.name = right.name → left.id = right.id) ∧
   (∀ declaration ∈ program.declarations, DeclarationWellFormed program declaration) ∧ Coherent program
 
 end Glorious.Language

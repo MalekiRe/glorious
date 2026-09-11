@@ -133,7 +133,7 @@ def ReceiverAccess (receiver : Term) (type : Term) (access : Access) : Prop :=
 
 def RelationHolds (program : Kernel.Program) (function : Function) (relation : InvocationRelation) : Prop :=
   relation.arguments = function.signature.parameters ∧ relation.result = function.signature.result ∧
-  relation.effects = function.signature.effects ∧ relation.unsafe = function.signature.unsafe ∧
+  relation.effects = function.signature.effects ∧ relation.unsafeAllowed = function.signature.unsafeAllowed ∧
   ∃ arguments access,
     ReceiverAccess relation.receiver (.callable function.declaration arguments) access ∧
     (∀ host observation, Foreign.Model.Lawful program host → Observes program host function observation →
@@ -151,7 +151,7 @@ def CheckedInterfaces (program : Kernel.Program) : Prop :=
       RelationHolds program function
         ⟨relation.receiver.substitute substitution,relation.access.substitute substitution,
           relation.arguments.map (Term.substitute substitution),relation.result.substitute substitution,
-          relation.effects.substitute substitution,relation.after.substitute substitution,relation.unsafe⟩
+          relation.effects.substitute substitution,relation.after.substitute substitution,relation.unsafeAllowed⟩
 
 def PlainBoundary (world : World) (values : List Address) : Prop :=
   ∀ id available, world.availability.get id = some available → available.active = true →

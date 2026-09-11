@@ -6,12 +6,12 @@ namespace Glorious.Language.Kernel
 
 inductive Projection where
   | field (index : Nat)
-  | index (local : Identity)
+  | index (localSlot : Identity)
   | dereference
   deriving DecidableEq, BEq, Repr, Inhabited
 
 structure Place where
-  local : Identity
+  localSlot : Identity
   projections : List Projection := []
   deriving DecidableEq, BEq, Repr, Inhabited
 
@@ -34,7 +34,7 @@ structure Capture where
 
 inductive Pattern where
   | wildcard
-  | bind (local : Local)
+  | bind (localSlot : Local)
   | scalar (value : ScalarValue)
   | unit
   | tuple (fields : List Pattern)
@@ -68,8 +68,8 @@ structure Invocation where
 mutual
   inductive Code where
     | result (value : Place)
-    | bind (local : Local) (value : Atom) (next : Code)
-    | evaluate (local : Local) (value : Code) (next : Code)
+    | bind (localSlot : Local) (value : Atom) (next : Code)
+    | evaluate (localSlot : Local) (value : Code) (next : Code)
     | assign (destination value : Place) (next : Code)
     | discard (value : Place) (next : Code)
     | invoke (result : Local) (call : Invocation) (next : Code)
@@ -82,7 +82,7 @@ mutual
     | endLoan (handle : Place) (next : Code)
     | unsafeScope (body : Code)
     | closeAvailable (value : Place) (next : Code)
-    | reserve (local : Local) (brand : Identity) (places : List Place) (next : Code)
+    | reserve (localSlot : Local) (brand : Identity) (places : List Place) (next : Code)
     | abort
     deriving Repr, Inhabited
 
@@ -124,7 +124,7 @@ def Program.function (program : Program) (id : DeclId) : Option Function :=
   program.functions.find? (fun function => function.declaration == id)
 
 structure Binding where
-  local : Identity
+  localSlot : Identity
   address : Address
   authority : Authority
   deriving Repr, Inhabited
@@ -147,23 +147,23 @@ inductive ResolvesProjections (world : World) :
       ResolvesProjections world base authority (.dereference :: projections) result permission
 
 inductive ResolvesPlace (world : World) (environment : Environment) : Place → Address → Authority → Prop where
-  | local {place binding address authority} : binding ∈ environment → binding.local = place.local →
-      (∀ other ∈ environment, other.local = place.local → other = binding) →
+  | localSlot {place binding address authority} : binding ∈ environment → binding.localSlot = place.localSlot →
+      (∀ other ∈ environment, other.localSlot = place.localSlot → other = binding) →
       ResolvesProjections world binding.address binding.authority place.projections address authority →
       ResolvesPlace world environment place address authority
-  | index {place binding prefix index suffix indexBinding indexValue sign width integer address authority middle permission} :
-      binding ∈ environment → binding.local = place.local → place.projections = prefix ++ .index index :: suffix →
-      indexBinding ∈ environment → indexBinding.local = index → world.Stores indexBinding.address indexValue →
+  | index {place binding prefixForm index suffix indexBinding indexValue sign width integer address authority middle permission} :
+      binding ∈ environment → binding.localSlot = place.localSlot → place.projections = prefixForm ++ .index index :: suffix →
+      indexBinding ∈ environment → indexBinding.localSlot = index → world.Stores indexBinding.address indexValue →
       indexValue.head = .scalar (.integer sign width integer) → 0 ≤ integer →
       Permitted world indexBinding.authority .shared indexBinding.address →
-      ResolvesProjections world binding.address binding.authority prefix middle permission →
+      ResolvesProjections world binding.address binding.authority prefixForm middle permission →
       ResolvesProjections world middle permission (.field integer.toNat :: suffix) address authority →
       ResolvesPlace world environment place address authority
 
 mutual
   inductive Matches (program : Language.Program) (world : World) : Address → Pattern → Prop where
     | wildcard {address} : Matches program world address .wildcard
-    | bind {address local value} : world.Stores address value → value.Initialized → Matches program world address (.bind local)
+    | bind {address localSlot value} : world.Stores address value → value.Initialized → Matches program world address (.bind localSlot)
     | scalar {address expected value} : world.Stores address value → value.Initialized →
         value.head = .scalar expected → (∀ width bits, expected ≠ .floating width bits) →
         Matches program world address (.scalar expected)
@@ -193,7 +193,7 @@ def FirstArm (program : Language.Program) (world : World) (address : Address) (a
     ∀ earlier ∈ skipped, ¬ Matches program world address earlier.pattern
 
 inductive PatternAction where
-  | bind (local : Local) (address : Address) (authority : Authority) (access : Access)
+  | bind (localSlot : Local) (address : Address) (authority : Authority) (access : Access)
   | consumeShell (address : Address) (authority : Authority)
   | dispose (address : Address) (authority : Authority)
   deriving Repr, Inhabited
@@ -203,8 +203,8 @@ mutual
       Address → Authority → Access → Pattern → List PatternAction → Prop where
     | wildcardOwned {address authority} : PatternPlan program world address authority .owned .wildcard [.dispose address authority]
     | wildcardBorrowed {address authority access} : access ≠ .owned → PatternPlan program world address authority access .wildcard []
-    | bind {address authority access local} : PatternPlan program world address authority access (.bind local)
-        [.bind local address authority access]
+    | bind {address authority access localSlot} : PatternPlan program world address authority access (.bind localSlot)
+        [.bind localSlot address authority access]
     | scalarOwned {address authority scalar} : PatternPlan program world address authority .owned (.scalar scalar) [.dispose address authority]
     | scalarBorrowed {address authority access scalar} : access ≠ .owned → PatternPlan program world address authority access (.scalar scalar) []
     | unitOwned {address authority} : PatternPlan program world address authority .owned .unit [.dispose address authority]
@@ -251,7 +251,7 @@ inductive BindsInput (program : Language.Program) (activation scope region : Ide
       BindsInput program activation scope region world input
         ⟨input.formal.id,input.storage,input.authority⟩ world
   | owned {before input address allocated after layout} : input.access = .owned →
-      Allocates program before (.local activation scope) region input.formal.type layout input.formal.mutable address allocated →
+      Allocates program before (.localSlot activation scope) region input.formal.type layout input.formal.mutable address allocated →
       Transfers allocated input.authority input.storage address after →
       BindsInput program activation scope region before input ⟨input.formal.id,address,.owner⟩ after
 
@@ -263,22 +263,22 @@ inductive BindsInputs (program : Language.Program) (activation scope region : Id
       BindsInputs program activation scope region before (input :: rest) (binding :: bindings) after
 
 def OwnedByActivation (root : Root) (activation : Identity) : Prop :=
-  (∃ scope, root.home = .local activation scope) ∨ ∃ scope, root.home = .temporary activation scope
+  (∃ scope, root.home = .localSlot activation scope) ∨ ∃ scope, root.home = .temporary activation scope
 
 def OwnedByScope (root : Root) (activation scope : Identity) : Prop :=
-  root.home = .local activation scope ∨ root.home = .temporary activation scope
+  root.home = .localSlot activation scope ∨ root.home = .temporary activation scope
 
 def NewestFirst (world : World) (roots : List Identity) : Prop :=
-  roots.Nodup ∧ ∀ i j a b left right, roots[i]? = some a → roots[j]? = some b →
+  roots.Nodup ∧ ∀ (i j : Nat) a b left right, roots[i]? = some a → roots[j]? = some b →
     world.roots.get a = some left → world.roots.get b = some right → i < j → right.born ≤ left.born
 
-def ScopeRoots (world : World) (activation scope : Identity) (protected : List Identity) (roots : List Identity) : Prop :=
+def ScopeRoots (world : World) (activation scope : Identity) (kept : List Identity) (roots : List Identity) : Prop :=
   NewestFirst world roots ∧ ∀ id, id ∈ roots ↔
-    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByScope root activation scope ∧ id ∉ protected
+    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByScope root activation scope ∧ id ∉ kept
 
-def ActivationRoots (world : World) (activation : Identity) (protected : List Identity) (roots : List Identity) : Prop :=
+def ActivationRoots (world : World) (activation : Identity) (kept : List Identity) (roots : List Identity) : Prop :=
   NewestFirst world roots ∧ ∀ id, id ∈ roots ↔
-    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByActivation root activation ∧ id ∉ protected
+    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByActivation root activation ∧ id ∉ kept
 
 theorem borrowed_capture_keeps_storage {program : Language.Program} {activation scope region world input binding after}
     (borrowed : input.access ≠ .owned)

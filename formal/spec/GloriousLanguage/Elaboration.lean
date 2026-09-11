@@ -24,20 +24,20 @@ structure Context where
   origin : SourceAnchor
   owner : Option DeclId := none
   capturePlaces : List (Source.Expr × Local) := []
-  visibility : Visibility := .private
+  visibility : Visibility := .privateScope
   attributes : List Source.Attribute := []
   selfType : Option Term := none
   itemIndex : Nat := 0
   deriving Repr, Inhabited
 
-def Context.bind (context : Context) (name : String) (local : Local) : Context :=
-  { context with typed := context.typed.bind local,
-    names := ⟨name,⟨local.id,[]⟩,local.type,local.mutable⟩ :: context.names.filter (fun old => old.name != name) }
+def Context.bind (context : Context) (name : String) (localSlot : Local) : Context :=
+  { context with typed := context.typed.bind localSlot,
+    names := ⟨name,⟨localSlot.id,[]⟩,localSlot.type,localSlot.mutable⟩ :: context.names.filter (fun old => old.name != name) }
 
 def Context.child (context : Context) (index : Nat) : Context :=
   { context with origin := { context.origin with node := context.origin.node ++ [index] }, itemIndex := 0 }
 
-def Fresh (context : Context) (local : Local) : Prop := ∀ old ∈ context.typed.locals, old.id ≠ local.id
+def Fresh (context : Context) (localSlot : Local) : Prop := ∀ old ∈ context.typed.locals, old.id ≠ localSlot.id
 
 def ScalarName : String → Scalar → Prop
   | "char", scalar => scalar = .character
@@ -74,7 +74,7 @@ inductive LiteralConstant (target : TargetProfile) : Source.Literal → Option T
 mutual
   inductive TypeExpression (program : Kernel.Program) (context : Context) : Source.TypeExpr → Kind → Term → Prop where
     | self {type} : context.selfType = some type → TypeExpression program context (.path ["Self"] [] []) .type type
-    | infer {kind cell} : TypeExpression program context .infer kind (.variable cell kind context.typed.static.universe)
+    | infer {kind cell} : TypeExpression program context .infer kind (.variable cell kind context.typed.static.universeLevel)
     | unit : TypeExpression program context .unit .type .unit
     | bottom : TypeExpression program context .bottom .type .bottom
     | builtin {name type} : BuiltinType program.declarations context.typed.static name type →
@@ -84,7 +84,7 @@ mutual
     | lifetime {name binder} : binder ∈ context.typed.static.binders → binder.name = name → binder.kind = .region →
         TypeExpression program context (.lifetime name) .region (.parameter binder.id .region)
     | static : TypeExpression program context (.lifetime "static") .region .staticRegion
-    | inferredRegion {cell} : TypeExpression program context (.lifetime "_") .region (.variable cell .region context.typed.static.universe)
+    | inferredRegion {cell} : TypeExpression program context (.lifetime "_") .region (.variable cell .region context.typed.static.universeLevel)
     | tuple {fields types} : TypeExpressions program context fields (List.replicate fields.length .type) types →
         TypeExpression program context (.tuple fields) .type (.tuple types)
     | array {element length type size} : TypeExpression program context element .type type → TypeExpression program context length .constant size →
@@ -143,8 +143,8 @@ def FieldIndex (program : Language.Program) (context : Language.Context) (type :
     Instantiates data.generics arguments substitution ∧ Substitutes substitution field.type fieldType
 
 inductive PlaceExpression (program : Kernel.Program) (context : Context) : Source.Expr → Place → Term → Bool → Prop where
-  | captured {source local} : (source,local) ∈ context.capturePlaces →
-      PlaceExpression program context source ⟨local.id,[]⟩ local.type local.mutable
+  | captured {source localSlot} : (source,localSlot) ∈ context.capturePlaces →
+      PlaceExpression program context source ⟨localSlot.id,[]⟩ localSlot.type localSlot.mutable
   | name {name binding} : binding ∈ context.names → binding.name = name →
       (∀ other ∈ context.names, other.name = name → other = binding) →
       PlaceExpression program context (.name [name] [] []) binding.place binding.type binding.mutable
@@ -181,11 +181,11 @@ mutual
   inductive PatternExpression (program : Kernel.Program) (context : Context) :
       Source.Pattern → Term → Access → Pattern → List (String × Local) → Prop where
     | wildcard {type access} : PatternExpression program context .wildcard type access .wildcard []
-    | binder {name explicit type access local} : Fresh context local →
+    | binder {name explicit type access localSlot} : Fresh context localSlot →
         (explicit = true ∨ (¬ ConstructorName program context [name] ∧ ∀ value result, ¬ ConstantAlias program context [name] [] value result)) →
-        (local.type = type ∧ access = .owned ∨ ∃ region mode, local.type = .reference mode region type ∧
+        (localSlot.type = type ∧ access = .owned ∨ ∃ region mode, localSlot.type = .reference mode region type ∧
           access = if mode = .shared then .shared else .unique) →
-        PatternExpression program context (.binder name explicit) type access (.bind local) [(name,local)]
+        PatternExpression program context (.binder name explicit) type access (.bind localSlot) [(name,localSlot)]
     | constant {path sourceArguments value type pattern access} : ConstantAlias program context path sourceArguments value type →
         ConstantPattern value pattern → PatternExpression program context (.constant path sourceArguments) type access pattern []
     | bareConstant {name value type pattern access} : ConstantAlias program context [name] [] value type → ConstantPattern value pattern →
@@ -229,22 +229,22 @@ mutual
     | nil {access} : PatternExpressions program context [] [] access [] []
     | cons {first rest type types access pattern patterns bindings more} : PatternExpression program context first type access pattern bindings →
         PatternExpressions program context rest types access patterns more →
-        (∀ name local, (name,local) ∈ bindings → ∀ other, (name,other) ∉ more) →
+        (∀ name localSlot, (name,localSlot) ∈ bindings → ∀ other, (name,other) ∉ more) →
         PatternExpressions program context (first :: rest) (type :: types) access (pattern :: patterns) (bindings ++ more)
 end
 
 def BindNames (context : Context) (bindings : List (String × Local)) : Context :=
-  bindings.foldl (fun current (name,local) => current.bind name local) context
+  bindings.foldl (fun current (name,localSlot) => current.bind name localSlot) context
 
 structure BindingCode where
-  local : Local
+  localSlot : Local
   value : Code
   deriving Repr, Inhabited
 
 def sequence (bindings : List BindingCode) (next : Code) : Code :=
-  bindings.foldr (fun binding rest => .evaluate binding.local binding.value rest) next
+  bindings.foldr (fun binding rest => .evaluate binding.localSlot binding.value rest) next
 
-def AtomCode (local : Local) (atom : Atom) : Code := .bind local atom (.result ⟨local.id,[]⟩)
+def AtomCode (localSlot : Local) (atom : Atom) : Code := .bind localSlot atom (.result ⟨localSlot.id,[]⟩)
 
 def SignatureReceiver (program : Kernel.Program) (context : Context) (type : Term)
     (access : Access) (signature : Signature) : Prop :=
@@ -254,18 +254,18 @@ def SignatureReceiver (program : Kernel.Program) (context : Context) (type : Ter
   (∃ brand region result, type = .label brand region result ∧ signature.parameters = [result] ∧
     signature.result = .bottom ∧ signature.effects = .row [] []) ∨
   (∃ mode region inner, type = .reference mode region inner ∧
-    Entails program.declarations context.typed.static (.callable type signature.parameters signature.result signature.effects signature.unsafe) ∧
+    Entails program.declarations context.typed.static (.callable type signature.parameters signature.result signature.effects signature.unsafeAllowed) ∧
     (mode = .shared → access = .shared))
 
 def IsContextual (program : Kernel.Program) (context : Context) (type : Term) (signature : Signature) : Prop :=
   Entails program.declarations context.typed.static
-    (.callable type signature.parameters signature.result signature.effects signature.unsafe)
+    (.callable type signature.parameters signature.result signature.effects signature.unsafeAllowed)
 
-def FixitySelected (program : Language.Program) (module : ModuleId) (operator : String) (prefix : Bool) (fixity : FixityDefinition) : Prop :=
+def FixitySelected (program : Language.Program) (module : ModuleId) (operator : String) (prefixForm : Bool) (fixity : FixityDefinition) : Prop :=
   Definition.fixity fixity ∈ program.declarations ∧ fixity.header.module = module ∧ fixity.operator = operator ∧
-  ((prefix = true ∧ fixity.kind = .prefix) ∨ (prefix = false ∧ fixity.kind ≠ .prefix)) ∧
+  ((prefixForm = true ∧ fixity.kind = .prefixForm) ∨ (prefixForm = false ∧ fixity.kind ≠ .prefixForm)) ∧
   ∀ other, Definition.fixity other ∈ program.declarations → other.header.module = module → other.operator = operator →
-    ((other.kind = .prefix) ↔ (fixity.kind = .prefix)) → other.target = fixity.target ∧ other.precedence = fixity.precedence ∧ other.kind = fixity.kind
+    ((other.kind = .prefixForm) ↔ (fixity.kind = .prefixForm)) → other.target = fixity.target ∧ other.precedence = fixity.precedence ∧ other.kind = fixity.kind
 
 inductive Grouped (program : Language.Program) (module : ModuleId) : Source.Expr → List (String × Source.Expr) → Source.Expr → Prop where
   | atom {expression} : Grouped program module expression [] expression
@@ -296,10 +296,10 @@ def CapturesResolved (program : Kernel.Program) (context : Context) (sources : L
 
 def ExtendsWithCaptures (outer inner : Context) (sources : List Source.Expr) (captures : List Local) : Prop :=
   inner.capturePlaces = sources.zip captures ∧ inner.typed.static.module = outer.typed.static.module ∧
-  inner.typed.static.unsafe = false ∧ inner.namedLabels = outer.namedLabels
+  inner.typed.static.unsafeAllowed = false ∧ inner.namedLabels = outer.namedLabels
 
 inductive SourceItemName : Source.Declaration → String → Namespace → Prop where
-  | trait {name generics requirements members unsafe} : SourceItemName (.trait name generics requirements members unsafe) name .trait
+  | trait {name generics requirements members unsafeAllowed} : SourceItemName (.trait name generics requirements members unsafeAllowed) name .trait
   | effect {name generics requirements operations} : SourceItemName (.effect name generics requirements operations) name .effect
   | associated {name generics kind requirements value} : SourceItemName (.associated name generics kind requirements value) name .type
   | constant {name generics type value} : SourceItemName (.constant name generics type value) name .value
@@ -307,11 +307,11 @@ inductive SourceItemName : Source.Declaration → String → Namespace → Prop 
   | module {name members} : SourceItemName (.module name members) name .type
   | import {tree name} : SourceItemName (.import tree) name .value
   | fixity {kind precedence operator target} : SourceItemName (.fixity kind precedence operator target) operator .value
-  | implementation {generics trait self requirements members unsafe negative name} :
-      SourceItemName (.implementation generics trait self requirements members unsafe negative) name .trait
+  | implementation {generics trait self requirements members unsafeAllowed negative name} :
+      SourceItemName (.implementation generics trait self requirements members unsafeAllowed negative) name .trait
 
 def AttributeContract (attributes : List Source.Attribute) (definition : Definition) : Prop :=
-  (∀ attribute ∈ attributes, match attribute with
+  (∀ annotationEntry ∈ attributes, match annotationEntry with
     | .reprC => ∃ data, definition = .data data ∧ data.representation = .c
     | .transparent => ∃ data, definition = .data data ∧ data.representation = .transparent
     | .reprInteger sign width => ∃ data, definition = .data data ∧ data.representation = .integer sign width
@@ -320,54 +320,54 @@ def AttributeContract (attributes : List Source.Attribute) (definition : Definit
     | .noStd | .noPrelude => True
     | .metadata _ _ => False) ∧
   (∀ data, definition = .data data →
-    (attributes.all (fun attribute => match attribute with | .reprC | .transparent | .reprInteger .. => false | _ => true) = true →
+    (attributes.all (fun annotationEntry => match annotationEntry with | .reprC | .transparent | .reprInteger .. => false | _ => true) = true →
       data.representation = .glorious) ∧ (Source.Attribute.nonExhaustive ∉ attributes → data.nonExhaustive = false))
 
 def MemberIdentities (program : Kernel.Program) (context : Context) (members : List Source.Declaration) (ids : List DeclId) : Prop :=
   ids.Nodup ∧ ids.length = members.length ∧
   ∀ id ∈ ids, ∃ declaration, program.declarations.lookup id = some declaration ∧
-    (∃ member ∈ members, SourceItemName member declaration.header.name declaration.header.namespace) ∧
+    (∃ member ∈ members, SourceItemName member declaration.header.name declaration.header.nameSpace) ∧
     declaration.header.module = context.typed.static.module
 
 mutual
   inductive Expression (program : Kernel.Program) : Context → Source.Expr → Term → Code → Prop where
-    | scalar {context literal type value local} : LiteralConstant program.declarations.input.target literal (some type) value type →
-        Fresh context local → local.type = type → Expression program context (.literal literal) type (AtomCode local (.constant value))
-    | defaultScalar {context literal type value local} : LiteralConstant program.declarations.input.target literal none value type →
-        Fresh context local → local.type = type → Expression program context (.literal literal) type (AtomCode local (.constant value))
-    | literalView {context literal scalars bytes primitive binding local} :
+    | scalar {context literal type value localSlot} : LiteralConstant program.declarations.input.target literal (some type) value type →
+        Fresh context localSlot → localSlot.type = type → Expression program context (.literal literal) type (AtomCode localSlot (.constant value))
+    | defaultScalar {context literal type value localSlot} : LiteralConstant program.declarations.input.target literal none value type →
+        Fresh context localSlot → localSlot.type = type → Expression program context (.literal literal) type (AtomCode localSlot (.constant value))
+    | literalView {context literal scalars bytes primitive binding localSlot} :
         ((literal = .string scalars ∧ Source.Decodes bytes scalars ∧ primitive = .literalText) ∨
           (literal = .bytes bytes ∧ primitive = .literalBytes)) →
         binding ∈ program.declarations.input.manifest.bindings → binding.primitive = some primitive →
-        Fresh context local → local.type = binding.signature.result →
-        Expression program context (.literal literal) local.type
-          (AtomCode local (.primitive binding.declaration [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) byte)))] []))
-    | unit {context local} : Fresh context local → local.type = .unit →
-        Expression program context .unit .unit (AtomCode local (.constant (.constantTuple [])))
-    | local {context source place type mutable local} : PlaceExpression program context source place type mutable →
-        Fresh context local → local.type = type → Expression program context source type (AtomCode local (.acquire place false))
-    | forcedMove {context source place type mutable local} : PlaceExpression program context source place type mutable →
-        Fresh context local → local.type = type → Expression program context (.move source) type (AtomCode local (.acquire place true))
-    | borrow {context source place type mutable local mode region} : PlaceExpression program context source place type mutable →
-        Fresh context local → (mode = .unique → mutable = true) → local.type = .reference mode (.rigid region .region 0) type →
-        Expression program context (.borrow mode source) local.type (AtomCode local (.borrow place mode region))
-    | constant {context path sourceArguments value type local} : ConstantAlias program context path sourceArguments value type →
-        Fresh context local → local.type = type → Expression program context (.name path sourceArguments []) type (AtomCode local (.constant value))
-    | function {context path sourceOwners sourceItems header declaration arguments signature local} :
+        Fresh context localSlot → localSlot.type = binding.signature.result →
+        Expression program context (.literal literal) localSlot.type
+          (AtomCode localSlot (.primitive binding.declaration [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) byte)))] []))
+    | unit {context localSlot} : Fresh context localSlot → localSlot.type = .unit →
+        Expression program context .unit .unit (AtomCode localSlot (.constant (.constantTuple [])))
+    | localSlot {context source place type mutable localSlot} : PlaceExpression program context source place type mutable →
+        Fresh context localSlot → localSlot.type = type → Expression program context source type (AtomCode localSlot (.acquire place false))
+    | forcedMove {context source place type mutable localSlot} : PlaceExpression program context source place type mutable →
+        Fresh context localSlot → localSlot.type = type → Expression program context (.move source) type (AtomCode localSlot (.acquire place true))
+    | borrow {context source place type mutable localSlot mode region} : PlaceExpression program context source place type mutable →
+        Fresh context localSlot → (mode = .unique → mutable = true) → localSlot.type = .reference mode (.rigid region .region 0) type →
+        Expression program context (.borrow mode source) localSlot.type (AtomCode localSlot (.borrow place mode region))
+    | constant {context path sourceArguments value type localSlot} : ConstantAlias program context path sourceArguments value type →
+        Fresh context localSlot → localSlot.type = type → Expression program context (.name path sourceArguments []) type (AtomCode localSlot (.constant value))
+    | function {context path sourceOwners sourceItems header declaration arguments signature localSlot} :
         Qualified program.declarations context.typed.static.module .value path header → program.declarations.function header.id = some declaration →
         TypeExpressions program context (sourceOwners ++ sourceItems) (declaration.signature.generics.map (·.kind)) arguments →
         Typing.CallSignature program.declarations context.typed.static header.id arguments signature →
-        Fresh context local → local.type = .callable header.id arguments →
-        Expression program context (.name path sourceOwners sourceItems) local.type (AtomCode local (.function header.id arguments))
-    | operation {context path sourceOwners sourceItems header operation arguments signature local} :
+        Fresh context localSlot → localSlot.type = .callable header.id arguments →
+        Expression program context (.name path sourceOwners sourceItems) localSlot.type (AtomCode localSlot (.function header.id arguments))
+    | operation {context path sourceOwners sourceItems header operation arguments signature localSlot} :
         Qualified program.declarations context.typed.static.module .value path header → program.declarations.operation header.id = some operation →
         TypeExpressions program context (sourceOwners ++ sourceItems) (operation.signature.generics.map (·.kind)) arguments →
         Typing.CallSignature program.declarations context.typed.static header.id arguments signature →
-        Fresh context local → local.type = .callable header.id arguments →
-        Expression program context (.name path sourceOwners sourceItems) local.type (AtomCode local (.operation header.id arguments []))
-    | labelName {context name id region type local} : (name,id) ∈ context.namedLabels → (id,region,type) ∈ context.typed.labels →
-        Fresh context local → local.type = .label (.rigid id .brand 0) region type →
-        Expression program context (.labelName name) local.type (AtomCode local (.label id))
+        Fresh context localSlot → localSlot.type = .callable header.id arguments →
+        Expression program context (.name path sourceOwners sourceItems) localSlot.type (AtomCode localSlot (.operation header.id arguments []))
+    | labelName {context name id region type localSlot} : (name,id) ∈ context.namedLabels → (id,region,type) ∈ context.typed.labels →
+        Fresh context localSlot → localSlot.type = .label (.rigid id .brand 0) region type →
+        Expression program context (.labelName name) localSlot.type (AtomCode localSlot (.label id))
     | tuple {context expressions types bindings places result} : Arguments program context expressions types bindings places →
         Fresh context result → result.type = .tuple types →
         Expression program context (.tuple expressions) result.type (sequence bindings (AtomCode result (.construct result.type none places)))
@@ -399,23 +399,23 @@ mutual
           (.evaluate callee calleeCode (sequence bindings (.tail ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩)))
     | block {context statements result type code scope} : Block program context statements result type code →
         Expression program context (.block statements result) type (.scope scope code)
-    | contextualBlock {context statements result expected signature function captures local} :
+    | contextualBlock {context statements result expected signature function captures localSlot} :
         IsContextual program context expected signature →
-        Closure program context (.block statements result) signature function captures → Fresh context local → local.type = expected →
+        Closure program context (.block statements result) signature function captures → Fresh context localSlot → localSlot.type = expected →
         expected = .callable function.declaration [] →
-        Expression program context (.block statements result) expected (AtomCode local (.closure function.declaration [] captures))
-    | anonymous {context head body signature function captures local} :
+        Expression program context (.block statements result) expected (AtomCode localSlot (.closure function.declaration [] captures))
+    | anonymous {context head body signature function captures localSlot} :
         Head program context head signature → Closure program context (.function head body) signature function captures →
-        Fresh context local → local.type = .callable function.declaration [] →
-        Expression program context (.function head body) local.type (AtomCode local (.closure function.declaration [] captures))
-    | clauses {context arms signature function captures local} :
-        Closure program context (.clauses arms) signature function captures → Fresh context local → local.type = .callable function.declaration [] →
-        Expression program context (.clauses arms) local.type (AtomCode local (.closure function.declaration [] captures))
-    | ownedCapture {context places source signature function captures local} : Closure program context source signature function captures →
+        Fresh context localSlot → localSlot.type = .callable function.declaration [] →
+        Expression program context (.function head body) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
+    | clauses {context arms signature function captures localSlot} :
+        Closure program context (.clauses arms) signature function captures → Fresh context localSlot → localSlot.type = .callable function.declaration [] →
+        Expression program context (.clauses arms) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
+    | ownedCapture {context places source signature function captures localSlot} : Closure program context source signature function captures →
         (∀ source ∈ places, ∃ place type mutable capture,
           PlaceExpression program context source place type mutable ∧ capture ∈ captures ∧ capture.place = place ∧ capture.mode = .own) →
-        Fresh context local → local.type = .callable function.declaration [] →
-        Expression program context (.capture places source) local.type (AtomCode local (.closure function.declaration [] captures))
+        Fresh context localSlot → localSlot.type = .callable function.declaration [] →
+        Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
     | label {context name annotation body type brand region code} :
         (annotation = none ∨ ∃ source, annotation = some source ∧ TypeExpression program context source .type type) →
         Expression program { context with namedLabels := (name,brand) :: context.namedLabels,
@@ -430,44 +430,44 @@ mutual
     | handle {context source arms computation input handler result identity} : Handler program context arms input handler →
         Expression program context source input computation → handler.result = result →
         Expression program context (.handle source arms) result (.handle identity computation handler)
-    | unsafe {context source type body} : Expression program { context with typed :=
-          { context.typed with static := { context.typed.static with unsafe := true } } } source type body →
+    | unsafeAllowed {context source type body} : Expression program { context with typed :=
+          { context.typed with static := { context.typed.static with unsafeAllowed := true } } } source type body →
         Expression program context (.unsafeBlock source) type (.unsafeScope body)
     | operators {context first rest grouped type code} : Grouped program.declarations context.typed.static.module first rest grouped →
         Expression program context grouped type code → Expression program context (.operators first rest) type code
-    | prefix {context operator operand fixity path header type code} : FixitySelected program.declarations context.typed.static.module operator true fixity →
+    | prefixForm {context operator operand fixity path header type code} : FixitySelected program.declarations context.typed.static.module operator true fixity →
         Qualified program.declarations context.typed.static.module .value path header → header.id = fixity.target →
-        Expression program context (.call (.name path [] []) [operand]) type code → Expression program context (.prefix operator operand) type code
+        Expression program context (.call (.name path [] []) [operand]) type code → Expression program context (.prefixForm operator operand) type code
     | coercion {context source actual expected code} : Expression program context source actual code →
         Subtype program.declarations context.typed.static actual expected → Expression program context source expected code
 
   inductive Arguments (program : Kernel.Program) : Context → List Source.Expr → List Term → List BindingCode → List Place → Prop where
     | nil {context} : Arguments program context [] [] [] []
-    | cons {context source sources type types local code rest places} : Fresh context local → local.type = type →
+    | cons {context source sources type types localSlot code rest places} : Fresh context localSlot → localSlot.type = type →
         Expression program context source type code →
-        Arguments program { context with typed := context.typed.bind local } sources types rest places →
-        Arguments program context (source :: sources) (type :: types) (⟨local,code⟩ :: rest) (⟨local.id,[]⟩ :: places)
+        Arguments program { context with typed := context.typed.bind localSlot } sources types rest places →
+        Arguments program context (source :: sources) (type :: types) (⟨localSlot,code⟩ :: rest) (⟨localSlot.id,[]⟩ :: places)
 
   inductive Block (program : Kernel.Program) : Context → List Source.Statement → Option Source.Expr → Term → Code → Prop where
     | result {context source type code} : Expression program context source type code → Block program context [] (some source) type code
-    | unit {context local} : Fresh context local → local.type = .unit →
-        Block program context [] none .unit (AtomCode local (.constant (.constantTuple [])))
-    | bind {context mutable sourcePattern annotation source rest result type local initializer pattern names body resultType} :
-        Fresh context local → local.type = type → Expression program context source type initializer →
+    | unit {context localSlot} : Fresh context localSlot → localSlot.type = .unit →
+        Block program context [] none .unit (AtomCode localSlot (.constant (.constantTuple [])))
+    | bind {context mutable sourcePattern annotation source rest result type localSlot initializer pattern names body resultType} :
+        Fresh context localSlot → localSlot.type = type → Expression program context source type initializer →
         (annotation = none ∨ ∃ sourceType, annotation = some sourceType ∧ TypeExpression program context sourceType .type type) →
         PatternExpression program context sourcePattern type .owned pattern names → (∀ entry ∈ names, entry.2.mutable = mutable) →
         Block program (BindNames context names) rest result resultType body →
         Typing.PatternCoverage program type [.clause pattern body] →
         Block program context (.bind mutable sourcePattern annotation source :: rest) result resultType
-          (.evaluate local initializer (.choose ⟨local.id,[]⟩ [.clause pattern body]))
-    | assign {context destination source rest result type local initializer place body resultType} :
-        Fresh context local → local.type = type → Expression program context source type initializer →
+          (.evaluate localSlot initializer (.choose ⟨localSlot.id,[]⟩ [.clause pattern body]))
+    | assign {context destination source rest result type localSlot initializer place body resultType} :
+        Fresh context localSlot → localSlot.type = type → Expression program context source type initializer →
         PlaceExpression program context destination place type true → Block program context rest result resultType body →
         Block program context (.assign destination source :: rest) result resultType
-          (.evaluate local initializer (.assign place ⟨local.id,[]⟩ body))
-    | discard {context source rest result local initializer body resultType} : Fresh context local →
-        Expression program context source local.type initializer → Block program context rest result resultType body →
-        Block program context (.discard source :: rest) result resultType (.evaluate local initializer (.discard ⟨local.id,[]⟩ body))
+          (.evaluate localSlot initializer (.assign place ⟨localSlot.id,[]⟩ body))
+    | discard {context source rest result localSlot initializer body resultType} : Fresh context localSlot →
+        Expression program context source localSlot.type initializer → Block program context rest result resultType body →
+        Block program context (.discard source :: rest) result resultType (.evaluate localSlot initializer (.discard ⟨localSlot.id,[]⟩ body))
     | item {context declaration rest result body type} : Declaration program context declaration →
         Block program context rest result type body → Block program context (.item declaration :: rest) result type body
 
@@ -504,7 +504,7 @@ mutual
         Fresh context tuple → tuple.type = .tuple signature.parameters →
         PatternArms program context arms tuple.type signature.result kernelArms → Typing.PatternCoverage program tuple.type kernelArms →
         PatternCallable program context arms signature parameters
-          (.bind tuple (.construct tuple.type none (parameters.map (fun local => ⟨local.id,[]⟩))) (.choose ⟨tuple.id,[]⟩ kernelArms))
+          (.bind tuple (.construct tuple.type none (parameters.map (fun localSlot => ⟨localSlot.id,[]⟩))) (.choose ⟨tuple.id,[]⟩ kernelArms))
 
   inductive PatternArms (program : Kernel.Program) : Context → List (Source.Pattern × Source.Expr) → Term → Term → List Arm → Prop where
     | nil {context input output} : PatternArms program context [] input output []
@@ -545,16 +545,16 @@ mutual
         TypeExpressions program extended (source.parameters.map (·.type)) (List.replicate source.parameters.length .type) parameters →
         TypeExpression program extended source.result .type result →
         (TypeExpression program extended source.effects .row effects ∨
-          ∃ instance, TypeExpression program extended source.effects .effect instance ∧ effects = .row [instance] []) →
+          ∃ instanceTerm, TypeExpression program extended source.effects .effect instanceTerm ∧ effects = .row [instanceTerm] []) →
         Predicates program extended source.requirements requirements →
-        Head program context source ⟨binders,parameters,result,effects,requirements,source.unsafe⟩
+        Head program context source ⟨binders,parameters,result,effects,requirements,source.unsafeAllowed⟩
 
   inductive Parameters (program : Kernel.Program) : Context → List Source.Parameter → List Local → List (String × Local) → Prop where
     | nil {context} : Parameters program context [] [] []
-    | cons {context source rest local type pattern names locals more} : TypeExpression program context source.type .type type → local.type = type →
+    | cons {context source rest localSlot type pattern names locals more} : TypeExpression program context source.type .type type → localSlot.type = type →
         PatternExpression program context source.pattern type .owned pattern names →
         Parameters program (BindNames context names) rest locals more →
-        Parameters program context (source :: rest) (local :: locals) (names ++ more)
+        Parameters program context (source :: rest) (localSlot :: locals) (names ++ more)
 
   inductive Generics (program : Kernel.Program) : Context → List Source.Generic → List Binder → Context → Prop where
     | nil {context} : Generics program context [] [] context
@@ -590,7 +590,7 @@ mutual
         TypeExpression program context source .type receiver → Qualified program.declarations context.typed.static.module .trait traitPath header →
         program.declarations.trait header.id = some trait → trait.relation = .ordinary →
         TypeExpressions program context sourceArguments (trait.generics.drop 1 |>.map (·.kind)) arguments →
-        (safe = true → trait.unsafe = true) →
+        (safe = true → trait.unsafeAllowed = true) →
         Predicate program context (.bound source traitPath sourceArguments safe negative) [.implements header.id (receiver :: arguments) negative]
     | use {context source traitPath quantity receiver header trait} : TypeExpression program context source .type receiver →
         Qualified program.declarations context.typed.static.module .trait traitPath header → program.declarations.trait header.id = some trait →
@@ -610,15 +610,15 @@ mutual
         Declaration program context (.visible visibility source)
     | attributed {context attributes source} : Declaration program { context with attributes := context.attributes ++ attributes } source →
         Declaration program context (.attributed attributes source)
-    | foreign {context members unsafe} : Declarations program context members →
-        (∀ member ∈ members, ∃ head, member = .function head none ∧ head.generics = [] ∧ (unsafe = true → head.unsafe = true)) →
-        Declaration program context (.foreign members unsafe)
-    | inherent {context generics self requirements members unsafe binders inner type constraints id arguments} :
+    | foreign {context members unsafeAllowed} : Declarations program context members →
+        (∀ member ∈ members, ∃ head, member = .function head none ∧ head.generics = [] ∧ (unsafeAllowed = true → head.unsafeAllowed = true)) →
+        Declaration program context (.foreign members unsafeAllowed)
+    | inherent {context generics self requirements members unsafeAllowed binders inner type constraints id arguments} :
         Generics program context generics binders inner → TypeExpression program inner self .type type →
         type = .nominal id arguments → Predicates program inner requirements constraints →
         Declarations program { inner with selfType := some type, owner := some id,
           typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
-        Declaration program context (.implementation generics none self requirements members unsafe false)
+        Declaration program context (.implementation generics none self requirements members unsafeAllowed false)
     | checked {context source definition} : DeclarationHeader program context source definition →
         (definition.header.id,context.origin) ∈ program.declarations.origins →
         definition.header.visibility = context.visibility → AttributeContract context.attributes definition →
@@ -682,17 +682,17 @@ mutual
         SourceVariants program context rest variants → SourceVariants program context (source :: rest) (variant :: variants)
 
   inductive ItemHeader (program : Kernel.Program) : Context → Source.Declaration → Definition → Prop where
-    | named {context source definition name namespace} : definition ∈ program.declarations.declarations →
-        SourceItemName source name namespace → definition.header.name = name → definition.header.namespace = namespace →
+    | named {context source definition name nameSpace} : definition ∈ program.declarations.declarations →
+        SourceItemName source name nameSpace → definition.header.name = name → definition.header.nameSpace = nameSpace →
         definition.header.module = context.typed.static.module → ItemHeader program context source definition
 
   inductive ItemBody (program : Kernel.Program) : Context → Source.Declaration → Definition → Prop where
-    | trait {context name generics requirements members unsafe definition binders inner constraints} :
+    | trait {context name generics requirements members unsafeAllowed definition binders inner constraints} :
         Generics program context generics binders inner → Predicates program inner requirements constraints →
-        definition.generics = binders → definition.requirements = constraints → definition.unsafe = unsafe →
+        definition.generics = binders → definition.requirements = constraints → definition.unsafeAllowed = unsafeAllowed →
         MemberIdentities program inner members definition.members →
         Declarations program { inner with owner := some definition.header.id } members →
-        ItemBody program context (.trait name generics requirements members unsafe) (.trait definition)
+        ItemBody program context (.trait name generics requirements members unsafeAllowed) (.trait definition)
     | effect {context name generics requirements operations definition binders inner constraints} :
         Generics program context generics binders inner → Predicates program inner requirements constraints →
         definition.generics = binders → definition.requirements = constraints →
@@ -721,17 +721,17 @@ mutual
         ((sourceValue = none ∧ definition.defaultValue = none) ∨ ∃ source value, sourceValue = some source ∧ definition.defaultValue = some value ∧
           TypeExpression program inner source kind value) →
         ItemBody program context (.associated name generics kind requirements sourceValue) (.associated definition)
-    | implementation {context generics traitPath traitArguments self requirements members unsafe negative definition
+    | implementation {context generics traitPath traitArguments self requirements members unsafeAllowed negative definition
         binders inner type header trait arguments constraints} :
         Generics program context generics binders inner → TypeExpression program inner self .type type →
         Qualified program.declarations context.typed.static.module .trait traitPath header →
         program.declarations.trait header.id = some trait → TypeExpressions program inner traitArguments (trait.generics.drop 1 |>.map (·.kind)) arguments →
         Predicates program inner requirements constraints → definition.generics = binders → definition.trait = header.id →
-        definition.arguments = type :: arguments → definition.requirements = constraints → definition.unsafe = unsafe → definition.negative = negative →
+        definition.arguments = type :: arguments → definition.requirements = constraints → definition.unsafeAllowed = unsafeAllowed → definition.negative = negative →
         (negative = true → members = [] ∧ definition.associated = [] ∧ definition.functions = []) →
         Declarations program { inner with owner := some header.id, selfType := some type,
           typed := { inner.typed with static := { inner.typed.static with assumptions := constraints ++ inner.typed.static.assumptions } } } members →
-        ItemBody program context (.implementation generics (some (.path traitPath traitArguments [])) self requirements members unsafe negative)
+        ItemBody program context (.implementation generics (some (.path traitPath traitArguments [])) self requirements members unsafeAllowed negative)
           (.implementation definition)
 
   inductive Declarations (program : Kernel.Program) : Context → List Source.Declaration → Prop where

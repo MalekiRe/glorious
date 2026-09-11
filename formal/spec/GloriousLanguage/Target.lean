@@ -128,6 +128,26 @@ inductive IntegerResult (target : TargetProfile) (signed : Bool) (width : Width)
   | wrapping {n} : IntegerResult target signed width .wrapping n (.ok (integerWrap target signed width n))
   | saturating {n} : IntegerResult target signed width .saturating n (.ok (integerClamp target signed width n))
 
+/-- Infinite two's-complement bit operations. The finite-width result rule
+then enforces the declared integer range, without relying on host integers. -/
+def integerAnd : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a &&& b)
+  | .ofNat a, .negSucc b => .ofNat (a ^^^ (a &&& b))
+  | .negSucc a, .ofNat b => .ofNat (b ^^^ (b &&& a))
+  | .negSucc a, .negSucc b => .negSucc (a ||| b)
+
+def integerOr : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a ||| b)
+  | .ofNat a, .negSucc b => .negSucc (b ^^^ (b &&& a))
+  | .negSucc a, .ofNat b => .negSucc (a ^^^ (a &&& b))
+  | .negSucc a, .negSucc b => .negSucc (a &&& b)
+
+def integerXor : Int → Int → Int
+  | .ofNat a, .ofNat b => .ofNat (a ^^^ b)
+  | .ofNat a, .negSucc b => .negSucc (a ^^^ b)
+  | .negSucc a, .ofNat b => .negSucc (a ^^^ b)
+  | .negSucc a, .negSucc b => .ofNat (a ^^^ b)
+
 def integerOperation (operation : IntegerOperation) (a b : Int) : Option Int :=
   match operation with
   | .add => some (a+b)
@@ -138,9 +158,9 @@ def integerOperation (operation : IntegerOperation) (a b : Int) : Option Int :=
   | .negate => some (-a)
   | .shiftLeft => if b < 0 then none else some (a * 2^b.toNat)
   | .shiftRight => if b < 0 then none else some (a / 2^b.toNat)
-  | .bitAnd => some (Int.land a b)
-  | .bitOr => some (Int.lor a b)
-  | .bitXor => some (Int.xor a b)
+  | .bitAnd => some (integerAnd a b)
+  | .bitOr => some (integerOr a b)
+  | .bitXor => some (integerXor a b)
 
 /-- Exact rational arithmetic is used to state rounding, not host floating
 evaluation. Denominators are checked at every mathematical observation. -/
@@ -312,10 +332,10 @@ inductive FloatCalculation (width : FloatWidth) : FloatOperation → List Nat �
   | sqrtInfinity {a} : decodeFloat width a = some (.infinity false) → FloatCalculation width .squareRoot [a] a
   | sqrtNegative {a m e} : (decodeFloat width a = some (.finite true m e) ∧ m ≠ 0 ∨
       decodeFloat width a = some (.infinity true)) → FloatCalculation width .squareRoot [a] (canonicalNaN width)
-  | sqrtFinite {a m e result mr er lower upper} : decodeFloat width a = some (.finite false m e) → m ≠ 0 →
+  | sqrtFinite {a m e result mr er} {lower upper : Fraction} : decodeFloat width a = some (.finite false m e) → m ≠ 0 →
       decodeFloat width result = some (.finite false mr er) →
-      lower.Valid → upper.Valid → lower.Le upper →
-      lower.multiply lower |>.Le (binaryFraction false m e) →
+      lower.Valid → upper.Valid → lower.Le upper → 0 ≤ lower.numerator →
+      (lower.multiply lower).Le (binaryFraction false m e) →
       (binaryFraction false m e).Le (upper.multiply upper) →
       (∀ rational, lower.Le rational → rational.Le upper → RoundsFinite width rational false result) →
       FloatCalculation width .squareRoot [a] result
@@ -375,6 +395,6 @@ def Manifest.WellFormed (target : TargetProfile) (manifest : Manifest) : Prop :=
     (∀ capability, binding.capability = some capability → capability ∈ manifest.grantedCapabilities) ∧
     (∀ domain, binding.domain = some domain → domain ∈ manifest.allocationDomains) ∧
     (binding.cABI = true → target.supportsC = true) ∧
-    (binding.signature.unsafe = false → binding.safeReviewed = true))
+    (binding.signature.unsafeAllowed = false → binding.safeReviewed = true))
 
 end Glorious.Language

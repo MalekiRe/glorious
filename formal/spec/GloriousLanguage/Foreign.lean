@@ -78,7 +78,7 @@ def Selected (program : Kernel.Program) (model : Model) (binding : RuntimeBindin
   import.capability = binding.capability ∧ import.domain = binding.domain ∧
   contract ∈ model.contracts ∧ contract.declaration = binding.declaration ∧
   (binding.cABI = true → CSignature program.declarations binding.signature import.signature) ∧
-  (binding.signature.unsafe = false → binding.safeReviewed = true ∧ import.reviewedSafe = true)
+  (binding.signature.unsafeAllowed = false → binding.safeReviewed = true ∧ import.reviewedSafe = true)
 
 def FramePreserved (contract : Contract) (before : World) (operands : List Address) (after : World) : Prop :=
   ∀ address value, before.Resident address value →
