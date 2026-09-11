@@ -391,7 +391,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 187 retains explicit region binders across selected nominal field queries.
 // Cache 188 normalizes parametric associated results without resolving caller regions.
 // Cache 189 preserves complete owned-product return provenance across partial stores.
-pub const STAGE0_CACHE_GENERATION: u32 = 189;
+// Cache 190 models manifest-bound memory effects and distinct raw-address provenance.
+pub const STAGE0_CACHE_GENERATION: u32 = 190;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

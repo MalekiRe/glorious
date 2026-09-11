@@ -110,6 +110,12 @@ impl crate::callable_control::PayloadInputs for Analyzer<'_> {
     fn reborrow(&self, reference: &Value, fields: &[u32]) -> Option<Value> {
         Some(project_borrowed_referent(self.resolved_value(reference), fields))
     }
+    fn raw_address(&self, input: &Value) -> Option<Value> {
+        Some(match self.resolved_value(input) {
+            address @ Value::RawAddress(_) => address,
+            input => Value::RawAddress(Box::new(input)),
+        })
+    }
     fn borrow_capture(&self, receiver: &Value, projection: crate::resident_invocations::CaptureProjection, _: bool) -> Option<Value> {
         fn borrow(value: Value, projection: &crate::resident_invocations::CaptureProjection) -> Option<Value> {
             Some(match value {

@@ -216,6 +216,35 @@ impl MemoryPrimitive {
         matches!(self, Self::BorrowShared | Self::BorrowUnique)
     }
 
+    /// Pointer operands whose existing residents can change. Raw reads may
+    /// consume a nonduplicable resident, so they are not a read-only proof.
+    /// The caller still has to resolve the addresses and overlap extent.
+    pub(crate) fn mutated_pointer_arguments(self) -> &'static [usize] {
+        match self {
+            Self::Read | Self::Write | Self::Reallocate | Self::Deallocate => &[0],
+            Self::Copy | Self::CopyNonoverlapping => &[1],
+            Self::SizeOf | Self::AlignOf | Self::Null | Self::Dangling | Self::Allocate
+            | Self::IsNull | Self::Offset | Self::OffsetConst | Self::Cast | Self::AsConst
+            | Self::BorrowShared | Self::BorrowUnique | Self::AsRawShared | Self::AsRawUnique
+            | Self::CastConst | Self::StaticUtf8Address | Self::StaticBytesAddress | Self::Forget
+            | Self::StaticBytesLen | Self::PointerEq | Self::PointerAddress => &[],
+        }
+    }
+
+    /// Match a frozen source invocation against the same finite declaration
+    /// contract as manifest binding. Address extraction preserves its input
+    /// loan rather than rebinding the declaration's independently elided region.
+    pub(crate) fn matches_invocation(self, generics: &[crate::GenericArgument],
+        parameters: &[Type], result: &Type) -> bool {
+        let Ok(mut signature) = self.signature().instantiate_generic(generics) else { return false; };
+        if matches!(self, Self::AsRawShared | Self::AsRawUnique)
+            && let ([Type::Reference { lifetime: expected, .. }], [Type::Reference { lifetime, .. }]) =
+                (signature.parameters.as_mut_slice(), parameters) {
+            *expected = *lifetime;
+        }
+        signature.parameters == parameters && signature.result == *result
+    }
+
     pub(crate) fn type_generic_indices(self) -> Vec<u32> {
         self.signature()
             .generic_kinds
@@ -286,6 +315,22 @@ mod tests {
             let mut excessive = types.clone();
             excessive.push(concrete.clone());
             assert!(primitive.instantiated_signature(&excessive).is_none());
+            let arguments = primitive.signature().generic_kinds.iter().map(|kind| match kind {
+                GenericKind::Lifetime => crate::GenericArgument::Lifetime(Lifetime::Static),
+                GenericKind::Type => crate::GenericArgument::Type(concrete.clone()),
+                _ => unreachable!("finite memory kinds"),
+            }).collect::<Vec<_>>();
+            let selected = primitive.signature().instantiate_generic(&arguments).unwrap();
+            assert!(primitive.matches_invocation(&arguments, &selected.parameters, &selected.result));
+            assert!(!primitive.matches_invocation(&arguments, &selected.parameters, &Type::Never));
+            let mut wrong_parameters = selected.parameters.clone();
+            wrong_parameters.push(Type::Unit);
+            assert!(!primitive.matches_invocation(&arguments, &wrong_parameters, &selected.result));
+            let mut wrong = arguments.clone();
+            wrong.push(crate::GenericArgument::Type(Type::Unit));
+            assert!(!primitive.matches_invocation(&wrong, &selected.parameters, &selected.result));
+            assert!(primitive.mutated_pointer_arguments().iter().all(|index|
+                matches!(selected.parameters.get(*index), Some(Type::RawPointer { .. }))));
         }
         let write = MemoryPrimitive::Write
             .instantiated_signature(&[concrete.clone()])

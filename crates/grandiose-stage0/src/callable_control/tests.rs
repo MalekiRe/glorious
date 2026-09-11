@@ -259,6 +259,94 @@ fn exact_mutations_share_ordered_storage_across_scopes_aliases_and_calls() {
 }
 
 #[test]
+fn trusted_memory_control_preserves_addresses_without_hiding_writes() {
+    use crate::{MemoryPrimitive as M, PrimitiveRole};
+    let fixture = Fixture::new("#![no_std]
+        unsafe fn offset<T>(pointer:*mut T, count:usize) -> *mut T;
+        unsafe fn as_const<T>(pointer:*mut T) -> *const T;
+        unsafe fn read<T>(pointer:*const T) -> T;
+        unsafe fn write<T>(pointer:*mut T, value:T);
+        unsafe fn raw<T>(value:&mut T) -> *mut T;
+        unsafe fn copy<T>(source:*const T, destination:*mut T, count:usize);
+        fn abort() -> !;
+        struct Storage { pointer:*mut i64, count:i64 }
+        fn change(value:Storage) -> Storage {
+            let mut value=value;
+            unsafe {
+                let pointer=offset(value.pointer,0);
+                value.count=read(as_const(pointer)); copy(as_const(pointer),pointer,1);
+            }; value
+        }
+        fn relay(value:Storage) -> Storage { change(value) }
+        fn choose(value:Storage, flag:i64) -> Storage {
+            handle flag { 0 => change(value), _ => abort() }
+        }
+        fn address(value:*mut i64) -> *const i64 { unsafe { as_const(offset(value,1)) } }
+        fn local() -> i64 { let mut value=0; unsafe { write(raw(&mut value),42); }; value }
+        fn uncertain(address:*const *mut i64) -> i64 {
+            let value=7; unsafe { write(read(address),42); }; value
+        }
+        fn alias(value:&i64, pointer:*mut i64) -> (i64,i64) {
+            let before = *value; unsafe { write(pointer,42); }; (before,*value)
+        }");
+    let primitives = [M::Offset, M::AsConst, M::Read, M::Write, M::AsRawUnique, M::Copy].into_iter()
+        .map(PrimitiveRole::Memory).chain([PrimitiveRole::Abort]).map(|role| {
+        let key = fixture.interface.definitions.iter().find_map(|(key, header)|
+            matches!(header, ElaboratedHeader::Callable(signature) if role.matches_declaration(signature)).then_some(*key)).unwrap();
+        (key, role)
+    }).collect::<BTreeMap<_, _>>();
+    let inputs = fixture.inputs();
+    let unbound = derive_control_summaries(&inputs, Default::default());
+    assert!(!unbound.get(CallableBrand::Named(fixture.names["change"])).unwrap().is_complete());
+    let summaries = derive_control_summaries_with_check(&inputs, Some(&primitives), Default::default(),
+        &mut |_, _| Ok::<_, ()>(())).unwrap();
+    assert!(summaries.bind(&inputs).is_err());
+    let bound = summaries.bind_with_primitives(&inputs, Some(&primitives)).unwrap();
+    let owner = fixture.names["relay"];
+    let call = bound.body(owner).unwrap().get(fixture.call_to(owner, fixture.names["change"])).unwrap().clone();
+    assert!(call.normal && !call.unknown && call.runtime_trap && call.without_performance());
+    assert!(!call.storage_read_only());
+    let copy = primitives.iter().find_map(|(key, role)| (*role == PrimitiveRole::Memory(M::Copy)).then_some(*key)).unwrap();
+    let change = fixture.names["change"];
+    let direct = bound.body(change).unwrap().get(fixture.call_to(change, copy)).unwrap().clone();
+    assert!(direct.normal && direct.runtime_trap && !direct.unknown && direct.without_performance());
+    assert!(!direct.storage_read_only(), "the primitive's own event belongs to its call contract");
+    let choice = summaries.get(CallableBrand::Named(fixture.names["choose"])).unwrap();
+    assert!(choice.is_complete(), "the exact terminal primitive has no unknown continuation: {choice:?}");
+    assert!(choice.alternatives().iter().any(|path| matches!(path.outcome, ControlOutcome::RuntimeTrap)));
+    for result in &call.returns {
+        let payloads::PayloadSource::Aggregate(fields) = &result.source else { panic!("{call:?}"); };
+        assert_eq!(fields[0].source, payloads::PayloadSource::Argument { index:0, path:vec![0] });
+    }
+    for name in ["local", "uncertain"] {
+        let summary = summaries.get(CallableBrand::Named(fixture.names[name])).unwrap();
+        assert!(summary.is_complete(), "{name}: {summary:?}");
+        assert!(!ControlCallCoverage::Alternatives(summary.alternatives()).storage_read_only(None));
+        assert!(summary.alternatives().iter().any(|path| matches!(&path.outcome,
+            ControlOutcome::Return(ControlValue { origin: ControlOrigin::Invalidated { .. }, shape: ControlValueShape::Unknown, .. }))),
+            "{name}: a raw write cannot preserve the old literal: {summary:?}");
+    }
+    let alias = summaries.get(CallableBrand::Named(fixture.names["alias"])).unwrap();
+    assert!(alias.is_complete());
+    for path in alias.alternatives() {
+        if let ControlOutcome::Return(ControlValue { shape: ControlValueShape::Tuple(values), .. }) = &path.outcome {
+            assert!(!matches!(values[0].origin, ControlOrigin::Invalidated { .. }), "strict input snapshot precedes the write");
+            assert!(matches!(values[1].origin, ControlOrigin::Invalidated { .. }), "external pointer may alias an incoming referent");
+        }
+    }
+    let summary = summaries.get(CallableBrand::Named(fixture.names["address"])).unwrap();
+    assert!(summary.is_complete());
+    assert!(summary.alternatives().iter().filter_map(|path| match &path.outcome {
+        ControlOutcome::Return(value) => Some(value), _ => None,
+    }).all(|value| matches!(&value.origin, ControlOrigin::Produced(_))
+        && matches!(&value.shape, ControlValueShape::RawPointer { target, input: Some(_) }
+            if **target == ControlMemoryTarget::External)), "address derivation is not input value equality");
+    let limited = derive_control_summaries_with_check(&inputs, Some(&primitives),
+        ControlSummaryLimits { max_alternatives:1, ..Default::default() }, &mut |_, _| Ok::<_, ()>(())).unwrap();
+    assert!(!limited.get(CallableBrand::Named(owner)).unwrap().is_complete());
+}
+
+#[test]
 fn mutation_does_not_rewrite_frozen_strict_invocation_inputs() {
     let fixture = Fixture::new("#![no_std]
         fn old(value:i64) -> i64 { 42 } fn new(value:i64) -> i64 { 7 }

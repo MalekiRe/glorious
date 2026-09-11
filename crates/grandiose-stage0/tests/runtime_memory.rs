@@ -339,6 +339,51 @@ fn mandatory_tail_return_proofs_cannot_hide_replaced_or_uncovered_pointer_fields
 }
 
 #[test]
+fn mandatory_tail_preserves_owned_headers_across_machine_memory_operations() {
+    let source = r#"
+        struct Storage { pointer: *mut i64, count: i64 }
+        fn update(value: Storage) -> Storage {
+            let mut value = value;
+            unsafe {
+                let pointer = offset(value.pointer, 0);
+                value.count = read(as_const(pointer));
+                copy(as_const(pointer), pointer, 1);
+            };
+            value
+        }
+        fn finish(value: Storage) -> i64 { unsafe { read(as_const(value.pointer)) } }
+        fn relay(value: Storage) -> i64 { let rest = update(value); tail finish(rest) }
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = cast<u8,i64>(allocate(8, 8)); write(pointer, 42);
+                let answer = relay(Storage { pointer: pointer, count: 0 });
+                deallocate(cast<i64,u8>(pointer), 8, 8); answer
+            }
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input)
+            .unwrap_or_else(|error| panic!("{:#?}", error.diagnostics())).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        for program in [&artifact, &decoded] {
+            // SAFETY: one initialized scalar is read/copied within the same
+            // allocation; the owner is released only after the tail returns.
+            assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let ir = StageZeroCompiler::new().compile_llvm(request(source), LlvmTarget::host().unwrap()).unwrap();
+    for optimization in [0, 2] {
+        // SAFETY: the same initialized allocation stays live through the tail
+        // transfer, then is released once by its caller.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+    }
+}
+
+#[test]
 fn mandatory_tail_preserves_incoming_memory_across_proven_short_circuit_callbacks() {
     let source = r#"
         struct Storage { pointer: *mut i64 }

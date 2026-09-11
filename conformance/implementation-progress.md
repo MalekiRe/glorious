@@ -5,6 +5,46 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Machine-memory effects and raw-address return provenance
+
+Cache 190 gives manifest-bound memory calls explicit outcomes and addressed
+mutation events in the shared callable-control relation. Selection checks the
+exact declaration identity and instantiated ABI. Raw reads may consume owners;
+writes, bulk copies, resize and release invalidate affected stored provenance.
+Pointer arithmetic retains address dependence, not equality with the original
+pointer value. Unknown addresses conservatively include current-frame storage;
+known outside-frame mutations preserve unrelated local owner headers. No raw
+operation becomes read-only merely because its implementation has no source body.
+
+The shared returned-payload relation distinguishes a raw address from a checked
+reference loan. Escape analysis retains its frame dependence without inventing
+reference authentication, pointee ownership or captured callable authority.
+Missing address evidence remains unknown. The bound terminal abort contributes
+a runtime-trap alternative, not an unknown or normally returning continuation.
+
+All **66 focused control, escape and primitive-domain tests pass**. The new
+checks cover exact primitive-call event attribution, external alias invalidation,
+unchanged strict operand snapshots, local and unknown-address writes, closed ABI
+rejection, address-versus-reference authority and analysis-limit coverage.
+
+All **12 runtime-memory tail-safety tests pass**, including unchanged negative
+checks for current-frame pointers stored through direct, helper and callback
+paths. The new owned-header test additionally passes fresh/decoded VM and
+generated native execution at O0/O2. All **36 reference-result tests pass**,
+including the existing generated-code cases. Checked-reference lifetime rules,
+executable provenance requirements and unsafe execution obligations remain intact.
+
+The unchanged iterator source test still reports one G4403 at the owned-step
+tail. Tracing now reaches the selected `OwnedStepper::step` implementation and
+locates its missing control coverage in the generic `less` helper's
+`PartialOrd::partial_cmp` call: source Core retains a deferred method, and the
+control evaluator does not select it after substituting the concrete invocation.
+The shared declaration-selection boundary must migrate that case; recognizing
+the library helper's spelling would not repair it. Temporary tracing is removed.
+The isolated I/O timeout, remaining library acceptance and full compiler
+conformance remain open; the subsequent complete self-hosted compiler is not
+claimed. No runtime format, native ABI, test budget or safety assertion changes.
+
 ## Effect-polymorphic control and pointer-safety fixtures
 
 The nine G4155 failures recorded immediately below came from obsolete fixture

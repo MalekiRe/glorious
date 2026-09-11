@@ -30,6 +30,9 @@ pub(crate) enum PayloadSource {
     /// Address-preserving projection of an existing input loan, distinct
     /// from reading the reference's contents or borrowing an owned input.
     Reborrow { input: Box<InvocationPayload>, fields: Vec<u32> },
+    /// A raw address retains frame provenance, not a checked reference loan
+    /// or the contents stored at that address.
+    RawAddress { input: Box<InvocationPayload> },
     /// Borrow storage owned by an evaluated borrowed receiver. The receiver
     /// retains its lifetime and permissions; the selected capture supplies the
     /// referent's resident contents. Neither is a forwarded capture value.
@@ -81,7 +84,7 @@ impl InvocationPayload {
                 field.instantiate_types(arguments);
             }
         }
-        if let PayloadSource::Reborrow { input, .. } = &mut self.source {
+        if let PayloadSource::Reborrow { input, .. } | PayloadSource::RawAddress { input } = &mut self.source {
             input.instantiate_types(arguments);
         }
         if let PayloadSource::Capture { callable_ty, resident_ty, .. }
@@ -130,6 +133,7 @@ pub(crate) trait PayloadInputs {
     /// Project the referent of a frozen reference snapshot without reading
     /// that referent's contents or creating a new caller-owned storage slot.
     fn reborrow(&self, reference: &Self::Value, fields: &[u32]) -> Option<Self::Value>;
+    fn raw_address(&self, _input: &Self::Value) -> Option<Self::Value> { None }
     fn borrow_capture(&self, _receiver: &Self::Value,
         _projection: crate::resident_invocations::CaptureProjection, _unique: bool) -> Option<Self::Value> { None }
 }
@@ -341,6 +345,11 @@ pub(crate) fn resolve_payload<D: PayloadInputs>(
                 _ => None,
             }
         }
+        PayloadSource::RawAddress { input } => match resolve_payload(input, callable, arguments, domain) {
+            ResolvedPayload::Inputs { values, .. } => values.iter()
+                .map(|value| domain.raw_address(value)).collect::<Option<Vec<_>>>(),
+            _ => None,
+        },
         PayloadSource::BorrowCapture { receiver_path, callable_ty, resident_ty, fields } => {
             let Type::Reference { mutability, .. } = &payload.ty else {
                 return ResolvedPayload::Unknown(payload.ty.clone());
@@ -474,6 +483,9 @@ fn construct_payload(&self, value: &ControlValue,
         | ControlValueShape::Record { fields, .. } =>
             PayloadSource::Aggregate(fields.iter().map(derive).collect()),
         ControlValueShape::Enum { fields, .. } => PayloadSource::Variant(fields.iter().map(derive).collect()),
+        // Address arithmetic changes value identity, but retains the input's
+        // storage dependency. It does not load or forward pointee contents.
+        ControlValueShape::RawPointer { input: Some(input), .. } => PayloadSource::RawAddress { input: Box::new(derive(input)) },
         ControlValueShape::Callable { brand: CallableBrand::Closure(brand), .. } => {
             let selected = self.staged_body(brand.owner).and_then(|body|
                 body.expressions.iter().enumerate().find(|(_, expression)|

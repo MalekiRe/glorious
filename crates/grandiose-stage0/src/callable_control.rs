@@ -18,6 +18,7 @@ use std::{collections::BTreeMap, sync::Arc};
 #[cfg(test)]
 mod tests;
 mod payloads;
+mod memory;
 pub(crate) use payloads::PayloadInputs;
 pub(crate) use payloads::ReferenceInputs;
 pub(crate) use payloads::{InvocationPayload, ResolvedPayload, ResolvedReturns, resolve_payload};
@@ -223,6 +224,19 @@ pub enum ControlValueShape {
     OpaqueCallable,
     Label(ControlLabelTarget),
     Borrow(Box<ControlValue>),
+    /// Address provenance is distinct from the bytes or initialized resident
+    /// reached through that address. Derivation retains input dependencies,
+    /// never input value equality or permission to load the pointee.
+    RawPointer { target: Box<ControlMemoryTarget>, input: Option<Box<ControlValue>> },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ControlMemoryTarget {
+    /// Storage outside the symbolic entry activation and its nested calls.
+    External,
+    Storage(ControlStorage),
+    /// May alias either local or external storage; never an empty footprint.
+    Unknown,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlGuard {
@@ -244,6 +258,10 @@ pub enum ControlEvent {
     /// Readers apply these ordered replacements only when loading a place;
     /// already evaluated invocation inputs remain frozen values.
     Store { site: ControlSite, destination: ControlStorage, value: ControlValue },
+    /// Manifest-bound machine effects in the same ordered execution log.
+    /// Mutations invalidate addressed residents; an empty list is a positive
+    /// finite primitive contract, not missing observations.
+    Memory { site: ControlSite, primitive: crate::MemoryPrimitive, mutations: Vec<ControlMemoryTarget> },
     /// An evaluated resident may require source-selected or opaque cleanup.
     /// This is a coverage gap for storage effects, not an observed Drop call
     /// or a claim about whether the value is consumed on this path.
@@ -343,6 +361,7 @@ impl ControlCallCoverage<'_> {
     fn storage_read_only(&self, invocation: Option<&ControlSite>) -> bool {
         self.events_satisfy(invocation, |event| match event {
             ControlEvent::Borrow { .. } | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
+            ControlEvent::Memory { mutations, .. } => mutations.is_empty(),
             ControlEvent::Store { .. } | ControlEvent::Perform { .. } | ControlEvent::UnresolvedCleanup { .. } => false,
         })
     }
@@ -355,7 +374,7 @@ impl ControlCallCoverage<'_> {
             // Source destruction cannot perform outward algebraic effects.
             // Its unknown writes remain a separate storage-proof obligation.
             ControlEvent::Store { .. } | ControlEvent::UnresolvedCleanup { .. } | ControlEvent::Borrow { .. }
-            | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } => true,
+            | ControlEvent::Invoke { .. } | ControlEvent::Transfer { .. } | ControlEvent::Memory { .. } => true,
         }) && matches!(self, Self::Alternatives(paths) if paths.iter().all(|path|
             !matches!(path.outcome, ControlOutcome::TerminalOperation { .. } | ControlOutcome::Cancellation)))
     }
@@ -366,12 +385,14 @@ impl ControlCallCoverage<'_> {
                 let site = match event {
                     ControlEvent::Store { site, .. } | ControlEvent::Borrow { site, .. } | ControlEvent::Invoke { site, .. }
                     | ControlEvent::Transfer { site, .. } | ControlEvent::Perform { site, .. }
+                    | ControlEvent::Memory { site, .. }
                     | ControlEvent::UnresolvedCleanup { site } => site,
                 };
                 invocation.is_none_or(|call| {
                     // Strict operands and earlier caller events are not part
                     // of the callee's conditional execution contract.
-                    site.calls.starts_with(&call.calls) && site.calls.get(call.calls.len()) == Some(&call.location)
+                    (matches!(event, ControlEvent::Memory { .. }) && site == call)
+                        || (site.calls.starts_with(&call.calls) && site.calls.get(call.calls.len()) == Some(&call.location))
                 })
             }).all(&accepts)))
     }
@@ -1188,6 +1209,10 @@ impl State {
             if *steps > limit { return Err(ControlUnknown::Limit); }
             if let ControlEvent::Store { site, destination, value: replacement } = event {
                 replace(&mut value, site, destination, replacement, interface, steps, limit)?;
+            } else if let ControlEvent::Memory { site, mutations, .. } = event {
+                for target in mutations {
+                    memory::invalidate(&mut value, target, site, interface, steps, limit)?;
+                }
             }
         }
         Ok(value)
@@ -1509,6 +1534,9 @@ fn with_symbolic_referent(mut value: ControlValue) -> ControlValue {
             shape: ControlValueShape::Unknown,
         });
         value.shape = ControlValueShape::Borrow(Box::new(referent));
+    } else if matches!(value.ty, Type::RawPointer { .. })
+        && matches!(value.shape, ControlValueShape::Unknown) && input_origin(&value.origin) {
+        value.shape = ControlValueShape::RawPointer { target: Box::new(ControlMemoryTarget::External), input: None };
     }
     value
 }
@@ -2401,6 +2429,18 @@ impl Analyzer<'_, '_> {
                     };
                     if !role.matches_declaration(signature) || !captures.is_empty() || !labels.is_empty() {
                         return vec![state.stop(ControlUnknown::InvalidContract(owner))];
+                    }
+                    if matches!(role, crate::PrimitiveRole::Abort) {
+                        if !arguments.is_empty() || generic_arguments.as_deref() != Some(&[])
+                            || result_ty != Type::Never {
+                            return vec![state.stop(ControlUnknown::InvalidContract(owner))];
+                        }
+                        state.outcome = ControlOutcome::RuntimeTrap;
+                        return vec![state];
+                    }
+                    if let crate::PrimitiveRole::Memory(primitive) = role {
+                        return memory::invoke(frame, id, owner, *primitive, generic_arguments.as_deref(),
+                            &arguments, result_ty, state);
                     }
                     let Some([GenericArgument::Type(Type::Scalar(scalar))]) = generic_arguments.as_deref() else {
                         return vec![state.stop(ControlUnknown::Unsupported("open runtime primitive ABI"))];

@@ -154,6 +154,10 @@ enum Value {
     /// across suspension, but can be overwritten by a body-local borrow in
     /// an aggregate projection.
     ExternalBorrowed,
+    /// An address can be frame-relative without being a checked reference
+    /// loan. Copying/returning it does not borrow its pointee; mandatory-tail
+    /// transfer must still account for the ending frame's address identity.
+    RawAddress(Box<Value>),
     /// A reference snapshot keeps validity, physical targets and declared
     /// resident contents distinct. The shared invocation relation may prove
     /// validity on every normal return without erasing any loan dependencies.
@@ -420,6 +424,7 @@ impl Analyzer<'_> {
                     contents: contents.as_ref().map(|contents| Box::new(resolve(contents, graph, active).unwrap_or(Value::None))),
                     authenticated: *authenticated,
                 },
+                Value::RawAddress(input) => Value::RawAddress(Box::new(resolve(input, graph, active).unwrap_or(Value::None))),
                 Value::Array { length, element, fields } => Value::Array { length: *length,
                     element: Box::new(resolve(element, graph, active).unwrap_or(Value::None)),
                     fields: fields.iter().map(|(index, value)| (*index, resolve(value, graph, active).unwrap_or(Value::None))).collect() },
@@ -2097,6 +2102,7 @@ fn type_has_variant_layout(signatures: &crate::ElaboratedInterface, ty: &Type, a
 
 fn frame_independent_value(value: &Value) -> bool {
     match value {
+        Value::RawAddress(input) => frame_independent_value(input),
         Value::Reference { dependencies, .. } => frame_independent_value(dependencies),
         Value::Region(_) => unreachable!("logical region must be resolved before checking a boundary"),
         Value::ReferenceFree | Value::FrameIndependent | Value::ExternalBorrowed => true,
@@ -2153,7 +2159,7 @@ fn collect_borrowed_roots(value: &Value, roots: &mut BTreeSet<String>) {
             for value in arguments.values() { collect_borrowed_roots(value, roots); }
         }
         Value::CallableResident { footprint, .. } => collect_borrowed_roots(footprint, roots),
-        Value::Closure { .. } | Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed => {}
+        Value::RawAddress(_) | Value::Closure { .. } | Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed => {}
     }
 }
 
@@ -2268,7 +2274,7 @@ fn value_contains_external_reference(value: &Value) -> bool {
         Value::Logical { physical, arguments } => value_contains_external_reference(physical)
             || arguments.values().any(value_contains_external_reference),
         Value::CallableResident { footprint, .. } => value_contains_external_reference(footprint),
-        Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
+        Value::RawAddress(_) | Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::Borrowed { .. } | Value::Closure { .. } => false,
     }
 }
 
@@ -2303,7 +2309,7 @@ fn collect_closure_captures(value: &Value, captures: &mut Vec<Capture>) {
             collect_closure_captures(physical, captures);
             for value in arguments.values() { collect_closure_captures(value, captures); }
         }
-        Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
+        Value::RawAddress(_) | Value::None | Value::ReferenceFree | Value::Control(_) | Value::FrameIndependent | Value::ExternalBorrowed | Value::Borrowed { .. } => {}
     }
 }
 
@@ -2415,6 +2421,28 @@ mod tests {
         assert_eq!(value_at_path(&value, &[2, 0]), Some(Value::ExternalBorrowed));
         assert!(replace_resident_path(&mut value, &[2, 3, logical, 0], Value::None));
         assert!(!frame_independent_value(&value), "unknown replacement cannot retain the earlier proof");
+    }
+
+    #[test]
+    fn raw_addresses_retain_frame_debt_without_checked_reference_authority() {
+        use super::*;
+        let local = Value::RawAddress(Box::new(Value::Borrowed {
+            root: "local".into(), storage: Some(1), fields: vec![], capture_path: vec![],
+        }));
+        assert!(!frame_independent_value(&local));
+        assert!(borrowed_roots(&local).is_empty());
+        assert!(!invocations::reference_is_known(&local));
+        assert!(!invocations::reference_is_empty(&local));
+        assert!(reference_targets(&local).is_none());
+        let external = Value::RawAddress(Box::new(Value::ExternalBorrowed));
+        assert!(frame_independent_value(&external));
+        assert!(!value_contains_external_reference(&external));
+        let region = crate::placeflow::regions::Region { site: "address".into(), path: vec![] };
+        let address = Value::RawAddress(Box::new(Value::Region([region.clone()].into())));
+        let mut values = ValueEnvironment::default();
+        values.regions.insert(region, local.clone(), merge_region_values);
+        assert!(!frame_independent_value(&Analyzer::resolved_value_in(&address, &values)));
+        assert!(!frame_independent_value(&Value::RawAddress(Box::new(Value::None))));
     }
 
     #[test]

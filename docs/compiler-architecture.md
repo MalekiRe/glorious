@@ -3047,3 +3047,38 @@ body relation, rather than exempting raw-pointer types or trusting helper names.
 The compiler still needs control and storage semantics for raw-memory primitives
 before the full VecIntoIter stepping case can use this path. Runtime memory and
 executable tail verifiers remain independent; no wire format or ABI changes.
+
+## Manifest-bound memory control and raw-address payloads
+
+Cache 190 extends the existing ordered callable-control relation with finite
+machine-memory contracts. The runtime manifest's exact declaration identity
+and instantiated ABI select each primitive; source names and raw-pointer types
+alone supply no authority. Primitive calls retain normal and possible runtime
+trap alternatives, while the bound terminal abort has no normal continuation.
+Neither contract invents a source handler invocation or destructor.
+
+The same event log used by typed stores now records addressed mutations. Raw
+reads conservatively include possible ownership consumption. Address provenance
+distinguishes external storage, a represented source storage identity and an
+unknown destination. Offset, cast, bulk-write and release targets conservatively
+cover their containing owner. Loads invalidate affected residents and their old
+input origins; they do not fabricate exact replacement bytes or a read-only
+proof. Known external mutations do not clobber unrelated new local headers,
+while unknown addresses retain possible local and external aliasing. Expansion
+and replay use the existing work budget and preserve unknown on missing input.
+
+Returned address derivation is a distinct shared payload relation, not forwarding
+the original pointer bits or loading pointee contents. EscapeFlow consumes it in
+its existing value domain: raw addresses retain possible ending-frame dependence
+without creating checked-reference loans, referent authentication or captured
+callable authority. Consumers without that address domain keep the projection
+unknown. Declared reference contracts and executable tail validation remain
+independent; source unsafe operations gain no frame-independence exemption.
+
+This admits owned headers returned after represented raw-memory operations. The
+full iterator acceptance case still stops at the deferred trait call inside its
+generic comparison helper. Its concrete invocation must select the method through
+the shared declaration boundary; this finite memory contract does not settle
+that missing control coverage or prove arbitrary byte initialization, allocation
+validity, complete guarded storage or full compiler/library/self-hosted acceptance.
+Executable encoding and the native ABI are unchanged.

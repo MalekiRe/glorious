@@ -109,6 +109,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
                 unreachable!("resolve storage snapshots before querying control dependencies")
             }
             Value::None
+            | Value::RawAddress(_)
             | Value::ReferenceFree
             | Value::FrameIndependent
             | Value::ExternalBorrowed
@@ -120,6 +121,7 @@ pub(super) fn value_controls(value: &Value) -> BTreeSet<ControlBrand> {
 
 pub(super) fn unrepresented_capture(value: &Value) -> bool {
     match value {
+        Value::RawAddress(input) => unrepresented_capture(input),
         Value::Reference { dependencies, .. } => unrepresented_capture(dependencies),
         Value::None | Value::Region(_) => true,
         Value::Aggregate(values) | Value::Variant(values) | Value::Alternatives(values) | Value::Joined(values) =>
