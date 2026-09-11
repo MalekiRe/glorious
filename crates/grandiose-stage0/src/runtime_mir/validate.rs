@@ -1500,7 +1500,12 @@ impl RuntimeMir {
                 let preparing = matches!(instruction, RuntimeOperation::PrepareInvocation { .. });
                 let mut receiver = destination;
                 while let Type::Reference { referent, .. } = receiver { receiver = referent; }
-                if preparing && !matches!(receiver, Type::Callable { .. }) {
+                // A nominal label supplies the same intrinsic Fn authority
+                // used by invocation validation. Preparation selects a value;
+                // it does not give a proof-only label an address or a loan.
+                let label_receiver = crate::types::label::callable(destination).is_some()
+                    && matches!(instruction, RuntimeOperation::PrepareInvocation { reborrow: false, .. });
+                if preparing && !matches!(receiver, Type::Callable { .. }) && !label_receiver {
                     return Err("invocation preparation requires a callable receiver".into());
                 }
                 if retaining && !matches!(destination, Type::Callable { .. }) {

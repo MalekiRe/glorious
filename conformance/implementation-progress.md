@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 157: prepared nominal label invocation
+
+Runtime MIR preparation uses the existing nominal label Fn authority, preserving
+the receiver's exact type and brand without granting an address or a reborrow.
+The previous callable-only check disagreed with the already checked generic
+label invocation contract. Existing proof erasure and executable label checks
+continue to apply; the label is not converted into an ordinary environment.
+
+The two cache-155 G7041 regressions now pass: helper-label protected operands and
+reference payloads, and computed field subjects with strict effects/loans. A new
+generic label/reference payload gate passes fresh/decoded VM and all-native plus
+both mixed-engine directions at O0/O2. A receiving-validator test rejects brand
+changes, label addressing and non-callable receivers.
+
+Owned receiver replacement remains open: preserving a selected environment must
+come from lawful source acquisition, not delaying destruction or blindly copying
+mutable capture state. The other cache-155 baseline failures and the broader
+handler/fusion/full-conformance obligations remain open. Cache 157 changes;
+verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 156: handler payloads consume acquired inputs
 
 The existing active handler frame retains the payload-binding relation produced

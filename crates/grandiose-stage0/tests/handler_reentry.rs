@@ -394,6 +394,13 @@ fn prepared_borrowed_receiver_keeps_its_selected_reference_handle() {
 }
 
 #[test]
+fn prepared_generic_label_receiver_preserves_reference_payloads() {
+    candidate("fn leave<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
+        fn forward<'a>(value:&'a i64) -> &'a i64 { leave(value,@forward) }
+        pub fn main() -> i64 { let answer=42; *forward(&answer) }");
+}
+
+#[test]
 fn field_receiver_prepared_before_an_argument_performance_survives_replay() {
     candidate("effect Ask { [2,2] ask() -> i64; }
         fn answer(value:i64) -> i64 { value }

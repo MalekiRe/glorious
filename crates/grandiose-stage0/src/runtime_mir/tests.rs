@@ -24,6 +24,45 @@ const CALL: &str = "pub fn main(action: () -> i64) -> i64 { action() }";
 const PERFORM: &str = "effect Ask { [0, 1] ask(value: i64) -> i64; } pub fn main() -> i64 { handle Ask::ask(42) { Ask::ask(value) with _ => value } }";
 
 #[test]
+fn prepared_nominal_label_retains_its_brand_without_address_authority() {
+    let mut body = fixture("pub fn main(target: (i64) -> !) -> ! { target(42) }");
+    let brand = crate::LabelBrand { owner: body.definition, label: 0 };
+    let label = crate::types::label::new(brand, Type::Scalar(crate::ScalarType::I64));
+    for local in &mut body.locals {
+        if matches!(local.ty, Type::Callable { .. }) { local.ty = label.clone(); }
+    }
+    // Labels have no callable-owned environment to destroy.
+    body.control.frame_cleanup.clear();
+    body.frame = body.derive_frame().unwrap();
+    body.validate().unwrap();
+    let (dst, src) = body.blocks.iter().flat_map(|block| &block.instructions).find_map(|op|
+        match op { RuntimeOperation::PrepareInvocation { dst, src, .. } => Some((*dst, *src)), _ => None }).unwrap();
+
+    let mut wrong_brand = body.clone();
+    wrong_brand.locals[dst.0 as usize].ty = crate::types::label::new(
+        crate::LabelBrand { label: 1, ..brand }, Type::Scalar(crate::ScalarType::I64));
+    wrong_brand.frame = wrong_brand.derive_frame().unwrap();
+    assert!(wrong_brand.validate().unwrap_err().contains("projection destination type"));
+
+    let mut addressed = body.clone();
+    addressed.locals[src.0 as usize].ty = Type::Reference {
+        mutability: Mutability::Shared, lifetime: crate::Lifetime::Static, referent: Box::new(label.clone()),
+    };
+    for op in addressed.blocks.iter_mut().flat_map(|block| &mut block.instructions) {
+        if let RuntimeOperation::PrepareInvocation { reborrow, .. } = op { *reborrow = true; }
+    }
+    addressed.frame = addressed.derive_frame().unwrap();
+    assert!(addressed.validate().unwrap_err().contains("preparation requires a callable receiver"));
+
+    let mut noncallable = body;
+    for local in &mut noncallable.locals {
+        if local.ty == label { local.ty = Type::Unit; }
+    }
+    noncallable.frame = noncallable.derive_frame().unwrap();
+    assert!(noncallable.validate().unwrap_err().contains("preparation requires a callable receiver"));
+}
+
+#[test]
 fn a_stored_reference_can_change_its_body_local_loan_without_changing_its_type() {
     let body = fixture("pub fn main() -> i64 {let first = 41; let second = 42; let mut pointer = &first; pointer = &second; *pointer}");
     assert!(body.blocks.iter().flat_map(|block| &block.instructions).any(|operation|

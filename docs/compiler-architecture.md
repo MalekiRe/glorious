@@ -2213,3 +2213,21 @@ payload liveness across arbitrary resumption/suffix interleavings still require
 that broader product. The cache-155 baseline failures and remaining receiver,
 native-handler and full-conformance obligations are unchanged. No executable or
 runtime format changes.
+
+## Prepared nominal label authority
+
+Runtime MIR receiver preparation now consumes the same compiler-owned nominal
+label Fn view as invocation validation. A label value can be selected before
+strict arguments without becoming an addressable environment. The preparation
+keeps its exact nominal type and brand; it does not authorize a label reborrow,
+change an arbitrary nominal into a callable, or infer a local transfer target.
+Existing runtime proof erasure and executable destination authentication remain
+independent requirements. No new label representation or semantic walker is added.
+
+Cache 157 fixes both preserved G7041 label-preparation regressions. Generic
+label forwarding with reference payloads passes fresh/decoded VM and native/mixed
+O0/O2 execution. Runtime validation rejects a changed destination brand, label
+addressing and non-callable preparation. This repairs the receiving type contract,
+not owned callable acquisition across argument replacement, general borrowed
+resumption invocation, mandatory-tail fusion or complete native-handler and
+full-conformance acceptance. Executable formats and runtime ABI are unchanged.
