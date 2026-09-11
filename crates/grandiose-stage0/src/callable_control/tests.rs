@@ -326,6 +326,42 @@ fn changed_storage_is_not_the_assignment_expression_result() {
 }
 
 #[test]
+fn opaque_owned_products_keep_unmodified_input_fields_after_nested_stores() {
+    let fixture = Fixture::new("#![no_std]
+        struct Storage<T> { pointer: *mut T, count: i64 }
+        struct Carrier<T> { storage: Storage<T>, spare: *mut T }
+        fn change<T>(value: Carrier<T>) -> Carrier<T> {
+            let mut value = value; value.storage.count = 0; value
+        }
+        fn replace<T>(value: Carrier<T>, next: *mut T) -> Carrier<T> {
+            let mut value = value; value.storage.pointer = next; value
+        }
+        fn relay(value: Carrier<i64>, next: *mut i64) -> Carrier<i64> {
+            change(value); replace(value,next)
+        }");
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    let bound = summaries.bind(&inputs).unwrap();
+    let owner = fixture.names["relay"];
+    let body = bound.body(owner).unwrap();
+    for (name, expected) in [
+        ("change", payloads::PayloadSource::Argument { index: 0, path: vec![0, 0] }),
+        ("replace", payloads::PayloadSource::Argument { index: 1, path: vec![] }),
+    ] {
+        let call = body.get(fixture.call_to(owner, fixture.names[name])).unwrap();
+        assert!(call.normal && !call.unknown, "{name}: {call:?}");
+        let [payload] = call.returns.as_slice() else { panic!("{call:?}"); };
+        let payloads::PayloadSource::Aggregate(fields) = &payload.source else { panic!("{call:?}"); };
+        let payloads::PayloadSource::Aggregate(storage) = &fields[0].source else { panic!("{call:?}"); };
+        assert_eq!(storage[0].source, expected);
+        assert_eq!(fields[1].source, payloads::PayloadSource::Argument { index: 0, path: vec![1] });
+        if name == "replace" {
+            assert_eq!(storage[1].source, payloads::PayloadSource::Argument { index: 0, path: vec![0, 1] });
+        }
+    }
+}
+
+#[test]
 fn mutation_alternatives_keep_branch_guards_and_unresolved_aliases_remain_unknown() {
     let fixture = Fixture::new("#![no_std]
         fn branch(flag:i64) -> i64 { let mut value = 0; handle flag { 0 => { value = 42; }, _ => { value = 7; } }; value }
@@ -374,7 +410,7 @@ fn ordered_storage_queries_are_charged_to_the_existing_work_budget() {
     let state = State { locals: BTreeMap::new(), guards: vec![],
         events: full.alternatives()[0].events.clone(), outcome: full.alternatives()[0].outcome.clone() };
     let mut steps = 0;
-    assert_eq!(state.load(value.clone(), &mut steps, 0), Err(ControlUnknown::Limit));
+    assert_eq!(state.load(value.clone(), &fixture.interface, &mut steps, 0), Err(ControlUnknown::Limit));
     let limited = derive_control_summaries(&inputs, ControlSummaryLimits { max_steps: 1, ..Default::default() });
     assert!(!ControlCallCoverage::Alternatives(limited.get(CallableBrand::Named(fixture.names["main"])).unwrap()
         .alternatives()).is_complete());
@@ -503,6 +539,7 @@ fn variant_reference_coverage_distinguishes_absence_from_unknown_alternatives() 
     ]) };
     let mut control = InvocationControl { normal: true, returns: vec![empty], ..Default::default() };
     let resolved = control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain);
+    assert!(resolved.complete_normal_returns);
     assert!(resolved.references.is_complete());
     assert_eq!(resolved.references.empty_paths().collect::<Vec<_>>(), vec![&[0][..]]);
     assert_eq!(resolved.references.paths().count(), 0);
@@ -514,9 +551,12 @@ fn variant_reference_coverage_distinguishes_absence_from_unknown_alternatives() 
     assert_eq!(resolved.references.paths().collect::<Vec<_>>(), vec![&[0][..]]);
     assert_eq!(resolved.references.empty_paths().count(), 0);
     control.unknown = true;
+    assert!(!control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).complete_normal_returns);
     assert!(!control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).references.is_complete());
     control.unknown = false;
     control.returns.push(InvocationPayload::unknown(result.clone()));
+    assert!(control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).complete_normal_returns,
+        "complete alternatives are distinct from known payload fields");
     assert!(!control.resolve_returns(&result, &fixture.interface, &(), &[()], &Domain).references.is_complete());
     let tuple = Type::Tuple(vec![signature.parameters[0].clone()]);
     control.returns = vec![InvocationPayload { ty: tuple.clone(), source: payloads::PayloadSource::Aggregate(vec![]) }];

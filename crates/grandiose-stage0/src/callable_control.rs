@@ -168,6 +168,33 @@ fn resident(mut value: ControlValue, storage: ControlStorage) -> ControlValue {
     }
     value
 }
+
+/// Open one product layer only when a projected store needs it. The interface
+/// owns nominal field substitution; this never guesses an enum variant or
+/// expands an array from a runtime extent. Every field keeps its original
+/// input projection until the ordered store relation replaces it.
+fn open_product(value: &mut ControlValue, interface: &ElaboratedInterface,
+    steps: &mut usize, limit: usize) -> Result<(), ControlUnknown> {
+    if !matches!(value.shape, ControlValueShape::Unknown) { return Ok(()); }
+    let types = match &value.ty {
+        Type::Tuple(fields) => fields.clone(),
+        Type::Nominal { definition, arguments } => interface
+            .instantiate_struct_fields_generic(*definition, arguments)
+            .map_err(|_| ControlUnknown::Unsupported("unavailable mutation layout"))?
+            .into_iter().map(|field| field.ty).collect(),
+        _ => return Err(ControlUnknown::Unsupported("unavailable mutation product")),
+    };
+    *steps = steps.saturating_add(types.len());
+    if *steps > limit { return Err(ControlUnknown::Limit); }
+    let fields = types.into_iter().enumerate().map(|(index, ty)| project(value, index as u32, &ty)).collect();
+    value.shape = match &value.ty {
+        Type::Tuple(_) => ControlValueShape::Tuple(fields),
+        Type::Nominal { definition, .. } => ControlValueShape::Record { definition: *definition, fields },
+        _ => unreachable!("checked product layout"),
+    };
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ControlValueShape {
     Unknown,
@@ -1111,12 +1138,13 @@ impl State {
     /// The execution log is the storage authority. Lexical bindings and
     /// reference handles retain identities; their embedded contents are
     /// formation snapshots, not a second mutable storage environment.
-    fn load(&self, mut value: ControlValue, steps: &mut usize, limit: usize) -> Result<ControlValue, ControlUnknown> {
+    fn load(&self, mut value: ControlValue, interface: &ElaboratedInterface,
+        steps: &mut usize, limit: usize) -> Result<ControlValue, ControlUnknown> {
         fn replace(current: &mut ControlValue, site: &ControlSite, destination: &ControlStorage, value: &ControlValue,
-            steps: &mut usize, limit: usize) -> Result<(), ControlUnknown> {
+            interface: &ElaboratedInterface, steps: &mut usize, limit: usize) -> Result<(), ControlUnknown> {
             *steps = steps.saturating_add(1);
             if *steps > limit { return Err(ControlUnknown::Limit); }
-            let Some(storage) = &current.storage else { return Ok(()); };
+            let Some(storage) = current.storage.clone() else { return Ok(()); };
             if !destination.strong_destination() && storage.external_resident() {
                 // Distinct symbolic inputs may alias. Invalidate the loaded
                 // contents (and their guards), not reference handles resident
@@ -1133,11 +1161,12 @@ impl State {
                     replacement = project(&replacement, index, &current.ty);
                 }
                 *current = resident(replacement, storage.clone());
-            } else if destination.path_from(storage).is_some() {
+            } else if destination.path_from(&storage).is_some() {
+                open_product(current, interface, steps, limit)?;
                 match &mut current.shape {
                     ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
                     | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => {
-                        for field in fields { replace(field, site, destination, value, steps, limit)?; }
+                        for field in fields { replace(field, site, destination, value, interface, steps, limit)?; }
                         // A changed aggregate is not the old input value.
                         // Preserve each unaffected field's provenance, but
                         // revoke the ancestor's whole-value forwarding path.
@@ -1158,14 +1187,14 @@ impl State {
             *steps = steps.saturating_add(1);
             if *steps > limit { return Err(ControlUnknown::Limit); }
             if let ControlEvent::Store { site, destination, value: replacement } = event {
-                replace(&mut value, site, destination, replacement, steps, limit)?;
+                replace(&mut value, site, destination, replacement, interface, steps, limit)?;
             }
         }
         Ok(value)
     }
 
-    fn load_outcome(&mut self, value: ControlValue, steps: &mut usize, limit: usize) {
-        self.outcome = match self.load(value, steps, limit) {
+    fn load_outcome(&mut self, value: ControlValue, interface: &ElaboratedInterface, steps: &mut usize, limit: usize) {
+        self.outcome = match self.load(value, interface, steps, limit) {
             Ok(value) => ControlOutcome::Return(value),
             Err(reason) => ControlOutcome::Unknown(reason),
         };
@@ -1684,7 +1713,7 @@ impl Analyzer<'_, '_> {
             CoreKind::Local(name) => {
                 return match state.locals.get(&name).cloned() {
                     Some(value) => {
-                        state.load_outcome(value, &mut self.steps, self.limits.max_steps);
+                        state.load_outcome(value, &self.seals[&frame.owner].interface, &mut self.steps, self.limits.max_steps);
                         vec![state]
                     }
                     None => vec![state.stop(ControlUnknown::InvalidCore(frame.owner))],
@@ -1745,7 +1774,7 @@ impl Analyzer<'_, '_> {
                     let Some(value) = state.locals.get(&capture.name).cloned() else {
                         return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
                     };
-                    let value = match state.load(value, &mut self.steps, self.limits.max_steps) {
+                    let value = match state.load(value, &self.seals[&frame.owner].interface, &mut self.steps, self.limits.max_steps) {
                         Ok(value) => value,
                         Err(reason) => return vec![state.stop(reason)],
                     };
@@ -1895,7 +1924,7 @@ impl Analyzer<'_, '_> {
                     .map(|mut state| {
                         if state.running() {
                             if let ControlValueShape::Borrow(value) = state.value().shape {
-                                state.load_outcome(*value, &mut self.steps, self.limits.max_steps);
+                                state.load_outcome(*value, &self.seals[&frame.owner].interface, &mut self.steps, self.limits.max_steps);
                             } else {
                                 return state
                                     .stop(ControlUnknown::Unsupported("opaque dereference"));
@@ -2271,7 +2300,7 @@ impl Analyzer<'_, '_> {
                 let Some(value) = state.locals.get(name).cloned() else {
                     return vec![state.stop(ControlUnknown::InvalidCore(frame.owner))];
                 };
-                state.load_outcome(value, &mut self.steps, self.limits.max_steps);
+                state.load_outcome(value, &self.seals[&frame.owner].interface, &mut self.steps, self.limits.max_steps);
                 vec![state]
             }
             crate::CorePlace::Deref { reference, .. } => self.eval(frame, *reference, state)
@@ -2280,14 +2309,18 @@ impl Analyzer<'_, '_> {
                         let ControlValueShape::Borrow(value) = state.value().shape else {
                             return state.stop(ControlUnknown::Unsupported("opaque mutation dereference"));
                         };
-                        state.load_outcome(*value, &mut self.steps, self.limits.max_steps);
+                        state.load_outcome(*value, &self.seals[&frame.owner].interface, &mut self.steps, self.limits.max_steps);
                     }
                     state
                 }).collect(),
             crate::CorePlace::Field { base, index, ty, .. } => self.place(frame, base, state)
                 .into_iter().map(|mut state| {
                     if state.running() {
-                        let value = state.value();
+                        let mut value = state.value();
+                        if let Err(reason) = open_product(&mut value, &self.seals[&frame.owner].interface,
+                            &mut self.steps, self.limits.max_steps) {
+                            return state.stop(reason);
+                        }
                         let fields = match &value.shape {
                             ControlValueShape::Tuple(fields) | ControlValueShape::Array(fields)
                             | ControlValueShape::Record { fields, .. } | ControlValueShape::Enum { fields, .. } => fields,

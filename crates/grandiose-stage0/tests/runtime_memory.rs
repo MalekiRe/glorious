@@ -273,6 +273,72 @@ fn mandatory_tail_preserves_incoming_memory_across_local_early_return_helpers() 
 }
 
 #[test]
+fn mandatory_tail_preserves_untouched_pointer_fields_in_returned_owned_products() {
+    let source = r#"
+        struct Storage<T> { pointer: *mut T, count: usize }
+        struct Carrier<T> { storage: Storage<T> }
+        fn update<T>(value: Carrier<T>) -> Carrier<T> {
+            let mut value = value; value.storage.count = 0; value
+        }
+        fn finish(value: Carrier<i64>) -> i64 { unsafe { read(as_const(value.storage.pointer)) } }
+        fn relay(value: Carrier<i64>) -> i64 { let rest = update(value); tail finish(rest) }
+        pub fn main() -> i64 {
+            unsafe {
+                let pointer = cast<u8,i64>(allocate(8, 8)); write(pointer, 42);
+                let answer = relay(Carrier { storage: Storage { pointer: pointer, count: 1 } });
+                deallocate(cast<i64,u8>(pointer), 8, 8); answer
+            }
+        }
+    "#;
+    for optimization in ["0", "2"] {
+        let mut input = request(source);
+        input.codegen_options.insert("optimization-level".into(), optimization.into());
+        let artifact = StageZeroCompiler::new().compile(input)
+            .unwrap_or_else(|error| panic!("{:#?}", error.diagnostics())).artifact.unwrap();
+        let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+        for program in [&artifact, &decoded] {
+            // SAFETY: the allocation is initialized and retained until relay
+            // returns, and the helper changes only its scalar count field.
+            assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn mandatory_tail_return_proofs_cannot_hide_replaced_or_uncovered_pointer_fields() {
+    let prefix = r#"
+        struct Storage { pointer: *mut i64, count: usize }
+        fn update(value: Storage) -> Storage { let mut value = value; value.count = 0; value }
+        fn replace(value: Storage, pointer: *mut i64) -> Storage {
+            let mut value = value; value.pointer = pointer; value
+        }
+        fn choose(value: Storage, flag: i64) -> Storage {
+            handle flag {
+                0 => update(value),
+                _ => unsafe { let mut local = 42; replace(value, as_raw_unique(&mut local)) },
+            }
+        }
+        fn finish(value: Storage) -> i64 { unsafe { read(as_const(value.pointer)) } }
+    "#;
+    for body in [
+        "let mut local = 42; let rest = unsafe { replace(value, as_raw_unique(&mut local)) }; tail finish(rest)",
+        "let rest = choose(value, flag); tail finish(rest)",
+    ] {
+        let source = format!("{prefix}
+            fn relay(value: Storage, flag: i64) -> i64 {{ {body} }}
+            pub fn main() -> i64 {{ unsafe {{ relay(Storage {{ pointer: null<i64>(), count: 1 }}, 1) }} }}");
+        for optimization in ["0", "2"] {
+            let mut input = request(&source);
+            input.codegen_options.insert("optimization-level".into(), optimization.into());
+            let failure = StageZeroCompiler::new().compile(input)
+                .expect_err("untouched siblings or one known return cannot prove a replaced pointer independent");
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G4403"),
+                "{source}: {:#?}", failure.diagnostics());
+        }
+    }
+}
+
+#[test]
 fn mandatory_tail_preserves_incoming_memory_across_proven_short_circuit_callbacks() {
     let source = r#"
         struct Storage { pointer: *mut i64 }

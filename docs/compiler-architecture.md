@@ -3022,3 +3022,28 @@ the producer's actual lifetime and shared/unique authority through their
 existing rules. There is no delayed-dereference guess, premature region seal or
 additional source/Core fact walker. This closes the direct associated-field
 dereference failure above without changing executable proofs, encoding or ABI.
+
+## Partial stores in opaque owned products
+
+Cache 189 makes the shared control evaluator open one tuple or interface-defined
+struct layer when a projected store needs it. A nominal parameter need not have
+arrived as an observed constructor. Place selection and ordered store replay use
+the same opening operation and the existing kind-checked field instantiation.
+Each untouched field retains its original input projection; changed ancestors
+lose whole-value identity, and the written field receives the actual stored
+value. No enum variant or runtime array extent is guessed. Expansion consumes
+the existing work budget, and unavailable layouts retain unknown coverage.
+
+Resolved invocation returns now expose complete normal-alternative coverage
+separately from reference-leaf coverage. Completeness alone is not a resident
+proof: payload fields may still be unknown. Escape analysis can discharge an
+unknown no-path result fallback only when every normal alternative resolves and
+every returned resident is independently frame-independent. Declared reference
+paths and lifetime debt remain intact. Missing alternatives, omitted payloads,
+unknown fields and current-frame pointers do not inherit a sibling's proof.
+
+This migrates actual returned owned-product tail transfers through the shared
+body relation, rather than exempting raw-pointer types or trusting helper names.
+The compiler still needs control and storage semantics for raw-memory primitives
+before the full VecIntoIter stepping case can use this path. Runtime memory and
+executable tail verifiers remain independent; no wire format or ABI changes.

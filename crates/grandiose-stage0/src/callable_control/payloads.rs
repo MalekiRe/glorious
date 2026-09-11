@@ -146,6 +146,9 @@ pub(crate) trait ReferenceInputs: PayloadInputs {
 
 pub(crate) struct ResolvedReturns<V> {
     pub payloads: Vec<ResolvedPayload<V>>,
+    /// Every possible normal result has a represented alternative. Individual
+    /// payload fields may still be unknown and require the consumer's proof.
+    pub complete_normal_returns: bool,
     pub references: ReferenceCoverage,
     /// Complete normal alternatives with a positively owned capture footprint.
     /// This can discharge a possible hidden capture, not a declared region debt.
@@ -279,7 +282,8 @@ impl InvocationControl {
                 .filter(|(path, _)| payloads.iter().all(|payload| noncapturing(payload, path, signatures)))
                 .map(|(path, _)| path).collect()
         } else { Default::default() };
-        ResolvedReturns { payloads, references: ReferenceCoverage { paths, empty_paths, complete }, noncapturing_callables }
+        ResolvedReturns { payloads, complete_normal_returns: invocation_covered,
+            references: ReferenceCoverage { paths, empty_paths, complete }, noncapturing_callables }
     }
 }
 

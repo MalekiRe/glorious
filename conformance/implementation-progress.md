@@ -5,6 +5,51 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Returned owned products after partial field stores
+
+Cache 189 repairs two connected boundaries in the shared return-provenance path.
+The control evaluator previously stopped when a field mutation targeted an
+opaque nominal parameter rather than an already observed constructor. It now
+opens the interface's kind-checked tuple/struct layout on demand during place
+selection and ordered store replay. Untouched fields preserve their original
+input paths; written fields carry their replacement values, and changed
+ancestors no longer forward the original whole value.
+
+Escape analysis previously joined an unknown no-path declaration fallback with
+even a complete, frame-independent body result. The shared resolved return
+product now distinguishes complete normal alternatives from reference-leaf
+coverage. Only complete alternatives whose every resident is proven independent
+can discharge that fallback. Explicit reference paths and lifetime debt remain;
+unknown fields, missing alternatives and changed pointers gain no permission.
+
+The new nested owned-product source test passes fresh and decoded VM execution
+at O0/O2: a generic helper changes a scalar field, returns the same owned storage
+pointer, and its caller transfers the result through mandatory tail. The new
+negative test rejects both replacing a pointer with current-frame storage and
+an uncovered branch beside a known independent return, at both optimization
+levels. The focused runtime-memory tail run has **10 passes and one failure**.
+Its existing invoked-callback mutation test instead fails during elaboration
+with G4155, before its expected executable provenance rejection; it is neither
+disabled nor counted as a passing safety gate.
+
+The focused control suite has **34 passes and eight failures**. All storage,
+mutation, strict-snapshot, alias, cleanup and resource-limit cases pass, together
+with the new generic nested-field test. The eight failing fixtures report G4155
+while elaborating unresolved associated effect rows, before the changed control
+analysis runs. These remain conformance debt. All **36 reference-result tests
+pass** in the final cache-189 build, including existing generated-code checks;
+declared reference/lifetime obligations are not relaxed. The strengthened
+normal-alternative/reference-coverage unit check also passes: a known set of
+alternatives can still contain an unknown payload, while an uncovered execution
+cannot claim complete alternatives.
+
+The final unchanged iterator source check still fails with exactly one G4403 at
+its owned-step tail transfer. Raw-memory primitive control/storage contracts
+remain necessary for that step, and the isolated I/O timeout remains open. This
+is a migrated owned-product return boundary, not full compiler, standard-library or subsequent
+self-hosted acceptance. No test limits, source annotations or safety assertions
+were weakened.
+
 ## Parametric projections with unresolved caller regions
 
 Cache 188 closes the remaining direct associated-field dereference failure

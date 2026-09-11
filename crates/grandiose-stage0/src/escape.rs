@@ -970,14 +970,24 @@ impl Analyzer<'_> {
             .map(<[u32]>::to_vec).collect::<Vec<_>>();
         let empty_paths = resolved.as_ref().into_iter().flat_map(|result| result.references.empty_paths())
             .map(<[u32]>::to_vec).collect::<Vec<_>>();
+        let complete_normal_returns = resolved.as_ref().is_some_and(|result| result.complete_normal_returns);
+        let return_count = resolved.as_ref().map_or(0, |result| result.payloads.len());
         let returned = resolved.into_iter().flat_map(|result| result.payloads).filter_map(|payload|
             control::known_payload(payload, &self.values, &mut self.control_captures, self.signatures)).collect::<Vec<_>>();
+        // A declaration without reference paths can still return a raw-backed
+        // product. A complete body relation may prove every returned resident
+        // frame-independent; retaining an unknown fallback would discard that
+        // proof. Missing alternatives or even one unknown field cannot do so.
+        // Explicit declared reference/region debt is never removed here.
+        let independent_returns = complete_normal_returns && returned.len() == return_count
+            && returned.iter().all(frame_independent_value);
         let targets = reference_paths.iter().map(|path| {
             let targets = (!returned.is_empty()).then(|| returned.iter().map(|value|
                 reference_targets(&value_at_path(value, path)?)).collect::<Option<Vec<_>>>()).flatten().map(join);
             (path.clone(), targets)
         }).collect::<Vec<_>>();
-        let mut result = if matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete { None }
+        let mut result = if (matches!(reference_origin, CallReferenceOrigin::Opaque) && references_complete)
+            || (matches!(reference_origin, CallReferenceOrigin::None | CallReferenceOrigin::Opaque) && independent_returns) { None }
             else { Some(self.reference_result_value(&reference_origin, reference_shape, &expression.ty,
                 values, references_complete, expression.span, "call")) };
         for (path, (footprint, resident_captures)) in callable_values {
