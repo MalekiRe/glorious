@@ -5,6 +5,29 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Resident permission before ownership transfer selection
+
+Cache 174 fixes the active stateful tuple-projection regression from cache 173.
+Ownership lowering now queries the same sealed resident-use evidence already
+consumed during specialization, before classifying observations and choosing
+Copy/Move operations. The declared quantity remains a separate input to the
+existing replacement/exposure constraints; a known initial environment cannot
+widen an opaque writer's storage guarantee. No second quantity solver or runtime
+exception is added.
+
+All 36 focused ownership validation tests pass, including affine capture,
+replacement, writable exposure, branch joins and stale-input rejection. Three
+stateful tuple, nested-tuple and record programs pass fresh VM, decoded VM and
+LLVM O0/O2, checking independent copied environments and persistent state across
+repeated calls.
+
+The added unique-capture negative regression is an active source-checking failure:
+ordinary projection of an affine callable is treated as an observation by
+PlaceFlow, while callable-use checking tracks invocation rather than the owning
+carrier transfer. The compiler accepts two moves and execution rejects the second
+with `UseAfterMove`. This requires repairing that source ownership/invocation
+boundary; cache 174 does not claim the negative acceptance gate passed.
+
 ## Owned Copy acquisition at reference and projection boundaries
 
 Cache 173 repairs the callback-environment destruction failure in
@@ -22,8 +45,8 @@ schema and native ABI remain unchanged.
 The original nine-source completion gate passes at both VM optimization settings,
 including decoded execution; its three mutability/escape rejection cases pass.
 
-The independently discovered stateful tuple-projection regression remains active,
-not ignored: accepted repeated reads still lower to two moves and the second
+At this checkpoint the independently discovered stateful tuple-projection
+regression remained active, not ignored: accepted repeated reads lowered to two moves and the second
 fails with `UseAfterMove`. The quantity contract is lost before runtime lowering;
 this checkpoint does not weaken the runtime check or claim that regression, the
 full language/library suite, or self-hosting is complete.

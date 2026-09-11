@@ -2708,3 +2708,20 @@ invalidates earlier lowering; executable schema and native ABI are unchanged.
 This repairs already-proven Copy transfers. Propagating concrete resident quantity
 through stateful callable projections remains an active failing source regression:
 ownership lowering currently emits two moves for accepted repeated tuple reads.
+
+## Resident evidence before source transfer selection
+
+Ownership lowering now uses the existing trait solver's sealed resident-use
+query when initializing the same quantity equations that specialization closes.
+It does so before classifying storage observations and choosing transfer modes;
+closing a quantity after a Move has already been chosen is too late. Declared
+quantities remain distinct and continue to bound replacements and writable
+exposure. Missing resident evidence falls back only to the declared guarantee.
+
+Cache 174 fixes stateful callable copies through tuple and nominal projections.
+The focused ownership checks and VM/decoded/LLVM stateful-copy matrix pass.
+The source lane still delegates ordinary affine callable occurrences to invocation
+checking; the new unique-capture double-projection rejection test remains active
+and fails because source acceptance precedes a runtime second-move rejection.
+Repairing source carrier ownership without conflating it with resumption-use
+budgets and borrowed invocation remains the next boundary obligation.

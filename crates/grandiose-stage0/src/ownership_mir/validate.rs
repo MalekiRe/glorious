@@ -658,6 +658,25 @@ mod tests {
     }
 
     #[test]
+    fn projected_resident_permissions_are_known_before_transfers_are_chosen() {
+        let mir = fixture("pub fn main() -> i64 { let mut value = 0;
+            let action = move (value) { value = 42; value };
+            let pair = (action,); let first = pair.0; let second = pair.0; first(); second() }");
+        let reads = mir.blocks.iter().flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction.operation {
+                OwnershipOperation::Project { mode, .. } => Some((instruction.destination, mode)),
+                _ => None,
+            }).collect::<Vec<_>>();
+        assert_eq!(reads.len(), 2);
+        for (destination, mode) in reads {
+            assert_eq!(mode, ValueTransfer::Copy);
+            assert_eq!(mir.owners[destination.0 as usize].quantity, Some(Quantity::UNRESTRICTED));
+            assert!(matches!(mir.values[destination.0 as usize].ty,
+                Type::Callable { invocation, .. } if invocation != Quantity::UNRESTRICTED));
+        }
+    }
+
+    #[test]
     fn an_environment_owning_a_unique_reference_does_not_gain_copy_authority() {
         let mut mir = fixture("pub fn main(value: &mut i64) -> i64 { let action = move (value) { *value }; action() }");
         let destination = mir.blocks.iter().flat_map(|block| &block.instructions)

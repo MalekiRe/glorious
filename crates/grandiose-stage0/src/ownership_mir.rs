@@ -389,11 +389,15 @@ impl OwnershipMir {
                 format!("ownership input has diagnosed obligations: {:?}", flow.diagnostics),
             ));
         }
+        let declared_quantities = control.values().iter().map(|decl|
+            quantities::declared_quantity(&decl.ty, signatures, solver, &flow.lexical_bounds))
+            .collect::<Vec<_>>();
         let mut owners = control
             .values()
             .iter()
+            .zip(&declared_quantities)
             .enumerate()
-            .map(|(index, decl)| {
+            .map(|(index, (decl, declared))| {
                 let value = ControlValue(index as u32);
                 let kind = match &decl.ty {
                     Type::Reference {
@@ -405,7 +409,10 @@ impl OwnershipMir {
                     _ if control.parameters().contains(&value) => OwnerKind::Parameter,
                     _ => OwnerKind::Temporary,
                 };
-                let quantity = quantities::declared_quantity(&decl.ty, signatures, solver, &flow.lexical_bounds);
+                // Use the same sealed resident evidence as specialization
+                // before choosing source transfers. Invocation count alone
+                // does not determine ownership of a callable environment.
+                let quantity = solver.and_then(|solver| solver.resident_use(&decl.ty)).or(*declared);
                 Owner {
                     value,
                     kind,
@@ -420,7 +427,6 @@ impl OwnershipMir {
                 }
             })
             .collect::<Vec<_>>();
-        let declared_quantities = owners.iter().map(|owner| owner.quantity).collect();
         for (value, mode) in control.parameters().iter().zip(captures) {
             owners[value.0 as usize].kind = OwnerKind::Capture(*mode);
         }
@@ -618,7 +624,8 @@ impl OwnershipMir {
             value_places.insert(instruction.destination, place);
         }
         let mut quantity_rules = quantities::Rules::produce(&control, &value_places, &owners, declared_quantities)?;
-        quantity_rules.solve(&mut owners, &quantity_rules.declared, &quantity_rules.declared)?;
+        let resident_seeds = owners.iter().map(|owner| owner.quantity).collect::<Vec<_>>();
+        quantity_rules.solve(&mut owners, &resident_seeds, &quantity_rules.declared)?;
         let ControlMir {
             definition,
             safety,

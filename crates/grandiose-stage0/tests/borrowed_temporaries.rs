@@ -14,6 +14,20 @@ fn request(source: &str, optimization: &str) -> CompilationRequest {
     }
 }
 
+fn assert_callable_ownership_across_engines(source: &str) {
+    let input = request(source, "0");
+    let artifact = StageZeroCompiler::new().compile(input.clone())
+        .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
+    assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
+    assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "O{optimization}: {source}");
+    }
+}
+
 #[test]
 fn borrowed_temporaries_have_local_storage_and_can_be_read_or_reborrowed() {
     for source in [
@@ -78,27 +92,37 @@ fn completion_transfers_preserve_callable_resident_ownership() {
             let outer=Wrapped::Value(Pair { first:task, second:0 });
             let callback=handle outer { Wrapped::Value(Pair { first:found, second:_ }) => found }; callback() }",
     ] {
-        let input = request(source, "0");
-        let artifact = StageZeroCompiler::new().compile(input.clone())
-            .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
-        assert_eq!(artifact.run_i64().unwrap_or_else(|error| panic!("{source}: {error:?}")), 42);
-        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
-        use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
-        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap()).unwrap();
-        for optimization in [0, 2] {
-            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
-            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42, "O{optimization}: {source}");
-        }
+        assert_callable_ownership_across_engines(source);
     }
 }
 
 #[test]
 fn projected_stateful_callable_copies_have_independent_environments() {
-    let source = "pub fn main() -> i64 { let mut count=0; let task=move (count) { count=count+1; count };
-        let wrapped=(task,); let first=wrapped.0; let second=wrapped.0; first()+second()+40 }";
-    let artifact = StageZeroCompiler::new().compile(request(source, "0"))
-        .unwrap_or_else(|error| panic!("{source}: {error:?}")).artifact.unwrap();
-    assert_eq!(artifact.run_i64().unwrap(), 42);
+    for source in [
+        "pub fn main() -> i64 { let mut count=0; let task=move (count) { count=count+1; count };
+            let wrapped=(task,); let first=wrapped.0; let second=wrapped.0; first()+second()+40 }",
+        "pub fn main() -> i64 { let mut count=0; let task=move (count) { count=count+1; count };
+            let wrapped=((task,),); let first=wrapped.0.0; let second=wrapped.0.0; first()+first()+second()+38 }",
+        "struct Wrapped<T> { value:T } pub fn main() -> i64 {
+            let mut count=0; let task=move (count) { count=count+1; count };
+            let wrapped=Wrapped { value:task }; let first=wrapped.value; let second=wrapped.value;
+            first()+first()+second()+38 }",
+    ] {
+        assert_callable_ownership_across_engines(source);
+    }
+}
+
+#[test]
+fn projected_callable_residents_do_not_duplicate_owned_unique_references() {
+    let source = "pub fn main() -> i64 { let mut value = 21; let reference = &mut value;
+        let task = move (reference) { *reference }; let wrapped = (task,);
+        let first = wrapped.0; let second = wrapped.0; first()+second() }";
+    let diagnostics = match StageZeroCompiler::new().compile(request(source, "0")) {
+        Err(error) => error.diagnostics(),
+        Ok(outcome) => panic!("accepted duplicate unique-capture projection; execution: {:?}",
+            outcome.artifact.unwrap().run_i64()),
+    };
+    assert!(diagnostics.iter().any(|diagnostic| matches!(diagnostic.code, "G5001" | "G5003")), "{diagnostics:#?}");
 }
 
 #[test]
