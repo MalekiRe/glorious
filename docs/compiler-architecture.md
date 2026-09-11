@@ -2942,3 +2942,29 @@ home creation and control admission reclaim idle bytes under budget pressure.
 Only bytes are reusable, never flags, values, activation brands or source homes.
 Cache 185 records this runtime/layout correction without changing executable
 proofs, portable encoding or the generated pointer-and-mask ABI.
+
+## Shared nominal fields in reference and callable analysis
+
+Cache 186 makes reference-shape traversal, raw-storage classification, callable
+field ownership, capture-carrier discovery and escape-array extent sealing use
+the interface's kind-checked struct/enum field instantiation. These consumers
+previously shared a second, incomplete substitution walker that left associated
+types in declaration form. That walker and its lifetime/argument helpers are
+removed. Field and pattern elaboration, reference contracts and callable
+ownership now receive the same instantiated field types and the same existing
+projection normalization, including projections selected by nominal arguments.
+
+Each consumer retains its own required proof: physical versus logical reference
+paths, enum-region compatibility, recursive-layout limits, callable invocation
+counts and capture dependencies remain distinct. Unavailable layouts and
+unresolved projections do not become empty reference footprints. This migration
+does not make raw pointers frame-independent or add an unsafe-call exemption.
+
+Borrowed associated fields still expose two integration debts. Caller-region
+contract rigidification uses universal placeholders without a corresponding
+normalization scope, and a direct caller field can retain an unsolved lifetime
+when dereference needs its associated reference shape. The preserved source
+acceptance tests reject at those boundaries. Unscoped universal placeholders
+must not be legalized merely because they are rigid; eligibility alone does not
+provide their missing scope. No trait-solver admission rule, executable proof,
+portable encoding or runtime ABI is changed by this checkpoint.

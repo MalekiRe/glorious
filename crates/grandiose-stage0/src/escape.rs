@@ -1953,14 +1953,9 @@ fn seal_array_extents(signatures: &crate::ElaboratedInterface, ty: &Type, value:
             for (ty, value) in types.iter().zip(fields) { seal_array_extents(signatures, ty, value); }
         }
         (Type::Nominal { definition, arguments }, Value::Aggregate(fields)) => {
-            let Some(crate::ElaboratedHeader::Nominal {
-                layout: crate::signature::ElaboratedNominalLayout::Struct(types)
-                    | crate::signature::ElaboratedNominalLayout::TupleStruct(types), ..
-            }) = signatures.definitions.get(definition) else { return; };
+            let Ok(types) = signatures.instantiate_struct_fields_generic(*definition, arguments) else { return; };
             for (ty, value) in types.iter().zip(fields) {
-                if let Ok(ty) = crate::core::instantiate_nominal_field_type(&ty.ty, arguments) {
-                    seal_array_extents(signatures, &ty, value);
-                }
+                seal_array_extents(signatures, &ty.ty, value);
             }
         }
         _ => {}
@@ -2077,10 +2072,10 @@ fn type_has_variant_layout(signatures: &crate::ElaboratedInterface, ty: &Type, a
         Type::Nominal { definition, arguments } if active.insert(*definition) => {
             let has = match signatures.definitions.get(definition) {
                 Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Enum(_), .. }) => true,
-                Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields)
-                    | crate::ElaboratedNominalLayout::TupleStruct(fields), .. }) => fields.iter().any(|field|
-                        crate::core::instantiate_nominal_field_type(&field.ty, arguments).ok()
-                            .is_some_and(|field| type_has_variant_layout(signatures, &field, active))),
+                Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(_)
+                    | crate::ElaboratedNominalLayout::TupleStruct(_), .. }) => signatures
+                        .instantiate_struct_fields_generic(*definition, arguments).is_ok_and(|fields|
+                            fields.iter().any(|field| type_has_variant_layout(signatures, &field.ty, active))),
                 _ => false,
             };
             active.remove(definition);

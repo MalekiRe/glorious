@@ -16651,19 +16651,16 @@ fn type_has_reference_storage(signatures: &ElaboratedInterface, ty: &Type,
         Type::Array(element) | Type::FixedArray { element, .. } => type_has_reference_storage(signatures, element, active, include_borrowed),
         Type::Nominal { definition, arguments } if active.insert(*definition) => {
             let has = match signatures.definitions.get(definition) {
-                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(fields)
-                    | ElaboratedNominalLayout::TupleStruct(fields), .. }) => fields.iter().any(|field|
-                        instantiate_nominal_field_type(&field.ty, arguments)
-                            .map_or(true, |field| type_has_reference_storage(signatures, &field, active, include_borrowed))),
-                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) => variants.iter().any(|variant| {
-                    let fields = match &variant.payload {
-                        crate::signature::ElaboratedEnumVariantPayload::Unit => vec![],
-                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields.iter().collect(),
-                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields.iter().map(|field| &field.ty).collect(),
-                    };
-                    fields.iter().any(|field| instantiate_nominal_field_type(field, arguments)
-                        .map_or(true, |field| type_has_reference_storage(signatures, &field, active, include_borrowed)))
-                }),
+                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(_)
+                    | ElaboratedNominalLayout::TupleStruct(_), .. }) => signatures
+                        .instantiate_struct_fields_generic(*definition, arguments)
+                        .map_or(true, |fields| fields.iter().any(|field|
+                            type_has_reference_storage(signatures, &field.ty, active, include_borrowed))),
+                Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) =>
+                    (0..variants.len()).any(|index| signatures
+                        .instantiate_enum_fields_generic(*definition, arguments, index as u32)
+                        .map_or(true, |fields| fields.iter().any(|field|
+                            type_has_reference_storage(signatures, &field.ty, active, include_borrowed)))),
                 Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Opaque, .. }) | None => true,
                 _ => false,
             };
@@ -16705,15 +16702,16 @@ fn collect_structural_reference_leaf_paths(
             arguments,
         } => match signatures.definitions.get(definition) {
             Some(ElaboratedHeader::Nominal {
-                layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
+                layout: ElaboratedNominalLayout::Struct(_) | ElaboratedNominalLayout::TupleStruct(_),
                 ..
             }) => {
+                let Ok(fields) = signatures.instantiate_struct_fields_generic(*definition, arguments) else {
+                    leaves.unknown(path);
+                    return;
+                };
                 for (index, field) in fields.iter().enumerate() {
                     path.push(index as u32);
-                    match instantiate_nominal_field_type(&field.ty, arguments) {
-                        Ok(field) => collect_reference_leaf_paths(signatures, &field, path, leaves, active, input),
-                        Err(()) => leaves.unknown(path),
-                    }
+                    collect_reference_leaf_paths(signatures, &field.ty, path, leaves, active, input);
                     path.pop();
                 }
             }
@@ -16732,23 +16730,15 @@ fn collect_structural_reference_leaf_paths(
                 // regions in different variants.
                 let mut variants_collected = ReferenceLeaves::default();
                 let mut variant_leaves = std::collections::BTreeMap::new();
-                for variant in variants {
-                    let fields = match &variant.payload {
-                        crate::signature::ElaboratedEnumVariantPayload::Unit => continue,
-                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => {
-                            fields.iter().collect::<Vec<_>>()
-                        }
-                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
-                            fields.iter().map(|field| &field.ty).collect::<Vec<_>>()
-                        }
+                for variant in 0..variants.len() {
+                    let Ok(fields) = signatures.instantiate_enum_fields_generic(*definition, arguments, variant as u32) else {
+                        variants_collected.unknown(path);
+                        continue;
                     };
                     for (index, field) in fields.into_iter().enumerate() {
                         path.push(index as u32);
                         let mut field_leaves = ReferenceLeaves::default();
-                        match instantiate_nominal_field_type(field, arguments) {
-                            Ok(field) => collect_reference_leaf_paths(signatures, &field, path, &mut field_leaves, active, input),
-                            Err(()) => field_leaves.unknown(path),
-                        }
+                        collect_reference_leaf_paths(signatures, &field.ty, path, &mut field_leaves, active, input);
                         path.pop();
                         for unknown in field_leaves.unresolved { variants_collected.unknown(&unknown); }
                         for (field_path, leaf) in field_leaves.known {
@@ -16852,32 +16842,16 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
                 }
                 let result = match signatures.definitions.get(definition) {
                     Some(ElaboratedHeader::Nominal {
-                        layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
+                        layout: ElaboratedNominalLayout::Struct(_) | ElaboratedNominalLayout::TupleStruct(_),
                         ..
-                    }) => fields.iter().any(|field| {
-                        instantiate_nominal_field_type(&field.ty, arguments)
-                            .map_or(true, |field| visit(signatures, &field, active))
-                    }),
+                    }) => signatures.instantiate_struct_fields_generic(*definition, arguments)
+                        .map_or(true, |fields| fields.iter().any(|field| visit(signatures, &field.ty, active))),
                     Some(ElaboratedHeader::Nominal {
                         layout: ElaboratedNominalLayout::Enum(variants),
                         ..
-                    }) => variants.iter().any(|variant| match &variant.payload {
-                        crate::signature::ElaboratedEnumVariantPayload::Unit => false,
-                        crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => {
-                            fields.iter().any(|field| {
-                                instantiate_nominal_field_type(field, arguments).map_or(true, |field| {
-                                    visit(signatures, &field, active)
-                                })
-                            })
-                        }
-                        crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => {
-                            fields.iter().any(|field| {
-                                instantiate_nominal_field_type(&field.ty, arguments).map_or(true, |field| {
-                                    visit(signatures, &field, active)
-                                })
-                            })
-                        }
-                    }),
+                    }) => (0..variants.len()).any(|index| signatures
+                        .instantiate_enum_fields_generic(*definition, arguments, index as u32)
+                        .map_or(true, |fields| fields.iter().any(|field| visit(signatures, &field.ty, active)))),
                     Some(ElaboratedHeader::Nominal {
                         layout: ElaboratedNominalLayout::Opaque,
                         ..
@@ -16902,87 +16876,6 @@ fn type_may_contain_reference(signatures: &ElaboratedInterface, ty: &Type) -> bo
     }
 
     visit(signatures, ty, &mut std::collections::BTreeSet::new())
-}
-
-pub(crate) fn instantiate_nominal_field_type(
-    ty: &Type,
-    arguments: &[GenericArgument],
-) -> Result<Type, ()> {
-    match ty {
-        Type::Generic(index) => match arguments.get(*index as usize) {
-            Some(GenericArgument::Type(ty)) => Ok(ty.clone()),
-            _ => Err(()),
-        },
-        Type::Tuple(fields) => fields
-            .iter()
-            .map(|field| instantiate_nominal_field_type(field, arguments))
-            .collect::<Result<Vec<_>, _>>()
-            .map(Type::Tuple),
-        Type::FixedArray { element, length } => Ok(Type::FixedArray {
-            element: Box::new(instantiate_nominal_field_type(element, arguments)?),
-            length: Box::new(crate::service::specialize_generic_argument(length, arguments)),
-        }),
-        Type::Array(element) => Ok(Type::Array(Box::new(instantiate_nominal_field_type(
-            element, arguments,
-        )?))),
-        Type::RawPointer { mutability, pointee } => Ok(Type::RawPointer {
-            mutability: *mutability,
-            pointee: Box::new(instantiate_nominal_field_type(pointee, arguments)?),
-        }),
-        Type::Reference {
-            mutability,
-            lifetime,
-            referent,
-        } => Ok(Type::Reference {
-            mutability: *mutability,
-            lifetime: instantiate_nominal_field_lifetime(*lifetime, arguments)?,
-            referent: Box::new(instantiate_nominal_field_type(referent, arguments)?),
-        }),
-        Type::Nominal {
-            definition,
-            arguments: nested,
-        } => Ok(Type::Nominal {
-            definition: *definition,
-            arguments: nested
-                .iter()
-                .map(|argument| instantiate_nominal_generic_argument(argument, arguments))
-                .collect::<Result<_, _>>()?,
-        }),
-        value => Ok(value.clone()),
-    }
-}
-
-fn instantiate_nominal_field_lifetime(
-    lifetime: Lifetime,
-    arguments: &[GenericArgument],
-) -> Result<Lifetime, ()> {
-    match lifetime {
-        Lifetime::Generic(index) => match arguments.get(index as usize) {
-            Some(GenericArgument::Lifetime(lifetime)) => Ok(*lifetime),
-            _ => Err(()),
-        },
-        lifetime => Ok(lifetime),
-    }
-}
-
-fn instantiate_nominal_generic_argument(
-    argument: &GenericArgument,
-    arguments: &[GenericArgument],
-) -> Result<GenericArgument, ()> {
-    match argument {
-        GenericArgument::Type(ty) => {
-            instantiate_nominal_field_type(ty, arguments).map(GenericArgument::Type)
-        }
-        // A lifetime nested in a nominal application is just as much part of
-        // that field's instantiated type as a nested type argument. Leaving
-        // `Slice<'a, T>` as `Slice<'generic-0, T>` while opening an enclosing
-        // `Str<'static>` hid its static reference leaf from callable
-        // provenance analysis and made sound source wrappers appear opaque.
-        GenericArgument::Lifetime(lifetime) => {
-            instantiate_nominal_field_lifetime(*lifetime, arguments).map(GenericArgument::Lifetime)
-        }
-        value => Ok(value.clone()),
-    }
 }
 
 /// Detect arithmetic that must wait for const inference, including defaults
@@ -17093,6 +16986,35 @@ fn closure_scalar(name: &str) -> Option<ScalarType> {
 #[cfg(test)]
 mod invariant_call_lifetime_tests {
     use super::*;
+
+    #[test]
+    fn associated_nominal_reference_shapes_normalize_without_certifying_open_residents() {
+        let source = "trait Items { type Item; }
+            struct Numbers {} impl Items for Numbers { type Item = i64; }
+            struct Borrowed<'a> {} impl<'a> Items for Borrowed<'a> { type Item = &'a i64; }
+            struct Carrier<I> where I: Items { item: <I as Items>::Item }
+            enum Alternative<I> where I: Items { Present(<I as Items>::Item), Absent }
+            fn owned() -> Carrier<Numbers> { Carrier { item: 42 } }
+            fn variant() -> Alternative<Numbers> { Alternative::Present(42) }
+            fn borrowed<'a>(item: &'a i64) -> Carrier<Borrowed<'a>> { Carrier { item: item } }
+            fn open<I>(item: <I as Items>::Item) -> Carrier<I> where I: Items { Carrier { item: item } }";
+        let package = crate::PackageKey("associated-reference-shapes@0.1.0".into());
+        let lexed = crate::LexedFile::lex(crate::FileKey::new(&package, "src/main.glorious"), source);
+        let scan = crate::DeclarationScan::scan(&lexed, source);
+        let interface = crate::InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
+        let signatures = ElaboratedInterface::elaborate(&interface);
+        assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+        for (name, expected) in [("owned", CallReferenceShape::None), ("variant", CallReferenceShape::None),
+            ("borrowed", CallReferenceShape::CallerPaths), ("open", CallReferenceShape::OpaquePotentiallyReference)] {
+            let definition = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some(name)).unwrap();
+            let ElaboratedHeader::Callable(contract) = &signatures.definitions[&definition.key] else { panic!("callable contract"); };
+            let origin = callable_reference_origin_from_contract(&signatures, &contract.parameters, &contract.result);
+            assert_eq!(call_reference_shape(&signatures, &contract.result, &origin), expected, "{name}: {origin:?}");
+            if name == "borrowed" {
+                assert!(origin.paths().iter().any(|path| path.result_fields == [0] && path.argument == 0), "{origin:?}");
+            }
+        }
+    }
 
     #[test]
     fn returned_reference_contracts_retain_nested_residents_and_generic_gaps() {

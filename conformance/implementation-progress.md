@@ -5,6 +5,59 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Shared normalized nominal fields
+
+Cache 186 removes the reference/ownership analyses' partial nominal-field
+substitution routine. It did not substitute associated projection subjects and
+could leave a closed field such as `Option<<Pulse as Iterator>::Item>` opaque.
+Core reference paths and storage classification, PlaceFlow capture/callable
+paths, UseFlow callable fields and EscapeFlow extent/variant inspection now
+consume the interface's existing kind-checked struct/enum field instantiation
+and shared projection solver. The duplicate type/lifetime/argument helpers are
+deleted; no new proof table or consumer-side opaque-result permission is added.
+
+The unchanged source iterator fixture now reports **one diagnostic instead of
+three**: the `peekable(Pulse)` and `zip(VecIntoIter<i64>, VecIntoIter<i64>)`
+factory-result G5023 errors are gone. G4403 remains for the mandatory-tail
+transfer of `VecIntoIter<Ticket>` after `OwnedStepper::step`. Its raw-backed
+residents still need a value-provenance proof, not a blanket pointer-type
+exemption. The iterator source case is not yet an execution pass.
+
+All ten focused reference-shape checks pass, including the new associated
+struct/enum shape test, rigid borrowed fields, open residents, partial siblings,
+enum-region conflicts and recursive layouts. The final reference-result suite
+has **32 passes and two failures**: all 30 original cases pass, together with
+new owned associated-field factories and associated-callable ownership tests.
+Those tests check fresh/decoded VM execution at O0/O2; callable whole-field and
+projected-field disposal still reject with G5011. The borrowed mutation checks
+also reject as required at both optimization levels before their positive
+factory composition fails.
+
+All 21 focused projection checks pass again in the final build, covering shared
+payload/capture projections, retained reference debt, lexical normalization,
+universe leak checks, forged ownership layouts, frozen signature validation and
+runtime/native projection boundaries. This is focused boundary coverage, not a
+full compiler or native acceptance run.
+
+The two new, active borrowed acceptance failures are intentionally preserved.
+A factory returning a nominal associated reference still fails G5023 because
+the caller-region contract rigidifies lifetimes into universal placeholders
+without supplying the corresponding projection-normalization scope. Directly
+dereferencing that field in the caller additionally exposes G4140 while its
+lifetime remains an inference cell. A normalization eligibility experiment
+confirmed that eligibility alone cannot supply scope; it has been removed.
+The trait solver's existing scope and inference rejection rules are unchanged.
+These are remaining authoritative-boundary integrations, not passing borrowed
+associated-type acceptance.
+
+The isolated, unchanged I/O source test also reached the original 590-second
+process budget with exit 143 and no case result. This confirms that merely
+removing the other matrix cases does not complete I/O under that limit; it does
+not identify a compiler or runtime phase, nor establish a diagnostic failure.
+No timeout, VM limit, source assertion or library privacy rule was relaxed.
+Full standard-library, language and subsequent self-hosted completion remain
+unfinished.
+
 ## Private scalar segment backing
 
 The next allocation trace classified the preserved boundary-rounding O0 failure

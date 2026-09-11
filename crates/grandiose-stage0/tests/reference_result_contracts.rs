@@ -34,6 +34,83 @@ const PREFIX: &str = r#"#![no_std]
 "#;
 
 #[test]
+fn associated_nominal_result_fields_use_the_selected_layout() {
+    for (declaration, construct, extract) in [
+        ("struct Carrier<I> where I: Items { item: <I as Items>::Item }",
+            "Carrier { item: item }", "result.item"),
+        ("enum Carrier<I> where I: Items { Present(<I as Items>::Item), Absent }",
+            "Carrier::Present(item)", "handle result { Carrier::Present(item) => item, Carrier::Absent => 0 }"),
+    ] {
+        accepts(&format!("#![no_std]
+            trait Items {{ type Item; }}
+            struct Numbers {{}}
+            impl Items for Numbers {{ type Item = i64; }}
+            {declaration}
+            fn wrap<I>(item: <I as Items>::Item) -> Carrier<I> where I: Items {{ {construct} }}
+            pub fn main() -> i64 {{ let result = wrap<Numbers>(42); {extract} }}"));
+    }
+}
+
+#[test]
+fn associated_nominal_result_fields_preserve_borrowed_residents() {
+    let prefix = "#![no_std]
+        trait Items { type Item; }
+        struct Borrowed<'a> {}
+        impl<'a> Items for Borrowed<'a> { type Item = &'a i64; }
+        struct Carrier<I> where I: Items { item: <I as Items>::Item }
+        fn wrap<'a>(item: &'a i64) -> Carrier<Borrowed<'a>> { Carrier { item: item } }
+        fn read<'a>(value: Carrier<Borrowed<'a>>) -> i64 { *value.item }";
+    for optimization in ["0", "2"] {
+        let source = format!("{prefix}
+            pub fn main() -> i64 {{ let mut value = 42; let result = wrap(&value); value = 0; read(result) }}");
+        let failure = StageZeroCompiler::new().compile(request(&source, optimization))
+            .expect_err("normalizing an associated resident must not discard its loan");
+        assert!(failure.diagnostics().iter().any(|diagnostic|
+            matches!(diagnostic.code, "G5004" | "G5006" | "G5007")), "{:?}", failure.diagnostics());
+    }
+    accepts(&format!("{prefix}
+        pub fn main() -> i64 {{ let value = 42; let result = wrap(&value); read(result) }}"));
+}
+
+#[test]
+fn associated_nominal_inferred_lifetime_field_dereference() {
+    // Keep the direct caller-field composition as an independent acceptance
+    // gate: its inferred lifetime must eventually normalize before dereference,
+    // not only after a generic helper has supplied a rigid lexical region.
+    accepts("#![no_std]
+        trait Items { type Item; }
+        struct Borrowed<'a> {}
+        impl<'a> Items for Borrowed<'a> { type Item = &'a i64; }
+        struct Carrier<I> where I: Items { item: <I as Items>::Item }
+        fn wrap<'a>(item: &'a i64) -> Carrier<Borrowed<'a>> { Carrier { item: item } }
+        pub fn main() -> i64 { let value = 42; let result = wrap(&value); *result.item }");
+}
+
+#[test]
+fn associated_nominal_callable_fields_keep_their_invocation_obligations() {
+    let prefix = "#![no_std]
+        trait Items { type Item; }
+        struct Functions {} impl Items for Functions { type Item = (i64) -> i64; }
+        struct Carrier<I> where I: Items { item: <I as Items>::Item }
+        fn identity(value: i64) -> i64 { value }";
+    accepts(&format!("{prefix}
+        fn apply(value: Carrier<Functions>) -> i64 {{
+            let invoke = (argument: i64) -> i64 {{ value.item(argument) }}; invoke(42)
+        }}
+        pub fn main() -> i64 {{ apply(Carrier {{ item: identity }}) }}"));
+    for body in ["0", "let ignored = move value.item; 0"] {
+        let source = format!("{prefix}
+            fn discard(value: Carrier<Functions>) -> i64 {{ {body} }}
+            pub fn main() -> i64 {{ discard(Carrier {{ item: identity }}) }}");
+        for optimization in ["0", "2"] {
+            let failure = StageZeroCompiler::new().compile(request(&source, optimization))
+                .expect_err("an associated callable field retains its minimum invocation count");
+            assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5011"), "{:?}", failure.diagnostics());
+        }
+    }
+}
+
+#[test]
 fn strict_reference_inputs_keep_their_original_loans_after_handle_replacement() {
     for expression in [
         "keep(reference, { reference = &second; first = 7; })",

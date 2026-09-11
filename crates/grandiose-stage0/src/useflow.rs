@@ -10,11 +10,11 @@
 use crate::{
     core::{
         CoreHandlerClause, CoreHandlerResumption, CoreId, CoreKind, CorePattern,
-        CorePlace, TypedBody, instantiate_nominal_field_type,
+        CorePlace, TypedBody,
     },
     placeflow::{FlowEventKind, MoveFact, PlaceFlow},
     quantity::{Quantity, QuantityError},
-    signature::{ElaboratedHeader, ElaboratedInterface, ElaboratedNominalLayout},
+    signature::{ElaboratedHeader, ElaboratedInterface},
     source::Span,
     types::Type,
 };
@@ -1376,27 +1376,16 @@ impl Analyzer<'_> {
         arguments: &[crate::GenericArgument],
         span: Span,
     ) -> Binding {
-        let Some(ElaboratedHeader::Nominal {
-            layout: ElaboratedNominalLayout::Struct(fields) | ElaboratedNominalLayout::TupleStruct(fields),
-            ..
-        }) = self
-            .signatures
-            .and_then(|signatures| signatures.definitions.get(&definition))
+        let Some(fields) = self.signatures.and_then(|signatures|
+            signatures.instantiate_struct_fields_generic(definition, arguments).ok())
         else {
             return Binding::Other;
         };
         let mut bindings = BTreeMap::new();
         for (index, field) in fields.iter().enumerate() {
-            let Ok(field_type) = instantiate_nominal_field_type(&field.ty, arguments) else {
-                // Frozen signature validation normally makes this impossible.
-                // Do not invent a partially decomposed owner for malformed
-                // imported Core; its structural validator remains the
-                // authoritative fail-closed boundary.
-                return Binding::Other;
-            };
             bindings.insert(
                 index as u32,
-                self.binding_for_type(&format!("{name}.{index}"), &field_type, span),
+                self.binding_for_type(&format!("{name}.{index}"), &field.ty, span),
             );
         }
         Binding::Aggregate(bindings)

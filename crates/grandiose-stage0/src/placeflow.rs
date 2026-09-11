@@ -2755,17 +2755,13 @@ impl Analyzer<'_> {
             Type::Nominal { definition, arguments } => {
                 if !active.insert(*definition) { return false; }
                 let no_captures = match self.signatures.and_then(|signatures| signatures.definitions.get(definition)) {
-                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(fields) | crate::ElaboratedNominalLayout::TupleStruct(fields), .. }) =>
-                        fields.iter().all(|field| crate::core::instantiate_nominal_field_type(&field.ty, arguments)
-                            .is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
+                    Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Struct(_) | crate::ElaboratedNominalLayout::TupleStruct(_), .. }) =>
+                        self.signatures.expect("selected interface").instantiate_struct_fields_generic(*definition, arguments)
+                            .is_ok_and(|fields| fields.iter().all(|field| self.result_has_no_capture_carriers(&field.ty, active))),
                     Some(crate::ElaboratedHeader::Nominal { layout: crate::ElaboratedNominalLayout::Enum(variants), .. }) =>
-                        variants.iter().all(|variant| match &variant.payload {
-                            crate::signature::ElaboratedEnumVariantPayload::Unit => true,
-                            crate::signature::ElaboratedEnumVariantPayload::Tuple(fields) => fields.iter().all(|field|
-                                crate::core::instantiate_nominal_field_type(field, arguments).is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
-                            crate::signature::ElaboratedEnumVariantPayload::Struct(fields) => fields.iter().all(|field|
-                                crate::core::instantiate_nominal_field_type(&field.ty, arguments).is_ok_and(|ty| self.result_has_no_capture_carriers(&ty, active))),
-                        }),
+                        (0..variants.len()).all(|index| self.signatures.expect("selected interface")
+                            .instantiate_enum_fields_generic(*definition, arguments, index as u32)
+                            .is_ok_and(|fields| fields.iter().all(|field| self.result_has_no_capture_carriers(&field.ty, active)))),
                     _ => false,
                 };
                 active.remove(definition);

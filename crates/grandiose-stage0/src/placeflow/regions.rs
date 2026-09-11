@@ -130,21 +130,19 @@ pub(crate) fn callable_paths(signatures: &crate::ElaboratedInterface, ty: &crate
                 let previous = active.insert(*definition, size);
                 let mut fields = vec![];
                 match signatures.definitions.get(definition) {
-                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(values) | ElaboratedNominalLayout::TupleStruct(values), .. }) =>
-                        fields.extend(values.iter().enumerate().map(|(index, field)| (index, &field.ty))),
-                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) => for variant in variants {
-                        match &variant.payload {
-                            crate::signature::ElaboratedEnumVariantPayload::Tuple(values) => fields.extend(values.iter().enumerate()),
-                            crate::signature::ElaboratedEnumVariantPayload::Struct(values) => fields.extend(values.iter().enumerate().map(|(index, field)| (index, &field.ty))),
-                            crate::signature::ElaboratedEnumVariantPayload::Unit => {},
+                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Struct(_) | ElaboratedNominalLayout::TupleStruct(_), .. }) =>
+                        if let Ok(values) = signatures.instantiate_struct_fields_generic(*definition, arguments) {
+                            fields.extend(values.into_iter().enumerate().map(|(index, field)| (index, field.ty)));
+                        },
+                    Some(ElaboratedHeader::Nominal { layout: ElaboratedNominalLayout::Enum(variants), .. }) => for variant in 0..variants.len() {
+                        if let Ok(values) = signatures.instantiate_enum_fields_generic(*definition, arguments, variant as u32) {
+                            fields.extend(values.into_iter().enumerate().map(|(index, field)| (index, field.ty)));
                         }
                     },
                     _ => {},
                 }
                 for (index, field) in fields {
-                    if let Ok(field) = crate::core::instantiate_nominal_field_type(field, arguments) {
-                        path.push(index as u32); visit(signatures, &field, input, path, active, leaves); path.pop();
-                    }
+                    path.push(index as u32); visit(signatures, &field, input, path, active, leaves); path.pop();
                 }
                 for (index, argument) in arguments.iter().enumerate() {
                     if let GenericArgument::Type(argument) = argument {
