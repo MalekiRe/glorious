@@ -407,6 +407,7 @@ fn invalidate_frames(frames: &mut [VerifierHandlerFrame], addresses: bool) {
             }
             continuation.destruction_preserves_frames.fill(false);
             continuation.invocation_preserves_frames.fill(false);
+            continuation.receiver_access.fill(ReceiverAccess::default());
             invalidate_frames(&mut continuation.above, addresses);
         }
     }
@@ -421,17 +422,52 @@ pub(super) fn invalidate_referent_storage(states: &mut VerifierState, storage: u
     fn invalidate_saved(saved_frames: &mut [VerifierHandlerFrame], storage: u32) {
         for frame in saved_frames {
             for continuation in &mut frame.continuations {
+                if let Some(proof) = continuation.receiver_access.get_mut(storage as usize) { *proof = ReceiverAccess::default(); }
                 invalidate(&continuation.reference_origins, &mut continuation.referent_independent, storage);
                 invalidate(&continuation.reference_origins, &mut continuation.invocation_preserves_frames, storage);
                 invalidate(&continuation.reference_origins, &mut continuation.destruction_preserves_frames, storage);
+                invalidate_receivers(&continuation.reference_origins, &mut continuation.receiver_access, storage);
                 invalidate_saved(&mut continuation.above, storage);
             }
+        }
+    }
+    fn invalidate_receivers(origins: &[ReferenceOriginSet], proofs: &mut [ReceiverAccess], storage: u32) {
+        for (origins, proof) in origins.iter().zip(proofs) {
+            if origins.contains(&storage) { *proof = ReceiverAccess::default(); }
         }
     }
     invalidate(&states.reference_origins, &mut states.referent_independent, storage);
     invalidate(&states.reference_origins, &mut states.invocation_preserves_frames, storage);
     invalidate(&states.reference_origins, &mut states.destruction_preserves_frames, storage);
+    invalidate_receivers(&states.reference_origins, &mut states.receiver_access, storage);
     invalidate_saved(&mut states.handlers, storage);
+}
+
+pub(super) struct ResidentProofUpdate {
+    destination: u32,
+    independent: bool,
+    referent_independent: bool,
+    destruction_preserves: bool,
+    invocation_preserves: bool,
+    receiver_access: ReceiverAccess,
+    references: Option<ReferenceOriginSet>,
+}
+
+impl ResidentProofUpdate {
+    /// Receiving ABI/layout validation has completed. Publish the frozen
+    /// input facts only now; a reference to the overwritten destination
+    /// cannot retain an earlier borrowed resident's permission.
+    pub(super) fn install(self, states: &mut VerifierState) {
+        let index = self.destination as usize;
+        states.frame_independent[index] = self.independent;
+        states.referent_independent[index] = self.referent_independent;
+        states.destruction_preserves_frames[index] = self.destruction_preserves;
+        states.invocation_preserves_frames[index] = self.invocation_preserves;
+        states.receiver_access[index] = if self.references.as_ref().is_some_and(|origins| origins.contains(&self.destination)) {
+            ReceiverAccess::default()
+        } else { self.receiver_access };
+        if let Some(references) = self.references { states.reference_origins[index] = references; }
+    }
 }
 
 /// Compute supported producer facts before an owned instruction consumes its
@@ -440,7 +476,7 @@ pub(super) fn invalidate_referent_storage(states: &mut VerifierState, storage: u
 pub(super) fn before_instruction(
     function: &VmFunction, instruction: &VmInstruction, states: &mut VerifierState,
     proofs: &TransferProofs,
-) -> (Option<(u32, bool, bool, bool, bool)>, bool, bool) {
+) -> (Option<ResidentProofUpdate>, bool, bool) {
     let result_proof = match instruction {
         VmInstruction::Call { callee, dst, arguments } | VmInstruction::CallOwned { callee, dst, arguments } => {
             Some((*dst, proofs.independent_results.contains(callee)
@@ -479,6 +515,11 @@ pub(super) fn before_instruction(
             call_preserving_independent(function, states, proofs, callee, arguments),
         _ => false,
     };
+    if !preserves_memory {
+        states.receiver_access.fill(ReceiverAccess::default());
+        // Even an address-preserving call can replace executable residents.
+        invalidate_frames(&mut states.handlers, false);
+    }
     if !preserves {
         states.frame_independent.fill(false);
         states.referent_independent.fill(false);
@@ -506,6 +547,54 @@ pub(super) fn before_instruction(
     let source = |register| independent(function, states, register);
     let destruction = |register| destruction_preserving(function, states, register);
     let invocation = |register| invocation_preserving(function, states, register);
+    let receiver = |register| ReceiverAccess::resident(function, states, register);
+    let receiver_proof = match instruction {
+        VmInstruction::Copy { src, dst } | VmInstruction::Move { src, dst }
+        | VmInstruction::Store { src, dst } | VmInstruction::StoreOwned { src, dst } =>
+            receiver(*src).transferred(function, *src, *dst),
+        VmInstruction::MakeTuple { fields, .. } | VmInstruction::MakeTupleOwned { fields, .. }
+        | VmInstruction::MakeArray { fields, .. } | VmInstruction::MakeArrayOwned { fields, .. }
+        | VmInstruction::MakeRecord { fields, .. } | VmInstruction::MakeRecordOwned { fields, .. }
+        | VmInstruction::MakeEnum { fields, .. } | VmInstruction::MakeEnumOwned { fields, .. } =>
+            fields.iter().map(|field| receiver(*field)).reduce(ReceiverAccess::meet).unwrap_or_default(),
+        VmInstruction::ProjectRecord { base, .. } | VmInstruction::ProjectTuple { base, .. }
+        | VmInstruction::ProjectArray { base, .. } | VmInstruction::TakeProjection { base, .. } => receiver(*base),
+        VmInstruction::TakeArrayElement { value, .. } => receiver(*value),
+        VmInstruction::UpdateRecord { base, value, .. } => receiver(*base).meet(receiver(*value)),
+        VmInstruction::Borrow { src, .. } | VmInstruction::PrepareInvocation { src, .. } => receiver(*src),
+        VmInstruction::DerefCopy { reference, .. } | VmInstruction::DerefMove { reference, .. } => receiver(*reference),
+        VmInstruction::MakeCallable { dst, .. } => ReceiverAccess::constructed(function, *dst),
+        _ => ReceiverAccess::default(),
+    };
+    // The same evaluated resident product retains all embedded reference
+    // roots through structural transport. A later slot replacement must also
+    // revoke a borrowed proof hidden in an aggregate or a projected alias.
+    let references = match instruction {
+        VmInstruction::Copy { src, .. } | VmInstruction::Move { src, .. }
+        | VmInstruction::Store { src, .. } | VmInstruction::StoreOwned { src, .. }
+        | VmInstruction::PrepareInvocation { src, .. } =>
+            states.reference_origins.get(*src as usize).cloned(),
+        VmInstruction::MakeTuple { fields, .. } | VmInstruction::MakeTupleOwned { fields, .. }
+        | VmInstruction::MakeArray { fields, .. } | VmInstruction::MakeArrayOwned { fields, .. }
+        | VmInstruction::MakeRecord { fields, .. } | VmInstruction::MakeRecordOwned { fields, .. }
+        | VmInstruction::MakeEnum { fields, .. } | VmInstruction::MakeEnumOwned { fields, .. } => {
+            let mut origins = ReferenceOriginSet::Empty;
+            for field in fields {
+                if let Some(incoming) = states.reference_origins.get(*field as usize) { origins.union_with(incoming); }
+            }
+            Some(origins)
+        }
+        VmInstruction::ProjectRecord { base, .. } | VmInstruction::ProjectTuple { base, .. }
+        | VmInstruction::ProjectArray { base, .. } | VmInstruction::TakeProjection { base, .. } =>
+            states.reference_origins.get(*base as usize).cloned(),
+        VmInstruction::TakeArrayElement { value, .. } => states.reference_origins.get(*value as usize).cloned(),
+        VmInstruction::UpdateRecord { base, value, .. } => {
+            let mut origins = states.reference_origins.get(*base as usize).cloned().unwrap_or_default();
+            if let Some(incoming) = states.reference_origins.get(*value as usize) { origins.union_with(incoming); }
+            Some(origins)
+        }
+        _ => None,
+    };
     let invocation_proof = match instruction {
         VmInstruction::Copy { src, .. } | VmInstruction::Move { src, .. }
         | VmInstruction::Store { src, .. } | VmInstruction::StoreOwned { src, .. } => invocation(*src),
@@ -592,5 +681,9 @@ pub(super) fn before_instruction(
         // fact survives raw conversion, cast, projection, or unknown calls.
         _ => frame_proof.is_some_and(|(_, independent)| independent),
     };
-    (frame_proof.map(|(destination, independent)| (destination, independent, referent_proof, destruction_proof, invocation_proof)), preserves_memory, preserves)
+    (frame_proof.map(|(destination, independent)| ResidentProofUpdate {
+        destination, independent, referent_independent: referent_proof,
+        destruction_preserves: destruction_proof, invocation_preserves: invocation_proof,
+        receiver_access: receiver_proof, references,
+    }), preserves_memory, preserves)
 }

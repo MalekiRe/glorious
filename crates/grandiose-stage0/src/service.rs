@@ -1734,11 +1734,11 @@ impl StageZeroCompiler {
                     validation_solver.set_associated_bindings(signature.where_associated_type_bindings.clone(), signature.where_associated_effect_bindings.clone());
                 }
                 core_validation.extend(
-                    core.validate_projection_obligations_in_environment(&signatures, &ambient_projection_bounds,
+                    core.stage_projection_obligations(&signatures, &ambient_projection_bounds,
                         &signatures.definitions.get(&declaration.key).and_then(|header| match header {
                             ElaboratedHeader::Callable(signature) => Some(signature.where_outlives.clone()),
                             _ => None,
-                        }).unwrap_or_default(), validation_solver.fresh_query()),
+                        }).unwrap_or_default(), validation_solver.fresh_query()).diagnostics,
                 );
                 diagnostics.extend(core_validation.iter().map(|diagnostic| {
                     if diagnostic.code.starts_with("G440") {
@@ -1890,12 +1890,12 @@ impl StageZeroCompiler {
                         implementation_signature.where_associated_type_bindings.iter().chain(&method_signature.where_associated_type_bindings).cloned().collect(),
                         implementation_signature.where_associated_effect_bindings.iter().chain(&method_signature.where_associated_effect_bindings).cloned().collect());
                     core_validation.extend(
-                        core.validate_projection_obligations_in_environment(
+                        core.stage_projection_obligations(
                             &signatures,
                             &ambient_projection_bounds,
                             &implementation_signature.where_outlives.iter().chain(&method_signature.where_outlives).cloned().collect::<Vec<_>>(),
                             validation_solver.fresh_query(),
-                        ),
+                        ).diagnostics,
                     );
                     diagnostics.extend(core_validation.iter().map(|diagnostic| {
                         if diagnostic.code.starts_with("G440") {

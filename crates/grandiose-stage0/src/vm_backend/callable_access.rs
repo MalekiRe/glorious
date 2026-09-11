@@ -7,6 +7,189 @@
 
 use super::*;
 
+/// Must permissions of every callable leaf in an evaluated resident. This
+/// deliberately bounded product is conservative for heterogeneous fields;
+/// projection cannot manufacture a permission absent from any possible leaf.
+/// It is value evidence, not an ABI coercion or an assumed target identity.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct ReceiverAccess {
+    shared: bool,
+    unique: bool,
+}
+
+#[cfg(test)]
+mod resident_tests {
+    use super::*;
+
+    fn callable(shared: bool) -> VmType {
+        VmType::Callable { shared_receiver: shared, unique_receiver: shared,
+            safety: Safety::Safe, parameters: vec![VmType::I64], result: Box::new(VmType::I64), effects: Box::default() }
+    }
+
+    fn fixture(prefix: Vec<VmInstruction>, callee: u32) -> VmFunction {
+        let reference = VmType::Reference { unique: false, referent: Box::new(callable(false)) };
+        let mut instructions = vec![VmInstruction::DeclareResult { result: VmType::I64, returns: true }];
+        instructions.extend(prefix);
+        instructions.extend([VmInstruction::CallIndirect { dst: 6, callee, arguments: vec![2] }, VmInstruction::Return { value: 6 }]);
+        VmFunction { definition: DefKey(Digest::of_bytes(b"executed-receiver-access")), safety: Safety::Safe,
+            unsafe_execution: false, captures: 0, parameters: 4, nominal_copy_descriptors: vec![],
+            registers: vec![callable(true), callable(false), VmType::I64, VmType::Bool, callable(false), reference.clone(),
+                VmType::I64, VmType::Tuple(vec![reference.clone()]), reference,
+                VmType::Reference { unique: false, referent: Box::new(callable(true)) }, VmType::Unit],
+            instructions }
+    }
+
+    fn borrow() -> VmInstruction {
+        VmInstruction::Borrow { dst: 5, src: 4, fields: vec![], unique: false, reborrow: false }
+    }
+
+    fn accepted(function: &VmFunction) -> bool {
+        verify_function_control(function, false, false, &Default::default()).is_ok()
+    }
+
+    fn receiver_rejected(function: &VmFunction) {
+        let result = verify_function_control(function, false, false, &Default::default()).map(|_| ());
+        assert!(matches!(result, Err(VmArtifactError::NotCallable { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn executed_receiver_access_follows_values_not_storage_types() {
+        let prefix = vec![VmInstruction::Store { dst: 4, src: 0 }, borrow()];
+        let direct = fixture(prefix.clone(), 5);
+        assert!(accepted(&direct));
+        let mut unknown = direct.clone();
+        unknown.registers[0] = callable(false);
+        receiver_rejected(&unknown);
+        for transport in [
+            vec![VmInstruction::Copy { dst: 8, src: 5 }],
+            vec![VmInstruction::Move { dst: 8, src: 5 }],
+            vec![VmInstruction::Borrow { dst: 8, src: 5, fields: vec![], unique: false, reborrow: true }],
+            vec![VmInstruction::MakeTuple { dst: 7, fields: vec![5] },
+                VmInstruction::ProjectTuple { dst: 8, base: 7, index: 0, field_count: 1, field_type: direct.registers[5].clone() }],
+        ] {
+            let mut transported = prefix.clone();
+            transported.extend(transport);
+            assert!(accepted(&fixture(transported.clone(), 8)), "{transported:?}");
+            transported.push(VmInstruction::Store { dst: 4, src: 1 });
+            receiver_rejected(&fixture(transported, 8));
+        }
+        let mut replaced = prefix.clone();
+        replaced.insert(1, VmInstruction::Store { dst: 4, src: 1 });
+        receiver_rejected(&fixture(replaced, 5));
+        let mut mutated = prefix;
+        mutated.push(VmInstruction::Call { dst: 10, callee: DefKey(Digest::of_bytes(b"unknown-writer")), arguments: vec![] });
+        receiver_rejected(&fixture(mutated, 5));
+    }
+
+    #[test]
+    fn executed_receiver_joins_and_weakened_reference_views_do_not_gain_authority() {
+        let mut branch = fixture(vec![
+            VmInstruction::BranchBool { condition: 3, then_target: 2, else_target: 4 },
+            VmInstruction::Store { dst: 4, src: 0 }, VmInstruction::Jump { target: 6 },
+            VmInstruction::Store { dst: 4, src: 0 }, VmInstruction::Jump { target: 6 }, borrow(),
+        ], 5);
+        assert!(accepted(&branch));
+        branch.instructions[4] = VmInstruction::Store { dst: 4, src: 1 };
+        receiver_rejected(&branch);
+        let weakened = fixture(vec![
+            VmInstruction::Borrow { dst: 9, src: 0, fields: vec![], unique: false, reborrow: false },
+            VmInstruction::Copy { dst: 5, src: 9 },
+        ], 5);
+        receiver_rejected(&weakened);
+    }
+
+    #[test]
+    fn executed_receiver_preparation_keeps_replacement_invalidation() {
+        for reborrow in [false, true] {
+            let mut function = fixture(vec![VmInstruction::Store { dst: 4, src: 0 }, borrow(),
+                VmInstruction::PrepareInvocation { dst: 8, src: 5, fields: vec![], reborrow }], 8);
+            if reborrow { function.registers[8] = callable(false); }
+            function.instructions[4] = VmInstruction::CallPrepared { dst: 6, callee: 8, arguments: vec![2] };
+            assert!(accepted(&function));
+            if !reborrow {
+                function.instructions.insert(4, VmInstruction::Store { dst: 4, src: 1 });
+                receiver_rejected(&function);
+            }
+        }
+    }
+}
+
+impl ReceiverAccess {
+    const ALL: Self = Self { shared: true, unique: true };
+
+    pub(super) fn meet(self, other: Self) -> Self {
+        Self { shared: self.shared && other.shared, unique: self.unique && other.unique }
+    }
+
+    fn union(self, other: Self) -> Self {
+        Self { shared: self.shared || other.shared, unique: self.unique || other.unique }
+    }
+
+    pub(super) fn permits(self, unique: bool) -> bool {
+        if unique { self.unique } else { self.shared }
+    }
+
+    fn declared(function: &VmFunction, ty: &VmType, active: &mut Vec<VmType>) -> Self {
+        match ty {
+            VmType::Callable { shared_receiver, unique_receiver, .. } =>
+                Self { shared: *shared_receiver, unique: *unique_receiver },
+            VmType::Reference { referent, .. } | VmType::Array(referent)
+            | VmType::FixedArray { element: referent, .. } | VmType::StaticData { element: referent, .. } =>
+                Self::declared(function, referent, active),
+            VmType::Tuple(fields) => fields.iter().fold(Self::ALL, |proof, field|
+                proof.meet(Self::declared(function, field, active))),
+            VmType::Nominal { .. } => {
+                if active.contains(ty) { return Self::default(); }
+                let Ok(layout) = nominal_layout_descriptor(function, ty) else { return Self::default(); };
+                active.push(ty.clone());
+                let proof = layout.variants.iter().flatten().fold(Self::ALL, |proof, field|
+                    proof.meet(Self::declared(function, field, active)));
+                active.pop();
+                proof
+            }
+            VmType::RawPointer { .. } | VmType::Generic(_) | VmType::ConstGeneric { .. }
+            | VmType::ConstIntegerExpr(_) => Self::default(),
+            _ => Self::ALL,
+        }
+    }
+
+    pub(super) fn resident(function: &VmFunction, states: &VerifierState, register: u32) -> Self {
+        let Some(ty) = function.registers.get(register as usize) else { return Self::default(); };
+        states.receiver_access.get(register as usize).copied().unwrap_or_default()
+            .union(Self::declared(function, ty, &mut vec![]))
+    }
+
+    pub(super) fn constructed(function: &VmFunction, register: u32) -> Self {
+        function.registers.get(register as usize).map(|ty| Self::declared(function, ty, &mut vec![])).unwrap_or_default()
+    }
+
+    /// Forgetting a reference view's contract cannot preserve its stronger
+    /// authority in hidden provenance. Same-typed value transport and owned
+    /// structural storage retain the evaluated resident's own contract.
+    pub(super) fn transferred(self, function: &VmFunction, src: u32, dst: u32) -> Self {
+        match (function.registers.get(src as usize), function.registers.get(dst as usize)) {
+            (Some(source), Some(destination)) => self.transferred_view(source, destination),
+            _ => Self::default(),
+        }
+    }
+
+    pub(super) fn transferred_view(self, source: &VmType, destination: &VmType) -> Self {
+        fn owned_view(source: &VmType, destination: &VmType) -> bool {
+            if source == destination { return true; }
+            match (source, destination) {
+                (VmType::Callable { .. }, VmType::Callable { .. }) => true,
+                (VmType::Tuple(source), VmType::Tuple(destination)) => source.len() == destination.len()
+                    && source.iter().zip(destination).all(|(source, destination)| owned_view(source, destination)),
+                (VmType::Array(source), VmType::Array(destination)) => owned_view(source, destination),
+                (VmType::FixedArray { element: source, length: left }, VmType::FixedArray { element: destination, length: right }) =>
+                    left == right && owned_view(source, destination),
+                _ => false,
+            }
+        }
+        if owned_view(source, destination) { self } else { Self::default() }
+    }
+}
+
 fn carries_reference(function: &VmFunction, ty: &VmType) -> bool {
     !vm_tail_owned_type(ty, &function.nominal_copy_descriptors, &mut vec![])
 }

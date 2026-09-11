@@ -9,14 +9,18 @@ use crate::CallableContract;
 pub(super) fn validate_invocation_prerequisites(
     body: &TypedBody, expression: &CoreExpr, signatures: &ElaboratedInterface,
     scope: &TraitSolver, outlives: &[crate::OutlivesPredicate], diagnostics: &mut Vec<CoreDiagnostic>,
-) {
-    let CoreKind::Call { callee, arguments, invocation, .. } = &expression.kind else { return; };
-    let Some(callee) = body.expressions.get(callee.0 as usize) else { return; };
+) -> Option<Mutability> {
+    let CoreKind::Call { callee, arguments, invocation, .. } = &expression.kind else { return None; };
+    let Some(callee) = body.expressions.get(callee.0 as usize) else { return None; };
     let mut solver = scope.fresh_query();
-    if let Err(reason) = validate_selected_invocation(body, callee, arguments, invocation, &mut solver, outlives) {
-        diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
-            message: format!("Typed Core invocation {reason}") });
-    }
+    let pending_receiver = match validate_selected_invocation(body, callee, arguments, invocation, &mut solver, outlives) {
+        Ok(pending) => pending,
+        Err(reason) => {
+            diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
+                message: format!("Typed Core invocation {reason}") });
+            None
+        }
+    };
     let mut valid = true;
     if let Some(selected) = crate::callable_declarations::selected_template(signatures, callee, Some(scope)) {
         valid = selected.signature.instantiate_generic(&selected.arguments)
@@ -51,6 +55,7 @@ pub(super) fn validate_invocation_prerequisites(
     }
     if !valid { diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
         message: "Typed Core invocation does not establish its frozen declaration prerequisites".into() }); }
+    pending_receiver
 }
 
 /// Declaration selection and invocation-region instantiation are distinct
@@ -59,16 +64,23 @@ pub(super) fn validate_invocation_prerequisites(
 fn validate_selected_invocation(
     body: &TypedBody, callee: &CoreExpr, arguments: &[CoreId], invocation: &CoreCallContract,
     solver: &mut TraitSolver, outlives: &[crate::OutlivesPredicate],
-) -> Result<(), &'static str> {
+) -> Result<Option<Mutability>, &'static str> {
     let declaration = solver.normalize_type(invocation.declaration.clone())
         .map_err(|_| "has an unresolved selected declaration")?;
     let Type::Callable { contract, parameters, effects, .. } = &declaration else {
         return Err("has no selected callable declaration");
     };
     if **contract != CallableContract::default() { return Err("puts value refinements on its selected declaration view"); }
-    if !selected_declaration_proven(&callee.ty, &declaration, solver) {
-        return Err("does not establish its selected callable declaration");
-    }
+    let pending_receiver = if selected_declaration_proven(&callee.ty, &declaration, solver) { None }
+        else if let Type::Reference { mutability, referent, .. } = solver.normalize_type(callee.ty.clone())
+            .map_err(|_| "has an unresolved receiver")?
+            && matches!(referent.as_ref(), Type::Callable { .. })
+            && callable_argument_accepts(&declaration, &referent) {
+            // ABI selection is established, but a widened storage contract
+            // does not itself establish borrowed invocation permission. Only
+            // the sealed execution product can discharge this obligation.
+            Some(mutability)
+        } else { return Err("does not establish its selected callable declaration"); };
     if parameters.len() != arguments.len() { return Err("changes its selected declaration arity"); }
     let mut substitution = CallLifetimeSubstitution { outlives: outlives.to_vec(),
         nominal_variances: Some(solver.nominal_variances()), preserve_free_generics: true,
@@ -92,7 +104,7 @@ fn validate_selected_invocation(
     let effects = solver.normalize_effect_row(effects).map_err(|_| "has an unresolved declaration effect row")?;
     let supplied = solver.normalize_effect_row(invocation.effects.clone()).map_err(|_| "has an unresolved invocation effect row")?;
     if effects != supplied { return Err("changes its instantiated declaration effect row"); }
-    Ok(())
+    Ok(pending_receiver)
 }
 
 fn selected_declaration_proven(subject: &Type, declaration: &Type, solver: &mut TraitSolver) -> bool {

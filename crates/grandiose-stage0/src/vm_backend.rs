@@ -61,6 +61,7 @@ mod callable_access;
 pub mod llvm;
 mod reference_origins;
 use reference_origins::ReferenceOriginSet;
+use callable_access::ReceiverAccess;
 pub use native_bridge::{
     VmNativeAbi, VmNativeCall, VmNativeCallback, VmNativeImport, VmNativeImports,
     VmNativeLayout, VmNativeLayoutField, VmNativeLayoutShape, VmNativeResidentContract, VmNativeStatus,
@@ -6226,6 +6227,7 @@ struct VerifierContinuation {
     local_labels: Vec<Option<label_dispatch::LocalLabel>>,
     destruction_preserves_frames: Vec<bool>,
     invocation_preserves_frames: Vec<bool>,
+    receiver_access: Vec<ReceiverAccess>,
     labels: Vec<bool>,
     /// The same resident-value provenance is restored with the continuation.
     resumptions: Vec<ResumptionValue>,
@@ -6265,6 +6267,7 @@ impl VerifierContinuation {
             local_labels: saved.local_labels.clone(),
             destruction_preserves_frames: saved.destruction_preserves_frames.clone(),
             invocation_preserves_frames: saved.invocation_preserves_frames.clone(),
+            receiver_access: saved.receiver_access.clone(),
             labels: saved.labels.clone(),
             resumptions: saved.resumptions.clone(),
             pending_leave: saved.pending_leave.clone(),
@@ -6285,6 +6288,7 @@ impl VerifierContinuation {
             local_labels: self.local_labels.clone(),
             destruction_preserves_frames: self.destruction_preserves_frames.clone(),
             invocation_preserves_frames: self.invocation_preserves_frames.clone(),
+            receiver_access: self.receiver_access.clone(),
             address_exposed: self.address_exposed.clone(),
             labels: self.labels.clone(),
             resumptions: self.resumptions.clone(),
@@ -6342,6 +6346,8 @@ struct VerifierState {
     local_labels: Vec<Option<label_dispatch::LocalLabel>>,
     destruction_preserves_frames: Vec<bool>,
     invocation_preserves_frames: Vec<bool>,
+    /// Executed resident permissions, independent of a widened storage ABI.
+    receiver_access: Vec<ReceiverAccess>,
     /// A first-class lexical label shares the callable ABI but can only be
     /// invoked in the frame that minted it. This taint is propagated through
     /// aggregates because a label cannot be frozen into another callable
@@ -6370,12 +6376,14 @@ struct VerifierState {
 /// source or overwriting a destination.
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct VerifierValue {
+    ty: VmType,
     references: ReferenceOriginSet,
     independent: bool,
     referent_independent: bool,
     label: Option<label_dispatch::LocalLabel>,
     destruction_preserves: bool,
     invocation_preserves: bool,
+    receiver_access: ReceiverAccess,
     labels: bool,
     resumptions: ResumptionValue,
 }
@@ -6384,12 +6392,14 @@ impl VerifierValue {
     fn snapshot(function: &VmFunction, states: &VerifierState, register: u32) -> Self {
         let index = register as usize;
         Self {
+            ty: function.registers[index].clone(),
             references: states.reference_origins[index].clone(),
             independent: tail_provenance::independent(function, states, register),
             referent_independent: tail_provenance::referent_independent(function, states, register),
             label: states.local_labels[index],
             destruction_preserves: tail_provenance::destruction_preserving(function, states, register),
             invocation_preserves: tail_provenance::invocation_preserving(function, states, register),
+            receiver_access: ReceiverAccess::resident(function, states, register),
             labels: states.labels[index],
             resumptions: states.resumptions[index].clone(),
         }
@@ -6398,12 +6408,15 @@ impl VerifierValue {
     fn install(self, function: &VmFunction, states: &mut VerifierState, register: u32) -> Result<(), VmArtifactError> {
         write(states, register)?;
         let index = register as usize;
+        let receiver_access = if self.references.contains(&register) { ReceiverAccess::default() }
+            else { self.receiver_access.transferred_view(&self.ty, &function.registers[index]) };
         states.reference_origins[index] = self.references;
         states.frame_independent[index] = self.independent;
         states.referent_independent[index] = self.referent_independent;
         states.local_labels[index] = label_dispatch::retain_at(function, register, self.label);
         states.destruction_preserves_frames[index] = self.destruction_preserves;
         states.invocation_preserves_frames[index] = self.invocation_preserves;
+        states.receiver_access[index] = receiver_access;
         states.labels[index] = self.labels;
         states.resumptions[index] = self.resumptions;
         Ok(())
@@ -6422,6 +6435,7 @@ struct VerifierContext {
 
 impl VerifierState {
     fn retire_value(&mut self, register: u32) {
+        tail_provenance::invalidate_referent_storage(self, register);
         let index = register as usize;
         self.registers[index] = Some(false);
         self.may_initialized[index] = false;
@@ -6431,6 +6445,7 @@ impl VerifierState {
         self.local_labels[index] = None;
         self.destruction_preserves_frames[index] = false;
         self.invocation_preserves_frames[index] = false;
+        self.receiver_access[index] = ReceiverAccess::default();
         self.labels[index] = false;
         self.resumptions[index] = ResumptionValue::None;
     }
@@ -6711,6 +6726,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 .map(|index| (assume_parameter_invocations && index < function.parameters as usize)
                     || entry_behaviors.and_then(|inputs| inputs.get(index)).is_some_and(|input| input.invocation)).collect(),
             labels: vec![false; function.registers.len()],
+            receiver_access: vec![ReceiverAccess::default(); function.registers.len()],
             resumptions: if transfer_proofs.symbolic_resumption_inputs { resumption_calls::input_values(function) }
                 else { vec![ResumptionValue::None; function.registers.len()] },
             handlers: Vec::new(),
@@ -6783,6 +6799,13 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
         if entry_behaviors.is_some() {
             tail_provenance::observe_call_inputs(function, instruction, &states, &mut call_input_behaviors)?;
         }
+        // The invocation itself may mutate storage. Authenticate its acquired
+        // receiver against the incoming state, before invalidating suffix facts.
+        let invoked_receiver_access = match instruction {
+            VmInstruction::CallIndirect { callee, .. } | VmInstruction::CallIndirectOwned { callee, .. }
+            | VmInstruction::CallPrepared { callee, .. } => ReceiverAccess::resident(function, &states, *callee),
+            _ => ReceiverAccess::default(),
+        };
         let (tail_update, preserves_memory, preserves_independent_memory) = tail_provenance::before_instruction(function, instruction, &mut states, transfer_proofs);
         if !preserves_independent_memory { opaque_label_targets.extend(possible_label_targets); }
         preserves_frame_memory &= preserves_memory;
@@ -7612,7 +7635,11 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     referent.as_ref()
                 } else { &source };
                 let destination = register_type(function, *dst)?;
-                if destination.callable_receiver().is_none()
+                let resident_access = ReceiverAccess::resident(function, &states, *src);
+                let callable_receiver = destination.callable_receiver().is_some()
+                    || matches!(&destination, VmType::Reference { unique, referent }
+                        if matches!(referent.as_ref(), VmType::Callable { .. }) && resident_access.permits(*unique));
+                if !callable_receiver
                     || !projected_storage_types(function, source, fields)?.contains(&destination) {
                     return Err(VmArtifactError::NotCallable { register: *src });
                 }
@@ -7620,7 +7647,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     let VmType::Reference { unique, .. } = register_type(function, *src)? else { unreachable!() };
                     let permitted = match &destination {
                         VmType::Callable { shared_receiver, unique_receiver, .. } =>
-                            if unique { *unique_receiver } else { *shared_receiver },
+                            (if unique { *unique_receiver } else { *shared_receiver }) || resident_access.permits(unique),
                         VmType::Reference { unique: child, .. } => unique || !*child,
                         _ => false,
                     };
@@ -8347,6 +8374,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                         local_labels: continuation.local_labels,
                         destruction_preserves_frames: continuation.destruction_preserves_frames,
                         invocation_preserves_frames: continuation.invocation_preserves_frames,
+                        receiver_access: continuation.receiver_access,
                         address_exposed: continuation.address_exposed,
                         labels: continuation.labels,
                         resumptions: continuation.resumptions,
@@ -8398,10 +8426,6 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 write(&mut states, *dst)?;
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize].clone();
-                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] =
-                        states.reference_origins[*src as usize].clone();
-                }
             }
             VmInstruction::StorageLive { local, .. } => {
                 let index = *local as usize;
@@ -8491,11 +8515,6 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 *state = Some(true);
                 states.labels[*dst as usize] = states.labels[*src as usize];
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize].clone();
-                if matches!(register_type(function, *dst)?, VmType::Reference { .. }) {
-                    states.reference_origins[*dst as usize] = states.reference_origins[*src as usize].clone();
-                } else {
-                    states.reference_origins[*dst as usize].clear();
-                }
             }
             VmInstruction::Move { dst, src } => {
                 read(&states, *src)?;
@@ -8603,11 +8622,17 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 states.resumptions[*dst as usize] = states.resumptions[*src as usize].opaque();
                 if *unique {
                     states.resumptions[*src as usize] = states.resumptions[*src as usize].opaque();
+                    // Writable exposure cannot leave the source or existing
+                    // aliases with a whole-storage resident refinement.
+                    tail_provenance::invalidate_referent_storage(&mut states, *src);
+                    states.receiver_access[*src as usize] = ReceiverAccess::default();
                 }
                 states.reference_origins[*dst as usize] = if *reborrow {
                     states.reference_origins[*src as usize].clone()
                 } else {
-                    ReferenceOriginSet::One(*src)
+                    let mut origins = states.reference_origins[*src as usize].clone();
+                    origins.union_with(&ReferenceOriginSet::One(*src));
+                    origins
                 };
             }
             VmInstruction::DerefCopy { dst, reference } => {
@@ -8997,6 +9022,10 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 if let Some(environment) = environment {
                     for (capture, descriptor) in captures.iter().zip(&environment.captures) {
+                        if descriptor.mode == VmCaptureMode::UniqueBorrow {
+                            tail_provenance::invalidate_referent_storage(&mut states, *capture);
+                            states.receiver_access[*capture as usize] = ReceiverAccess::default();
+                        }
                         if matches!(descriptor.mode, VmCaptureMode::Copy | VmCaptureMode::Move) {
                             states.registers[*capture as usize] = Some(false);
                         }
@@ -9047,7 +9076,12 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                     return Err(VmArtifactError::HandlerResumeUnavailable);
                 }
                 let receiver = register_type(function, *callee)?;
-                let Some(VmType::Callable { parameters, result, safety, .. }) = receiver.callable_receiver() else {
+                let callable = receiver.callable_receiver().or_else(|| match &receiver {
+                    VmType::Reference { unique, referent } if invoked_receiver_access.permits(*unique)
+                        && matches!(referent.as_ref(), VmType::Callable { .. }) => Some(referent.as_ref()),
+                    _ => None,
+                });
+                let Some(VmType::Callable { parameters, result, safety, .. }) = callable else {
                     return Err(VmArtifactError::NotCallable { register: *callee });
                 };
                 if *safety == Safety::Unsafe && !function.unsafe_execution {
@@ -9265,12 +9299,7 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 advances = false;
             }
         }
-        if let Some((destination, independent, referent_independent, destruction_preserves, invocation_preserves)) = tail_update {
-            states.frame_independent[destination as usize] = independent;
-            states.referent_independent[destination as usize] = referent_independent;
-            states.destruction_preserves_frames[destination as usize] = destruction_preserves;
-            states.invocation_preserves_frames[destination as usize] = invocation_preserves;
-        }
+        if let Some(update) = tail_update { update.install(&mut states); }
         if let Some((destination, label)) = local_label_update {
             states.local_labels[destination as usize] = label;
         }
@@ -9692,6 +9721,7 @@ fn propagate_state(
             changed |= join_verifier_facts(&mut existing.local_labels, &state.local_labels, |left, right| if left == right { left } else { None });
             changed |= join_verifier_facts(&mut existing.destruction_preserves_frames, &state.destruction_preserves_frames, |left, right| left && right);
             changed |= join_verifier_facts(&mut existing.invocation_preserves_frames, &state.invocation_preserves_frames, |left, right| left && right);
+            changed |= join_verifier_facts(&mut existing.receiver_access, &state.receiver_access, ReceiverAccess::meet);
             changed |= join_verifier_facts(&mut existing.address_exposed, &state.address_exposed, |left, right| left || right);
             // Labels/resumptions are capability may-taints, not readability.
             // An arm cannot erase authority carried on another predecessor.
@@ -9749,12 +9779,14 @@ fn seed_call_handlers(
             let ty = register_type(function, *destination)?;
             let owned = vm_tail_owned_type(&ty, &function.nominal_copy_descriptors, &mut vec![]);
             let value = VerifierValue {
+                ty: ty.clone(),
                 references: if owned { ReferenceOriginSet::Empty } else { references.clone() },
                 independent: owned,
                 referent_independent: false,
                 label: None,
                 destruction_preserves: false,
                 invocation_preserves: false,
+                receiver_access: ReceiverAccess::default(),
                 labels,
                 resumptions: if control && resumption_calls::may_contain(&ty, &function.nominal_copy_descriptors) {
                     ResumptionValue::Unknown
@@ -10202,6 +10234,7 @@ fn write(states: &mut VerifierState, register: u32) -> Result<(), VmArtifactErro
     states.local_labels[index] = None;
     states.destruction_preserves_frames[index] = false;
     states.invocation_preserves_frames[index] = false;
+    states.receiver_access[index] = ReceiverAccess::default();
     states.resumptions[index] = ResumptionValue::None;
     match *state {
         None if !source_storage || storage_live => {

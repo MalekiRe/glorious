@@ -5,6 +5,40 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 166: executed borrowed receiver permission
+
+The shared source validator now retains explicit borrowed receiver obligations
+after checking selected ABI and prerequisites. Standalone validation stays strict;
+the sealed control batch must discharge the obligations from complete isolated
+invocation observations before resource checking or fusion. Constructor identity
+alone, a stronger caller, unknown coverage and stale input cannot supply permission.
+
+The executable resident product independently retains receiver permissions through
+value transport and invalidates them on replacement, writable exposure, unknown
+execution and incompatible joins. Aggregate reference origins follow the same
+transfer product, including saved-continuation invalidation. Reference contracts
+and native backing layouts are unchanged, and weakening a reference view cannot
+keep hidden stronger authority.
+
+The full handler-reentry suite now passes **63/63**, with no ignored tests,
+including the previously failing earlier-borrowed-receiver case across fresh/
+decoded VM, all-native and both mixed directions at O0/O2. Focused source and
+executable tests cover incomplete coverage, missing observations, stale arenas,
+resident access denial, aliases, products, replacement, branch joins, unknown
+writers and reference-view weakening. Cache is 166 and verifier is 50; portable
+bytecode 75/schema 119 and native ABI 19 do not change.
+
+The subsequent focused receiver run passes the original and reference-handle
+cases, including fresh/decoded rejection when constructor receiver permission is
+removed. Its newly added tuple-projection case fails Core G4183: whole-tuple
+widening is not yet projected onto the earlier field type. The suite now contains
+64 tests; this new failing case is not counted in the earlier 63/63 checkpoint.
+
+This does not declare full native-handler completion. General borrowed resumption
+admission, helper-local symbolic delimiters, guarded interleavings, foreign control,
+mandatory-tail handling and full shared-storage/performance evidence remain under
+active implementation and acceptance review.
+
 ## Cache 165: constructed values versus binding storage
 
 Core and Evaluation bindings now retain an explicit stored type. Control uses

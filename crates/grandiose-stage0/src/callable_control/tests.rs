@@ -20,6 +20,60 @@ struct Fixture {
 }
 
 #[test]
+fn borrowed_receiver_obligations_require_complete_isolated_resident_evidence() {
+    let mut fixture = Fixture::new("#![no_std]
+        type Callback=(i64)->i64;
+        fn replace(slot:&mut Callback,replacement:Callback) {*slot=replacement;}
+        fn main() -> i64 {
+            let first=42; let second=7;
+            let mut callback:Callback=(value:i64)->i64 {first};
+            let before=(&callback)(0);
+            let replacement:Callback=(value:i64)->i64 {second};
+            replace(&mut callback,replacement);
+            before
+        }");
+    let owner = fixture.names["main"];
+    let body = &fixture.bodies[&owner];
+    let strict = body.validate_projection_obligations(&fixture.interface, &[]);
+    assert!(strict.iter().any(|diagnostic| diagnostic.code == "G4304"), "{strict:?}");
+    let staged = body.stage_projection_obligations(&fixture.interface, &[], &[], crate::TraitSolver::new(&fixture.interface));
+    assert!(staged.diagnostics.is_empty(), "{:?}", staged.diagnostics);
+    assert_eq!(staged.borrowed_receivers.len(), 1);
+    let inputs = fixture.inputs();
+    let summaries = derive_control_summaries(&inputs, Default::default());
+    assert!(!summaries.get(CallableBrand::Named(owner)).unwrap().matches(&inputs),
+        "a body-only match cannot certify a pending executed receiver");
+    assert!(summaries.bind(&inputs).unwrap().body(owner).is_some());
+    let limited = derive_control_summaries(&inputs, ControlSummaryLimits { max_steps: 1, ..Default::default() });
+    assert!(limited.bind(&inputs).is_err(), "truncated execution is not receiver authority");
+    let mut missing = summaries.clone();
+    missing.summaries.get_mut(&CallableBrand::Named(owner)).unwrap().calls.clear();
+    assert!(missing.bind(&inputs).is_err(), "unobserved invocation is not authority");
+    let mut unknown = summaries.clone();
+    let summary = unknown.summaries.get_mut(&CallableBrand::Named(owner)).unwrap();
+    for site in summary.calls.keys() {
+        summary.call_gaps.insert(CallContext::from(site), ControlUnknown::UnobservedCall);
+    }
+    assert!(unknown.bind(&inputs).is_err(), "positive observations cannot erase an unconditional gap");
+    let mut denied = summaries.clone();
+    let summary = denied.summaries.get_mut(&CallableBrand::Named(owner)).unwrap();
+    for paths in summary.calls.values_mut() {
+        for path in paths {
+            for event in &mut path.events {
+                if let ControlEvent::Invoke { callee: ControlValue { shape: ControlValueShape::Borrow(value), .. }, .. } = event
+                    && let Type::Callable { contract, .. } = &mut value.ty {
+                    contract.shared_receiver = false;
+                }
+            }
+        }
+    }
+    assert!(denied.bind(&inputs).is_err(), "the executed resident must supply the requested access");
+    drop(inputs);
+    fixture.bodies.get_mut(&owner).unwrap().expressions.reverse();
+    assert!(summaries.bind(&fixture.inputs()).is_err(), "a changed arena cannot reuse the obligation proof");
+}
+
+#[test]
 fn trusted_integer_control_requires_the_bound_identity_and_closed_abi() {
     use crate::PrimitiveRole;
     let mut fixture = Fixture::new("#![no_std]

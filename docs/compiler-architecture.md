@@ -2430,3 +2430,40 @@ borrowed-invocation authority must be established at its executed acquisition,
 not recovered from the constructor merely because it once occupied the slot.
 That source/executable proof migration and the remaining native-handler gates
 are not completed by this storage boundary. Runtime formats are unchanged.
+
+## Executed borrowed receiver obligations
+
+Frozen declaration validation separates callable ABI/prerequisite selection
+from borrowed receiver permission. A widened reference type can leave an explicit
+pending receiver obligation, not a successful standalone validation. The staged
+control batch retains these obligations in its body dependency seals. Binding
+discharges them from the existing evaluator's actual invocation inputs, with
+complete coverage across isolated callable occurrences. Expanded caller-specific
+inputs, missing observations, unknown paths and analysis limits cannot establish
+a helper's universal permission. No source ownership product is published before
+this binding, and ordinary loan checking still rejects conflicting mutation.
+
+The executable verifier independently transports receiver permissions in its
+existing resident-value product. The bounded must contract covers every possible
+callable leaf; heterogeneous products remain conservative. Checked construction,
+owned value transfers, borrows and projections supply the evidence. CFG joins
+intersect it; replacement, writable exposure and unknown execution revoke it,
+including aliases and saved continuations. Structural reference-origin transport
+uses the same producer so aggregate aliases cannot hide from invalidation.
+Invocation authenticates its input before its own mutation invalidates suffix
+facts. Forgetting a reference view's contract cannot retain hidden stronger
+permission. Neither the reference's ABI nor its native backing layout changes.
+
+Cache 166 and verifier 50 repair the earlier borrowed receiver regression.
+The full handler-reentry gate passes all 63 tests, covering fresh/decoded VM and
+native/mixed O0/O2 execution. Source checks reject incomplete/stale evidence;
+executable checks reject replaced residents, mixed-permission joins, unknown
+writers and weakened-reference authority. Removing the checked constructor's
+permission also rejects after decoding. A newly added tuple-projection composition
+still fails Core G4183: widening its parent tuple has not widened an earlier
+projected field type. That join-projection integration remains active; it is not
+included in the preceding 63-test passing checkpoint. This is not yet full native-handler
+acceptance: general borrowed resumption admission, helper-local symbolic
+delimiters, guarded interleavings, foreign control, mandatory-tail handling and
+complete shared-storage/performance evidence remain to be assessed or completed.
+Bytecode 75/schema 119 and native ABI 19 remain unchanged.

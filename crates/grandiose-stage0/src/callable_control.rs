@@ -374,6 +374,10 @@ struct Seal {
     body: Arc<TypedBody>,
     interface: Arc<ElaboratedInterface>,
     valid: Result<(), ControlUnknown>,
+    /// ABI/prerequisite validation has completed, but these invocations still
+    /// require receiver authority from executed residents. No bound resource
+    /// product can be published until the complete batch discharges them.
+    borrowed_receivers: BTreeMap<CoreId, crate::Mutability>,
     labels: Option<crate::core::label_dependencies::LabelDependencies>,
 }
 impl std::fmt::Debug for Seal {
@@ -447,6 +451,7 @@ impl CallableControlSummary {
         // This public, body-only query cannot validate runtime authority.
         // Production consumers use the full batch binding below.
         self.primitives.is_empty() && self.dependencies.iter().all(|(key, seal)| {
+            if !seal.borrowed_receivers.is_empty() { return false; }
             bodies.get(key).is_some_and(|input| {
                 self.matches_body(*key, input.body)
                     && crate::signature::host_contract_fingerprint(*key, input.signature)
@@ -532,9 +537,43 @@ impl ControlSummarySet {
                     || !interface_matches {
                     return Err(ControlUnknown::InvalidContract(*key));
                 }
+                for (call, mutability) in &seal.borrowed_receivers {
+                    if !self.borrowed_receiver_proven(*key, *call, *mutability) {
+                        return Err(ControlUnknown::Unsupported("unproved executed borrowed receiver"));
+                    }
+                }
             }
         }
         Ok(BoundControlSummaries { summaries: self })
+    }
+
+    /// A caller's specialized inputs cannot establish a helper's universal
+    /// permission. Use only that callable's isolated invocation observations,
+    /// with all occurrences and unconditional coverage gaps retained.
+    fn borrowed_receiver_proven(&self, owner: DefKey, call: CoreId, mutability: crate::Mutability) -> bool {
+        let mut observed = false;
+        for (callable, summary) in self.iter().filter(|(_, summary)| summary.identity.definition == owner) {
+            for (site, evidence) in summary.invocation_evidence().filter(|(site, _)|
+                site.calls.is_empty() && site.location.callable == callable && site.location.expression == call) {
+                if !evidence.coverage.is_complete() { return false; }
+                for path in evidence.observed {
+                    let Some(callee) = path.events.iter().find_map(|event| match event {
+                        ControlEvent::Invoke { site: actual, callee, .. } if actual == site => Some(callee),
+                        _ => None,
+                    }) else { return false; };
+                    let (Type::Reference { mutability: actual, referent, .. }, ControlValueShape::Borrow(value)) =
+                        (&callee.ty, &callee.shape) else { return false; };
+                    let Type::Callable { contract, .. } = &value.ty else { return false; };
+                    if *actual != mutability || !crate::types::regions::accepts_body_storage(referent, &value.ty)
+                        || !match mutability {
+                            crate::Mutability::Shared => contract.shared_receiver,
+                            crate::Mutability::Unique => contract.unique_receiver,
+                        } { return false; }
+                    observed = true;
+                }
+            }
+        }
+        observed
     }
 }
 
@@ -1193,10 +1232,11 @@ fn derive_control_phase<E>(
         let result_valid = input.body.expressions.get(input.body.root.0 as usize).is_some_and(|expr|
             solver.fresh_query().callable_abi_erasure_proven(&input.signature.result, &expr.ty));
         let validation = if pending_control { input.body.validate_for_control_fusion() } else { input.body.validate() };
+        let projections = input.body.stage_projection_obligations(input.interface, &input.signature.where_bounds,
+            &input.signature.where_outlives, solver);
         let valid = if input.body.recovered || !input.body.diagnostics.is_empty() || !validation.is_empty()
             || !input.interface.diagnostics.is_empty()
-            || !input.body.validate_projection_obligations_in_environment(input.interface, &input.signature.where_bounds,
-                &input.signature.where_outlives, solver).is_empty() {
+            || !projections.diagnostics.is_empty() {
             Err(ControlUnknown::InvalidCore(*key))
         } else if crate::callable_declarations::body_signature(input.interface, *key)
                 .is_some_and(|declared| &declared != input.signature)
@@ -1210,6 +1250,7 @@ fn derive_control_phase<E>(
             identity: ControlBodyIdentity { definition: *key, body: input.body.semantic_fingerprint(),
                 contract: crate::signature::host_contract_fingerprint(*key, input.signature) },
             body: Arc::new(input.body.clone()), interface, valid,
+            borrowed_receivers: projections.borrowed_receivers,
             labels: crate::core::label_dependencies::LabelDependencies::derive(&input.body.expressions).ok(),
         }));
     }

@@ -371,7 +371,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 156 publishes handler payload provenance from those evaluated inputs.
 // Cache 157 validates prepared labels through their intrinsic Fn authority.
 // Cache 159 shares directional callable input views with assignment and stores.
-pub const STAGE0_CACHE_GENERATION: u32 = 165;
+// Cache 166 discharges staged borrowed receiver obligations from executed residents.
+pub const STAGE0_CACHE_GENERATION: u32 = 166;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -401,7 +402,8 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 75;
 // Verifier 47 authenticates single-consumer prepared invocation views.
 // Verifier 48 retains remaining invocation bounds through handler transitions.
 // Verifier 49 closes executable outward-operation edges and callee return states.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 49;
+// Verifier 50 transports and invalidates executed resident receiver permissions.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 50;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

@@ -1420,8 +1420,23 @@ impl TypedBody {
 
     pub(crate) fn validate_projection_obligations_in_environment(
         &self, signatures: &ElaboratedInterface, ambient: &[(Type, crate::ElaboratedTraitReference)],
-        outlives: &[crate::OutlivesPredicate], mut scoped: TraitSolver,
+        outlives: &[crate::OutlivesPredicate], scoped: TraitSolver,
     ) -> Vec<CoreDiagnostic> {
+        let mut validation = self.stage_projection_obligations(signatures, ambient, outlives, scoped);
+        for (call, _) in validation.borrowed_receivers {
+            validation.diagnostics.push(CoreDiagnostic { code: "G4304", span: self.expression(call).span,
+                message: "Typed Core invocation does not establish its selected callable receiver".into() });
+        }
+        validation.diagnostics
+    }
+
+    /// Pending receiver obligations are not validation success. The staged
+    /// control batch must bind and discharge them before publishing resource
+    /// permission; standalone validation above remains strict.
+    pub(crate) fn stage_projection_obligations(
+        &self, signatures: &ElaboratedInterface, ambient: &[(Type, crate::ElaboratedTraitReference)],
+        outlives: &[crate::OutlivesPredicate], mut scoped: TraitSolver,
+    ) -> CoreProjectionValidation {
         let mut terms = FrozenProjectionTerms::default();
         for (_, ty) in &self.parameters {
             terms.types.push(ty);
@@ -1469,16 +1484,24 @@ impl TypedBody {
             diagnostics.push(CoreDiagnostic { code: "G4304", span,
                 message: "Typed Core region constraints imply an unproved rigid outlives requirement".into() });
         }
-        for expression in &self.expressions {
+        let mut borrowed_receivers = std::collections::BTreeMap::new();
+        for (index, expression) in self.expressions.iter().enumerate() {
             effect_contracts::validate_application(expression, signatures, &scoped, &outlives, &mut diagnostics);
-            callable_contracts::validate_invocation_prerequisites(self, expression, signatures, &scoped, &outlives, &mut diagnostics);
+            if let Some(mutability) = callable_contracts::validate_invocation_prerequisites(self, expression, signatures, &scoped, &outlives, &mut diagnostics) {
+                borrowed_receivers.insert(CoreId(index as u32), mutability);
+            }
         }
-        diagnostics
+        CoreProjectionValidation { diagnostics, borrowed_receivers }
     }
 
     fn contains(&self, id: CoreId) -> bool {
         (id.0 as usize) < self.expressions.len()
     }
+}
+
+pub(crate) struct CoreProjectionValidation {
+    pub diagnostics: Vec<CoreDiagnostic>,
+    pub borrowed_receivers: std::collections::BTreeMap<CoreId, Mutability>,
 }
 
 /// Borrowed type-kind carriers discovered in a frozen Core product.  Keeping

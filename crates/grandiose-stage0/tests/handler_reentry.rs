@@ -391,7 +391,7 @@ fn prepared_receiver_keeps_captures_before_argument_replacement() {
 
 #[test]
 fn borrowed_receiver_before_helper_replacement_retains_its_acquired_contract() {
-    candidate("type Callback=(i64)->i64;
+    let mut program = candidate("type Callback=(i64)->i64;
         fn replace(slot:&mut Callback,replacement:Callback) {*slot=replacement;}
         pub fn main() -> i64 {
             let first=20; let second=22;
@@ -400,6 +400,34 @@ fn borrowed_receiver_before_helper_replacement_retains_its_acquired_contract() {
             let replacement:Callback=(value:i64)->i64 {second};
             replace(&mut callback,replacement);
             before + callback(0)
+        }");
+    let main = program.functions.get_mut(&program.entry).unwrap();
+    let constructor = main.instructions.iter().find_map(|instruction| match instruction {
+        VmInstruction::MakeCallable { dst, captures, .. } if !captures.is_empty() => Some(*dst),
+        _ => None,
+    }).expect("the original acquired receiver has a checked capture constructor");
+    let VmType::Callable { shared_receiver, unique_receiver, .. } = &mut main.registers[constructor as usize] else { panic!() };
+    assert!(*shared_receiver && *unique_receiver);
+    *shared_receiver = false;
+    *unique_receiver = false;
+    program.fingerprint = program.computed_fingerprint();
+    let error = verify_vm_program(program.clone()).unwrap_err();
+    assert!(matches!(error, VmArtifactError::NotCallable { .. }), "{error:?}");
+    assert!(decode_and_verify_program(&grandiose_stage0::encode_program(&program)).is_err(),
+        "decoding must reconstruct receiver authority instead of trusting an earlier proof");
+}
+
+#[test]
+fn projected_borrowed_receiver_retains_its_executed_resident_before_helper_replacement() {
+    candidate("type Callback=(i64)->i64;
+        fn replace(slot:&mut (Callback,i64),replacement:Callback) {*slot=(replacement,0);}
+        pub fn main() -> i64 {
+            let first=42; let second=7;
+            let mut callbacks:(Callback,i64)=((value:i64)->i64 {first},0);
+            let before=(&callbacks.0)(0);
+            let replacement:Callback=(value:i64)->i64 {second};
+            replace(&mut callbacks,replacement);
+            before
         }");
 }
 
