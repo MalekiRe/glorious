@@ -398,6 +398,9 @@ pub struct LlvmExecutionProfile {
     pub instructions: u64,
     pub peak_call_depth: u32,
     pub recycled_tail_calls: u64,
+    /// Actual shared-domain backing extents and resident entry transport.
+    /// This is not a census of Rust metadata allocations or native stack bytes.
+    pub native_memory: super::VmNativeMemoryProfile,
 }
 
 #[cfg(test)]

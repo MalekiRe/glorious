@@ -313,9 +313,9 @@ impl LlvmNativeModule {
             // safe source graph are installed; no external adapter is added.
             return unsafe { self.run_i64_mixed_with_unsafe(limits) };
         }
-        // SAFETY: the native graph contains no admitted programmer-owned
-        // unsafe operation. The empty entry contract is checked below.
-        unsafe { self.run_i64_profiled(limits) }.map(|(value, _)| value)
+        // The native graph contains no admitted programmer-owned unsafe
+        // operation. The shared runner checks the empty entry contract.
+        self.run_shared(limits, false).map(|(value, _)| value)
     }
 
     /// # Safety
@@ -325,7 +325,7 @@ impl LlvmNativeModule {
         if !self.plan.vm_functions.is_empty() {
             return unsafe { self.run_i64_mixed_with_unsafe(limits) };
         }
-        unsafe { self.run_i64_profiled(limits) }.map(|(value, _)| value)
+        self.run_shared(limits, false).map(|(value, _)| value)
     }
 
     /// Execute the chosen VM/LLVM partition over one source graph and one
@@ -338,7 +338,18 @@ impl LlvmNativeModule {
         &self,
         limits: VmExecutionLimits,
     ) -> Result<i64, LlvmError> {
-        self.run_shared(limits).map(|(value, _)| value)
+        self.run_shared(limits, false).map(|(value, _)| value)
+    }
+
+    /// Measure the actual selected engine partition in the shared execution
+    /// domain, including generated resident entry allocation/copy events.
+    ///
+    /// # Safety
+    /// The source-memory obligations of `run_i64_mixed_with_unsafe` apply.
+    pub unsafe fn run_i64_mixed_profiled(
+        &self, limits: VmExecutionLimits,
+    ) -> Result<(i64, LlvmExecutionProfile), LlvmError> {
+        self.run_shared(limits, true)
     }
 
     /// Execute generated computation and report shared activation depth/tails.
@@ -357,6 +368,6 @@ impl LlvmNativeModule {
                 "mixed partition requires the shared VM/native runner",
             ));
         }
-        self.run_shared(limits)
+        self.run_shared(limits, true)
     }
 }

@@ -33,6 +33,14 @@ pub struct VmNativeMemoryProfile {
     /// Bytes passed through native-home bulk moves, copies, and exports.
     /// Scalar loads/stores and allocator-internal relocation are not included.
     pub home_bulk_copy_bytes: u64,
+    /// Already-present addressable residents lent to generated segments.
+    /// Private scalar spills and empty future frame slots are not shared objects.
+    pub generated_resident_entries: u64,
+    /// Backing allocations/copies while admitting those existing residents at
+    /// machine entry. Source value production, ownership transfer and replay
+    /// run in the common runtime and are not boundary adapters.
+    pub generated_resident_entry_allocations: u64,
+    pub generated_resident_entry_copy_bytes: u64,
     /// Cumulative operation/copy counters saturate rather than wrap. If set,
     /// those counters are lower bounds, not exact measurements.
     pub counters_saturated: bool,
@@ -66,6 +74,19 @@ fn peaks(value: &mut VmNativeMemoryProfile) {
 
 impl NativeMemoryMeasurements {
     pub(super) fn snapshot(&self) -> VmNativeMemoryProfile { self.value.get() }
+
+    /// This interval contains only storage admission, never generated or guest
+    /// computation. Measure the allocation owners' actual events, not an
+    /// assumption derived from a type or an engine selection.
+    pub(super) fn resident_entry(&self, before: VmNativeMemoryProfile) {
+        let mut value = self.value.get();
+        let allocations = value.home_allocations.saturating_sub(before.home_allocations);
+        let copies = value.home_bulk_copy_bytes.saturating_sub(before.home_bulk_copy_bytes);
+        accumulate(&mut value.generated_resident_entries, 1, &mut value.counters_saturated);
+        accumulate(&mut value.generated_resident_entry_allocations, allocations, &mut value.counters_saturated);
+        accumulate(&mut value.generated_resident_entry_copy_bytes, copies, &mut value.counters_saturated);
+        self.value.set(value);
+    }
 
     fn acquired(&self, kind: AllocationKind, bytes: usize) {
         if bytes == 0 { return; }
@@ -176,6 +197,26 @@ impl Drop for NativeAllocation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_entry_counts_actual_backing_events_only_inside_its_interval() {
+        let measurements = NativeMemoryMeasurements::default();
+        measurements.acquired(AllocationKind::Home, 16);
+        measurements.copied(AllocationKind::Home, 16);
+        let unchanged = measurements.snapshot();
+        measurements.resident_entry(unchanged);
+        let before = measurements.snapshot();
+        measurements.acquired(AllocationKind::Home, 8);
+        measurements.copied(AllocationKind::Home, 8);
+        measurements.resident_entry(before);
+        measurements.copied(AllocationKind::Home, 4);
+        let result = measurements.snapshot();
+        assert_eq!(result.generated_resident_entries, 2);
+        assert_eq!(result.generated_resident_entry_allocations, 1);
+        assert_eq!(result.generated_resident_entry_copy_bytes, 8);
+        assert_eq!(result.home_bulk_copy_bytes, 28);
+        assert!(!result.counters_saturated);
+    }
 
     #[test]
     fn native_profile_cumulative_counters_saturate_explicitly_without_corrupting_live_bytes() {

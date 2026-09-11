@@ -2493,3 +2493,27 @@ boundaries, receiver strengthening, captured debt, environment identity and
 partial initialization. Verifier 50, bytecode 75/schema 119 and native ABI 19
 are unchanged. This closes the receiver/storage regressions, not the remaining
 native-handler admission and shared-storage/performance acceptance audit.
+
+## Measured resident entry transport
+
+The existing native allocation owners supply opt-in backing-extent and bulk-copy
+measurements to both native and mixed runners. Machine entry measures the interval
+in which each already-present addressable resident is admitted, before generated
+computation starts. Empty future frame slots and private scalar spills are not
+shared-object adapters. Counters saturate explicitly; they do not claim to measure
+Rust metadata, allocator-internal work or process RSS. No profile fact supplies
+semantic authority or changes storage admission.
+
+Profiled replay and shared-payload integration checks observe zero resident-entry
+allocations and copied bytes. A 1,000-iteration mixed mandatory-tail cycle completes
+its local handler before each backedge at O0/O2 under eight-call/eight-handler/
+eight-continuation and 128-KiB native limits. Its VM and decoded executions pass as
+well. This supplies evidence for ended delimiters, not a waiver for an active
+unfused handler at a mandatory tail site.
+
+The new cross-engine unique operation-payload address/mutation regression still
+fails source G5013 before execution. EscapeFlow retains directly performed payloads
+but clears helper-performed clause bindings, so a checked unique reborrow has no
+incoming payload snapshot. The test remains active. Its address and mutation
+assertions have not passed and complete shared-handler storage acceptance remains
+open. Cache 167, verifier 50, bytecode 75/schema 119 and native ABI 19 are unchanged.

@@ -55,6 +55,9 @@ impl LlvmNativeModule {
         for (slot, layout) in frame.layouts.iter().enumerate() {
             let local = slot as u32;
             let resident = registers.wants_native(local);
+            let observed_entry = if resident && registers.values[slot].is_some() {
+                budget.native_memory.measurements.as_ref().map(|measurements| (measurements.clone(), measurements.snapshot()))
+            } else { None };
             let home = if resident {
                 registers.native_home(local, budget)?
             } else {
@@ -66,6 +69,7 @@ impl LlvmNativeModule {
             if let Some(value) = &registers.values[slot] {
                 home.store(&[], value, budget)?;
             } else { home.clear(&[]); }
+            if let Some((measurements, before)) = observed_entry { measurements.resident_entry(before); }
             flags.push(frame.paths[slot].iter().map(|path| u8::from(home.is_initialized(path))).collect::<Vec<_>>());
             slots.extend([home.pointer().cast_const(), flags.last().unwrap().as_ptr()]);
             homes.push(home);
@@ -100,7 +104,7 @@ impl LlvmNativeModule {
         Ok(stopped)
     }
 
-    pub(super) fn run_shared(&self, limits: VmExecutionLimits) -> Result<(i64, LlvmExecutionProfile), LlvmError> {
+    pub(super) fn run_shared(&self, limits: VmExecutionLimits, measure_memory: bool) -> Result<(i64, LlvmExecutionProfile), LlvmError> {
         self.plan().validate_abi(self.abi())?;
         let program = &self.plan().program.program;
         let entry = &program.functions[&program.entry];
@@ -108,7 +112,8 @@ impl LlvmNativeModule {
             return Err(LlvmError::AbiMismatch("native i64 runner requires a zero-argument i64 entry"));
         }
         let mut budget = ExecutionBudget {
-            native_memory: Default::default(), unsafe_execution: true, limits,
+            native_memory: if measure_memory { crate::vm_backend::native_memory::NativeMemory::profiled() } else { Default::default() },
+            unsafe_execution: true, limits,
             instructions: 0, allocated_elements: 0,
         };
         budget.native_memory.generated = Some(Arc::new(self.clone()));
@@ -116,7 +121,8 @@ impl LlvmNativeModule {
         let value = crate::vm_backend::execute_program_profiled(program, program.entry, &[], 0,
             &mut budget, &mut None, Some(&mut profile), false, None, None).map_err(LlvmError::Runtime)?;
         let result = crate::vm_backend::expect_i64(value).map_err(LlvmError::Runtime)?;
+        let native_memory = budget.native_memory.measurements.as_ref().map(|measurements| measurements.snapshot()).unwrap_or_default();
         Ok((result, LlvmExecutionProfile { instructions: budget.instructions,
-            peak_call_depth: profile.peak_call_depth, recycled_tail_calls: profile.recycled_tail_calls }))
+            peak_call_depth: profile.peak_call_depth, recycled_tail_calls: profile.recycled_tail_calls, native_memory }))
     }
 }

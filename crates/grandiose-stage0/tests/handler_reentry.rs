@@ -63,8 +63,12 @@ fn candidate(source: &str) -> CandidateVmProgram {
         let ir = all_native.with_vm_functions(selected).unwrap();
         for optimization in [0, 2] {
             let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
-            assert_eq!(native.run_i64_with_limits(Default::default()).unwrap_or_else(|error|
-                panic!("O{optimization}: {source}\n{error:#?}")), 42);
+            let (value, profile) = unsafe { native.run_i64_mixed_profiled(Default::default()) }.unwrap_or_else(|error|
+                panic!("O{optimization}: {source}\n{error:#?}"));
+            assert_eq!(value, 42);
+            assert!(!profile.native_memory.counters_saturated, "{profile:?}");
+            assert_eq!(profile.native_memory.generated_resident_entry_allocations, 0, "{source}\n{profile:?}");
+            assert_eq!(profile.native_memory.generated_resident_entry_copy_bytes, 0, "{source}\n{profile:?}");
         }
     }
     decode_program(&bytes).unwrap()

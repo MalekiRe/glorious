@@ -718,6 +718,9 @@ fn native_effects_resume_across_an_ordinary_generated_call() {
 }
 
 const MEMORY_HELPERS: &str = r#"
+    pub fn native_address<T>(value: &T) -> usize {
+        unsafe { __g1_memory_pointer_address(__g1_memory_as_raw_shared(value)) }
+    }
     pub unsafe fn native_home<T>(value: T) -> *mut T {
         unsafe {
             let bytes = __g1_memory_allocate(__g1_memory_size_of<T>(), __g1_memory_align_of<T>());
@@ -1092,6 +1095,44 @@ fn generated_native_preserves_actual_reference_backing_addresses() {
 }
 
 #[test]
+fn mixed_handler_payloads_share_backing_addresses_and_mutations_without_entry_adapters() {
+    let source = "effect Touch { [1,1] touch(value:&mut i64, expected:usize) -> i64; }
+        fn address(value:&i64) -> usize { native_address(value) }
+        fn leaf(value:&mut i64, expected:usize) -> i64 / Touch {
+            *value = *value + 1; Touch::touch(value,expected)
+        }
+        fn checked(value:&mut i64, expected:usize) -> i64 {
+            let same = address(&(*value)) == expected;
+            *value = *value + 1; handle same { true => *value, false => 0 }
+        }
+        pub fn main() -> i64 {
+            let mut value = 40; let expected = address(&value);
+            let result = handle leaf(&mut value,expected) {
+                Touch::touch(payload,expected) with k => { let result=checked(payload,expected); k(result) }
+            };
+            result + value - 42
+        }";
+    let ir = StageZeroCompiler::new().compile_llvm(memory_request(source), LlvmTarget::host().unwrap()).unwrap();
+    let program = ir.vm_program();
+    assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    let decoded = grandiose_stage0::decode_and_verify_program(&program.canonical_bytes()).unwrap();
+    assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    for selected in [vec![], vec![ir.entry_key()], ir.function_keys().iter().copied().filter(|key| *key != ir.entry_key()).collect()] {
+        let mixed = ir.with_vm_functions(selected).unwrap();
+        for optimization in [0, 2] {
+            let native = unsafe { mixed.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            let (value, profile) = unsafe { native.run_i64_mixed_profiled(Default::default()) }.unwrap();
+            assert_eq!(value, 42);
+            let memory = profile.native_memory;
+            assert!(memory.generated_resident_entries > 0, "{profile:?}");
+            assert!(!memory.counters_saturated, "{profile:?}");
+            assert_eq!(memory.generated_resident_entry_allocations, 0, "{profile:?}");
+            assert_eq!(memory.generated_resident_entry_copy_bytes, 0, "{profile:?}");
+        }
+    }
+}
+
+#[test]
 fn cross_engine_mandatory_tails_release_frames_and_permute_arguments() {
     let source = "fn vm_even(n: i64, a: i64, b: i64) -> i64 {
             let marker = 41001;
@@ -1116,6 +1157,42 @@ fn cross_engine_mandatory_tails_release_frames_and_permute_arguments() {
         }
         .unwrap();
         assert_eq!(native.run_i64_with_limits(limits).unwrap(), 42);
+    }
+}
+
+#[test]
+fn completed_handler_iterations_release_control_before_cross_engine_tail_cycles() {
+    let source = "effect Step { [1,1] step() -> i64; }
+        fn vm_even(n:i64, total:i64) -> i64 {
+            let marker=41001;
+            handle n == 0 { true => total - 958, false => {
+                let amount=handle Step::step() { Step::step() with k => k(1) };
+                tail native_odd(n-1,total+amount)
+            } }
+        }
+        fn native_odd(n:i64, total:i64) -> i64 {
+            handle n == 0 { true => total - 958, false => {
+                let amount=handle Step::step() { Step::step() with k => k(1) };
+                tail vm_even(n-1,total+amount)
+            } }
+        }
+        pub fn main() -> i64 { let marker=41002; tail vm_even(1000,0) }";
+    let ir = compile_mixed(source);
+    let limits = VmExecutionLimits { max_call_depth: 8, max_handler_depth: 8,
+        max_retained_continuations: 8, max_native_bytes: 128 * 1024, ..Default::default() };
+    let program = ir.vm_program();
+    assert_eq!(program.run_i64_with_limits(limits).unwrap(), 42);
+    let decoded = grandiose_stage0::decode_and_verify_program(&program.canonical_bytes()).unwrap();
+    assert_eq!(decoded.run_i64_with_limits(limits).unwrap(), 42);
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        let (value, profile) = unsafe { native.run_i64_mixed_profiled(limits) }.unwrap();
+        assert_eq!(value, 42);
+        assert!(profile.peak_call_depth <= 8 && profile.recycled_tail_calls >= 1000, "{profile:?}");
+        assert!(profile.native_memory.peak_live_bytes <= 128 * 1024, "{profile:?}");
+        assert!(!profile.native_memory.counters_saturated, "{profile:?}");
+        assert_eq!(profile.native_memory.generated_resident_entry_allocations, 0, "{profile:?}");
+        assert_eq!(profile.native_memory.generated_resident_entry_copy_bytes, 0, "{profile:?}");
     }
 }
 

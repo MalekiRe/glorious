@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Native resident-entry measurements (cache 167)
+
+Native and mixed profiling now expose the existing allocation owners' backing
+storage and bulk-copy counters. Additional interval measurements count admission
+of already-present addressable residents at machine entry. They exclude private
+scalar spills, empty future frame slots and Rust metadata; saturation is explicit.
+Ordinary execution does not enable these optional memory counters.
+
+The 17 replay checks and selected one-shot/shared-payload checks pass with zero
+resident-entry allocations and copied bytes. The new 1,000-iteration handler/tail
+cycle passes fresh/decoded VM and mixed O0/O2 with limits of eight calls, handlers
+and retained continuations and 128 KiB of native storage. Completed delimiters
+are released before the mandatory backedge.
+
+The separate new unique operation-payload identity/mutation regression fails
+G5013 at helper invocation in the clause. EscapeFlow loses helper-performed input
+provenance while its direct-operation path retains it. This is an active source
+consumer integration failure, not a passing address-identity gate or full native
+handler completion. No compiler cache, verifier, wire or ABI generation changes.
+
 ## Cache 167: structural callable storage composition
 
 Owned tuple/array joins now publish the corresponding field constraints through
