@@ -2467,3 +2467,29 @@ acceptance: general borrowed resumption admission, helper-local symbolic
 delimiters, guarded interleavings, foreign control, mandatory-tail handling and
 complete shared-storage/performance evidence remain to be assessed or completed.
 Bytecode 75/schema 119 and native ABI 19 remain unchanged.
+
+## Structural projections of stored callable joins
+
+The type-owned callable join relation publishes its owned structural projections
+after both sides are normalized in the same inference world. Tuple and array
+fields consume the parent's storage constraint; references, nominal identities
+and callable input/result contracts do not acquire independent leaf rewrites.
+Constructed callable values retain their own checked environment and receiver
+contract while nested stored residents consume the same projected joins.
+
+Core, Control, Ownership, Specialized, Cleanup and executable MIR validate
+structural construction using the existing directional stored-resident relation.
+An aggregate's stored field may forget additional receiver authority, but it
+cannot invent authority or erase captured-region and predicate obligations.
+The previous exact-field comparisons at these boundaries are removed. Legacy
+MIR consumes the same rule. Native resident field transport uses the whole-home
+type/layout relation and retains authenticated environment identity and logical
+initialization holes; it does not create a new closure or grant source Copy.
+
+Cache 167 fixes the preserved projected borrowed-receiver regression. The full
+handler-reentry gate passes 64/64, including fresh/decoded VM and native/mixed
+O0/O2 execution. Focused type, Core, Control and native tests cover projection
+boundaries, receiver strengthening, captured debt, environment identity and
+partial initialization. Verifier 50, bytecode 75/schema 119 and native ABI 19
+are unchanged. This closes the receiver/storage regressions, not the remaining
+native-handler admission and shared-storage/performance acceptance audit.

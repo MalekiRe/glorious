@@ -1689,7 +1689,10 @@ impl NativeHome {
         }
         if let VmValue::Resident(source) = value {
             let (source_pointer, source_layout) = source.project(&[])?;
-            if source_layout.ty != layout.ty {
+            // Aggregate fields are storage boundaries just like the whole
+            // home above. Keep authenticated resident bytes and initialization
+            // while admitting only the same directional callable view.
+            if source_layout.memory != layout.memory || !super::vm_type_matches(&source_layout.ty, &layout.ty) {
                 return Err(error("native field move has a different layout"));
             }
             let origin = source.state.borrow()?.clone();
@@ -1893,6 +1896,37 @@ impl NativeHome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resident_field_views_preserve_environment_identity_and_holes_without_strengthening() {
+        let mut budget = budget(4096);
+        let signature = |permission| VmType::Callable { shared_receiver: permission, unique_receiver: permission,
+            safety: crate::Safety::Safe, parameters: vec![], result: Box::new(VmType::I64), effects: Box::default() };
+        let strong = signature(true);
+        let weak = signature(false);
+        let layout = |ty| Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let captures = super::super::RuntimeCaptureEnvironment::new(vec![VmValue::I64(42)]);
+        let value = VmValue::Callable { callee: crate::DefKey(crate::Digest::of_bytes(b"resident-field-view")),
+            captures: captures.clone(), signature: strong.clone() };
+        let source = NativeHome::new(layout(VmType::Tuple(vec![strong.clone(), VmType::I64])), &mut budget).unwrap();
+        source.store(&[], &VmValue::Tuple(Arc::from([value, VmValue::I64(7)])), &mut budget).unwrap();
+        source.clear(&[1]);
+        let destination = NativeHome::new(layout(VmType::Tuple(vec![VmType::Tuple(vec![weak.clone(), VmType::I64])])), &mut budget).unwrap();
+        destination.store(&[], &VmValue::Tuple(Arc::from([VmValue::Resident(source)])), &mut budget).unwrap();
+        assert!(!destination.is_initialized(&[0, 1]));
+        let VmValue::Callable { captures: retained, signature: actual, .. } = destination.load(&[0, 0], &mut budget).unwrap() else { panic!() };
+        assert!(Arc::ptr_eq(&captures, &retained));
+        assert_eq!(actual, strong);
+        let weak_source = NativeHome::new(layout(weak), &mut budget).unwrap();
+        let strong_destination = NativeHome::new(layout(VmType::Tuple(vec![strong])), &mut budget).unwrap();
+        let error = strong_destination.store(&[], &VmValue::Tuple(Arc::from([VmValue::Resident(weak_source.clone())])), &mut budget).unwrap_err();
+        assert!(matches!(error, VmArtifactError::NativeMemory { message: "native storage value has a different concrete type" }), "{error:?}");
+        let (pointer, field_layout) = strong_destination.project(&[0]).unwrap();
+        let error = strong_destination.store_at(&field_layout, pointer, &mut vec![0], &VmValue::Resident(weak_source), &mut budget).unwrap_err();
+        assert!(matches!(error, VmArtifactError::NativeMemory { message: "native field move has a different layout" }), "{error:?}");
+        let scalar = NativeHome::new(layout(VmType::I64), &mut budget).unwrap();
+        assert!(strong_destination.store(&[], &VmValue::Tuple(Arc::from([VmValue::Resident(scalar)])), &mut budget).is_err());
+    }
 
     fn budget(bytes: u64) -> ExecutionBudget {
         ExecutionBudget {

@@ -1051,6 +1051,20 @@ impl TypedBody {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
                     message: "Typed Core binding storage does not accept its initializer contract".into() });
             }
+            if expression.ty != Type::Never {
+                let accepts = |stored: &Type, value: &CoreId| self.expressions.get(value.0 as usize)
+                    .is_some_and(|value| value.ty == Type::Never || crate::types::regions::accepts_body_storage(stored, &value.ty));
+                let valid = match &expression.kind {
+                    CoreKind::Tuple(values) if values.is_empty() && expression.ty == Type::Unit => true,
+                    CoreKind::Tuple(values) => matches!(&expression.ty, Type::Tuple(fields)
+                        if fields.len() == values.len() && fields.iter().zip(values).all(|(stored, value)| accepts(stored, value))),
+                    CoreKind::Array(values) => expression.ty.array_accepts_count(values.len())
+                        && expression.ty.array_element().is_some_and(|element| values.iter().all(|value| accepts(element, value))),
+                    _ => true,
+                };
+                if !valid { diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core structural storage does not accept its constructed fields".into() }); }
+            }
             if let CoreKind::LabelValue { brand } = expression.kind
                 && !crate::types::label::matches_brand(&expression.ty, brand) {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,

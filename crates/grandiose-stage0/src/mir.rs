@@ -6798,6 +6798,20 @@ impl MirFunction {
             }
             return Ok(());
         }
+        if let MirInstruction::MakeTuple { dst, fields } = instruction {
+            let destination = self.local_type(*dst)?;
+            if fields.is_empty() && destination == &Type::Unit { return Ok(()); }
+            let Type::Tuple(stored) = destination else {
+                return Err("MIR tuple destination does not have its tuple type".into());
+            };
+            if stored.len() != fields.len() { return Err("MIR tuple field count differs from its storage layout".into()); }
+            for (stored, field) in stored.iter().zip(fields) {
+                if !crate::types::regions::accepts_body_storage(stored, self.local_type(*field)?) {
+                    return Err("MIR tuple storage does not accept its constructed field".into());
+                }
+            }
+            return Ok(());
+        }
         if let MirInstruction::MakeArray {
             dst,
             fields,
@@ -6809,7 +6823,7 @@ impl MirFunction {
                 return Err("MIR array destination does not have its array type".into());
             }
             for field in fields {
-                if self.local_type(*field)? != element_type {
+                if !crate::types::regions::accepts_body_storage(element_type, self.local_type(*field)?) {
                     return Err("MIR array field does not match its element type".into());
                 }
             }

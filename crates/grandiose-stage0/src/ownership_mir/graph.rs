@@ -96,10 +96,12 @@ impl OwnershipMir {
                 OwnershipAggregate::Tuple if fields.is_empty() && ty == &Type::Unit => true,
                 OwnershipAggregate::Tuple => {
                     matches!(ty, Type::Tuple(types) if types.len() == fields.len()
-                    && types.iter().zip(fields).all(|(ty, field)| self.graph_type(field.value).ok() == Some(ty)))
+                    && types.iter().zip(fields).all(|(ty, field)| self.graph_type(field.value)
+                        .is_ok_and(|value| crate::types::regions::accepts_body_storage(ty, value))))
                 }
                 OwnershipAggregate::Array => ty.array_accepts_count(fields.len()) && ty.array_element().is_some_and(|element|
-                    fields.iter().all(|field| self.graph_type(field.value).ok() == Some(element))),
+                    fields.iter().all(|field| self.graph_type(field.value)
+                        .is_ok_and(|value| crate::types::regions::accepts_body_storage(element, value)))),
                 OwnershipAggregate::Record(definition)
                 | OwnershipAggregate::Enum { definition, .. } => {
                     matches!(ty, Type::Nominal { definition: actual, .. } if actual == definition)
@@ -126,9 +128,9 @@ impl OwnershipMir {
             OwnershipOperation::Borrow(_) | OwnershipOperation::Capture { .. } => true,
         };
         if !valid {
-            return Err(invalid(
-                "ownership operation result type disagrees with its contract",
-            ));
+            return Err(invalid(&format!(
+                "ownership operation result type disagrees with its contract: {:?}: {ty:?}", instruction.operation,
+            )));
         }
         Ok(())
     }

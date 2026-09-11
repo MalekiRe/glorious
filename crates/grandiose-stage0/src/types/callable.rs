@@ -111,6 +111,47 @@ mod abi_refinement_tests {
     }
 
     #[test]
+    fn storage_join_projections_cover_owned_fields_without_entering_other_contracts() {
+        let callable = |contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let strong = callable(CallableContract { shared_receiver: true, unique_receiver: true, ..Default::default() });
+        let weak = callable(CallableContract::default());
+        let array = |ty| Type::FixedArray { element: Box::new(ty), length: Box::new(GenericArgument::ConstInteger(2.into())) };
+        for (from, to) in [
+            (Type::Tuple(vec![strong.clone(), Type::Unit]), Type::Tuple(vec![weak.clone(), Type::Unit])),
+            (Type::Array(Box::new(strong.clone())), Type::Array(Box::new(weak.clone()))),
+            (array(Type::Tuple(vec![strong.clone()])), array(Type::Tuple(vec![weak.clone()]))),
+        ] {
+            let projected = CallableContract::value_join_projections(from.clone(), to.clone());
+            assert_eq!(projected.first(), Some(&(from.clone(), to.clone())));
+            assert!(projected.contains(&(strong.clone(), weak.clone())));
+            let apply = |mut ty: Type| {
+                for rule in &projected {
+                    let GenericArgument::Type(result) = CallableContract::replace_value_types(GenericArgument::Type(ty), std::slice::from_ref(rule), 0)
+                        else { unreachable!() };
+                    ty = result;
+                }
+                ty
+            };
+            assert_eq!(apply(from), to);
+            assert_eq!(apply(strong.clone()), weak);
+        }
+        let nominal = |ty| Type::Nominal { definition: crate::DefKey(crate::Digest::of_bytes(b"projection-boundary")),
+            arguments: vec![GenericArgument::Type(ty)] };
+        let signature = |ty| Type::Callable { contract: Box::default(), safety: Safety::Safe, lifetime_binders: 0,
+            parameters: vec![ty], result: Box::new(Type::Unit), effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        for (from, to) in [
+            (reference(Lifetime::Static, strong.clone()), reference(Lifetime::Static, weak.clone())),
+            (nominal(strong.clone()), nominal(weak.clone())),
+            (signature(strong.clone()), signature(weak.clone())),
+        ] {
+            let projected = CallableContract::value_join_projections(Type::Tuple(vec![from]), Type::Tuple(vec![to]));
+            assert!(!projected.contains(&(strong.clone(), weak.clone())), "{projected:?}");
+        }
+    }
+
+    #[test]
     fn assignment_refinement_preserves_reference_regions_and_the_declared_callable_abi() {
         let function = |lifetime, contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
             lifetime_binders: 0, parameters: vec![reference(lifetime, Type::Unit)], result: Box::new(Type::Unit),
@@ -286,6 +327,37 @@ impl CallableContract {
             },
             (previous, _) => previous,
         }
+    }
+
+    /// Project a checked storage join onto its owned structural residents.
+    /// A field selected before the join must receive the same stored view as
+    /// its parent. References, callable ABIs and nominal identities are not
+    /// owned projection edges and supply no additional replacement rule.
+    pub(crate) fn value_join_projections(from: Type, to: Type) -> Vec<(Type, Type)> {
+        fn resident(from: &Type, to: &Type, output: &mut Vec<(Type, Type)>) {
+            if from == to { return; }
+            match (from, to) {
+                (Type::Callable { .. }, Type::Callable { .. }) => output.push((from.clone(), to.clone())),
+                (Type::Tuple(left), Type::Tuple(right)) if left.len() == right.len() => {
+                    output.push((from.clone(), to.clone()));
+                    for (left, right) in left.iter().zip(right) { resident(left, right, output); }
+                }
+                (Type::Array(left), Type::Array(right)) => {
+                    output.push((from.clone(), to.clone()));
+                    resident(left, right, output);
+                }
+                (Type::FixedArray { element: left, length: left_length }, Type::FixedArray { element: right, length: right_length })
+                    if left_length == right_length => {
+                    output.push((from.clone(), to.clone()));
+                    resident(left, right, output);
+                }
+                _ => {},
+            }
+        }
+        let mut output = vec![];
+        resident(&from, &to, &mut output);
+        if output.is_empty() && from != to { output.push((from, to)); }
+        output
     }
 
     /// Replace complete callable refinements without changing ABI structure

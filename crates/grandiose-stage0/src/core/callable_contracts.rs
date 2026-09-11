@@ -193,9 +193,15 @@ impl Elaborator<'_> {
         // miss a join that its later, already-resolved local read receives.
         argument = self.inference.resolve_argument_structure(argument);
         for (from, to) in &self.callable_value_joins {
-            let replacement = [(self.inference.resolve_type_structure(from.clone()), self.inference.resolve_type_structure(to.clone()))];
-            if constructor && matches!(&argument, GenericArgument::Type(ty) if ty == &replacement[0].0) { continue; }
-            argument = CallableContract::replace_value_types(argument, &replacement, 0);
+            let replacements = CallableContract::value_join_projections(
+                self.inference.resolve_type_structure(from.clone()), self.inference.resolve_type_structure(to.clone()));
+            // Parent views are installed before their projected constraints,
+            // so repeated resident types in untouched sibling fields cannot
+            // keep a view inconsistent with an independently selected field.
+            for replacement in replacements {
+                if constructor && matches!(&argument, GenericArgument::Type(ty) if ty == &replacement.0) { continue; }
+                argument = CallableContract::replace_value_types(argument, &[replacement], 0);
+            }
         }
         argument
     }

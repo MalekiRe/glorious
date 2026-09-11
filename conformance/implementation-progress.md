@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 167: structural callable storage composition
+
+Owned tuple/array joins now publish the corresponding field constraints through
+the existing normalized callable join producer. Constructor contracts remain
+distinct from stored views. All structural-construction receiving validators
+consume the same directional resident rule; native field transport retains the
+authenticated bytes, environment identity and partial initialization already
+supported by whole-home transport.
+
+The preserved projected borrowed-callback regression now passes the complete
+fresh/decoded VM, all-native and both mixed-direction O0/O2 matrix. The full
+handler-reentry gate passes **64/64**, with no ignored tests. Focused type/Core/
+Control/native checks reject receiver upgrades and capture-debt erasure and
+verify projection boundaries, retained environments and moved-out fields.
+Cache is 167; verifier 50, bytecode 75/schema 119 and native ABI 19 are unchanged.
+
+Receiver/storage regressions are closed. Native-handler admission and complete
+shared-storage/performance evidence remain under active acceptance review;
+this checkpoint is not a declaration of full compiler or library conformance.
+
 ## Cache 166: executed borrowed receiver permission
 
 The shared source validator now retains explicit borrowed receiver obligations

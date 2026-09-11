@@ -474,12 +474,13 @@ impl ControlMir {
                 if values.is_empty() && ty == &Type::Unit {
                     true
                 } else {
-                    matches!(ty, Type::Tuple(fields) if fields.len() == values.len() && fields.iter().zip(values).all(|(ty, value)| self.ty(*value).ok() == Some(ty)))
+                    matches!(ty, Type::Tuple(fields) if fields.len() == values.len() && fields.iter().zip(values)
+                        .all(|(ty, value)| self.ty(*value).is_ok_and(|value| crate::types::regions::accepts_body_storage(ty, value))))
                 }
             }
             ControlOperation::Array(values) => {
                 ty.array_accepts_count(values.len()) && ty.array_element().is_some_and(|element|
-                    values.iter().all(|value| self.ty(*value).ok() == Some(element)))
+                    values.iter().all(|value| self.ty(*value).is_ok_and(|value| crate::types::regions::accepts_body_storage(element, value))))
             }
             ControlOperation::Function { .. } => matches!(ty, Type::Callable { .. }),
             ControlOperation::Literal(_) => {
@@ -560,6 +561,37 @@ impl ControlTerminator {
 mod tests {
     use super::*;
     use crate::{Digest, FileKey, ScalarType};
+
+    #[test]
+    fn structural_storage_checks_directional_callable_authority_and_debt() {
+        let callable = |contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE };
+        let strong = callable(crate::types::CallableContract {
+            shared_receiver: true, unique_receiver: true, ..Default::default()
+        });
+        let weak = callable(Default::default());
+        let mut indebted = strong.clone();
+        let Type::Callable { contract, .. } = &mut indebted else { unreachable!() };
+        contract.captures.push(Type::Reference { mutability: crate::Mutability::Shared,
+            lifetime: crate::Lifetime::Generic(0), referent: Box::new(Type::Unit) });
+        for array in [false, true] {
+            let mut mir = fixture();
+            let instruction = ControlInstruction { scope: ControlScopeId(0), destination: ControlValue(2),
+                operation: if array { ControlOperation::Array(vec![ControlValue(1)]) }
+                    else { ControlOperation::Tuple(vec![ControlValue(1)]) } };
+            for (provided, stored, accepted) in [
+                (strong.clone(), weak.clone(), true),
+                (weak.clone(), strong.clone(), false),
+                (indebted.clone(), weak.clone(), false),
+                (Type::Unit, weak.clone(), false),
+            ] {
+                mir.values[1].ty = provided;
+                mir.values[2].ty = if array { Type::Array(Box::new(stored)) } else { Type::Tuple(vec![stored]) };
+                assert_eq!(mir.validate_operation(&instruction).is_ok(), accepted, "{instruction:?}");
+            }
+        }
+    }
 
     fn fixture() -> ControlMir {
         let digest = Digest::of_bytes(b"control-validator");

@@ -17,6 +17,24 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn structural_callable_storage_cannot_strengthen_a_constructed_field() {
+    let core = core_for("structural-receiver-upgrade@0.1.0",
+        "pub fn main(callback:(i64)->i64) -> i64 {let saved=(callback,); saved.0(0)}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let mut forged = core.clone();
+    let contract = forged.expressions.iter_mut().find_map(|expression| match (&expression.kind, &mut expression.ty) {
+        (CoreKind::Tuple(_), Type::Tuple(fields)) => match &mut fields[0] {
+            Type::Callable { contract, .. } => Some(contract), _ => None,
+        },
+        _ => None,
+    }).unwrap();
+    contract.shared_receiver = true;
+    assert_ne!(core.semantic_fingerprint(), forged.semantic_fingerprint());
+    assert!(forged.validate().iter().any(|diagnostic| diagnostic.message.contains("structural storage")));
+}
+
+#[test]
 fn binding_storage_retains_its_join_without_rewriting_constructed_code() {
     let core = core_for("stored-constructor-contract@0.1.0",
         "type Callback=(i64)->i64; fn expose(slot:&mut Callback) {}
