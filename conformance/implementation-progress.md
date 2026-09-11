@@ -5,6 +5,69 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Private scalar segment backing
+
+The next allocation trace classified the preserved boundary-rounding O0 failure
+at 13,285,255 native work ticks. Private scalar spill homes accounted for
+10,509,123 allocations and actual resident-home construction for 5,144,315;
+ordinary arguments and other runtime storage made up the remainder of the
+unchanged 16,777,216-element ceiling. This identified a concrete storage-path
+cost, not permission to exempt float code from accounting.
+
+Cache 185 publishes aligned scalar offsets and one spill extent from the same
+checked native layouts. Machine entry uses this backing only for private scalar
+registers; addressable owners and non-scalar residents retain their actual homes
+and initialization loans. Each segment reconstructs scalar inputs and flags from
+its current registers, and reads output bytes only under the verified segment's
+current flag. The shared native layout reader still rejects invalid scalar bits.
+The old scalar-home map is removed from activations and snapshots.
+
+At most one idle allocation is retained in the execution domain, with exact-size,
+alignment-checked reuse. Nested entry owns distinct backing. New allocations and
+all live/idle bytes remain charged and measured; raw allocation/resize, home
+creation and control admission reclaim idle backing under byte-budget pressure.
+No source identity, resident, initialization flag or reference authority enters
+the pool. The unsafe spill-read boundary explicitly requires the current
+generated initialization contract, not an arbitrary claim about stale bytes.
+
+The 22 native-storage checks pass, including 1,024 exact-ceiling reuse cycles,
+invalid flags/layouts/Bool/Char bits, expired input homes, nested backing and
+byte-pressure reclamation. Twelve generated-code checks pass, including a new
+O0/O2 assertion that a private scalar-only entry allocates one backing block,
+not one home per register. Six handler-payload checks, four mixed/native tail
+checks, the three-shot aggregate replay check and the scalar/control O0/O2
+matrix pass as well. These are 46 focused checks, not the entire native suite.
+
+The previously failing full native decimal-conversion regression now passes in
+292.18 seconds with tracing enabled and again in 366.11 seconds in the final
+untraced cache-185 build while the library matrix ran concurrently. It executes
+the unchanged boundary-rounding
+and exact-minimum-subnormal fixtures, each through VM and native O0/O2 under
+the original default limits. The diagnostic instrumentation has been removed,
+and all 22 native-storage checks pass again in the final build.
+This closes that regression, not complete native floating-point, library,
+language or self-hosted acceptance. Executable proofs, portable encoding and
+the generated pointer-and-mask ABI are unchanged.
+
+The subsequent 35-case source-library matrix reached its 590-second process
+budget (exit 143), after **29 passes and five source-checking failures**. I/O did
+not report a case result before termination and remains unverified, not counted
+as a sixth diagnostic failure or a pass. All ten float cases, source-map and
+full-library composition passed. The five failing families are `budget` (G5024
+ownership), `iterator` (G4403 tail provenance and G5023 returned-reference
+provenance), and `iterator_callbacks`, `sorting`, and `traversal` (visibility,
+lifetime and inference obligations). No full matrix pass is claimed.
+
+Those remaining failures require checking the actual source/test contracts,
+not automatically granting source admission. In particular, the budget spec's
+exact-linear tickets must survive unsuccessful release paths; wildcard disposal
+of a returned ticket cannot be legalized to make a fixture pass. Several callback
+fixtures also reference private `__g1_abort`; any fixture migration must preserve
+its assertion and non-invocation requirements without weakening library privacy.
+An isolated I/O check under the same limits and these source-boundary repairs
+are the next library acceptance work. Full language and self-hosted acceptance
+remain separate, unfinished requirements.
+
 ## Shared native initialization-loan backing
 
 The preserved native decimal-conversion regression identifies its first failure

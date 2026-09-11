@@ -382,6 +382,21 @@ fn with_hostile_float_mode<T>(body: impl FnOnce() -> T) -> T {
 }
 
 #[test]
+fn generated_private_scalar_registers_use_one_backing_allocation() {
+    let ir = compile("pub fn main() -> i64 { 42 }");
+    assert!(ir.function_keys().iter().all(|key| ir.function(*key).unwrap().registers.iter()
+        .all(|ty| matches!(ty, grandiose_stage0::VmType::I64 | grandiose_stage0::VmType::Unit))));
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        let (value, profile) = unsafe { native.run_i64_profiled(Default::default()) }.unwrap();
+        assert_eq!(value, 42);
+        assert_eq!(profile.native_memory.home_allocations, 1, "{profile:?}");
+        assert_eq!(profile.native_memory.raw_allocations, 0, "{profile:?}");
+        assert_eq!(profile.native_memory.generated_resident_entries, 0, "{profile:?}");
+    }
+}
+
+#[test]
 fn actual_llvm_native_scalar_control_matches_vm_at_o0_and_o2() {
     for source in [
         "pub fn main() -> i64 { 42 }",

@@ -11,6 +11,7 @@ use std::{
     fmt::Write,
     sync::Arc,
 };
+use grandiose_runtime::memory::MemoryLayout;
 
 #[path = "memory_emit.rs"]
 mod memory;
@@ -24,6 +25,8 @@ const MAX_INIT_PATHS: usize = 16 * 1024;
 pub(in crate::vm_backend) struct FunctionPlan {
     pub(in crate::vm_backend) layouts: Vec<Arc<NativeLayout>>,
     pub(in crate::vm_backend) paths: Vec<Arc<[Vec<u32>]>>,
+    pub(in crate::vm_backend) scalar_spill_layout: MemoryLayout,
+    pub(in crate::vm_backend) scalar_spill_offsets: Vec<Option<usize>>,
     pub(in crate::vm_backend) scratch_bytes: usize,
     pub(in crate::vm_backend) pattern_references: Vec<PatternReferencePlan>,
     pattern_reference_width: usize,
@@ -81,6 +84,8 @@ impl<'a> Plan<'a> {
             let descriptors = function.nominal_copy_descriptors.clone().into();
             let mut layouts = vec![];
             let mut paths: Vec<Arc<[Vec<u32>]>> = vec![];
+            let mut scalar_spill_layout = MemoryLayout::of::<()>();
+            let mut scalar_spill_offsets = vec![];
             let mut frame_bytes = 0u64;
             let mut path_count = 0usize;
             for (register, ty) in function.registers.iter().enumerate() {
@@ -113,6 +118,13 @@ impl<'a> Plan<'a> {
                             + if layout.has_resident_metadata() { 4 * std::mem::size_of::<usize>() as u64 } else { 0 },
                     )
                     .ok_or_else(|| unsupported(0, "native activation layout overflow"))?;
+                let offset = if matches!(layout.shape, NativeShape::Scalar) {
+                    let (combined, offset) = scalar_spill_layout.extend(layout.memory)
+                        .map_err(|_| unsupported(0, "native scalar spill layout overflow"))?;
+                    scalar_spill_layout = combined;
+                    Some(offset)
+                } else { None };
+                scalar_spill_offsets.push(offset);
                 layouts.push(layout);
                 paths.push(resident_paths.into_iter().collect());
             }
@@ -159,6 +171,8 @@ impl<'a> Plan<'a> {
             result.plans.push(FunctionPlan {
                 layouts,
                 paths,
+                scalar_spill_layout,
+                scalar_spill_offsets,
                 scratch_bytes: pattern_bytes + path_count + function.registers.len()
                     * (std::mem::size_of::<Arc<crate::vm_backend::native_storage::NativeHome>>()
                         + std::mem::size_of::<Vec<u8>>()

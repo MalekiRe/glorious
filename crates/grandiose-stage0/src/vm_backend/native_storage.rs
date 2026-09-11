@@ -8,7 +8,7 @@ use super::{
     ExecutionBudget, VmArtifactError, VmFunction, VmInstruction,
     VmNominalCopyDescriptor, VmType, VmValue,
 };
-use grandiose_runtime::memory::RawAllocation;
+use grandiose_runtime::memory::{MemoryLayout, RawAllocation};
 use std::{
     cell::{Cell, Ref, RefCell, RefMut},
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -972,6 +972,111 @@ enum StorageAuthority {
     ExternalArgument,
 }
 
+/// Private scalar spills have no resident identity, reference origins, or
+/// initialization authority beyond one generated segment. Keep their raw
+/// backing separate from source homes; snapshots retain scalar values only.
+#[derive(Debug)]
+pub(super) struct NativeScalarSpills {
+    allocation: NativeAllocation,
+    live_bytes: Rc<Cell<usize>>,
+}
+
+impl NativeScalarSpills {
+    pub(super) fn acquire(layout: MemoryLayout, scratch_bytes: usize,
+        budget: &mut ExecutionBudget,
+    ) -> Result<Self, VmArtifactError> {
+        if let Some(spills) = budget.native_memory.scalar_spills.take() {
+            let available = budget.native_memory.live_native_bytes().checked_add(scratch_bytes)
+                .is_some_and(|bytes| bytes as u64 <= budget.limits.max_native_bytes);
+            let backing = spills.allocation.layout();
+            if backing.size() == layout.size() && backing.alignment() >= layout.alignment()
+                && backing.size() as u64 <= budget.limits.max_native_allocation_bytes && available {
+                return Ok(spills);
+            }
+            // An oversized idle buffer may not force a smaller live frame
+            // over its byte ceiling. Release it before admitting exact backing.
+            drop(spills);
+        }
+        let available = budget.limits.max_native_bytes
+            .saturating_sub(budget.native_memory.live_native_bytes() as u64)
+            .saturating_sub(scratch_bytes as u64)
+            .min(budget.limits.max_native_allocation_bytes);
+        let allocation = RawAllocation::new(layout, usize::try_from(available).unwrap_or(usize::MAX))
+            .map_err(super::native_memory::memory_error)?;
+        let allocation = NativeAllocation::new(allocation,
+            budget.native_memory.measurements.clone(), AllocationKind::Home);
+        budget.reserve_value("native scalar spill backing", 1)?;
+        let live_bytes = budget.native_memory.home_bytes.clone();
+        live_bytes.set(live_bytes.get().checked_add(layout.size())
+            .ok_or_else(|| error("native scalar spill size overflow"))?);
+        Ok(Self { allocation, live_bytes })
+    }
+
+    pub(super) fn slot(&self, offset: usize, layout: &NativeLayout) -> Result<*mut u8, VmArtifactError> {
+        if !matches!(layout.shape, NativeShape::Scalar)
+            || offset.checked_add(layout.memory.size()).is_none_or(|end| end > self.allocation.layout().size())
+            || self.allocation.layout().alignment() < layout.memory.alignment()
+            || offset % layout.memory.alignment() != 0 {
+            return Err(error("invalid private native scalar spill layout"));
+        }
+        // The checked extent and alignment come from the sealed native plan.
+        Ok(unsafe { self.allocation.as_ptr().as_ptr().add(offset) })
+    }
+
+    pub(super) fn store(&self, offset: usize, layout: &NativeLayout, value: Option<&VmValue>,
+        budget: &mut ExecutionBudget,
+    ) -> Result<bool, VmArtifactError> {
+        let pointer = self.slot(offset, layout)?;
+        let Some(value) = value else { return Ok(false); };
+        if !super::vm_type_matches(&super::borrowed_value_type(value, &layout.ty), &layout.ty) {
+            return Err(error("native scalar spill value has a different concrete type"));
+        }
+        let value = match value {
+            VmValue::Uninitialized(_) => return Ok(false),
+            VmValue::Resident(home) => {
+                home.project(&[])?;
+                if !home.is_initialized(&[]) { return Ok(false); }
+                home.scalar_value()?
+            }
+            value => value.clone(),
+        };
+        // This is private scalar storage, with no resident/reference metadata
+        // or outstanding addressable owner. The layout validates scalar bits.
+        unsafe { layout.write(pointer, value, budget)?; }
+        Ok(true)
+    }
+
+    /// # Safety
+    /// A flag of one must come from successful scalar storage or the verified
+    /// generated segment's current initialization mask. It certifies initialized
+    /// bytes for this exact layout; Bool/Char value validity is checked here.
+    pub(super) unsafe fn load(&self, offset: usize, layout: &NativeLayout, initialized: u8,
+        budget: &mut ExecutionBudget,
+    ) -> Result<Option<VmValue>, VmArtifactError> {
+        let pointer = self.slot(offset, layout)?;
+        match initialized {
+            0 => Ok(None),
+            // Only the generated segment's current flag permits a read; old
+            // backing bytes alone never establish an initialized register.
+            1 => unsafe { layout.read(pointer, budget).map(Some) },
+            _ => Err(error("invalid native scalar spill initialization flag")),
+        }
+    }
+
+    pub(super) fn release(self, budget: &mut ExecutionBudget) {
+        // Re-entry owns a separate buffer while the outer segment is active.
+        // Keep at most one idle allocation, and never any of its value/mask
+        // authority. Every next segment reconstructs those from its registers.
+        budget.native_memory.scalar_spills = Some(self);
+    }
+}
+
+impl Drop for NativeScalarSpills {
+    fn drop(&mut self) {
+        self.live_bytes.set(self.live_bytes.get() - self.allocation.layout().size());
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct NativeHome {
     allocation: RefCell<Option<NativeAllocation>>,
@@ -999,6 +1104,8 @@ impl NativeHome {
         budget: &mut ExecutionBudget,
     ) -> Result<Arc<Self>, VmArtifactError> {
         let bytes = layout.memory.size();
+        budget.native_memory.reclaim_idle_spills(bytes,
+            usize::try_from(budget.limits.max_native_bytes).unwrap_or(usize::MAX));
         let available = budget
             .limits
             .max_native_bytes
@@ -1942,6 +2049,124 @@ mod tests {
             instructions: 0,
             allocated_elements: 0,
         }
+    }
+
+    #[test]
+    fn private_scalar_spills_reuse_bytes_without_retaining_initialization_or_home_authority() {
+        let mut budget = budget(1024);
+        let layout = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+        let spills = NativeScalarSpills::acquire(layout.memory, 0, &mut budget).unwrap();
+        let pointer = spills.slot(0, &layout).unwrap();
+        assert!(spills.store(0, &layout, Some(&VmValue::I64(42)), &mut budget).unwrap());
+        assert_eq!(super::super::expect_i64(unsafe { spills.load(0, &layout, 1, &mut budget) }.unwrap().unwrap()).unwrap(), 42);
+        spills.release(&mut budget);
+        let charged = budget.allocated_elements;
+        budget.limits.max_allocation_elements = charged;
+        for _ in 0..1024 {
+            let spills = NativeScalarSpills::acquire(layout.memory, 0, &mut budget).unwrap();
+            assert_eq!(spills.slot(0, &layout).unwrap(), pointer);
+            assert!(!spills.store(0, &layout, None, &mut budget).unwrap());
+            assert!(unsafe { spills.load(0, &layout, 0, &mut budget) }.unwrap().is_none());
+            assert!(!spills.store(0, &layout, Some(&VmValue::Uninitialized(VmType::I64)), &mut budget).unwrap());
+            assert!(spills.store(0, &layout, Some(&VmValue::Uninitialized(VmType::U64)), &mut budget).is_err());
+            assert!(unsafe { spills.load(0, &layout, 2, &mut budget) }.is_err());
+            assert!(spills.store(0, &layout, Some(&VmValue::I64(42)), &mut budget).unwrap());
+            assert_eq!(super::super::expect_i64(unsafe { spills.load(0, &layout, 1, &mut budget) }.unwrap().unwrap()).unwrap(), 42);
+            let flags = [1];
+            assert!(NativeHome::capture_loan(layout.clone(), pointer, flags.as_ptr(), &budget).is_err());
+            assert!(budget.native_memory.homes.borrow().allocations.is_empty());
+            assert!(budget.native_memory.homes.borrow().native_inputs.is_empty());
+            spills.release(&mut budget);
+            assert_eq!(budget.allocated_elements, charged);
+        }
+        assert!(matches!(NativeScalarSpills::acquire(MemoryLayout::of::<i128>(), 0, &mut budget),
+            Err(VmArtifactError::AllocationLimit { .. })));
+        assert!(budget.native_memory.scalar_spills.is_none());
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
+    }
+
+    #[test]
+    fn private_scalar_spills_validate_layout_bits_and_live_resident_inputs() {
+        let mut budget = budget(1024);
+        let layout = |ty| Arc::new(super::super::native_memory::native_layout(&ty, &Arc::from([]), &mut vec![]).unwrap());
+        let integer = layout(VmType::I64);
+        let spills = NativeScalarSpills::acquire(integer.memory, 0, &mut budget).unwrap();
+        assert!(spills.slot(1, &integer).is_err());
+        assert!(spills.slot(8, &integer).is_err());
+        assert!(spills.slot(0, &layout(VmType::I128)).is_err());
+        assert!(spills.slot(0, &layout(VmType::Tuple(vec![VmType::I64]))).is_err());
+        let boolean = layout(VmType::Bool);
+        unsafe { spills.slot(0, &boolean).unwrap().write(2); }
+        assert!(unsafe { spills.load(0, &boolean, 1, &mut budget) }.is_err());
+        let character = layout(VmType::Char);
+        unsafe { spills.slot(0, &character).unwrap().cast::<u32>().write(0xd800); }
+        assert!(unsafe { spills.load(0, &character, 1, &mut budget) }.is_err());
+        let home = NativeHome::new(integer.clone(), &mut budget).unwrap();
+        let resident = VmValue::Resident(home.clone());
+        assert!(!spills.store(0, &integer, Some(&resident), &mut budget).unwrap());
+        home.store(&[], &VmValue::I64(42), &mut budget).unwrap();
+        assert!(spills.store(0, &integer, Some(&resident), &mut budget).unwrap());
+        home.retire();
+        assert!(spills.store(0, &integer, Some(&resident), &mut budget).is_err());
+    }
+
+    #[test]
+    fn private_scalar_spill_reentry_owns_distinct_backing_and_charges_live_bytes() {
+        let mut budget = budget(16);
+        budget.native_memory = super::super::native_memory::NativeMemory::profiled();
+        let layout = super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap();
+        let outer = NativeScalarSpills::acquire(layout.memory, 0, &mut budget).unwrap();
+        let inner = NativeScalarSpills::acquire(layout.memory, 0, &mut budget).unwrap();
+        assert_ne!(outer.slot(0, &layout).unwrap(), inner.slot(0, &layout).unwrap());
+        assert_eq!(budget.native_memory.live_native_bytes(), 16);
+        assert!(NativeScalarSpills::acquire(layout.memory, 0, &mut budget).is_err());
+        inner.release(&mut budget);
+        outer.release(&mut budget);
+        assert_eq!(budget.native_memory.live_native_bytes(), 8);
+        drop(budget.native_memory.scalar_spills.take());
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
+        let profile = budget.native_memory.measurements.as_ref().unwrap().snapshot();
+        assert_eq!((profile.home_allocations, profile.home_deallocations, profile.home_peak_bytes), (2, 2, 16));
+    }
+
+    #[test]
+    fn idle_scalar_spills_yield_the_byte_budget_to_raw_homes_and_control() {
+        let layout = MemoryLayout::of::<i64>();
+        let mut budget = budget(8);
+        for kind in 0..3 {
+            NativeScalarSpills::acquire(layout, 0, &mut budget).unwrap().release(&mut budget);
+            match kind {
+                0 => {
+                    let pointer = budget.native_memory.allocate(layout, 8, 8).unwrap();
+                    budget.native_memory.deallocate(pointer, layout).unwrap();
+                }
+                1 => {
+                    let resident = Arc::new(super::super::native_memory::native_layout(&VmType::I64, &Arc::from([]), &mut vec![]).unwrap());
+                    drop(NativeHome::new(resident, &mut budget).unwrap());
+                }
+                _ => { drop(budget.native_memory.reserve_control(8, budget.limits).unwrap()); }
+            }
+            assert!(budget.native_memory.scalar_spills.is_none());
+            assert_eq!(budget.native_memory.live_native_bytes(), 0);
+        }
+        budget.limits.max_native_bytes = 12;
+        let small = MemoryLayout::new(4, 1).unwrap();
+        let pointer = budget.native_memory.allocate(small, 8, 12).unwrap();
+        NativeScalarSpills::acquire(layout, 0, &mut budget).unwrap().release(&mut budget);
+        let pointer = unsafe { budget.native_memory.reallocate(pointer, small, 8, 8, 12) }.unwrap();
+        assert!(budget.native_memory.scalar_spills.is_none());
+        budget.native_memory.deallocate(pointer, MemoryLayout::new(8, 1).unwrap()).unwrap();
+        NativeScalarSpills::acquire(layout, 0, &mut budget).unwrap().release(&mut budget);
+        let active = NativeScalarSpills::acquire(MemoryLayout::of::<i32>(), 0, &mut budget).unwrap();
+        assert_eq!(budget.native_memory.live_native_bytes(), 4, "an active smaller frame does not retain excess cached bytes");
+        let pointer = budget.native_memory.allocate(layout, 8, 12).unwrap();
+        budget.native_memory.deallocate(pointer, layout).unwrap();
+        drop(active);
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
+        NativeScalarSpills::acquire(layout, 0, &mut budget).unwrap().release(&mut budget);
+        budget.native_memory.reclaim_idle_spills(0, 0);
+        assert!(budget.native_memory.scalar_spills.is_none(), "a reduced allowance reclaims idle bytes even without new payload");
+        assert_eq!(budget.native_memory.live_native_bytes(), 0);
     }
 
     #[test]

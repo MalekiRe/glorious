@@ -10685,9 +10685,6 @@ struct RuntimeRegisters {
     source_storage: BTreeMap<u32, u64>,
     native_plan: Option<Arc<native_storage::NativeFramePlan>>,
     native_homes: BTreeMap<u32, Arc<native_storage::NativeHome>>,
-    /// Private scalar register spill space. Values, not these unobservable
-    /// bytes, are snapshotted; a generated segment reloads them on entry.
-    machine_scalars: BTreeMap<u32, Arc<native_storage::NativeHome>>,
     pending_native: Vec<u32>,
     capture_environment: Option<Arc<RuntimeCaptureEnvironment>>,
     /// A replay of an active callback can own copied capture slots without
@@ -18930,7 +18927,6 @@ mod tests {
         assert!(fresh.prepared_receivers.is_empty());
         assert!(fresh.pending_native.is_empty());
         assert!(fresh.native_homes.is_empty());
-        assert!(fresh.machine_scalars.is_empty());
         assert!(fresh.capture_environment.is_none());
         assert_eq!(budget.allocated_elements, 1);
     }

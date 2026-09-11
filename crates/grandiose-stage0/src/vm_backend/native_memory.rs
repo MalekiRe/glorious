@@ -22,6 +22,8 @@ pub(super) struct NativeMemory {
     control_bytes: Rc<Cell<usize>>,
     pub(super) measurements: Option<Rc<NativeMemoryMeasurements>>,
     pub(super) homes: super::native_storage::HomeRegistry,
+    /// Unobservable scalar segment backing, never a source resident or snapshot.
+    pub(super) scalar_spills: Option<super::native_storage::NativeScalarSpills>,
     pub(super) residents: Rc<super::native_residents::ResidentMetadata>,
     program_descriptors: Option<Arc<[VmNominalCopyDescriptor]>>,
     storage_plans: BTreeMap<super::DefKey, Arc<super::native_storage::NativeFramePlan>>,
@@ -79,9 +81,16 @@ impl NativeMemory {
 
     pub(super) fn live_native_bytes(&self) -> usize { self.live_bytes + self.home_bytes.get() + self.control_bytes.get() }
 
-    pub(super) fn reserve_control(&self, bytes: usize, limits: super::VmExecutionLimits)
+    pub(super) fn reclaim_idle_spills(&mut self, bytes: usize, total_limit: usize) {
+        if self.live_native_bytes().checked_add(bytes).is_none_or(|total| total > total_limit) {
+            self.scalar_spills.take();
+        }
+    }
+
+    pub(super) fn reserve_control(&mut self, bytes: usize, limits: super::VmExecutionLimits)
         -> Result<NativeControlLease, VmArtifactError>
     {
+        self.reclaim_idle_spills(bytes, usize::try_from(limits.max_native_bytes).unwrap_or(usize::MAX));
         let total = self.live_native_bytes().checked_add(bytes)
             .ok_or_else(|| error("native control storage size overflow"))?;
         if bytes as u64 > limits.max_native_allocation_bytes || total as u64 > limits.max_native_bytes {
@@ -145,6 +154,7 @@ impl NativeMemory {
         block_limit: usize,
         total_limit: usize,
     ) -> Result<*mut u8, VmArtifactError> {
+        self.reclaim_idle_spills(layout.size(), total_limit);
         let available = total_limit.saturating_sub(self.live_native_bytes()).min(block_limit);
         let allocation = match RawAllocation::new(layout, available) {
             Ok(allocation) => allocation,
@@ -212,6 +222,7 @@ impl NativeMemory {
             }
             self.allocations.remove(&pointer.addr()).unwrap()
         };
+        self.reclaim_idle_spills(size.saturating_sub(old.size()), total_limit);
         let available = total_limit
             .saturating_sub(self.live_native_bytes() - old.size())
             .min(block_limit);

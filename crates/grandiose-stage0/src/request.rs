@@ -386,7 +386,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 182 uses executable may-resident facts to prove vacant cleanup paths.
 // Cache 183 shares empty register-buffer reuse across runtime invocation entries.
 // Cache 184 shares immutable native paths and reuses empty initialization-loan backing.
-pub const STAGE0_CACHE_GENERATION: u32 = 184;
+// Cache 185 separates private scalar segment backing from addressable native homes.
+pub const STAGE0_CACHE_GENERATION: u32 = 185;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.

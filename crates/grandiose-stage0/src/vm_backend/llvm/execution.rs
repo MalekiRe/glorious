@@ -7,7 +7,7 @@ use super::{LlvmError, LlvmExecutionProfile, LlvmNativeModule, NativeContext};
 use crate::vm_backend::{
     DefKey, ExecutionBudget, RuntimeRegisters, VmArtifactError, VmExecutionLimits,
     VmFunction, VmInstruction, VmType, VmValue, VmAuthoringProfile,
-    native_memory::NativeShape, native_storage::{NativeFramePlan, NativeHome},
+    native_memory::NativeShape, native_storage::{NativeFramePlan, NativeScalarSpills},
 };
 use std::sync::Arc;
 
@@ -48,6 +48,7 @@ impl LlvmNativeModule {
         let index = self.plan().functions.binary_search(&function.definition)
             .map_err(|_| error("native frame does not belong to its bound graph"))?;
         let frame = &self.plan().frame_layouts[index];
+        let spills = NativeScalarSpills::acquire(frame.scalar_spill_layout, frame.scratch_bytes, budget)?;
         let _scratch = budget.native_memory.reserve_control(frame.scratch_bytes, budget.limits)?;
         let mut homes = Vec::with_capacity(frame.layouts.len());
         let mut flags = Vec::with_capacity(frame.layouts.len());
@@ -58,27 +59,34 @@ impl LlvmNativeModule {
             let observed_entry = if resident && registers.values[slot].is_some() {
                 budget.native_memory.measurements.as_ref().map(|measurements| (measurements.clone(), measurements.snapshot()))
             } else { None };
-            let home = if resident {
-                registers.native_home(local, budget)?
+            let (home, pointer) = if resident {
+                let home = registers.native_home(local, budget)?;
+                if let Some(value) = &registers.values[slot] {
+                    home.store(&[], value, budget)?;
+                } else { home.clear(&[]); }
+                flags.push(frame.paths[slot].iter().map(|path| u8::from(home.is_initialized(path))).collect::<Vec<_>>());
+                let pointer = home.pointer();
+                (Some(home), pointer)
             } else {
-                if !registers.machine_scalars.contains_key(&local) {
-                    registers.machine_scalars.insert(local, NativeHome::new(layout.clone(), budget)?);
+                if frame.paths[slot].len() != 1 || !frame.paths[slot][0].is_empty() {
+                    return Err(error("private scalar spill has a non-scalar initialization contract"));
                 }
-                registers.machine_scalars[&local].clone()
+                let offset = frame.scalar_spill_offsets[slot]
+                    .ok_or_else(|| error("private native register has no scalar spill layout"))?;
+                flags.push(vec![u8::from(spills.store(offset, layout, registers.values[slot].as_ref(), budget)?)]);
+                (None, spills.slot(offset, layout)?)
             };
-            if let Some(value) = &registers.values[slot] {
-                home.store(&[], value, budget)?;
-            } else { home.clear(&[]); }
             if let Some((measurements, before)) = observed_entry { measurements.resident_entry(before); }
-            flags.push(frame.paths[slot].iter().map(|path| u8::from(home.is_initialized(path))).collect::<Vec<_>>());
-            slots.extend([home.pointer().cast_const(), flags.last().unwrap().as_ptr()]);
+            slots.extend([pointer.cast_const(), flags.last().unwrap().as_ptr()]);
             homes.push(home);
         }
         let mut loans = Vec::with_capacity(homes.len());
         for (slot, home) in homes.iter().enumerate() {
             // The generated code writes the actual active initialization view,
             // not a shadow mask interpreted after the computation has run.
-            loans.push(unsafe { home.lend_native(flags[slot].as_mut_ptr(), frame.paths[slot].clone(), budget)? });
+            if let Some(home) = home {
+                loans.push(unsafe { home.lend_native(flags[slot].as_mut_ptr(), frame.paths[slot].clone(), budget)? });
+            }
         }
         let mut context = NativeContext::new(budget.limits);
         context.instructions = budget.instructions;
@@ -97,10 +105,16 @@ impl LlvmNativeModule {
             return Err(error("native segment returned without a verified frame transition"));
         }
         for (slot, home) in homes.into_iter().enumerate() {
-            registers.values[slot] = if !home.is_initialized(&[]) { None }
-                else if registers.wants_native(slot as u32) { Some(VmValue::Resident(home)) }
-                else { Some(home.scalar_value()?) };
+            registers.values[slot] = if let Some(home) = home {
+                if home.is_initialized(&[]) { Some(VmValue::Resident(home)) } else { None }
+            } else {
+                // The successfully completed verified segment supplies the
+                // current scalar mask, never bytes retained from another entry.
+                unsafe { spills.load(frame.scalar_spill_offsets[slot].expect("checked scalar spill"),
+                    &frame.layouts[slot], flags[slot][0], budget)? }
+            };
         }
+        spills.release(budget);
         Ok(stopped)
     }
 

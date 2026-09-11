@@ -2918,3 +2918,27 @@ admission before publishing a new loan. Immutable code metadata and inline views
 do not pretend to allocate per entry. Cache 184 records this runtime correction;
 executable proofs, portable encoding and native ABI are unchanged. This repairs
 metadata churn, not full compiler, library or self-hosted acceptance.
+
+## Private scalar segment backing
+
+The checked native frame layout now publishes aligned scalar spill offsets and
+one backing extent. Machine entry uses that storage only for registers that the
+existing runtime storage plan does not make addressable. Non-scalar residents,
+borrowed/captured storage and exposed scalar owners still use their actual
+NativeHome and live initialization loans. No source address can name a private
+spill slot, and no home or reference authority is registered for its bytes.
+
+Each segment reloads scalar values and creates its current initialization flags.
+Only a successfully completed verified segment's flag permits reading its result
+bytes; scalar bit validation uses the shared native layout reader. An expired
+resident cannot be admitted as a scalar input. The former per-register scalar
+home map is removed from runtime activations and continuation snapshots.
+
+The execution domain retains at most one idle raw spill allocation. Reuse requires
+the exact extent and compatible alignment; re-entry owns separate backing while
+an outer segment is active. New backing is charged, and both active and idle
+bytes remain in the shared native ledger and profile. Raw allocation, resize,
+home creation and control admission reclaim idle bytes under budget pressure.
+Only bytes are reusable, never flags, values, activation brands or source homes.
+Cache 185 records this runtime/layout correction without changing executable
+proofs, portable encoding or the generated pointer-and-mask ABI.

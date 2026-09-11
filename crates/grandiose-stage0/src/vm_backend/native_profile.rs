@@ -24,6 +24,8 @@ pub struct VmNativeMemoryProfile {
     /// Successful nonzero-to-nonzero extent changes; same-size calls are no-ops.
     pub raw_reallocations: u64,
     pub raw_deallocations: u64,
+    /// Resident-home and private scalar-spill backing, including idle pooled
+    /// spill bytes until they are reused or reclaimed for another allocation.
     pub home_live_bytes: u64,
     pub home_peak_bytes: u64,
     pub home_allocations: u64,
