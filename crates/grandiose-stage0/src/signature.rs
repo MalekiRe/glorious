@@ -692,6 +692,8 @@ pub struct ElaboratedInterface {
     /// Host imports are interface facts rather than an ambient service map.
     /// Core snapshots this record into every direct host call before MIR.
     pub host_imports: BTreeMap<DefKey, HostImport>,
+    /// Validated library constructors selected before any literal elaboration.
+    pub literal_views: BTreeMap<crate::LiteralViewKind, DefKey>,
     pub diagnostics: Vec<SignatureDiagnostic>,
 }
 
@@ -1347,6 +1349,7 @@ impl ElaboratedInterface {
             merged.pattern_values.extend(part.pattern_values);
             merged.inherent_self_types.extend(part.inherent_self_types);
             merged.host_imports.extend(part.host_imports);
+            merged.literal_views.extend(part.literal_views);
             merged.diagnostics.extend(part.diagnostics);
         }
         merged.normalize_aliases();
@@ -1804,6 +1807,7 @@ impl ElaboratedInterface {
             pattern_values: self.pattern_values.clone(),
             inherent_self_types: self.inherent_self_types.clone(),
             host_imports: self.host_imports.clone(),
+            literal_views: self.literal_views.clone(),
             diagnostics: vec![],
         };
         let mut reported = BTreeSet::<Vec<DefKey>>::new();
@@ -5814,12 +5818,10 @@ impl Elaborator<'_> {
                     }
                 };
             }
-            // The bundled standard library may spell the sealed backing
-            // handle in order to publish aliases such as `Str<'a>`.  It is
-            // never resolved for an application package, so ordinary source
-            // cannot construct a compiler static-data capability merely by
-            // copying this spelling.
-            if name == "__StaticData" && self.module.package.0 == "std@0.1.0" {
+            // The host-selected library may name the backing handle in its
+            // ordinary wrapper contracts. Copying its package name or source
+            // spelling does not grant that authority to another package.
+            if name == "__StaticData" && self.index.admits_static_data(&self.module.package) {
                 return match arguments.as_slice() {
                     [HeaderGenericArgument::Type(element)] => {
                         let tag = match element {
@@ -5832,7 +5834,7 @@ impl Elaborator<'_> {
                             _ => {
                                 self.error(
                                     "G3305",
-                                    "`__StaticData` accepts only `Utf8Bytes` or `u8` in bundled std".into(),
+                                    "`__StaticData` accepts only `Utf8Bytes` or `u8` in the selected library".into(),
                                 );
                                 return Type::Error;
                             }

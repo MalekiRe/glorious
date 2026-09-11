@@ -92,6 +92,25 @@ fn cli_emits_verifies_and_runs_verified_vm_programs() {
 }
 
 #[test]
+fn cli_binds_a_private_literal_view_in_an_explicitly_selected_library() {
+    let directory = temporary_directory();
+    let source = directory.join("main.glorious");
+    let library = directory.join("library.glorious");
+    fs::write(&source, r#"pub fn main() -> i64 { let value = "abc"; value.answer }"#).unwrap();
+    fs::write(&library, "pub struct View { pub answer: i64, private backing: __StaticData<Utf8Bytes> } fn literal(value: __StaticData<Utf8Bytes>) -> View { View { answer: 42, backing: value } }").unwrap();
+    let compiler = env!("CARGO_BIN_EXE_grc-stage0");
+    let flags = ["--runtime-standard-library", "chosen@9", "--runtime-literal-view", "utf8", "crate", "literal",
+        "--source", "chosen@9", "src/lib.glorious", library.to_str().unwrap(), "run", source.to_str().unwrap()];
+    let result = Command::new(compiler).args(flags).output().unwrap();
+    assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    assert_eq!(String::from_utf8(result.stdout).unwrap(), "42\n");
+    let rejected = Command::new(compiler).args(["--runtime-literal-view", "utf8", "crate", "literal", "check", source.to_str().unwrap()]).output().unwrap();
+    assert!(!rejected.status.success());
+    assert!(String::from_utf8_lossy(&rejected.stderr).contains("require --runtime-standard-library"));
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[test]
 fn cli_source_run_trust_does_not_grant_unsafe_execution_to_serialized_files() {
     let directory = temporary_directory();
     let source = directory.join("unsafe.glorious");

@@ -12,6 +12,8 @@ use runtime_manifest::FloatPrimitive;
 use runtime_manifest::FloatWidth;
 use runtime_manifest::FloatBinaryOp;
 use runtime_manifest::HostImportSelector;
+use runtime_manifest::LiteralViewSelector;
+use runtime_manifest::LiteralViewKind;
 use types::ScalarType;
 pub mod kernel;
 pub mod request;
@@ -54,7 +56,7 @@ fn limits() -> world::Limits {
     world::Limits { sources: request::sources::Limits { source_count: 100, source_bytes: 10000, identity_bytes: 10000 },
         namespace: request::namespace::Limits { packages: 100, alias_bytes: 10000, capabilities: 100, capability_bytes: 10000 },
         options: options::Limits { entries: 100, key_bytes: 10000, value_bytes: 10000 },
-        runtime_manifest: runtime_manifest::input::Limits { selectors: 200, host_imports: 100, text_bytes: 10000 }, fingerprint_bytes: 100000 }
+        runtime_manifest: runtime_manifest::input::Limits { selectors: 200, host_imports: 100, literal_views: 2, text_bytes: 10000 }, fingerprint_bytes: 100000 }
 }
 fn steps(builder: &mut world::Builder, controls: &mut operation::Controls, count: usize) -> Result<usize, request::Failure> {
     handle world::step(&mut *builder, &mut *controls) {
@@ -141,9 +143,17 @@ fn host_rows(a: &Vec<HostImportSelector>, b: &Vec<HostImportSelector>, index: us
         host_rows(a, b, index + 1, score * strings(&left.module_path, &right.module_path) * strings(&left.name, &right.name)
             * strings(&left.capability, &right.capability) * strings(&left.symbol, &right.symbol)) } }
 }
+fn view_rows(a: &Vec<LiteralViewSelector>, b: &Vec<LiteralViewSelector>, index: usize, score: i64) -> i64 {
+    handle index == Vec::len(a) { true => score, false => { let left = Vec::get_unchecked(a, index); let right = Vec::get_unchecked(b, index);
+        view_rows(a, b, index + 1, score * eq(as<i64>(runtime_manifest::literal_view_tag(left.kind)), as<i64>(runtime_manifest::literal_view_tag(right.kind)))
+            * strings(&left.module_path, &right.module_path) * strings(&left.name, &right.name)) } }
+}
 fn manifests(a: &RuntimeManifestInput, b: &RuntimeManifestInput) -> i64 {
     handle Vec::len(&a.selectors) == Vec::len(&b.selectors) { false => 0, true => handle Vec::len(&a.host_imports) == Vec::len(&b.host_imports) {
-        false => 0, true => yes(Eq::eq(&a.standard_library, &b.standard_library)) * selector_rows(&a.selectors, &b.selectors, 0, 1) * host_rows(&a.host_imports, &b.host_imports, 0, 1),
+        false => 0, true => handle Vec::len(&a.literal_views) == Vec::len(&b.literal_views) {
+            false => 0, true => yes(Eq::eq(&a.standard_library, &b.standard_library)) * selector_rows(&a.selectors, &b.selectors, 0, 1)
+                * host_rows(&a.host_imports, &b.host_imports, 0, 1) * view_rows(&a.literal_views, &b.literal_views, 0, 1),
+        },
     } }
 }
 fn runtime(value: &world::NormalizedWorld, expected: &Option<RuntimeManifestInput>) -> i64 {

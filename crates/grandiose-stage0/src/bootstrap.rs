@@ -413,7 +413,7 @@ mod authority_tests {
                     role: PrimitiveRole::IntCheckedDiv,
                     module_path: "crate".into(), name: "primitive".into(),
                 }],
-                host_imports: vec![],
+                literal_views: vec![], host_imports: vec![],
             }),
         }
     }
@@ -429,6 +429,25 @@ mod authority_tests {
             source_semantics_fingerprint(&float.normalize().unwrap()),
             "bootstrap convergence must bind the actual runtime role"
         );
+    }
+
+    #[test]
+    fn bootstrap_source_semantics_commit_to_literal_view_selection() {
+        use crate::{LiteralViewKind, LiteralViewSelector};
+        let empty = request();
+        let baseline = source_semantics_fingerprint(&empty.clone().normalize().unwrap());
+        let mut input = empty;
+        input.runtime_manifest.as_mut().unwrap().literal_views.push(LiteralViewSelector {
+            kind: LiteralViewKind::Utf8, module_path: "crate".into(), name: "view".into(),
+        });
+        let original = source_semantics_fingerprint(&input.clone().normalize().unwrap());
+        assert_ne!(baseline, original);
+        for field in 0..3 {
+            let mut changed = input.clone();
+            let view = &mut changed.runtime_manifest.as_mut().unwrap().literal_views[0];
+            match field { 0 => view.kind = LiteralViewKind::Octets, 1 => view.module_path = "crate::other".into(), _ => view.name = "renamed".into() }
+            assert_ne!(original, source_semantics_fingerprint(&changed.normalize().unwrap()));
+        }
     }
 
     #[test]

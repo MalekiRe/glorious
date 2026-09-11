@@ -763,9 +763,9 @@ fn slice_lex_compare_range<T>(left: Slice<T>, right: Slice<T>, start: usize, end
 }
 
 // Literal elaboration calls this ordinary standard-library wrapper after the
-// compiler has emitted a sealed UTF-8 static-data handle. It is public only
-// so the compiler can address the distributed package by its stable name;
-// callers still cannot construct or name the handle type themselves.
+// compiler has emitted a sealed UTF-8 static-data handle. The runtime manifest
+// binds this private declaration explicitly; source visibility and package
+// spelling do not grant literal authority. Its body remains an ordinary call.
 fn __g1_wrap_static_str(value: __StaticData<Utf8Bytes>) -> Str<'static> {
     unsafe {
         Str<'static> {
@@ -778,7 +778,7 @@ fn __g1_wrap_static_str(value: __StaticData<Utf8Bytes>) -> Str<'static> {
 }
 
 // Raw-byte literals use the same public Slice representation as dynamic
-// arrays.  The raw static tag is preserved by the private manifest leaf and
+// arrays. The raw static tag is preserved by the private manifest wrapper and
 // never confers permission to construct a Str.
 fn __g1_wrap_static_slice(value: __StaticData<u8>) -> Slice<'static, u8> {
     unsafe {

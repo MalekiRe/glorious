@@ -1362,7 +1362,7 @@ fn gsc2_request_options_preserve_map_replacement_and_canonical_key_order() {
 
 fn world_request_reference_cases(group: usize) -> Vec<CompilationRequest> {
     use grandiose_stage0::{BootstrapLimits, BootstrapStage};
-    use grandiose_stage0::runtime_manifest::{FloatBinaryOp, FloatPrimitive, FloatWidth, HostImportSelector, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput};
+    use grandiose_stage0::runtime_manifest::{FloatBinaryOp, FloatPrimitive, FloatWidth, HostImportSelector, LiteralViewKind, LiteralViewSelector, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput};
     let base = CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"normalized-world-author")),
         mode: CompilationMode::Check, root_package: PackageKey("app@1".into()),
@@ -1378,6 +1378,9 @@ fn world_request_reference_cases(group: usize) -> Vec<CompilationRequest> {
             PrimitiveSelector { role: PrimitiveRole::Abort, module_path: "std".into(), name: "abort".into() },
             // Derived role order puts Float before Blake3, unlike wire-tag order.
             PrimitiveSelector { role: PrimitiveRole::Float(FloatPrimitive::Binary { width: FloatWidth::F32, operation: FloatBinaryOp::Add }), module_path: "std::float".into(), name: "add".into() },
+        ], literal_views: vec![
+            LiteralViewSelector { kind: LiteralViewKind::Octets, module_path: "literal".into(), name: "bytes".into() },
+            LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: "literal".into(), name: "text".into() },
         ], host_imports: vec![
             HostImportSelector { module_path: "z".into(), name: "read".into(), capability: "file.read".into(), symbol: "host_read".into() },
             HostImportSelector { module_path: "a".into(), name: "write".into(), capability: "file.write".into(), symbol: "host_write".into() },
@@ -1431,8 +1434,8 @@ fn world_request_reference_cases(group: usize) -> Vec<CompilationRequest> {
         2 => {
             cases.push(base.clone());
             let mut populated = base.clone(); populated.runtime_manifest = Some(runtime.clone()); cases.push(populated.clone());
-            let mut value = base.clone(); value.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("".into()), selectors: vec![], host_imports: vec![] }); cases.push(value);
-            for field in 0..10 {
+            let mut value = base.clone(); value.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("".into()), selectors: vec![], literal_views: vec![], host_imports: vec![] }); cases.push(value);
+            for field in 0..13 {
                 let mut value = populated.clone(); let manifest = value.runtime_manifest.as_mut().unwrap();
                 match field {
                     0 => manifest.standard_library = PackageKey("different-stdlib@9".into()),
@@ -1444,12 +1447,15 @@ fn world_request_reference_cases(group: usize) -> Vec<CompilationRequest> {
                     6 => manifest.host_imports[0].capability = "other.capability".into(),
                     7 => manifest.host_imports[0].symbol = "symbol\0suffix".into(),
                     8 => manifest.selectors.clear(),
-                    _ => manifest.host_imports.clear(),
+                    9 => manifest.host_imports.clear(),
+                    10 => manifest.literal_views[0].module_path = "renamed.module".into(),
+                    11 => manifest.literal_views[1].name = "other-view".into(),
+                    _ => manifest.literal_views.clear(),
                 }
                 cases.push(value);
             }
             let mut value = populated; let manifest = value.runtime_manifest.as_mut().unwrap();
-            manifest.selectors.reverse(); manifest.host_imports.reverse(); cases.push(value);
+            manifest.selectors.reverse(); manifest.host_imports.reverse(); manifest.literal_views.reverse(); cases.push(value);
         }
         3 => {
             let seed = BootstrapStage { ordinal: 1, producer: base.build.compiler, optimization_level: 2,
@@ -1501,7 +1507,7 @@ fn world_request_witness(value: &CompilationRequest, name: &str) -> String {
         let runtime = match &value.runtime_manifest {
             None => "None".to_owned(),
             Some(manifest) => {
-                result.push_str("let selectors = Vec<PrimitiveSelector>::new(); let hosts = Vec<HostImportSelector>::new();\n");
+                result.push_str("let mut selectors = Vec<PrimitiveSelector>::new(); let mut hosts = Vec<HostImportSelector>::new(); let mut views = Vec<LiteralViewSelector>::new();\n");
                 for selector in &manifest.selectors {
                     let role = match selector.role {
                         PrimitiveRole::Float(FloatPrimitive::Binary { width, operation }) => format!("PrimitiveRole::Float(FloatPrimitive::Binary {{ width: FloatWidth::{width:?}, operation: FloatBinaryOp::{operation:?} }})"),
@@ -1512,7 +1518,8 @@ fn world_request_witness(value: &CompilationRequest, name: &str) -> String {
                     result.push_str(&format!("Vec::push(&mut selectors, PrimitiveSelector {{ role: {role}, module_path: {}, name: {} }});\n", text(&selector.module_path), text(&selector.name)));
                 }
                 for host in &manifest.host_imports { result.push_str(&format!("Vec::push(&mut hosts, HostImportSelector {{ module_path: {}, name: {}, capability: {}, symbol: {} }});\n", text(&host.module_path), text(&host.name), text(&host.capability), text(&host.symbol))); }
-                format!("Result::Ok(RuntimeManifestInput {{ standard_library: identity::PackageKey {{ value: {} }}, selectors: selectors, host_imports: hosts }})", text(&manifest.standard_library.0))
+                for view in &manifest.literal_views { result.push_str(&format!("Vec::push(&mut views, LiteralViewSelector {{ kind: LiteralViewKind::{:?}, module_path: {}, name: {} }});\n", view.kind, text(&view.module_path), text(&view.name))); }
+                format!("Result::Ok(RuntimeManifestInput {{ standard_library: identity::PackageKey {{ value: {} }}, selectors: selectors, host_imports: hosts, literal_views: views }})", text(&manifest.standard_library.0))
             }
         };
         result.push_str(&format!("Witness {{ valid: valid, input: request::CompilationRequest {{ build: request::CompilerBuildIdentity {{ compiler: {}, language_generation: {}, query_generation: {}, interface_generation: {}, cache_generation: {}, bytecode_generation: {}, verifier_generation: {} }}, mode: {mode}, root_package: identity::PackageKey {{ value: {} }}, sources: values, target: {}, semantic_options: semantic, codegen_options: codegen, capability_manifest: caps, runtime_manifest: {runtime} }} }} }}\n",
@@ -1684,7 +1691,7 @@ fn gsc2_request_world_lifecycle_preserves_cancellation_work_and_fingerprint_limi
     sample.capability_manifest = vec!["c".into()];
     sample.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![
         PrimitiveSelector { role: PrimitiveRole::Abort, module_path: "m".into(), name: "n".into() },
-    ], host_imports: vec![HostImportSelector { module_path: "m".into(), name: "n".into(), capability: "c".into(), symbol: "s".into() }] });
+    ], literal_views: vec![], host_imports: vec![HostImportSelector { module_path: "m".into(), name: "n".into(), capability: "c".into(), symbol: "s".into() }] });
     let expected = sample.clone().normalize().unwrap();
     // Independent extent accounting for the exact world-v2 framed fields.
     // The semantic digest itself comes from the reference normalizer.
@@ -1706,6 +1713,8 @@ fn gsc2_request_world_lifecycle_preserves_cancellation_work_and_fingerprint_limi
         for selector in &manifest.selectors { length += field(1) + field(selector.module_path.len()) + field(selector.name.len()); }
         length += field(8);
         for host in &manifest.host_imports { length += field(host.module_path.len()) + field(host.name.len()) + field(host.capability.len()) + field(host.symbol.len()); }
+        length += field(8);
+        for view in &manifest.literal_views { length += field(1) + field(view.module_path.len()) + field(view.name.len()); }
     }
     let mut generated = world_request_witness(&sample, "sample");
     generated.push_str(&format!("fn transcript_bytes() -> usize {{ {length} }}\nfn expected_fingerprint() -> identity::Digest {{ digest(b\"{}\") }}\n", expected.fingerprint.as_bytes().iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>()));
@@ -1747,7 +1756,7 @@ fn gsc2_request_world_cross_component_failures_match_reference_fields_and_order(
     let stage = BootstrapStage { ordinal: 0, producer: base.build.compiler, optimization_level: 2,
         limits: BootstrapLimits { max_sources: 10, max_total_source_bytes: 10000 }, expected_artifact: None };
     let selector = PrimitiveSelector { role: PrimitiveRole::Abort, module_path: "std".into(), name: "abort".into() };
-    let bad_runtime = RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![selector.clone(), selector], host_imports: vec![] };
+    let bad_runtime = RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![selector.clone(), selector], literal_views: vec![], host_imports: vec![] };
     let mut bad_tail = base.clone(); bad_tail.mode = CompilationMode::Bootstrap(stage.clone()); bad_tail.runtime_manifest = Some(bad_runtime.clone());
     bad_tail.capability_manifest = vec!["*".into()]; bad_tail.root_package = PackageKey("9invalid".into());
     let mut cases = vec![];
@@ -1774,8 +1783,8 @@ fn gsc2_request_world_cross_component_failures_match_reference_fields_and_order(
     }
     value.capability_manifest = base.capability_manifest.clone(); cases.push(value.clone());
     value.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![PrimitiveSelector {
-        role: PrimitiveRole::Float(FloatPrimitive::Convert { from: ScalarType::F32, to: ScalarType::F32, checked: false }), module_path: "std".into(), name: "bad".into() }], host_imports: vec![] }); cases.push(value.clone());
-    value.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![], host_imports: vec![HostImportSelector {
+        role: PrimitiveRole::Float(FloatPrimitive::Convert { from: ScalarType::F32, to: ScalarType::F32, checked: false }), module_path: "std".into(), name: "bad".into() }], literal_views: vec![], host_imports: vec![] }); cases.push(value.clone());
+    value.runtime_manifest = Some(RuntimeManifestInput { standard_library: PackageKey("std".into()), selectors: vec![], literal_views: vec![], host_imports: vec![HostImportSelector {
         module_path: "m".into(), name: "n".into(), capability: "*".into(), symbol: "s".into() }] }); cases.push(value);
     for change in 0..10 {
         let mut value = base.clone(); let mut stage = stage.clone(); stage.ordinal = 1;
@@ -1809,7 +1818,7 @@ fn gsc2_request_world_cross_component_failures_match_reference_fields_and_order(
 
 #[test]
 fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalization() {
-    use grandiose_stage0::runtime_manifest::{FloatPrimitive, HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput};
+    use grandiose_stage0::runtime_manifest::{FloatPrimitive, HostImportSelector, LiteralViewKind, LiteralViewSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput};
     use grandiose_stage0::ScalarType;
     fn literal(bytes: &[u8]) -> String {
         format!("b\"{}\"", bytes.iter().map(|byte| format!("\\x{byte:02x}")).collect::<String>())
@@ -1835,10 +1844,10 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
         HostImportSelector { module_path: module.into(), name: name.into(), capability: capability.into(), symbol: symbol.into() }
     }
     fn manifest(selectors: Vec<PrimitiveSelector>, host_imports: Vec<HostImportSelector>) -> RuntimeManifestInput {
-        RuntimeManifestInput { standard_library: PackageKey("std@0.1.0".into()), selectors, host_imports }
+        RuntimeManifestInput { standard_library: PackageKey("std@0.1.0".into()), selectors, host_imports, literal_views: vec![] }
     }
     fn emit(value: &RuntimeManifestInput, binding: &str) -> String {
-        let mut result = format!("let {binding} = empty(); {binding}.standard_library = PackageKey {{ value: {} }};\n", text(&value.standard_library.0));
+        let mut result = format!("let mut {binding} = empty(); {binding}.standard_library = PackageKey {{ value: {} }};\n", text(&value.standard_library.0));
         for selector in &value.selectors {
             result.push_str(&format!("Vec::push(&mut {binding}.selectors, PrimitiveSelector {{ role: {}, module_path: {}, name: {} }});\n",
                 role(selector.role), text(&selector.module_path), text(&selector.name)));
@@ -1846,6 +1855,9 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
         for host in &value.host_imports {
             result.push_str(&format!("Vec::push(&mut {binding}.host_imports, HostImportSelector {{ module_path: {}, name: {}, capability: {}, symbol: {} }});\n",
                 text(&host.module_path), text(&host.name), text(&host.capability), text(&host.symbol)));
+        }
+        for view in &value.literal_views {
+            result.push_str(&format!("Vec::push(&mut {binding}.literal_views, LiteralViewSelector {{ kind: LiteralViewKind::{:?}, module_path: {}, name: {} }});\n", view.kind, text(&view.module_path), text(&view.name)));
         }
         result
     }
@@ -1892,6 +1904,12 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
     cases.push(manifest(vec![], ["b", "a", "", "猫"].map(|suffix| host(&("x".repeat(80) + suffix), "n", "r", "s")).to_vec()));
     cases.push(manifest(vec![], (0..24).rev().map(|i| host("m", &format!("n{i:02}"), "r", "s")).collect()));
     cases.push(manifest(vec![], vec![host("\0", "a b", "r", "s*\n"), host("猫", "e\u{301}", "w", "💜")]));
+    let views = [LiteralViewKind::Utf8, LiteralViewKind::Octets].map(|kind| LiteralViewSelector { kind, module_path: "chosen::private".into(), name: format!("wrap_{kind:?}") });
+    for order in [vec![0, 1], vec![1, 0], vec![0], vec![1], vec![0, 0], vec![1, 1], vec![0, 0, 1, 1], vec![1, 1, 0, 0]] {
+        let mut value = manifest(vec![], vec![]);
+        value.literal_views = order.into_iter().map(|index| views[index].clone()).collect();
+        cases.push(value);
+    }
     let mut generated = String::new();
     for (index, input) in cases.iter().enumerate() {
         let mut canonical = input.clone();
@@ -1901,6 +1919,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
             Err(ManifestError::DuplicateRole(role)) => (2, role, String::new(), String::new()),
             Err(ManifestError::InvalidHostImport { module_path, name }) => (3, PrimitiveRole::Abort, module_path, name),
             Err(ManifestError::DuplicateHostImport { module_path, name }) => (4, PrimitiveRole::Abort, module_path, name),
+            Err(ManifestError::DuplicateLiteralView(kind)) => (match kind { LiteralViewKind::Utf8 => 5, LiteralViewKind::Octets => 6 }, PrimitiveRole::Abort, String::new(), String::new()),
             other => panic!("unexpected manifest oracle: {other:?}"),
         };
         if kind != 0 { canonical = manifest(vec![], vec![]); }
@@ -1943,7 +1962,7 @@ fn gsc2_request_runtime_manifest_matches_authority_and_host_input_canonicalizati
     let program = source_program(case, &[("@CASES@", generated), ("@ROLES@", metadata), ("@CONVERSIONS@", literal(&conversions))]);
     let (results, profile) = program.run_tuple_i64_for_authoring(Default::default()).unwrap();
     record_execution_values(case, &program, "", &format!("{results:?}"), Some(&profile));
-    assert_eq!(results, [cases.len() as i64, 182, 648, 1, 20]);
+    assert_eq!(results, [cases.len() as i64, 182, 648, 1, 26]);
 }
 
 #[test]

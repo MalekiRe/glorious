@@ -5,7 +5,7 @@ use std::{collections::BTreeMap, env, fs, process::ExitCode, thread};
 use grandiose_stage0::{
     decode_and_verify_program, write_atomically, BootstrapLimits, BootstrapManifest,
     BootstrapStage, CompilationMode, CompilationRequest, CompileDiagnostic, CompilerBuildIdentity,
-    Digest, HostImportSelector, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
+    Digest, HostImportSelector, LiteralViewKind, LiteralViewSelector, LogicalPath, PackageKey, PrimitiveRole, PrimitiveSelector,
     RuntimeManifestInput, SourceInput, StageZeroCompiler, SystemVmHost, VmExecutionLimits,
 };
 
@@ -283,6 +283,7 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
     let mut capability_manifest = Vec::new();
     let mut selectors = Vec::new();
     let mut host_imports = Vec::new();
+    let mut literal_views = Vec::new();
     let mut root_package = None;
     let mut additional_sources = Vec::new();
     let mut positional = Vec::new();
@@ -310,6 +311,17 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
                     return Err("--runtime-standard-library requires a PACKAGE".into());
                 };
                 standard_library = Some(PackageKey(package));
+                continue;
+            }
+            if argument == "--runtime-literal-view" {
+                let Some(kind) = arguments.next() else { return Err("--runtime-literal-view requires KIND MODULE NAME".into()); };
+                let Some(module_path) = arguments.next() else { return Err("--runtime-literal-view requires KIND MODULE NAME".into()); };
+                let Some(name) = arguments.next() else { return Err("--runtime-literal-view requires KIND MODULE NAME".into()); };
+                let kind = match kind.as_str() {
+                    "utf8" => LiteralViewKind::Utf8, "octets" => LiteralViewKind::Octets,
+                    _ => return Err("literal view kind must be utf8 or octets".into()),
+                };
+                literal_views.push(LiteralViewSelector { kind, module_path, name });
                 continue;
             }
             if argument == "--runtime-leaf" {
@@ -450,11 +462,12 @@ fn split_cli_options(arguments: impl IntoIterator<Item = String>) -> Result<CliO
             standard_library,
             selectors,
             host_imports,
+            literal_views,
         }),
-        None if selectors.is_empty() && host_imports.is_empty() => None,
+        None if selectors.is_empty() && host_imports.is_empty() && literal_views.is_empty() => None,
         None => {
             return Err(
-                "--runtime-leaf and --runtime-host require --runtime-standard-library PACKAGE"
+                "runtime bindings require --runtime-standard-library PACKAGE"
                     .into(),
             );
         }
@@ -607,6 +620,7 @@ fn usage() {
     );
     eprintln!("RUNTIME: --runtime-standard-library PACKAGE");
     eprintln!("         --runtime-leaf ROLE MODULE NAME  (repeatable)");
+    eprintln!("         --runtime-literal-view utf8|octets MODULE NAME  (repeatable)");
     eprintln!("         --capability CAPABILITY  (repeatable, explicit host authority)");
     eprintln!("SOURCES: --root-package PACKAGE");
     eprintln!("         --source PACKAGE LOGICAL_PATH FILE  (repeatable)");

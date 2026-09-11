@@ -164,6 +164,9 @@ pub struct DefinitionIndex {
     module_attributes: BTreeMap<ModuleKey, crate::scanner::ModuleAttributes>,
     /// A driver-selected source module, never compiler-invented declarations.
     library_prelude: Option<ModuleKey>,
+    /// Host-selected library identity. Source names never grant permission to
+    /// mention sealed static backing data during header or body elaboration.
+    runtime_library: Option<PackageKey>,
     /// Dependency roots linked into this frozen interface set. Source uses
     /// the package-name component before `@`; full package keys remain the
     /// ownership identities used by coherence.
@@ -251,6 +254,15 @@ pub struct ImportBinding {
 }
 
 impl DefinitionIndex {
+    pub fn with_runtime_library(mut self, package: Option<PackageKey>) -> Self {
+        self.runtime_library = package;
+        self
+    }
+
+    pub(crate) fn admits_static_data(&self, package: &PackageKey) -> bool {
+        self.runtime_library.as_ref() == Some(package)
+    }
+
     pub fn from_interface(interface: &PackageInterface) -> Self {
         let mut index = Self::default();
         index.extend(interface);

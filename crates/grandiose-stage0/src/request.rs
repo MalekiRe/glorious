@@ -383,7 +383,7 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 178 proves helper-result independence under per-input reference hypotheses.
 // Cache 179 separates coercion shape inference from directional region constraints.
 // Cache 180 preserves checked array input views without rewriting value producers.
-pub const STAGE0_CACHE_GENERATION: u32 = 180;
+pub const STAGE0_CACHE_GENERATION: u32 = 181;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -782,6 +782,12 @@ pub(crate) fn put_runtime_manifest(bytes: &mut Vec<u8>, manifest: Option<&Runtim
             put(bytes, host.name.as_bytes());
             put(bytes, host.capability.as_bytes());
             put(bytes, host.symbol.as_bytes());
+        }
+        put(bytes, &(manifest.literal_views.len() as u64).to_le_bytes());
+        for view in &manifest.literal_views {
+            put(bytes, &[view.kind.stable_tag()]);
+            put(bytes, view.module_path.as_bytes());
+            put(bytes, view.name.as_bytes());
         }
     }
 }

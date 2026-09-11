@@ -27,7 +27,7 @@ enum Phase {
     Domain, Compiler, Generations, Mode, BootstrapDomain, Ordinal, Producer, Optimization,
     MaxSources, MaxBytes, ExpectedPresence, ExpectedDigest, Root, Target, SourceCount, Sources,
     SemanticCount, SemanticRows, CodegenCount, CodegenRows, CapabilityCount, Capabilities,
-    RuntimePresence, RuntimePackage, SelectorCount, Selectors, HostCount, Hosts, Hash, Ready,
+    RuntimePresence, RuntimePackage, SelectorCount, Selectors, HostCount, Hosts, ViewCount, Views, Hash, Ready,
 }
 enum Field { Text, Word { value: u64, width: usize }, Digest(Digest) }
 
@@ -81,6 +81,14 @@ fn text<'a>(data: &'a Data, cursor: &Cursor) -> Result<Str<'a>, Failure> {
         },
         Phase::RuntimePackage => handle manifest(data) {
             Result::Err(error) => Result::Err(error), Result::Ok(value) => Result::Ok(String::as_str(&value.standard_library.value)),
+        },
+        Phase::Views => handle manifest(data) {
+            Result::Err(error) => Result::Err(error), Result::Ok(value) => handle Vec::get(&value.literal_views, cursor.row) {
+                Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(view) => handle cursor.column {
+                    1 => Result::Ok(String::as_str(&view.module_path)), 2 => Result::Ok(String::as_str(&view.name)),
+                    _ => Result::Err(Failure::Invariant),
+                },
+            },
         },
         Phase::Selectors => handle manifest(data) {
             Result::Err(error) => Result::Err(error), Result::Ok(value) => handle Vec::get(&value.selectors, cursor.row) {
@@ -147,6 +155,14 @@ fn field(data: &Data, cursor: &Cursor) -> Result<Field, Failure> {
         Phase::RuntimePresence => handle Result::as_ref(&data.runtime_manifest) { Result::Err(_) => word(0, 1), Result::Ok(_) => word(1, 1) },
         Phase::SelectorCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => word(as<u64>(Vec::len(&value.selectors)), 8) },
         Phase::HostCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => word(as<u64>(Vec::len(&value.host_imports)), 8) },
+        Phase::ViewCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => word(as<u64>(Vec::len(&value.literal_views)), 8) },
+        Phase::Views => handle cursor.column == 0 {
+            false => Result::Ok(Field::Text), true => handle manifest(data) {
+                Result::Err(error) => Result::Err(error), Result::Ok(value) => handle Vec::get(&value.literal_views, cursor.row) {
+                    Result::Err(_) => Result::Err(Failure::Invariant), Result::Ok(view) => word(as<u64>(runtime_manifest::literal_view_tag(view.kind)), 1),
+                },
+            },
+        },
         Phase::Selectors => handle cursor.column == 0 {
             false => Result::Ok(Field::Text), true => handle manifest(data) {
                 Result::Err(error) => Result::Err(error), Result::Ok(value) => handle Vec::get(&value.selectors, cursor.row) {
@@ -199,8 +215,10 @@ fn advance(data: &Data, cursor: &mut Cursor) -> Result<Event, Failure> {
         Phase::RuntimePackage => next(cursor, Phase::SelectorCount),
         Phase::SelectorCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => list(cursor, Vec::len(&value.selectors), Phase::Selectors, Phase::HostCount) },
         Phase::Selectors => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => rows(cursor, 3, Vec::len(&value.selectors), Phase::HostCount) },
-        Phase::HostCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => list(cursor, Vec::len(&value.host_imports), Phase::Hosts, Phase::Hash) },
-        Phase::Hosts => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => rows(cursor, 4, Vec::len(&value.host_imports), Phase::Hash) },
+        Phase::HostCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => list(cursor, Vec::len(&value.host_imports), Phase::Hosts, Phase::ViewCount) },
+        Phase::Hosts => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => rows(cursor, 4, Vec::len(&value.host_imports), Phase::ViewCount) },
+        Phase::ViewCount => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => list(cursor, Vec::len(&value.literal_views), Phase::Views, Phase::Hash) },
+        Phase::Views => handle manifest(data) { Result::Err(error) => Result::Err(error), Result::Ok(value) => rows(cursor, 3, Vec::len(&value.literal_views), Phase::Hash) },
         _ => Result::Err(Failure::Invariant),
     }
 }

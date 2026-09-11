@@ -710,6 +710,10 @@ fn bundled_standard_library(mut request: CompilationRequest) -> CompilationReque
                 name: format!("__g1_{}", role.selector_name().replace('-', "_")),
             })
             .collect(),
+            literal_views: vec![
+                crate::LiteralViewSelector { kind: crate::LiteralViewKind::Utf8, module_path: "crate".into(), name: "__g1_wrap_static_str".into() },
+                crate::LiteralViewSelector { kind: crate::LiteralViewKind::Octets, module_path: "crate".into(), name: "__g1_wrap_static_slice".into() },
+            ],
             host_imports: vec![],
         });
     }
@@ -1006,8 +1010,9 @@ impl StageZeroCompiler {
                 )
             }));
         }
-        let prelude = graphs.keys()
-            .find(|package| crate::identity::package_module_alias(package).as_deref() == Some("std"))
+        let runtime_library = snapshot.world().runtime_manifest.as_ref().map(|manifest| manifest.standard_library.clone());
+        let prelude = runtime_library.as_ref()
+            .or_else(|| graphs.keys().find(|package| crate::identity::package_module_alias(package).as_deref() == Some("std")))
             .map(|package| crate::ModuleKey { package: package.clone(), path: "crate::prelude".into() })
             .filter(|module| graphs.get(&module.package).is_some_and(|graph| graph.modules.contains_key(module)));
         let index = DefinitionIndex::from_interfaces_with_prelude(
@@ -1016,7 +1021,7 @@ impl StageZeroCompiler {
                 .flat_map(|graph| graph.modules.values())
                 .map(|node| &node.interface.interface),
             prelude,
-        );
+        ).with_runtime_library(runtime_library);
         let declared_fixities = graphs
             .values()
             .flat_map(|graph| graph.modules.values())
@@ -1165,6 +1170,7 @@ impl StageZeroCompiler {
             signatures
                 .host_imports
                 .extend(manifest.host_imports.clone());
+            signatures.literal_views.extend(manifest.literal_views.clone());
         }
         // An evaluated top-level `let` has no declared result annotation.
         // Freeze its inferred Core result before ordinary bodies are read, so

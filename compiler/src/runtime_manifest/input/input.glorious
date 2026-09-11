@@ -2,12 +2,14 @@ use std::*;
 use super::RuntimeManifestInput;
 use super::PrimitiveSelector;
 use super::HostImportSelector;
+use super::LiteralViewSelector;
+use super::LiteralViewKind;
 use super::ManifestError;
 use super::super::kernel::operation;
 use super::super::kernel::order;
 use super::super::request::names;
 
-pub struct Limits { selectors: usize, host_imports: usize, text_bytes: usize }
+pub struct Limits { pub selectors: usize, pub host_imports: usize, pub literal_views: usize, pub text_bytes: usize }
 pub enum Event { Continue, Ready }
 pub enum Failure { Rejected(ManifestError), Control(operation::Failure), Capacity { name: u32, limit: usize }, Closed, Busy, Invariant }
 pub struct Builder { private work: Option<Work>, private limits: Limits }
@@ -17,16 +19,18 @@ struct Work {
     input: RuntimeManifestInput, selector_slots: Vec<Option<PrimitiveSelector>>, host_slots: Vec<Option<HostImportSelector>>,
     selectors: Vec<PrimitiveSelector>, hosts: Vec<HostImportSelector>, sorter: Option<order::Builder>, indices: Vec<usize>,
     comparison: Option<Comparison>, cursor: usize, byte: usize, field: usize, phase: Phase,
+    utf8: Option<LiteralViewSelector>, octets: Option<LiteralViewSelector>, views: Vec<LiteralViewSelector>,
+    duplicate_utf8: Bool, duplicate_octets: Bool,
 }
 struct Comparison { left: usize, right: usize, field: usize, byte: usize }
 enum Decision { Continue(Comparison), Done(Ordering) }
 enum Phase { Selectors, SelectorReverse, SelectorSort, SelectorOutput, SelectorValid, SelectorDuplicates,
-    Hosts, HostReverse, HostSort, HostOutput, HostValid, HostDuplicates, Ready }
+    Hosts, HostReverse, HostSort, HostOutput, HostValid, HostDuplicates, Views, ViewUtf8, ViewOctets, Ready }
 
 pub fn begin(value: RuntimeManifestInput, limits: Limits) -> Builder {
     Builder { work: Result::Ok(Work { input: value, selector_slots: Vec<Option<PrimitiveSelector>>::new(), host_slots: Vec<Option<HostImportSelector>>::new(),
         selectors: Vec<PrimitiveSelector>::new(), hosts: Vec<HostImportSelector>::new(), sorter: None, indices: Vec<usize>::new(), comparison: None,
-        cursor: 0, byte: 0, field: 0, phase: Phase::Selectors }), limits: limits }
+        cursor: 0, byte: 0, field: 0, phase: Phase::Selectors, utf8: None, octets: None, views: Vec<LiteralViewSelector>::new(), duplicate_utf8: false, duplicate_octets: false }), limits: limits }
 }
 pub fn abort(builder: &mut Builder) -> () { (*builder).work = None; }
 pub fn value<'a>(admitted: &'a Admitted) -> &'a RuntimeManifestInput { &admitted.value }
@@ -276,7 +280,7 @@ fn validate_host(work: &mut Work, limits: Limits, controls: &mut operation::Cont
 }
 fn duplicate_host(work: &mut Work, controls: &mut operation::Controls) -> Result<Event, Failure> {
     handle work.cursor >= Vec::len(&work.hosts) {
-        true => { (*work).phase = Phase::Ready; Result::Ok(Event::Ready) },
+        true => reset(work, Phase::Views),
         false => {
             let left = Vec::get_unchecked(&work.hosts, work.cursor - 1); let right = Vec::get_unchecked(&work.hosts, work.cursor);
             let a = host_text(left, work.field); let b = host_text(right, work.field);
@@ -294,6 +298,46 @@ fn duplicate_host(work: &mut Work, controls: &mut operation::Controls) -> Result
         },
     }
 }
+// There are exactly two data classes. Admit into disjoint slots and emit in
+// kind order; no string comparison or unbounded sorting is required. Every
+// admission and emission is still a charged, cancellable builder transition.
+fn store_view(slot: &mut Option<LiteralViewSelector>, duplicate: &mut Bool, value: LiteralViewSelector) -> Result<Event, Failure> {
+    handle Result::as_ref(& *slot) {
+        Result::Ok(_) => { (*duplicate) = true; Result::Ok(Event::Continue) },
+        Result::Err(_) => { (*slot) = Result::Ok(value); Result::Ok(Event::Continue) },
+    }
+}
+fn gather_views(work: &mut Work, limits: Limits) -> Result<Event, Failure> {
+    handle Vec::len(&work.input.literal_views) > limits.literal_views {
+        true => Result::Err(Failure::Capacity { name: 8, limit: limits.literal_views }),
+        false => handle Vec::pop(&mut work.input.literal_views) {
+            Result::Err(_) => reset(work, Phase::ViewUtf8),
+            Result::Ok(value) => handle text_limit(&value.module_path, limits.text_bytes, 9) {
+                Result::Err(error) => Result::Err(error),
+                Result::Ok(_) => handle text_limit(&value.name, limits.text_bytes, 10) {
+                    Result::Err(error) => Result::Err(error),
+                    Result::Ok(_) => handle value.kind {
+                        LiteralViewKind::Utf8 => store_view(&mut work.utf8, &mut work.duplicate_utf8, value),
+                        LiteralViewKind::Octets => store_view(&mut work.octets, &mut work.duplicate_octets, value),
+                    },
+                },
+            },
+        },
+    }
+}
+fn output_view(work: &mut Work, utf8: Bool) -> Result<Event, Failure> {
+    let duplicate = handle utf8 { true => work.duplicate_utf8, false => work.duplicate_octets };
+    handle duplicate {
+        true => { let kind = handle utf8 { true => LiteralViewKind::Utf8, false => LiteralViewKind::Octets };
+            Result::Err(Failure::Rejected(ManifestError::DuplicateLiteralView(kind))) },
+        false => emit_view(work, utf8),
+    }
+}
+fn emit_view(work: &mut Work, utf8: Bool) -> Result<Event, Failure> {
+    let value = handle utf8 { true => Option::take(&mut work.utf8), false => Option::take(&mut work.octets) };
+    handle value { Result::Err(_) => (), Result::Ok(value) => Vec::push(&mut work.views, value) };
+    handle utf8 { true => reset(work, Phase::ViewOctets), false => { (*work).phase = Phase::Ready; Result::Ok(Event::Ready) } }
+}
 fn transition(work: &mut Work, limits: Limits, controls: &mut operation::Controls) -> Result<Event, Failure> {
     handle work.phase {
         Phase::Selectors => gather_selectors(work, limits), Phase::SelectorReverse => reverse_selectors(work, limits),
@@ -302,6 +346,7 @@ fn transition(work: &mut Work, limits: Limits, controls: &mut operation::Control
         Phase::Hosts => gather_hosts(work, limits), Phase::HostReverse => reverse_hosts(work, limits),
         Phase::HostSort => sort_step(work, controls, true, Phase::HostOutput), Phase::HostOutput => output_host(work),
         Phase::HostValid => validate_host(work, limits, controls), Phase::HostDuplicates => duplicate_host(work, controls),
+        Phase::Views => gather_views(work, limits), Phase::ViewUtf8 => output_view(work, true), Phase::ViewOctets => output_view(work, false),
         Phase::Ready => Result::Ok(Event::Ready),
     }
 }
@@ -326,7 +371,7 @@ pub fn finish(builder: &mut Builder, controls: &operation::Controls) -> Result<A
         Result::Ok(_) => handle Option::take(&mut builder.work) {
             Result::Err(_) => Result::Err(Failure::Closed),
             Result::Ok(work) => handle work.phase {
-                Phase::Ready => Result::Ok(Admitted { value: RuntimeManifestInput { standard_library: work.input.standard_library, selectors: work.selectors, host_imports: work.hosts } }),
+                Phase::Ready => Result::Ok(Admitted { value: RuntimeManifestInput { standard_library: work.input.standard_library, selectors: work.selectors, host_imports: work.hosts, literal_views: work.views } }),
                 _ => Result::Err(Failure::Busy),
             },
         },

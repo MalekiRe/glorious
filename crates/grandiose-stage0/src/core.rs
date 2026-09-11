@@ -5418,59 +5418,30 @@ impl Elaborator<'_> {
         }, span)
     }
 
-    /// Source literals are contextual. The distributed standard library keeps
-    /// `Bool` as `Result<(), ()>`, so its ordinary `true` and `false`
-    /// spellings must build that nominal carrier when a Bool is expected.
+    /// Freeze intrinsic numeric evidence and materialize static data through
+    /// the selected library before ordinary contextual type/lifetime joining.
     fn literal_expected(&mut self, text: String, expected: Option<Type>, span: Span) -> CoreId {
         let expected = expected.map(|ty| self.inference.resolve_type_structure(ty));
-        // A string literal is compiler-emitted immutable data, but `Str` is
-        // intentionally an ordinary source-defined view rather than another
-        // compiler scalar. When the expected type is the distributed
-        // `Str` (including a callable's not-yet-opened lifetime binder),
-        // construct the sealed data literal first and invoke
-        // std's manifest-bound wrapper. Keeping the final wrapping step as a
-        // normal Core call lets `Str` evolve its private source layout without
-        // teaching bytecode about a public string-slice representation.
-        if text.starts_with('"')
-            && expected
-                .as_ref()
-                .is_some_and(|expected| self.is_standard_str(expected))
-        {
-            let raw = self.alloc(
-                CoreKind::Literal(text),
-                Type::StaticData {
-                    element: Box::new(Type::Scalar(ScalarType::U8)),
-                    tag: crate::STATIC_UTF8_DATA_TAG,
-                    alignment: 1,
-                },
-                span,
-            );
-            let callee = self.standard_static_str_wrapper(span);
-            return self.call(callee, vec![raw], span);
-        }
-        if text.starts_with("b\"")
-            && expected
-                .as_ref()
-                .is_some_and(|expected| self.constrain_standard_byte_slice(expected))
-        {
-            let raw = self.alloc(
-                CoreKind::Literal(text),
-                Type::StaticData {
-                    element: Box::new(Type::Scalar(ScalarType::U8)),
-                    tag: crate::STATIC_RAW_U8_DATA_TAG,
-                    alignment: 1,
-                },
-                span,
-            );
-            let callee = self.standard_static_slice_wrapper(span);
-            return self.call(callee, vec![raw], span);
+        // Only an explicit bootstrap scalar or privileged sealed-data context
+        // bypasses the selected library view. Missing or unresolved context is
+        // not permission to invent a second public Text/Bytes representation.
+        let kind = if text.starts_with('"') { Some(crate::LiteralViewKind::Utf8) }
+            else if text.starts_with("b\"") { Some(crate::LiteralViewKind::Octets) }
+            else { None };
+        if let Some(kind) = kind {
+            let legacy = matches!((&expected, kind),
+                (Some(Type::Scalar(ScalarType::Text)), crate::LiteralViewKind::Utf8)
+                | (Some(Type::Scalar(ScalarType::Bytes)), crate::LiteralViewKind::Octets));
+            let sealed = expected.as_ref() == Some(&kind.data_type());
+            if !legacy && !sealed {
+                let raw = self.alloc(CoreKind::Literal(text), kind.data_type(), span);
+                let callee = self.literal_view_wrapper(kind, span);
+                return self.call(callee, vec![raw], span);
+            }
         }
         let ty = match (expected, text.as_str()) {
-            // The standard library's `Str<'a>` is a public alias for the
-            // sealed static UTF-8 backing type.  A quoted literal acquires
-            // that representation only in this explicit expected context;
-            // uncontextualized literals retain the ordinary dynamic Text
-            // type used by legacy compiler leaves.
+            // Privileged sealed-data contexts consume the backing literal
+            // directly; public literals are materialized above.
             (Some(ref static_data @ Type::StaticData { ref element, tag, .. }), literal)
                 if matches!(element.as_ref(), Type::Scalar(crate::types::ScalarType::U8))
                     && ((literal.starts_with('"') && tag == crate::STATIC_UTF8_DATA_TAG)
@@ -5531,132 +5502,21 @@ impl Elaborator<'_> {
         )
     }
 
-    fn constrain_standard_byte_slice(&mut self, expected: &Type) -> bool {
-        let ResolutionState::Resolved(definition) = self.index.resolve_path(
-            DefinitionNamespace::Type,
-            self.module,
-            &["std".into(), "Slice".into()],
-        ) else {
-            return false;
+    /// Consume the manifest's validated declaration identity. No source name,
+    /// visibility rule, or fixed package version reconstructs this binding.
+    fn literal_view_wrapper(&mut self, kind: crate::LiteralViewKind, span: Span) -> CoreId {
+        let Some(&definition) = self.signatures.literal_views.get(&kind) else {
+            return self.fail(span, "G4188", "the selected library has no manifest-bound view for this literal");
         };
-        let Type::Nominal { definition: actual, arguments } = expected else { return false; };
-        if actual != &definition { return false; }
-        let [GenericArgument::Lifetime(_), GenericArgument::Type(element)] = arguments.as_slice() else { return false; };
-        // Octet data supplies element evidence even when an earlier operand
-        // left the selected Slice's element unresolved. Ordinary unification
-        // may solve that cell; it cannot specialize a rigid caller parameter
-        // or turn a differently typed slice into a byte view.
-        self.inference.unify(element.clone(), Type::Scalar(ScalarType::U8)).is_ok()
-    }
-
-    /// Resolve the compiler-selected literal wrapper from the standard
-    /// package's own root. This deliberately bypasses application-package
-    /// visibility: it is compiler elaboration of a literal, not a source
-    /// spelling that should make the helper part of the public API.
-    fn standard_static_str_wrapper(&mut self, span: Span) -> CoreId {
-        let standard_module = ModuleKey {
-            package: PackageKey("std@0.1.0".into()),
-            path: "crate".into(),
+        let Some(signature) = self.signatures.definitions.get(&definition).and_then(callable).cloned() else {
+            return self.fail(span, "G4188", "the selected literal view has no callable contract");
         };
-        let ResolutionState::Resolved(definition) = self.index.resolve_path(
-            DefinitionNamespace::Value,
-            &standard_module,
-            &["__g1_wrap_static_str".into()],
-        ) else {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed standard library is missing its static Str literal wrapper",
-            );
-        };
-        let Some(signature) = self
-            .signatures
-            .definitions
-            .get(&definition)
-            .and_then(callable)
-            .cloned()
-        else {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed static Str literal wrapper has no callable contract",
-            );
-        };
-        if !signature.generic_kinds.is_empty() {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed static Str literal wrapper must not be generic",
-            );
-        }
         self.alloc(
-            CoreKind::Function {
-                definition,
-                arguments: vec![],
-                host_import: self.signatures.host_imports.get(&definition).cloned(),
-            },
-            Type::Callable { contract: Default::default(),
-                safety: signature.safety,
-                lifetime_binders: 0,
-                parameters: signature.parameters,
-                result: Box::new(signature.result),
-                effects: signature.effects,
-                invocation: signature.invocation,
-            },
-            span,
-        )
-    }
-
-    fn standard_static_slice_wrapper(&mut self, span: Span) -> CoreId {
-        let standard_module = ModuleKey {
-            package: PackageKey("std@0.1.0".into()),
-            path: "crate".into(),
-        };
-        let ResolutionState::Resolved(definition) = self.index.resolve_path(
-            DefinitionNamespace::Value,
-            &standard_module,
-            &["__g1_wrap_static_slice".into()],
-        ) else {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed standard library is missing its static Slice literal wrapper",
-            );
-        };
-        let Some(signature) = self
-            .signatures
-            .definitions
-            .get(&definition)
-            .and_then(callable)
-            .cloned()
-        else {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed static Slice literal wrapper has no callable contract",
-            );
-        };
-        if !signature.generic_kinds.is_empty() {
-            return self.fail(
-                span,
-                "G4188",
-                "the distributed static Slice literal wrapper must not be generic",
-            );
-        }
-        self.alloc(
-            CoreKind::Function {
-                definition,
-                arguments: vec![],
-                host_import: self.signatures.host_imports.get(&definition).cloned(),
-            },
-            Type::Callable { contract: Default::default(),
-                safety: signature.safety,
-                lifetime_binders: 0,
-                parameters: signature.parameters,
-                result: Box::new(signature.result),
-                effects: signature.effects,
-                invocation: signature.invocation,
-            },
+            CoreKind::Function { definition, arguments: vec![], host_import: None },
+            Type::Callable { contract: Default::default(), safety: signature.safety,
+                lifetime_binders: 0, parameters: signature.parameters,
+                result: Box::new(signature.result), effects: signature.effects,
+                invocation: signature.invocation },
             span,
         )
     }
@@ -7096,11 +6956,9 @@ impl Elaborator<'_> {
                     _ => Type::Error,
                 };
             }
-            // Match signature elaboration exactly: this compiler-owned type
-            // spelling is admitted only while checking the bundled standard
-            // library, where it can be hidden behind public aliases. It is
-            // not a source-level capability for application packages.
-            if name == "__StaticData" && self.module.package.0 == "std@0.1.0" {
+            // Header and body annotations consume the same host-selected
+            // library identity; neither reconstructs authority from a name.
+            if name == "__StaticData" && self.index.admits_static_data(&self.module.package) {
                 return match arguments {
                     [crate::header::HeaderGenericArgument::Type(element)] => {
                         let tag = match element {

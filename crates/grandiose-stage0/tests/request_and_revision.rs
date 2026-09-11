@@ -46,7 +46,7 @@ fn authority_tag_requests() -> (CompilationRequest, CompilationRequest) {
             module_path: "crate".into(),
             name: "primitive".into(),
         }],
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
     });
     let mut float = integer.clone();
     float.runtime_manifest.as_mut().unwrap().selectors[0].role =
@@ -143,7 +143,7 @@ fn world_fingerprint_frames_capabilities_separately_from_optional_runtime_manife
     runtime.capability_manifest.clear();
     runtime.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("std@0.1.0".into()),
-        selectors: vec![], host_imports: vec![],
+        selectors: vec![], literal_views: vec![], host_imports: vec![],
     });
     assert_ne!(
         capabilities.clone().normalize().unwrap().fingerprint,
@@ -158,6 +158,7 @@ fn world_fingerprint_frames_capabilities_separately_from_optional_runtime_manife
 
 #[test]
 fn world_v2_matches_an_independently_written_complete_framed_transcript() {
+    use grandiose_stage0::{LiteralViewKind, LiteralViewSelector};
     let producer = Digest::of_bytes(b"v2-producer");
     let package = PackageKey("app@0.1.0".into());
     let a = SourceInput::new(package.clone(), LogicalPath::parse("src/a.glorious").unwrap(), b"".as_slice());
@@ -181,7 +182,10 @@ fn world_v2_matches_an_independently_written_complete_framed_transcript() {
             PrimitiveSelector { role: PrimitiveRole::IntCheckedDiv, module_path: "crate::int".into(), name: "divide".into() },
             PrimitiveSelector { role: PrimitiveRole::parse_selector_name("f32-add").unwrap(), module_path: "crate::float".into(), name: "add".into() },
         ],
-        host_imports: vec![
+        literal_views: vec![
+            LiteralViewSelector { kind: LiteralViewKind::Octets, module_path: "crate::view".into(), name: "raw".into() },
+            LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: "crate::view".into(), name: "text".into() },
+        ], host_imports: vec![
             HostImportSelector { module_path: "crate::io".into(), name: "write".into(), capability: "fs.write".into(), symbol: "host-write".into() },
             HostImportSelector { module_path: "crate::io".into(), name: "read".into(), capability: "fs.read".into(), symbol: "host\0read".into() },
         ],
@@ -237,12 +241,20 @@ fn world_v2_matches_an_independently_written_complete_framed_transcript() {
     for value in ["crate::io", "read", "fs.read", "host\0read", "crate::io", "write", "fs.write", "host-write"] {
         field(&mut bytes, value);
     }
+    field(&mut bytes, 2_u64.to_le_bytes());
+    field(&mut bytes, [0]);
+    field(&mut bytes, b"crate::view");
+    field(&mut bytes, b"text");
+    field(&mut bytes, [1]);
+    field(&mut bytes, b"crate::view");
+    field(&mut bytes, b"raw");
     assert_eq!(world.fingerprint, Digest::of_bytes(&bytes));
     input.sources.reverse();
     input.capability_manifest.reverse();
     let runtime = input.runtime_manifest.as_mut().unwrap();
     runtime.selectors.reverse();
     runtime.host_imports.reverse();
+    runtime.literal_views.reverse();
     assert_eq!(world.fingerprint, input.normalize().unwrap().fingerprint);
 }
 
@@ -453,7 +465,7 @@ fn runtime_manifest_selectors_are_canonical_semantic_world_inputs() {
     let mut with_manifest = request(vec![source]);
     with_manifest.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("std@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::BranchBool,

@@ -1137,7 +1137,7 @@ fn only_manifest_bound_abort_has_a_no_cleanup_disposition() {
         let mut request = request(&source, optimization);
         request.runtime_manifest = Some(grandiose_stage0::RuntimeManifestInput {
             standard_library: request.root_package.clone(),
-            host_imports: vec![],
+            literal_views: vec![], host_imports: vec![],
             selectors: vec![grandiose_stage0::PrimitiveSelector {
                 role: grandiose_stage0::PrimitiveRole::Abort,
                 module_path: "crate".into(),

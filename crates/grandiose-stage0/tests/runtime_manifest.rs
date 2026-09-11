@@ -16,7 +16,7 @@ fn interface(package: PackageKey, source: &str) -> grandiose_stage0::PackageInte
 fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library,
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::TextByteLen,
@@ -55,6 +55,67 @@ fn manifest(standard_library: PackageKey) -> RuntimeManifestInput {
             },
         ],
     }
+}
+
+fn literal_manifest() -> (RuntimeManifestInput, grandiose_stage0::PackageInterface, ElaboratedInterface) {
+    use grandiose_stage0::{DefinitionIndex, LiteralViewKind, LiteralViewSelector};
+    let package = PackageKey("chosen-library@7".into());
+    let interface = interface(package.clone(), r#"
+        pub struct View<'a> { value: &'a i64 }
+        fn materialize(value: __StaticData<Utf8Bytes>) -> View<'static> { () }
+    "#);
+    let index = DefinitionIndex::from_interface(&interface).with_runtime_library(Some(package.clone()));
+    let signatures = ElaboratedInterface::elaborate_with_index(&interface, &index);
+    assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);
+    (RuntimeManifestInput { standard_library: package, selectors: vec![], host_imports: vec![],
+        literal_views: vec![LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: "crate".into(), name: "materialize".into() }],
+    }, interface, signatures)
+}
+
+#[test]
+fn literal_views_bind_private_ordinary_functions_in_the_selected_library() {
+    use grandiose_stage0::LiteralViewKind;
+    let (input, interface, signatures) = literal_manifest();
+    let bound = input.bind([interface.clone()], &signatures).unwrap();
+    let definition = interface.definitions.iter().find(|definition| definition.name.as_deref() == Some("materialize")).unwrap();
+    assert_eq!(bound.literal_views[&LiteralViewKind::Utf8], definition.key);
+    assert!(bound.primitives.is_empty() && bound.host_imports.is_empty());
+    let mut empty = input.clone(); empty.literal_views.clear();
+    assert_ne!(bound.digest, empty.bind([interface], &signatures).unwrap().digest);
+}
+
+#[test]
+fn literal_view_bindings_reject_nonclosed_or_nonordinary_contracts() {
+    use grandiose_stage0::{ElaboratedHeader, GenericKind, LiteralViewKind, ScalarType, Type};
+    let (input, interface, signatures) = literal_manifest();
+    let definition = input.bind([interface.clone()], &signatures).unwrap().literal_views[&LiteralViewKind::Utf8];
+    for case in 0..12 {
+        let mut invalid = signatures.clone();
+        let ElaboratedHeader::Callable(signature) = invalid.definitions.get_mut(&definition).unwrap() else { unreachable!() };
+        match case {
+            0 => signature.safety = grandiose_stage0::Safety::Unsafe,
+            1 => signature.parameters.clear(),
+            2 => signature.parameters.push(signature.parameters[0].clone()),
+            3 => signature.parameters = vec![Type::Scalar(ScalarType::Bytes)],
+            4 => { let Type::StaticData { tag, .. } = &mut signature.parameters[0] else { unreachable!() }; *tag = 0x4752_414e_4449_4f53_455f_5241_5755_385f; }
+            5 => { let Type::StaticData { alignment, .. } = &mut signature.parameters[0] else { unreachable!() }; *alignment = 8; }
+            6 => { signature.generics = 1; signature.generic_kinds.push(GenericKind::Type); }
+            7 => signature.result = Type::Scalar(ScalarType::Text),
+            8 => signature.effects = grandiose_stage0::EffectRow::closed([definition]),
+            9 => { let Type::Nominal { arguments, .. } = &mut signature.result else { unreachable!() }; arguments[0] = grandiose_stage0::GenericArgument::Lifetime(grandiose_stage0::Lifetime::Generic(0)); }
+            10 => { let Type::Nominal { definition: target, .. } = &mut signature.result else { unreachable!() }; *target = definition; }
+            _ => signature.where_outlives.push(grandiose_stage0::OutlivesPredicate::Region { longer: grandiose_stage0::Lifetime::Static, shorter: grandiose_stage0::Lifetime::Static }),
+        }
+        assert!(matches!(input.bind([interface.clone()], &invalid), Err(ManifestError::IncompatibleLiteralView { kind: LiteralViewKind::Utf8, .. })), "case {case}");
+    }
+    let mut host = input.clone();
+    host.host_imports.push(HostImportSelector { module_path: "crate".into(), name: "materialize".into(), capability: "host.view".into(), symbol: "view".into() });
+    assert!(matches!(host.bind([interface.clone()], &signatures), Err(ManifestError::ConflictingRuntimeBinding { .. })));
+    let mut duplicate = input.clone(); duplicate.literal_views.push(input.literal_views[0].clone());
+    assert_eq!(duplicate.canonicalize(), Err(ManifestError::DuplicateLiteralView(LiteralViewKind::Utf8)));
+    assert!(matches!(duplicate.bind([interface.clone()], &signatures), Err(ManifestError::DuplicateLiteralView(LiteralViewKind::Utf8))));
+    let mut missing = input; missing.literal_views[0].name = "not-present".into();
+    assert!(matches!(missing.bind([interface], &signatures), Err(ManifestError::MissingDeclaration { .. })));
 }
 
 #[test]
@@ -111,7 +172,7 @@ fn manifest_can_grant_a_strict_runtime_leaf_subset() {
     let signatures = ElaboratedInterface::elaborate(&interface);
     let manifest = RuntimeManifestInput {
         standard_library: standard,
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::TextByteLen,
             module_path: "crate".into(),
@@ -136,7 +197,7 @@ fn manifest_host_selector_cannot_replace_a_source_host_boundary() {
     let input = RuntimeManifestInput {
         standard_library: standard,
         selectors: vec![],
-        host_imports: vec![HostImportSelector {
+        literal_views: vec![], host_imports: vec![HostImportSelector {
             module_path: "crate".into(),
             name: "now".into(),
             capability: "other_clock".into(),
@@ -158,7 +219,7 @@ fn bytes_runtime_leaves_bind_by_exact_identity_and_abi() {
     let signatures = ElaboratedInterface::elaborate(&package_interface);
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::BytesGet,
             module_path: "crate".into(),
@@ -189,7 +250,7 @@ fn u32_runtime_leaves_bind_by_exact_identity_and_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::U32CheckedAdd,
             module_path: "crate".into(),
@@ -224,7 +285,7 @@ fn generic_int_shr_requires_its_exact_mixed_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntShr,
             module_path: "crate".into(),
@@ -258,7 +319,7 @@ fn generic_int_bit_xor_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitXor,
             module_path: "crate".into(),
@@ -293,7 +354,7 @@ fn generic_int_bit_and_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitAnd,
             module_path: "crate".into(),
@@ -328,7 +389,7 @@ fn generic_int_bit_or_requires_its_exact_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitOr,
             module_path: "crate".into(),
@@ -363,7 +424,7 @@ fn generic_int_bit_not_requires_its_exact_unary_generic_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntBitNot,
             module_path: "crate".into(),
@@ -398,7 +459,7 @@ fn generic_int_shift_left_requires_its_exact_i64_u32_i64_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntShl,
             module_path: "crate".into(),
@@ -433,7 +494,7 @@ fn generic_int_wrapping_to_u32_requires_its_exact_i64_to_u32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU32,
             module_path: "crate".into(),
@@ -468,7 +529,7 @@ fn generic_int_wrapping_to_usize_requires_its_exact_i64_to_usize_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToUsize,
             module_path: "crate".into(),
@@ -503,7 +564,7 @@ fn generic_int_wrapping_to_u8_requires_its_exact_i64_to_u8_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU8,
             module_path: "crate".into(),
@@ -538,7 +599,7 @@ fn generic_int_wrapping_to_u16_requires_its_exact_i64_to_u16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToU16,
             module_path: "crate".into(),
@@ -573,7 +634,7 @@ fn generic_int_wrapping_to_i16_requires_its_exact_i64_to_i16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToI16,
             module_path: "crate".into(),
@@ -607,7 +668,7 @@ fn generic_int_checked_to_i32_requires_its_exact_i64_to_i32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToI32,
             module_path: "crate".into(),
@@ -642,7 +703,7 @@ fn generic_int_wrapping_to_i32_requires_its_exact_i64_to_i32_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertWrappingToI32,
             module_path: "crate".into(),
@@ -676,7 +737,7 @@ fn generic_int_checked_to_usize_requires_its_exact_i64_to_usize_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToUsize,
             module_path: "crate".into(),
@@ -711,7 +772,7 @@ fn generic_int_checked_to_u8_requires_its_exact_i64_to_u8_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToU8,
             module_path: "crate".into(),
@@ -746,7 +807,7 @@ fn generic_int_checked_to_u16_requires_its_exact_i64_to_u16_abi() {
     let standard = PackageKey("std@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::IntConvertCheckedToU16,
             module_path: "crate".into(),
@@ -785,7 +846,7 @@ fn primitive_manifest_rejects_signature_mismatch_before_authority_freezes() {
     );
     let signatures = ElaboratedInterface::elaborate(&interface);
     assert!(matches!(
-        RuntimeManifestInput { standard_library: standard, host_imports: vec![], selectors: vec![PrimitiveSelector { role: PrimitiveRole::BranchBool, module_path: "crate".into(), name: "branch_bool".into() }] }.bind(vec![interface], &signatures),
+        RuntimeManifestInput { standard_library: standard, literal_views: vec![], host_imports: vec![], selectors: vec![PrimitiveSelector { role: PrimitiveRole::BranchBool, module_path: "crate".into(), name: "branch_bool".into() }] }.bind(vec![interface], &signatures),
         Err(ManifestError::IncompatibleSignature {
             role: PrimitiveRole::BranchBool,
             ..
@@ -857,7 +918,7 @@ fn blake3_requires_the_exact_manifest_bound_bytes_abi() {
     let standard = PackageKey("compiler-support@0.1.0".into());
     let input = RuntimeManifestInput {
         standard_library: standard.clone(),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::Blake3,
             module_path: "crate".into(),

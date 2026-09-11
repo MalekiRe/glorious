@@ -288,7 +288,7 @@ fn library_request_with_fragments(source: &str, optimization: &str, additional: 
     // explicitly; it must not pass the bundled-library byte-identity gate.
     request.runtime_manifest = Some(grandiose_stage0::RuntimeManifestInput {
         standard_library: PackageKey("std@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: library
             .lines()
             .filter(|line| line.ends_with(';'))

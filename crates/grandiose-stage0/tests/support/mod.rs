@@ -25,8 +25,15 @@ fn standard() -> &'static (PackageInterface, ElaboratedInterface) {
         let lexed = LexedFile::lex(FileKey::new(&package, "src/lib.glorious"), source);
         let scan = DeclarationScan::scan(&lexed, source);
         let interface = InterfaceSet::collect(package, "crate", &lexed, source, &scan).interface;
-        let index = DefinitionIndex::from_interface(&interface);
-        let mut signatures = ElaboratedInterface::elaborate(&interface);
+        let index = DefinitionIndex::from_interface(&interface).with_runtime_library(Some(interface.package.clone()));
+        let mut signatures = ElaboratedInterface::elaborate_with_index(&interface, &index);
+        signatures.literal_views = grandiose_stage0::RuntimeManifestInput {
+            standard_library: interface.package.clone(), selectors: vec![], host_imports: vec![],
+            literal_views: vec![
+                grandiose_stage0::LiteralViewSelector { kind: grandiose_stage0::LiteralViewKind::Utf8, module_path: "crate".into(), name: "__g1_wrap_static_str".into() },
+                grandiose_stage0::LiteralViewSelector { kind: grandiose_stage0::LiteralViewKind::Octets, module_path: "crate".into(), name: "__g1_wrap_static_slice".into() },
+            ],
+        }.bind([interface.clone()], &signatures).unwrap().literal_views;
         let fixities = FixityTable::for_module(&interface);
         freeze_initializers(&interface, source, &lexed, &index, &mut signatures, &fixities);
         assert!(signatures.diagnostics.is_empty(), "{:?}", signatures.diagnostics);

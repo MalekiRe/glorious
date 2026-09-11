@@ -4,6 +4,8 @@ use kernel::identity::PackageKey;
 use runtime_manifest::RuntimeManifestInput;
 use runtime_manifest::PrimitiveSelector;
 use runtime_manifest::HostImportSelector;
+use runtime_manifest::LiteralViewSelector;
+use runtime_manifest::LiteralViewKind;
 use runtime_manifest::ManifestError;
 use runtime_manifest::PrimitiveRole;
 use runtime_manifest::FloatPrimitive;
@@ -26,7 +28,7 @@ fn text(bytes: Slice<u8>) -> String {
     let values = Vec<u8>::new(); Vec::extend_from_slice(&mut values, bytes);
     handle String::from_utf8(values) { Result::Ok(value) => value, Result::Err(_) => String::new() }
 }
-fn limits() -> input::Limits { input::Limits { selectors: 1000, host_imports: 1000, text_bytes: 1000 } }
+fn limits() -> input::Limits { input::Limits { selectors: 1000, host_imports: 1000, literal_views: 1000, text_bytes: 1000 } }
 fn steps(builder: &mut input::Builder, controls: &mut operation::Controls, count: usize) -> Result<usize, input::Failure> {
     handle input::step(&mut *builder, &mut *controls) {
         Result::Err(error) => Result::Err(error),
@@ -74,13 +76,20 @@ fn host_rows(a: &Vec<HostImportSelector>, b: &Vec<HostImportSelector>, cursor: u
         },
     }
 }
+fn view_rows(a: &Vec<LiteralViewSelector>, b: &Vec<LiteralViewSelector>, cursor: usize, score: i64) -> i64 {
+    handle cursor == Vec::len(a) { true => score, false => { let left = Vec::get_unchecked(a, cursor); let right = Vec::get_unchecked(b, cursor);
+        view_rows(a, b, cursor + 1, score * eq(as<i64>(runtime_manifest::literal_view_tag(left.kind)), as<i64>(runtime_manifest::literal_view_tag(right.kind)))
+            * same(&left.module_path, &right.module_path) * same(&left.name, &right.name)) } }
+}
 fn manifests(a: &RuntimeManifestInput, b: &RuntimeManifestInput) -> i64 {
     handle Vec::len(&a.selectors) == Vec::len(&b.selectors) {
         false => 0,
         true => handle Vec::len(&a.host_imports) == Vec::len(&b.host_imports) {
             false => 0,
-            true => same(&a.standard_library.value, &b.standard_library.value) * selector_rows(&a.selectors, &b.selectors, 0, 1)
-                * host_rows(&a.host_imports, &b.host_imports, 0, 1),
+            true => handle Vec::len(&a.literal_views) == Vec::len(&b.literal_views) {
+                false => 0, true => same(&a.standard_library.value, &b.standard_library.value) * selector_rows(&a.selectors, &b.selectors, 0, 1)
+                    * host_rows(&a.host_imports, &b.host_imports, 0, 1) * view_rows(&a.literal_views, &b.literal_views, 0, 1),
+            },
         },
     }
 }
@@ -90,6 +99,7 @@ fn rejection(error: ManifestError, expected: &Expected) -> i64 {
         ManifestError::DuplicateRole(role) => eq(expected.kind, 2) * yes(Eq::eq(&role, &expected.role)),
         ManifestError::InvalidHostImport { module_path: module, name: name } => eq(expected.kind, 3) * same(&module, &expected.a) * same(&name, &expected.b),
         ManifestError::DuplicateHostImport { module_path: module, name: name } => eq(expected.kind, 4) * same(&module, &expected.a) * same(&name, &expected.b),
+        ManifestError::DuplicateLiteralView(kind) => handle kind { LiteralViewKind::Utf8 => eq(expected.kind, 5), LiteralViewKind::Octets => eq(expected.kind, 6) },
         _ => 0,
     }
 }
@@ -149,14 +159,16 @@ fn conversions(expected: Slice<u8>, index: usize, score: i64) -> i64 {
     }
 }
 fn empty() -> RuntimeManifestInput {
-    RuntimeManifestInput { standard_library: PackageKey { value: Str::to_string("std@0.1.0") }, selectors: Vec<PrimitiveSelector>::new(), host_imports: Vec<HostImportSelector>::new() }
+    RuntimeManifestInput { standard_library: PackageKey { value: Str::to_string("std@0.1.0") }, selectors: Vec<PrimitiveSelector>::new(), host_imports: Vec<HostImportSelector>::new(), literal_views: Vec<LiteralViewSelector>::new() }
 }
 fn sample() -> RuntimeManifestInput {
-    let value = empty();
+    let mut value = empty();
     Vec::push(&mut value.selectors, PrimitiveSelector { role: PrimitiveRole::BranchBool, module_path: Str::to_string("a"), name: Str::to_string("b") });
     Vec::push(&mut value.selectors, PrimitiveSelector { role: PrimitiveRole::Abort, module_path: Str::to_string("a"), name: Str::to_string("a") });
     Vec::push(&mut value.host_imports, HostImportSelector { module_path: Str::to_string("a"), name: Str::to_string("b"), capability: Str::to_string("r"), symbol: Str::to_string("s") });
     Vec::push(&mut value.host_imports, HostImportSelector { module_path: Str::to_string("a"), name: Str::to_string("a"), capability: Str::to_string("r"), symbol: Str::to_string("s") });
+    Vec::push(&mut value.literal_views, LiteralViewSelector { kind: LiteralViewKind::Octets, module_path: Str::to_string("a"), name: Str::to_string("b") });
+    Vec::push(&mut value.literal_views, LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: Str::to_string("a"), name: Str::to_string("a") });
     value
 }
 fn advance(builder: &mut input::Builder, controls: &mut operation::Controls, count: usize) -> () {
@@ -225,17 +237,26 @@ fn text_capacity(field: u32) -> i64 {
     let value = empty();
     Vec::push(&mut value.selectors, PrimitiveSelector { role: PrimitiveRole::Abort, module_path: sized(field, 2), name: sized(field, 3) });
     Vec::push(&mut value.host_imports, HostImportSelector { module_path: sized(field, 4), name: sized(field, 5), capability: sized(field, 6), symbol: sized(field, 7) });
-    capacity(value, input::Limits { selectors: 1, host_imports: 1, text_bytes: 1 }, field, 1)
+    capacity(value, input::Limits { selectors: 1, host_imports: 1, literal_views: 2, text_bytes: 1 }, field, 1)
 }
 fn capacities() -> i64 {
     let controls = operation::create(1000000, 1000000);
-    let exact = input::begin(sample(), input::Limits { selectors: 2, host_imports: 2, text_bytes: 1 });
-    let zero = input::begin(empty(), input::Limits { selectors: 0, host_imports: 0, text_bytes: 0 });
+    let exact = input::begin(sample(), input::Limits { selectors: 2, host_imports: 2, literal_views: 2, text_bytes: 1 });
+    let zero = input::begin(empty(), input::Limits { selectors: 0, host_imports: 0, literal_views: 2, text_bytes: 0 });
     expect(run(&mut exact, &mut controls), 0) + expect(input::finish(&mut exact, &controls), 1)
         + expect(run(&mut zero, &mut controls), 0) + expect(input::finish(&mut zero, &controls), 1)
-        + capacity(sample(), input::Limits { selectors: 1, host_imports: 2, text_bytes: 1 }, 0, 1)
-        + capacity(sample(), input::Limits { selectors: 2, host_imports: 1, text_bytes: 1 }, 1, 1)
+        + capacity(sample(), input::Limits { selectors: 1, host_imports: 2, literal_views: 2, text_bytes: 1 }, 0, 1)
+        + capacity(sample(), input::Limits { selectors: 2, host_imports: 1, literal_views: 2, text_bytes: 1 }, 1, 1)
         + text_capacity(2) + text_capacity(3) + text_capacity(4) + text_capacity(5) + text_capacity(6) + text_capacity(7)
+        + view_capacity(8) + view_capacity(9) + view_capacity(10)
+}
+fn view_capacity(field: u32) -> i64 {
+    let mut value = empty();
+    Vec::push(&mut value.literal_views, LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: sized(field, 9), name: sized(field, 10) });
+    handle field == 8 {
+        true => capacity(value, input::Limits { selectors: 0, host_imports: 0, literal_views: 0, text_bytes: 1 }, 8, 0),
+        false => capacity(value, input::Limits { selectors: 0, host_imports: 0, literal_views: 1, text_bytes: 1 }, field, 1),
+    }
 }
 @CASES@
 @ROLES@

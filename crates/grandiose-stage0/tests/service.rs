@@ -700,7 +700,7 @@ fn request_with_dependency(root: &str, package: &str, source: &str) -> Compilati
 fn text_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::TextByteLen,
@@ -744,7 +744,7 @@ fn text_runtime_manifest() -> RuntimeManifestInput {
 fn char_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: [
             (
                 PrimitiveRole::CharFromU32Checked,
@@ -765,7 +765,7 @@ fn char_runtime_manifest() -> RuntimeManifestInput {
 fn bytes_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: [
             (PrimitiveRole::TextByteLen, "__g1_text_byte_len"),
             (PrimitiveRole::TextAsBytes, "__g1_text_as_bytes"),
@@ -796,7 +796,7 @@ fn bytes_runtime_manifest() -> RuntimeManifestInput {
 fn text_bytes_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: [
             (PrimitiveRole::TextByteLen, "__g1_text_byte_len"),
             (PrimitiveRole::TextConcat, "__g1_text_concat"),
@@ -838,7 +838,7 @@ fn text_bytes_runtime_manifest() -> RuntimeManifestInput {
 fn u32_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: [
             (PrimitiveRole::CharToU32, "__g1_char_to_u32"),
             (PrimitiveRole::U32CheckedAdd, "__g1_u32_checked_add"),
@@ -872,7 +872,7 @@ fn u32_runtime_manifest() -> RuntimeManifestInput {
 fn int_runtime_manifest(role: PrimitiveRole, name: &str) -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role,
             module_path: "crate".into(),
@@ -941,7 +941,7 @@ fn manifest_bound_float_finiteness_predicates_execute_through_unsigned_vm_paths(
         let mut input = request(&source);
         input.runtime_manifest = Some(RuntimeManifestInput {
             standard_library: PackageKey("app@0.1.0".into()),
-            host_imports: vec![],
+            literal_views: vec![], host_imports: vec![],
             selectors: [
                 (format!("{name}-to-bits"), to_bits),
                 (format!("{name}-from-bits"), from_bits),
@@ -1637,7 +1637,7 @@ fn manifest_bound_generic_int_shr_uses_its_mixed_vm_abi() {
     );
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::IntShr,
@@ -1769,7 +1769,7 @@ fn manifest_bound_generic_int_shift_left_rejects_an_i64_width_count() {
     );
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![
             PrimitiveSelector {
                 role: PrimitiveRole::CharToU32,
@@ -1934,7 +1934,7 @@ const ARRAY_RUNTIME_LEAVES: &str = "pub fn __g1_array_get_borrow_shared<'a, T>(v
 fn array_runtime_manifest() -> RuntimeManifestInput {
     RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: [
             (
                 PrimitiveRole::ArrayGetBorrowShared,
@@ -3148,7 +3148,7 @@ fn manifest_bound_host_placeholder_skips_seed_only_unit_body() {
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
         selectors: vec![],
-        host_imports: vec![HostImportSelector {
+        literal_views: vec![], host_imports: vec![HostImportSelector {
             module_path: "crate".into(),
             name: "__g1_process_args_get".into(),
             capability: "process_args".into(),
@@ -3176,7 +3176,7 @@ fn manifest_host_placeholder_requires_its_declared_capability() {
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
         selectors: vec![],
-        host_imports: vec![HostImportSelector {
+        literal_views: vec![], host_imports: vec![HostImportSelector {
             module_path: "crate".into(),
             name: "__g1_process_args_get".into(),
             capability: "process_args".into(),
@@ -3199,7 +3199,7 @@ fn service_lowers_only_the_manifest_bound_abort_leaf_to_a_terminal_vm_trap() {
     let mut input = request("fn __g1_abort() -> ! { () } pub fn main() -> ! { __g1_abort() }");
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector {
             role: PrimitiveRole::Abort,
             module_path: "crate".into(),
@@ -12845,7 +12845,7 @@ fn generic_integer_shift_wrappers_materialize_signed_unsigned_and_trapping_width
         let mut input = request(source);
         input.runtime_manifest = Some(RuntimeManifestInput {
             standard_library: PackageKey("app@0.1.0".into()),
-            host_imports: vec![],
+            literal_views: vec![], host_imports: vec![],
             selectors: [
                 (PrimitiveRole::IntShr, "__g1_int_shr"),
                 (PrimitiveRole::IntWrappingNeg, "__g1_int_wrapping_neg"),
@@ -14118,7 +14118,7 @@ fn service_replays_generic_operation_payloads_through_generic_call_frames() {
     let mut input = request(source);
     input.runtime_manifest = Some(RuntimeManifestInput {
         standard_library: PackageKey("app@0.1.0".into()),
-        host_imports: vec![],
+        literal_views: vec![], host_imports: vec![],
         selectors: vec![PrimitiveSelector { role: PrimitiveRole::TextConcat,
             module_path: "crate".into(), name: "join".into() }],
     });

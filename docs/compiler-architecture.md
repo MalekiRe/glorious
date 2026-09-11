@@ -1219,13 +1219,33 @@ bootstrap `Array<T>` context selects the legacy carrier. Later generic calls,
 patterns, materialization and runtime layout consume the existing fixed-array
 type rather than recovering a length from expression syntax.
 
-A contextual octet literal first resolves the selected standard Slice identity,
-then unifies its element with `u8` through the existing inference context. It
-still constructs sealed static data and invokes the manifest-bound wrapper as
-an ordinary Core call. A rigid or incompatible element cannot acquire byte-view
-authority. Partial resolution exposes solved components without defaulting
-unrelated holes; full zonking and the existing layout/provenance validators
-remain required at persistence and execution boundaries.
+The host-selected runtime manifest separately binds UTF-8 and octet literal
+constructors to exact declaration identities. These are ordinary safe, closed,
+pure library functions over the corresponding sealed static-data tag, not
+machine primitives or host imports. Binding rejects conflicting authority and
+incompatible contracts. The validated constructor map enters the frozen
+interface before top-level initializer or body elaboration; its result type is
+the sole producer of a literal's ordinary library view type. Missing context
+does not default a literal to legacy Text/Bytes, and missing binding is an error.
+Explicit bootstrap scalar contexts and privileged sealed-data contexts remain
+separate, explicit compatibility boundaries.
+
+Core constructs the sealed data and an ordinary call without looking up wrapper
+or view names. The shared inference/coercion relation then checks the expected
+type, element evidence and lifetime shortening. Header and body annotations
+admit the private sealed-data spelling only in the host-selected library
+package, never because a package happens to be named std. Private constructor
+visibility is not widened for source callers. Existing call dependencies,
+reference-result proofs, layout validation and lowering consume these ordinary
+calls unchanged.
+
+Both canonical request/bootstrapping commitments and the bound manifest digest
+include the literal bindings in counted, typed collections. The existing
+self-hosted request admission builder retains the two classes in disjoint
+slots, emits kind order, rejects duplicate kinds and charges every admission
+and emission step. Its world encoder includes the same count and selector
+fields. Cross-language execution parity remains a separate acceptance gate;
+updating that source schema alone is not evidence that it executes correctly.
 
 This repairs these contextual literal producers, not all bootstrap literal
 extensions, library ownership contracts or full compiler/self-hosted acceptance.

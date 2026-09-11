@@ -5,6 +5,46 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Manifest-selected literal materialization
+
+Cache 181 replaces contextual, spelling-based literal wrapper discovery with
+explicit UTF-8/octet selectors in the selected library's runtime manifest.
+Binding validates private ordinary constructor identities and their safe,
+closed, pure sealed-data contracts without classifying them as primitive/host
+calls. Header and body sealed-data admission now share the host-selected
+library identity. The constructor map is frozen before global initializer
+inference. Uncontextualized literals obtain the selected library result type;
+only explicit bootstrap scalar/sealed-data contexts bypass materialization.
+Neither wrapper names, public view names nor a fixed package version are
+reconstructed by the literal consumer.
+
+The previously preserved byte-literal branch-order regression passes, including
+fresh VM, decoded VM and LLVM O0/O2. The final focused run passes all 27
+manifest tests and 14 static-data tests, including uncontextualized local/global
+literals, five selected-library programs using renamed private wrappers and
+rejection of sealed-data access from an unselected package named std. All five
+selected inference tests pass, including both text/byte branch orders and
+borrow-escape rejection. The existing two contextual byte-element inference
+tests, CLI literal selection and bootstrap literal-selector commitments pass.
+The independent complete request transcript passes with both counted literal
+selectors. All Rust test targets compile.
+
+Runtime request input, bootstrap commitments, the counted bound-manifest digest,
+CLI selectors and the existing self-hosted admission/fingerprint consumers are
+migrated together. The source oracle now includes kind order, duplicate kinds,
+selector fields and bounded admission cases. Its full production-closure test
+does **not** pass: existing source mutations lack `mut` (including lexer state
+and identity buffers), and kernel code accesses private fields. These errors
+prevent execution parity; the migrated source mirror remains unverified.
+The request/revision suite finishes at 20/22: two historical tests still pin
+older cache/bytecode versions. They remain active and unchanged. No full
+language, standard-library or self-hosted acceptance is claimed here.
+The wider prelude run exposes two unchanged unit-pattern failures (diagnostic
+identity and an unreachable fallback). Its comment/opt-out fixture now uses the
+explicit trusted execution API for its newly materialized static Str; the
+original source and fresh/decoded result assertions pass without relaxing the
+runtime's unsafe-execution guard.
+
 ## Array input coercions and frozen normal-result proofs
 
 Cache 180 migrates array-element joins to the shared directional coercion

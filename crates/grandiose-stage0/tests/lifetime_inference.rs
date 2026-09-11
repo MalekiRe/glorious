@@ -113,6 +113,19 @@ fn run_views(source: &str) {
 }
 
 #[test]
+fn inferred_text_literal_view_joins_do_not_depend_on_branch_order() {
+    for selection in [
+        "handle flag { true => input, false => \"\" }",
+        "handle flag { false => \"\", true => input }",
+    ] {
+        run_views(&format!(r#"
+            fn choose<'a>(input: Str<'a>, flag: Bool) -> usize {{ let value = {selection}; Str::len(value) }}
+            pub fn main() -> i64 {{ as<i64>(choose("*",true) + choose("*",false)) + 41 }}
+        "#));
+    }
+}
+
+#[test]
 fn inferred_nominal_view_joins_accept_shorter_borrows_and_static_fallbacks() {
     for selection in [
         "handle flag { true => input, false => empty }",

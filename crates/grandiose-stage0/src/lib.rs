@@ -152,7 +152,7 @@ pub use revision::{
     RetentionStats, RevisionCache, RevisionError, RevisionMetadata, RevisionRetentionMetadata,
 };
 pub use runtime_manifest::{
-    HostImportSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
+    HostImportSelector, LiteralViewKind, LiteralViewSelector, ManifestError, PrimitiveRole, PrimitiveSelector, RuntimeManifestInput,
     TrustedRuntimeManifest,
 };
 pub use scanner::{DeclarationKind, DeclarationScan, DeclarationShell, ScanDiagnostic, TokenRange, Visibility};

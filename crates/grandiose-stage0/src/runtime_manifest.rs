@@ -1,8 +1,8 @@
-//! Finite machine-primitive authority bound to a trusted library identity.
+//! Runtime authority and ordinary literal views bound to a selected library.
 //!
 //! Source names are never authority.  A request host supplies selectors for a
 //! distinguished standard-library package; binding resolves them to exact
-//! public declaration identities and freezes a digestible table.
+//! declaration identities and freezes digestible, separately typed tables.
 
 use std::collections::BTreeMap;
 
@@ -950,11 +950,37 @@ pub struct HostImportSelector {
     pub symbol: String,
 }
 
+/// Literal data classes select ordinary library constructors, not runtime
+/// primitives. The function body and the returned view layout remain source-owned.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum LiteralViewKind { Utf8, Octets }
+
+impl LiteralViewKind {
+    pub(crate) const fn stable_tag(self) -> u8 {
+        match self { Self::Utf8 => 0, Self::Octets => 1 }
+    }
+    pub(crate) fn data_type(self) -> Type {
+        Type::StaticData {
+            element: Box::new(Type::Scalar(ScalarType::U8)),
+            tag: match self { Self::Utf8 => crate::STATIC_UTF8_DATA_TAG, Self::Octets => crate::STATIC_RAW_U8_DATA_TAG },
+            alignment: 1,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct LiteralViewSelector {
+    pub kind: LiteralViewKind,
+    pub module_path: String,
+    pub name: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeManifestInput {
     pub standard_library: PackageKey,
     pub selectors: Vec<PrimitiveSelector>,
     pub host_imports: Vec<HostImportSelector>,
+    pub literal_views: Vec<LiteralViewSelector>,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TrustedRuntimeManifest {
@@ -963,10 +989,13 @@ pub struct TrustedRuntimeManifest {
     /// Frozen source declaration identities that lower directly to host ABI
     /// calls, rather than elaborating their seed-only placeholder bodies.
     pub host_imports: BTreeMap<DefKey, HostImport>,
+    pub literal_views: BTreeMap<LiteralViewKind, DefKey>,
     pub digest: Digest,
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ManifestError {
+    DuplicateLiteralView(LiteralViewKind),
+    IncompatibleLiteralView { kind: LiteralViewKind, definition: DefKey },
     InvalidRole(PrimitiveRole),
     DuplicateRole(PrimitiveRole),
     MissingDeclaration {
@@ -1029,6 +1058,12 @@ impl RuntimeManifestInput {
                     module_path: pair[0].module_path.clone(),
                     name: pair[0].name.clone(),
                 });
+            }
+        }
+        self.literal_views.sort();
+        for pair in self.literal_views.windows(2) {
+            if pair[0].kind == pair[1].kind {
+                return Err(ManifestError::DuplicateLiteralView(pair[0].kind));
             }
         }
         Ok(())
@@ -1152,12 +1187,73 @@ impl RuntimeManifestInput {
                 },
             );
         }
+        let mut literal_views = BTreeMap::new();
+        for selector in &self.literal_views {
+            if literal_views.contains_key(&selector.kind) {
+                return Err(ManifestError::DuplicateLiteralView(selector.kind));
+            }
+            let candidates = interfaces.iter()
+                .filter(|interface| interface.module.path == selector.module_path)
+                .flat_map(|interface| &interface.definitions)
+                .filter(|definition| definition.name.as_deref() == Some(selector.name.as_str()))
+                .collect::<Vec<_>>();
+            let definition = match candidates.as_slice() {
+                [] => return Err(ManifestError::MissingDeclaration { module_path: selector.module_path.clone(), name: selector.name.clone() }),
+                [definition] => definition.key,
+                _ => return Err(ManifestError::AmbiguousDeclaration { module_path: selector.module_path.clone(), name: selector.name.clone() }),
+            };
+            if primitives.values().any(|key| *key == definition)
+                || host_imports.contains_key(&definition)
+                || signatures.host_imports.contains_key(&definition)
+            {
+                return Err(ManifestError::ConflictingRuntimeBinding { definition });
+            }
+            let compatible = match signatures.definitions.get(&definition) {
+                Some(ElaboratedHeader::Callable(signature)) => {
+                    signature.safety == crate::Safety::Safe
+                        && signature.generics == 0 && signature.generic_kinds.is_empty()
+                        && signature.parameters == [selector.kind.data_type()]
+                        && signature.effects == EffectRow::empty()
+                        && signature.where_bounds.is_empty() && signature.where_outlives.is_empty()
+                        && signature.where_associated_type_bindings.is_empty()
+                        && signature.where_associated_effect_bindings.is_empty()
+                        && signature.universal_bounds.is_empty()
+                        && matches!(&signature.result, Type::Nominal { definition, .. }
+                            if matches!(signatures.definitions.get(definition), Some(ElaboratedHeader::Nominal { .. })))
+                        && literal_view_type_is_closed(&signature.result)
+                }
+                _ => false,
+            };
+            if !compatible {
+                return Err(ManifestError::IncompatibleLiteralView { kind: selector.kind, definition });
+            }
+            literal_views.insert(selector.kind, definition);
+        }
         Ok(TrustedRuntimeManifest {
             standard_library: self.standard_library.clone(),
-            digest: manifest_digest(&self.standard_library, &primitives, &host_imports),
+            digest: manifest_digest(&self.standard_library, &primitives, &host_imports, &literal_views),
             primitives,
             host_imports,
+            literal_views,
         })
+    }
+}
+fn literal_view_type_is_closed(value: &Type) -> bool {
+    use crate::GenericArgument;
+    match value {
+        Type::Unit | Type::Scalar(_) => true,
+        Type::Nominal { arguments, .. } => arguments.iter().all(|argument| match argument {
+            GenericArgument::Lifetime(Lifetime::Static) | GenericArgument::ConstInteger(_)
+                | GenericArgument::ConstQuantity(_) => true,
+            GenericArgument::Type(value) => literal_view_type_is_closed(value),
+            _ => false,
+        }),
+        Type::Tuple(elements) => elements.iter().all(literal_view_type_is_closed),
+        Type::Array(element) | Type::RawPointer { pointee: element, .. }
+            | Type::Reference { referent: element, lifetime: Lifetime::Static, .. }
+            | Type::StaticData { element, .. } => literal_view_type_is_closed(element),
+        Type::FixedArray { element, length } => matches!(length.as_ref(), GenericArgument::ConstInteger(_)) && literal_view_type_is_closed(element),
+        _ => false,
     }
 }
 fn expected_signature(role: PrimitiveRole) -> crate::CallableSignature {
@@ -1925,20 +2021,28 @@ fn manifest_digest(
     standard_library: &PackageKey,
     primitives: &BTreeMap<PrimitiveRole, DefKey>,
     host_imports: &BTreeMap<DefKey, HostImport>,
+    literal_views: &BTreeMap<LiteralViewKind, DefKey>,
 ) -> Digest {
-    let mut bytes = b"grandiose-stage0-runtime-manifest-v1".to_vec();
+    let mut bytes = b"grandiose-stage0-runtime-manifest-v2".to_vec();
     bytes.extend_from_slice(&(standard_library.0.len() as u64).to_le_bytes());
     bytes.extend_from_slice(standard_library.0.as_bytes());
+    bytes.extend_from_slice(&(primitives.len() as u64).to_le_bytes());
     for (role, definition) in primitives {
         bytes.push(role.stable_tag());
         bytes.extend_from_slice(&definition.0.as_bytes());
     }
+    bytes.extend_from_slice(&(host_imports.len() as u64).to_le_bytes());
     for (definition, import) in host_imports {
         bytes.extend_from_slice(&definition.0.as_bytes());
         bytes.extend_from_slice(&(import.capability.len() as u64).to_le_bytes());
         bytes.extend_from_slice(import.capability.as_bytes());
         bytes.extend_from_slice(&(import.symbol.len() as u64).to_le_bytes());
         bytes.extend_from_slice(import.symbol.as_bytes());
+    }
+    bytes.extend_from_slice(&(literal_views.len() as u64).to_le_bytes());
+    for (kind, definition) in literal_views {
+        bytes.push(kind.stable_tag());
+        bytes.extend_from_slice(&definition.0.as_bytes());
     }
     Digest::of_bytes(&bytes)
 }
@@ -1971,7 +2075,7 @@ mod tests {
                         || (checked && float_from && is_runtime_integer(to));
                     let role = PrimitiveRole::Float(FloatPrimitive::Convert { from, to, checked });
                     let mut input = RuntimeManifestInput { standard_library: PackageKey("std@0.1.0".into()),
-                        selectors: vec![PrimitiveSelector { role, module_path: "crate".into(), name: "leaf".into() }], host_imports: vec![] };
+                        selectors: vec![PrimitiveSelector { role, module_path: "crate".into(), name: "leaf".into() }], literal_views: vec![], host_imports: vec![] };
                     let canonicalized = input.canonicalize();
                     assert_eq!(canonicalized.is_ok(), valid, "{role:?}");
                     if valid {
@@ -2135,8 +2239,8 @@ mod tests {
         let integer = BTreeMap::from([(PrimitiveRole::IntCheckedDiv, definition)]);
         let float = BTreeMap::from([(PrimitiveRole::parse_selector_name("f32-add").unwrap(), definition)]);
         assert_ne!(
-            manifest_digest(&package, &integer, &BTreeMap::new()),
-            manifest_digest(&package, &float, &BTreeMap::new())
+            manifest_digest(&package, &integer, &BTreeMap::new(), &BTreeMap::new()),
+            manifest_digest(&package, &float, &BTreeMap::new(), &BTreeMap::new())
         );
     }
 

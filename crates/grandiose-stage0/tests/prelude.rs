@@ -261,9 +261,15 @@ fn no_implicit_prelude_preserves_explicit_dependency_imports() {
 
 #[test]
 fn comments_do_not_select_library_opt_outs() {
-    runs(
-        "// #![no_std]\n/* #![no_implicit_prelude] */ pub fn main() -> i64 { let text = \"#![no_std]\"; 40 + 2 }",
-    );
+    let source = "// #![no_std]\n/* #![no_implicit_prelude] */ pub fn main() -> i64 { let text = \"#![no_std]\"; 40 + 2 }";
+    let outcome = StageZeroCompiler::new().compile(request(source)).unwrap();
+    assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+    let program = outcome.artifact.unwrap();
+    let decoded = decode_and_verify_program(&program.canonical_bytes()).unwrap();
+    // SAFETY: this local fixture now materializes its unannotated literal
+    // through the bundled library's native-memory-backed static Str wrapper.
+    assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
 }
 
 #[test]

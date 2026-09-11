@@ -131,6 +131,9 @@ fn byte_literal_lowers_to_a_distinct_raw_static_data_tag() {
     let request = CompilationRequest {
         build: CompilerBuildIdentity::stage0(Digest::of_bytes(b"raw-static-data-literal")),
         mode: CompilationMode::Build,
+        runtime_manifest: Some(grandiose_stage0::RuntimeManifestInput {
+            standard_library: standard.clone(), selectors: vec![], host_imports: vec![], literal_views: vec![],
+        }),
         root_package: standard.clone(),
         sources: vec![SourceInput::new(
             standard,
@@ -141,7 +144,6 @@ fn byte_literal_lowers_to_a_distinct_raw_static_data_tag() {
         semantic_options: BTreeMap::new(),
         codegen_options: BTreeMap::new(),
         capability_manifest: vec![],
-        runtime_manifest: None,
     };
 
     let outcome = StageZeroCompiler::new().compile(request).unwrap();
@@ -172,6 +174,87 @@ fn raw_byte_literal_lowers_to_the_public_static_slice_view() {
         pub fn main() -> usize { byte_count(b"\x00\xffA") }
     "#;
     assert_eq!(run_bundled_usize(source), 3);
+}
+
+#[test]
+fn uncontextualized_literals_and_global_initializers_use_library_views() {
+    for source in [
+        r#"pub fn main() -> usize { let value = "éλ"; std::Str::len(value) }"#,
+        r#"let value = "éλ"; pub fn main() -> usize { std::Str::len(value) }"#,
+        r#"pub fn main() -> usize { let value = b"\x00\xffAZ"; std::Slice::len(&value) }"#,
+        r#"let value = b"\x00\xffAZ"; pub fn main() -> usize { std::Slice::len(&value) }"#,
+    ] {
+        assert_eq!(run_bundled_usize(source), 4, "{source}");
+    }
+}
+
+fn selected_literal_request(source: &str) -> CompilationRequest {
+    use grandiose_stage0::{LiteralViewKind, LiteralViewSelector, RuntimeManifestInput};
+    let mut request = bundled_request(source);
+    let selected = PackageKey("chosen-library@7".into());
+    request.sources[1] = SourceInput::new(selected.clone(), LogicalPath::parse("src/lib.glorious").unwrap(), br#"
+        pub struct TextView { private backing: __StaticData<Utf8Bytes>, pub marker: i64 }
+        pub struct OctetView { private backing: __StaticData<u8>, pub marker: i64 }
+        fn from_text(value: __StaticData<Utf8Bytes>) -> TextView { TextView { backing: value, marker: 42 } }
+        fn from_octets(value: __StaticData<u8>) -> OctetView { OctetView { backing: value, marker: 42 } }
+    "#.as_slice());
+    request.runtime_manifest = Some(RuntimeManifestInput { standard_library: selected, selectors: vec![], host_imports: vec![],
+        literal_views: vec![
+            LiteralViewSelector { kind: LiteralViewKind::Utf8, module_path: "crate".into(), name: "from_text".into() },
+            LiteralViewSelector { kind: LiteralViewKind::Octets, module_path: "crate".into(), name: "from_octets".into() },
+        ],
+    });
+    request
+}
+
+#[test]
+fn selected_literal_views_execute_renamed_private_library_bodies() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    for source in [
+        r#"pub fn main() -> i64 { let value = "abc"; value.marker }"#,
+        r#"pub fn main() -> i64 { let value = b"\x00\xff"; value.marker }"#,
+        r#"let value = "abc"; pub fn main() -> i64 { value.marker }"#,
+        r#"let value = b"\x00\xff"; pub fn main() -> i64 { value.marker }"#,
+        r#"pub fn main() -> i64 { let value: chosen_library::TextView = "abc"; value.marker }"#,
+    ] {
+        let request = selected_literal_request(source);
+        let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap_or_else(|error| panic!("{source}: {error:#?}"));
+        assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
+        let artifact = outcome.artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        let llvm = StageZeroCompiler::new().compile_llvm(request, LlvmTarget::host().unwrap()).unwrap();
+        for optimization in [0, 2] {
+            // SAFETY: this fixture contains only locally compiled ordinary
+            // constructors over immutable compiler-emitted backing data.
+            let native = unsafe { llvm.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(unsafe { native.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        }
+    }
+}
+
+#[test]
+fn literals_cannot_invent_missing_bindings_or_use_the_other_data_class() {
+    for source in [
+        r#"pub fn main() -> i64 { let value = "abc"; value.marker }"#,
+        r#"pub fn main() -> i64 { let value = b"abc"; value.marker }"#,
+    ] {
+        let mut request = selected_literal_request(source);
+        request.runtime_manifest.as_mut().unwrap().literal_views.clear();
+        let errors = StageZeroCompiler::new().compile(request).unwrap_err().diagnostics();
+        assert!(errors.iter().any(|error| error.code == "G4188"), "{errors:#?}");
+    }
+    let request = selected_literal_request(r#"pub fn main() -> i64 { let value: chosen_library::OctetView = "abc"; value.marker }"#);
+    assert!(StageZeroCompiler::new().compile(request).is_err());
+}
+
+#[test]
+fn a_package_named_std_has_no_unselected_static_data_authority() {
+    let mut request = selected_literal_request("pub fn main() -> i64 { 42 }");
+    request.sources.push(SourceInput::new(PackageKey("std@0.1.0".into()), LogicalPath::parse("src/lib.glorious").unwrap(),
+        b"pub fn forge(value: __StaticData<u8>) -> i64 { 42 }".as_slice()));
+    let errors = StageZeroCompiler::new().compile(request).unwrap_err().diagnostics();
+    assert!(errors.iter().any(|error| error.code == "G3304"), "{errors:#?}");
 }
 
 
