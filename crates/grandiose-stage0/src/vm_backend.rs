@@ -9034,9 +9034,8 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 if returns && let Some(outgoing) = outgoing {
                     returned = Some(result.clone());
                     resumption_contract.returned(&states.resumption_paths, &outgoing)?;
-                    result_independent &= transfer_proofs.independent_results.contains(callee)
-                        && arguments.iter().all(|argument| tail_provenance::independent(function, &states, *argument)
-                            && tail_provenance::destruction_preserving(function, &states, *argument));
+                    result_independent &= tail_provenance::result_independent(
+                        function, &states, transfer_proofs, callee, arguments);
                     result_destruction_preserving &= transfer_proofs.preserving_result_destruction.contains(callee)
                         && arguments.iter().all(|argument| tail_provenance::destruction_preserving(function, &states, *argument));
                 } else { trapped = true; }

@@ -339,6 +339,57 @@ fn mandatory_tail_rejects_reference_mutation_hidden_in_an_invoked_callback() {
 }
 
 #[test]
+fn mandatory_tail_distinguishes_getter_contents_from_a_local_owner_address() {
+    let mixed = "fn pointer(address: &mut Storage, contents: &mut Storage, choose_address: Bool) -> *mut i64 { handle choose_address { true => unsafe { cast<Storage,i64>(as_raw_unique(address)) }, false => contents.pointer } }";
+    for (getter, call, valid) in [
+        ("fn pointer(value: &mut Storage) -> *mut i64 { value.pointer }", "pointer(&mut scratch)", true),
+        ("fn pointer(value: &mut Storage) -> *mut i64 { unsafe { cast<Storage,i64>(as_raw_unique(value)) } }", "pointer(&mut scratch)", false),
+        (mixed, "pointer(&mut *storage, &mut scratch, false)", true),
+        (mixed, "pointer(&mut scratch, &mut *storage, false)", false),
+    ] {
+        let source = format!(r#"
+            struct Storage {{ pointer: *mut i64 }}
+            {getter}
+            fn finish(storage: &Storage) -> i64 {{ unsafe {{ read(as_const(storage.pointer)) }} }}
+            fn relay(storage: &mut Storage) -> i64 {{
+                let mut scratch = Storage {{ pointer: storage.pointer }};
+                let copied = {call};
+                (*storage).pointer = copied;
+                tail finish(storage)
+            }}
+            pub fn main() -> i64 {{ unsafe {{
+                let allocation = cast<u8,i64>(allocate(8, 8));
+                write(allocation, 42);
+                let mut storage = Storage {{ pointer: allocation }};
+                let result = relay(&mut storage);
+                deallocate(cast<i64,u8>(allocation), 8, 8);
+                result
+            }} }}
+        "#);
+        let outcome = StageZeroCompiler::new().compile(request(&source));
+        if valid {
+            let artifact = outcome.unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+            let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+            for program in [&artifact, &decoded] {
+                // SAFETY: only the initialized heap allocation is dereferenced and freed.
+                assert_eq!(unsafe { program.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+            }
+            use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+            let ir = StageZeroCompiler::new().compile_llvm(request(&source), LlvmTarget::host().unwrap()).unwrap();
+            for optimization in [0, 2] {
+                // SAFETY: execute the same checked local allocation fixture.
+                let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+                assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }.unwrap().0, 42);
+            }
+        } else {
+            let diagnostics = outcome.expect_err("a getter must not hide the outgoing scratch address").diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G7042"
+                && diagnostic.message.contains("no frame-independent provenance proof")), "{diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
 fn mandatory_tail_keeps_incoming_proof_across_local_scratch_owner_mutation() {
     let source = r#"
         struct Storage { pointer: *mut i64 }

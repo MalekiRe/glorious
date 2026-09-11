@@ -13,8 +13,8 @@ pub(super) struct TransferProofs {
     preserving_calls: BTreeSet<DefKey>,
     conditional_preserving_calls: BTreeSet<DefKey>,
     invocation_conditional_preserving_calls: BTreeSet<DefKey>,
-    input_preserving_calls: BTreeMap<DefKey, InputPreservation>,
-    pub(super) independent_results: BTreeSet<DefKey>,
+    input_preserving_calls: BTreeMap<DefKey, InputIndependence>,
+    independent_results: BTreeMap<DefKey, InputIndependence>,
     pub(super) preserving_result_destruction: BTreeSet<DefKey>,
     pub(super) entry_behaviors: BTreeMap<DefKey, Vec<CallableBehavior>>,
 }
@@ -115,11 +115,11 @@ pub(super) fn program_summaries(functions: &BTreeMap<DefKey, VmFunction>, entry:
 /// This is a checked conjunction of per-input hypotheses, not permission to
 /// weaken every reference just because one parameter borrows a local slot.
 #[derive(Clone, Debug, Eq, PartialEq)]
-struct InputPreservation {
+struct InputIndependence {
     referent_inputs: BTreeSet<u32>,
 }
 
-impl InputPreservation {
+impl InputIndependence {
     fn weakest(function: &VmFunction) -> Self {
         Self { referent_inputs: function.registers.iter().take(function.parameters as usize)
             .enumerate().filter_map(|(index, ty)| matches!(ty, VmType::Reference { .. })
@@ -132,6 +132,37 @@ impl InputPreservation {
                 referent_independent(function, states, *argument)
             } else { independent(function, states, *argument) }
         })
+    }
+
+    /// Strengthen one checked conjunction, never combine independently
+    /// successful weakenings. The caller has already proven the obligation
+    /// under full address-graph hypotheses; this only chooses which typed
+    /// reference inputs can instead supply independent resident contents.
+    fn strengthen(&self, function: &VmFunction, proofs: &TransferProofs,
+        obligation: IndependenceObligation) -> Result<Self, VmArtifactError> {
+        let holds = |inputs: &BTreeSet<u32>| -> Result<bool, VmArtifactError> {
+            Ok(obligation.holds(&verify_function_control_with_reference_inputs(
+                function, false, true, inputs, false, proofs)?))
+        };
+        if self.referent_inputs.is_empty() || holds(&self.referent_inputs)? { return Ok(self.clone()); }
+        let mut proven = Self { referent_inputs: BTreeSet::new() };
+        for input in &self.referent_inputs {
+            proven.referent_inputs.insert(*input);
+            if !holds(&proven.referent_inputs)? { proven.referent_inputs.remove(input); }
+        }
+        Ok(proven)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum IndependenceObligation { Result, Memory }
+
+impl IndependenceObligation {
+    fn holds(self, control: &VerifiedFunctionControl) -> bool {
+        match self {
+            Self::Result => control.result_independent,
+            Self::Memory => control.preserves_independent_frame_memory,
+        }
     }
 }
 
@@ -162,8 +193,9 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
         conditional_preserving_calls: functions.keys().copied().collect(),
         invocation_conditional_preserving_calls: functions.keys().copied().collect(),
         input_preserving_calls: functions.iter().map(|(definition, function)|
-            (*definition, InputPreservation::weakest(function))).collect(),
-        independent_results: functions.keys().copied().collect(),
+            (*definition, InputIndependence::weakest(function))).collect(),
+        independent_results: functions.iter().map(|(definition, function)|
+            (*definition, InputIndependence::weakest(function))).collect(),
         preserving_result_destruction: functions.keys().copied().collect(),
         entry_behaviors: BTreeMap::new(),
         resumption_calls: BTreeMap::new(),
@@ -201,28 +233,20 @@ pub(super) fn summaries(functions: &BTreeMap<DefKey, VmFunction>) -> Result<Tran
             queued.remove(&definition);
             let control = verify_function_control(&functions[&definition], false, true, &proofs)?;
             let mut changed = false;
-            if !control.result_independent { changed |= proofs.independent_results.remove(&definition); }
+            if !control.result_independent {
+                changed |= proofs.independent_results.remove(&definition).is_some();
+            } else if let Some(current) = proofs.independent_results.get(&definition) {
+                let proven = current.strengthen(&functions[&definition], &proofs, IndependenceObligation::Result)?;
+                changed |= proven != *current;
+                proofs.independent_results.insert(definition, proven);
+            }
             if !control.result_destruction_preserving { changed |= proofs.preserving_result_destruction.remove(&definition); }
             if !control.preserves_frame_memory { changed |= proofs.conditional_preserving_calls.remove(&definition); }
             if !control.preserves_independent_frame_memory {
                 changed |= proofs.input_preserving_calls.remove(&definition).is_some();
             } else if let Some(current) = proofs.input_preserving_calls.get(&definition).cloned()
-                && !current.referent_inputs.is_empty()
-                && !control.preserves_frame_memory
-                && !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
-                    &current.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
-                // Strengthen the failed contract using this same machine
-                // verifier. Each accepted weakening is checked together with
-                // every earlier one: independently successful one-bit probes
-                // must not be combined into an unverified conjunction.
-                let mut proven = InputPreservation { referent_inputs: BTreeSet::new() };
-                for input in &current.referent_inputs {
-                    proven.referent_inputs.insert(*input);
-                    if !verify_function_control_with_reference_inputs(&functions[&definition], false, true,
-                        &proven.referent_inputs, false, &proofs)?.preserves_independent_frame_memory {
-                        proven.referent_inputs.remove(input);
-                    }
-                }
+                && !control.preserves_frame_memory {
+                let proven = current.strengthen(&functions[&definition], &proofs, IndependenceObligation::Memory)?;
                 // Contracts only strengthen, so recursive propagation terminates
                 // after finitely many removed hypotheses. Recheck every caller,
                 // including recursive edges, under the strengthened requirement.
@@ -274,6 +298,12 @@ pub(super) fn call_preserving_independent(
     call_preserving_invocations(function, states, proofs, callee, arguments)
         || (destructors && proofs.input_preserving_calls.get(callee)
             .is_some_and(|contract| contract.satisfied(function, states, arguments)))
+}
+
+pub(super) fn result_independent(function: &VmFunction, states: &VerifierState,
+    proofs: &TransferProofs, callee: &DefKey, arguments: &[u32]) -> bool {
+    proofs.independent_results.get(callee).is_some_and(|contract| contract.satisfied(function, states, arguments))
+        && arguments.iter().all(|argument| destruction_preserving(function, states, *argument))
 }
 
 fn preserving_calls(functions: &BTreeMap<DefKey, VmFunction>) -> BTreeSet<DefKey> {
@@ -479,9 +509,7 @@ pub(super) fn before_instruction(
 ) -> (Option<ResidentProofUpdate>, bool, bool) {
     let result_proof = match instruction {
         VmInstruction::Call { callee, dst, arguments } | VmInstruction::CallOwned { callee, dst, arguments } => {
-            Some((*dst, proofs.independent_results.contains(callee)
-                && arguments.iter().all(|argument| independent(function, states, *argument)
-                    && destruction_preserving(function, states, *argument))))
+            Some((*dst, result_independent(function, states, proofs, callee, arguments)))
         }
         _ => None,
     };

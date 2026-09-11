@@ -2772,3 +2772,20 @@ its suffix harmless. Exposed storage and mixed label/callable identities do
 not supply an exact local destination. Cache 177 restores pure helper tail
 proofs across this protocol migration; no alternate source-name proof or
 blanket call-preservation exception is introduced.
+
+## Per-input executable result independence
+
+Helper-result evidence carries the same address-versus-referent input contract
+as memory-preservation evidence. The authoritative executable verifier proves
+each obligation under a complete conjunction of hypotheses. Contract refinement
+only strengthens those hypotheses and rechecks dependent callers to a fixed
+point; independently successful weakenings are never combined without checking
+their conjunction. A getter of independent resident data can accept a borrowed
+local owner, while a getter of the owner's address must retain the stronger
+input requirement.
+
+Ordinary call results and tail-call results consume this contract through one
+query. It does not relax the full transitive-address proof required for an
+actual tail-transfer argument, and it does not infer independence from an empty
+loan set, source safety annotation or unknown producer. Cache 178 changes
+compiler proof construction only; executable schema and native ABI are unchanged.

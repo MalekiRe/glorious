@@ -5,6 +5,26 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Per-input result provenance for borrowed-owner getters
+
+Cache 178 replaces the executable helper-result independence bit with the
+existing per-input hypothesis contract. A result may depend on a borrowed
+owner's independent contents without depending on the address of that owner's
+local slot. Result and memory-preservation obligations now use one strengthening
+algorithm and the same machine verifier. Both ordinary and tail-call result
+consumers discharge the selected contract; actual tail arguments still require
+full frame independence. Unknown results remain unproved.
+
+Two positive getters, including mixed address/contents inputs, pass fresh VM,
+decoded VM and LLVM O0/O2. Two outgoing-address variants are rejected. Five
+direct/transitive raw-pointer write/copy negatives and all ten executable
+tail-provenance verifier tests pass. The random source-family gate now passes;
+the prior label repair also clears format and codecs. Seven focused float gates
+finish at five passes, with float_parse reaching an allocation-budget failure
+and float_shortest reaching a later tail-provenance failure in
+`float_shortest_search`. Neither limit nor expected result was relaxed.
+The source-map follow-up has no completed result at this checkpoint.
+
 ## Prepared receivers in executable label-transfer evidence
 
 Cache 177 repairs the executable label-forwarding boundary exposed by the
