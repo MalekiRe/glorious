@@ -208,6 +208,13 @@ def World.WellFormed (world : World) : Prop :=
   (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
     (root.live = true → root.region ∈ world.liveRegions) ∧ root.layout.Valid ∧
     root.bytes.length = root.layout.size ∧ ∀ byte ∈ root.bytes, ∀ n, byte = some n → n < 256) ∧
+  (∀ region ∈ world.liveRegions, region < world.nextRegion) ∧
+  (∀ id root, world.roots.get id = some root → root.live = true →
+    0 < root.base ∧ root.base % root.layout.alignment = 0) ∧
+  (∀ a b left right, world.roots.get a = some left → world.roots.get b = some right →
+    a ≠ b → left.live = true → right.live = true →
+    left.layout.size = 0 ∨ right.layout.size = 0 ∨
+      left.base+left.layout.size ≤ right.base ∨ right.base+right.layout.size ≤ left.base) ∧
   (∀ id loan, world.loans.get id = some loan → id = loan.identity ∧ id < world.nextLoan ∧
     (loan.live = true → loan.region ∈ world.liveRegions ∧ (world.root loan.referent).isSome = true)) ∧
   (∀ address value id, world.Resident address value → value.head = .reference id →
@@ -363,7 +370,8 @@ def Replayable (program : Program) (world : World) (roots : List Identity) : Pro
     (value.shellLive = true → PrincipalOf program value.type .duplicable) ∧
     (∀ brand, value.head ≠ .label brand) ∧ (∀ id, value.head ≠ .available id)) ∧
   (∀ address value id loan, address.root ∈ roots → world.Resident address value → value.head = .reference id →
-    world.loans.get id = some loan → loan.mode = .shared)
+    world.loans.get id = some loan → loan.mode = .shared) ∧
+  (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ∈ roots → loan.mode = .shared)
 
 theorem hole_cannot_end {before after : World} {id loan}
     (found : before.loans.get id = some loan) (hole : ¬ before.Initialized loan.referent) : ¬ EndsLoan before id after := by

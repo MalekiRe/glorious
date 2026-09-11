@@ -130,7 +130,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       before.task = .leave context brand argument → LabelRoute before.frames brand inner outerContext region type outer →
       Protect program outerContext before.world argument .owner kept after →
       AbandonedRoots after inner [kept.root] roots → Cancelable program.declarations after roots →
-      ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (.yield outerContext kept) }
+      ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield outerContext kept)) }
   | reserve {before context localSlot brand places next addresses allocated destination after layout} :
       before.task = .run context (.reserve localSlot brand places next) → Addresses before.world context.environment places addresses →
       addresses.Nodup → (∀ a ∈ addresses, ∀ b ∈ addresses, a ≠ b → ¬ a.Overlaps b) →

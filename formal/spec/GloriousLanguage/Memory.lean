@@ -158,7 +158,7 @@ inductive AllocatesBuffer (program : Language.Program) :
   | fresh {before domain element count base elementLayout layout} :
       domain ∈ program.input.manifest.allocationDomains → LayoutOf program ⟨[],[],0,default,true⟩ element elementLayout →
       ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
-      base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
+      0 < base → base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
       DisjointStorage before base layout.size →
       AllocatesBuffer program before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
         { before with roots := before.roots.set before.nextRoot ⟨.allocation domain,0,before.nextRegion,base,layout, .array element (.constant (.integer false .pointer count)), some (.resident before.nextOwner (.array element (.constant (.integer false .pointer count))) .array false (List.replicate count none)),true,before.clock,true,List.replicate layout.size none⟩, liveRegions := before.nextRegion :: before.liveRegions, nextRegion := before.nextRegion+1, nextRoot := before.nextRoot+1, nextOwner := before.nextOwner+1, clock := before.clock+1 }

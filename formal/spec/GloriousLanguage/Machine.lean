@@ -78,6 +78,15 @@ inductive Frame where
       (operands : List Address) (hostState : List Nat) (next : Code)
   deriving Repr, Inhabited
 
+def Frame.ownedRegions : Frame → List Identity
+  | .activation _ _ region | .scope _ _ region => [region]
+  | .handler installed owns => installed.computation.region :: (if owns then [installed.environment.region] else [])
+  | .serviced installed owns clause _ | .completion installed owns clause =>
+      clause.region :: (if owns then [installed.environment.region] else [])
+  | _ => []
+
+def CloseRegions (regions : List Identity) (next : Task) : Task := regions.eraseDups.foldr Task.closeRegion next
+
 structure Suspension where
   identity : Identity
   handler : InstalledHandler
@@ -194,14 +203,14 @@ def FreshNamedFrame (function : Function) (caller : Context) (brand region : Ide
 /-- A proper-tail destination has no outstanding result transformation or
 dynamic delimiter. More permissive structural fusion requires a separate
 equivalence proof in the target contract, not a retained old activation. -/
-inductive TailFrames : List Frame → Identity → Context → Identity → List Frame → Prop where
-  | activation {caller activation region rest} : TailFrames (.activation caller activation region :: rest) activation caller region rest
-  | scope {outer scope region rest activation caller oldRegion finish} :
-      TailFrames rest activation caller oldRegion finish →
-      TailFrames (.scope outer scope region :: rest) activation caller oldRegion finish
-  | label {outer brand region result rest activation caller oldRegion finish} :
-      TailFrames rest activation caller oldRegion finish →
-      TailFrames (.label outer brand region result :: rest) activation caller oldRegion finish
+inductive TailFrames : List Frame → Identity → Context → List Identity → List Frame → Prop where
+  | activation {caller activation region rest} : TailFrames (.activation caller activation region :: rest) activation caller [region] rest
+  | scope {outer scope region rest activation caller regions finish} :
+      TailFrames rest activation caller regions finish →
+      TailFrames (.scope outer scope region :: rest) activation caller (region :: regions) finish
+  | label {outer brand region result rest activation caller regions finish} :
+      TailFrames rest activation caller regions finish →
+      TailFrames (.label outer brand region result :: rest) activation caller regions finish
 
 def ScheduledPattern (actions : PatternActions) : List PatternAction :=
   actions.shells ++ actions.bindings ++ actions.cleanup
@@ -253,12 +262,12 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
   | enter {before caller function inputs context after} : before.task = .enter caller function inputs false →
       EnterWorld program before caller function inputs context after →
       LocalStep program before none { before with world := after, task := .run context function.body, frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation caller context.activation context.region :: before.frames, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
-  | enterTail {before caller function inputs context after outer oldRegion rest roots} :
+  | enterTail {before caller function inputs context after outer regions rest roots} :
       before.task = .enter caller function inputs true → EnterWorld program before caller function inputs context after →
-      TailFrames before.frames caller.activation outer oldRegion rest →
+      TailFrames before.frames caller.activation outer regions rest →
       ActivationRoots after caller.activation [] roots → Suspensible after roots →
       (∀ input ∈ inputs, input.access ≠ .owned → input.storage.root ∉ roots) →
-      LocalStep program before (some (.tail caller.activation context.activation)) { before with world := after, task := .cleanup caller roots (.closeRegion oldRegion (.run context function.body)), frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation outer context.activation context.region :: rest, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
+      LocalStep program before (some (.tail caller.activation context.activation)) { before with world := after, task := .cleanup caller roots (CloseRegions regions (.run context function.body)), frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation outer context.activation context.region :: rest, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
   | bindReturn {before context value caller destination next rest after} : before.task = .yield context value →
       before.frames = .binding caller destination next :: rest → Transfers before.world .owner value destination after →
       LocalStep program before (some (.move value destination))

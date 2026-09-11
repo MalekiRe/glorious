@@ -137,3 +137,26 @@ layouts, C layout identity and rejection of an unsupported three-byte enum tag.
 Runtime lexical-to-generative type instantiation, physical snapshot relocation,
 generic normalization and complete target/control-site coverage remain open.
 The new target layout obligations are specifications, not implemented runtimes.
+
+## Physical snapshots and complete abandoned-region cleanup
+
+`lake build` passes all 32 jobs. Snapshot maps now assign checked, disjoint
+physical extents and rebase provenance-carrying internal pointers with the same
+map. Address-only integers and pointers into unselected storage remain unchanged.
+World well-formedness checks live-region bounds, alignment and disjoint extents.
+Replay excludes unique loans into copied storage, even when the unique handle is
+outside the snapshot. Loan copies follow actual copied handles, avoiding phantom
+copied loans for external handles; copied parent links are restricted to copied
+loans. Region selection includes empty captured control scopes, not just roots.
+
+Frame-owned regions are shared by terminal-effect, label-leave and cancellation
+cleanup. Tail-frame stripping returns every intervening scope region, and the
+execution path closes them after owner cleanup. Regression propositions check
+pointer provenance cases, physical rebasing, nested-tail region order and
+deduplicated region closure. The complete full-build checkpoint includes the
+previous source and representation checks.
+
+This still does not prove snapshot simulation, global preservation/progress,
+or complete replayable-control coverage. In particular, the conservative
+label-frame replay restriction and lexical-to-runtime generative type closure
+remain actual adequacy work, not completed metatheorems.

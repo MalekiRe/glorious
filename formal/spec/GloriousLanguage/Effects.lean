@@ -125,14 +125,8 @@ def SuspendPermission (program : Kernel.Program) (world : World) (roots : List I
   (quantity.lower = 0 → Cancelable program.declarations world roots) ∧
   (∀ n, quantity.upper = some n → 1 < n → Replayable program.declarations world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame)
 
-def CloseRegions (regions : List Identity) (next : Task) : Task := regions.foldr Task.closeRegion next
-
 def SuspensionRegions (suspension : Suspension) : List Identity :=
-  (suspension.frames.filterMap (fun frame => match frame with
-    | .activation _ _ region | .scope _ _ region => some region
-    | .handler handler _ => some handler.computation.region
-    | .serviced _ _ clause _ | .completion _ _ clause => some clause.region
-    | _ => none) ++ [suspension.handler.computation.region]).eraseDups
+  (suspension.frames.flatMap Frame.ownedRegions ++ [suspension.handler.computation.region]).eraseDups
 
 /-- Checked after clause-local destruction, so disposing an optional handle
 can perform its cancellation. Missing suspension state is not a spent token. -/
@@ -158,7 +152,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       Protects program clause withRegion payload kept moved →
       DelimitedRoots moved handler inner (kept.map Address.root) roots → Cancelable program.declarations moved roots →
       PayloadPlan program.declarations moved kept arm.patterns actions →
-      EffectStep program before none { before with world := moved, task := .cleanup context roots (.closeRegion handler.computation.region (.pattern clause (ScheduledPattern actions) arm.body)), frames := .serviced handler owns clause none :: outer, nextActivation := before.nextActivation+1 }
+      EffectStep program before none { before with world := moved, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions ++ [handler.computation.region]) (.pattern clause (ScheduledPattern actions) arm.body)), frames := .serviced handler owns clause none :: outer, nextActivation := before.nextActivation+1 }
   | suspend {before context id arguments payload inner handler owns arm outer operation signature quantity bound
       clause withRegion kept moved roots homes localSlot address created actions suspension} :
       before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →

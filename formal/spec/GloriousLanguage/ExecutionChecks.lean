@@ -44,4 +44,29 @@ example (program : Kernel.Program) (world : World) (operation : DeclId)
     ¬ Bypasses program world operation arguments payload (.hostCallback context destination binding operands state next) := by
   exact fun impossible => impossible
 
+example (map : Relocation) (pointer : RawPointer) (raw : pointer.allocation = none) :
+    map.pointer pointer = pointer := by simp [Relocation.pointer, raw]
+
+example (map : Relocation) (pointer : RawPointer) (id : Identity)
+    (external : id ∉ map.roots) (origin : pointer.allocation = some id) :
+    map.pointer pointer = pointer := by simp [Relocation.pointer, origin, external]
+
+example (map : Relocation) (pointer : RawPointer) (id base : Identity)
+    (selected : id ∈ map.roots) (origin : pointer.allocation = some id)
+    (physical : map.physical.get id = some base) :
+    (map.pointer pointer).address = base+pointer.offset ∧
+    (map.pointer pointer).allocation = some (map.root id) := by
+  simp [Relocation.pointer, origin, selected, physical]
+
+example (map : Relocation) (id base : Identity) (root : Root)
+    (physical : map.physical.get id = some base) : (map.rootValue id root).base = base := by
+  simp [Relocation.rootValue, physical]
+
+example (outer inner : Execution.Context) :
+    TailFrames [.scope inner 30 30,.scope inner 20 20,.activation outer 4 10] 4 outer [30,20,10] [] :=
+  .scope (.scope .activation)
+
+example (next : Task) : CloseRegions [30,20,30,10] next =
+    .closeRegion 30 (.closeRegion 20 (.closeRegion 10 next)) := by rfl
+
 end Glorious.Language.ExecutionChecks
