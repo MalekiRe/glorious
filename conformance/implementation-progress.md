@@ -5,6 +5,31 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Native-handler execution acceptance audit
+
+The integrated native-handler milestone is complete for the checked Stage0
+VM/LLVM execution profile. Generated computation and bytecode use the same
+activation, storage, effect and resumption convention; selected native bodies are
+not replaced with bytecode or synchronous host-call wrappers.
+
+The cache-172 full handler gate passes **86/86**, without exclusions. Three added
+focused gates pass ordinary mandatory-tail helper dispatch across all engine
+partitions, exact suspension of linear storage versus rejected cancellation,
+and source rejection of borrowed resumption invocation lacking receiver access.
+The native-import gate rejects private callable results and outward callback
+effects before calling foreign code. The mandatory-tail gate rejects following
+work and undisposed current-frame dependencies. These are the required admission
+boundaries, not permission to capture foreign stacks or retain unbounded tail
+frames. Existing backing-address, zero-entry-adapter, replay/cleanup and exact
+retained-control-limit gates remain passing.
+
+[The native backend document](../docs/stage0-native-llvm.md) now describes this
+shared runtime and its current ABI rather than the superseded synchronous mixed
+adapter. Full guarded source-resource analysis, broader native/library acceptance,
+other target profiles and the wider-suite failures recorded below remain outside
+this milestone. Cache 172, verifier 53, bytecode 77/schema 121 and native ABI
+22/control v4 are unchanged by this acceptance audit.
+
 ## Cache 172: suspension inputs and distinct dynamic clause storage
 
 The existing handler input product now retains ownership snapshots at executed

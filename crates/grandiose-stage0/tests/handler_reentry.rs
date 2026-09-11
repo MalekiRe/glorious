@@ -125,6 +125,39 @@ fn ordinary_helpers_transport_and_invoke_the_same_resumption_authority() {
 }
 
 #[test]
+fn mandatory_tail_helpers_preserve_the_enclosing_handler_across_engines() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        fn leaf() -> i64 / Ask { Ask::ask() }
+        fn relay() -> i64 / Ask { tail leaf() }
+        pub fn main() -> i64 { handle relay() { Ask::ask() with k => k(40) + 2 } }");
+}
+
+#[test]
+fn exact_native_suspension_preserves_a_linear_owner_that_optional_cancellation_rejects() {
+    let source = "use std::*; struct Token {} impl Use<[1,1]> for Token {}
+        fn consume(value:Token) -> i64 { let Token {} = value; 42 }
+        effect Ask { [1,1] ask() -> i64; }
+        pub fn main() -> i64 { handle { let owner=Token {}; Ask::ask(); consume(owner) }
+            { Ask::ask() => 0 } }";
+    candidate(source);
+    let cancelled = source.replace("[1,1] ask", "[0,1] ask").replace("Ask::ask() => 0", "Ask::ask() with _ => 42");
+    let error = StageZeroCompiler::new().compile(request(&cancelled)).err().expect("linear cancellation must reject");
+    assert!(error.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5024"), "{error:?}");
+}
+
+#[test]
+fn a_shared_borrow_cannot_supply_owned_resumption_invocation_authority() {
+    let source = "effect Ask { [1,1] ask() -> i64; }
+        fn apply<F>(task:&F) -> i64 where for<'a> &'a F:Fn<(i64,),Output=i64,Effects={}> { task(42) }
+        pub fn main() -> i64 { handle Ask::ask() { Ask::ask() with k => apply(&k) } }";
+    let error = StageZeroCompiler::new().compile(request(source)).err().expect("borrowed resumption invocation must reject");
+    assert!(error.diagnostics().iter().any(|diagnostic|
+        diagnostic.class == grandiose_stage0::DiagnosticClass::Source
+            && diagnostic.code == "G4188"
+            && diagnostic.message.contains("borrowed receiver")), "{error:?}");
+}
+
+#[test]
 fn ordinary_resumption_helpers_preserve_their_local_handler_delimiters() {
     candidate("effect Ask { [1,1] ask() -> i64; }
         effect Local { [1,1] local() -> i64; }

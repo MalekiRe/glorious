@@ -1,4 +1,4 @@
-# Stage-zero generated LLVM checkpoint
+# Stage-zero generated LLVM and native handlers
 
 `StageZeroCompiler::compile_llvm(request, LlvmTarget::host())` compiles Glorious
 source through the ordinary checked compiler and lowers its verified concrete
@@ -7,8 +7,9 @@ trusted LLVM compiler and loads the generated object. This is actual generated
 CPU code, not the Rust compiler's backend selection, a host arithmetic fixture,
 or a call to the VM interpreter from each emitted operation.
 
-This is an executable backend and ordinary mixed-call checkpoint, **not complete
-language-spec §17**. Existing native-import/callback tests
+The native-handler execution milestone uses one shared resumable-frame convention
+for generated and bytecode computation. This is **not complete language-spec §17**
+or full compiler/library conformance. Existing native-import/callback tests
 remain distinct from the generated-code tests in `tests/llvm_native.rs`.
 
 ## Admitted execution
@@ -60,25 +61,69 @@ Other native hosts compile this helper against their own C environment rather
 than inheriting the GNU struct layout; the executed hostile-mode matrix currently
 covers x86-64 GNU/Linux, not a claim of cross-host runtime validation.
 
-Ordinary direct calls use a uniform native slot ABI. Mandatory tail transfers
-return to a native dispatcher that recycles two aligned argument packets. They
-do not depend on LLVM tail-call optimization: alternating packets preserve
-parallel argument permutation and the old body activation returns before the
-next body starts. VM thunks use a private typed execution outcome to return a
-verified mandatory tail packet to this same dispatcher. The VM activation and
-callback return before the next native body starts; no recursive cross-engine
-call substitutes for a tail transfer. Surviving ordinary VM callers retain
-their result destinations and are not silently discarded. The tests execute
-10,000 alternating VM/native tail transfers at native O0 and O2 under a finite
-call-depth limit.
+Generated segments execute local computation against the runtime's existing
+resident homes. They return at verified frame transitions: ordinary calls,
+mandatory tails, handler dispatch/resumption, labels and source-storage lifecycle
+events. The common runtime implements these transitions for both engines; it
+does not replace a selected native body with bytecode. No native C stack frame
+has to remain suspended around a source continuation.
 
-Every execution has shared instruction, activation-depth, and logical native
-resident-byte budgets. The initial stack-backed implementation also limits an
-individual planned body to 64 KiB, its initialization tree to 16,384 paths, and
-total charged native activation storage to 1 MiB. Charged storage includes body
-residents, initialization metadata, parallel-transfer temporaries, and recycled
-argument packets. These are logical resident limits, not an exact accounting of
-LLVM register spills or a native process-memory sandbox.
+Mandatory tails replace the current source activation after checked argument and
+cleanup transfer. Surviving ordinary callers retain their result destinations.
+This does not depend on LLVM tail-call optimization or recursive cross-engine
+callbacks. Tests execute 10,000 alternating VM/native tails at O0/O2, and a
+1,000-iteration handler/tail cycle under eight-call/eight-handler/eight-retained-
+continuation and 128-KiB native-storage limits. An active unfused delimiter or
+unresolved owner obligation at a source `tail` remains a rejection.
+
+Every execution shares instruction, activation-depth, handler-depth, retained-
+continuation and logical native-byte budgets. Retained control includes both
+pending performances and returning-resumption edges throughout saved branches;
+aliases do not count as independent authority, while replayed branches do.
+Native admission limits an individual planned body to 64 KiB and its
+initialization tree to 16,384 paths. Native storage and segment scratch are
+charged to the execution budget; machine helper paths retain their explicit
+stack limit. These are logical limits, not exact Rust metadata, allocator/RSS or
+LLVM spill accounting, and not a native process-memory sandbox.
+
+## Deep handlers and clause ownership
+
+The checked pipeline carries effect identity, ordered payload ownership,
+resumption quantity and result/completion contracts through Runtime MIR, VM LIR
+and executable verification. Direct, indirect and captured ordinary helpers may
+perform or invoke resumptions across either engine. Helper-local delimiters,
+first-match forwarding and transformed completion results use the same control
+graph. Clauses run outside their serviced delimiter; resumption reinstalls it.
+
+Optional cancellation destroys only legally abandoned owners. Exact finite
+replay duplicates admitted initialized residents and internal control authority;
+the final use consumes the original. Checked aliases share one invocation budget.
+Unique loans, linear residents and captured labels do not become replayable by
+crossing engines. Borrowed observation of a resumption supplies no owned or
+shared invocation permission that its checked callable contract lacks.
+
+Protected storage and clause-owned storage are distinct parts of Cleanup's
+published ownership product. Every dynamic clause entry starts fresh local
+allocations, while older returning clauses retain their original homes. Local
+label exits preserve dynamically interposed handlers when no delimiter is
+crossed, and abandon only crossed return paths otherwise. Clause cleanup uses
+the same ownership frontier as suspension/replay, with no register-content
+heuristic for deciding who owns an allocation.
+
+The cache-172 handler integration gate passes 86 tests, including fresh/decoded
+VM, all-native and both mixed directions at O0/O2. Backing-address/mutation and
+bounded handler/tail checks also pass. Three additional admission checks cover
+an ordinary mandatory-tail helper under its caller's delimiter, exact suspension
+of a linear owner versus forbidden optional cancellation, and rejection of
+borrowed resumption invocation without receiver permission. The foreign callback
+and active-frame tail rejection gates pass as well.
+
+These gates close the native-handler execution milestone for the checked Stage0
+VM/LLVM profile. They do not waive source ownership, fusion or foreign-boundary
+requirements, or claim complete language/library conformance.
+Profiled execution observes zero generated
+resident-entry allocations and copied bytes: creating a source clause local or
+an explicitly admitted replay snapshot is distinct from an engine-entry adapter.
 
 ## Identity and trust boundary
 
@@ -111,10 +156,11 @@ Reads reject unknown, cross-execution, unleased, retired, wrong-target, and
 wrong-signature tokens. Copying arbitrary token bytes without a supported raw
 move/copy does not create a resident lease. Source-level tests run shared and
 mutable captured callables through Vec storage, reserve, move, pop, and invocation
-at O0/O2, both fresh and decoded. Native format generation 8 also gives generated
-capture-free local placeholders this full layout; their zero environment token
-is not VM authority. Generated captured/indirect callable execution remains a
-separate, explicitly rejected boundary at this checkpoint.
+at O0/O2, both fresh and decoded. Generated captured and indirect callable
+execution uses the same authenticated storage and checked receiver contract.
+Labels and resumptions are execution-domain control residents, not C function
+pointers; decoding never accepts serialized native addresses as authority.
+The current native ABI is generation 22, shared-resumable-frames v4.
 
 ## Generated LLVM and bytecode sharing
 
@@ -125,12 +171,11 @@ is an explicit whole-function selection, never an instruction fallback. Local
 VM-only operations are allowed in selected bodies, but unsupported control is
 rejected even when placed entirely in the VM partition.
 
-Ordinary crossings use the shared native bridge in one allocation domain. Owned
-aggregate parameters enter the generated body by their existing resident pointer,
-without an argument-byte copy. The reverse callback installs the same external
-native storage as the VM parameter home. Owned returns initialize the caller's
-slot. Scalar/reference slot values are copied as ABI values while the actual
-referent backing address is preserved. Source Drop glue remains the exact checked
+Ordinary crossings use the existing runtime activations in one allocation domain.
+Owned aggregate parameters retain their resident homes, without an argument-byte
+copy. Owned returns initialize the caller's destination. Scalar/reference values
+are transported as ABI values while the actual referent backing address is
+preserved. Source Drop glue remains the exact checked
 source implementation bound by the full code identity; no same-shaped foreign
 destructor is selected by a symbol name.
 
@@ -145,14 +190,11 @@ provide the same lifetime and immutability. Private VM views never escape throug
 the public i64 runner. Invalid null/overflowing extents and unsupported static
 tags/layouts reject before the resident can be accessed.
 
-The mixed VM execution adapter remains private; it is not published or serialized
-as portable verified bytecode. Its native bodies are the LLVM implementations of
-the original immutable verified body graph, so tail preservation is reconstructed
-from those source bodies while every adapter graph/ABI/control check remains in
-place. Ordinary bytecode verification still treats a `HostCall` as an unknown
-external boundary; source-like capability or symbol names cannot import these
-semantic proofs. Tests require that the private adapted graph fails ordinary
-portable verification, and that a forged adapter result ABI still rejects.
+The engine partition selects implementations of the original immutable verified
+body graph. There is no synthetic `HostCall` wrapper around each native body and
+no portable bytecode rewrite that imports private native-control authority.
+Ordinary external host calls retain their independent capability/ABI checks;
+source-like capability or symbol names do not import shared-runtime proofs.
 
 Generated argument slots contain two pointers: existing resident bytes and a
 canonical initialization sidecar. Native calls and recycled tail packets preserve
@@ -172,12 +214,10 @@ owned records/results, fixed-array results and VM patterns, linear zero-sized
 owners, and once-only source Drop on both sides. Tests also cover partially
 moved records and nested array/enum owners. They run the
 cleanup in either engine and prove each remaining source destructor executes once.
-Instruction/depth/byte limits
-are shared, including still-live native frames during a VM callback. The current
-synchronous mixed runner adds an explicit eight-crossing re-entry limit and
-starts its closed zero-argument graph on a 16 MiB worker stack. It does not
-transfer borrowed host state between threads. Native activation allocation is
-also checked against the requested single-allocation limit.
+Instruction/depth/byte limits are shared across retained source activations.
+The shared runner has no separate synchronous eight-crossing ceiling or worker-
+thread handoff for ordinary Glorious calls. Native allocation is checked against
+the requested single-allocation limit as well as the total native-byte budget.
 
 Raw allocation/reallocation/release use a small allocator-runtime callback over
 that same allocation domain, not a VM instruction interpreter. Raw reads/writes,
@@ -193,23 +233,33 @@ references to raw allocation; zero-byte linear owners; malformed layout and
 extent errors; and independent total-byte/single-allocation limits. Raw allocation
 owners release bytes on execution teardown, never implicitly execute source Drop.
 
-## Explicit remaining frontier
+## Admission boundaries and remaining work
 
-The generated backend does not yet execute first-class/captured/borrowed callable parameters,
-outward effects, resumptions, or captured lexical control. Private dynamic-array/text
-layouts and some pattern/projection forms are also
-rejected. Ordinary closed-graph VM calls from native bodies are supported;
-they are not yet a public callable-value ABI. Pointer address/cast/comparison and
-size/alignment and static-data machine leaves are supported.
+The generated backend executes admitted first-class/captured/borrowed callables,
+outward Glorious effects, resumptions and checked lexical control through the
+shared convention above. Labels still require correctness-driven destination
+resolution/fusion; opaque or foreign boundaries cannot be repaired by stack
+search. A borrowed callable must prove its receiver permission. Active handler
+dependence cannot silently weaken a mandatory-tail guarantee.
 
-The public runner currently exposes only a zero-argument i64 entry. Expanding the boundary
-requires source-level differential tests and actual generated LLVM↔VM calls for
-callable values and supported outward control contracts.
+The ordinary C/native-import boundary is separate. Private callable results and
+outward callback effects reject before the foreign callback executes. An
+arbitrary C stack cannot be captured or replayed, and no foreign unwinding or
+cross-frame label protocol is implied by the shared Glorious convention.
+Unsupported machine layouts/instructions and incomplete executable evidence
+continue to fail closed; VM-only local operations require explicit VM selection.
+
+The public runner currently exposes only a zero-argument i64 entry. General host
+entry shapes, remaining source-analysis and library failures, and full §17
+acceptance are separate work. The latest wider-suite failures are recorded in
+[implementation progress](../conformance/implementation-progress.md); the
+native-handler gate is not a claim that every compiler regression passes.
 
 Run the targeted regression with:
 
 ```sh
-CARGO_BUILD_JOBS=1 bash tooling/cargo-fast.sh test -p grandiose-stage0 --test llvm_native -- --test-threads=1
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p grandiose-stage0 --test handler_reentry
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test -p grandiose-stage0 --test llvm_native handler
 ```
 
 The test requires an installed compatible `clang` and Linux dynamic loader. It
