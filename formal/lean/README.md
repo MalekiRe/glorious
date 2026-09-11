@@ -1,5 +1,11 @@
 # Executable Lean semantics — in progress
 
+**Current working draft:** the whole-compiler first implementation pass is in
+place, including an executable driver and VM receiving-IR bridge. See
+[`DRAFT.md`](DRAFT.md). The implemented/proved boundary below describes the
+earlier verified checkpoint, not the unverified whole-compiler draft. Draft code
+does not establish any additional conformance or end-to-end acceptance yet.
+
 This is the beginning of the executable formal reference requested for
 Glorious. It is **not full language conformance, a completed compiler, or a
 proof that Stage0 is correct**. The two repository specifications remain the

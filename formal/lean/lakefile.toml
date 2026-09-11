@@ -1,7 +1,11 @@
 name = "gloriousSemantics"
 version = "0.1.0"
-defaultTargets = ["Glorious"]
+defaultTargets = ["Glorious", "glorious-lean"]
 moreLeanArgs = ["-DwarningAsError=true"]
 
 [[lean_lib]]
 name = "Glorious"
+
+[[lean_exe]]
+name = "glorious-lean"
+root = "Main"

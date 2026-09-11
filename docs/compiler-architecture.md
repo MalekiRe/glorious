@@ -3082,3 +3082,20 @@ the shared declaration boundary; this finite memory contract does not settle
 that missing control coverage or prove arbitrary byte initialization, allocation
 validity, complete guarded storage or full compiler/library/self-hosted acceptance.
 Executable encoding and the native ABI are unchanged.
+
+## Receiving-IR structure before whole-artifact analysis
+
+The executable verifier now establishes all function descriptors, then all
+instruction shapes, before constructing its whole-artifact quantity summaries.
+The existing checks have moved out of late function verification; they are not
+duplicated in a new compiler-side filter. Cross-function shape checks therefore
+also receive validated callee descriptors. Direct verification, generated
+cleanup metadata and cached function proofs share this ordering.
+
+This fixes a malformed-register panic exposed while integrating the Lean
+compiler's VM-table bridge. Missing receiver storage, invalid register types,
+register operands and branch destinations reject before semantic analyses index
+them. Valid fresh and decoded artifacts retain the same obligations and wire
+format. This is receiving-boundary validation, not proof of the new Lean source
+compiler or its lowering; that whole-compiler draft remains in its build and
+semantic-integration repair phase.

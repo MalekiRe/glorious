@@ -1230,6 +1230,16 @@ fn verify_artifact(
         }
         return Err(error);
     }
+    // Whole-artifact summaries and cross-function shape checks index these
+    // tables. Establish every descriptor before checking any instruction,
+    // then establish every instruction before constructing semantic facts.
+    // This also applies when function-local proof results are cached.
+    for (id, function) in artifact.functions.iter().enumerate() {
+        verify_function_descriptor(artifact, id as u32, function)?;
+    }
+    for (id, function) in artifact.functions.iter().enumerate() {
+        verify_function_instructions(artifact, id as u32, function)?;
+    }
     if let Err(error) = verify_function_metadata(artifact) {
         if timing_enabled || std::env::var_os("G1_VERIFY_TRACE").is_some() {
             eprintln!("g1-verifier artifact stage function-metadata: {error}");
@@ -2123,30 +2133,11 @@ fn verify_types(a: &Artifact) -> Result<(), VerifyError> {
     Ok(())
 }
 
-fn verify_function(
+fn verify_function_descriptor(
     a: &Artifact,
     fid: u32,
     f: &Function,
-    require_cleanup_metadata: bool,
-    allow_seeded_leave_generation: bool,
-    quantity_cache: &QuantityVerificationCache,
-) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
-    macro_rules! stage {
-        ($name:literal, $expression:expr) => {
-            match $expression {
-                Ok(value) => value,
-                Err(error) => {
-                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
-                        eprintln!(
-                            "g1-verifier function {fid} `{}` stage {}: {error}",
-                            f.name, $name
-                        );
-                    }
-                    return Err(error);
-                }
-            }
-        };
-    }
+) -> Result<(), VerifyError> {
     if f.outward_protocols
         .iter()
         .any(|protocol| *protocol as usize >= a.protocols.len())
@@ -2207,17 +2198,65 @@ fn verify_function(
         }
         return Err(VerifyError::InvalidFunction(fid));
     }
+    Ok(())
+}
+
+fn verify_function_instructions(
+    a: &Artifact,
+    fid: u32,
+    f: &Function,
+) -> Result<(), VerifyError> {
+    let code = function_code(a, f)?;
     if std::env::var("G1_VERIFY_FUNCTION").is_ok_and(|name| name == f.name) {
-        for (pc, instruction) in a.code[start..end].iter().enumerate() {
+        for (pc, instruction) in code.iter().enumerate() {
             eprintln!(
                 "g1-verifier function {fid} `{}` pc {pc}: {instruction:?}",
                 f.name
             );
         }
     }
-    for (local, ins) in a.code[start..end].iter().enumerate() {
-        stage!("instruction-shape", shape(a, fid, local as u32, f, ins));
+    for (local, ins) in code.iter().enumerate() {
+        if let Err(error) = shape(a, fid, local as u32, f, ins) {
+            if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                eprintln!(
+                    "g1-verifier function {fid} `{}` stage instruction-shape: {error}",
+                    f.name
+                );
+            }
+            return Err(error);
+        }
     }
+    Ok(())
+}
+
+fn verify_function(
+    a: &Artifact,
+    fid: u32,
+    f: &Function,
+    require_cleanup_metadata: bool,
+    allow_seeded_leave_generation: bool,
+    quantity_cache: &QuantityVerificationCache,
+) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
+    macro_rules! stage {
+        ($name:literal, $expression:expr) => {
+            match $expression {
+                Ok(value) => value,
+                Err(error) => {
+                    if std::env::var_os("G1_VERIFY_TRACE").is_some() {
+                        eprintln!(
+                            "g1-verifier function {fid} `{}` stage {}: {error}",
+                            f.name, $name
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        };
+    }
+    // The descriptor and instruction passes ran for the complete batch before
+    // quantity_cache was constructed; do not reconstruct their checks here.
+    let start = f.code_start as usize;
+    let end = start + f.code_len as usize;
     let label_states = stage!("labels", verify_labels(a, fid, f));
     let continuation_live = stage!(
         "continuation-liveness",
@@ -17968,6 +18007,33 @@ mod tests {
             required_features: 1,
             entry_function: None,
         }
+    }
+
+    #[test]
+    fn structural_inputs_are_checked_before_whole_artifact_summaries() {
+        let valid = base(
+            vec![Instruction::Const { dst: 1, constant: 0 }, Instruction::Return { src: Some(1) }],
+            vec![UNIT, I64],
+        );
+        let valid = with_generated_cleanup_plans(valid).unwrap();
+        super::verify(valid.clone()).unwrap();
+
+        let mut bad_register = valid.clone();
+        bad_register.code[1] = Instruction::Return { src: Some(20) };
+        assert!(matches!(super::verify(bad_register.clone()), Err(VerifyError::InvalidRegister { register: 20, .. })));
+        assert!(matches!(with_generated_cleanup_plans(bad_register), Err(VerifyError::InvalidRegister { register: 20, .. })));
+
+        let mut missing_receiver = valid.clone();
+        missing_receiver.functions[0].register_types.clear();
+        assert!(matches!(super::verify(missing_receiver), Err(VerifyError::InvalidFunction(0))));
+
+        let mut bad_type = valid.clone();
+        bad_type.functions[0].register_types[1] = u32::MAX;
+        assert!(matches!(super::verify(bad_type), Err(VerifyError::InvalidType(u32::MAX))));
+
+        let mut bad_target = valid;
+        bad_target.code[0] = Instruction::Jump { target: 20 };
+        assert!(matches!(super::verify(bad_target), Err(VerifyError::InvalidTarget { target: 20, .. })));
     }
 
     #[test]
