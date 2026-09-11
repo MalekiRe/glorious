@@ -5,6 +5,36 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Array input coercions and frozen normal-result proofs
+
+Cache 180 migrates array-element joins to the shared directional coercion
+relation while retaining the destination's regions and joined callable
+refinements. Its array input views use existing normal-result forwarding;
+original producers keep their declared types and frozen reference-result
+metadata. The old refinement propagation no longer substitutes an array's
+shorter regions into unrelated uses of its static value producer. Tuple-style
+enum constructor context now uses the same relation as record-style variants.
+
+Three static/borrowed array shapes, an explicit-region enum case and independent
+stateful callable elements pass fresh VM, decoded VM and LLVM O0/O2. Five array
+borrow-extension/invariance cases and two enum escape cases are rejected. Six
+targeted borrowed-callable checks retain quantified, residual-predicate and
+receiver-variance contracts. Frozen Core mutations that
+invent a static lifetime, remove the required region evidence or invent shared
+callable receiver authority are rejected by the normal-result boundary's shared
+type/variance/region proof. Existing structural storage matching remains strict.
+
+All 40 expected-reborrow tests and 24 lifetime-inference tests pass, excluding
+only the separately preserved literal-view regression. The selected fixed-array
+gate completes at 10/13. All three failures reproduce with the previous Core
+implementation: partial linear construction reaches G4222/G4215 instead of the
+required ownership diagnostic, cancellation cleanup returns 43 instead of 42,
+and the reference-through-Vec roundtrip lacks a checked native reference origin.
+Those gates remain active; their assertions and runtime limits are unchanged.
+This checkpoint does not resolve literal selection, the full I/O timeout or
+the other compiler/library failures recorded below, and does not establish
+complete conformance or self-hosting.
+
 ## Directional region inference through joins and constructor inputs
 
 Cache 179 separates coercion shape inference from lifetime equality. The

@@ -307,6 +307,43 @@ fn escape_and_quantity_consumers_require_matching_shared_continuation_facts() {
 }
 
 #[test]
+fn frozen_result_views_cannot_invent_callable_authority() {
+    let (core, signatures) = core_and_signatures_for("result-view-callable-proof@0.1.0",
+        "fn main(callback: (i64) -> i64) -> (i64) -> i64 { callback }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate_projection_obligations(&signatures, &[]).is_empty());
+    let mut forged = core;
+    let contract = forged.expressions.iter_mut().find_map(|expression| match (&expression.kind, &mut expression.ty) {
+        (CoreKind::Block(_), Type::Callable { contract, .. }) => Some(contract), _ => None,
+    }).unwrap();
+    contract.shared_receiver = true;
+    assert!(forged.validate_projection_obligations(&signatures, &[]).iter()
+        .any(|diagnostic| diagnostic.code == "G4304" && diagnostic.message.contains("normal-result forwarding")));
+}
+
+#[test]
+fn frozen_array_input_views_require_directional_region_evidence() {
+    let (core, signatures) = core_and_signatures_for("array-input-region-proof@0.1.0",
+        "fn main<'a>(input: &'a i64, other: &'static i64) -> i64 { let [first,second] = [other,input]; *first }");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    assert!(core.validate_projection_obligations(&signatures, &[]).is_empty());
+    let view = core.expressions.iter().find_map(|expression| match &expression.kind {
+        CoreKind::Array(values) => Some(values[1]), _ => None,
+    }).unwrap();
+    assert!(matches!(core.expression(view).kind, CoreKind::Block(_)));
+    let mut forged = core.clone();
+    let Type::Reference { lifetime, .. } = &mut forged.expressions[view.0 as usize].ty else { panic!() };
+    *lifetime = Lifetime::Static;
+    assert!(forged.validate_projection_obligations(&signatures, &[]).iter()
+        .any(|diagnostic| diagnostic.code == "G4304" && diagnostic.message.contains("normal-result forwarding")));
+    let mut missing = core;
+    missing.body_regions = Default::default();
+    assert!(missing.validate_projection_obligations(&signatures, &[]).iter()
+        .any(|diagnostic| diagnostic.code == "G4304" && diagnostic.message.contains("normal-result forwarding")));
+}
+
+#[test]
 fn contextual_byte_slice_literals_retain_element_evidence_across_open_regions() {
     let core = core_for("contextual-byte-slice@0.1.0",
         "use std::*; pub fn main<'a>(bytes: Slice<'a,u8>) -> Ordering { Slice::lex_compare(bytes, b\".\") }");

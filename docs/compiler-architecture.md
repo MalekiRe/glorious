@@ -2814,3 +2814,25 @@ Array-element joins and the remaining contextual enum-constructor equality
 path are not migrated by this checkpoint. Their consumers still need the same
 directional contract, with constructor and callable-refinement composition
 verified rather than assumed from the branch tests above.
+
+## Checked array-input views without producer rewriting
+
+Array elements now enter their common element type through the same directional
+coercion relation as other results. The destination retains its inferred regions
+and the ordinary joined callable refinements. Refinement propagation preserves
+each original producer's ABI and regions; it cannot rewrite a static wrapper's
+declared result or its frozen reference-origin metadata merely because that value
+also enters a shorter array view.
+
+A differing checked element view is represented by the existing Core normal-
+result block boundary, which lowers to explicit result forwarding before array
+storage. Frozen normal-result boundaries are independently checked against the
+same lexical/body-region evidence and nominal variance product, including the
+destination's actual callable authority and retained debt. Missing region facts,
+longer fabricated lifetimes and stronger fabricated receiver authority are not
+accepted. Structural Core, Control and MIR storage type checks remain strict;
+no new permissive storage matcher or alternate lifetime inventory is introduced.
+
+The remaining tuple-style enum-constructor contextual check now uses the same
+directional relation as record-style variants. Cache 180 changes source checking
+and forwarding construction; executable encoding and native ABI are unchanged.

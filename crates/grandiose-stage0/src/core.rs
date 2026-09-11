@@ -1500,6 +1500,29 @@ impl TypedBody {
         }
         let mut borrowed_receivers = std::collections::BTreeMap::new();
         for (index, expression) in self.expressions.iter().enumerate() {
+            if let CoreKind::Block(values) = &expression.kind
+                && expression.ty != Type::Never
+                && let Some(value) = values.last().and_then(|value| self.expressions.get(value.0 as usize))
+                && value.ty != Type::Never {
+                // A block is also the explicit normal-result forwarding
+                // boundary. Recheck that view against frozen lexical region
+                // evidence; a representation-preserving view is not itself
+                // evidence that a shorter value can outlive its source.
+                let mut substitution = CallLifetimeSubstitution { outlives: outlives.clone(),
+                    nominal_variances: Some(scoped.nominal_variances()), ..Default::default() };
+                let accepted = align_lifetime_types(&expression.ty, &value.ty, &mut substitution, LifetimeMode::Rigid, 0)
+                    .is_ok_and(|aligned| {
+                        // Region alignment must not supply the destination
+                        // with the source's stronger resident authority or
+                        // silently discharge its capture/predicate debt.
+                        let aligned = crate::CallableContract::retain_abi_with_refinements(aligned, &expression.ty);
+                        crate::types::regions::accepts_body_storage(&aligned, &value.ty)
+                    });
+                if !accepted || !substitution.inference_outlives.is_empty() {
+                    diagnostics.push(CoreDiagnostic { code: "G4304", span: expression.span,
+                        message: "Typed Core normal-result forwarding lacks its directional type and region proof".into() });
+                }
+            }
             effect_contracts::validate_application(expression, signatures, &scoped, &outlives, &mut diagnostics);
             if let Some(mutability) = callable_contracts::validate_invocation_prerequisites(self, expression, signatures, &scoped, &outlives, &mut diagnostics) {
                 borrowed_receivers.insert(CoreId(index as u32), mutability);
@@ -5853,8 +5876,15 @@ impl Elaborator<'_> {
                 let value = self.expression_expected(value, expected_element.clone());
                 let actual = self.expressions[value.0 as usize].ty.clone();
                 self.queue_callable_abi_erasure(element.clone(), actual.clone(), span);
-                match self.inference.unify(element.clone(), actual) {
-                    Ok(joined) => element = joined,
+                match self.unify_rigid_lifetimes_after_inference(element.clone(), actual, span, true, LifetimeMode::Rigid) {
+                    Ok(joined) => {
+                        // Alignment exposes the source's regions to equality
+                        // inference, not to the array's stored element type.
+                        // Retain the destination regions and the ordinary
+                        // joined callable refinements as for checked stores.
+                        element = crate::CallableContract::retain_abi_with_refinements(
+                            self.inference.resolve_type_structure(element.clone()), &joined);
+                    }
                     Err(_) => {
                         self.error(span, "G4119", "array elements have incompatible types");
                         self.recovered = true;
@@ -5869,10 +5899,19 @@ impl Elaborator<'_> {
         // only actual element value refinements participate in this join.
         for value in &values {
             let actual = self.inference.resolve_type_structure(self.expressions[value.0 as usize].ty.clone());
-            if actual != element && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
-                self.callable_value_joins.push((actual, element.clone()));
+            let refined = crate::CallableContract::retain_abi_with_refinements(actual.clone(), &element);
+            if actual != refined && !matches!(actual, Type::Never | Type::Infer(_) | Type::Error) {
+                self.callable_value_joins.push((actual, refined));
             }
         }
+        // Keep each producer's declared regions and reference-result metadata
+        // intact. Its checked array-input view is an ordinary normal-result
+        // forwarding boundary, lowered to Forward before structural storage.
+        let values = values.into_iter().map(|value| {
+            let actual = self.inference.resolve_type_structure(self.expressions[value.0 as usize].ty.clone());
+            if actual == element || matches!(actual, Type::Never) { value }
+            else { self.alloc(CoreKind::Block(vec![value]), element.clone(), span) }
+        }).collect::<Vec<_>>();
         let ty = if fixed { Type::fixed_array(element, values.len() as u64) } else { Type::Array(Box::new(element)) };
         let ty = self.strict_result(&values, ty);
         self.alloc(CoreKind::Array(values), ty, span)
@@ -10398,7 +10437,7 @@ impl Elaborator<'_> {
             arguments: arguments.clone(),
         };
         if let Some(expected) = expected
-            && self.inference.unify(nominal.clone(), expected).is_err()
+            && self.unify_rigid_lifetimes(expected, nominal.clone(), span).is_err()
         {
             return Some(self.fail(
                 span,

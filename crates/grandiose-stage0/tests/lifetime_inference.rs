@@ -50,6 +50,69 @@ fn rejects_lifetime(source: &str) {
 }
 
 #[test]
+fn array_element_coercions_join_static_and_borrowed_views() {
+    for (pattern, elements) in [
+        ("[left,right]", "[empty,input]"),
+        ("[left,right]", "[input,empty]"),
+        ("[[left],[right]]", "[[empty],[input]]"),
+    ] {
+        run_views(&format!("fn choose<'a>(input: Slice<'a,u8>) -> usize {{ let empty: Slice<'static,u8> = b\"\"; let {pattern} = {elements}; Slice::len(&left) + Slice::len(&right) }} pub fn main() -> i64 {{ as<i64>(choose(b\"*\")) + 41 }}"));
+    }
+}
+
+#[test]
+fn enum_constructor_coercions_preserve_explicit_source_regions() {
+    run_views(r#"
+        enum View<'a> { Value(Slice<'a,u8>) }
+        fn choose<'a>(input: Slice<'a,u8>, flag: Bool) -> View<'a> {
+            handle flag { true => View<'static>::Value(b""), false => View::Value(input) }
+        }
+        fn length<'a>(view: View<'a>) -> usize { handle view { View::Value(bytes) => Slice::len(&bytes) } }
+        pub fn main() -> i64 { as<i64>(length(choose(b"*",false)) + length(choose(b"",true))) + 41 }
+    "#);
+    for constructor in ["View::Value(input)", "View<'a>::Value(input)"] {
+        rejects_lifetime(&format!("enum View<'a> {{ Value(Slice<'a,u8>) }} fn invalid<'a>(input: Slice<'a,u8>) -> View<'static> {{ {constructor} }} pub fn main() -> i64 {{ 42 }}"));
+    }
+}
+
+#[test]
+fn array_element_coercions_cannot_extend_borrows() {
+    for elements in ["[empty,input]", "[input,empty]"] {
+        rejects_lifetime(&format!("fn invalid<'a>(input: Slice<'a,u8>) -> Slice<'static,u8> {{ let empty: Slice<'static,u8> = b\"\"; let [first,second] = {elements}; first }} pub fn main() -> i64 {{ 42 }}"));
+        rejects_lifetime(&format!("fn invalid<'a>(input: Slice<'a,u8>) {{ let empty: Slice<'static,u8> = b\"\"; let values: [Slice<'static,u8>;2] = {elements}; }} pub fn main() -> i64 {{ 42 }}"));
+    }
+    rejects_lifetime("fn invalid<'a>(input: &'a mut &'a i64, wide: &'a mut &'static i64) { let values = [wide,input]; } pub fn main() -> i64 { 42 }");
+}
+
+#[test]
+fn array_element_coercions_retain_independent_callable_state() {
+    run_views(r#"
+        pub fn main() -> i64 {
+            let mut left = 20;
+            let mut right = 20;
+            let callbacks = [() -> i64 { left = left + 1; left }, () -> i64 { right = right + 1; right }];
+            let [first,second] = callbacks;
+            first() + second()
+        }
+    "#);
+}
+
+fn run_views(source: &str) {
+    let artifact = StageZeroCompiler::new().compile(request(source))
+        .unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+    let decoded = decode_and_verify_program(&artifact.canonical_bytes()).unwrap();
+    // SAFETY: fixtures use only trusted views of compiler-emitted static octets.
+    assert_eq!(unsafe { artifact.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    assert_eq!(unsafe { decoded.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let ir = StageZeroCompiler::new().compile_llvm(request(source), LlvmTarget::host().unwrap()).unwrap();
+    for optimization in [0, 2] {
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(unsafe { native.run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+    }
+}
+
+#[test]
 fn inferred_nominal_view_joins_accept_shorter_borrows_and_static_fallbacks() {
     for selection in [
         "handle flag { true => input, false => empty }",
