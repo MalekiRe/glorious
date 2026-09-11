@@ -2017,3 +2017,29 @@ regression and its owned-Copy-capture composition now pass across engines. Recei
 replacement still lacks its complete lifetime contract. Borrowed invocation,
 helper-local symbolic delimiters, foreign-control admission, mandatory-tail fusion
 and full zero-marshalling/performance acceptance remain separate open obligations.
+
+## Strict quantity input snapshots
+
+UseFlow freezes the evaluated callee before its strict arguments, and freezes
+each argument and aggregate field before evaluating the next. Ordinary invocation,
+checked helper execution and operation-payload escape consume these same value
+snapshots. Later replacement of source storage cannot change the capability
+already supplied at an earlier position. Closure formation refreshes its capture
+snapshot on each execution, while retaining the existing frame-local cache scope.
+The prior late argument lookup and recursive outgoing-value lookup are removed.
+Known enum-constructor layout checking still supplies the typed escape contract;
+it selects fields from the evaluated product, not from the final environment.
+
+Specialization also binds retained resident-quantity equations to their original
+Ownership MIR input before closing them. The existing closed receiving seal is
+not permission to reuse stale source equations after an instruction, owner,
+alias, loan or capture-contract change.
+
+Cache 150 records these source/ownership boundaries. Snapshot analysis now rejects
+the original affine receiver's double use instead of charging the replacement.
+Runtime strict-value materialization is still incomplete: an ordinary argument
+or aggregate field can retain a source alias until after a later operand replaces
+it. Both new execution regressions remain active, alongside the prepared receiver's
+native lifetime failure. A correct quantity snapshot is not a runtime lifetime
+or materialization proof, and none of the remaining native-handler acceptance
+requirements is waived.

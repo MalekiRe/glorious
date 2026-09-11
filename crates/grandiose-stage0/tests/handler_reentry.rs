@@ -41,7 +41,7 @@ fn candidate(source: &str) -> CandidateVmProgram {
     let outcome = StageZeroCompiler::new().compile(request.clone()).unwrap_or_else(|error| panic!("{source}\n{error:#?}"));
     assert!(outcome.diagnostics.is_empty(), "{:?}", outcome.diagnostics);
     let artifact = outcome.artifact.unwrap();
-    assert_eq!(artifact.run_i64().unwrap(), 42);
+    assert_eq!(artifact.run_i64().unwrap(), 42, "{source}");
     let bytes = artifact.canonical_bytes();
     assert_eq!(
         decode_and_verify_program(&bytes)
@@ -318,6 +318,36 @@ fn computed_field_receiver_is_evaluated_once_before_its_arguments() {
             let result = receiver(&mut count).0(argument(&mut count));
             result + count
         }");
+}
+
+fn replaced_argument_candidate(invocation: &str) {
+    candidate(&format!("fn first(value:i64) -> i64 {{42}}
+            fn second(value:i64) -> i64 {{0}}
+            fn invoke<F>(task:F, value:i64) -> i64 where F:Fn<(i64,),Output=i64,Effects={{}}> {{task(value)}}
+            pub fn main() -> i64 {{
+                let mut callback:(i64)->i64=first;
+                let replacement:(i64)->i64=second;
+                {invocation}
+            }}"));
+}
+
+#[test]
+fn argument_snapshot_survives_later_source_replacement() {
+    replaced_argument_candidate("invoke(callback, {callback=replacement; 0})");
+}
+
+#[test]
+fn aggregate_snapshot_survives_later_source_replacement() {
+    replaced_argument_candidate("{let saved=(callback, {callback=replacement; 0}); invoke(saved.0, saved.1)}");
+}
+
+#[test]
+fn factory_capture_snapshots_preserve_their_resumption_input() {
+    candidate("effect Ask { [1,1] ask() -> i64; }
+        fn wrap<F>(task:F) -> () -> i64 where F:Fn<(i64,),Output=i64,Effects={}> {
+            move(task) {task(42)}
+        }
+        pub fn main() -> i64 {handle Ask::ask() {Ask::ask() with k => wrap(k)()}}");
 }
 
 #[test]

@@ -486,6 +486,13 @@ struct Environment {
     bindings: BTreeMap<String, Binding>,
 }
 
+/// The value selected by one completed strict operand. Later operands may
+/// replace its source storage, but cannot change this invocation input.
+struct EvaluatedValue {
+    expression: CoreId,
+    binding: Binding,
+}
+
 struct Analyzer<'a> {
     continuations: &'a crate::core_continuations::CoreContinuations,
     body: &'a TypedBody,
@@ -627,8 +634,7 @@ impl Analyzer<'_> {
                 // capability environment first, otherwise `move function`
                 // would erase the function from the closure's own body.
                 self.closure_values
-                    .entry(id)
-                    .or_insert_with(|| ClosureValue {
+                    .insert(id, ClosureValue {
                         environment: capture_environment.brand,
                         resident_types: capture_environment.captures.iter().map(|capture|
                             (capture.name.clone(), crate::capture_formation::CaptureFormation::new(capture).resident_type())).collect(),
@@ -744,11 +750,13 @@ impl Analyzer<'_> {
                 self.result_values.insert(id, binding);
                 summary
             }
-            CoreKind::Tuple(values) | CoreKind::Array(values) => {
-                self.sequence(values, environment, expression.span)
-            }
-            CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
-                self.sequence(fields, environment, expression.span)
+            CoreKind::Tuple(values) | CoreKind::Array(values)
+            | CoreKind::Record { fields: values, .. } | CoreKind::Enum { fields: values, .. } => {
+                let (summary, values) = self.evaluated_values(values, environment, expression.span);
+                let binding = values.map(|values| Binding::Aggregate(values.into_iter().enumerate()
+                    .map(|(index, value)| (index as u32, value.binding)).collect())).unwrap_or(Binding::Other);
+                self.result_values.insert(id, binding);
+                summary
             }
             CoreKind::IntrinsicCall { arguments, .. } => {
                 self.sequence(arguments, environment, expression.span)
@@ -758,13 +766,8 @@ impl Analyzer<'_> {
                 payload_types,
                 ..
             } => {
-                let summary = self.sequence(arguments.clone(), environment, expression.span);
-                if arguments
-                    .iter()
-                    .any(|argument| self.continuations.is_abrupt(*argument))
-                {
-                    return summary;
-                }
+                let (summary, arguments) = self.evaluated_values(arguments, environment, expression.span);
+                let Some(arguments) = arguments else { return summary; };
                 // Performing an operation is a typed ownership boundary just
                 // like an ordinary call.  In particular, a callable payload
                 // cannot disappear merely because its consumer is selected
@@ -779,7 +782,6 @@ impl Analyzer<'_> {
                 let transfers = self.escape_perform_arguments(
                     &arguments,
                     &payload_types,
-                    environment,
                     expression.span,
                 );
                 self.compose(expression.span, summary, transfers)
@@ -1026,6 +1028,20 @@ impl Analyzer<'_> {
         summary
     }
 
+    fn evaluated_values(&mut self, values: Vec<CoreId>, environment: &mut Environment, span: Span)
+        -> (Summary, Option<Vec<EvaluatedValue>>) {
+        let mut summary = Summary::default();
+        let mut evaluated = Vec::with_capacity(values.len());
+        for expression in values {
+            let next = self.expression(expression, environment);
+            summary = self.compose(span, summary, next);
+            if self.continuations.is_abrupt(expression) { return (summary, None); }
+            let binding = self.binding_for_value(expression, environment);
+            evaluated.push(EvaluatedValue { expression, binding });
+        }
+        (summary, Some(evaluated))
+    }
+
     /// Evaluate the prefix of a straight-line Core fragment through its first
     /// definitely intercepted discarded operation. `None` means the fragment
     /// has no such total direct operation, so callers must use ordinary
@@ -1067,19 +1083,16 @@ impl Analyzer<'_> {
                 // facade names.  An opaque/imported forwarding function has
                 // exactly the same potential cancellation boundary as a
                 // local function with the same callable interface.
-                let prefix = self.sequence(
-                    std::iter::once(callee).chain(arguments.iter().copied()),
-                    environment,
-                    expression.span,
-                );
-                if self.continuations.is_abrupt(callee)
-                    || arguments.iter().any(|argument| self.continuations.is_abrupt(*argument)) {
-                    return Some(prefix);
-                }
+                let prefix = self.expression(callee, environment);
+                if self.continuations.is_abrupt(callee) { return Some(prefix); }
+                let receiver = self.binding_for_value(callee, environment);
+                let arguments_summary = self.sequence(arguments.clone(), environment, expression.span);
+                let prefix = self.compose(expression.span, prefix, arguments_summary);
+                if arguments.iter().any(|argument| self.continuations.is_abrupt(*argument)) { return Some(prefix); }
                 // The operation can only be intercepted after entering the
                 // callee. This does not imply that any callable argument was
                 // invoked before cancellation.
-                Some(match self.binding_for_value(callee, environment) {
+                Some(match receiver {
                     Binding::Contract(key) => self.compose(expression.span, prefix, Summary::one(key)),
                     _ => prefix,
                 })
@@ -1158,45 +1171,41 @@ impl Analyzer<'_> {
         if self.continuations.is_abrupt(callee) {
             return summary;
         }
-        let evaluated_arguments = self.sequence(arguments.clone(), environment, span);
-        summary = self.compose(span, summary, evaluated_arguments);
-        if arguments
-            .iter()
-            .any(|argument| self.continuations.is_abrupt(*argument))
-        {
-            return summary;
-        }
         let binding = self.binding_for_value(callee, environment);
-        let inputs = arguments.iter().map(|argument| self.binding_for_value(*argument, environment)).collect::<Vec<_>>();
+        let (evaluated_arguments, inputs) = self.evaluated_values(arguments, environment, span);
+        summary = self.compose(span, summary, evaluated_arguments);
+        let Some(inputs) = inputs else { return summary; };
+        let bindings = inputs.iter().map(|input| input.binding.clone()).collect::<Vec<_>>();
         if !matches!(binding, Binding::Closure(_) | Binding::Choice(_))
-            && let Some((body, result)) = self.checked_body_call(id, &binding, &inputs, span) {
+            && let Some((body, result)) = self.checked_body_call(id, &binding, &bindings, span) {
             self.result_values.insert(id, result);
             return self.compose(span, summary, body);
         }
-        let body = self.invoke_binding(&binding, &inputs, callee, &arguments, environment, span);
+        let body = self.invoke_binding(&binding, &inputs, callee, span);
         self.result_values.insert(id, body.1);
         self.compose(span, summary, body.0)
     }
 
-    fn invoke_binding(&mut self, binding: &Binding, inputs: &[Binding], callee: CoreId,
-        arguments: &[CoreId], environment: &Environment, span: Span) -> (Summary, Binding) {
+    fn invoke_binding(&mut self, binding: &Binding, inputs: &[EvaluatedValue], callee: CoreId,
+        span: Span) -> (Summary, Binding) {
         match binding {
             Binding::Contract(key) => {
-                let arguments = self.escape_arguments(callee, arguments, environment, span);
+                let arguments = self.escape_arguments(callee, inputs, span);
                 (self.compose(span, arguments, Summary::one(*key)), Binding::Other)
             }
-            Binding::Closure(closure) => self.run_closure(closure.clone(), inputs, span),
+            Binding::Closure(closure) => self.run_closure(closure.clone(),
+                &inputs.iter().map(|input| input.binding.clone()).collect::<Vec<_>>(), span),
             Binding::Choice(choices) => {
                 let mut results = vec![];
                 let summary = self.branch_bindings(choices, span, |this, binding| {
-                    let (summary, result) = this.invoke_binding(binding, inputs, callee, arguments, environment, span);
+                    let (summary, result) = this.invoke_binding(binding, inputs, callee, span);
                     results.push(result);
                     summary
                 });
                 (summary, Binding::choice(results))
             }
             Binding::Aggregate(_) | Binding::GlobalCallable | Binding::Other => {
-                (self.escape_arguments(callee, arguments, environment, span), Binding::Other)
+                (self.escape_arguments(callee, inputs, span), Binding::Other)
             }
         }
     }
@@ -1269,7 +1278,7 @@ impl Analyzer<'_> {
             CoreKind::Tuple(values)
             | CoreKind::Array(values)
             | CoreKind::Record { fields: values, .. }
-            | CoreKind::Enum { fields: values, .. } => Binding::Aggregate(
+            | CoreKind::Enum { fields: values, .. } => self.result_values.get(&id).cloned().unwrap_or_else(|| Binding::Aggregate(
                 values
                     .iter()
                     .enumerate()
@@ -1277,7 +1286,7 @@ impl Analyzer<'_> {
                         (index as u32, self.binding_for_value(*value, environment))
                     })
                     .collect(),
-            ),
+            )),
             CoreKind::Move(value) => self.binding_for_value_at_place(
                 *value,
                 environment,
@@ -1534,9 +1543,8 @@ impl Analyzer<'_> {
 
     fn escape_perform_arguments(
         &mut self,
-        arguments: &[CoreId],
+        arguments: &[EvaluatedValue],
         payload_types: &[Type],
-        environment: &Environment,
         span: Span,
     ) -> Summary {
         // `TypedBody::validate` independently proves this arity relation.
@@ -1549,9 +1557,9 @@ impl Analyzer<'_> {
             // owns this contract.  A generic argument may have been inferred
             // or coerced into the parameter; `payload_types` is the zonked,
             // instantiated receiver ABI frozen in Core.
-            let next = self.escape_value_as(
-                *argument,
-                environment,
+            let next = self.escape_evaluated_as(
+                argument.expression,
+                &argument.binding,
                 payload_type,
                 CallableEscapeBoundary::Argument,
             );
@@ -1835,17 +1843,16 @@ impl Analyzer<'_> {
     fn escape_arguments(
         &mut self,
         callee: CoreId,
-        arguments: &[CoreId],
-        environment: &Environment,
+        arguments: &[EvaluatedValue],
         span: Span,
     ) -> Summary {
         let parameter_types = self.callable_parameter_types(callee);
         let mut summary = Summary::default();
         for (index, argument) in arguments.iter().enumerate() {
             let next = if let Some(parameter_type) = parameter_types.get(index) {
-                self.escape_value_as(
-                    *argument,
-                    environment,
+                self.escape_evaluated_as(
+                    argument.expression,
+                    &argument.binding,
                     parameter_type,
                     CallableEscapeBoundary::Argument,
                 )
@@ -1853,10 +1860,10 @@ impl Analyzer<'_> {
                 // Typed Core validates call arity before this analysis. Keep
                 // malformed frozen input fail-closed rather than assuming an
                 // arbitrary capability for an unmatched argument.
-                self.escape_value(
-                    *argument,
-                    environment,
+                self.escape_binding(
+                    &argument.binding,
                     None,
+                    self.body.expression(argument.expression).span,
                     CallableEscapeBoundary::Argument,
                 )
             };
@@ -1985,58 +1992,6 @@ impl Analyzer<'_> {
         self.run_closure(closure, &[], span).0
     }
 
-    fn escape_value(
-        &mut self,
-        id: CoreId,
-        environment: &Environment,
-        required: Option<Quantity>,
-        boundary: CallableEscapeBoundary,
-    ) -> Summary {
-        match self.binding_for_value(id, environment) {
-            Binding::Contract(key) => {
-                self.escape_contract(key, required, self.body.expression(id).span, boundary);
-                Summary::default()
-            }
-            Binding::Closure(closure) => {
-                self.escape_closure(closure, self.body.expression(id).span)
-            }
-            Binding::Choice(choices) => self.branch_bindings(&choices, self.body.expression(id).span,
-                |this, binding| this.escape_binding(binding, required, this.body.expression(id).span, boundary)),
-            Binding::Aggregate(fields) => {
-                let mut summary = Summary::default();
-                for binding in fields.values() {
-                    let next = self.escape_binding(
-                        binding,
-                        required,
-                        self.body.expression(id).span,
-                        boundary,
-                    );
-                    summary = self.compose(self.body.expression(id).span, summary, next);
-                }
-                summary
-            }
-            Binding::GlobalCallable | Binding::Other => match &self.body.expression(id).kind {
-                CoreKind::Tuple(values) | CoreKind::Array(values) | CoreKind::Block(values) => {
-                    let mut summary = Summary::default();
-                    for value in values {
-                        let next = self.escape_value(*value, environment, None, boundary);
-                        summary = self.compose(self.body.expression(id).span, summary, next);
-                    }
-                    summary
-                }
-                CoreKind::Record { fields, .. } | CoreKind::Enum { fields, .. } => {
-                    let mut summary = Summary::default();
-                    for value in fields {
-                        let next = self.escape_value(*value, environment, None, boundary);
-                        summary = self.compose(self.body.expression(id).span, summary, next);
-                    }
-                    summary
-                }
-                _ => Summary::default(),
-            },
-        }
-    }
-
     /// Transfer a value into a receiver whose complete structural callable
     /// contract is known.  Callable capability is recursive: a `Pair<F>` is
     /// not an untyped shell when `F` is an exactly-once callable.  The old
@@ -2049,12 +2004,19 @@ impl Analyzer<'_> {
         expected: &Type,
         boundary: CallableEscapeBoundary,
     ) -> Summary {
+        let binding = self.binding_for_value(id, environment);
+        self.escape_evaluated_as(id, &binding, expected, boundary)
+    }
+
+    fn escape_evaluated_as(
+        &mut self, id: CoreId, binding: &Binding, expected: &Type, boundary: CallableEscapeBoundary,
+    ) -> Summary {
         if let CoreKind::Block(values) = &self.body.expression(id).kind {
             // Only the tail value crosses this boundary. Prefix expressions
             // were checked during evaluation; neither discard their use
             // counts nor reclassify them as outgoing capabilities.
             return values.last().map_or_else(Summary::default, |value|
-                self.escape_value_as(*value, environment, expected, boundary));
+                self.escape_evaluated_as(*value, binding, expected, boundary));
         }
         // An enum constructor carries its active variant at this expression,
         // unlike an enum parameter whose variant is genuinely dynamic. Use
@@ -2068,24 +2030,20 @@ impl Analyzer<'_> {
             && let Some(field_types) =
                 self.enum_variant_field_types(expected, *definition, *variant)
             && field_types.len() == fields.len()
+            && let Binding::Aggregate(bindings) = binding
+            && bindings.len() == fields.len()
         {
             let mut summary = Summary::default();
-            for (field, field_type) in fields.iter().zip(field_types.iter()) {
-                let next = self.escape_value_as(*field, environment, field_type, boundary);
+            for (index, (field, field_type)) in fields.iter().zip(field_types.iter()).enumerate() {
+                let Some(field_binding) = bindings.get(&(index as u32)) else {
+                    return self.escape_binding(binding, None, self.body.expression(id).span, boundary);
+                };
+                let next = self.escape_evaluated_as(*field, field_binding, field_type, boundary);
                 summary = self.compose(self.body.expression(id).span, summary, next);
             }
             return summary;
         }
-        let binding = self.binding_for_value(id, environment);
-        if matches!(binding, Binding::GlobalCallable | Binding::Other) {
-            // Preserve the established conservative traversal for computed
-            // forms such as blocks. They do not retain a field-by-field
-            // binding identity, so accepting them as an empty capability
-            // would erase a nested callable obligation.
-            self.escape_value(id, environment, callable_invocation(expected), boundary)
-        } else {
-            self.escape_binding_as(&binding, expected, self.body.expression(id).span, boundary)
-        }
+        self.escape_binding_as(binding, expected, self.body.expression(id).span, boundary)
     }
 
     fn escape_binding_as(
@@ -2437,6 +2395,104 @@ mod tests {
             effects: EffectRow::empty(),
             invocation,
         }
+    }
+
+    fn receiver_replacement_body() -> TypedBody {
+        let callback = callable(Quantity::AFFINE);
+        let integer = Type::Scalar(crate::ScalarType::I64);
+        let expression = |kind, ty| CoreExpr { kind, ty, span: span() };
+        let invoke = |callee, argument| CoreKind::Call {
+            mandatory_tail: false, callee, arguments: vec![argument],
+            invocation: crate::core::CoreCallContract { declaration: callback.clone(), effects: EffectRow::empty() },
+            reference_contract: crate::core::CallReferenceOrigin::None,
+            reference_origin: crate::core::CallReferenceOrigin::None,
+            reference_shape: crate::core::CallReferenceShape::None,
+        };
+        TypedBody {
+            safety: crate::Safety::Safe, unsafe_scopes: Default::default(), unsafe_implementations: Default::default(),
+            body_regions: Default::default(), parameters: vec![("first".into(), callback.clone()), ("second".into(), callback.clone())],
+            expressions: vec![
+                expression(CoreKind::Local("first".into()), callback.clone()),
+                expression(CoreKind::Let { name:"current".into(), value:CoreId(0) }, Type::Unit),
+                expression(CoreKind::Local("current".into()), callback.clone()),
+                expression(CoreKind::Local("second".into()), callback.clone()),
+                expression(CoreKind::Assign { place: CorePlace::Local { name:"current".into(), ty:callback.clone() }, value:CoreId(3) }, Type::Unit),
+                expression(CoreKind::Literal("0".into()), integer.clone()),
+                expression(CoreKind::Block(vec![CoreId(4), CoreId(5)]), integer.clone()),
+                expression(invoke(CoreId(2), CoreId(6)), integer.clone()),
+                expression(invoke(CoreId(0), CoreId(5)), integer.clone()),
+                expression(CoreKind::Block(vec![CoreId(1), CoreId(7), CoreId(8)]), integer),
+            ], root:CoreId(9), diagnostics:vec![], recovered:false,
+        }
+    }
+
+    fn checked_uses(body: &TypedBody) -> UseFlow {
+        assert!(body.validate().is_empty(), "{:?}", body.validate());
+        let ownership = PlaceFlow::analyze(body);
+        assert!(ownership.diagnostics.is_empty(), "{:?}", ownership.diagnostics);
+        UseFlow::analyze(body, &ownership)
+    }
+
+    #[test]
+    fn argument_replacement_cannot_change_the_already_evaluated_receiver() {
+        let body = receiver_replacement_body();
+        let uses = checked_uses(&body);
+        let first = uses.callable_uses.iter().find(|fact| fact.name == "first").unwrap();
+        assert_eq!(first.actual, Quantity::new(2, Some(2)).unwrap(), "{uses:#?}");
+        assert!(!uses.diagnostics.is_empty(), "the original affine receiver was invoked twice");
+        let mut once = body;
+        once.expressions[9].kind = CoreKind::Block(vec![CoreId(1), CoreId(7)]);
+        let uses = checked_uses(&once);
+        assert!(uses.diagnostics.is_empty(), "{uses:#?}");
+        assert_eq!(uses.callable_uses.iter().find(|fact| fact.name == "first").unwrap().actual, Quantity::ONCE);
+        assert_eq!(uses.callable_uses.iter().find(|fact| fact.name == "second").unwrap().actual, Quantity::ZERO);
+    }
+
+    #[test]
+    fn later_operands_cannot_replace_prior_argument_or_aggregate_field_capabilities() {
+        for aggregate in [false, true] {
+            let mut body = receiver_replacement_body();
+            let mut arguments = vec![CoreId(2), CoreId(6)];
+            let mut parameters = vec![callable(Quantity::AFFINE), Type::Scalar(crate::ScalarType::I64)];
+            if aggregate {
+                let ty = Type::Tuple(parameters);
+                parameters = vec![ty.clone()];
+                let tuple = CoreId(body.expressions.len() as u32);
+                body.expressions.push(CoreExpr { kind:CoreKind::Tuple(arguments), ty, span:span() });
+                arguments = vec![tuple];
+            }
+            let target = Type::Callable { contract:Default::default(), safety:crate::Safety::Safe,
+                lifetime_binders:0, parameters, result:Box::new(Type::Scalar(crate::ScalarType::I64)),
+                effects:EffectRow::empty(), invocation:Quantity::UNRESTRICTED };
+            let callee = CoreId(body.expressions.len() as u32);
+            body.expressions.push(CoreExpr { kind:CoreKind::Function {
+                definition:crate::DefKey(crate::Digest::of_bytes(b"snapshot-argument-consumer")), arguments:vec![], host_import:None,
+            }, ty:target.clone(), span:span() });
+            body.expressions[7].kind = CoreKind::Call { mandatory_tail:false, callee, arguments,
+                invocation:crate::core::CoreCallContract { declaration:target, effects:EffectRow::empty() },
+                reference_contract:crate::core::CallReferenceOrigin::None, reference_origin:crate::core::CallReferenceOrigin::None,
+                reference_shape:crate::core::CallReferenceShape::None };
+            let uses = checked_uses(&body);
+            assert!(uses.callable_escapes.iter().any(|fact| fact.name == "first" && fact.boundary == CallableEscapeBoundary::Argument), "{uses:#?}");
+            assert!(!uses.callable_escapes.iter().any(|fact| fact.name == "second"), "{uses:#?}");
+            assert!(uses.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{uses:#?}");
+        }
+    }
+
+    #[test]
+    fn later_operation_payloads_cannot_replace_an_evaluated_capability() {
+        let mut body = receiver_replacement_body();
+        body.expressions[7].kind = CoreKind::Perform {
+            effect:crate::EffectInstance { definition:crate::DefKey(crate::Digest::of_bytes(b"snapshot-effect")), arguments:vec![] },
+            operation:0, operation_arguments:vec![], payload_types:vec![callable(Quantity::AFFINE), Type::Scalar(crate::ScalarType::I64)],
+            arguments:vec![CoreId(2), CoreId(6)], terminal:false,
+            reference_contract:crate::core::CallReferenceOrigin::None, reference_origin:crate::core::CallReferenceOrigin::None,
+            reference_shape:crate::core::CallReferenceShape::None,
+        };
+        let uses = checked_uses(&body);
+        assert!(uses.callable_escapes.iter().any(|fact| fact.name == "first"), "{uses:#?}");
+        assert!(!uses.callable_escapes.iter().any(|fact| fact.name == "second"), "{uses:#?}");
+        assert!(uses.diagnostics.iter().any(|diagnostic| diagnostic.code == "G5013"), "{uses:#?}");
     }
 
     #[test]

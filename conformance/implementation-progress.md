@@ -5,6 +5,39 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 150: evaluated quantity inputs
+
+UseFlow's existing execution freezes each strict input at its evaluation point:
+callee, arguments, aggregate fields and operation payloads. Invocation and escape
+consume those snapshots instead of re-reading source bindings after later operand
+mutations. Closure formation refreshes its capture snapshot on execution. The
+late outgoing-value reconstruction is removed. Retained ownership quantity rules
+also bind their original Ownership MIR input before concrete specialization;
+the receiving specialized seal alone cannot authenticate changed source equations.
+
+All eight quantity unit tests pass, including a regression that formerly counted
+one use each of an original and replacement callback instead of rejecting two
+uses of the original affine capability. Typed argument/payload service checks and
+the enum callable-extraction service check pass. Explicit-effect factory capture
+and replay-product transport pass the fresh/decoded VM and native/mixed O0/O2
+matrix. The source-input quantity-seal check passes, rejecting closure of a
+previously valid rule product after its owner inventory is changed.
+
+Two new execution regressions remain active: a later operand's source replacement
+changes an earlier ordinary argument or aggregate field from the selected function
+returning 42 to the replacement returning 0, already in the fresh VM. Lowering's
+late materialization still aliases source storage despite correct quantity input
+snapshots. The existing prepared-receiver native lifetime regression remains open.
+Eight older generic-factory tests stop before this analysis at G4155 unresolved
+associated effect rows (their Fn declarations omit Effects); they were not changed,
+ignored or counted as passing quantity/factory checks.
+
+Cache 150 changes; verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+Receiver access/lifetime, strict value materialization, borrowed resumption
+invocation, helper-local symbolic delimiters, foreign-control admission,
+mandatory-tail fusion and full zero-marshalling/performance acceptance remain
+open. Full compiler/library and self-hosted acceptance are not established.
+
 ## Cache 149: closed resident owner quantities
 
 The ownership producer now retains its quantity constraints through specialization.

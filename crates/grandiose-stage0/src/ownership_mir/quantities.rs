@@ -19,6 +19,18 @@ pub(super) struct Rules {
     /// Open lexical evidence remains valid when a closed query cannot improve
     /// it. It is not used as a substitute for a failed constraint solution.
     pub(super) declared: Vec<Option<Quantity>>,
+    pub(super) input: Option<std::sync::Arc<Input>>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct Input {
+    definition: DefKey,
+    values: Vec<ControlValueDecl>,
+    owners: Vec<Owner>,
+    blocks: Vec<OwnershipBlock>,
+    loans: Vec<Loan>,
+    aliases: BTreeMap<ControlValue, ControlValue>,
+    captures: Vec<crate::CaptureEnvironment>,
 }
 
 pub(super) fn declared_quantity(
@@ -36,6 +48,21 @@ pub(super) fn declared_quantity(
 }
 
 impl Rules {
+    pub(super) fn seal_input(body: &OwnershipMir) -> std::sync::Arc<Input> {
+        std::sync::Arc::new(Input { definition: body.definition,
+            values: body.values.clone(), owners: body.owners.clone(), blocks: body.blocks.clone(),
+            loans: body.loans.clone(), aliases: body.aliases.clone(),
+            captures: body.closures.iter().map(|closure| closure.environment.clone()).collect() })
+    }
+
+    fn matches(&self, body: &OwnershipMir) -> bool {
+        self.input.as_ref().is_some_and(|input| input.definition == body.definition
+            && input.values == body.values && input.owners == body.owners && input.blocks == body.blocks
+            && input.loans == body.loans && input.aliases == body.aliases
+            && input.captures.len() == body.closures.len()
+            && input.captures.iter().zip(&body.closures).all(|(capture, closure)| *capture == closure.environment))
+    }
+
     pub(super) fn forward_temporary(&mut self, source: ControlValue) {
         self.rules.push(Rule::Forward(source));
         self.declared.push(self.declared[source.0 as usize]);
@@ -46,7 +73,7 @@ impl Rules {
         declared: Vec<Option<Quantity>>,
     ) -> Self {
         let mut result = Self { rules: vec![Rule::Declared; declared.len()],
-            replacements: BTreeMap::new(), exposed: BTreeSet::new(), declared };
+            replacements: BTreeMap::new(), exposed: BTreeSet::new(), declared, input: None };
         for instruction in control.blocks().iter().flat_map(|block| &block.instructions) {
             result.rules[instruction.destination.0 as usize] = match &instruction.operation {
                 ControlOperation::Function { .. }
@@ -137,6 +164,9 @@ impl OwnershipMir {
     pub(crate) fn close_owner_quantities(&self, values: &[ControlValueDecl],
         signatures: &ElaboratedInterface, solver: &crate::TraitSolver,
     ) -> Result<Vec<Owner>, OwnershipError> {
+        if !self.quantity_rules.matches(self) {
+            return Err(OwnershipError("resident quantity constraints have stale ownership inputs".into()));
+        }
         self.quantity_rules.close(values, &self.owners, signatures, solver)
     }
 }

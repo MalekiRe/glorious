@@ -989,6 +989,7 @@ impl OwnershipMir {
         };
         result.live_in = result.compute_liveness();
         result.elaborate_inventory();
+        result.quantity_rules.input = Some(quantities::Rules::seal_input(&result));
         result.validate()?;
         Ok(result)
     }

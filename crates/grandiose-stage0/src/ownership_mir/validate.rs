@@ -577,6 +577,16 @@ mod tests {
     }
 
     #[test]
+    fn specialization_cannot_close_quantity_rules_after_ownership_input_mutation() {
+        let mut mir = fixture("pub fn main(value:i64) -> i64 {value}");
+        let signatures = ElaboratedInterface::default();
+        let solver = crate::TraitSolver::new(&signatures);
+        assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).is_ok());
+        mir.owners[mir.parameters[0].0 as usize].quantity = Some(Quantity::ONCE);
+        assert!(mir.close_owner_quantities(&mir.values, &signatures, &solver).unwrap_err().0.contains("stale ownership inputs"));
+    }
+
+    #[test]
     fn a_copyable_environment_can_be_copied_without_consuming_the_callable_owner() {
         let mir = fixture("pub fn main() -> i64 { let value = 42; let first = move (value) { 42 }; let second = first; first(); second() }");
         let capture = mir.blocks.iter().flat_map(|block| &block.instructions)
