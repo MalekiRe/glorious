@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod minimum;
 mod drop;
 mod invocations;
-use minimum::{MinimumBinding, MinimumDisposition, MinimumHandler};
+use minimum::{HandlerFrame, MinimumBinding, MinimumDisposition};
 pub(crate) use minimum::DischargedMinimum;
 
 /// A statically-selected subplace of one local.  PlaceFlow deliberately keeps
@@ -257,13 +257,27 @@ mod reference_origin_tests {
 
 /// Snapshot the source before generative arm names shadow its spelling.
 /// Installation happens only in the selected arm, after its locals exist.
+#[derive(Clone)]
 struct PatternBindingTransfer {
     name: String,
     value: CoreId,
     moved: Option<Projection>,
     borrowed_move: bool,
-    aliases: Vec<(Vec<u32>, ReferenceOrigins)>,
+    aliases: Vec<(Vec<u32>, ReferenceSnapshot)>,
     regions: Vec<(Vec<u32>, BTreeSet<regions::Region>)>,
+}
+
+/// A deferred value transfer includes its upstream source-carrier debt. Its
+/// input temporary may retire before the destination's lexical arm exists.
+#[derive(Clone)]
+struct ReferenceSnapshot {
+    origins: ReferenceOrigins,
+    ancestors: BTreeSet<String>,
+}
+
+enum PatternValue<'a> {
+    Subject(CoreId),
+    Acquired(&'a invocations::EvaluatedOperand),
 }
 
 /// A frozen ownership fact for a loan that is still live at the body exit.
@@ -903,7 +917,7 @@ impl PlaceFlow {
             moved_places: BTreeSet::new(),
             minimum_bindings: BTreeMap::new(),
             minimum_states: vec![MinimumDisposition::default()],
-            minimum_handlers: vec![],
+            handler_frames: vec![],
             minimum_suspensions: vec![],
             normal_continuation: true,
             label_continuations: vec![],
@@ -1096,7 +1110,7 @@ struct Analyzer<'a> {
     moved_places: BTreeSet<Projection>,
     minimum_bindings: BTreeMap<String, MinimumBinding>,
     minimum_states: Vec<MinimumDisposition>,
-    minimum_handlers: Vec<MinimumHandler>,
+    handler_frames: Vec<HandlerFrame>,
     minimum_suspensions: Vec<minimum::MinimumSuspension>,
     move_paths: MovePathArena,
     bindings: PlaceBindingArena,
@@ -1999,6 +2013,7 @@ impl Analyzer<'_> {
                 );
                 let inputs = self.visit_sequence(&arguments, live_after);
                 if arguments.iter().all(|argument| !self.continuations.is_abrupt(*argument)) {
+                    self.record_handler_invocation_inputs(id, &inputs);
                     self.record_call_reference_origin(&Self::result_owner(id), id, &inputs, reference_origin);
                     self.pending_results.insert(id);
                     self.check_minimum_suspension(&effect, operation, e.span);
@@ -2022,9 +2037,9 @@ impl Analyzer<'_> {
                 // dynamic handler boundary even though the source argument's
                 // spelling is not visible inside the arm.
                 self.collect_local_uses(computation, &mut inside_handler);
-                self.enter_minimum_handler(&clauses);
+                self.enter_handler_frame(computation, &clauses);
                 self.visit_pattern_subject(computation, &inside_handler, e.span);
-                let minimum_handler = self.minimum_handlers.pop().expect("active minimum-use handler");
+                let handler = self.handler_frames.pop().expect("active handler frame");
                 if !self.normal_continuation { return; }
                 let incoming_state = self.capture_continuation();
                 let incoming = incoming_state.states.clone();
@@ -2042,8 +2057,8 @@ impl Analyzer<'_> {
                 for (clause_index, clause) in clauses.into_iter().enumerate() {
                     self.restore_continuation(&incoming_state);
                     self.refinements = incoming_refinements.clone();
-                    self.minimum_states = self.minimum_clause_inputs(&minimum_handler, &clause, &incoming_minimum);
-                    let transfers = self.handler_payload_transfers(computation, &clause);
+                    self.minimum_states = self.minimum_clause_inputs(&handler, &clause, &incoming_minimum);
+                    let transfers = handler.payloads[clause_index].clone();
                     self.begin_scope();
                     let resumption = match &clause.resumption {
                         crate::core::CoreHandlerResumption::Explicit { name, .. } => {
@@ -2066,7 +2081,9 @@ impl Analyzer<'_> {
                             clause: clause_index,
                         }),
                     );
-                    self.install_pattern_transfers(transfers);
+                    // An unobserved payload supplies no extra caller-storage
+                    // relation; it does not prove that reference debt is empty.
+                    if let Some(transfers) = transfers { self.install_pattern_transfers(transfers); }
                     self.check_custom_drop_payload_patterns(&clause);
                     self.open_minimum_payload_patterns(&clause);
                     let arm_results = self.pending_results.clone();
@@ -2119,7 +2136,7 @@ impl Analyzer<'_> {
                     self.refinements = incoming_refinements.clone();
                     self.minimum_states = incoming_minimum.clone();
                     let transfers = self.pattern_binding_transfers(
-                        computation, &clause.pattern, &clause.bindings, true,
+                        PatternValue::Subject(computation), &clause.pattern, &clause.bindings, true,
                     );
                     let minimum_place = self.projection(computation);
                     self.begin_scope();
@@ -2293,6 +2310,7 @@ impl Analyzer<'_> {
 
     fn finish_invocation_inputs(&mut self, callee: CoreId, callable: &invocations::Value, arguments: &[invocations::EvaluatedOperand], call: CoreId, span: Span) {
         self.record_invocation_stores(callee, callable, arguments, call);
+        self.record_handler_invocation_inputs(call, arguments);
         let CoreKind::Call { reference_origin, .. } = self.body.expression(call).kind.clone() else { unreachable!("invocation inputs"); };
         self.record_call_reference_origin(&Self::result_owner(call), call, arguments, reference_origin);
         self.pending_results.insert(call);
@@ -3990,6 +4008,21 @@ impl Analyzer<'_> {
         BTreeSet::from([ProjectionLoan::external(call, fields, mutability)])
     }
 
+    fn record_handler_invocation_inputs(&mut self, computation: CoreId, arguments: &[invocations::EvaluatedOperand]) {
+        // The existing handler analysis relates a direct protected invocation
+        // to its clauses. Publish that relation while its actual inputs still
+        // exist, not after finishing the protected computation. General nested
+        // and interleaved suspension paths do not gain an input proof here.
+        let targets = self.handler_frames.iter().enumerate()
+            .filter(|(_, frame)| frame.computation == computation)
+            .map(|(index, frame)| (index, frame.clauses.clone())).collect::<Vec<_>>();
+        for (index, clauses) in targets {
+            let payloads = clauses.iter().map(|clause|
+                self.handler_payload_transfers(computation, clause, arguments)).collect();
+            self.handler_frames[index].payloads = payloads;
+        }
+    }
+
     /// Handler payload binders are ordinary branch locals, but their backing
     /// loan comes from the suspended operation's frozen caller-region path.
     /// Install that alias before analysing the arm so reborrows, forwarding,
@@ -3998,24 +4031,24 @@ impl Analyzer<'_> {
         &self,
         computation: CoreId,
         clause: &crate::core::CoreHandlerClause,
-    ) -> Vec<PatternBindingTransfer> {
+        arguments: &[invocations::EvaluatedOperand],
+    ) -> Option<Vec<PatternBindingTransfer>> {
         let CoreKind::Perform {
             effect,
             operation,
-            arguments,
             ..
         } = self.body.expression(computation).kind.clone()
         else {
-            return self.call_handler_payload_transfers(computation, clause);
+            return self.call_handler_payload_transfers(computation, clause, arguments);
         };
         if effect != clause.effect || operation != clause.operation {
-            return vec![];
+            return None;
         }
-        clause.patterns.iter().zip(arguments).flat_map(|(pattern, argument)| {
+        Some(clause.patterns.iter().zip(arguments).flat_map(|(pattern, argument)| {
             // Perform already transferred the caller's arguments. The
             // handler owns the payload, not a second move from that caller.
-            self.pattern_binding_transfers(argument, pattern, &clause.bindings, false)
-        }).collect()
+            self.pattern_binding_transfers(PatternValue::Acquired(argument), pattern, &clause.bindings, false)
+        }).collect())
     }
 
     /// An indirect callee's sealed effect row carries the same declaration
@@ -4025,25 +4058,28 @@ impl Analyzer<'_> {
     /// the caller's erased local lifetimes.
     fn call_handler_payload_transfers(
         &self, computation: CoreId, clause: &crate::core::CoreHandlerClause,
-    ) -> Vec<PatternBindingTransfer> {
-        let Some(signatures) = self.signatures else { return vec![]; };
-        let CoreKind::Call { invocation, arguments, .. } = &self.body.expression(computation).kind else {
-            return vec![];
+        arguments: &[invocations::EvaluatedOperand],
+    ) -> Option<Vec<PatternBindingTransfer>> {
+        let signatures = self.signatures?;
+        let CoreKind::Call { invocation, .. } = &self.body.expression(computation).kind else {
+            return None;
         };
         let Type::Callable { parameters, effects, .. } = &invocation.declaration else {
-            return vec![];
+            return None;
         };
         if !effects.tails.is_empty() || !effects.projections.is_empty() {
-            return vec![];
+            return None;
         }
         let Some(crate::ElaboratedHeader::Effect(declaration)) =
-            signatures.definitions.get(&clause.effect.definition) else { return vec![]; };
-        let Some(operation) = declaration.operations.get(clause.operation as usize) else { return vec![]; };
+            signatures.definitions.get(&clause.effect.definition) else { return None; };
+        let operation = declaration.operations.get(clause.operation as usize)?;
         let mut paths = vec![];
-        for effect in effects.effects.iter().filter(|effect| effect.definition == clause.effect.definition) {
+        let matching = effects.effects.iter().filter(|effect| effect.definition == clause.effect.definition).collect::<Vec<_>>();
+        if matching.is_empty() { return None; }
+        for effect in matching {
             let Ok((_, operation)) = signatures.instantiate_effect_operation_generic(
                 effect.definition, &effect.arguments, &[], &operation.name,
-            ) else { return vec![]; };
+            ) else { return None; };
             let origin = crate::core::callable_reference_origin_from_contract(
                 signatures, parameters, &Type::Tuple(operation.signature.parameters),
             );
@@ -4052,7 +4088,7 @@ impl Analyzer<'_> {
                 CallReferenceOrigin::None | CallReferenceOrigin::External => {},
                 // A callee-local or otherwise unproven payload cannot be
                 // promoted to one of the known caller regions.
-                CallReferenceOrigin::Opaque | CallReferenceOrigin::Unsafe => return vec![],
+                CallReferenceOrigin::Opaque | CallReferenceOrigin::Unsafe => return None,
             }
         }
         let mut transfers = vec![];
@@ -4070,7 +4106,7 @@ impl Analyzer<'_> {
                     source.extend_from_slice(leaf);
                     let regions = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
                         .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
-                            self.logical_regions_from_value_path(*argument, &path.argument_fields))).collect();
+                            self.pattern_value_origins(&PatternValue::Acquired(argument), &path.argument_fields).0)).collect();
                     (leaf.clone(), regions)
                 }).collect();
                 let aliases = leaves.into_iter().map(|(leaf, ty)| {
@@ -4078,32 +4114,34 @@ impl Analyzer<'_> {
                     source.extend_from_slice(&leaf);
                     let loans = paths.iter().filter(|path| crate::core::reference_path_matches(&path.result_fields, &source))
                         .flat_map(|path| arguments.get(path.argument as usize).into_iter().flat_map(|argument|
-                            self.reference_loans_from_value_path(*argument, &path.argument_fields)))
+                            self.pattern_value_origins(&PatternValue::Acquired(argument), &path.argument_fields).1.loans))
                         .map(|mut loan| {
                             loan.unique = matches!(ty, Type::Reference { mutability: crate::Mutability::Unique, .. });
                             loan
                         }).collect();
-                    (leaf, ReferenceOrigins::unknown(loans))
+                    (leaf, self.snapshot_reference_transfer(ReferenceOrigins::unknown(loans)))
                 }).collect();
                 transfers.push(PatternBindingTransfer {
                     name, value: computation, moved: None, borrowed_move: false, aliases, regions,
                 });
             }
         }
-        transfers
+        Some(transfers)
     }
 
     fn pattern_binding_transfers(
-        &self, value: CoreId, pattern: &CorePattern,
+        &self, input: PatternValue<'_>, pattern: &CorePattern,
         types: &[(String, Type)], move_source: bool,
     ) -> Vec<PatternBindingTransfer> {
+        let value = match &input { PatternValue::Subject(value) => *value, PatternValue::Acquired(value) => value.expression };
         let mut bindings = vec![];
         collect_pattern_binders(pattern, &mut vec![], &mut bindings);
         let empty = ElaboratedInterface::default();
         let signatures = self.signatures.unwrap_or(&empty);
         bindings.into_iter().filter_map(|(name, fields)| {
             let (_, ty) = types.iter().find(|(binding, _)| binding == &name)?;
-            let moving = move_source && self.signatures.is_some() && !self.is_duplicable(ty);
+            let moving = matches!(&input, PatternValue::Subject(_)) && move_source
+                && self.signatures.is_some() && !self.is_duplicable(ty);
             let moved = if moving { self.projection(value).map(|mut place| {
                 place.fields.extend_from_slice(&fields);
                 place
@@ -4117,16 +4155,35 @@ impl Analyzer<'_> {
             let regions = leaves.iter().map(|(leaf, _)| {
                 let mut source = fields.clone();
                 source.extend_from_slice(leaf);
-                (leaf.clone(), self.logical_regions_from_value_path(value, &source))
+                (leaf.clone(), self.pattern_value_origins(&input, &source).0)
             }).collect();
             let aliases = leaves.into_iter().map(|(leaf, _)| {
                 let mut source = fields.clone();
                 source.extend_from_slice(&leaf);
-                let origins = self.reference_origins_from_value_path(value, &source);
-                (leaf, origins)
+                let origins = self.pattern_value_origins(&input, &source).1;
+                (leaf, self.snapshot_reference_transfer(origins))
             }).collect();
             Some(PatternBindingTransfer { name, value, moved, borrowed_move, aliases, regions })
         }).collect()
+    }
+
+    fn pattern_value_origins(&self, input: &PatternValue<'_>, path: &[u32]) -> (BTreeSet<regions::Region>, ReferenceOrigins) {
+        match input {
+            PatternValue::Subject(value) => (self.logical_regions_from_value_path(*value, path), self.reference_origins_from_value_path(*value, path)),
+            PatternValue::Acquired(input) => {
+                let projected = crate::resident_invocations::Inputs::project(self, &input.operand.value, path).expect("resident projection");
+                self.invocation_reference_origins(&projected)
+            }
+        }
+    }
+
+    fn snapshot_reference_transfer(&self, origins: ReferenceOrigins) -> ReferenceSnapshot {
+        let ancestors = origins.loans.iter().filter_map(|loan| loan.owner.as_ref()).flat_map(|owner|
+            self.reference_ancestors(owner).into_iter().filter(|ancestor|
+                ancestor != owner && !self.origin_has_been_moved(ancestor)
+                    && self.bindings.get(ancestor.split('.').next().expect("resident root")).is_some())
+                .collect::<BTreeSet<_>>()).collect();
+        ReferenceSnapshot { origins, ancestors }
     }
 
     fn install_refinement_bindings(&mut self, refinement: &crate::core::CoreRefinementBranch) {
@@ -4190,9 +4247,13 @@ impl Analyzer<'_> {
             for (leaf, regions) in transfer.regions {
                 if !regions.is_empty() { self.logical.origins.entry(projection_key(&name, &leaf)).or_default().extend(regions); }
             }
-            for (leaf, origins) in transfer.aliases {
+            for (leaf, snapshot) in transfer.aliases {
                 let destination = projection_key(&name, &leaf);
-                self.install_reference_snapshot(&destination, origins, transfer.value);
+                // Temporary owner names are not a deferred provenance lookup.
+                // Physical targets and source ancestry were acquired together.
+                let origins = snapshot.origins.map(|loan| ProjectionLoan { owner: None, ..loan });
+                self.install_resident_snapshot(&destination, origins, transfer.value, false);
+                self.reborrow_parents.entry(destination).or_default().extend(snapshot.ancestors);
             }
         }
         self.release_vacated_reference_loans(self.body.expression(self.body.root).span);

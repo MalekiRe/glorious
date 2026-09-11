@@ -2187,3 +2187,29 @@ reproduce with this change removed. Owned receiver acquisition/lifetime, general
 borrowed resumption invocation, helper-local symbolic delimiters, foreign-control
 admission, mandatory-tail fusion and full zero-marshalling/performance acceptance
 remain open. Executable verifier, portable formats and runtime ABI do not change.
+
+## Deferred handler payload bindings
+
+The existing active handler frame now carries both suspension disposition and
+the input relation for its directly protected invocation. Strict operation and
+call consumers publish clause payload transfers while their evaluated inputs
+still exist. Clause binding consumes that product; it no longer rereads the
+operation's or helper's Core arguments from post-computation storage.
+
+Ordinary pattern binding and handler payload binding share a deferred reference
+snapshot containing physical/logical provenance and upstream source-carrier
+ancestry. Installing a snapshot does not depend on a retired argument temporary's
+namespace. Source Copy/Move transfers existing debt without borrowing its old
+handle slot; a real upstream unique reborrow remains suspended. An unobserved
+input relation is explicit and is not a proof of an empty reference footprint.
+
+Cache 156 fixes the preserved handler-payload replacement regression. Direct and
+helper-forwarded payloads, tuple fields, upstream carrier suspension/release and
+native O0/O2 execution pass. All 30 reference-result tests pass, as do selected
+ordinary pattern/capture, positional borrowed-payload and label-return loan gates.
+This migrates the existing direct-protected-invocation relation, not a general
+guarded suspension-state solver: nested performances, branch correlation and
+payload liveness across arbitrary resumption/suffix interleavings still require
+that broader product. The cache-155 baseline failures and remaining receiver,
+native-handler and full-conformance obligations are unchanged. No executable or
+runtime format changes.

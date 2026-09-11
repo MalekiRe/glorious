@@ -177,21 +177,70 @@ fn borrowed_unique_receivers_retain_view_authority_during_arguments() {
 
 #[test]
 fn handler_payloads_keep_the_reference_selected_before_argument_replacement() {
-    let source = |mutation: &str| format!("#![no_std]
-        effect Select<'a> {{ [1,1] read(value:&'a i64, ignored:()) -> i64; }}
+    for aggregate in [false, true] {
+      for invocation in ["Select<'a>::read", "emit<'a>"] {
+        let ty = if aggregate { "(&'a i64,)" } else { "&'a i64" };
+        let argument = if aggregate { "(reference,)" } else { "reference" };
+        let pattern = if aggregate { "(payload,)" } else { "payload" };
+        let source = |mutation: &str| format!("#![no_std]
+        effect Select<'a> {{ [1,1] read(value:{ty}, ignored:()) -> i64; }}
+        fn emit<'a>(value:{ty}, ignored:()) -> i64 / {{Select<'a>}} {{ Select<'a>::read(value, ignored) }}
         fn choose<'a>(first:&'a mut i64, second:&'a i64) -> i64 {{
             let mut reference = &(*first);
-            handle Select<'a>::read(reference, {{ reference = second; }}) {{
-                Select<'a>::read(payload, _) with k => {{ {mutation} k(*payload) }}
+            handle {invocation}({argument}, {{ reference = second; }}) {{
+                Select<'a>::read({pattern}, _) with k => {{ {mutation} k(*payload) }}
             }}
         }}
         pub fn main() -> i64 {{ let mut first = 42; let second = 0; choose(&mut first, &second) }}");
-    accepts(&source(""));
-    let Err(failure) = StageZeroCompiler::new().compile(request(&source("*first = 7;"), "0")) else {
-        panic!("the handler must retain the evaluated operation payload's original loan");
+        accepts(&source(""));
+        let Err(failure) = StageZeroCompiler::new().compile(request(&source("*first = 7;"), "0")) else {
+            panic!("{aggregate}, {invocation}: the handler must retain the evaluated operation payload's original loan");
+        };
+        assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
+            "{aggregate}, {invocation}: {:?}", failure.diagnostics());
+      }
+    }
+}
+
+#[test]
+fn deferred_handler_payloads_preserve_and_release_upstream_carrier_debt() {
+    let source = |inside: &str, after: &str| format!("#![no_std]
+        effect Select<'a> {{ [1,1] read(value:&'a i64, ignored:()) -> i64; }}
+        fn choose<'a>(first:&'a mut i64, second:&'a i64, third:&'a mut i64) -> i64 {{
+            let mut parent = first; let mut reference = &(*parent);
+            let result = handle Select<'a>::read(reference, {{ reference = second; }}) {{
+                Select<'a>::read(payload, _) with k => {{ {inside} k(*payload) }}
+            }};
+            {after} result
+        }}
+        pub fn main() -> i64 {{ let mut first = 42; let second = 0; let mut third = 0; choose(&mut first, &second, &mut third) }}");
+    accepts(&source("", "parent = third;"));
+    let Err(failure) = StageZeroCompiler::new().compile(request(&source("parent = third;", ""), "0")) else {
+        panic!("a pending payload retains its upstream parent's carrier suspension");
     };
-    assert!(failure.diagnostics().iter().any(|diagnostic| matches!(diagnostic.code, "G5004" | "G5006" | "G5007")),
-        "{:?}", failure.diagnostics());
+    assert!(failure.diagnostics().iter().any(|diagnostic| diagnostic.code == "G5004"), "{:?}", failure.diagnostics());
+}
+
+#[test]
+fn acquired_handler_reference_payloads_execute_in_generated_code() {
+    use grandiose_stage0::vm_backend::llvm::{LlvmCompileOptions, LlvmTarget};
+    let source = "#![no_std]
+        effect Select<'a> { [1,1] read(value:&'a i64, ignored:()) -> i64; }
+        fn emit<'a>(value:&'a i64, ignored:()) -> i64 / {Select<'a>} { Select<'a>::read(value, ignored) }
+        fn choose<'a>(first:&'a mut i64, second:&'a i64) -> i64 {
+            let mut reference = &(*first);
+            handle emit<'a>(reference, { reference = second; }) {
+                Select<'a>::read(payload, _) with k => k(*payload)
+            }
+        }
+        pub fn main() -> i64 { let mut first = 42; let second = 0; choose(&mut first, &second) }";
+    for optimization in [0, 2] {
+        let ir = StageZeroCompiler::new().compile_llvm(request(source, &optimization.to_string()), LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("source O{optimization}: {error:#?}"));
+        // SAFETY: execute only this locally compiled and checked source.
+        let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+        assert_eq!(native.run_i64_with_limits(Default::default()).unwrap(), 42);
+    }
 }
 
 #[test]

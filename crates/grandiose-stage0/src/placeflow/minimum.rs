@@ -30,7 +30,11 @@ pub(super) struct MinimumBinding {
     scope: SourceStorageScopeId,
 }
 
-pub(super) struct MinimumHandler {
+pub(super) struct HandlerFrame {
+    pub(super) computation: CoreId,
+    pub(super) clauses: Vec<crate::core::CoreHandlerClause>,
+    /// None is an unobserved/unsupported input relation, not an empty payload.
+    pub(super) payloads: Vec<Option<Vec<PatternBindingTransfer>>>,
     operations: Vec<(crate::EffectInstance, u32, Quantity)>,
     retained: BTreeSet<String>,
     cancellations: Vec<(crate::EffectInstance, u32, Vec<MinimumDisposition>)>,
@@ -182,7 +186,7 @@ impl Analyzer<'_> {
         }
     }
 
-    pub(super) fn enter_minimum_handler(&mut self, clauses: &[crate::core::CoreHandlerClause]) {
+    pub(super) fn enter_handler_frame(&mut self, computation: CoreId, clauses: &[crate::core::CoreHandlerClause]) {
         let operations = clauses
             .iter()
             .map(|clause| {
@@ -195,7 +199,10 @@ impl Analyzer<'_> {
                 (clause.effect.clone(), clause.operation, usage)
             })
             .collect();
-        self.minimum_handlers.push(MinimumHandler {
+        self.handler_frames.push(HandlerFrame {
+            computation,
+            clauses: clauses.to_vec(),
+            payloads: vec![None; clauses.len()],
             operations,
             retained: self.minimum_bindings.keys().cloned().collect(),
             cancellations: vec![],
@@ -204,7 +211,7 @@ impl Analyzer<'_> {
 
     pub(super) fn minimum_clause_inputs(
         &self,
-        handler: &MinimumHandler,
+        handler: &HandlerFrame,
         clause: &crate::core::CoreHandlerClause,
         completed: &[MinimumDisposition],
     ) -> Vec<MinimumDisposition> {
@@ -242,7 +249,7 @@ impl Analyzer<'_> {
         operation: u32,
         span: Span,
     ) {
-        let handler = self.minimum_handlers.iter().rev().find(|handler| {
+        let handler = self.handler_frames.iter().rev().find(|handler| {
             handler
                 .operations
                 .iter()
@@ -279,7 +286,7 @@ impl Analyzer<'_> {
             .cloned()
             .collect::<BTreeSet<_>>();
         self.check_minimum_scope(&abandoned, span);
-        if let Some(handler) = self.minimum_handlers.iter_mut().rev().find(|handler| {
+        if let Some(handler) = self.handler_frames.iter_mut().rev().find(|handler| {
             handler
                 .operations
                 .iter()
@@ -333,7 +340,7 @@ impl Analyzer<'_> {
                             .map(|place| place.fields.clone()).collect(),
                         opened: state.opened.iter().filter(|(place, _)| place.root == *owner)
                             .map(|(place, variant)| (place.fields.clone(), *variant)).collect(),
-                        handlers: self.minimum_handlers.iter().map(|handler|
+                        handlers: self.handler_frames.iter().map(|handler|
                             (handler.operations.clone(), handler.retained.contains(owner))).collect(),
                     };
                     if !self.minimum_suspensions.contains(&requirement) { self.minimum_suspensions.push(requirement); }

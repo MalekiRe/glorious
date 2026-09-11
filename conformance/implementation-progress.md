@@ -5,6 +5,29 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 156: handler payloads consume acquired inputs
+
+The existing active handler frame retains the payload-binding relation produced
+at its directly protected invocation. Direct operation inputs and helper effect
+contracts consume the same evaluated argument residents as stores and returns.
+Deferred pattern snapshots include upstream source-carrier ancestry, so retiring
+an input temporary cannot erase a unique parent's suspension or retarget a
+payload to a subsequently replaced source handle. Unobserved input relations
+remain explicit. Both old late handler-argument lookup paths are removed.
+
+All 30 reference-result tests pass. The formerly failing regression now rejects
+the invalid write for direct/helper calls and scalar/tuple payloads while valid
+fresh/decoded execution passes. Separate tests cover carrier suspension inside a
+clause, release after the handler, and native O0/O2 payload execution. Selected
+ordinary aggregate/capture transfers, positional borrowed payloads and rejoined
+label-return backing loans also pass.
+
+This is the existing direct-protected-invocation relation, not complete guarded
+analysis of nested performances or resumption/suffix interleavings. The four
+baseline failures documented at cache 155, owned receiver lifetime and the other
+native-handler/full-conformance obligations remain open. Cache 156 changes;
+verifier 49, bytecode 75/schema 119 and native ABI 18 do not.
+
 ## Cache 155: retained strict reference residents
 
 PlaceFlow acquires a distinct loan-graph resident at each strict input position.
