@@ -2,6 +2,18 @@
 // 2^32, not host floating arithmetic. Binary search finds adjacent representable
 // values; comparison with their exact dyadic midpoint implements ties-to-even.
 struct FloatRatio { numerator: Vec<u32>, denominator: Vec<u32>, exponent: i128 }
+// Construct natural * 10^exponent exactly, keeping the power of two separate
+// from the integer power of five. Parsing and shortest formatting share this
+// representation rather than converting through host floating arithmetic.
+fn float_decimal_ratio(natural: Vec<u32>, exponent: i128) -> FloatRatio {
+    let mut numerator = natural;
+    let mut denominator = float_big_from(1);
+    handle exponent < 0 {
+        true => float_big_power(&mut denominator, 5, as<u128>(0 - exponent)),
+        false => float_big_power(&mut numerator, 5, as<u128>(exponent)),
+    };
+    FloatRatio { numerator: numerator, denominator: denominator, exponent: exponent }
+}
 fn float_big_from(value: u64) -> Vec<u32> {
     let mut out = Vec::new();
     handle value == 0 {
@@ -47,7 +59,12 @@ fn float_big_add_from(value: &mut Vec<u32>, index: usize, carry: u64) {
 fn float_big_power(value: &mut Vec<u32>, factor: u64, count: u128) {
     handle count == 0 {
         true => (),
-        false => { float_big_multiply(&mut *value, factor); tail float_big_power(value, factor, count - 1) },
+        false => {
+            // A u32 limb times any u64 factor plus its carry fits in u128.
+            let (multiple, remaining) = float_power_chunk(factor, count, bit_not<u64>(0), 1);
+            float_big_multiply(&mut *value, multiple);
+            tail float_big_power(value, factor, remaining)
+        },
     }
 }
 fn float_big_shift_words(value: &Vec<u32>, out: &mut Vec<u32>, shift: u32, index: usize, carry: u64) {
@@ -103,6 +120,16 @@ fn float_dyadic(bits: u64, mantissa_bits: u32, bias: i32) -> (u64,i128) {
         false => (bit_or(fraction, bit_shl(as<u64>(1), mantissa_bits)), as<i128>(exponent) - as<i128>(bias) - as<i128>(mantissa_bits)),
     }
 }
+// Midpoint of adjacent nonnegative magnitudes. The bit pattern after max-finite
+// denotes the conceptual finite endpoint 2^max_exponent, not an infinity in
+// this exact rational representation.
+fn float_dyadic_midpoint(lower: u64, mantissa_bits: u32, bias: i32) -> (u64,i128) {
+    let (low_m, low_e) = float_dyadic(lower, mantissa_bits, bias);
+    let (high_m, high_e) = float_dyadic(lower + 1, mantissa_bits, bias);
+    let common = min(low_e, high_e);
+    let midpoint = bit_shl(low_m, as<u32>(low_e - common)) + bit_shl(high_m, as<u32>(high_e - common));
+    (midpoint, common - 1)
+}
 fn float_find_floor(value: &FloatRatio, low: u64, high: u64, mantissa_bits: u32, bias: i32) -> u64 {
     handle low == high {
         true => low,
@@ -120,12 +147,8 @@ fn float_round_ratio(value: &FloatRatio, infinity: u64, mantissa_bits: u32, bias
     let lower = float_find_floor(value, 0, infinity - 1, mantissa_bits, bias);
     let (low_m, low_e) = float_dyadic(lower, mantissa_bits, bias);
     handle float_ratio_compare(value, low_m, low_e) { Ordering::Equal => return(lower, @float_round_ratio), _ => () };
-    // The bit pattern after max-finite denotes the conceptual finite endpoint
-    // 2^max_exponent here, not an infinity in rational arithmetic.
-    let (high_m, high_e) = float_dyadic(lower + 1, mantissa_bits, bias);
-    let common = min(low_e, high_e);
-    let midpoint = bit_shl(low_m, as<u32>(low_e - common)) + bit_shl(high_m, as<u32>(high_e - common));
-    handle float_ratio_compare(value, midpoint, common - 1) {
+    let (midpoint, exponent) = float_dyadic_midpoint(lower, mantissa_bits, bias);
+    handle float_ratio_compare(value, midpoint, exponent) {
         Ordering::Less => lower,
         Ordering::Greater => lower + 1,
         Ordering::Equal => handle bit_and(lower, 1) == 0 { true => lower, false => lower + 1 },
@@ -253,12 +276,7 @@ fn float_parse_bits(text: Str, width: u32, mantissa_bits: u32, bias: i32, maximu
     handle order < minimum_order { true => return(Result::Ok(sign), @float_parse_bits), false => () };
     let mut numerator = Vec::new();
     float_build_natural(&digits, first, last, &mut numerator);
-    let mut denominator = float_big_from(1);
-    handle exponent < 0 {
-        true => float_big_power(&mut denominator, 5, as<u128>(0 - exponent)),
-        false => float_big_power(&mut numerator, 5, as<u128>(exponent)),
-    };
-    let ratio = FloatRatio { numerator: numerator, denominator: denominator, exponent: exponent };
+    let ratio = float_decimal_ratio(numerator, exponent);
     let rounded = float_round_ratio(&ratio, infinity, mantissa_bits, bias);
     handle rounded == infinity {
         true => Result::Err(float_parse_error(length - 1, FloatParseErrorKind::Overflow)),

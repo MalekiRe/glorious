@@ -35,6 +35,32 @@ fn compile(source: &str) -> LlvmIrProgram {
 }
 
 #[test]
+fn source_decimal_float_conversion_executes_in_native_code() {
+    let dependencies = ["src/lib.glorious", "src/foundation.glorious", "src/float.glorious",
+        "src/float_text.glorious", "src/float_parse.glorious", "src/float_shortest.glorious"];
+    let library = grandiose_stage0::service::STANDARD_LIBRARY_FRAGMENTS.iter()
+        .filter(|(path, _)| dependencies.contains(path)).map(|(_, text)| *text).collect::<Vec<_>>().join("\n");
+    for (name, case) in [
+        ("boundaries", include_str!("../../../stdlib/tests/float_shortest_boundaries.glorious")),
+        ("exact subnormal", include_str!("../../../stdlib/tests/float_exact_subnormal.glorious")),
+    ] {
+        let source = format!("{}\n{case}", include_str!("../../../stdlib/tests/support.glorious"));
+        let mut input = request(&source);
+        input.sources.push(SourceInput::new(PackageKey("std@0.1.0".into()),
+            LogicalPath::parse("src/lib.glorious").unwrap(), library.as_bytes()));
+        let ir = StageZeroCompiler::new().compile_llvm(input, LlvmTarget::host().unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error:#?}"));
+        // SAFETY: both fixtures execute the locally compiled source library.
+        assert_eq!(unsafe { ir.vm_program().run_i64_with_unsafe(Default::default()) }.unwrap(), 42);
+        for optimization in [0, 2] {
+            let native = unsafe { ir.compile(&LlvmCompileOptions { optimization, ..Default::default() }) }.unwrap();
+            assert_eq!(unsafe { native.run_i64_profiled(Default::default()) }
+                .unwrap_or_else(|error| panic!("{name} native O{optimization}: {error:#?}")).0, 42);
+        }
+    }
+}
+
+#[test]
 fn generated_borrowed_captures_share_original_and_nested_storage() {
     for source in [
         "pub fn main() -> i64 { let mut value = 40; let task = () -> () { value = value + 1; }; task(); task(); value }",

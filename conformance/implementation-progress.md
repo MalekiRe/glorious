@@ -5,6 +5,48 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Exact rounding intervals and bounded decimal powers
+
+Shortest formatting now validates each decimal-grid candidate directly against
+the two exact rounding midpoints of its known nonzero finite target magnitude.
+The shared decimal-ratio and dyadic-midpoint helpers are also consumed by the
+parser. Both endpoints are inclusive only for an even target significand;
+the max-finite upper endpoint remains the conceptual next finite power of two.
+Sign handling, decimal prefix carry, closest-candidate selection and lexical
+tie-breaking retain the source specification's policy.
+
+This change alone passed the new midpoint boundary cases and the existing parse
+gate, but shortest formatting still exceeded 100,000,000 work ticks. A separate
+digit-for-digit minimum-subnormal exact-format test reproduced that failure in
+97.49 seconds without invoking shortest formatting or parsing. The exact
+formatter's one-power-at-a-time decimal multiplication was another real cost.
+
+Both decimal-byte and natural-limb powers now consume a common bounded scalar
+power chunk. The chunk builder checks `power <= maximum / factor` before each
+multiplication. Decimal factors are bounded by `u64::MAX/10`; digit < 10 and
+carry < factor keep the full product representable. Natural u32 limbs use u128
+products with u64 factors. Appended carries retain all their digits/limbs.
+No runtime limit, accounting rule, primitive import or existing source assertion
+was changed. These are source-library algorithms, not Rust float replacements.
+
+The eight selected float source gates pass together in 132.60 seconds: text,
+parse, tail, shortest, midpoint boundaries, exact minimum subnormal, math and
+conversion. The additional exact-extremes gate passes in 85.13 seconds, checking
+every digit of f32 subnormal/normal/max-finite and f64 normal/max-finite values,
+including negative max-finite. Reference strings were expanded independently
+with integer powers of two and five. Every source gate compiles and independently
+decodes/verifies its artifact before execution under unchanged default limits.
+
+The new native O0/O2 source-corpus test is preserved but **does not pass**:
+`source_decimal_float_conversion_executes_in_native_code` reaches native
+execution and reports `AllocationLimit { limit: 16777216 }` after 98.32 seconds.
+It checks the same boundary and exact-subnormal fixtures, not a reduced native
+corpus. The initial failure did not identify which case/optimization failed;
+the test now includes that context for the next investigation. Native allocation
+cost remains an acceptance obligation. Compiler cache 183, verifier 54 and
+native ABI are unchanged. No full library, language or self-hosted acceptance
+is claimed.
+
 ## Shared runtime register-buffer reuse
 
 The unchanged float-shortest gate's allocation-limit failure was measured at

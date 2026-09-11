@@ -1,6 +1,7 @@
 // Search decimal grids in increasing significant-digit count. The two grid
 // points bracketing the exact value suffice: the round-trip interval is convex.
-// Candidate validation always parses at the destination precision.
+// Candidate validation compares exact rationals with the destination's own
+// rounding interval; it does not search the entire float space for every grid.
 fn float_shortest_digits(bytes: Slice<u8>, index: usize, digits: &mut Vec<u8>) -> usize {
     let byte = *Slice::get_unchecked(bytes, index);
     handle byte {
@@ -35,10 +36,24 @@ fn float_shortest_candidate(mantissa: u64, count: usize, exponent: i32, negative
     };
     out
 }
-fn float_shortest_roundtrips(text: &String, bits: u64, width: u32, mantissa_bits: u32, bias: i32) -> Bool {
-    let (maximum, minimum) = handle width == 32 { true => (as<i128>(38), as<i128>(-46)), false => (as<i128>(308), as<i128>(-324)) };
-    handle float_parse_bits(String::as_str(text), width, mantissa_bits, bias, maximum, minimum) {
-        Result::Ok(parsed) => parsed == bits, Result::Err(_) => false,
+fn float_shortest_roundtrips(mantissa: u64, count: usize, exponent: i32, bits: u64, mantissa_bits: u32, bias: i32) -> Bool {
+    // `bits` is a nonzero finite magnitude; sign is handled only when spelling
+    // the candidate. Even if mantissa carries into a new decimal digit, its
+    // value remains mantissa * 10^(exponent - count + 1).
+    let ratio = float_decimal_ratio(float_big_from(mantissa), as<i128>(exponent) - as<i128>(count) + 1);
+    let inclusive = bit_and(bits, 1) == 0;
+    let (lower_m, lower_e) = float_dyadic_midpoint(bits - 1, mantissa_bits, bias);
+    let above = handle float_ratio_compare(&ratio, lower_m, lower_e) {
+        Ordering::Less => false, Ordering::Equal => inclusive, Ordering::Greater => true,
+    };
+    handle above {
+        false => false,
+        true => {
+            let (upper_m, upper_e) = float_dyadic_midpoint(bits, mantissa_bits, bias);
+            handle float_ratio_compare(&ratio, upper_m, upper_e) {
+                Ordering::Less => true, Ordering::Equal => inclusive, Ordering::Greater => false,
+            }
+        },
     }
 }
 fn float_shortest_tail_nonzero(digits: &Vec<u8>, index: usize) -> Bool {
@@ -65,8 +80,8 @@ fn float_shortest_search(digits: &Vec<u8>, index: usize, prefix: u64, exponent: 
     let lower = float_shortest_candidate(prefix, count, exponent, negative);
     handle count == Vec::len(digits) { true => return(lower, @float_shortest_search), false => () };
     let upper = float_shortest_candidate(prefix + 1, count, exponent, negative);
-    let lower_ok = float_shortest_roundtrips(&lower, bits, width, mantissa_bits, bias);
-    let upper_ok = float_shortest_roundtrips(&upper, bits, width, mantissa_bits, bias);
+    let lower_ok = float_shortest_roundtrips(prefix, count, exponent, bits, mantissa_bits, bias);
+    let upper_ok = float_shortest_roundtrips(prefix + 1, count, exponent, bits, mantissa_bits, bias);
     handle lower_ok {
         true => handle upper_ok { true => float_shortest_choose(digits, count, lower, upper), false => lower },
         false => handle upper_ok {
@@ -94,7 +109,7 @@ fn float_format_shortest(bits: u64, width: u32, mantissa_bits: u32, bias: i32) -
     let exponent_start = float_shortest_digits(bytes, start, &mut digits);
     let exponent = float_shortest_exponent(bytes, exponent_start + 1, 0);
     let exponent = handle *Slice::get_unchecked(bytes, exponent_start) == 45 { true => 0 - exponent, false => exponent };
-    float_shortest_search(&digits, 0, 0, exponent, negative, bits, width, mantissa_bits, bias)
+    float_shortest_search(&digits, 0, 0, exponent, negative, magnitude, width, mantissa_bits, bias)
 }
 impl f32 {
     pub fn format_shortest(value: Self) -> String { float_format_shortest(as<u64>(Self::to_bits(value)), 32, 23, 127) }

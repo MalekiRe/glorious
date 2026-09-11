@@ -5,13 +5,15 @@ fn float_decimal_digits(value: u64, out: &mut Vec<u8>) {
     Vec::push(&mut *out, as<u8>(value % 10));
     handle value < 10 { true => (), false => tail float_decimal_digits(value / 10, out) }
 }
-fn float_decimal_multiply(digits: &mut Vec<u8>, factor: u8, index: usize, carry: u8) {
+// Digits stay below ten and carry stays below factor. Bounding factor by
+// u64::MAX/10 therefore keeps 9*factor+carry representable at every step.
+fn float_decimal_multiply(digits: &mut Vec<u8>, factor: u64, index: usize, carry: u64) {
     handle index == Vec::len(& *digits) {
-        true => handle carry == 0 { true => (), false => Vec::push(digits, carry) },
+        true => handle carry == 0 { true => (), false => float_decimal_digits(carry, digits) },
         false => {
-            let product = *Vec::get_unchecked(& *digits, index) * factor + carry;
+            let product = as<u64>(*Vec::get_unchecked(& *digits, index)) * factor + carry;
             let place = handle Vec::get_mut(&mut *digits, index) { Result::Ok(place) => place, Result::Err(_) => __g1_abort() };
-            *place = product % 10;
+            *place = as<u8>(product % 10);
             tail float_decimal_multiply(digits, factor, index + 1, product / 10)
         },
     }
@@ -19,7 +21,11 @@ fn float_decimal_multiply(digits: &mut Vec<u8>, factor: u8, index: usize, carry:
 fn float_decimal_power(digits: &mut Vec<u8>, factor: u8, exponent: u32) {
     handle exponent == 0 {
         true => (),
-        false => { float_decimal_multiply(&mut *digits, factor, 0, 0); tail float_decimal_power(digits, factor, exponent - 1) },
+        false => {
+            let (multiple, remaining) = float_power_chunk(as<u64>(factor), as<u128>(exponent), bit_not<u64>(0) / 10, 1);
+            float_decimal_multiply(&mut *digits, multiple, 0, 0);
+            tail float_decimal_power(digits, factor, as<u32>(remaining))
+        },
     }
 }
 fn float_decimal_low(digits: &Vec<u8>, index: usize) -> usize {

@@ -91,6 +91,9 @@ source_case!(ffi, "../../../stdlib/tests/ffi.glorious", "src/foundation.glorious
 source_case!(float_parse, "../../../stdlib/tests/float_parse.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_parse.glorious");
 source_case!(float_tail, "../../../stdlib/tests/float_tail.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_parse.glorious");
 source_case!(float_shortest, "../../../stdlib/tests/float_shortest.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_text.glorious", "src/float_parse.glorious", "src/float_shortest.glorious");
+source_case!(float_shortest_boundaries, "../../../stdlib/tests/float_shortest_boundaries.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_text.glorious", "src/float_parse.glorious", "src/float_shortest.glorious");
+source_case!(float_exact_subnormal, "../../../stdlib/tests/float_exact_subnormal.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_text.glorious");
+source_case!(float_exact_extremes, "../../../stdlib/tests/float_exact_extremes.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_text.glorious");
 source_case!(float_math, "../../../stdlib/tests/float_math.glorious", "src/foundation.glorious", "src/float.glorious", "src/float_parse.glorious", "src/float_math.glorious");
 source_case!(float_convert, "../../../stdlib/tests/float_convert.glorious", "src/foundation.glorious", "src/integer.glorious", "src/integer_text.glorious", "src/float.glorious", "src/float_parse.glorious", "src/float_math.glorious", "src/float_convert.glorious");
 source_case!(iterator, "../../../stdlib/tests/iterator.glorious", "src/foundation.glorious", "src/memory.glorious", "src/iterator.glorious");

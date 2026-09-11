@@ -10,6 +10,28 @@ This is work in progress against the consolidated 7 September 2026 specification
 not a complete or certified conforming standard library. Source bodies existing
 on disk and executable/compiler-validated implementations are different states.
 
+## Exact decimal conversion
+
+Parsing and shortest formatting share an exact decimal-ratio constructor and
+adjacent-dyadic midpoint calculation. Shortest candidates are tested against
+the known target magnitude's rounding interval rather than reparsed through a
+search of the entire float space. Midpoint equality is admitted only for an
+even target significand, including the subnormal boundary and the conceptual
+finite endpoint above max-finite. Sign, shortest digit count, closest-decimal
+selection and lexical tie-breaking retain their specified rules.
+
+Powers of two and five are applied in bounded scalar chunks. The common chunk
+builder guards multiplication by division against its consumer's bound.
+Decimal-byte multiplication uses at most `u64::MAX/10`, keeping each digit and
+carry step exact in u64; natural-number multiplication uses u32 limbs and u128
+products with a u64 factor. Both append the complete remaining carry. The
+implementation remains Glorious source, without host float parsing or formatting.
+
+The current source gates include exact full-digit subnormal/normal/max-finite
+references and even/odd midpoint inclusion at both widths. Their results and
+the still-failing native allocation gate are recorded in
+[implementation progress](../conformance/implementation-progress.md).
+
 ## Composition and validation
 
 The compiler currently injects the existing `src/lib.glorious` distribution.

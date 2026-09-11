@@ -9,6 +9,22 @@ pub enum ToleranceError { Negative, NonFinite }
 pub enum FloatParseErrorKind { Empty, InvalidDigit, InvalidSeparator, InvalidExponent, TrailingInput, Overflow }
 pub struct FloatParseError { pub offset: usize, pub kind: FloatParseErrorKind }
 
+// Largest prefix power that fits a caller's exact multiplication bound.
+// Callers start with power=1 and factor<=maximum, so a nonempty chunk always
+// consumes at least one exponent. The division guards every multiplication.
+fn float_power_chunk(factor: u64, count: u128, maximum: u64, power: u64) -> (u64,u128) {
+    handle count == 0 {
+        true => (power, 0),
+        false => handle factor <= 1 {
+            true => (power * factor, 0),
+            false => handle power > maximum / factor {
+                true => (power, count),
+                false => tail float_power_chunk(factor, count - 1, maximum, power * factor),
+            },
+        },
+    }
+}
+
 fn f32_canonical(bits: u32) -> u32 {
     handle bit_and(bits, 2139095040) == 2139095040 {
         false => bits,
