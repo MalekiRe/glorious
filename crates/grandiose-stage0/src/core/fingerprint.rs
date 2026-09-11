@@ -386,9 +386,10 @@ impl CoreFingerprintEncoder<'_> {
                 self.capture_environment(environment);
                 self.id(*body);
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, stored_type } => {
                 self.bytes(b"let");
                 self.bytes(name.as_bytes());
+                self.ty(stored_type);
                 self.id(*value);
             }
             CoreKind::Label { brand, body } => {

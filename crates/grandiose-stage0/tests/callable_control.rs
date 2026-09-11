@@ -573,12 +573,12 @@ fn shared_core_call_nodes_do_not_alias_distinct_evaluated_results() {
         .expressions
         .iter()
         .find_map(|expr| match &expr.kind {
-            CoreKind::Let { name, value } if name == "first" => Some(*value),
+            CoreKind::Let { name, value, .. } if name == "first" => Some(*value),
             _ => None,
         })
         .unwrap();
     for expr in &mut body.expressions {
-        if let CoreKind::Let { name, value } = &mut expr.kind {
+        if let CoreKind::Let { name, value, .. } = &mut expr.kind {
             if name == "second" {
                 *value = first;
             }
@@ -878,12 +878,12 @@ fn repeated_label_arena_evaluations_mint_distinct_activation_targets() {
         .expressions
         .iter()
         .find_map(|expr| match &expr.kind {
-            CoreKind::Let { name, value } if name == "first" => Some(*value),
+            CoreKind::Let { name, value, .. } if name == "first" => Some(*value),
             _ => None,
         })
         .unwrap();
     for expr in &mut body.expressions {
-        if let CoreKind::Let { name, value } = &mut expr.kind {
+        if let CoreKind::Let { name, value, .. } = &mut expr.kind {
             if name == "second" {
                 *value = first;
             }

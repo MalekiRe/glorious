@@ -1711,7 +1711,7 @@ impl Analyzer<'_, '_> {
                     })
                     .collect();
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, .. } => {
                 return self
                     .eval(frame, value, state)
                     .into_iter()

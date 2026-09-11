@@ -14,7 +14,7 @@ fn normalize(source: &str) -> EvaluationMir {
 }
 
 #[test]
-fn callable_initializers_and_reads_share_their_resolved_value_join() {
+fn callable_storage_and_reads_share_their_join_without_rewriting_the_constructor() {
     let mir = normalize("pub fn main() -> i64 {
         let first = 42; let second = 0;
         let mut callback:(i64)->i64 = (argument:i64)->i64 {first};
@@ -23,16 +23,18 @@ fn callable_initializers_and_reads_share_their_resolved_value_join() {
     }");
     let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
     let binding = instructions.iter().find(|instruction|
-        matches!(&instruction.operation, Op::Bind(name) if name == "callback")).unwrap();
+        matches!(&instruction.operation, Op::Bind { name, .. } if name == "callback")).unwrap();
     let [EvaluationOperand::Value(value)] = binding.operands.as_slice() else { panic!("binding input") };
     let initializer = instructions.iter().find(|instruction| instruction.value == *value).unwrap();
-    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_none()));
+    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_some()));
+    let Op::Bind { stored_type, .. } = &binding.operation else { unreachable!() };
+    assert!(matches!(stored_type, Type::Callable { contract, .. } if contract.environment.is_none()));
     let call = instructions.iter().find(|instruction| matches!(&instruction.operation,
         Op::Call(contract) if !contract.prepared_receiver)).unwrap();
     let EvaluationOperand::Value(value) = call.operands[0] else { panic!("receiver input") };
     let receiver = instructions.iter().find(|instruction| instruction.value == value).unwrap();
     assert!(matches!(receiver.operation, Op::AcquireValue));
-    assert_eq!(initializer.ty, receiver.ty);
+    assert_eq!(stored_type, &receiver.ty);
     grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
 }
 
@@ -70,15 +72,16 @@ fn generic_callable_arguments_share_the_resolved_value_join() {
         }");
     let instructions = mir.regions().iter().flat_map(|region| &region.instructions).collect::<Vec<_>>();
     let binding = instructions.iter().find(|instruction|
-        matches!(&instruction.operation, Op::Bind(name) if name == "callback")).unwrap();
+        matches!(&instruction.operation, Op::Bind { name, .. } if name == "callback")).unwrap();
     let [EvaluationOperand::Value(value)] = binding.operands.as_slice() else { panic!("binding input") };
     let initializer = instructions.iter().find(|instruction| instruction.value == *value).unwrap();
     let argument = instructions.iter().find_map(|instruction| match &instruction.operation {
         Op::Function { arguments, .. } if arguments.len() == 1 => Some(&arguments[0]),
         _ => None,
     }).unwrap();
-    assert_eq!(argument, &grandiose_stage0::GenericArgument::Type(initializer.ty.clone()));
-    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_none()));
+    let Op::Bind { stored_type, .. } = &binding.operation else { unreachable!() };
+    assert_eq!(argument, &grandiose_stage0::GenericArgument::Type(stored_type.clone()));
+    assert!(matches!(&initializer.ty, Type::Callable { contract, .. } if contract.environment.is_some()));
     grandiose_stage0::control_mir::ControlMir::lower(&mir).unwrap();
 }
 

@@ -54,7 +54,7 @@ fn visit(body: &TypedBody, id: CoreId, scope: &mut Scope, active: &mut BTreeSet<
                 error(diagnostics, expression.span, "resumption use does not match its active lexical binder and contract");
             }
         }
-        CoreKind::Let { name, value } => {
+        CoreKind::Let { name, value, .. } => {
             visit(body, *value, scope, active, checked, diagnostics);
             // An alias is an ordinary resident value, not another binder for
             // the generative continuation. Shadowing ends the old spelling.

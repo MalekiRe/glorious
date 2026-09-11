@@ -314,7 +314,7 @@ fn direct_replay_split(
                 arguments,
                 ..
             } => (effect, *operation, arguments.clone(), None),
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, .. } => {
                 let CoreKind::Perform {
                     effect,
                     operation,
@@ -695,7 +695,7 @@ impl Analyzer<'_> {
             CoreKind::Label { body, .. } | CoreKind::Transfer { value: body, .. } => {
                 self.expression(body, environment)
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, .. } => {
                 let summary = self.expression(value, environment);
                 if self.continuations.is_abrupt(value) {
                     return summary;
@@ -2429,7 +2429,7 @@ mod tests {
             body_regions: Default::default(), parameters: vec![("first".into(), callback.clone()), ("second".into(), callback.clone())],
             expressions: vec![
                 expression(CoreKind::Local("first".into()), callback.clone()),
-                expression(CoreKind::Let { name:"current".into(), value:CoreId(0) }, Type::Unit),
+                expression(CoreKind::Let { name:"current".into(), value:CoreId(0), stored_type: callback.clone() }, Type::Unit),
                 expression(CoreKind::Local("current".into()), callback.clone()),
                 expression(CoreKind::Local("second".into()), callback.clone()),
                 expression(CoreKind::Assign { place: CorePlace::Local { name:"current".into(), ty:callback.clone() }, value:CoreId(3) }, Type::Unit),

@@ -772,6 +772,9 @@ pub enum CoreKind {
     Let {
         name: String,
         value: CoreId,
+        /// Contract of the binding's storage, distinct from the value
+        /// produced by its initializer. Later writes constrain this view.
+        stored_type: Type,
     },
     Label {
         brand: LabelBrand,
@@ -1042,6 +1045,12 @@ impl TypedBody {
             needs_unsafe_validation |= matches!(&expression.kind, CoreKind::Call { invocation, .. }
                 if matches!(invocation.declaration, Type::Callable { safety: crate::Safety::Unsafe, .. }));
             let owner = CoreId(index as u32);
+            if let CoreKind::Let { value, stored_type, .. } = &expression.kind
+                && self.expressions.get(value.0 as usize).is_some_and(|value|
+                    value.ty != Type::Never && !crate::types::regions::accepts_body_storage(stored_type, &value.ty)) {
+                diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
+                    message: "Typed Core binding storage does not accept its initializer contract".into() });
+            }
             if let CoreKind::LabelValue { brand } = expression.kind
                 && !crate::types::label::matches_brand(&expression.ty, brand) {
                 diagnostics.push(CoreDiagnostic { code: "G4183", span: expression.span,
@@ -1261,11 +1270,9 @@ impl TypedBody {
                     let mut scoped = locals.clone();
                     for value in values { visit(body, *value, &mut scoped, active, checked, diagnostics); }
                 }
-                CoreKind::Let { name, value } => {
+                CoreKind::Let { name, value, stored_type } => {
                     visit(body, *value, locals, active, checked, diagnostics);
-                    if let Some(value) = body.expressions.get(value.0 as usize) {
-                        locals.insert(name.clone(), value.ty.clone());
-                    }
+                    locals.insert(name.clone(), stored_type.clone());
                 }
                 CoreKind::Closure { parameters, environment, body: closure_body, .. } => {
                     if parameters.iter().any(|(_, ty)| is_pack(ty))
@@ -1487,6 +1494,7 @@ struct FrozenProjectionTerms<'a> {
 
 fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProjectionTerms<'a>) {
     match kind {
+        CoreKind::Let { stored_type, .. } => terms.types.push(stored_type),
         CoreKind::Call { invocation, .. } => {
             terms.types.push(&invocation.declaration);
             terms.effect_rows.push(&invocation.effects);
@@ -1574,7 +1582,6 @@ fn collect_core_projection_terms<'a>(kind: &'a CoreKind, terms: &mut FrozenProje
         | CoreKind::Record { .. }
         | CoreKind::Field { .. }
         | CoreKind::Enum { .. }
-        | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::IntrinsicCall { .. }
@@ -2674,6 +2681,7 @@ pub(crate) fn generic_argument_contains_inference(argument: &GenericArgument) ->
 
 fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Let { stored_type, .. } => type_contains_inference(stored_type),
         CoreKind::Call { invocation, .. } => type_contains_inference(&invocation.declaration)
             || effect_row_contains_inference(&invocation.effects),
         CoreKind::ConstValue(argument) => generic_argument_contains_inference(argument),
@@ -2758,7 +2766,6 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
         | CoreKind::Record { .. }
         | CoreKind::Field { .. }
         | CoreKind::Enum { .. }
-        | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::IntrinsicCall { .. }
@@ -2778,6 +2785,7 @@ fn core_metadata_contains_inference(kind: &CoreKind) -> bool {
 /// caches, or fingerprints consume them.
 fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Let { stored_type, .. } => !is_canonical_type_identity(stored_type),
         CoreKind::Call { invocation, .. } => !is_canonical_type_identity(&invocation.declaration)
             || !is_canonical_effect_row_identity(&invocation.effects),
         CoreKind::ConstValue(argument) => !is_canonical_generic_argument_identity(argument),
@@ -2882,7 +2890,6 @@ fn core_metadata_contains_noncanonical_type_identity(kind: &CoreKind) -> bool {
         | CoreKind::Record { .. }
         | CoreKind::Field { .. }
         | CoreKind::Enum { .. }
-        | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::IntrinsicCall { .. }
@@ -2943,6 +2950,7 @@ fn pattern_contains_noncanonical_type_identity(pattern: &CorePattern) -> bool {
 
 fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
     match kind {
+        CoreKind::Let { stored_type, .. } => type_contains_out_of_scope_bound_lifetime(stored_type),
         CoreKind::Call { invocation, .. } => type_contains_out_of_scope_bound_lifetime(&invocation.declaration)
             || effect_row_contains_out_of_scope_bound_lifetime(&invocation.effects, &[]),
         CoreKind::ConstValue(argument) => generic_argument_contains_out_of_scope_bound_lifetime(argument, &[]),
@@ -3038,7 +3046,6 @@ fn core_metadata_contains_out_of_scope_bound_lifetime(kind: &CoreKind) -> bool {
         | CoreKind::Record { .. }
         | CoreKind::Field { .. }
         | CoreKind::Enum { .. }
-        | CoreKind::Let { .. }
         | CoreKind::Label { .. }
         | CoreKind::Transfer { .. }
         | CoreKind::IntrinsicCall { .. }
@@ -4394,7 +4401,7 @@ impl Elaborator<'_> {
                     Type::Unit
                 };
                 self.alloc(
-                    CoreKind::Let { name, value },
+                    CoreKind::Let { name, value, stored_type: ty },
                     statement_type,
                     expression.span,
                 )
@@ -5868,7 +5875,8 @@ impl Elaborator<'_> {
                 self.recovered = true;
             }
             let value = self.alloc(CoreKind::Field { base: pack, index: index as u32, field_count }, ty.clone(), span);
-            prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value }, Type::Unit, span));
+            prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value,
+                stored_type: self.expressions[value.0 as usize].ty.clone() }, Type::Unit, span));
             self.locals.define(name, ty);
         }
         ((parameter, pack_type), prefix)
@@ -7623,7 +7631,7 @@ impl Elaborator<'_> {
                     let [CoreId(let_index), CoreId(call_index)] = *window else {
                         return false;
                     };
-                    let CoreKind::Let { name, value } = &self.expressions[let_index as usize].kind
+                    let CoreKind::Let { name, value, .. } = &self.expressions[let_index as usize].kind
                     else {
                         return false;
                     };
@@ -7755,7 +7763,7 @@ impl Elaborator<'_> {
                     self.collect_captures(*value, locals, captures);
                 }
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, .. } => {
                 self.collect_captures(*value, locals, captures);
                 locals.insert(name.clone());
             }
@@ -8069,7 +8077,11 @@ impl Elaborator<'_> {
         for index in 0..self.expressions.len() {
             let span = self.expressions[index].span;
             let ty = self.expressions[index].ty.clone();
-            self.expressions[index].ty = self.zonk_type(ty, span);
+            self.expressions[index].ty = if matches!(self.expressions[index].kind,
+                CoreKind::Closure { .. } | CoreKind::Function { .. } | CoreKind::TraitMethod { .. }) {
+                let ty = self.joined_callable_constructor_type(ty);
+                self.zonk_resolved_type(ty, span)
+            } else { self.zonk_type(ty, span) };
             let kind = self.expressions[index].kind.clone();
             let result = self.expressions[index].ty.clone();
             self.expressions[index].kind = self.zonk_core_metadata(kind, span, &result);
@@ -8078,6 +8090,7 @@ impl Elaborator<'_> {
 
     fn zonk_core_metadata(&mut self, mut kind: CoreKind, span: Span, result: &Type) -> CoreKind {
         match &mut kind {
+            CoreKind::Let { stored_type, .. } => *stored_type = self.zonk_type(stored_type.clone(), span),
             CoreKind::ConstValue(argument) => *argument = self.zonk_generic_argument(argument.clone(), span),
             CoreKind::Literal(text) => {
                 // Check after contextual type selection, directly at the
@@ -8319,7 +8332,6 @@ impl Elaborator<'_> {
             | CoreKind::Record { .. }
             | CoreKind::Field { .. }
             | CoreKind::Enum { .. }
-            | CoreKind::Let { .. }
             | CoreKind::IntrinsicCall { .. }
             | CoreKind::Block(_)
             | CoreKind::Borrow { .. }
@@ -8405,6 +8417,10 @@ impl Elaborator<'_> {
     }
     fn zonk_type(&mut self, ty: Type, span: Span) -> Type {
         let ty = self.joined_callable_value_type(ty);
+        self.zonk_resolved_type(ty, span)
+    }
+
+    fn zonk_resolved_type(&mut self, ty: Type, span: Span) -> Type {
         match self.inference.zonk(ty) {
             Ok(ty) => self.normalize_type_projections(ty),
             Err(_) => {
@@ -14734,7 +14750,9 @@ impl Elaborator<'_> {
         // This is not zonking/defaulting: unresolved cells, regions and rows
         // remain open, and ordinary lifetime/ownership checks still apply.
         let mut ty = self.inference.resolve_type_structure(ty);
-        ty = self.joined_callable_value_type(ty);
+        ty = if matches!(kind, CoreKind::Closure { .. } | CoreKind::Function { .. } | CoreKind::TraitMethod { .. }) {
+            self.joined_callable_constructor_type(ty)
+        } else { self.joined_callable_value_type(ty) };
         self.mint_callable_contract(&kind, &mut ty);
         let id = CoreId(self.expressions.len() as u32);
         self.expressions.push(CoreExpr { kind, ty, span });

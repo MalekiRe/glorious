@@ -669,7 +669,7 @@ mod checked_borrow_tests {
             let input_ty = if aggregate { product.clone() } else { reference.clone() };
             body.expressions = vec![
                 crate::core::CoreExpr { kind: CoreKind::Local("input".into()), ty: reference.clone(), span },
-                crate::core::CoreExpr { kind: CoreKind::Let { name: "saved".into(), value: CoreId(0) }, ty: Type::Unit, span },
+                crate::core::CoreExpr { kind: CoreKind::Let { name: "saved".into(), value: CoreId(0), stored_type: reference.clone() }, ty: Type::Unit, span },
                 crate::core::CoreExpr { kind: CoreKind::Local("saved".into()), ty: reference.clone(), span },
                 crate::core::CoreExpr { kind: CoreKind::Local("second".into()), ty: reference.clone(), span },
                 crate::core::CoreExpr { kind: CoreKind::Assign { place: CorePlace::Local { name: "saved".into(), ty: reference.clone() }, value: CoreId(3) }, ty: Type::Unit, span },
@@ -1844,7 +1844,7 @@ impl Analyzer<'_> {
                     self.record_label_continuation(brand, e.span);
                 }
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, stored_type } => {
                 // A strict initializer which transfers out or evaluates to
                 // `Never` never creates the lexical owner. In particular,
                 // reserving the binding before the initializer would let a
@@ -1903,8 +1903,8 @@ impl Analyzer<'_> {
                     binding.clone(),
                     PlaceBindingOrigin::Let { expression: id },
                 );
-                self.record_destructor_paths(&binding, &self.body.expression(value).ty.clone());
-                self.record_minimum_binding(&binding, &self.body.expression(value).ty.clone(), e.span);
+                self.record_destructor_paths(&binding, &stored_type);
+                self.record_minimum_binding(&binding, &stored_type, e.span);
                 self.states.insert(binding.clone(), LocalState::Initialized);
                 self.event(FlowEventKind::Initialize(binding), e.span)
             }

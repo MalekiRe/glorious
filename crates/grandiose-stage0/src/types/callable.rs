@@ -45,6 +45,32 @@ mod abi_refinement_tests {
     }
 
     #[test]
+    fn stored_callable_views_are_directional_and_do_not_change_referents() {
+        let callable = |contract| Type::Callable { contract: Box::new(contract), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+            effects: EffectRow::empty(), invocation: Quantity::ONCE };
+        let mut resident = CallableContract::default();
+        resident.environment = Some(Box::new(Type::Unit));
+        resident.shared_receiver = true;
+        resident.unique_receiver = true;
+        resident.captures.push(reference(Lifetime::Generic(0), Type::Unit));
+        let stored = callable(resident.join_residents(&CallableContract::default()));
+        let produced = callable(resident);
+        for (stored, produced) in [(stored.clone(), produced.clone()),
+            (Type::Tuple(vec![stored.clone()]), Type::Tuple(vec![produced.clone()])),
+            (Type::Array(Box::new(stored.clone())), Type::Array(Box::new(produced.clone())))] {
+            assert!(super::super::regions::accepts_body_storage(&stored, &produced));
+            assert!(!super::super::regions::accepts_body_storage(&produced, &stored));
+        }
+        for mutability in [Mutability::Shared, Mutability::Unique] {
+            let reference = |ty| Type::Reference { mutability, lifetime: Lifetime::Static, referent: Box::new(ty) };
+            assert!(!super::super::regions::accepts_body_storage(&reference(stored.clone()), &reference(produced.clone())));
+        }
+        assert!(!super::super::regions::accepts_body_storage(&callable(CallableContract::default()), &produced),
+            "an erased storage annotation cannot delete captured loan debt");
+    }
+
+    #[test]
     fn writable_residents_intersect_authority_and_retain_capture_obligations() {
         let mut resident = CallableContract::default();
         resident.environment = Some(Box::new(Type::Unit));
@@ -101,6 +127,27 @@ mod abi_refinement_tests {
 }
 
 impl CallableContract {
+    /// A resident may enter a wider storage contract only if that contract
+    /// retains all its debt and promises no additional receiver/environment
+    /// authority. Apply this through owned structural products, never through
+    /// reference handles, callable ABIs, or nominal identities.
+    pub(crate) fn storage_input_view(required: &Type, provided: Type) -> Option<Type> {
+        let provided = Self::invocation_input_view(required, provided);
+        Some(match (required, provided) {
+            (Type::Callable { contract: required, .. },
+                Type::Callable { contract, safety, lifetime_binders, parameters, result, effects, invocation }) => {
+                if required.as_ref() != &required.join_residents(&contract) { return None; }
+                Type::Callable { contract: required.clone(), safety, lifetime_binders, parameters, result, effects, invocation }
+            }
+            (Type::Tuple(required), Type::Tuple(provided)) if required.len() == provided.len() =>
+                Type::Tuple(required.iter().zip(provided).map(|(required, provided)| Self::storage_input_view(required, provided)).collect::<Option<_>>()?),
+            (Type::Array(required), Type::Array(provided)) => Type::Array(Box::new(Self::storage_input_view(required, *provided)?)),
+            (Type::FixedArray { element: required, .. }, Type::FixedArray { element, length }) =>
+                Type::FixedArray { element: Box::new(Self::storage_input_view(required, *element)?), length },
+            (_, provided) => provided,
+        })
+    }
+
     /// A writable owned place must admit every resident promised by the
     /// writer's referent type. Unlike an annotation, an empty contract here
     /// is an actual alternative. Never reinterpret an existing reference or

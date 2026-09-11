@@ -17,6 +17,49 @@ fn flow_for(package_name: &str, source: &str) -> PlaceFlow {
 }
 
 #[test]
+fn binding_storage_retains_its_join_without_rewriting_constructed_code() {
+    let core = core_for("stored-constructor-contract@0.1.0",
+        "type Callback=(i64)->i64; fn expose(slot:&mut Callback) {}
+         pub fn main() -> i64 {let answer=42; let reference = &answer;
+             let mut callback:Callback=(value:i64)->i64 {*reference};
+             expose(&mut callback); callback(0)}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    let (binding, value, stored) = core.expressions.iter().enumerate().find_map(|(index, expression)| match &expression.kind {
+        CoreKind::Let { name, value, stored_type } if name == "callback" => Some((index, *value, stored_type)),
+        _ => None,
+    }).unwrap();
+    let Type::Callable { contract: produced, .. } = &core.expression(value).ty else { panic!() };
+    let Type::Callable { contract: stored, .. } = stored else { panic!() };
+    assert!(produced.environment.is_some() && produced.shared_receiver && produced.unique_receiver);
+    assert!(stored.environment.is_none() && !stored.shared_receiver && !stored.unique_receiver);
+    assert!(!produced.captures.is_empty());
+    assert!(produced.captures.iter().all(|capture| stored.captures.contains(capture)));
+    let mut forged = core.clone();
+    let CoreKind::Let { stored_type: Type::Callable { contract, .. }, .. } = &mut forged.expressions[binding].kind else { panic!() };
+    contract.captures.clear();
+    assert_ne!(core.semantic_fingerprint(), forged.semantic_fingerprint());
+    assert!(forged.validate().iter().any(|diagnostic| diagnostic.message.contains("binding storage")));
+}
+
+#[test]
+fn binding_storage_cannot_invent_receiver_permission_for_an_incoming_value() {
+    let core = core_for("stored-receiver-upgrade@0.1.0",
+        "pub fn main(callback:(i64)->i64) -> i64 {let saved=callback; saved(0)}");
+    assert!(core.diagnostics.is_empty(), "{:?}", core.diagnostics);
+    assert!(core.validate().is_empty(), "{:?}", core.validate());
+    for unique in [false, true] {
+        let mut forged = core.clone();
+        let contract = forged.expressions.iter_mut().find_map(|expression| match &mut expression.kind {
+            CoreKind::Let { stored_type: Type::Callable { contract, .. }, .. } => Some(contract),
+            _ => None,
+        }).unwrap();
+        if unique { contract.unique_receiver = true; } else { contract.shared_receiver = true; }
+        assert!(forged.validate().iter().any(|diagnostic| diagnostic.message.contains("binding storage")));
+    }
+}
+
+#[test]
 fn writable_callable_storage_cannot_keep_the_initial_borrowed_receiver_permission() {
     for receiver in ["&callback", "&mut callback"] {
         let core = core_for("writable-callable-receiver@0.1.0", &format!(
@@ -3202,6 +3245,8 @@ fn placeflow_ignores_a_forged_conflicting_suffix_after_a_direct_transfer() {
                 kind: CoreKind::Let {
                     name: "loan".into(),
                     value: CoreId(1),
+                    stored_type: Type::Reference { mutability: grandiose_stage0::Mutability::Unique,
+                        lifetime: Lifetime::Elided, referent: Box::new(i64.clone()) },
                 },
                 ty: Type::Unit,
                 span,
@@ -6017,6 +6062,7 @@ fn escapeflow_fails_closed_for_a_forged_nested_external_store_place() {
                 kind: CoreKind::Let {
                     name: "value".into(),
                     value: CoreId(1),
+                    stored_type: Type::Scalar(ScalarType::I64),
                 },
                 ty: Type::Unit,
                 span,
@@ -7095,6 +7141,7 @@ fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
                 kind: CoreKind::Let {
                     name: "value".into(),
                     value: CoreId(0),
+                    stored_type: i64.clone(),
                 },
                 ty: Type::Unit,
                 span,
@@ -7121,6 +7168,7 @@ fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
                 kind: CoreKind::Let {
                     name: "holder".into(),
                     value: CoreId(4),
+                    stored_type: Type::Array(Box::new(reference.clone())),
                 },
                 ty: Type::Unit,
                 span,
@@ -7156,6 +7204,7 @@ fn forged_array_reference_slots_keep_reborrow_and_escape_provenance() {
                 kind: CoreKind::Let {
                     name: "child".into(),
                     value: CoreId(9),
+                    stored_type: reference.clone(),
                 },
                 ty: Type::Unit,
                 span,
@@ -7241,6 +7290,7 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
                 kind: CoreKind::Let {
                     name: "first".into(),
                     value: CoreId(0),
+                    stored_type: i64.clone(),
                 },
                 ty: Type::Unit,
                 span,
@@ -7267,6 +7317,7 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
                 kind: CoreKind::Let {
                     name: "holder".into(),
                     value: CoreId(4),
+                    stored_type: array.clone(),
                 },
                 ty: Type::Unit,
                 span,
@@ -7302,6 +7353,7 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
                 kind: CoreKind::Let {
                     name: "child".into(),
                     value: CoreId(9),
+                    stored_type: reference.clone(),
                 },
                 ty: Type::Unit,
                 span,
@@ -7315,6 +7367,7 @@ fn forged_aggregate_reference_carrier_cannot_be_replaced_while_child_reborrow_is
                 kind: CoreKind::Let {
                     name: "second".into(),
                     value: CoreId(11),
+                    stored_type: i64.clone(),
                 },
                 ty: Type::Unit,
                 span,

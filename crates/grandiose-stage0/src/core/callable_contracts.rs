@@ -171,13 +171,18 @@ impl Elaborator<'_> {
         }
     }
 
-    pub(super) fn joined_callable_value_argument(&self, mut argument: GenericArgument) -> GenericArgument {
+    pub(super) fn joined_callable_value_argument(&self, argument: GenericArgument) -> GenericArgument {
+        self.apply_callable_value_joins(argument, false)
+    }
+
+    fn apply_callable_value_joins(&self, mut argument: GenericArgument, constructor: bool) -> GenericArgument {
         // Normalize the value and both sides of each retained join in the
         // same inference world. Otherwise a pre-inference initializer can
         // miss a join that its later, already-resolved local read receives.
         argument = self.inference.resolve_argument_structure(argument);
         for (from, to) in &self.callable_value_joins {
             let replacement = [(self.inference.resolve_type_structure(from.clone()), self.inference.resolve_type_structure(to.clone()))];
+            if constructor && matches!(&argument, GenericArgument::Type(ty) if ty == &replacement[0].0) { continue; }
             argument = CallableContract::replace_value_types(argument, &replacement, 0);
         }
         argument
@@ -186,6 +191,15 @@ impl Elaborator<'_> {
     pub(super) fn joined_callable_value_type(&self, ty: Type) -> Type {
         let GenericArgument::Type(ty) = self.joined_callable_value_argument(GenericArgument::Type(ty))
             else { unreachable!("kind-preserving callable join") };
+        ty
+    }
+
+    /// Constructed code has its own checked resident contract. A constraint
+    /// on storage holding that code cannot rewrite the constructor itself.
+    /// Nested stored residents still consume the ordinary normalized joins.
+    pub(super) fn joined_callable_constructor_type(&self, ty: Type) -> Type {
+        let GenericArgument::Type(ty) = self.apply_callable_value_joins(GenericArgument::Type(ty), true)
+            else { unreachable!("kind-preserving constructor join") };
         ty
     }
 
@@ -220,7 +234,7 @@ impl Elaborator<'_> {
                     walk(elaborator, *value, Access::Owned, locals, captures, result);
                     place(elaborator, target, Access::Unique, locals, captures, result);
                 }
-                CoreKind::Let { name, value } => {
+                CoreKind::Let { name, value, .. } => {
                     walk(elaborator, *value, Access::Owned, locals, captures, result);
                     locals.insert(name.clone());
                 }

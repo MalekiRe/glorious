@@ -182,7 +182,7 @@ pub enum EvaluationOperation {
         pattern: CorePattern,
         refinement: RefinementEnvironment,
     },
-    Bind(String),
+    Bind { name: String, stored_type: Type },
     /// Dispose of a statement result at this point, before evaluating the
     /// next statement. Ownership MIR selects the actual destruction action.
     Discard,
@@ -245,7 +245,7 @@ impl EvaluationOperation {
             PrepareInvocation => ValueRole::Invocation,
             AcquireValue | Literal(_) | ConstValue(_) | Function { .. } | TraitMethod { .. }
             | Constant { .. } | Tuple | Array | Record(_) | Enum { .. } | PatternTest { .. }
-            | Bind(_) | Discard | ReleaseAvailable | Assign | Borrow { .. } | Move | Call(_)
+            | Bind { .. } | Discard | ReleaseAvailable | Assign | Borrow { .. } | Move | Call(_)
             | Perform { .. } | Intrinsic(_) | LazyBoolean { .. } | LabelValue(_) | Transfer(_)
             | Closure { .. } => ValueRole::Acquired,
         }
@@ -400,6 +400,15 @@ impl EvaluationMir {
             let mut available = BTreeMap::new();
             for (index, instruction) in region.instructions.iter().enumerate() {
                 instruction.validate_shape()?;
+                if let EvaluationOperation::Bind { stored_type, .. } = &instruction.operation {
+                    let [EvaluationOperand::Value(operand)] = instruction.operands.as_slice()
+                        else { unreachable!("validated binding arity"); };
+                    if !region.instructions[..index].iter().find(|value| value.value == *operand)
+                        .is_some_and(|value| value.ty == Type::Never
+                            || crate::types::regions::accepts_body_storage(stored_type, &value.ty)) {
+                        return Err(EvaluationError("binding storage does not accept its evaluated initializer".into()));
+                    }
+                }
                 if instruction.operation == EvaluationOperation::ReleaseAvailable {
                     let [EvaluationOperand::Value(operand)] = instruction.operands.as_slice()
                         else { unreachable!("validated release arity"); };
@@ -457,7 +466,7 @@ impl EvaluationMir {
                             return Err(EvaluationError("resumption differs from its active lexical binder and contract".into()));
                         }
                     }
-                    EvaluationOperation::Bind(name) => { resumptions.remove(name); }
+                    EvaluationOperation::Bind { name, .. } => { resumptions.remove(name); }
                     EvaluationOperation::Closure { body, .. } => pending.push((*body, Resumptions::new())),
                     EvaluationOperation::Handle { computation, arms } => {
                         pending.push((*computation, resumptions.clone()));
@@ -576,7 +585,7 @@ impl EvaluationInstruction {
             Op::Field { index, field_count } => values && arity == 1 && index < field_count,
             Op::PatternTest { .. }
             | Op::AcquireValue
-            | Op::Bind(_)
+            | Op::Bind { .. }
             | Op::Discard
             | Op::Deref
             | Op::LazyBoolean { .. } => values && arity == 1,
@@ -682,6 +691,36 @@ mod tests {
         read.operation = EvaluationOperation::PrepareInvocation;
         read.operands = vec![EvaluationOperand::Place(EvaluationPlace::Local { name:"place".into(), ty:Type::Unit })];
         assert!(mir.validate().unwrap_err().0.contains("invocation view cannot become"));
+    }
+
+    #[test]
+    fn binding_storage_rejects_forged_type_and_receiver_authority() {
+        let mut mir = fixture();
+        let callable = Type::Callable { contract: Box::default(), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE };
+        mir.parameters.push(("callback".into(), callable.clone()));
+        let mut input = mir.regions[0].instructions[0].clone();
+        input.operation = EvaluationOperation::ReadLocal("callback".into());
+        input.ty = callable.clone();
+        let mut binding = input.clone();
+        binding.value = EvaluationValue(1);
+        binding.ty = Type::Unit;
+        binding.operands = vec![EvaluationOperand::Value(input.value)];
+        binding.operation = EvaluationOperation::Bind { name: "saved".into(), stored_type: callable };
+        mir.regions[0].instructions = vec![input, binding];
+        mir.regions[0].exit = EvaluationExit::Yield(EvaluationValue(1));
+        mir.validate().unwrap();
+        for mutation in 0..3 {
+            let mut forged = mir.clone();
+            let EvaluationOperation::Bind { stored_type, .. } = &mut forged.regions[0].instructions[1].operation else { panic!() };
+            if mutation == 0 { *stored_type = Type::Unit; } else {
+                let Type::Callable { contract, .. } = stored_type else { panic!() };
+                if mutation == 1 { contract.shared_receiver = true; } else { contract.unique_receiver = true; }
+            }
+            assert!(forged.validate().unwrap_err().0.contains("binding storage"));
+            assert!(crate::control_mir::ControlMir::lower(&forged).is_err());
+        }
     }
 
     #[test]
@@ -1219,9 +1258,9 @@ impl Builder<'_> {
                     refinement,
                 }
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, stored_type } => {
                 operands = self.values(&[value], sequence)?;
-                Op::Bind(name)
+                Op::Bind { name, stored_type }
             }
             CoreKind::Assign { place, value } => {
                 // The language's assignment contract evaluates the RHS before

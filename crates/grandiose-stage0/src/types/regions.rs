@@ -23,7 +23,8 @@ pub(crate) fn same_body_storage(left: &Type, right: &Type) -> bool {
 /// transfer. Keep the acquired value's contract intact, and independently
 /// compare every other stored type component modulo closed body regions.
 pub(crate) fn accepts_body_storage(destination: &Type, source: &Type) -> bool {
-    same_body_storage(destination, &super::CallableContract::invocation_input_view(destination, source.clone()))
+    super::CallableContract::storage_input_view(destination, source.clone())
+        .is_some_and(|source| same_body_storage(destination, &source))
 }
 
 /// Move a caller-owned argument beneath `amount` additional scopes. Regions

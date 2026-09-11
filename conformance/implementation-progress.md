@@ -5,6 +5,28 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Cache 165: constructed values versus binding storage
+
+Core and Evaluation bindings now retain an explicit stored type. Control uses
+it for the actual binding allocation; PlaceFlow's stored owner contracts and
+fusion consume it as well. Callable constructors keep their own checked value
+contracts when a later write widens the binding. The shared resident comparison
+validates directional initialization and stores, preserves capture/predicate
+debt, and does not reinterpret existing references or callable ABIs.
+
+All 18 Evaluation integration tests pass, including the updated assertions that
+reads/generic arguments agree with storage while constructors retain their own
+environment. Source and receiving checks reject forged receiver permissions and
+lost captured-reference debt; fingerprints include the stored type. The original
+helper-mutation receiver passes fresh/decoded VM and native/mixed O0/O2.
+
+The major handler gate reports 62 passing and one failing, matching the preceding
+cache-164 integration result. The earlier borrowed receiver still fails G4304;
+point-sensitive invocation authority remains to be integrated. General borrowed
+resumption, guarded resource, mandatory-tail, foreign-control and full performance
+acceptance also remain open. This is not full native-handler completion. Runtime
+and executable formats are unchanged; cache generation is 165.
+
 ## Cache 164: manifest-bound integer control coverage
 
 Control analysis and lowering now consume the same trusted primitive identity

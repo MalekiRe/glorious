@@ -507,7 +507,7 @@ impl Analyzer<'_> {
             CoreKind::Enum { fields, .. } => Value::Variant(self.strict_values(fields)),
             CoreKind::Field { base, index, .. } =>
                 value_at_path(&self.value(base), &[index]).unwrap_or(Value::None),
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, .. } => {
                 let evaluated = self.value(value);
                 if self.continuations.is_abrupt(value) {
                     return Value::None;

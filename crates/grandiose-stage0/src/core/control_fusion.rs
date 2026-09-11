@@ -402,7 +402,7 @@ impl Fusion<'_> {
         let name = self.name(original);
         let ty = self.physical_expression(value).ty.clone();
         let contract = self.contract(value).clone();
-        prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value }, Type::Unit, span));
+        prefix.push(self.alloc(CoreKind::Let { name: name.clone(), value, stored_type: ty.clone() }, Type::Unit, span));
         Input { place: CorePlace::Local { name, ty }, contract }
     }
     fn target(&self, target: &ControlLabelTarget, span: Span) -> Result<LabelBrand, CoreDiagnostic> {
@@ -460,12 +460,14 @@ impl Fusion<'_> {
                 let place = frame.locals.get(&name).cloned().ok_or_else(|| diagnostic(span, format!("unbound fusion input `{name}`")))?;
                 return Ok(self.resident(place, span));
             }
-            CoreKind::Let { name, value } => {
+            CoreKind::Let { name, value, stored_type } => {
                 let value = self.expression(value, frame)?;
                 let fresh = self.name(&name);
-                frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: self.physical_expression(value).ty.clone() },
-                    contract: self.contract(value).clone() });
-                CoreKind::Let { name: fresh, value }
+                let contract = ValueContract { ty: self.semantic_type(frame, stored_type),
+                    representation: self.contract(value).representation.clone() };
+                let stored_type = self.resident_type(&contract);
+                frame.locals.insert(name, Input { place: CorePlace::Local { name: fresh.clone(), ty: stored_type.clone() }, contract });
+                CoreKind::Let { name: fresh, value, stored_type }
             }
             CoreKind::Block(values) => {
                 let locals = frame.locals.clone();

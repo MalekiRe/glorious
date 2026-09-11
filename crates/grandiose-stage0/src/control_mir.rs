@@ -226,6 +226,9 @@ impl ControlMir {
             return Err(invalid("missing entry block"));
         }
         self.validate_payload_acceptance()?;
+        let bindings = self.source_bindings.iter().filter_map(|(origin, value)|
+            matches!(origin, crate::placeflow::PlaceBindingOrigin::Let { .. }).then_some(*value))
+            .collect::<BTreeSet<_>>();
         let prepared = self.blocks.iter().flat_map(|block| &block.instructions)
             .filter_map(|instruction| matches!(instruction.operation,
                 ControlOperation::Capability(ControlCapabilityOperation::PrepareInvocation(_)))
@@ -281,6 +284,14 @@ impl ControlMir {
                     return Err(invalid("missing instruction scope"));
                 }
                 self.validate_operation(instruction)?;
+                if bindings.contains(&instruction.destination) {
+                    let ControlOperation::Forward(source) = instruction.operation else {
+                        return Err(invalid("binding storage has no evaluated initializer"));
+                    };
+                    if !crate::types::regions::accepts_body_storage(self.ty(instruction.destination)?, self.ty(source)?) {
+                        return Err(invalid("binding storage does not accept its initializer contract"));
+                    }
+                }
             }
             for edge in block.terminator.edges() {
                 self.validate_edge(&edge)?;
@@ -627,6 +638,22 @@ mod tests {
     }
 
     #[test]
+    fn binding_storage_is_checked_independently_of_forwarding_representation() {
+        let mut mir = fixture();
+        let callable = Type::Callable { contract: Box::default(), safety: Safety::Safe,
+            lifetime_binders: 0, parameters: vec![], result: Box::new(Type::Unit),
+            effects: crate::EffectRow::empty(), invocation: crate::Quantity::ONCE };
+        for index in 1..5 { mir.values[index].ty = callable.clone(); }
+        mir.blocks[1].instructions[0].operation = ControlOperation::Forward(ControlValue(1));
+        mir.source_bindings.insert(crate::placeflow::PlaceBindingOrigin::Let { expression: CoreId(2) }, ControlValue(2));
+        mir.validate().unwrap();
+        let Type::Callable { contract, .. } = &mut mir.values[2].ty else { panic!() };
+        contract.shared_receiver = true;
+        contract.unique_receiver = true;
+        assert!(matches!(mir.validate(), Err(ControlError::Invalid(message)) if message.contains("binding storage")));
+    }
+
+    #[test]
     fn stored_reference_edges_use_representation_types_without_erasing_mutability() {
         let mut mir = fixture();
         let reference = |lifetime, mutability, referent| Type::Reference {
@@ -842,10 +869,10 @@ impl Builder<'_> {
             }).collect::<Result<Vec<_>, _>>()?;
             // Allocate actual binding storage before its Unit statement result;
             // this retains the source binding origin used by ownership import.
-            if let EvalOp::Bind(name) = &instruction.operation {
+            if let EvalOp::Bind { name, stored_type } = &instruction.operation {
                 let source = operands[0];
                 let binding = self.value(
-                    self.result.ty(source)?.clone(),
+                    stored_type.clone(),
                     instruction.source,
                     instruction.span,
                 )?;
@@ -879,7 +906,7 @@ impl Builder<'_> {
                         ControlOperation::Capability(ControlCapabilityOperation::ReadReference(value))
                     } else { ControlOperation::Read(value) }
                 },
-                EvalOp::Bind(_) => ControlOperation::Unit,
+                EvalOp::Bind { .. } => ControlOperation::Unit,
                 EvalOp::Discard => ControlOperation::Discard(operands[0]),
                 // Core/PlaceFlow authorize this exact abandonment. Keep its
                 // operand on the ordinary consuming disposal path, so an

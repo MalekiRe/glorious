@@ -161,7 +161,7 @@ fn changed_storage_is_not_the_assignment_expression_result() {
     let assignment = body.expressions.iter().position(|expression|
         matches!(expression.kind, CoreKind::Assign { .. })).unwrap();
     for expression in &mut body.expressions {
-        if let CoreKind::Let { name, value } = &mut expression.kind && name == "unit" {
+        if let CoreKind::Let { name, value, .. } = &mut expression.kind && name == "unit" {
             *value = CoreId(assignment as u32);
         }
     }

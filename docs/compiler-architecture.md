@@ -2402,3 +2402,31 @@ and truncated coverage remain checked. Earlier point-sensitive borrowed receiver
 contracts, general borrowed resumptions, guarded interleavings, mandatory-tail
 fusion, foreign-control admission and full performance acceptance remain open.
 Executable and runtime generations are unchanged.
+
+## Constructed callable values and binding storage contracts
+
+Typed Core bindings retain their stored type separately from the initializer's
+produced type. The existing normalized join producer applies whole-storage
+constraints to that binding without replacing a callable constructor's own
+checked environment and receiver contract. Nested resident terms still consume
+the same joins. This preserves constructed code evidence, not point-sensitive
+permission for every subsequent read of its storage.
+
+Evaluation carries the stored binding contract explicitly; Control allocates the
+binding with that type rather than reconstructing it from the initializer.
+PlaceFlow's stored destruction/minimum contracts and structural fusion consume
+the same field. Source, Evaluation and Control validation check the directional
+initialization relation. Fingerprints, inference sealing, projection-domain and
+binder validation include the new type. Runtime/legacy stores share that same
+type-owned resident comparison: weakening cannot invent receiver/environment
+authority or erase capture/predicate debt, and does not traverse reference
+referents, callable ABIs or nominal identities.
+
+Cache 165 verifies distinct constructed/stored contracts, stale fingerprints,
+forged receiver and capture-debt rejection, and the helper replacement execution
+matrix. The handler integration run remains 62 passing and one failing: the
+earlier borrowed receiver still fails G4304 after its slot is widened. Actual
+borrowed-invocation authority must be established at its executed acquisition,
+not recovered from the constructor merely because it once occupied the slot.
+That source/executable proof migration and the remaining native-handler gates
+are not completed by this storage boundary. Runtime formats are unchanged.
