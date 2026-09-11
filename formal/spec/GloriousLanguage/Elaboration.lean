@@ -252,17 +252,17 @@ deconstructs the incoming formal. A name alone is not a runtime binding. -/
 def parameterPrologue (plans : List (Local × Pattern)) (body : Code) : Code :=
   plans.foldr (fun (formal,pattern) rest => .choose ⟨formal.id,[]⟩ [.clause pattern rest]) body
 
-def FunctionContext (context : Context) (signature : Signature) (locals : List Local) : Context :=
-  { context with typed := { context.typed with
+def FunctionContext (context : Context) (function : Function) : Context :=
+  { context with currentRegion := some function.activationRegion, typed := { context.typed with
       static := { context.typed.static with
-        binders := context.typed.static.binders ++ signature.generics,
-        assumptions := signature.constraints ++ context.typed.static.assumptions,
+        binders := context.typed.static.binders ++ function.signature.generics,
+        assumptions := function.signature.constraints ++ context.typed.static.assumptions,
         unsafeAllowed := false },
-      locals := locals, effects := signature.effects } }
+      locals := function.captures ++ function.parameters, effects := function.signature.effects } }
 
 def NamedFunctionContext (context : Context) (function : Function) (name : String) (exitLabel : Identity) : Context :=
-  let inner := FunctionContext { context with names := [], capturePlaces := [] } function.signature function.parameters
-  { inner with currentRegion := some exitLabel, namedLabels := [(name,exitLabel)], typed := { inner.typed with labels := [(exitLabel,.rigid exitLabel .region 0,function.signature.result)] } }
+  let inner := FunctionContext { context with names := [], capturePlaces := [] } function
+  { inner with namedLabels := [(name,exitLabel)], typed := { inner.typed with labels := [(exitLabel,.rigid function.activationRegion .region 0,function.signature.result)] } }
 
 def AtomCode (localSlot : Local) (atom : Atom) : Code := .bind localSlot atom (.result ⟨localSlot.id,[]⟩)
 
@@ -430,23 +430,24 @@ mutual
           (.evaluate callee calleeCode (sequence bindings (.tail ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩)))
     | block {context statements result type code scope} : Block program { context with itemIndex := 0, currentRegion := some scope } statements result type code →
         Expression program context (.block statements result) type (.scope scope code)
-    | contextualBlock {context statements result expected signature function captures localSlot} :
+    | contextualBlock {context statements result expected signature function arguments captures localSlot} :
         IsContextual program context expected signature →
-        Closure program context (.block statements result) signature function captures → Fresh context localSlot → localSlot.type = expected →
-        expected = .callable function.declaration [] →
-        Expression program context (.block statements result) expected (AtomCode localSlot (.closure function.declaration [] captures))
-    | anonymous {context head body signature function captures localSlot} :
-        Head program context head signature → Closure program context (.function head body) signature function captures →
-        Fresh context localSlot → localSlot.type = .callable function.declaration [] →
-        Expression program context (.function head body) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
-    | clauses {context arms signature function captures localSlot} :
-        Closure program context (.clauses arms) signature function captures → Fresh context localSlot → localSlot.type = .callable function.declaration [] →
-        Expression program context (.clauses arms) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
-    | ownedCapture {context places source signature function captures localSlot} : Closure program (context.child places.length) source signature function captures →
+        Closure program context (.block statements result) signature function arguments captures → Fresh context localSlot → localSlot.type = expected →
+        expected = .callable function.declaration arguments →
+        Expression program context (.block statements result) expected (AtomCode localSlot (.closure function.declaration arguments captures))
+    | anonymous {context head body signature function arguments captures localSlot} :
+        Head program context head signature → Closure program context (.function head body) signature function arguments captures →
+        Fresh context localSlot → localSlot.type = .callable function.declaration arguments →
+        Expression program context (.function head body) localSlot.type (AtomCode localSlot (.closure function.declaration arguments captures))
+    | clauses {context arms signature function arguments captures localSlot} :
+        Closure program context (.clauses arms) signature function arguments captures → Fresh context localSlot → localSlot.type = .callable function.declaration arguments →
+        Expression program context (.clauses arms) localSlot.type (AtomCode localSlot (.closure function.declaration arguments captures))
+    | ownedCapture {context places source signature function arguments captures localSlot} :
+        Closure program (context.child places.length) source signature function arguments captures →
         (∀ source ∈ places, ∃ place type mutable capture,
           PlaceExpression program context source place type mutable ∧ capture ∈ captures ∧ capture.place = place ∧ capture.mode = .own) →
-        Fresh context localSlot → localSlot.type = .callable function.declaration [] →
-        Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration [] captures))
+        Fresh context localSlot → localSlot.type = .callable function.declaration arguments →
+        Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration arguments captures))
     | label {context name annotation body type brand region code} :
         (annotation = none ∨ ∃ source, annotation = some source ∧ TypeExpression program context source .type type) →
         Expression program { (context.child 0) with currentRegion := some region, namedLabels := (name,brand) :: context.namedLabels, typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
@@ -502,37 +503,37 @@ mutual
         Block program { context with itemIndex := context.itemIndex+1 } rest result type body →
         Block program context (.item declaration :: rest) result type body
 
-  inductive Closure (program : Kernel.Program) : Context → Source.Expr → Signature → Function → List Capture → Prop where
-    | function {context head body signature function captures sources inner parameterNames plans bodyCode declaration} :
-        Head program context head signature → function.signature = signature → program.function function.declaration = some function →
+  inductive Closure (program : Kernel.Program) : Context → Source.Expr → Signature → Function → List Term → List Capture → Prop where
+    | function {context head body signature function arguments captures sources inner parameterNames plans bodyCode declaration} :
+        Head program context head signature → function.signature = signature → Instance program function.declaration arguments function →
         function.namedExit = none →
         program.declarations.function function.declaration = some declaration → declaration.header.sourceVisible = false →
         declaration.origin = .source context.origin →
         CapturesResolved program context sources captures function.captures → ExtendsWithCaptures context inner sources function.captures →
-        Parameters program (FunctionContext inner signature (function.captures ++ function.parameters))
+        Parameters program (FunctionContext inner function)
           head.parameters function.parameters parameterNames plans →
-        Expression program ((BindNames (FunctionContext inner signature (function.captures ++ function.parameters)) parameterNames).child 0)
+        Expression program ((BindNames (FunctionContext inner function) parameterNames).child 0)
           body signature.result bodyCode → function.body = parameterPrologue plans bodyCode →
-        Contracts.ResourceAdmission program function → Closure program context (.function head body) signature function captures
-    | clauses {context arms signature function captures sources inner code declaration} : function.signature = signature →
+        Contracts.ResourceAdmission program function → Closure program context (.function head body) signature function arguments captures
+    | clauses {context arms signature function arguments captures sources inner code declaration} : function.signature = signature →
         function.namedExit = none →
-        program.function function.declaration = some function → program.declarations.function function.declaration = some declaration →
+        Instance program function.declaration arguments function → program.declarations.function function.declaration = some declaration →
         declaration.header.sourceVisible = false → CapturesResolved program context sources captures function.captures →
         declaration.origin = .source context.origin →
         ExtendsWithCaptures context inner sources function.captures →
-        PatternCallable program (FunctionContext inner signature (function.captures ++ function.parameters))
+        PatternCallable program (FunctionContext inner function)
           arms signature function.parameters code → function.body = code →
-        Contracts.ResourceAdmission program function → Closure program context (.clauses arms) signature function captures
-    | block {context statements result signature function captures sources inner body declaration} : function.signature = signature →
+        Contracts.ResourceAdmission program function → Closure program context (.clauses arms) signature function arguments captures
+    | block {context statements result signature function arguments captures sources inner body declaration} : function.signature = signature →
         function.namedExit = none →
-        program.function function.declaration = some function → program.declarations.function function.declaration = some declaration →
+        Instance program function.declaration arguments function → program.declarations.function function.declaration = some declaration →
         declaration.header.sourceVisible = false → CapturesResolved program context sources captures function.captures →
         declaration.origin = .source context.origin →
         ExtendsWithCaptures context inner sources function.captures →
         (∀ parameter ∈ function.parameters, ∃ principal, PrincipalOf program.declarations parameter.type principal ∧ principal.MayDiscard) →
-        Block program (FunctionContext inner signature (function.captures ++ function.parameters))
+        Block program (FunctionContext inner function)
           statements result signature.result body → function.body = body →
-        Contracts.ResourceAdmission program function → Closure program context (.block statements result) signature function captures
+        Contracts.ResourceAdmission program function → Closure program context (.block statements result) signature function arguments captures
 
   inductive PatternCallable (program : Kernel.Program) : Context → List (Source.Pattern × Source.Expr) → Signature → List Local → Code → Prop where
     | single {context arms signature parameter kernelArms} : signature.parameters = [parameter.type] →
@@ -567,13 +568,16 @@ mutual
         HandlerArms program { context with itemIndex := context.itemIndex+1 } rest input output completion operations →
         HandlerArms program context (.completion sourcePattern sourceBody :: rest) input output (.clause pattern body :: completion) operations
     | operation {context path sourceArguments sourcePatterns sourceBody rest input output header operation arguments signature
-        patterns names continuation body completion operations bodyResult} :
+        patterns names continuation bodyCode body completion operations bodyResult} :
         Qualified program.declarations context.typed.static.module .value path header → program.declarations.operation header.id = some operation →
         TypeExpressions program context sourceArguments (operation.signature.generics.map (·.kind)) arguments →
         Typing.CallSignature program.declarations context.typed.static header.id arguments signature →
         PatternExpressions program context sourcePatterns (signature.parameters ++ continuation.toList.map Local.type) .owned
           patterns names →
-        Expression program (((BindNames context names).child context.itemIndex).child 0) sourceBody bodyResult body →
+        Expression program (((BindNames context names).child context.itemIndex).child 0) sourceBody bodyResult bodyCode →
+        ListRel (fun formal pattern => Typing.PatternCoverage program formal.type [.clause pattern bodyCode])
+          continuation.toList (patterns.drop signature.parameters.length) →
+        body = parameterPrologue (continuation.toList.zip (patterns.drop signature.parameters.length)) bodyCode →
         Typing.OperationArmsType program context.typed [.clause header.id arguments [] (patterns.take signature.parameters.length) continuation body] output →
         HandlerArms program { context with itemIndex := context.itemIndex+1 } rest input output completion operations →
         HandlerArms program context (.operation path sourceArguments sourcePatterns sourceBody :: rest) input output completion
@@ -838,5 +842,10 @@ theorem Parameters.formals {program : Kernel.Program} {context sources locals na
     (checked : Parameters program context sources locals names plans) : plans.map Prod.fst = locals := by
   induction sources generalizing context locals names plans <;> cases checked <;> simp_all
   solve_by_elim
+
+theorem Closure.instance {program : Kernel.Program} {context source signature function arguments captures}
+    (checked : Closure program context source signature function arguments captures) :
+    Instance program function.declaration arguments function := by
+  cases checked <;> assumption
 
 end Glorious.Language.Elaboration

@@ -27,8 +27,49 @@ example {outer inner : Elaboration.Context} {sources captures localSlot}
   subst inner
   exact resident
 
-example (context : Elaboration.Context) (signature : Signature) (locals : List Local) :
-    (FunctionContext context signature locals).typed.static.unsafeAllowed = false := rfl
+example (context : Elaboration.Context) (function : Function) :
+    (FunctionContext context function).typed.static.unsafeAllowed = false := rfl
+
+example (context : Elaboration.Context) (function : Function) :
+    (FunctionContext context function).currentRegion = some function.activationRegion := rfl
+
+example {program : Kernel.Program} {context source signature function arguments captures}
+    (checked : Closure program context source signature function arguments captures) :
+    Instance program function.declaration arguments function := checked.instance
+
+example (formal : Local) (pattern : Pattern) (body : Code) :
+    parameterPrologue ((some formal).toList.zip [pattern]) body =
+      .choose ⟨formal.id,[]⟩ [.clause pattern body] := rfl
+
+private def referenceTemplate : Function :=
+  { declaration := default
+    captures := [⟨4,.reference .shared (.parameter 7 .region) .unit,false⟩]
+    parameters := []
+    signature := ⟨[⟨7,"captured_region",.region,none⟩],[],
+      .reference .shared (.parameter 7 .region) .unit,.row [] [],[],false⟩
+    body := .bind ⟨5,.reference .shared (.parameter 7 .region) .unit,false⟩
+      (.borrow ⟨4,[.dereference]⟩ .shared (.parameter 7 .region)) (.result ⟨5,[]⟩)
+    activationRegion := 7
+    namedExit := none }
+
+/-- The capture type, signature and executable borrow use the same ordinary
+substitution; the callee's numerically identical lexical region cannot capture
+the already concrete caller lifetime. -/
+example :
+    let instantiated := referenceTemplate.instantiate [(7,.runtimeRegion 7)]
+    (instantiated.captures.map Local.type = [.reference .shared (.runtimeRegion 7) .unit]) ∧
+    instantiated.signature.result = .reference .shared (.runtimeRegion 7) .unit ∧
+    instantiated.body = .bind ⟨5,.reference .shared (.runtimeRegion 7) .unit,false⟩
+      (.borrow ⟨4,[.dereference]⟩ .shared (.runtimeRegion 7)) (.result ⟨5,[]⟩) ∧
+    (instantiated.entryScope 100 200).term instantiated.signature.result =
+      .reference .shared (.runtimeRegion 7) .unit := by
+  simp [referenceTemplate, Function.instantiate, Local.mapTerms, Signature.instantiate,
+    Code.instantiate, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
+
+example (function : Function) (region brand : Identity) :
+    (function.entryScope region brand).term (.rigid function.activationRegion .region 0) =
+      .runtimeRegion region := by
+  simp [Function.entryScope, ScopeInstantiation.term, Table.get]
 
 example (context : Typing.Context) (callee argument : Local) (code : Code) :
     argument ∈ (BindingContext (context.bind callee) [⟨argument,code⟩]).locals := by

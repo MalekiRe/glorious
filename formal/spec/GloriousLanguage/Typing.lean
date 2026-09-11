@@ -292,7 +292,7 @@ mutual
           (operation.terminal = false ∧ ∃ quantity, operation.quantity = some quantity ∧
             ((continuation = none ∧ quantity.Contains 1 ∧ output = signature.result) ∨
               (∃ localSlot brand, continuation = some localSlot ∧
-                localSlot.type = .continuation brand signature.result result signature.effects quantity ∧ output = result)))) →
+                localSlot.type = .continuation (.rigid brand .brand 0) signature.result result signature.effects quantity ∧ output = result)))) →
         CodeType program { context with locals := bindings ++ continuation.toList ++ context.locals } body output →
         OperationArmsType program context rest result →
         OperationArmsType program context (.clause id family item patterns continuation body :: rest) result
@@ -304,9 +304,9 @@ def FunctionType (program : Kernel.Program) (function : Function) : Prop :=
     (function.parameters.map (·.type)) = function.signature.parameters ∧
     (function.parameters.map (·.id)).Nodup ∧ (function.captures.map (·.id)).Nodup ∧
     (∀ formal ∈ function.parameters, ∀ capture ∈ function.captures, formal.id ≠ capture.id) ∧
-    CodeType program ⟨⟨[],function.signature.constraints,0,declaration.header.module,false⟩,
+    CodeType program ⟨⟨function.signature.generics,function.signature.constraints,0,declaration.header.module,false⟩,
       function.captures ++ function.parameters,
-      function.namedExit.toList.map (fun id => (id,.rigid id .region 0,function.signature.result)),function.signature.effects,none⟩
+      function.namedExit.toList.map (fun id => (id,.rigid function.activationRegion .region 0,function.signature.result)),function.signature.effects,none⟩
       function.body function.signature.result
 
 end Glorious.Language.Typing

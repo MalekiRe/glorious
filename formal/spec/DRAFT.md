@@ -189,3 +189,28 @@ source continuation-pattern binding and proof-carrier type derivation are also
 incomplete. Runtime control authority, full snapshot simulation, source
 nonvacuity and global preservation/progress remain unproved. No compiler or
 library code or acceptance tests were changed or run.
+
+## Closure instances and continuation binding
+
+`lake build` passes all 32 jobs. Closure elaboration now publishes its actual
+type arguments and checks the corresponding ordinary `Instance`. Every source
+closure construction stores those arguments in its callable type and atom;
+runtime instantiation uses them for the signature, capture fields and body.
+The empty-argument-only source path is removed. A checked theorem extracts the
+same instance from every successful closure elaboration. A regression follows
+a captured reference region through the capture type, signature and executable
+borrow, including a numerically colliding callee-local region.
+
+All functions now declare their lexical activation-region binder. The source
+function context, named-exit type, structural typing and runtime entry consume
+that binder; anonymous bodies no longer inherit an unbound caller region.
+Handler continuation patterns use the ordinary executable parameter prologue,
+so their source bindings are introduced by execution. Structural operation-arm
+typing requires the lexical brand that clause entry actually instantiates.
+
+The remaining source audit still includes implicit capture discovery (notably
+ambient label names), correlated capture alternatives, polymorphic anonymous
+heads, generic/default inference and proof-carrier types. No theorem here proves
+that every legal source closure has an elaboration, or that every generated
+instance satisfies semantic admission. Constructive nonvacuity, control-state
+authority, snapshot simulation and global soundness remain open.

@@ -118,6 +118,7 @@ structure Function where
   captures : List Local
   signature : Signature
   body : Code
+  activationRegion : Identity
   namedExit : Option Identity
   deriving Repr, Inhabited
 

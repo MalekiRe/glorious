@@ -205,9 +205,7 @@ def EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
     BindsInputs program.declarations before.nextActivation before.world.nextRegion before.world.nextRegion
       withRegion inputs environment after ∧
     context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
-      (match function.namedExit with
-       | none => {}
-       | some label => ⟨[(label,before.world.nextRegion)],[(label,.label before.nextBrand)]⟩),false⟩ ∧
+      function.entryScope before.world.nextRegion before.nextBrand,false⟩ ∧
     (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
 
 def FreshNamedFrame (function : Function) (caller : Context) (brand region : Identity) : List Frame :=

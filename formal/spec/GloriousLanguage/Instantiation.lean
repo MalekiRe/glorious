@@ -93,6 +93,10 @@ def Function.instantiate (function : Function) (substitution : Substitution) : F
     signature := function.signature.instantiate substitution
     body := function.body.instantiate substitution }
 
+def Function.entryScope (function : Function) (region brand : Identity) : ScopeInstantiation :=
+  ⟨[(function.activationRegion,region)],
+    (match function.namedExit with | none => [] | some label => [(label,.label brand)])⟩
+
 def Instance (program : Program) (id : DeclId) (arguments : List Term) (function : Function) : Prop :=
   ∃ template declaration substitution,
     program.function id = some template ∧ program.declarations.function id = some declaration ∧
