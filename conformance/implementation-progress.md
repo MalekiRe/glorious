@@ -5,6 +5,39 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Shared runtime register-buffer reuse
+
+The unchanged float-shortest gate's allocation-limit failure was measured at
+12,448,630 work ticks: 11,775,719 charged elements came from ordinary call
+register buffers and 3,123,683 from mandatory-tail register buffers, together
+about 89% of its 16,777,216-element ceiling. Temporary allocation instrumentation
+was removed after locating these actual allocation sites.
+
+Cache 183 migrates the existing authoring-only empty-register pool into the
+shared invocation machinery. Direct, indirect/prepared, callable-destruction
+and mandatory-tail entries now use one function-keyed pool. Only cleared Vec
+backing is retained; every entry creates a fresh activation with its own native
+homes, source-storage brands, captures and prepared-receiver state. Normally
+returned frames and completed mandatory-tail frames contribute buffers, not
+live suspended or returning-resumption frames. Ordinary self-call tail
+recognition remains authoring-only; ordinary depth checks are unchanged.
+
+The focused direct/indirect and self/mutual tail tests pass with exact allocation
+ceilings and one-element-tighter rejection. New backing-pointer checks pass
+while proving activation and storage state are fresh. All 26 mandatory-tail
+tests pass, including source/native, borrow, cleanup, handler-destination and
+untrusted-artifact checks. The original float-parse source gate now passes in
+35.45 seconds with its original assertions and default limits. All six focused
+native-callable tests pass, including capture restoration, partial destruction,
+raw-heap transport, overwritten authority and explicit activation limits.
+The unchanged float-shortest follow-up now passes the former allocation ceiling
+but reaches `InstructionLimit { limit: 100000000 }` after 142.41 seconds. Its
+execution-cost requirement remains open; its original result assertions and
+limits are unchanged.
+No resource ceiling, allocation charge for newly materialized values, source
+assertion or safety proof was relaxed. Full language, library and self-hosted
+acceptance remain open.
+
 ## Vacant executable cleanup paths in recursive helpers
 
 The `float_shortest` source family reproduced G7042 in

@@ -2118,15 +2118,17 @@ pub struct VmExecutionLimits {
 /// Authoring-runtime measurements, not compiler semantic counters. Logical
 /// VM-budget charges and observed native backing extents are separate; neither
 /// is a Rust allocator census.
-/// The opt-in authoring runner can recycle caller-preserving self-tail calls
-/// and reuse cleared register buffers from normally returned callees;
-/// ordinary execution retains its existing call-depth behavior.
+/// Every program runner reuses cleared register buffers without retaining
+/// activation state. The opt-in authoring runner can additionally recycle
+/// caller-preserving self-tail calls; ordinary execution retains its existing
+/// call-depth behavior.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct VmAuthoringProfile {
     pub work_ticks: u64,
     pub charged_allocation_elements: u64,
     pub peak_call_depth: u32,
     pub recycled_tail_calls: u64,
+    /// Cleared backing reused by ordinary, destruction or mandatory-tail entry.
     pub reused_call_register_buffers: u64,
     pub inspected_tail_argument_elements: u64,
     pub native_memory: VmNativeMemoryProfile,
@@ -10694,6 +10696,36 @@ struct RuntimeRegisters {
     detached_captures: bool,
 }
 
+/// Only empty Vec backing is reusable across activations. Keep one stable
+/// entry per function, local to this execution; native homes, capture loans,
+/// lexical brands and continuation state always belong to a fresh frame.
+#[derive(Default)]
+struct RuntimeRegisterBuffers {
+    spare: BTreeMap<DefKey, Option<Vec<Option<VmValue>>>>,
+}
+
+impl RuntimeRegisterBuffers {
+    fn acquire(&mut self, function: &VmFunction, budget: &mut ExecutionBudget,
+        profile: Option<&mut VmAuthoringProfile>) -> Result<Vec<Option<VmValue>>, VmArtifactError> {
+        if let Some(values) = self.spare.get_mut(&function.definition).and_then(Option::take) {
+            if let Some(profile) = profile { profile.reused_call_register_buffers += 1; }
+            Ok(values)
+        } else {
+            budget.reserve_allocation(function.registers.len())?;
+            Ok(vec![None; function.registers.len()])
+        }
+    }
+
+    /// Call only after outgoing values and capture loans have been transferred.
+    /// The enclosing frame is still retired normally; nothing but its cleared
+    /// value-vector allocation enters the pool.
+    fn release(&mut self, definition: DefKey, registers: &mut RuntimeRegisters) {
+        let mut values = std::mem::take(&mut registers.values);
+        values.fill(None);
+        self.spare.entry(definition).or_default().get_or_insert(values);
+    }
+}
+
 impl RuntimeRegisters {
     fn as_slice(&self) -> &[Option<VmValue>] { &self.values }
 
@@ -16211,10 +16243,7 @@ fn execute_program_in_float_profile(
     // call stack and restores it on `Resume`.
     let mut definition = definition;
     let mut callers = borrowed_callers.as_deref_mut().map(std::mem::take).unwrap_or_default();
-    // One empty allocation per function, local to this execution. Keep map
-    // entries stable so warm calls do not allocate/remove bookkeeping nodes.
-    // Never retain homes, lexical brands, loans, or continuation state here.
-    let mut spare_registers = BTreeMap::<DefKey, Option<Vec<Option<VmValue>>>>::new();
+    let mut register_buffers = RuntimeRegisterBuffers::default();
     let mut handlers = Vec::<RuntimeHandlerFrame>::new();
     let mut resumption_returns = Vec::<RuntimeResumptionReturn>::new();
     let mut next_handler_id = 0u64;
@@ -18255,8 +18284,9 @@ fn execute_program_in_float_profile(
                 let values = arguments.iter().map(|argument| registers.copy_value(*argument, budget))
                     .collect::<Result<Vec<_>, _>>()?;
                 let native_return = registers.native_plan.as_ref().is_some_and(|plan| plan.native_return);
-                budget.reserve_allocation(target.registers.len())?;
-                let mut incoming = RuntimeRegisters::for_function_with_native_return(target, budget, native_return)?;
+                register_buffers.release(definition, &mut registers);
+                let backing = register_buffers.acquire(target, budget, profile.as_deref_mut())?;
+                let mut incoming = RuntimeRegisters::with_values(target, budget, native_return, backing)?;
                 for (index, value) in values.into_iter().enumerate() { incoming.install_argument(index, value); }
                 incoming.finish_native_writes(budget)?;
                 // No rebasing into a deeper caller index, no saved registers,
@@ -18339,14 +18369,7 @@ fn execute_program_in_float_profile(
                         limit: budget.limits.max_call_depth,
                     });
                 }
-                let callee_values = if let Some(profile) = profile.as_deref_mut()
-                    && let Some(values) = spare_registers.get_mut(callee).and_then(Option::take) {
-                    profile.reused_call_register_buffers += 1;
-                    values
-                } else {
-                    budget.reserve_allocation(callee_function.registers.len())?;
-                    vec![None; callee_function.registers.len()]
-                };
+                let callee_values = register_buffers.acquire(callee_function, budget, profile.as_deref_mut())?;
                 let mut incoming = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
                 for (index, value) in values.into_iter().enumerate() {
                     incoming[index] = Some(value);
@@ -18412,7 +18435,7 @@ fn execute_program_in_float_profile(
                     >= budget.limits.max_call_depth {
                     return Err(VmArtifactError::CallDepthLimit { limit: budget.limits.max_call_depth });
                 }
-                budget.reserve_allocation(callee_function.registers.len())?;
+                let backing = register_buffers.acquire(callee_function, budget, profile.as_deref_mut())?;
                 callers.push(RuntimeProgramCaller {
                     definition,
                     registers: std::mem::take(&mut registers),
@@ -18420,7 +18443,7 @@ fn execute_program_in_float_profile(
                     return_destination: *dst,
                 });
                 definition = callee;
-                registers = RuntimeRegisters::for_function(callee_function, budget)?;
+                registers = RuntimeRegisters::with_values(callee_function, budget, false, backing)?;
                 for (index, value) in values.into_iter().enumerate() {
                     registers.install_argument(index, value);
                 }
@@ -18617,14 +18640,7 @@ fn execute_program_in_float_profile(
                         limit: budget.limits.max_call_depth,
                     });
                 }
-                let callee_values = if let Some(profile) = profile.as_deref_mut()
-                    && let Some(values) = spare_registers.get_mut(&callee).and_then(Option::take) {
-                    profile.reused_call_register_buffers += 1;
-                    values
-                } else {
-                    budget.reserve_allocation(callee_function.registers.len())?;
-                    vec![None; callee_function.registers.len()]
-                };
+                let callee_values = register_buffers.acquire(callee_function, budget, profile.as_deref_mut())?;
                 let mut incoming = RuntimeRegisters::with_values(callee_function, budget, native_return, callee_values)?;
                 for (index, value) in values.into_iter().enumerate() {
                     incoming[index] = Some(value);
@@ -18745,14 +18761,7 @@ fn execute_program_in_float_profile(
                         UniqueReferenceTransfer::ToCaller,
                     )?;
                     let caller = callers.pop().expect("checked nonempty call stack");
-                    if profile.is_some() {
-                        // The returned value has already been transferred out.
-                        // Clear every slot before pooling only its Vec backing;
-                        // replacing the frame below releases all other state.
-                        let mut values = std::mem::take(&mut registers.values);
-                        values.fill(None);
-                        spare_registers.entry(definition).or_default().get_or_insert(values);
-                    }
+                    register_buffers.release(definition, &mut registers);
                     definition = caller.definition;
                     registers = caller.registers;
                     registers[caller.return_destination as usize] = Some(value);
@@ -18887,6 +18896,45 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn recycled_register_backing_does_not_retain_activation_or_storage_state() {
+        use super::*;
+        let function = VmFunction {
+            definition: DefKey(Digest::of_bytes(b"fresh-frame-recycled-backing")),
+            safety: Safety::Safe, unsafe_execution: false, nominal_copy_descriptors: vec![],
+            captures: 0, parameters: 0, registers: vec![VmType::I64],
+            instructions: vec![VmInstruction::ConstI64 { dst: 0, value: 42 }, VmInstruction::Return { value: 0 }],
+        };
+        let mut budget = ExecutionBudget {
+            native_memory: NativeMemory::default(), unsafe_execution: false,
+            limits: VmExecutionLimits { max_allocation_elements: 1, ..Default::default() },
+            instructions: 0, allocated_elements: 0,
+        };
+        let mut buffers = RuntimeRegisterBuffers::default();
+        let values = buffers.acquire(&function, &mut budget, None).unwrap();
+        let backing = values.as_ptr();
+        let mut registers = RuntimeRegisters::with_values(&function, &mut budget, false, values).unwrap();
+        let previous_activation = registers.activation.clone();
+        registers.values[0] = Some(VmValue::I64(42));
+        registers.source_storage.insert(0, 99);
+        registers.prepared_receivers.insert(0);
+        registers.pending_native.push(0);
+        buffers.release(function.definition, &mut registers);
+        drop(registers);
+        let values = buffers.acquire(&function, &mut budget, None).unwrap();
+        assert_eq!(values.as_ptr(), backing, "reuse must avoid a real backing allocation");
+        let fresh = RuntimeRegisters::with_values(&function, &mut budget, false, values).unwrap();
+        assert!(!fresh.activation.same(&previous_activation));
+        assert!(fresh.values.iter().all(Option::is_none));
+        assert!(fresh.source_storage.is_empty());
+        assert!(fresh.prepared_receivers.is_empty());
+        assert!(fresh.pending_native.is_empty());
+        assert!(fresh.native_homes.is_empty());
+        assert!(fresh.machine_scalars.is_empty());
+        assert!(fresh.capture_environment.is_none());
+        assert_eq!(budget.allocated_elements, 1);
+    }
+
     #[test]
     fn cleanup_vacancy_uses_may_residents_without_erasing_exposed_or_live_paths() {
         use super::*;

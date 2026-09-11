@@ -1308,7 +1308,7 @@ fn authoring_tuple_runner_preserves_results_types_and_existing_execution_limits(
 }
 
 #[test]
-fn authoring_reuses_only_empty_returned_register_buffers_within_one_execution() {
+fn runtime_reuses_only_empty_returned_register_buffers_within_one_execution() {
     for indirect in [false, true] {
         let entry = DefKey(Digest::of_bytes(b"register-pool-entry"));
         let first = DefKey(Digest::of_bytes(b"register-pool-first"));
@@ -1364,6 +1364,7 @@ fn authoring_reuses_only_empty_returned_register_buffers_within_one_execution() 
         let program = decode_and_verify_program(&encode_program(&candidate)).unwrap();
         let limits = VmExecutionLimits { max_allocation_elements: expected_allocation, ..Default::default() };
         for _ in 0..2 {
+            assert_eq!(program.run_i64_with_limits(limits).unwrap(), 42);
             let (result, profile) = program.run_i64_for_authoring(limits).unwrap();
             assert_eq!(result, 42);
             assert_eq!(profile.charged_allocation_elements, expected_allocation);
@@ -1372,10 +1373,79 @@ fn authoring_reuses_only_empty_returned_register_buffers_within_one_execution() 
             assert_eq!(profile.peak_call_depth, 2);
         }
         assert_eq!(program.run_i64().unwrap(), 42);
-        assert!(matches!(program.run_i64_with_limits(limits), Err(VmArtifactError::AllocationLimit { .. })));
+        assert!(matches!(program.run_i64_with_limits(VmExecutionLimits {
+            max_allocation_elements: expected_allocation - 1, ..limits
+        }), Err(VmArtifactError::AllocationLimit { .. })));
         assert!(matches!(program.run_i64_for_authoring(VmExecutionLimits {
             max_allocation_elements: expected_allocation - 1, ..limits
         }), Err(VmArtifactError::AllocationLimit { .. })));
+    }
+}
+
+#[test]
+fn mandatory_tail_reuses_empty_buffers_but_charges_new_frames_and_arguments() {
+    for mutual in [false, true] {
+        for count in [2, 128] {
+            let entry = DefKey(Digest::of_bytes(b"tail-buffer-entry"));
+            let first = DefKey(Digest::of_bytes(b"tail-buffer-first"));
+            let second = DefKey(Digest::of_bytes(b"tail-buffer-second"));
+            let repeat = |definition, callee| VmFunction {
+                definition, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+                nominal_copy_descriptors: vec![], captures: 0, parameters: 1,
+                registers: vec![VmType::I64, VmType::I64, VmType::I64, VmType::Bool,
+                    VmType::Bool, VmType::I64, VmType::I64, VmType::I64],
+                instructions: vec![
+                    VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                    // Every invocation must see a fresh empty scratch slot.
+                    VmInstruction::IsInitialized { dst: 3, base: 2, fields: vec![] },
+                    VmInstruction::BranchBool { condition: 3, then_target: 3, else_target: 4 },
+                    VmInstruction::Trap,
+                    VmInstruction::ConstI64 { dst: 1, value: 0 },
+                    VmInstruction::Store { dst: 2, src: 1 },
+                    VmInstruction::CompareI64 { dst: 4, left: 0, right: 2, op: grandiose_stage0::VmCompare::Equal },
+                    VmInstruction::BranchBool { condition: 4, then_target: 12, else_target: 8 },
+                    VmInstruction::ConstI64 { dst: 5, value: 1 },
+                    VmInstruction::SubI64 { dst: 6, left: 0, right: 5 },
+                    VmInstruction::TailCallOwned { callee, arguments: vec![6] },
+                    VmInstruction::Trap,
+                    VmInstruction::ConstI64 { dst: 7, value: 42 },
+                    VmInstruction::Return { value: 7 },
+                ],
+            };
+            let mut functions = BTreeMap::from([
+                (entry, VmFunction {
+                    definition: entry, safety: grandiose_stage0::Safety::Safe, unsafe_execution: false,
+                    nominal_copy_descriptors: vec![], captures: 0, parameters: 0,
+                    registers: vec![VmType::I64], instructions: vec![
+                        VmInstruction::DeclareResult { result: VmType::I64, returns: true },
+                        VmInstruction::ConstI64 { dst: 0, value: count },
+                        VmInstruction::TailCallOwned { callee: first, arguments: vec![0] },
+                    ],
+                }),
+                (first, repeat(first, if mutual { second } else { first })),
+            ]);
+            if mutual { functions.insert(second, repeat(second, first)); }
+            let mut candidate = CandidateVmProgram {
+                schema: grandiose_stage0::STAGE0_VM_SCHEMA, runtime_manifest: None, host_capabilities: vec![],
+                entry, callable_environments: BTreeMap::new(), fingerprint: Digest::of_bytes(b"stale"), functions,
+            };
+            candidate.fingerprint = candidate.computed_fingerprint();
+            let program = decode_and_verify_program(&encode_program(&candidate)).unwrap();
+            let expected = 1 + (if mutual { 16 } else { 8 }) + count as u64 + 1;
+            let limits = VmExecutionLimits { max_call_depth: 1, max_allocation_elements: expected, ..Default::default() };
+            for _ in 0..2 {
+                assert_eq!(program.run_i64_with_limits(limits).unwrap(), 42);
+                let (result, profile) = program.run_i64_for_authoring(limits).unwrap();
+                assert_eq!(result, 42);
+                assert_eq!(profile.charged_allocation_elements, expected);
+                assert_eq!(profile.peak_call_depth, 1);
+                assert_eq!(profile.recycled_tail_calls, count as u64 + 1);
+                assert_eq!(profile.reused_call_register_buffers, count as u64 - u64::from(mutual));
+            }
+            assert!(matches!(program.run_i64_with_limits(VmExecutionLimits {
+                max_allocation_elements: expected - 1, ..limits
+            }), Err(VmArtifactError::AllocationLimit { .. })));
+        }
     }
 }
 

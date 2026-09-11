@@ -1,5 +1,24 @@
 # Authoring runtime: physical allocation measurements
 
+## Shared empty register backing (cache 183)
+
+The program engine now uses the same function-keyed empty-buffer pool in normal
+and authoring execution. Direct, indirect/prepared, callable-destruction and
+mandatory-tail entries acquire only cleared Vec backing. Mandatory tail calls
+can release their outgoing buffer before acquiring the target's buffer; both
+self and mutual recursion still construct fresh activation/storage products.
+The authoring-only optimization of ordinary self-calls remains opt-in and does
+not change ordinary call-depth behavior.
+
+New buffers and all argument/value materialization remain charged. The buffer
+counter now includes reuse at mandatory-tail and destruction entry. The exact
+allocation regression exercises direct/indirect reuse and 2/128-step self and
+mutual mandatory-tail cycles, including a one-element-tighter rejection. A
+separate unit probe checks actual backing-pointer reuse with fresh activation,
+source-storage and prepared-receiver state. These are not allocator-wide or
+native backing measurements; historical physical tables below are not rerun or
+recertified by this checkpoint.
+
 ## Terminal value-CFG checkpoint
 
 A36's frozen report `target/compiler-check/run-bvgwj_9n/report.json` passes all

@@ -2874,3 +2874,25 @@ their preservation proofs to cleanup of a closure that was never constructed on
 that path. Real invocation, destruction, mutation and mandatory-tail carrier
 obligations remain unchanged. Cache 182 and verifier 54 record this correction;
 the portable instruction encoding and native ABI do not change.
+
+## Empty register backing and fresh runtime activations
+
+The shared program engine pools one cleared register-vector allocation per
+function within one execution. Ordinary direct, indirect, prepared, destruction
+and mandatory-tail entries acquire backing through the same runtime pool.
+Normally returning and mandatory-tail frames release only their cleared value
+vectors after outgoing values and capture loans have been transferred. Suspended
+or returning-resumption frames are not pooled by that transition.
+
+Every invocation still constructs a fresh RuntimeRegisters product. Activation
+identity, source-storage brands, native homes, capture restoration, prepared
+receivers and continuation state never enter the backing pool. Self-tail and
+mutually tail-recursive calls therefore reuse bytes without retaining the
+outgoing activation's storage authority. The opt-in authoring optimization of
+ordinary self-calls remains separate; ordinary call-depth behavior is unchanged.
+
+New register backing and all existing argument/value materialization retain
+their allocation charges. Only genuinely reused backing avoids another charge;
+there is no limit increase, counter reset or exemption for library code.
+Cache 183 records the runtime correction. Executable proofs, encoding and native
+ABI remain unchanged.
