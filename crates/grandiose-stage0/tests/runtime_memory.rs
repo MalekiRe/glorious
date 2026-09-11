@@ -412,7 +412,8 @@ fn mandatory_tail_rejects_reference_mutation_hidden_in_an_invoked_callback() {
     for invoke in ["action()", "invoke(action)"] {
         let source = format!(r#"
             struct Storage {{ pointer: *mut i64 }}
-            fn invoke<F>(action: F) where F: Fn<(), Output = ()> {{ action() }}
+            fn invoke<F>(action: F) / {{ <F as Fn<()>>::Effects }}
+                where F: Fn<(), Output = ()> {{ action() }}
             fn finish(storage: &Storage) -> i64 {{ unsafe {{ read(as_const(storage.pointer)) }} }}
             fn relay(storage: &mut Storage) -> i64 {{
                 let mut local = 42;

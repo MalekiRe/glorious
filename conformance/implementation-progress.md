@@ -5,6 +5,38 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Effect-polymorphic control and pointer-safety fixtures
+
+The nine G4155 failures recorded immediately below came from obsolete fixture
+contracts, not a rejection of valid effect forwarding. Language sections 8.1
+and 10.2 give `Fn::Effects` no default and require permission for the invoked
+row; an omitted function row is closed empty. Cache 135 already removed the
+old implicit-purity behavior, with a dedicated negative regression. A bound
+`F:Fn<(),Output=()>` alone cannot justify invoking F from an empty-row function.
+
+The six shared/control fixture declarations and the runtime-memory callback
+helper now forward `{ <F as Fn<()>>::Effects }` explicitly. They still admit
+arbitrary callback effects; they do not acquire an `Effects={}` restriction.
+All original unknown-prefix, label-address, return-payload, dependency-seal and
+pointer-safety assertions are unchanged. All **42 control tests pass**. The
+previously blocked callback mutation test now reaches and passes its original
+G7042 executable frame-independence rejection for both direct and helper-driven
+invocation at O0/O2.
+
+A new integration test checks two-level generic forwarding with both a pure
+callback and a genuinely effectful callback handled by its caller, through
+fresh/decoded VM execution at O0/O2. The same effectful invocation without a
+handler rejects G4155. The old missing-permission generic declaration remains
+an explicit negative, even when its concrete caller supplies a pure function.
+The unchanged `omitted_fn_effect_equalities_remain_symbolic_not_pure` Core
+regression also passes. This repairs test admission so the intended analyses
+are actually exercised; no production code, cache generation, effect default,
+test assertion or execution budget changes.
+
+The iterator's raw-memory control/provenance work and isolated I/O timeout remain
+open. These focused results do not establish full compiler, standard-library or
+subsequent self-hosted acceptance.
+
 ## Returned owned products after partial field stores
 
 Cache 189 repairs two connected boundaries in the shared return-provenance path.

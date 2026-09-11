@@ -643,7 +643,8 @@ impl Fixture {
 
 const AFTER_UNKNOWN: &str = "#![no_std]
     fn relay<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
-    fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
+    fn select<F>(observe:F) -> i64 / { <F as Fn<()>>::Effects }
+        where F:Fn<(),Output=()> { observe(); relay(42,@select) }";
 
 #[test]
 fn stored_reference_liveness_follows_live_aliases_into_ordinary_and_captured_storage() {
@@ -925,7 +926,8 @@ fn observed_label_addresses_retain_input_identity_through_structural_callable_vi
 fn an_unknown_prefix_cannot_discard_an_observed_label_address_obligation() {
     let fixture = Fixture::new("#![no_std]
         fn borrower(value:(i64) -> !) -> ! { { let reference = &value; }; value(42) }
-        pub fn caller<F>(observe:F) -> i64 where F:Fn<(),Output=()> { observe(); borrower(@caller) }");
+        pub fn caller<F>(observe:F) -> i64 / { <F as Fn<()>>::Effects }
+            where F:Fn<(),Output=()> { observe(); borrower(@caller) }");
     let inputs = fixture.inputs();
     let summaries = derive_control_summaries(&inputs, Default::default());
     assert!(!summaries.get(CallableBrand::Named(fixture.names["caller"])).unwrap().is_complete());
@@ -1003,7 +1005,8 @@ fn an_unresolved_label_operand_does_not_gain_a_destination_from_never() {
     let fixture = Fixture::new(
         "#![no_std]
         fn relay<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
-        fn select<F,L>(observe:F, target:L) -> ! where F:Fn<(),Output=()>, L:Label<i64> {
+        fn select<F,L>(observe:F, target:L) -> ! / { <F as Fn<()>>::Effects }
+            where F:Fn<(),Output=()>, L:Label<i64> {
             observe(); relay(42,target)
         }",
     );
@@ -1108,7 +1111,8 @@ fn abstract_label_payload_keeps_its_instantiated_input_type() {
     let fixture = Fixture::new(
         "#![no_std]
         fn relay<T,L>(value:T, target:L) -> ! where L:Label<T> { target(value) }
-        fn select<F>(observe:F, value:&i64) -> &i64 where F:Fn<(),Output=()> {
+        fn select<F>(observe:F, value:&i64) -> &i64 / { <F as Fn<()>>::Effects }
+            where F:Fn<(),Output=()> {
             observe(); relay(value,@select)
         }",
     );
@@ -1138,7 +1142,8 @@ fn normal_return_payloads_project_captured_and_explicit_inputs() {
             let read = move (target) { (target,) };
             let alias = read(); keep(alias); 42
         }
-        fn after<F>(observe:F, value:&i64) -> &i64 where F:Fn<(),Output=()> {
+        fn after<F>(observe:F, value:&i64) -> &i64 / { <F as Fn<()>>::Effects }
+            where F:Fn<(),Output=()> {
             observe(); keep(value)
         }");
     let inputs = fixture.inputs();
@@ -1169,7 +1174,8 @@ fn normal_return_payloads_project_captured_and_explicit_inputs() {
 #[test]
 fn an_unconditional_coverage_gap_retains_observed_captured_return_dependencies() {
     let fixture = Fixture::new("#![no_std]
-        fn select<F>(observe:F) -> i64 where F:Fn<(),Output=()> {
+        fn select<F>(observe:F) -> i64 / { <F as Fn<()>>::Effects }
+            where F:Fn<(),Output=()> {
             observe();
             let target = @select;
             let read = move (target) { target };

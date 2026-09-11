@@ -34,6 +34,30 @@ fn rejects(source: &str, codes: &[&str]) {
 }
 
 #[test]
+fn unspecified_callback_effects_are_forwarded_not_defaulted_to_empty() {
+    let prefix = r#"#![no_std]
+        effect Read { read() -> i64; }
+        fn pure() -> i64 { 42 }
+        fn effectful() -> i64 / Read { Read::read() }
+        fn invoke<F>(action: F) -> i64 / { <F as Fn<()>>::Effects }
+            where F: Fn<(),Output=i64> { action() }
+        fn relay<F>(action: F) -> i64 / { <F as Fn<()>>::Effects }
+            where F: Fn<(),Output=i64> { invoke(action) }
+    "#;
+    accepts(&format!("{prefix} pub fn main() -> i64 {{ relay(pure) }}"));
+    accepts(&format!("{prefix} pub fn main() -> i64 {{
+        handle relay(effectful) {{ Read::read() => 42 }}
+    }}"));
+    rejects(&format!("{prefix} pub fn main() -> i64 {{ relay(effectful) }}"), &["G4155"]);
+    // Preserve the rejected pre-migration contract. Even when one caller
+    // supplies a pure function, generic checking may not invent F::Effects={}
+    // for a declaration that admits arbitrary effectful callables as well.
+    rejects(&format!("{prefix}
+        fn concealed<F>(action: F) -> i64 where F: Fn<(),Output=i64> {{ action() }}
+        pub fn main() -> i64 {{ concealed(pure) }}"), &["G4155"]);
+}
+
+#[test]
 fn family_and_operation_projection_contracts_are_lexical() {
     accepts(r#"#![no_std]
         trait Source { type Item; }
