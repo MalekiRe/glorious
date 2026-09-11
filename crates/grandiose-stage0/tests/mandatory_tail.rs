@@ -47,6 +47,38 @@ fn run_native(source: &str, optimization: u8) -> i64 {
 }
 
 #[test]
+fn mandatory_tail_retains_incoming_references_after_recursive_short_circuit_helpers() {
+    for predicate in ["value < 48 or { value > 57 }", "value >= 48 and { value <= 57 }"] {
+        let source = format!(r#"
+            fn scan(value: u8, remaining: i64) -> i64 {{
+                handle remaining == 0 {{
+                    true => 0,
+                    false => handle {predicate} {{
+                        true => 1,
+                        false => tail scan(value, remaining - 1),
+                    }},
+                }}
+            }}
+            fn finish(value: &i64) -> i64 {{ *value }}
+            fn relay(value: &i64, byte: u8) -> i64 {{
+                scan(byte, 2);
+                tail finish(value)
+            }}
+            pub fn main() -> i64 {{
+                let value = 42;
+                relay(&value, 0);
+                relay(&value, 99);
+                relay(&value, 50)
+            }}
+        "#);
+        let artifact = compile(&source).unwrap_or_else(|error| panic!("{source}: {error:#?}")).artifact.unwrap();
+        assert_eq!(artifact.run_i64().unwrap(), 42);
+        assert_eq!(decode_and_verify_program(&artifact.canonical_bytes()).unwrap().run_i64().unwrap(), 42);
+        for optimization in [0, 2] { assert_eq!(run_native(&source, optimization), 42); }
+    }
+}
+
+#[test]
 fn mandatory_tail_retains_incoming_references_after_pure_branching_helpers() {
     for helper in [
         "fn inspect(value: &i64) -> Result<i64, ()> { handle *value < 1 { true => return(Result::Err(()), @inspect), false => () }; Result::Ok(1) }",

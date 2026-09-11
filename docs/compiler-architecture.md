@@ -2856,3 +2856,21 @@ no new permissive storage matcher or alternate lifetime inventory is introduced.
 The remaining tuple-style enum-constructor contextual check now uses the same
 directional relation as record-style variants. Cache 180 changes source checking
 and forwarding construction; executable encoding and native ABI are unchanged.
+
+## Executable cleanup vacancy and possible residents
+
+The bytecode control verifier uses its existing may-initialized resident fact
+when refining a whole-slot initialization probe. A never-defined SSA carrier
+and a consumed carrier remain distinct for readability and source storage
+liveness, but both can prove vacancy; their join can do so only when no incoming
+path may supply a resident. Missing definite-readability evidence alone never
+proves vacancy. Previously exposed addresses still prevent this local inference,
+and a possible initialized predecessor retains the cleanup path.
+
+This repairs the authoritative control worklist consumed by executable helper
+memory summaries, rather than assigning harmless behavior to a destructor whose
+input is unknown. In particular, recursive short-circuit helpers no longer lose
+their preservation proofs to cleanup of a closure that was never constructed on
+that path. Real invocation, destruction, mutation and mandatory-tail carrier
+obligations remain unchanged. Cache 182 and verifier 54 record this correction;
+the portable instruction encoding and native ABI do not change.

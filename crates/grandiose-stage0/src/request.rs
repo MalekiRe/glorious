@@ -383,7 +383,8 @@ pub const STAGE0_INTERFACE_GENERATION: u32 = 22;
 // Cache 178 proves helper-result independence under per-input reference hypotheses.
 // Cache 179 separates coercion shape inference from directional region constraints.
 // Cache 180 preserves checked array input views without rewriting value producers.
-pub const STAGE0_CACHE_GENERATION: u32 = 181;
+// Cache 182 uses executable may-resident facts to prove vacant cleanup paths.
+pub const STAGE0_CACHE_GENERATION: u32 = 182;
 pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 27 shares checked signed/radix pattern parsing and rounds f32
 // patterns directly at f32 precision, without an intermediate f64 parse.
@@ -415,7 +416,9 @@ pub const STAGE0_BYTECODE_GENERATION: u32 = 77;
 // Verifier 49 closes executable outward-operation edges and callee return states.
 // Verifier 50 transports and invalidates executed resident receiver permissions.
 // Verifier 51 closes ordered local-resumption trace dependencies before publication.
-pub const STAGE0_VERIFIER_GENERATION: u32 = 53;
+// Verifier 54 distinguishes never-defined or consumed vacant slots from
+// possibly initialized and exposed storage when checking cleanup branches.
+pub const STAGE0_VERIFIER_GENERATION: u32 = 54;
 
 impl CompilerBuildIdentity {
     /// Construct the complete generation identity for this Rust-hosted stage.

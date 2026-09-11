@@ -308,6 +308,40 @@ fn mandatory_tail_preserves_incoming_memory_across_proven_short_circuit_callback
 }
 
 #[test]
+fn mandatory_tail_rejects_mutation_in_closed_short_circuit_callbacks() {
+    for invoke in [
+        "value >= 48 and { unsafe { write(destination, pointer) }; true }",
+        "invoke(() -> Bool { unsafe { write(destination, pointer) }; true })",
+    ] {
+        let source = format!(r#"
+            struct Storage {{ pointer: *mut i64 }}
+            fn invoke<F>(action: F) -> Bool where F: Fn<(), Output = Bool, Effects = {{}}> {{ action() }}
+            fn finish(storage: &Storage) -> i64 {{ unsafe {{ read(as_const(storage.pointer)) }} }}
+            fn relay(storage: &mut Storage, value: u8) -> i64 {{
+                let mut local = 42;
+                let pointer = unsafe {{ as_raw_unique(&mut local) }};
+                let destination = unsafe {{ as_raw_unique(&mut storage.pointer) }};
+                let selected = {invoke};
+                handle selected {{ true => (), false => () }};
+                tail finish(storage)
+            }}
+            pub fn main() -> i64 {{
+                let mut storage = Storage {{ pointer: unsafe {{ null<i64>() }} }};
+                relay(&mut storage, 50)
+            }}
+        "#);
+        for optimization in ["0", "2"] {
+            let mut input = request(&source);
+            input.codegen_options.insert("optimization-level".into(), optimization.into());
+            let diagnostics = StageZeroCompiler::new().compile(input)
+                .expect_err("vacant cleanup cannot hide executed callback mutation").diagnostics();
+            assert!(diagnostics.iter().any(|diagnostic| diagnostic.code == "G7042"
+                && diagnostic.message.contains("no frame-independent provenance proof")), "{diagnostics:#?}");
+        }
+    }
+}
+
+#[test]
 fn mandatory_tail_rejects_reference_mutation_hidden_in_an_invoked_callback() {
     for invoke in ["action()", "invoke(action)"] {
         let source = format!(r#"

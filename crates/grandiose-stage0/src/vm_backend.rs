@@ -9265,8 +9265,14 @@ fn verify_function_control_with_hypotheses(function: &VmFunction, check_return_f
                 }
                 if let Some(VmInstruction::IsInitialized { dst, base, fields }) = pc.checked_sub(1).and_then(|previous| function.instructions.get(previous))
                     && dst == condition && previous_instruction == pc.checked_sub(1) {
+                    // Readability distinguishes never-defined SSA storage
+                    // from a consumed resident. Either can be vacant, also
+                    // after their join, but only the existing may-resident
+                    // fact proves that no predecessor supplied a value.
+                    // Exposed addresses still forbid this local inference.
                     definitely_empty = fields.is_empty() && !states.address_exposed[*base as usize]
-                        && states.registers[*base as usize] == Some(false);
+                        && (states.registers[*base as usize] == Some(false)
+                            || !states.may_initialized[*base as usize]);
                     definitely_present = fields.is_empty() && !states.address_exposed[*base as usize]
                         && states.registers[*base as usize] == Some(true);
                     then_states[*base as usize] = Some(true);
@@ -18881,6 +18887,60 @@ impl ExecutionBudget {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cleanup_vacancy_uses_may_residents_without_erasing_exposed_or_live_paths() {
+        use super::*;
+        let callable = VmType::Callable {
+            shared_receiver: true, unique_receiver: true, safety: Safety::Safe,
+            parameters: vec![], result: Box::new(VmType::Unit), effects: Box::default(),
+        };
+        for (prefix, preserving) in [
+            (vec![], true),
+            // A never-defined path joins a consumed path. Neither holds a
+            // resident, even though the readability join is unknown.
+            (vec![
+                VmInstruction::BranchBool { condition: 0, then_target: 2, else_target: 5 },
+                VmInstruction::Move { dst: 2, src: 1 },
+                VmInstruction::Move { dst: 1, src: 2 },
+                VmInstruction::Jump { target: 5 },
+            ], true),
+            // The same readability join must not erase a possible resident.
+            (vec![
+                VmInstruction::BranchBool { condition: 0, then_target: 2, else_target: 4 },
+                VmInstruction::Move { dst: 2, src: 1 },
+                VmInstruction::Jump { target: 4 },
+            ], false),
+            // Consuming an exposed slot does not retract its aliases.
+            (vec![
+                VmInstruction::Move { dst: 2, src: 1 },
+                VmInstruction::Borrow { dst: 5, src: 2, fields: vec![], unique: false, reborrow: false },
+                VmInstruction::Move { dst: 1, src: 2 },
+            ], false),
+        ] {
+            let mut instructions = vec![VmInstruction::DeclareResult { result: VmType::Unit, returns: true }];
+            instructions.extend(prefix);
+            let probe = instructions.len() as u32;
+            instructions.extend([
+                VmInstruction::IsInitialized { dst: 3, base: 2, fields: vec![] },
+                VmInstruction::BranchBool { condition: 3, then_target: probe + 2, else_target: probe + 4 },
+                VmInstruction::DestroyCallable { dst: 4, value: 2 },
+                VmInstruction::Return { value: 4 },
+                VmInstruction::ConstUnit { dst: 4 },
+                VmInstruction::Return { value: 4 },
+            ]);
+            let function = VmFunction {
+                definition: DefKey(Digest::of_bytes(b"cleanup-vacancy-may-residents")),
+                safety: Safety::Safe, unsafe_execution: false, nominal_copy_descriptors: vec![],
+                captures: 0, parameters: 2,
+                registers: vec![VmType::Bool, callable.clone(), callable.clone(), VmType::Bool,
+                    VmType::Unit, VmType::Reference { unique: false, referent: Box::new(callable.clone()) }],
+                instructions,
+            };
+            let control = verify_function_control(&function, true, false, &Default::default()).unwrap();
+            assert_eq!(control.preserves_independent_frame_memory, preserving, "{:#?}", function.instructions);
+        }
+    }
+
     #[test]
     fn exposure_tracks_borrowed_capture_storage_without_resetting_history() {
         use super::*;

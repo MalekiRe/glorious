@@ -5,6 +5,41 @@ implementation work, not completed acceptance families or overall conformance.
 The scenarios in `cases.tsv` remain planned until their complete required
 execution and evidence contracts are implemented.
 
+## Vacant executable cleanup paths in recursive helpers
+
+The `float_shortest` source family reproduced G7042 in
+`float_shortest_search`: its digit-vector input lost its frame-independence
+proof after a round-trip parse. Tracing the executable memory summaries found
+the first unsupported operation in the parser's recursive short-circuit
+scanners: cleanup of a generated closure on a path where that closure had
+never been initialized. A reduced recursive Boolean scanner reproduced the
+same rejection in its caller, independently of floating-point code.
+
+Cache 182 / verifier 54 repairs the existing bytecode control worklist. A
+whole-slot initialization probe consumes the authoritative may-resident fact
+as well as definite readability. Never-defined and consumed vacant paths can
+join without inventing a possible destructor input. A possibly initialized
+predecessor and an exposed slot still retain their cleanup obligations.
+No alternate proof map, source-name exception, destructor assumption or relaxed
+mandatory-tail carrier rule is introduced.
+
+The reduced source regression passes fresh/decoded VM and LLVM O0/O2, exercising
+both short-circuit operators and both operand outcomes. The direct verifier
+regression distinguishes never-defined vacancy, vacant joins, possibly
+initialized joins and consumed-but-exposed storage. All five existing direct,
+helper, raw-write and raw-copy frame-pointer rejection cases pass. New closed
+callback cases reject both short-circuit and generic-helper mutation with G7042
+at O0/O2. The older callback negative remains unchanged and fails earlier with
+G4155/G7007: its generic invocation has an unresolved associated effect row,
+so it does not currently reach the executable rejection it asserts.
+The unchanged `standard_library_sources::float_shortest` follow-up now passes
+compilation and independent canonical-bytecode verification, then fails during
+execution with `AllocationLimit { limit: 16777216 }` (124.51 seconds for the
+test). The original G7042 rejection is repaired; the source family's original
+assertions and default budgets are unchanged. Runtime allocation cost remains
+an acceptance obligation. No full language, standard-library or self-hosted
+completion is claimed.
+
 ## Manifest-selected literal materialization
 
 Cache 181 replaces contextual, spelling-based literal wrapper discovery with
