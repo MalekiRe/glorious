@@ -13,19 +13,6 @@ theorem List.map_eq_self_of {α : Type} (f : α → α) (values : List α)
       simp only [List.map_cons,fixed first List.mem_cons_self,
         ih (fun value member => fixed value (List.mem_cons_of_mem _ member))]
 
-theorem Term.child_sizeOf {term child : Term} (member : child ∈ term.children) :
-    sizeOf child < sizeOf term := by
-  cases term <;> simp only [Term.children,List.mem_cons,List.mem_append,List.not_mem_nil] at member
-  all_goals simp_wf
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals first
-  | contradiction
-  | subst child; omega
-  | have smaller := List.sizeOf_lt_of_mem member; omega
-
 theorem Term.mapChildren_children (f : Term → Term) (term : Term) :
     (term.mapChildren f).children = term.children.map f := by
   cases term <;> simp only [Term.mapChildren,Term.children,List.map_cons,List.map_nil,List.map_append]

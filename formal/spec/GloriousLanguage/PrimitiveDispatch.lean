@@ -74,7 +74,7 @@ theorem AtomStep.primitive_progress {program : Kernel.Program} {before : State}
     (access : typingContext.static.unsafeAllowed = context.unsafeAllowed) :
     ∃ after, AtomStep program before none after := by
   cases typed with
-  | @primitive _ _ _ binding substitution signature member identity instantiated signatureEqual
+  | @primitive _ _ _ binding substitution signature member identity instantiated argumentKinds signatureEqual
       scalarSignature places allowed effects =>
       have unsafeEqual : signature.unsafeAllowed = binding.signature.unsafeAllowed := by
         rw [signatureEqual]
@@ -101,7 +101,7 @@ theorem AtomStep.primitive_typed {program : Kernel.Program} {before after : Stat
       Typing.PlacesType program.declarations typingContext operands signature.parameters := by
   obtain ⟨binding,addresses,member,identity,resolved,allowed,rfl,rfl⟩ := step.primitive_cases task
   cases typed with
-  | primitive typedMember typedId instantiated signatureEqual scalarSignature places unsafeAllowed effects =>
+  | primitive typedMember typedId instantiated argumentKinds signatureEqual scalarSignature places unsafeAllowed effects =>
       have same := valid.manifest.binding_unique member typedMember (identity.trans typedId.symm)
       subst_vars
       exact ⟨_,_,_,_,rfl,rfl,instantiated,rfl,rfl,scalarSignature,resolved,places⟩

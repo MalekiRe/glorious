@@ -19,10 +19,6 @@ theorem RegionPermutation.substitution_append (permutation : RegionPermutation) 
     permutation.substitution (first ++ second) = permutation.substitution first ++ permutation.substitution second := by
   simp only [RegionPermutation.substitution,List.map_append]
 
-theorem Program.effect_lookup {program : Program} {id : DeclId} {effect : EffectDefinition}
-    (found : program.effect id = some effect) : program.lookup id = some (.effect effect) := by
-  unfold Program.effect at found
-  split at found <;> simp_all
 
 theorem DomainValid.permute {program : Program} (valid : ProgramWellFormed program) {context : Context} {term : Term}
     (domain : DomainValid program context term) (permutation : RegionPermutation) :

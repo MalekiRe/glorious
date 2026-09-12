@@ -150,7 +150,7 @@ theorem Instantiates.kind_transport {program : Program} {context : Context}
       exact .cons (head.trans typed.term_kind.symm)
         (ih (fun term present => kinded term (List.mem_cons_of_mem _ present)) changeArguments)
 
-private theorem ListRel.split_append {α β : Type} {relation : α → β → Prop}
+theorem ListRel.split_append {α β : Type} {relation : α → β → Prop}
     {first last : List α} {otherFirst otherLast : List β}
     (related : ListRel relation (first ++ last) (otherFirst ++ otherLast))
     (lengths : first.length = otherFirst.length) :

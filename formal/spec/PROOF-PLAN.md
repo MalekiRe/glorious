@@ -566,18 +566,73 @@ their retained invocation lifetime; whole-frame preservation remains open.
 
 Positive definitional conversion now preserves full kinding, including row
 equivalence and contextual reduction. Logical predicate transport uses one
-template's actual capture-admissible substitutions and pointwise lexical
-equality. Entailment, reference lifetime subtyping, type-outlives and RunsIn
-consume that evidence; quantified assumptions have actual instantiation
-elimination. Projection domains transport once the destination substitution
-is capture-admissible. This last condition is not generally conversion-stable
-under syntactic capture rejection: hygienic predicate substitution and general
-declaration predicate-kinding admission remain actual producer repairs, before
-the still-open global confluence theorem. The logical/runtime-equivariance
-dependency gate passed (37 jobs).
+template's actual substitutions and pointwise lexical equality. Entailment,
+reference lifetime subtyping, type-outlives and RunsIn consume that evidence.
+The original logical/runtime-equivariance dependency gate passed (37 jobs).
 
 The combined frozen suspension, pattern/context, logical-evidence and runtime
 equivariance checkpoint passed its targeted dependency gate (90 jobs).
+
+The subsequent predicate boundary repairs the actual substitution operation,
+not just a capture-admission side condition. Quantified binders are freshened
+from finite lexical source/substitution support before caller values are
+inserted unchanged. Each default masks and renames only preceding binders;
+the previous whole-list default mask could incorrectly hide an outer name
+that matched a later local binder. Runtime-region renaming commutes with this
+actual operation because generative runtime atoms do not determine lexical
+fresh names. The former arbitrary-term-map commutation claim is removed.
+
+Published declaration requirements and invocation predicates now require
+`ConstraintKinded` in their real declaration scopes, including owner/item
+parameters and recursively ordered quantified defaults. This is kind
+admission, not evidence that a predicate is true. One support-sensitive term
+transport proof is consumed by the existing `Kinding.substitute` API and by
+general finite-support predicate alpha-renaming. `PredicateSubstitutionKinding`
+derives both the checked substitution graph and the kinding of the actual
+hygienic result for every predicate constructor. No output-kind certificate,
+global caller-name freshness, or eager normalization premise is used.
+`PredicateAlpha` derives argument-order/kind and unchanged-caller-value
+correspondence for the actual fresh quantified output binders.
+
+Universal elimination now derives its substitution graph from source predicate
+admission and actual ordered arguments. `PredicateAdmission` consumes published
+admission at actual implementation selection, projection domains, nominal and
+effect domains, and function/operation generic instances. Projection-domain
+conversion no longer requires caller-supplied target capture admissibility:
+the actual recursively masked kind checks are derived from conversion of the
+existing raw environments. `ReductionResiduals` proves that root expansions
+survive arbitrary child reductions and all row-equivalence laws, with actual
+positively reduced or row-equivalent results respectively.
+
+Global confluence, termination/scalar discrimination, and complete trait-method
+selection remain open. An additional admission audit is required for `ImplLocal`:
+it still uses logical equality under implementation requirements to establish
+nominal self locality, unlike the positive-conversion head-matching path.
+The checked invocation-entailment rules also need their actual generic-domain
+and declaration-requirement connection audited; kinded invocation instances
+alone do not establish that stronger logical contract.
+
+The frozen predicate/admission, reduction-residual, runtime-equivariance and
+primitive-dispatch dependency gate passed (47 jobs). The major whole
+umbrella gate did not pass: `DropCapabilities.Entails.use_principal` cannot
+invert logical congruence or quantified elimination into the current
+syntax-indexed canonical capability equations. In particular, those equations
+have no projection case although logical equality can identify a projection
+with a type that has a principal. This is an authoritative capability/equality
+mismatch, not an omitted proof case; adding a postulated capability to Drop
+admission would not repair it. Existing `PreservationChecks`, `BorrowChecks`
+and `SourceChecks` also contain stale proof obligations at strengthened
+admission boundaries. Their failures are preserved; no full integration or
+runtime Drop-preservation success is claimed.
+
+The head-coherence audit also exposed an overstrong admission premise:
+`HeadSolutionsCoherent` requires positive joinability of arbitrary matching
+substitutions. With a single generic implementation this already implies
+joinability for arbitrary kinded definitionally equal arguments, hiding the
+global confluence obligation in admission. That premise must be repaired to
+state actual semantic uniqueness, and its joining consumers must derive
+positive joining independently. The current checkpoint does not establish
+global confluence from that premise.
 
 ## 3. Remaining boundary completeness and final audit
 

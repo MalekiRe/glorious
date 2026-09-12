@@ -1,5 +1,6 @@
 import GloriousLanguage.RuntimeSupport
 import GloriousLanguage.DefinitionalAdmission
+import GloriousLanguage.PredicateHygiene
 
 /-! Static judgments transport along a genuine runtime-region permutation.
 The permutation supplies only fresh-name mathematics, never an assumed
@@ -50,20 +51,8 @@ theorem RegionPermutation.lexical_term (permutation : RegionPermutation) {term :
 theorem RegionPermutation.term_substitute (permutation : RegionPermutation) (substitution : Substitution) (term : Term) :
     permutation.term (term.substitute substitution) =
       (permutation.term term).substitute (permutation.substitution substitution) := by
-  cases term <;> simp only [Term.substitute,RegionPermutation.term,Term.renameRuntimeRegions]
-  case parameter id kind =>
-    rw [RegionPermutation.substitution,Table.get_map_values]
-    cases substitution.get id <;> simp only [Option.getD,Option.map,RegionPermutation.term,Term.renameRuntimeRegions]
-  all_goals try rfl
-  all_goals try simp only [List.map_map,Function.comp_def]
-  all_goals
-    congr 1
-    all_goals first
-    | exact permutation.term_substitute substitution _
-    | apply List.map_congr_left
-      intro child _
-      exact permutation.term_substitute substitution child
-termination_by term
+  simpa only [RegionPermutation.term,RegionPermutation.substitution] using
+    term.renameRuntimeRegions_substitute permutation.rename substitution
 
 theorem RegionPermutation.substitution_involutive (permutation : RegionPermutation) (substitution : Substitution) :
     permutation.substitution (permutation.substitution substitution) = substitution := by
@@ -102,38 +91,12 @@ theorem RegionPermutation.context_involutive (permutation : RegionPermutation) (
   simp only [RegionPermutation.context,List.map_map,Function.comp_def,
     permutation.binder_involutive,permutation.constraint_involutive,List.map_id']
 
-theorem Constraint.mapTerms_substitute (f : Term → Term) (mapped : Substitution → Substitution)
-    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
-    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
-      (mapped substitution).filter (fun entry => keep entry.1))
-    (substitution : Substitution) (constraint : Constraint) :
-    (constraint.substitute substitution).mapTerms f = (constraint.mapTerms f).substitute (mapped substitution) := by
-  cases constraint <;>
-    simp only [Constraint.mapTerms,Constraint.substitute,terms,List.map_map,Function.comp_def]
-  all_goals try rfl
-  case quantified binders requirements =>
-    have restricted :
-        (mapped substitution).filter
-          (fun entry => !(binders.any (fun binder => binder.id == entry.1))) =
-        mapped (substitution.filter
-          (fun entry => !(binders.any (fun binder => binder.id == entry.1)))) :=
-      (filtered substitution
-        (fun id => !(binders.any (fun binder => binder.id == id)))).symm
-    simp only [List.any_map,Function.comp_def,restricted,Option.map_map]
-    congr 1
-    · apply List.map_congr_left
-      intro binder _
-      simp only [terms]
-    · apply List.map_congr_left
-      intro requirement _
-      exact requirement.mapTerms_substitute f mapped terms filtered _
-termination_by constraint
-
 theorem RegionPermutation.constraint_substitute (permutation : RegionPermutation)
     (substitution : Substitution) (constraint : Constraint) :
     permutation.constraint (constraint.substitute substitution) =
-      (permutation.constraint constraint).substitute (permutation.substitution substitution) :=
-  constraint.mapTerms_substitute permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
+      (permutation.constraint constraint).substitute (permutation.substitution substitution) := by
+  simpa only [RegionPermutation.constraint,RegionPermutation.term,RegionPermutation.substitution] using
+    constraint.renameRuntimeRegions_substitute permutation.rename substitution
 
 theorem RegionPermutation.parameter_origin (permutation : RegionPermutation) {term : Term} {id : Identity} {kind : Kind}
     (same : permutation.term term = .parameter id kind) : term = .parameter id kind := by
@@ -204,18 +167,18 @@ theorem RegionPermutation.constraint_admissible (permutation : RegionPermutation
       (permutation.substitution_filter substitution
         (fun id => !(binders.any (fun binder => binder.id == id)))).symm
     simp only [List.any_map,Function.comp_def,restricted]
-    refine ⟨?_,?_,?_⟩
-    · intro entry present binder member occurs
-      obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-      obtain ⟨oldBinder,inBinders,rfl⟩ := List.mem_map.mp member
-      exact admissible.1 original inOriginal oldBinder inBinders (permutation.parameter_occurs occurs)
-    · intro binder member value found
-      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    refine ⟨?_,?_⟩
+    · intro index binder member value found
+      simp only [List.getElem?_map] at member
+      obtain ⟨original,present,rfl⟩ := Option.map_eq_some_iff.mp member
       obtain ⟨oldValue,selected,rfl⟩ := Option.map_eq_some_iff.mp found
-      exact permutation.substitutes_self (admissible.2.1 original present oldValue selected)
+      have mapped := permutation.substitutes_self (admissible.1 index original present oldValue selected)
+      rw [permutation.substitution_filter substitution
+        (fun id => !((binders.take index).any (fun binder => binder.id == id)))] at mapped
+      simpa only [← List.map_take,List.any_map,Function.comp_def] using mapped
     · intro requirement member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-      exact permutation.constraint_admissible (admissible.2.2 original present)
+      exact permutation.constraint_admissible (admissible.2 original present)
 termination_by constraint
 
 theorem RegionPermutation.substitute_constraint (permutation : RegionPermutation)
@@ -280,12 +243,6 @@ theorem RegionPermutation.assignment_fields (permutation : RegionPermutation)
   | nil => exact .nil
   | cons first _ ih => exact .cons (by simpa only [permutation.assignment_at] using first) ih
 
-theorem Program.alias_lookup {program : Program} {id : DeclId} {declaration : AliasDefinition}
-    (found : program.alias id = some declaration) : program.lookup id = some (.alias declaration) := by
-  unfold Program.alias at found
-  cases selected : program.lookup id <;> simp only [selected] at found
-  case none => cases found
-  case some value => cases value <;> simp_all
 
 theorem CapabilityEquation.permute {program : Program} (valid : ProgramWellFormed program)
     {assignment : Term → Option Principal} {term : Term} {principal : Principal}
@@ -539,19 +496,7 @@ theorem RegionPermutation.substitute_lexical_constraints (permutation : RegionPe
       exact .cons (permutation.substitute_lexical_constraint (lexical _ List.mem_cons_self) first)
         (ih (fun constraint member => lexical constraint (List.mem_cons_of_mem _ member)))
 
-theorem Program.associated_lookup {program : Program} {id : DeclId} {declaration : AssociatedDefinition}
-    (found : program.associated id = some declaration) : program.lookup id = some (.associated declaration) := by
-  unfold Program.associated at found
-  cases selected : program.lookup id <;> simp only [selected] at found
-  case none => cases found
-  case some value => cases value <;> simp_all
 
-theorem Program.trait_lookup {program : Program} {id : DeclId} {declaration : TraitDefinition}
-    (found : program.trait id = some declaration) : program.lookup id = some (.trait declaration) := by
-  unfold Program.trait at found
-  cases selected : program.lookup id <;> simp only [selected] at found
-  case none => cases found
-  case some value => cases value <;> simp_all
 
 theorem RegionPermutation.lexical_terms (permutation : RegionPermutation) {terms : List Term}
     (lexical : ∀ term ∈ terms, term.Lexical) : terms.map permutation.term = terms :=

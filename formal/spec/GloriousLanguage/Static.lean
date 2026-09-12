@@ -382,6 +382,44 @@ def DomainValid (program : Program) (context : Context) (term : Term) : Prop :=
 def WellKinded (program : Program) (context : Context) (term : Term) (kind : Kind) : Prop :=
   Kinding program context term kind ∧ DomainValid program context term
 
+/-- A quantified declaration owns its parameter identities. Entering its
+scope masks same-identity outer entries; freshening therefore need not avoid
+unrelated, unused identities from an arbitrary enclosing context. -/
+def Context.bindParameters (context : Context) (binders : List Binder) : Context :=
+  { context with binders := binders ++ context.binders.filter (fun previous => !(binders.any (fun binder => binder.id == previous.id))) }
+
+/-- Predicate kind admission is distinct from proving the predicate true.
+Its term premises use the same source kinding producer as signatures and
+implementation heads. Nested quantifiers own their binder scope and check
+defaults only in the preceding lexical prefix. -/
+inductive ConstraintKinded (program : Program) : Context → Constraint → Prop where
+  | equal {context left right kind} : Kinding program context left kind → Kinding program context right kind →
+      ConstraintKinded program context (.equal left right)
+  | outlives {context long short} : Kinding program context long .region → Kinding program context short .region →
+      ConstraintKinded program context (.outlives long short)
+  | typeOutlives {context type region} : Kinding program context type .type → Kinding program context region .region →
+      ConstraintKinded program context (.typeOutlives type region)
+  | rowIncludes {context allowed required} : Kinding program context allowed .row → Kinding program context required .row →
+      ConstraintKinded program context (.rowIncludes allowed required)
+  | implements {context id trait arguments negative substitution} : program.trait id = some trait →
+      Instantiates trait.generics arguments substitution →
+      (∀ argument ∈ arguments, Kinding program context argument argument.kind) →
+      ConstraintKinded program context (.implements id arguments negative)
+  | use {context type quantity} : Kinding program context type .type → quantity.Valid →
+      ConstraintKinded program context (.use type quantity)
+  | callable {context receiver arguments result effects unsafeAllowed} : Kinding program context receiver .type →
+      (∀ argument ∈ arguments, Kinding program context argument .type) → Kinding program context result .type →
+      Kinding program context effects .row →
+      ConstraintKinded program context (.callable receiver arguments result effects unsafeAllowed)
+  | runsIn {context receiver access arguments after unsafeAllowed} : Kinding program context receiver .type →
+      Kinding program context access .type → (∀ argument ∈ arguments, Kinding program context argument .type) →
+      Kinding program context after .type → ConstraintKinded program context (.runsIn receiver access arguments after unsafeAllowed)
+  | quantified {context binders requirements} : (binders.map (·.id)).Nodup →
+      (∀ i binder value, binders[i]? = some binder → binder.defaultValue = some value →
+        Kinding program (context.bindParameters (binders.take i)) value binder.kind) →
+      (∀ requirement ∈ requirements, ConstraintKinded program (context.bindParameters binders) requirement) →
+      ConstraintKinded program context (.quantified binders requirements)
+
 inductive ConstantType (program : Program) (context : Context) : Term → Term → Prop where
   | scalar {value} : value.Valid program.input.target → ConstantType program context (.constant value) (.scalar value.type)
   | unit : ConstantType program context (.constantTuple []) .unit
@@ -641,11 +679,39 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
   | .fixity fixity => fixity.precedence ≤ 255 ∧
     ∃ function, program.function fixity.target = some function ∧ Visible function.header fixity.header.module
 
+/-- All published logical predicates are admitted in their actual declaration
+scope. Associated predicates include their owning trait's parameters, while
+implementation predicates use the implementation's own head parameters.
+This checks kinds, not satisfiability or the missing global confluence result. -/
+def DeclarationConstraintsKinded (program : Program) : Definition → Prop
+  | .data data => ∀ requirement ∈ data.requirements,
+      ConstraintKinded program ⟨data.generics,data.requirements,0,data.header.module,false,{}⟩ requirement
+  | .function function =>
+      let context : Context := ⟨function.signature.generics,function.signature.constraints,0,function.header.module,false,{}⟩
+      (∀ requirement ∈ function.signature.constraints, ConstraintKinded program context requirement) ∧
+      ∀ relation ∈ function.invocations,
+        ConstraintKinded program context (.callable relation.receiver relation.arguments relation.result relation.effects relation.unsafeAllowed) ∧
+        ConstraintKinded program context (.runsIn relation.receiver relation.access relation.arguments relation.after relation.unsafeAllowed)
+  | .trait trait => ∀ requirement ∈ trait.requirements,
+      ConstraintKinded program ⟨trait.generics,trait.requirements,0,trait.header.module,false,{}⟩ requirement
+  | .associated associated => ∃ trait, program.trait associated.owner = some trait ∧
+      ∀ requirement ∈ associated.requirements,
+        ConstraintKinded program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
+          0,associated.header.module,false,{}⟩ requirement
+  | .implementation implementation => ∀ requirement ∈ implementation.requirements,
+      ConstraintKinded program ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false,{}⟩ requirement
+  | .effect effect => ∀ requirement ∈ effect.requirements,
+      ConstraintKinded program ⟨effect.generics,effect.requirements,0,effect.header.module,false,{}⟩ requirement
+  | .operation operation => ∀ requirement ∈ operation.signature.constraints,
+      ConstraintKinded program ⟨operation.signature.generics,operation.signature.constraints,0,operation.header.module,false,{}⟩ requirement
+  | .alias _ | .constant _ | .global _ | .module _ | .import _ | .fixity _ => True
+
 /-- Source templates are checked before runtime instantiation. Runtime atoms
 remain well-kinded in execution judgments, but cannot occur literally in the
 immutable declarations those judgments instantiate. -/
 def DeclarationWellFormed (program : Program) (definition : Definition) : Prop :=
-  (definition.Lexical ∧ definition.ScopeClosed) ∧ DeclarationShapeWellFormed program definition
+  (definition.Lexical ∧ definition.ScopeClosed) ∧
+    DeclarationShapeWellFormed program definition ∧ DeclarationConstraintsKinded program definition
 
 def ProgramWellFormed (program : Program) : Prop :=
   SourceClosure program ∧ (program.declarations.map (·.header.id)).Nodup ∧

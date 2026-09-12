@@ -114,6 +114,19 @@ def Term.mapChildren (f : Term → Term) : Term → Term
   | .constantConstructor d xs ys => .constantConstructor d (xs.map f) (ys.map f)
   | term => term
 
+theorem Term.child_sizeOf {term child : Term} (member : child ∈ term.children) :
+    sizeOf child < sizeOf term := by
+  cases term <;> simp only [Term.children,List.mem_cons,List.mem_append,List.not_mem_nil] at member
+  all_goals simp_wf
+  all_goals try (change _ ∨ _ at member; rcases member with member | member)
+  all_goals try (change _ ∨ _ at member; rcases member with member | member)
+  all_goals try (change _ ∨ _ at member; rcases member with member | member)
+  all_goals try (change _ ∨ _ at member; rcases member with member | member)
+  all_goals first
+  | contradiction
+  | subst child; omega
+  | have smaller := List.sizeOf_lt_of_mem member; omega
+
 def SameHead (a b : Term) : Prop := a.mapChildren (fun _ => .unit) = b.mapChildren (fun _ => .unit)
 
 def Access.type (access : Access) (region type : Term) : Term :=
@@ -328,6 +341,100 @@ def Constraint.terms : Constraint → List Term
   | .quantified binders requirements =>
       binders.flatMap (fun binder => binder.defaultValue.toList) ++ requirements.flatMap Constraint.terms
 
+/-- Lexical parameter support, deliberately excluding generative runtime
+regions and brands. Fresh predicate binders must not order runtime atoms. -/
+def Term.parameterIds : Term → List Identity
+  | .parameter id _ => [id]
+  | .tuple fields | .nominal _ fields | .alias _ fields | .callable _ fields | .effect _ fields |
+      .constantTuple fields => fields.flatMap Term.parameterIds
+  | .array a b | .reference _ a b => a.parameterIds ++ b.parameterIds
+  | .rawPointer _ a => a.parameterIds
+  | .continuation a b c d _ => a.parameterIds ++ b.parameterIds ++ c.parameterIds ++ d.parameterIds
+  | .label a b c => a.parameterIds ++ b.parameterIds ++ c.parameterIds
+  | .environment a b fields | .available a b fields | .bindings a b fields =>
+      a.parameterIds ++ b.parameterIds ++ fields.flatMap Term.parameterIds
+  | .row fields tails | .projection _ _ fields tails _ | .constantConstructor _ fields tails =>
+      fields.flatMap Term.parameterIds ++ tails.flatMap Term.parameterIds
+  | _ => []
+
+def Term.renameParameters (rename : Identity → Identity) : Term → Term
+  | .parameter id kind => .parameter (rename id) kind
+  | .tuple fields => .tuple (fields.map (Term.renameParameters rename))
+  | .array a b => .array (a.renameParameters rename) (b.renameParameters rename)
+  | .reference mode a b => .reference mode (a.renameParameters rename) (b.renameParameters rename)
+  | .rawPointer mode a => .rawPointer mode (a.renameParameters rename)
+  | .nominal id arguments => .nominal id (arguments.map (Term.renameParameters rename))
+  | .alias id arguments => .alias id (arguments.map (Term.renameParameters rename))
+  | .callable id arguments => .callable id (arguments.map (Term.renameParameters rename))
+  | .continuation a b c d resumptionQuantity => .continuation (a.renameParameters rename) (b.renameParameters rename)
+      (c.renameParameters rename) (d.renameParameters rename) resumptionQuantity
+  | .label a b c => .label (a.renameParameters rename) (b.renameParameters rename) (c.renameParameters rename)
+  | .environment a b fields => .environment (a.renameParameters rename) (b.renameParameters rename)
+      (fields.map (Term.renameParameters rename))
+  | .available a b fields => .available (a.renameParameters rename) (b.renameParameters rename)
+      (fields.map (Term.renameParameters rename))
+  | .bindings a b fields => .bindings (a.renameParameters rename) (b.renameParameters rename)
+      (fields.map (Term.renameParameters rename))
+  | .effect id arguments => .effect id (arguments.map (Term.renameParameters rename))
+  | .row instances tails => .row (instances.map (Term.renameParameters rename)) (tails.map (Term.renameParameters rename))
+  | .projection trait member owners items kind => .projection trait member
+      (owners.map (Term.renameParameters rename)) (items.map (Term.renameParameters rename)) kind
+  | .constantTuple fields => .constantTuple (fields.map (Term.renameParameters rename))
+  | .constantConstructor id arguments fields => .constantConstructor id
+      (arguments.map (Term.renameParameters rename)) (fields.map (Term.renameParameters rename))
+  | term => term
+
+def Binder.renameParameters (rename : Identity → Identity) (binder : Binder) : Binder :=
+  { binder with id := rename binder.id, defaultValue := binder.defaultValue.map (Term.renameParameters rename) }
+
+/-- Simultaneous renaming includes nested binders with the same identity,
+preserving their shadowing. The fresh range chosen below is disjoint from all
+other binders and free parameters in the entire source predicate. -/
+def Constraint.renameParameters (rename : Identity → Identity) : Constraint → Constraint
+  | .quantified binders requirements => .quantified (binders.map (Binder.renameParameters rename))
+      (requirements.map (Constraint.renameParameters rename))
+  | constraint => constraint.mapTerms (Term.renameParameters rename)
+
+def Constraint.boundIds : Constraint → List Identity
+  | .quantified binders requirements => binders.map (·.id) ++ requirements.flatMap Constraint.boundIds
+  | _ => []
+
+def Constraint.parameterIds (constraint : Constraint) : List Identity :=
+  constraint.terms.flatMap Term.parameterIds ++ constraint.boundIds
+
+def Substitution.parameterIds (substitution : Substitution) : List Identity :=
+  substitution.flatMap (fun entry => entry.1 :: entry.2.parameterIds)
+
+def Constraint.freshSeed (constraint : Constraint) (substitution : Substitution) : Identity :=
+  (constraint.parameterIds ++ substitution.parameterIds).sum + 1
+
+def Binder.freshRename (binders : List Binder) (seed : Identity) (id : Identity) : Identity :=
+  if id ∈ binders.map (·.id) then seed + id else id
+
+def Constraint.quantifierCount : Constraint → Nat
+  | .quantified _ requirements => 1 + (requirements.map Constraint.quantifierCount).sum
+  | _ => 0
+
+theorem Constraint.quantifierCount_renameParameters (rename : Identity → Identity) (constraint : Constraint) :
+    (constraint.renameParameters rename).quantifierCount = constraint.quantifierCount := by
+  cases constraint <;> simp only [Constraint.renameParameters,Constraint.mapTerms,Constraint.quantifierCount]
+  case quantified binders requirements =>
+    simp only [List.map_map,Function.comp_def]
+    congr 2
+    apply List.map_congr_left
+    intro requirement _
+    exact requirement.quantifierCount_renameParameters rename
+termination_by constraint
+
+theorem List.nat_le_sum_of_mem {value : Nat} {values : List Nat} (member : value ∈ values) : value ≤ values.sum := by
+  induction values with
+  | nil => cases member
+  | cons first rest ih =>
+    simp only [List.sum_cons]
+    rcases List.mem_cons.mp member with rfl | present
+    · omega
+    · have smaller := ih present; omega
+
 def Constraint.substitute (substitution : Substitution) : Constraint → Constraint
   | .equal a b => .equal (a.substitute substitution) (b.substitute substitution)
   | .outlives a b => .outlives (a.substitute substitution) (b.substitute substitution)
@@ -341,11 +448,24 @@ def Constraint.substitute (substitution : Substitution) : Constraint → Constra
       (access.substitute substitution) (arguments.map (Term.substitute substitution)) (after.substitute substitution) unsafeAllowed
   | .quantified binders requirements =>
       let restricted := substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1)))
-      .quantified (binders.map (fun binder => { binder with defaultValue := binder.defaultValue.map (Term.substitute restricted) }))
-        (requirements.map (Constraint.substitute restricted))
+      let seed := (Constraint.quantified binders requirements).freshSeed substitution
+      let rename := Binder.freshRename binders seed
+      .quantified (binders.mapIdx (fun index binder => { binder with
+        id := rename binder.id
+        defaultValue := binder.defaultValue.map (fun value =>
+          (value.renameParameters (Binder.freshRename (binders.take index) seed)).substitute
+            (substitution.filter (fun entry => !((binders.take index).any (fun binder => binder.id == entry.1))))) }))
+        (requirements.attach.map (fun requirement => (requirement.val.renameParameters rename).substitute restricted))
+termination_by constraint => constraint.quantifierCount
+decreasing_by
+  simp only [Constraint.quantifierCount_renameParameters,Constraint.quantifierCount]
+  have smaller := List.nat_le_sum_of_mem (List.mem_map.mpr ⟨_,requirement.property,rfl⟩ :
+    requirement.val.quantifierCount ∈ requirements.map Constraint.quantifierCount)
+  omega
 
-/-- Bound declaration identities are globally fresh; checking this condition
-also rejects accidental capture in externally supplied substitutions. -/
+/-- Kind-correctness of the input substitution under each lexical binder mask.
+The actual operation freshens quantified identities; caller parameters are not
+rejected merely because their names coincide with a declaration's binder. -/
 def Constraint.SubstitutionAdmissible (substitution : Substitution) : Constraint → Prop
   | .equal a b | .outlives a b | .typeOutlives a b | .rowIncludes a b =>
       Substitutes substitution a (a.substitute substitution) ∧ Substitutes substitution b (b.substitute substitution)
@@ -357,8 +477,9 @@ def Constraint.SubstitutionAdmissible (substitution : Substitution) : Constraint
       ∀ term ∈ receiver :: access :: after :: arguments, Substitutes substitution term (term.substitute substitution)
   | .quantified binders requirements =>
       let restricted := substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1)))
-      (∀ entry ∈ restricted, ∀ binder ∈ binders, ¬ Occurs (.parameter binder.id binder.kind) entry.2) ∧
-      (∀ binder ∈ binders, ∀ value, binder.defaultValue = some value → Substitutes restricted value (value.substitute restricted)) ∧
+      (∀ index binder, binders[index]? = some binder → ∀ value, binder.defaultValue = some value →
+        let prefixSub := substitution.filter (fun entry => !((binders.take index).any (fun binder => binder.id == entry.1)))
+        Substitutes prefixSub value (value.substitute prefixSub)) ∧
       ∀ requirement ∈ requirements, requirement.SubstitutionAdmissible restricted
 
 def SubstituteConstraint (substitution : Substitution) (before after : Constraint) : Prop :=

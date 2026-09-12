@@ -220,27 +220,6 @@ theorem Term.substitutions_rowEquivalent (term : Term) {left right : Substitutio
         | apply ListRel.maps; intro child _; exact child.substitutions_rowEquivalent agree
 termination_by term
 
-theorem Table.get_map_values {α β : Type} (table : Table α) (function : α → β) (key : Identity) :
-    Table.get (table.map (fun entry => (entry.1,function entry.2))) key = (table.get key).map function := by
-  simp [Table.get,Function.comp_def]
-
-theorem Term.renameRuntimeRegions_substitute (term : Term) (substitution : Substitution)
-    (rename : Identity → Identity) :
-    (term.substitute substitution).renameRuntimeRegions rename =
-      (term.renameRuntimeRegions rename).substitute
-        (substitution.map (fun entry => (entry.1,entry.2.renameRuntimeRegions rename))) := by
-  cases term <;> simp only [Term.substitute,Term.renameRuntimeRegions,List.map_map,Function.comp_def]
-  case parameter id kind =>
-    rw [Table.get_map_values]
-    cases found : substitution.get id <;> simp only [Option.map_none,Option.map_some,Option.getD_none,
-      Option.getD_some,Term.renameRuntimeRegions]
-  all_goals try rfl
-  all_goals congr 1
-  all_goals first
-    | apply List.map_congr_left; intro child _; exact child.renameRuntimeRegions_substitute substitution rename
-    | exact Term.renameRuntimeRegions_substitute _ substitution rename
-termination_by term
-
 theorem SemanticTerm.renameRuntimeRegions_kind (rename : Identity → Identity) (term : SemanticTerm) :
     (term.renameRuntimeRegions rename).kind = term.kind := by
   induction term using Quotient.ind with

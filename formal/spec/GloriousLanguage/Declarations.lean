@@ -244,6 +244,48 @@ def Program.effect (program : Program) (id : DeclId) : Option EffectDefinition :
 def Program.constant (program : Program) (id : DeclId) : Option ConstantDefinition :=
   match program.lookup id with | some (.constant declaration) => some declaration | _ => none
 
+theorem Program.data_lookup {program : Program} {id : DeclId} {data : DataDefinition}
+    (found : program.data id = some data) : program.lookup id = some (.data data) := by
+  unfold Program.data at found
+  split at found <;> simp_all
+
+theorem Program.function_lookup {program : Program} {id : DeclId} {function : FunctionDefinition}
+    (found : program.function id = some function) : program.lookup id = some (.function function) := by
+  unfold Program.function at found
+  split at found <;> simp_all
+
+theorem Program.operation_lookup {program : Program} {id : DeclId} {operation : OperationDefinition}
+    (found : program.operation id = some operation) : program.lookup id = some (.operation operation) := by
+  unfold Program.operation at found
+  split at found <;> simp_all
+
+theorem Program.alias_lookup {program : Program} {id : DeclId} {declaration : AliasDefinition}
+    (found : program.alias id = some declaration) : program.lookup id = some (.alias declaration) := by
+  unfold Program.alias at found
+  cases selected : program.lookup id <;> simp only [selected] at found
+  case none => cases found
+  case some value => cases value <;> simp_all
+
+theorem Program.associated_lookup {program : Program} {id : DeclId} {declaration : AssociatedDefinition}
+    (found : program.associated id = some declaration) : program.lookup id = some (.associated declaration) := by
+  unfold Program.associated at found
+  cases selected : program.lookup id <;> simp only [selected] at found
+  case none => cases found
+  case some value => cases value <;> simp_all
+
+theorem Program.trait_lookup {program : Program} {id : DeclId} {declaration : TraitDefinition}
+    (found : program.trait id = some declaration) : program.lookup id = some (.trait declaration) := by
+  unfold Program.trait at found
+  cases selected : program.lookup id <;> simp only [selected] at found
+  case none => cases found
+  case some value => cases value <;> simp_all
+
+theorem Program.effect_lookup {program : Program} {id : DeclId} {effect : EffectDefinition}
+    (found : program.effect id = some effect) : program.lookup id = some (.effect effect) := by
+  unfold Program.effect at found
+  split at found <;> simp_all
+
+
 def Program.Constructor (program : Program) (constructor : DeclId)
     (data : DataDefinition) (variant : VariantDefinition) : Prop :=
   program.data data.header.id = some data ∧ variant ∈ data.variants ∧ variant.header.id = constructor

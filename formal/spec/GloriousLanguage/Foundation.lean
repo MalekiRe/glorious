@@ -158,6 +158,30 @@ abbrev Table (α : Type) := List (Identity × α)
 def Table.get (table : Table α) (key : Identity) : Option α :=
   (table.find? (fun entry => entry.1 == key)).map Prod.snd
 
+theorem Table.get_map_values {α β : Type} (table : Table α) (function : α → β) (key : Identity) :
+    Table.get (table.map (fun entry => (entry.1,function entry.2))) key = (table.get key).map function := by
+  simp [Table.get,Function.comp_def]
+
+theorem List.flatMap_congr_left {α β : Type} {values : List α} {first second : α → List β}
+    (agree : ∀ value ∈ values, first value = second value) : values.flatMap first = values.flatMap second := by
+  induction values with
+  | nil => rfl
+  | cons value values ih =>
+    simp only [List.flatMap_cons,agree value List.mem_cons_self,
+      ih (fun value member => agree value (List.mem_cons_of_mem _ member))]
+
+theorem List.map_mapIdx {α β γ : Type} (f : β → γ) (g : Nat → α → β) (values : List α) :
+    (values.mapIdx g).map f = values.mapIdx (fun index value => f (g index value)) := by
+  apply List.ext_getElem?
+  intro index
+  simp only [List.getElem?_map,List.getElem?_mapIdx,Option.map_map,Function.comp_def]
+
+theorem List.mapIdx_map {α β γ : Type} (f : Nat → β → γ) (g : α → β) (values : List α) :
+    (values.map g).mapIdx f = values.mapIdx (fun index value => f index (g value)) := by
+  apply List.ext_getElem?
+  intro index
+  simp only [List.getElem?_map,List.getElem?_mapIdx,Option.map_map,Function.comp_def]
+
 def Table.erase (table : Table α) (key : Identity) : Table α :=
   table.filter (fun entry => entry.1 != key)
 

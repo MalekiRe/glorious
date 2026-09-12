@@ -16,20 +16,8 @@ theorem ListRel.substitutes_eq_map {substitution : Substitution} {before after :
   | nil => rfl
   | cons term _ ih => simp [term.2.1,ih]
 
-theorem Program.data_lookup {program : Program} {id : DeclId} {data : DataDefinition}
-    (found : program.data id = some data) : program.lookup id = some (.data data) := by
-  unfold Program.data at found
-  split at found <;> simp_all
 
-theorem Program.function_lookup {program : Program} {id : DeclId} {function : FunctionDefinition}
-    (found : program.function id = some function) : program.lookup id = some (.function function) := by
-  unfold Program.function at found
-  split at found <;> simp_all
 
-theorem Program.operation_lookup {program : Program} {id : DeclId} {operation : OperationDefinition}
-    (found : program.operation id = some operation) : program.lookup id = some (.operation operation) := by
-  unfold Program.operation at found
-  split at found <;> simp_all
 
 theorem Program.Constructor.variant_unique {program : Program} {id : DeclId}
     {data : DataDefinition} {left right : VariantDefinition} (valid : ProgramWellFormed program)
@@ -39,7 +27,7 @@ theorem Program.Constructor.variant_unique {program : Program} {id : DeclId}
     (Or.inr (Or.inl ⟨data,right,⟨b.1,b.2.1,rfl⟩,rfl⟩)) (a.2.2.trans b.2.2.symm)
   have member : Definition.data data ∈ program.declarations :=
     List.mem_of_find?_eq_some (Program.data_lookup a.1)
-  have distinct := (valid.2.2.2.2.1 _ member).2.2.1
+  have distinct := (valid.2.2.2.2.1 _ member).2.1.2.1
   obtain ⟨i,hi,atLeft⟩ := List.mem_iff_getElem.mp a.2.1
   obtain ⟨j,hj,atRight⟩ := List.mem_iff_getElem.mp b.2.1
   have nameEq := congrArg Header.name headerEq

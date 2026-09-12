@@ -42,7 +42,7 @@ theorem ProgramWellFormed.implementation_identity_unique {program : Program}
 theorem ProgramWellFormed.associated_members_unique {program : Program} (valid : ProgramWellFormed program)
     {implementation : ImplDefinition} (member : Definition.implementation implementation ∈ program.declarations) :
     (implementation.associated.map Prod.fst).Nodup := by
-  have declaration := (valid.2.2.2.2.1 _ member).2
+  have declaration := (valid.2.2.2.2.1 _ member).2.1
   obtain ⟨_,_,_,_,_,members,_⟩ := declaration
   exact members
 

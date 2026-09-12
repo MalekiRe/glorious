@@ -330,22 +330,22 @@ theorem RegionPermutation.code_instantiate (permutation : RegionPermutation)
   · exact funext (fun term => permutation.term_substitute substitution term)
   · exact funext (fun signature => permutation.signature_instantiate signature substitution)
 
-theorem Kernel.Function.mapTerms_instantiate (f : Term → Term) (mapped : Substitution → Substitution)
-    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
-    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
-      (mapped substitution).filter (fun entry => keep entry.1))
+theorem Kernel.Function.renameRuntimeRegions_instantiate (rename : Identity → Identity)
     (function : Kernel.Function) (substitution : Substitution) :
-    (function.instantiate substitution).mapTerms f = (function.mapTerms f).instantiate (mapped substitution) := by
+    (function.instantiate substitution).mapTerms (Term.renameRuntimeRegions rename) =
+      (function.mapTerms (Term.renameRuntimeRegions rename)).instantiate
+        (substitution.map (fun entry => (entry.1,entry.2.renameRuntimeRegions rename))) := by
   simp only [Kernel.Function.mapTerms,Kernel.Function.instantiate,Kernel.Function.transformTerms_comp]
   congr 1
-  · exact funext (terms substitution)
-  · exact funext (fun signature => signature.mapTerms_instantiate f mapped terms filtered substitution)
+  · exact funext (Term.renameRuntimeRegions_substitute rename substitution)
+  · exact funext (fun signature => signature.renameRuntimeRegions_instantiate rename substitution)
 
 theorem RegionPermutation.function_instantiate (permutation : RegionPermutation)
     (function : Kernel.Function) (substitution : Substitution) :
     permutation.function (function.instantiate substitution) =
-      (permutation.function function).instantiate (permutation.substitution substitution) :=
-  function.mapTerms_instantiate permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
+      (permutation.function function).instantiate (permutation.substitution substitution) := by
+  simpa only [RegionPermutation.function,RegionPermutation.term,RegionPermutation.substitution] using
+    function.renameRuntimeRegions_instantiate permutation.rename substitution
 
 theorem RegionPermutation.lexical_function (permutation : RegionPermutation) {function : Kernel.Function}
     (lexical : function.Lexical) : permutation.function function = function :=
@@ -398,7 +398,11 @@ theorem Kernel.Instance.relocation_permutation {program : Kernel.Program} (inven
     intro entry member
     rw [instantiated.2.2] at member
     exact congrArg (fun term => (entry.1,term)) (argumentsAgree entry.2 (List.of_mem_zip member).2)
-  rw [template.mapTerms_instantiate map.term map.substitution map.term_substitute map.substitution_filter,
+  have instantiated : (template.instantiate substitution).mapTerms map.term =
+      (template.mapTerms map.term).instantiate (map.substitution substitution) := by
+    simpa only [Execution.Relocation.term,Execution.Relocation.substitution] using
+      template.renameRuntimeRegions_instantiate map.region substitution
+  rw [instantiated,
     fixed,permutation.function_instantiate,permutation.lexical_function lexical,substitutionAgree]
 
 end Glorious.Language

@@ -5,26 +5,6 @@ operations. Generic defaults and quantified constraints use the same semantic
 term action as parameters, results and environment access. -/
 namespace Glorious.Language
 
-theorem List.flatMap_congr_left {α β : Type} {values : List α} {first second : α → List β}
-    (agree : ∀ value ∈ values, first value = second value) : values.flatMap first = values.flatMap second := by
-  induction values with
-  | nil => rfl
-  | cons value values ih =>
-    simp only [List.flatMap_cons,agree value List.mem_cons_self,
-      ih (fun value member => agree value (List.mem_cons_of_mem _ member))]
-
-theorem Constraint.terms_mapTerms (f : Term → Term) (constraint : Constraint) :
-    (constraint.mapTerms f).terms = constraint.terms.map f := by
-  cases constraint <;>
-    simp only [Constraint.mapTerms,Constraint.terms,List.map_cons,List.map_nil,List.map_append,
-      List.flatMap_map,List.map_flatMap,Option.toList_map]
-  case quantified binders requirements =>
-    congr 1
-    apply List.flatMap_congr_left
-    intro requirement _
-    exact requirement.terms_mapTerms f
-termination_by constraint
-
 theorem Signature.terms_mapTerms (f : Term → Term) (signature : Signature) :
     (signature.mapTerms f).terms = signature.terms.map f := by
   simp only [Signature.mapTerms,Signature.terms,List.map_cons,List.map_append,
@@ -112,23 +92,24 @@ theorem Signature.mapTerms_congr (first second : Term → Term) (signature : Sig
 def RegionPermutation.signature (permutation : RegionPermutation) (signature : Signature) : Signature :=
   signature.mapTerms permutation.term
 
-theorem Signature.mapTerms_instantiate (f : Term → Term) (mapped : Substitution → Substitution)
-    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
-    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
-      (mapped substitution).filter (fun entry => keep entry.1))
+theorem Signature.renameRuntimeRegions_instantiate (rename : Identity → Identity)
     (signature : Signature) (substitution : Substitution) :
-    (signature.instantiate substitution).mapTerms f = (signature.mapTerms f).instantiate (mapped substitution) := by
-  simp only [Signature.mapTerms,Signature.instantiate,List.map_nil,List.map_map,Function.comp_def,terms]
+    (signature.instantiate substitution).mapTerms (Term.renameRuntimeRegions rename) =
+      (signature.mapTerms (Term.renameRuntimeRegions rename)).instantiate
+        (substitution.map (fun entry => (entry.1,entry.2.renameRuntimeRegions rename))) := by
+  simp only [Signature.mapTerms,Signature.instantiate,List.map_nil,List.map_map,Function.comp_def,
+    Term.renameRuntimeRegions_substitute]
   congr 1
   apply List.map_congr_left
   intro constraint _
-  exact constraint.mapTerms_substitute f mapped terms filtered substitution
+  exact constraint.renameRuntimeRegions_substitute rename substitution
 
 theorem RegionPermutation.signature_instantiate (permutation : RegionPermutation)
     (signature : Signature) (substitution : Substitution) :
     permutation.signature (signature.instantiate substitution) =
-      (permutation.signature signature).instantiate (permutation.substitution substitution) :=
-  signature.mapTerms_instantiate permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
+      (permutation.signature signature).instantiate (permutation.substitution substitution) := by
+  simpa only [RegionPermutation.signature,RegionPermutation.term,RegionPermutation.substitution] using
+    signature.renameRuntimeRegions_instantiate permutation.rename substitution
 
 theorem RegionPermutation.lexical_signature (permutation : RegionPermutation) {signature : Signature}
     (lexical : ∀ term ∈ signature.terms, term.Lexical) : permutation.signature signature = signature := by

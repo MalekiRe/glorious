@@ -23,7 +23,7 @@ theorem MatchesImplHead.instantiated {program : Program} (valid : ProgramWellFor
     (instantiated : Instantiates implementation.generics values substitution)
     (valuesKinded : ∀ value ∈ values, Kinding program context value value.kind) :
     MatchesImplHead program context implementation (implementation.arguments.map (Term.substitute substitution)) substitution := by
-  have declaration := (valid.2.2.2.2.1 _ declared).2
+  have declaration := (valid.2.2.2.2.1 _ declared).2.1
   obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
   obtain ⟨_,ownerSub,_,headKinded,_,_⟩ := signature
   refine .matched (specialized := implementation.arguments.map (Term.substitute substitution)) instantiated valuesKinded ?_ ?_

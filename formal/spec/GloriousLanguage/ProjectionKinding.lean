@@ -8,12 +8,7 @@ namespace Glorious.Language
 theorem ProgramWellFormed.alias_body {program : Program} (valid : ProgramWellFormed program)
     {id : DeclId} {alias : AliasDefinition} (found : program.alias id = some alias) :
     Kinding program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type := by
-  have lookup : program.lookup id = some (.alias alias) := by
-    unfold Program.alias at found
-    cases selected : program.lookup id <;> simp only [selected] at found
-    case none => cases found
-    case some value => cases value <;> simp_all
-  exact (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some lookup)).2.2.1
+  exact (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.alias_lookup found))).2.1.2.1
 
 theorem ProgramWellFormed.alias_specialization {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {id : DeclId} {alias : AliasDefinition} {arguments : List Term} {substitution : Substitution}
@@ -32,12 +27,7 @@ theorem ProgramWellFormed.default_body {program : Program} (valid : ProgramWellF
     ((trait.generics ++ associated.generics).map (·.id)).Nodup ∧
       Kinding program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
         0,associated.header.module,false,{}⟩ body associated.kind := by
-  have lookup : program.lookup member = some (.associated associated) := by
-    unfold Program.associated at associatedFound
-    cases selected : program.lookup member <;> simp only [selected] at associatedFound
-    case none => cases associatedFound
-    case some value => cases value <;> simp_all
-  have declaration := (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some lookup)).2
+  have declaration := (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))).2.1
   obtain ⟨actual,actualFound,_,unique,bodies⟩ := declaration
   rw [owner,traitFound] at actualFound
   cases Option.some.inj actualFound
@@ -65,7 +55,7 @@ theorem ProgramWellFormed.override_body {program : Program} (valid : ProgramWell
     ((implementation.generics ++ associated.generics).map (·.id)).Nodup ∧
       ∃ requirements, Kinding program ⟨implementation.generics ++ associated.generics,
         implementation.requirements ++ requirements,0,implementation.header.module,false,{}⟩ body associated.kind := by
-  have declaration := (valid.2.2.2.2.1 _ declared).2
+  have declaration := (valid.2.2.2.2.1 _ declared).2.1
   obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
   obtain ⟨_,ownerSub,_,_,_,bodies⟩ := signature
   obtain ⟨actual,requirements,found,_,_,unique,_,kinded⟩ := bodies member body bodyMember
