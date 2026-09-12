@@ -401,6 +401,7 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
         (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
         parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
         parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
+        parent'.fields.length = parent.fields.length ∧
         Permitted after.world .owner .owned address ∧
         after.world.CustodyHandedOff (.resident parent.owner) ∧
         (∀ id loan, after.world.loans.get id = some loan → loan.live = true →
@@ -424,6 +425,7 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
         (∀ field, field ∉ indices → parent'.fields[field]? = parent.fields[field]?) ∧
         parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
         parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
+        parent'.fields.length = parent.fields.length ∧
         Permitted after.world .owner .owned address ∧
         after.world.CustodyHandedOff (.resident parent.owner) ∧
         (∀ id loan, after.world.loans.get id = some loan → loan.live = true →
@@ -436,7 +438,7 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
       intro before parent task nodup stored permission handed kinds ancestry
       exact ⟨_,{ before with task := .finishShell address .owner next },parent,CleanupRun.fields_done task,rfl,
         by simpa using stored,by simp,by intro field _; rfl,rfl,rfl,rfl,rfl,rfl,
-        by simpa using permission,by simpa using handed,by simpa using kinds,by simpa using ancestry⟩
+        rfl,by simpa using permission,by simpa using handed,by simpa using kinds,by simpa using ancestry⟩
   | cons field rest ih =>
       intro before parent task nodup stored permission handed kinds ancestry
       obtain ⟨notRest, nodupRest⟩ := List.nodup_cons.mp nodup
@@ -445,14 +447,15 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
       obtain ⟨scheduled, movedRun, schedTask, schedWorld⟩ : ∃ scheduled, CleanupRun program host before [] scheduled ∧
           scheduled.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) ∧
           scheduled.world = before.world := ⟨_,moved,rfl,rfl⟩
-      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, midPermission, midHanded, midKinds, midAncestry, vacant⟩ :=
+      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, midLen, midPermission, midHanded, midKinds, midAncestry, vacant⟩ :=
         step field rest scheduled (parent := parent) schedTask (by rw [schedWorld]; exact stored)
           (by rw [schedWorld]; exact permission) (by rw [schedWorld]; exact handed)
           (by rw [schedWorld]; exact kinds) (by rw [schedWorld]; exact ancestry)
-      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, finalPermission, finalHanded, finalKinds, finalAncestry⟩ :=
+      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, lenEq, finalPermission, finalHanded, finalKinds, finalAncestry⟩ :=
         ih middle middleParent running nodupRest midStored midPermission (by rw [← midOwner] at midHanded; exact midHanded) midKinds midAncestry
       refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_,
         ownerEq.trans midOwner,headEq.trans midHead,typeEq.trans midType,liveEq.trans midLive,resEq.trans midRes,
+        lenEq.trans midLen,
         finalPermission,(by rw [midOwner] at finalHanded; exact finalHanded),finalKinds,finalAncestry⟩
       · intro other member
         rcases List.mem_cons.mp member with same | member
