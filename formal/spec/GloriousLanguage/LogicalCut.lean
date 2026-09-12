@@ -42,7 +42,7 @@ theorem Entails.cut {program : Program} {source target : Context} {constraint : 
       CutResult program source (fun target => InfersHeadParameter program sourceContext target binder template query value))
     (motive_16 := fun source implementation arguments binder value _ =>
       CutResult program source (fun target => InfersHeadArgument program target implementation arguments binder value))
-    ?structural ?logical ?capEqual ?equation ?evidence
+    ?structural ?logical ?capEqual ?equation ?evidence ?capExpansion
     ?refl ?symm ?trans ?congrChildren ?assumed ?entailed ?definitional
     ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal_1 ?empty ?assumed_1 ?same ?trans_1 ?instances ?entailed_1
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
@@ -62,6 +62,8 @@ theorem Entails.cut {program : Program} {source target : Context} {constraint : 
     exact .equal (equal target kinds assumptions) (evidence target kinds assumptions)
   case equation _ _ _ _ _ restriction equation target kinds assumptions => exact .equation restriction equation
   case evidence _ _ _ _ _ restriction _ ih target kinds assumptions => exact .evidence restriction (ih target kinds assumptions)
+  case capExpansion _ _ _ _ _ _ _ reduced unfolded target kinds assumptions =>
+    exact .expansion (reduced target kinds assumptions) (unfolded target kinds assumptions)
   case refl => exact .refl
   case symm _ _ _ _ ih target kinds assumptions => exact .symm (ih target kinds assumptions)
   case trans _ _ _ _ _ _ first second target kinds assumptions => exact .trans (first target kinds assumptions) (second target kinds assumptions)

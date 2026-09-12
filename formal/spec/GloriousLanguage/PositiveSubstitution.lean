@@ -140,7 +140,7 @@ theorem DefinitionalStep.map_substitute_inspected {program : Program} (valid : P
       InfersHeadParameter program sourceContext target binder template (map query) (map value))
     (motive_16 := fun context implementation arguments binder value _ => context = source →
       InfersHeadArgument program target implementation (arguments.map map) binder (map value))
-    ?unused_structural ?unused_logical ?unused_capEqual ?unused_equation ?unused_evidence
+    ?unused_structural ?unused_logical ?unused_capEqual ?unused_equation ?unused_evidence ?unused_expansion
     ?unused_refl ?unused_symm ?unused_trans ?unused_congrChildren ?unused_assumed ?unused_entailed ?unused_definitional
     ?unused_rowDuplicate ?unused_tailDuplicate ?selected ?unused_head ?unused_tail ?unused_equal_1 ?unused_empty ?unused_assumed_1 ?unused_same ?unused_trans_1 ?unused_instances ?unused_entailed_1
     ?unused_assumed_2 ?unused_scalar ?unused_unit ?unused_pointer ?unused_reference ?unused_bottom ?unused_tuple ?unused_array ?unused_nominal ?unused_callable ?unused_label ?unused_environment

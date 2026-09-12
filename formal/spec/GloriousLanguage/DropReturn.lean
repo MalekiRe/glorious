@@ -214,7 +214,7 @@ theorem DropContract.normal_return_cleanup {program : Kernel.Program} {host : Fo
   obtain ⟨ended,receiver,stored,receiverType,initialized⟩ := returned
   have typed : Typing.WorldTyped program before.world := world ▸ (observed.worldTyped valid.declarations valid.inventory lawful).2
   obtain ⟨principal,capability,discard⟩ := application.capability
-  have disposable := (typed.2.1 _ _ (World.resident_iff_stores.mpr stored)).mayDispose valid.inventory initialized
+  have disposable := (typed.2.1 _ _ (World.resident_iff_stores.mpr stored)).mayDispose valid.declarations valid.inventory initialized
     (receiverType.symm ▸ capability) discard
   have nonunit : receiver.type ≠ .unit := by
     cases application with

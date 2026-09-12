@@ -9,15 +9,11 @@ instance and machine hook-entry rules. Neither an executable body, a zero-arg
 specialization, nor an after-world typing judgment is an admission premise. -/
 namespace Glorious.Language
 
-theorem PrincipalOf.drop_mayDiscard {program : Program} {id : DeclId} {data : DataDefinition}
+theorem PrincipalOf.drop_mayDiscard {program : Program} (valid : ProgramWellFormed program) {id : DeclId} {data : DataDefinition}
     {arguments : List Term} {hook : DeclId} {principal : Principal}
     (selected : program.data id = some data) (drops : data.dropHook = some hook)
-    (capability : PrincipalOf program (.nominal id arguments) principal) : principal.MayDiscard := by
-  cases principalOf_equation.mp capability with
-  | nominal found _ _ _ _ _ _ discard =>
-    have same := Option.some.inj (found.symm.trans selected)
-    subst same
-    exact discard (by simp [drops])
+    (capability : PrincipalOf program (.nominal id arguments) principal) : principal.MayDiscard :=
+  capability.nominal_drop_discardable valid selected drops
 
 
 namespace Specification
@@ -144,7 +140,7 @@ theorem destroyHook_progress {program : Kernel.Program} {before : State} {contex
     (Kinding.runtimeRegion (id := context.region))
   rw [← nominal] at dispatch contract capability
   have valueTyped := typed.2.1 address value (World.resident_iff_stores.mpr stored)
-  have disposable := valueTyped.mayDispose valid.inventory initialized capability discard
+  have disposable := valueTyped.mayDispose valid.declarations valid.inventory initialized capability discard
   have live := (initialized [] value .root).1
   obtain ⟨formal,parameters,formalType⟩ := dispatch.2.2.parameter
   have step := LocalStep.destroyHook task stored live disposable dispatch allocated borrowed rfl

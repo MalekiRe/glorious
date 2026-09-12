@@ -6,6 +6,32 @@ capability is the greatest class with an actual source witness, not an
 arbitrary inverse choice or a fabricated permission for an empty fiber. -/
 namespace Glorious.Language
 
+/-- The image is supported by actual finite unfoldings. Each expansion and
+logical leaf remains in that finite proof; only structural dependencies may
+return to the greatest assignment. Empty image fibers grant no permission. -/
+theorem CapabilityEvidence.image_coinduction {program : Program} {context : Context}
+    (map : Term → Term) (domain : Term → Prop)
+    {assignment : Term → Option Principal} {type : Term} {principal : Principal}
+    (admitted : domain type) (found : assignment type = some principal)
+    (unfolded : ∀ image,
+      (∀ term claimed, domain term → assignment term = some claimed →
+        ∃ result, image (map term) = some result ∧ claimed.Restricts result) →
+      ∀ term claimed, domain term → assignment term = some claimed →
+        CapabilityUnfolds program context image (map term) claimed) :
+    CapabilityEvidence program context (map type) principal := by
+  let image : Term → Option Principal := fun target =>
+    Principal.greatest (fun claimed => ∃ source, domain source ∧ map source = target ∧ assignment source = some claimed)
+  have imageUpper : ∀ term claimed, domain term → assignment term = some claimed →
+      ∃ result, image (map term) = some result ∧ claimed.Restricts result := by
+    intro term claimed admitted selected
+    exact Principal.greatest_upper ⟨term,admitted,rfl,selected⟩
+  obtain ⟨greatest,selected,ordered⟩ := imageUpper type principal admitted found
+  apply CapabilityEvidence.restrict (last := greatest) ?_ ordered
+  apply CapabilityEvidence.structural (assignment := image) selected
+  intro target claimed imageFound
+  obtain ⟨source,sourceAdmitted,rfl,sourceFound⟩ := Principal.greatest_origin imageFound
+  exact unfolded image imageUpper source claimed sourceAdmitted sourceFound
+
 /-- The coinductive transport boundary permits noninjective term maps.
 The equation premise concerns one actual structural layer under an enlarged
 assignment; logical leaves must already have their target derivations. This
@@ -24,21 +50,12 @@ theorem CapabilityEvidence.map_coinduction {sourceProgram targetProgram : Progra
       ∀ term supported, domain term → CapabilityEquation sourceProgram assignment term supported → ∃ result,
         supported.Restricts result ∧ CapabilityEquation targetProgram targetAssignment (map term) result) :
     CapabilityEvidence targetProgram targetContext (map type) principal := by
-  let image : Term → Option Principal := fun target =>
-    Principal.greatest (fun claimed => ∃ source, domain source ∧ map source = target ∧ assignment source = some claimed)
-  have imageUpper : ∀ term claimed, domain term → assignment term = some claimed →
-      ∃ result, image (map term) = some result ∧ claimed.Restricts result := by
-    intro term claimed admitted selected
-    exact Principal.greatest_upper ⟨term,admitted,rfl,selected⟩
-  obtain ⟨greatest,selected,ordered⟩ := imageUpper type principal admitted found
-  apply CapabilityEvidence.restrict (last := greatest) ?_ ordered
-  apply CapabilityEvidence.coinduction (assignment := image) selected
-  intro target claimed imageFound
-  obtain ⟨source,sourceAdmitted,rfl,sourceFound⟩ := Principal.greatest_origin imageFound
+  apply CapabilityEvidence.image_coinduction map domain admitted found
+  intro image imageUpper source claimed sourceAdmitted sourceFound
   obtain ⟨supported,sourceOrder,equation | evidence⟩ := unfolded source claimed sourceAdmitted sourceFound
   · obtain ⟨result,targetOrder,mapped⟩ := equations image imageUpper source supported sourceAdmitted equation
-    exact ⟨result,sourceOrder.trans targetOrder,Or.inl mapped⟩
-  · exact ⟨supported,sourceOrder,Or.inr evidence⟩
+    exact .equation (sourceOrder.trans targetOrder) mapped
+  · exact .evidence sourceOrder evidence
 
 /-- Context transport leaves structural equations unchanged while replacing
 only their actual logical leaves. It is the identity-map specialization of

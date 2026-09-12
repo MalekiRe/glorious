@@ -37,8 +37,9 @@ theorem Entails.interpret_atoms {program : Program} (valid : ProgramWellFormed p
     (motive_1 := fun source type principal _ => AtomResult program target specialization current map source
       (CapabilityEvidence program target (map type) principal))
     (motive_2 := fun source assignment type principal _ => AtomResult program target specialization current map source
-      (∃ supported, principal.Restricts supported ∧ (CapabilityEquation program assignment type supported ∨
-        CapabilityEvidence program target (map type) supported)))
+      (∀ image, (∀ term claimed, assignment term = some claimed →
+        ∃ result, image (map term) = some result ∧ claimed.Restricts result) →
+        CapabilityUnfolds program target image (map type) principal))
     (motive_3 := fun source left right _ => AtomResult program target specialization current map source (Equal program target (map left) (map right)))
     (motive_4 := fun source trait arguments negative implementation substitution _ => AtomResult program target specialization current map source
       (SelectsImpl program target trait (arguments.map map) negative implementation (mapSub substitution)))
@@ -61,7 +62,7 @@ theorem Entails.interpret_atoms {program : Program} (valid : ProgramWellFormed p
       (InfersHeadParameter program sourceContext target binder template (map query) (map value)))
     (motive_16 := fun source implementation arguments binder value _ => AtomResult program target specialization current map source
       (InfersHeadArgument program target implementation (arguments.map map) binder (map value)))
-    ?structural ?logical ?capEqual ?equation ?evidence
+    ?structural ?logical ?capEqual ?equation ?evidence ?capExpansion
     ?refl ?symm ?trans ?congrChildren ?assumed ?entailed ?definitional
     ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal_1 ?empty ?assumed_1 ?same ?trans_1 ?instances ?entailed_1
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
@@ -75,14 +76,21 @@ theorem Entails.interpret_atoms {program : Program} (valid : ProgramWellFormed p
   all_goals dsimp only [AtomResult]
   all_goals intros
   case structural _ _ _ assignment found _ unfolded forward pullback assumptions =>
-    exact CapabilityEvidence.map_atoms_coinduction valid found map shape fixed mapKinds
-      (fun term principal selected => unfolded term principal selected forward pullback assumptions)
+    apply CapabilityEvidence.image_coinduction map (fun _ => True) True.intro found
+    intro image related term principal _ selected
+    exact unfolded term principal selected forward pullback assumptions image
+      (fun term principal selected => related term principal True.intro selected)
   case logical _ _ _ _ _ requested lower ih forward pullback assumptions =>
     exact .logical (by simpa only [Constraint.mapTerms,FreshAtomSpecialization.term] using (atoms (by trivial)).mp (ih forward pullback assumptions)) requested lower
   case capEqual _ _ _ _ _ _ equal evidence forward pullback assumptions =>
     exact .equal (equal forward pullback assumptions) (evidence forward pullback assumptions)
-  case equation _ _ _ _ _ restriction equation forward pullback assumptions => exact ⟨_,restriction,Or.inl equation⟩
-  case evidence _ _ _ _ _ restriction _ ih forward pullback assumptions => exact ⟨_,restriction,Or.inr (ih forward pullback assumptions)⟩
+  case equation _ _ _ _ _ restriction equation forward pullback assumptions image related =>
+    obtain ⟨result,mapped,ordered⟩ := equation.map_atoms valid map shape fixed mapKinds related
+    exact .equation (restriction.trans ordered) mapped
+  case evidence _ _ _ _ _ restriction _ ih forward pullback assumptions image related =>
+    exact .evidence restriction (ih forward pullback assumptions)
+  case capExpansion _ _ _ _ _ _ _ reduced unfolded forward pullback assumptions image related =>
+    exact .expansion (reduced forward pullback assumptions) (unfolded forward pullback assumptions image related)
   case refl => exact .refl
   case symm _ _ _ _ ih forward pullback assumptions => exact .symm (ih forward pullback assumptions)
   case trans _ _ _ _ _ _ first second forward pullback assumptions => exact .trans (first forward pullback assumptions) (second forward pullback assumptions)

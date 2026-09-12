@@ -38,6 +38,8 @@ import GloriousLanguage.RuntimeTypingEquivariance
 import GloriousLanguage.InvocationLeaseCleanup
 import GloriousLanguage.SemanticPreservation
 import GloriousLanguage.CapabilityModels
+import GloriousLanguage.CapabilityInversion
+import GloriousLanguage.CapabilityFields
 import GloriousLanguage.PublicValues
 import GloriousLanguage.RuntimeWorldEquivariance
 import GloriousLanguage.RuntimeCoverageEquivariance

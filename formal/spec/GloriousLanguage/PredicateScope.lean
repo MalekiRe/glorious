@@ -218,7 +218,7 @@ theorem Entails.scopeMeaning {program : Program} (valid : ProgramWellFormed prog
     (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
     (motive_15 := fun _ _ _ _ _ _ _ => True)
     (motive_16 := fun _ _ _ _ _ _ => True)
-    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence
+    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence ?capExpansion
     ?refl ?symm ?trans ?congr ?assumed ?equalEntailed ?definitional
     ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances ?rowEntailed
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment

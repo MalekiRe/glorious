@@ -18,8 +18,7 @@ authority origins, and callback runtime liveness through nested execution and cl
 Closed logical equality is proved equivalent to definitional
 conversion, and source predicate scope reaches actual match entry and its first
 binding/cleanup action. These are
-not full-language soundness or conformance: conversion-safe capability inversion,
-source lexical/type normalization,
+not full-language soundness or conformance: source lexical/type normalization,
 task/frame typing and retained-frame liveness, initialized return lifetimes, resource progress and
 complete target contracts remain open. `PROOF-PLAN.md` records the current
 hardest-first dependency chain; `DRAFT.md` retains the earlier draft audit.
@@ -88,6 +87,11 @@ or a dependency of this project.
 - `DeclarationDependencyKinding`, `CapabilitySubstitution`, `LogicalSubstitution`:
   kinded declaration dependencies, recursive structural capability substitution
   and hygienic substitution-domain transport through actual logical equality.
+- `CapabilityInversion`, `CapabilityFields`, `DropCapabilities`: guarded recursive
+  capability evidence has a genuine structural origin modulo conversion.
+  Transparent expansion is finite; recursive fields share the original evidence.
+  Actual resident fields and captures inherit the resulting canonical permission,
+  consumed by drop dispatch and hook return. Unique references cannot acquire Copy.
 - `BinderDefaults`, `DeclarationKinding`: ordered default admission and full
   declaration term-kinding through actual instantiation.
 - `StaticAtomTransport`, `LogicalCut`, `LogicalUniverse`: shared static/runtime
@@ -123,8 +127,8 @@ or a dependency of this project.
   ordinary definitional equality has actual positive common reducts, with no
   normalization or simulation assumption. `DefinitionalSeparation` consumes this
   in constructor, scalar, normal-form and actual definitional-quotient proofs.
-  Conversion-safe capability inversion and runtime representation consumers
-  remain separate obligations; arbitrary lexical equality is not assumed consistent.
+  Capability inversion consumes this separation; runtime representation consumers
+  remain a separate obligation. Arbitrary lexical equality is not assumed consistent.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

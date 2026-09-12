@@ -1376,6 +1376,45 @@ scalar storage progress, elaboration, runtime body typing, whole-execution
 preservation, invocation lifecycle and private-hook preservation. Neither
 examples nor the known failing higher Drop dependency are counted as passing.
 
+The conversion-safe capability-to-Drop boundary now supersedes the higher
+Drop failures recorded above. The repair first corrects an actual modeling
+bug: a bare alias cycle could formerly delegate its permission to the greatest
+assignment without exposing any structural type. `CapabilityEquation` no
+longer treats alias expansion as a recursive guard. `CapabilityUnfolds.expansion`
+instead carries actual finite definitional steps to a structural equation or
+finite logical evidence. Recursive nominal and owned-field dependencies still
+share their original greatest assignment; no global normalization or acyclic
+declaration restriction is assumed.
+
+All actual static transport consumers now retain that finite expansion proof.
+The common image-coinduction producer uses only nonempty source fibers, and
+the sixteen-judgment atom/cut/substitution proofs consume its real unfoldings.
+`CapabilityInversion.closed_origin` proves that every closed capability has
+an actual structural origin modulo ordinary conversion, including logical
+congruence and quantified elimination. Ordinary Church–Rosser then supplies
+constructor/child separation. In particular, a unique reference's evidence is
+bounded by affine permission and cannot acquire Copy.
+
+`CapabilityFields` transports permissions through the same ordered child
+conversions and actual declaration substitution graphs, including every
+nominal variant, quantity source and principal restriction. `DropCapabilities`
+uses these witnesses for the actual constructor fields, instantiated callable
+captures and arbitrary typed resident paths. Canonical permissions are selected
+from their real evidence, not inverted as raw syntax equations. Drop admission
+excludes exact-use declaration restrictions and exact-use residents; initialized
+zero-use residents yield the actual `MayDispose` condition. `DropDispatch` and
+`DropReturn` now consume these results, removing every obsolete
+`principalOf_equation` use rather than bypassing the failing higher consumers.
+
+The fresh source-only integrated gate passes 228 jobs with warnings as errors,
+including those higher Drop consumers, ordinary conversion and substitutions,
+actual source handler execution, scalar storage progress, runtime body typing,
+whole-execution preservation, invocation lifecycle and private-hook preservation.
+No examples or aggregate soundness gate were run. This closes the capability
+inversion dependency, not full Drop conformance: authoritative storage effects
+for proper-field handoff, initialized return lifetimes, task/frame typing,
+erased-resource custody and complete resource progress remain open.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

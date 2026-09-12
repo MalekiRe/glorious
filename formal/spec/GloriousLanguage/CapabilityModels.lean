@@ -115,9 +115,6 @@ theorem CapabilityEquation.monotone {program : Program} {first last : Term → O
   | array positive found =>
     obtain ⟨result,selected,le⟩ := related _ _ found
     exact ⟨result,.array positive selected,le⟩
-  | alias found instantiated substituted selected =>
-    obtain ⟨result,selected,le⟩ := related _ _ selected
-    exact ⟨result,.alias found instantiated substituted selected,le⟩
   | nominal found instantiated substituted capabilities marked meets restricted drops =>
     obtain ⟨results,fields,ordered⟩ := related.fields capabilities
     obtain ⟨marker,marked,markerOrder⟩ := marker_monotone related marked
@@ -232,16 +229,6 @@ theorem CapabilityEquation.functional {program : Program} {assignment : Term →
     cases right with
     | emptyArray => omega
     | array _ found => exact Option.some.inj (selected.symm.trans found)
-  | alias selected instantiated substituted found =>
-    cases right with
-    | alias selected2 instantiated2 substituted2 found2 =>
-      have same := Option.some.inj (selected2.symm.trans selected)
-      subst same
-      have same := instantiated2.2.2.trans instantiated.2.2.symm
-      subst same
-      have same := substituted2.2.1.trans substituted.2.1.symm
-      subst same
-      exact Option.some.inj (found.symm.trans found2)
   | nominal selected instantiated substituted capabilities marked meets restricted _ =>
     cases right with
     | nominal selected2 instantiated2 substituted2 capabilities2 marked2 meets2 restricted2 _ =>

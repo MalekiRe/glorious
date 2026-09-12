@@ -45,13 +45,6 @@ theorem CapabilityEquation.map_atoms {program : Program} (valid : ProgramWellFor
     simp only [Term.mapChildren,literal]
     obtain ⟨result,selected,ordered⟩ := related _ _ assigned
     exact ⟨result,.array positive selected,ordered⟩
-  | alias found instantiated substituted assigned =>
-    rw [shape]
-    have template := fixed _ (List.mem_of_find?_eq_some (Program.alias_lookup found))
-    have graph := substituted.map_instantiated (valid.alias_body found) instantiated map shape
-      (template _ (by simp [Definition.terms])) kinds
-    obtain ⟨result,selected,ordered⟩ := related _ _ assigned
-    exact ⟨result,.alias found (instantiated.map_values map (fun term _ => kinds term)) graph selected,ordered⟩
   | @nominal id data arguments inner residentTypes residentPrincipals sourceMarker structuralPrincipal resultPrincipal
       found instantiated substituted assigned marked meets restricted drops =>
     rw [shape]

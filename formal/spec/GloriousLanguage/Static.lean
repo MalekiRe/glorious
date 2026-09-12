@@ -92,8 +92,10 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
   | principal {principal} : Kinding program context (.principal principal) .quantity
   | static : Kinding program context .staticRegion .region
 
-/-- A capability equation is local. Recursive nominal derivation is specified
-below as its greatest solution, not an acyclic field walk or assumed Copy. -/
+/-- A capability equation exposes a genuine structural head. Recursive
+nominal dependencies use the greatest assignment below; transparent alias and
+projection expansion must first finish through the actual finite reduction
+judgment and cannot themselves guard a recursive permission claim. -/
 inductive CapabilityEquation (program : Program) (assignment : Term → Option Principal) : Term → Principal → Prop where
   | unit : CapabilityEquation program assignment .unit .duplicable
   | bottom : CapabilityEquation program assignment .bottom .duplicable
@@ -108,9 +110,6 @@ inductive CapabilityEquation (program : Program) (assignment : Term → Option P
       CapabilityEquation program assignment (.array element (.constant (.integer sign width 0))) .duplicable
   | array {element sign width length principal} : 0 < length → assignment element = some principal →
       CapabilityEquation program assignment (.array element (.constant (.integer sign width length))) principal
-  | alias {id declaration arguments substitution value principal} : program.alias id = some declaration →
-      Instantiates declaration.generics arguments substitution → Substitutes substitution declaration.value value →
-      assignment value = some principal → CapabilityEquation program assignment (.alias id arguments) principal
   | nominal {id data arguments substitution fields principals marker structural principal} : program.data id = some data →
       Instantiates data.generics arguments substitution →
       ListRel (Substitutes substitution) ((data.variants.flatMap (·.fields)).map (·.type)) fields →
@@ -175,6 +174,10 @@ mutual
         CapabilityEquation program assignment type supported → CapabilityUnfolds program context assignment type claimed
     | evidence {context assignment type claimed supported} : claimed.Restricts supported →
         CapabilityEvidence program context type supported → CapabilityUnfolds program context assignment type claimed
+    | expansion {context assignment type exposed claimed} :
+        DefinitionalStep program context type exposed →
+        CapabilityUnfolds program context assignment exposed claimed →
+        CapabilityUnfolds program context assignment type claimed
 
   inductive Equal (program : Program) : Context → Term → Term → Prop where
     | refl {context a} : Equal program context a a

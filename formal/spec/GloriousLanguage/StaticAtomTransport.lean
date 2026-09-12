@@ -50,11 +50,6 @@ theorem CapabilityEquation.renameAtoms {program : Program} {assignment : Term â†
   case tuple fields => exact .tuple (embedding.assignment_fields fields)
   case emptyArray => exact .emptyArray
   case array positive found => exact .array positive (by simpa only [embedding.assignment_at] using found)
-  case alias found instantiated substituted selected =>
-    have kept := fixed _ (List.mem_of_find?_eq_some (Program.alias_lookup found))
-    exact .alias found (instantiated.renameAtoms embedding.toAtomRenaming)
-      (embedding.substitutes_fixed (kept _ (by simp [Definition.terms])) substituted)
-      (by simpa only [embedding.assignment_at] using selected)
   case nominal id data arguments substitution fields principals marker structural found instantiated
       substituted capabilities marked meets restricted drops =>
     have kept := fixed _ (List.mem_of_find?_eq_some (Program.data_lookup found))
@@ -124,7 +119,7 @@ theorem Entails.renameAtoms {program : Program} {context : Context} {constraint 
     (motive_16 := fun context implementation arguments binder value _ =>
       InfersHeadArgument program (embedding.context context) implementation
         (arguments.map embedding.term) binder (embedding.term value))
-    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence
+    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence ?capExpansion
     ?refl ?symm ?trans ?congr ?assumed ?equalEntailed ?definitional
     ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances ?rowEntailed
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
@@ -150,6 +145,7 @@ theorem Entails.renameAtoms {program : Program} {context : Context} {constraint 
   case capEqual _ _ equal evidence => exact .equal equal evidence
   case capEquation restriction equation => exact .equation restriction (equation.renameAtoms embedding fixed)
   case capEvidence restriction _ evidence => exact .evidence restriction evidence
+  case capExpansion _ _ reduced unfolded => exact .expansion reduced unfolded
   case refl => exact .refl
   case symm _ ih => exact .symm ih
   case trans _ _ first second => exact .trans first second

@@ -142,13 +142,6 @@ theorem CapabilityEquation.kinding_restrict {program : Program} (valid : Program
   | array positive assigned =>
     cases kinded with
     | array element _ => exact .array positive (keep element assigned)
-  | alias found instantiated substituted assigned =>
-    cases kinded with
-    | alias actual _ arguments =>
-      obtain rfl := Option.some.inj (found.symm.trans actual)
-      have dependency := (valid.alias_specialization actual instantiated arguments).1
-      rw [← substituted.2.1] at dependency
-      exact .alias actual instantiated substituted (keep dependency assigned)
   | nominal found instantiated substituted assigned marked meets restricted drops =>
     cases kinded with
     | nominal actual _ arguments =>
