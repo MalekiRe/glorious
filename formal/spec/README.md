@@ -285,8 +285,15 @@ or a dependency of this project.
   custody) and `World.Destroys.write_disjoint` shows a write apart from the whole
   subtree preserves it (shell, permission, loan-table readiness and every child,
   with the prefix law chaining the apartness). The recursion theorem
-  (`CleanupRun.destroy_tree`) that consumes them is NOT yet stated; the remaining
-  transports are an ending-row step, the `RequestReturns` map and `Retires`.
+  (`CleanupRun.destroy_tree`) that consumes them is NOT yet stated. The
+  relinquishment frame is done: `World.restamp`/`World.RequestReturns.get_eq` read
+  the relinquished table as the old table restamped, and
+  `World.RequestReturns.frame_set`/`frame_set_none` show an ending row commutes
+  with that map (every other row untouched; at the ended identity the restamping
+  decision reads only the custody and the kind, neither of which an ending
+  changes). Still to write: the kill transport (`World.Destroys.end_loan`) on top
+  of that frame, the `Retires` transport, the reversed-index field loop and the
+  recursion theorem itself.
 - `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
   `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
   and `source_execution` now take a `Typing.ScopeReading` indexed by the actual

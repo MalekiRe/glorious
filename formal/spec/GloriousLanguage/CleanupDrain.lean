@@ -552,3 +552,129 @@ theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World}
         (fun probe included => deep probe (Address.Prefix.trans (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included))
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The restamping one row receives when its custody relinquishes pending
+returns: `returnRequested` is set exactly for the storage borrows of that custody
+and every other field is untouched. -/
+def World.restamp (custody : ClaimCustody) (loan : Loan) : Loan :=
+  if loan.custody = some custody ∧ loan.kind = .storageBorrow then
+    { loan with returnRequested := true } else loan
+
+theorem World.RequestReturns.loans_eq (world : World) (custody : ClaimCustody) :
+    (world.RequestReturns custody).loans = world.loans.map (fun entry => (entry.1,World.restamp custody entry.2)) :=
+  rfl
+
+theorem World.RequestReturns.get_eq (world : World) (custody : ClaimCustody) (key : Identity) :
+    (world.RequestReturns custody).loans.get key = (world.loans.get key).map (World.restamp custody) := by
+  rw [World.RequestReturns.loans_eq,Table.get_map_values]
+
+theorem World.restamp_live (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).live = loan.live := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_kind (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).kind = loan.kind := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_referent (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).referent = loan.referent := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_parent (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).parent = loan.parent := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_guards (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).guards = loan.guards := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+/-- Ending one row cannot turn the relinquished table's entry at another
+identity into a row: the restamping map preserves `none`. -/
+theorem World.RequestReturns.frame_set_none {world : World} {custody : ClaimCustody} {id : Identity} {dead : Loan}
+    (_deadFound : world.loans.get id = some dead) {key : Identity}
+    (missing : (({ world with loans := world.loans.set id { dead with live := false } }
+      ).RequestReturns custody).loans.get key = none) :
+    (world.RequestReturns custody).loans.get key = none := by
+  have canonical : Table.get (List.map (fun entry : Identity × Loan => (entry.1,World.restamp custody entry.2))
+      ({ world with loans := world.loans.set id { dead with live := false } }.loans)) key = none := by
+    show (({ world with loans := world.loans.set id { dead with live := false } }
+      ).RequestReturns custody).loans.get key = none
+    exact missing
+  rw [Table.get_map_values] at canonical
+  have afterTable : Table.get (Table.set world.loans id { dead with live := false }) key = none :=
+    Option.map_eq_none_iff.mp canonical
+  by_cases same : key = id
+  · subst key
+    rw [Table.get_set] at afterTable
+    cases afterTable
+  · rw [Table.get_set_other _ _ _ _ same] at afterTable
+    rw [World.RequestReturns.get_eq,afterTable]
+    rfl
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The relinquishment map and an ending row commute: every other row is
+untouched, and at the ended identity the restamping decision reads only the
+custody and the kind, neither of which an ending changes. -/
+theorem World.RequestReturns.frame_set {world : World} {custody : ClaimCustody} {id : Identity} {dead : Loan}
+    (deadFound : world.loans.get id = some dead) {key : Identity} {row : Loan}
+    (found : (({ world with loans := world.loans.set id { dead with live := false } }
+      ).RequestReturns custody).loans.get key = some row) :
+    ∃ previous, (world.RequestReturns custody).loans.get key = some previous ∧
+      previous.kind = row.kind ∧ previous.referent = row.referent ∧ previous.parent = row.parent ∧
+      previous.guards = row.guards ∧ (row.live = true → previous.live = true) := by
+  have canonical : Table.get (List.map (fun entry : Identity × Loan => (entry.1,World.restamp custody entry.2))
+      ({ world with loans := world.loans.set id { dead with live := false } }.loans)) key = some row := by
+    show (({ world with loans := world.loans.set id { dead with live := false } }
+      ).RequestReturns custody).loans.get key = some row
+    exact found
+  rw [Table.get_map_values] at canonical
+  obtain ⟨original,originalFound,rowEq⟩ := Option.map_eq_some_iff.mp canonical
+  by_cases same : key = id
+  · subst key
+    have originalEq : original = { dead with live := false } :=
+      Option.some.inj (originalFound.symm.trans (Table.get_set _ _ _))
+    subst originalEq
+    refine ⟨World.restamp custody dead,?_,?_,?_,?_,?_,?_⟩
+    · rw [World.RequestReturns.get_eq,deadFound]
+      rfl
+    · simp only [← rowEq,World.restamp_kind]
+    · simp only [← rowEq,World.restamp_referent]
+    · simp only [← rowEq,World.restamp_parent]
+    · simp only [← rowEq,World.restamp_guards]
+    · simp only [← rowEq,World.restamp_live]
+      intro live
+      exact absurd live (by simp)
+  · have previousFound : Table.get world.loans key = some original := by
+      rw [Table.get_set_other _ _ _ _ same] at originalFound
+      exact originalFound
+    refine ⟨World.restamp custody original,?_,?_,?_,?_,?_,?_⟩
+    · rw [World.RequestReturns.get_eq,previousFound]
+      rfl
+    · simp only [← rowEq,World.restamp_kind]
+    · simp only [← rowEq,World.restamp_referent]
+    · simp only [← rowEq,World.restamp_parent]
+    · simp only [← rowEq,World.restamp_guards]
+    · simp only [← rowEq,World.restamp_live]
+      exact fun live => live
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+end Glorious.Language
