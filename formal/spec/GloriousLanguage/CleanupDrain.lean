@@ -1371,3 +1371,26 @@ theorem List.Nodup.reverse {α : Type} {l : List α} (nodup : l.Nodup) : l.rever
       exact nodup.1 (by simpa using member)
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- The custody's pending-return wrapper is the identity when that custody has no
+live, return-requested storage borrow: the queue it folds over is empty, so the
+bare continuation is reached without a step. -/
+theorem CleanupRun.release_custody_none {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {custody : ClaimCustody} {next : Task}
+    (task : before.task = ReleaseCustodyLoans before.world custody next)
+    (none : before.world.loans.filterMap (fun entry =>
+      if entry.2.live && entry.2.kind == .storageBorrow && entry.2.returnRequested &&
+        entry.2.custody == some custody then some entry.1 else none) = []) :
+    ∃ trace after, CleanupRun program host before trace after ∧ after.task = next := by
+  have frozen : before.task = next := by
+    rw [task]
+    unfold ReleaseCustodyLoans ReleaseLoans
+    rw [none]
+    rfl
+  exact ⟨[], before, .refl, frozen⟩
+
+end Glorious.Language.Execution
