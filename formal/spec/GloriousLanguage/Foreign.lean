@@ -43,6 +43,11 @@ structure Registration where
   retained : Bool
   extent : Identity
 
+/-- The registration carries the exact callable authority that callbacks
+will consume, including the shared view of a shared invocation. -/
+def Registration.place (registration : Registration) : ResolvedPlace :=
+  ⟨registration.owner,registration.authority.lend registration.access⟩
+
 def Registration.Valid (program : Kernel.Program) (world : World) (runtimes : List Identity)
     (registration : Registration) : Prop :=
   registration.active = true →
@@ -105,7 +110,7 @@ def AccessSeed (program : Kernel.Program) (model : Model) (contract : Contract)
   place ∈ session.known ∨
   (∃ registration ∈ model.registrations session.state,
     registration.active = true ∧ registration.retained = true ∧
-    place = ⟨registration.owner,registration.authority.lend registration.access⟩ ∧
+    place = registration.place ∧
     ∃ root domain, current.root registration.owner = some root ∧
       (root.home = .allocation domain ∨ root.home = .external domain)) ∨
   (contract.external current session.call place ∧
@@ -217,15 +222,17 @@ def RegistrationsValid (program : Kernel.Program) (model : Model) (world : World
   (model.registrations state |>.map (·.identity)).Nodup ∧
   ∀ registration ∈ model.registrations state, registration.Valid program world (model.runtimes state)
 
-/-- Keeping a newly registered owner is a contract capability, independently
-of linking the callback's machine entry address. Existing registrations must
-be the same records, not just reuse an old numeric registration identity. -/
-def RetentionPermitted (program : Kernel.Program) (contract : Contract) (model : Model)
+/-- Registering a callback requires the exact authority later exposed by the
+registry. Address reachability alone cannot upgrade a shared view to ownership.
+Keeping that authority beyond synchronous extent additionally requires the
+contract's retention permission. Unchanged registrations are exact records. -/
+def RegistrationsPermitted (program : Kernel.Program) (contract : Contract) (model : Model)
     (initial current : World) (session : ForeignSession)
     (before after : List Nat) : Prop :=
-  ∀ registration ∈ model.registrations after, registration.active = true → registration.retained = true →
+  ∀ registration ∈ model.registrations after, registration.active = true →
     registration ∈ model.registrations before ∨
-      Retainable program model contract initial current session registration.owner
+      (Accessible program model contract initial current session registration.place ∧
+        (registration.retained = true → contract.retainable current session registration.owner))
 
 /-- Laws constrain the model only on its declared contract domain. World
 typing is derived from mutations; no post-world typing assumption occurs. -/
@@ -236,7 +243,7 @@ structure Model.Lawful (program : Kernel.Program) (model : Model) : Prop where
     Selected program model initial.call imported contract → world.WellFormed → CallTyped program world initial.call →
     contract.precondition world initial → model.start initial.call.binding.declaration world initial state →
     contract.session world { initial with state } ∧ RegistrationsValid program model world state ∧
-    RetentionPermitted program contract model world world initial initial.state state
+    RegistrationsPermitted program contract model world world initial initial.state state
   step : ∀ session imported contract before observation after action next,
     Selected program model session.call imported contract → before.WellFormed → contract.session before session →
     model.step session.call.binding.declaration before session observation after action next →
@@ -253,13 +260,13 @@ structure Model.Lawful (program : Kernel.Program) (model : Model) : Prop where
     (∀ address value id loan, after.Resident address value → value.head = .reference id →
       after.loans.get id = some loan → ¬ before.References id →
       Retainable program model contract before after session loan.referent ∨ loan.region ∈ before.liveRegions) ∧
-    RetentionPermitted program contract model before after session session.state next
+    RegistrationsPermitted program contract model before after session session.state next
   callbackReturned : ∀ session imported contract world current registration result next,
     Selected program model session.call imported contract → world.WellFormed →
     contract.callbackPostcondition world session current registration result →
     model.callbackReturned session.call.binding.declaration world session current registration result next →
     contract.session world (session.returned result next) ∧ RegistrationsValid program model world next ∧
-    RetentionPermitted program contract model world world
+    RegistrationsPermitted program contract model world world
       (session.returned result current) current next
 
 /-- Host payload adapter to ordinary invocation inputs. Captures still use
@@ -313,8 +320,7 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
       contract.session before.world session →
       model.step session.call.binding.declaration before.world session observation after (.callback id arguments) nextState →
       registration ∈ model.registrations session.state → registration.identity = id → registration.active = true →
-      Accessible program model contract before.world after session
-        ⟨registration.owner,registration.authority.lend registration.access⟩ →
+      Accessible program model contract before.world after session registration.place →
       (registration.access = .owned → ∀ current ∈ model.registrations nextState, current.active = true →
         ¬ registration.owner.Overlaps current.owner) →
       CallableReceiver after registration.owner registration.authority registration.access registration.function registration.arguments →

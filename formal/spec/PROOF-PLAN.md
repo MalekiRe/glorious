@@ -459,6 +459,16 @@ control must still preserve private placement across callbacks and prove that
 returned values cannot name hidden leases. Persistent external registration
 invariants and initialized return/cleanup preservation also remain open.
 
+Callback registration now requires the exact handed-off callable authority,
+including its shared view, for every newly active record. Retention adds the
+contract's permission; it cannot turn mere address reachability into ownership.
+The old address-only registration admission is removed. `ForeignRegistration`
+derives authority grants from actual start, return and host-step laws and proves
+their origin through arbitrary host continuations, with the exact trace split.
+An unchanged record is retained verbatim; changes to its authority or activation
+must discharge a new grant. This is registration-authority preservation, not
+yet the source lifetime/frame invariant for externally retained callbacks.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target
