@@ -1517,3 +1517,25 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
     exact ⟨_, drained, (.silent (by simp [Task.Cleanup,task]) structural (fieldsRun.append finishRun |>.append drainedRun)), drainedTask'⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- An allocation at a fresh root leaves a receiver stored elsewhere untouched: the
+allocation's address root is the fresh `nextRoot`, so the roots-table update cannot
+be the receiver's row. -/
+theorem Allocates.stores_other {program : RuntimeProgram} {before after : World} {home : Home} {region : Identity}
+    {type : Term} {layout : Layout} {mutable : Bool} {address observed : Address} {shell : Value}
+    (allocated : Allocates program.declarations before home region type layout mutable address after)
+    (stored : before.Stores observed shell)
+    (different : address.root ≠ observed.root) :
+    after.Stores observed shell := by
+  rw [World.Stores] at stored ⊢
+  cases allocated with
+  | fresh request extent =>
+    unfold World.read World.root
+    rw [Table.get_set_other _ _ _ _ (Ne.symm different)]
+    exact stored
+
+end Glorious.Language.Execution
