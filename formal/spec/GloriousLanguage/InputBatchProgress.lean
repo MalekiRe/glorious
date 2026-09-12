@@ -3302,6 +3302,39 @@ theorem Kernel.BatchPrepared.of_compatible {program : RuntimeProgram} {footprint
   · intro place member
     cases member
 
+/-- Receiver lending transports along the entry lifetime. -/
+theorem Execution.lendsReceiver_callee {program : Kernel.Program}
+    {first second : Execution.Context} {before after : World} {address : Address}
+    {authority permission : Authority} {access : Access} {lease : Option InvocationLease}
+    (activation : first.activation = second.activation) (scope : first.scope = second.scope)
+    (region : first.region = second.region)
+    (lent : Execution.LendsReceiver program first before address authority access lease permission after) :
+    Execution.LendsReceiver program second before address authority access lease permission after := by
+  rw [Execution.LendsReceiver] at lent ⊢
+  rw [activation,scope,region] at lent
+  exact lent
+
+/-- Invocation preparation transports along the entry lifetime: its only use of
+the callee context is the receiver lending. -/
+theorem Execution.preparesEntry_callee_context {program : Kernel.Program}
+    {first second : Execution.Context} {function : Kernel.Function} {before after : World}
+    {source : Execution.EntrySource} {inputs : List Kernel.InvocationInput}
+    (activation : first.activation = second.activation) (scope : first.scope = second.scope)
+    (region : first.region = second.region)
+    (prepared : Execution.PreparesEntry program first function before source inputs after) :
+    Execution.PreparesEntry program second function before source inputs after := by
+  cases prepared with
+  | supplied => exact .supplied
+  | resident callable instanceArguments lent captures consumedReceiver =>
+      exact .resident callable instanceArguments
+        (Execution.lendsReceiver_callee activation scope region lent) captures consumedReceiver
+  | contextual callable instanceArguments witnessed reserved lentReceiver lentWitness reservedLent
+      consumedReceiver consumedAvailability =>
+      exact .contextual callable instanceArguments witnessed reserved
+        (Execution.lendsReceiver_callee activation scope region lentReceiver)
+        (Execution.lendsReceiver_callee activation scope region lentWitness)
+        reservedLent consumedReceiver consumedAvailability
+
 /-- The ordinary entry endpoint. The source admission states the invocation
 preparation directly at the entry context the caller will select, for whatever
 environment the ordered binder produces; the binder then either completes every
@@ -3312,11 +3345,11 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
     {caller : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
     {withRegion prepared : World} {inputs : List InvocationInput}
     (consumed : World → World)
-    (entry : ∀ environment, ∃ declaration, program.declarations.function function.declaration = some declaration ∧
-      Execution.PreparesEntry program
-        ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
-          before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
-          [⟨function.declaration,environment⟩]⟩ function withRegion source inputs prepared)
+    (callee : Execution.Context)
+    (calleeLifetime : callee.activation = before.nextActivation ∧
+      callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
+    (prepares : Execution.PreparesEntry program callee function withRegion source inputs prepared)
     (fresh : FreshRegion before.world before.world.nextRegion withRegion)
     (preparedValid : prepared.WellFormed)
     (incoming : IncomingResources program function prepared inputs)
@@ -3328,12 +3361,18 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
     (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     ∃ context after outcome,
       Execution.EnterWorldAttempt program before caller function source context after outcome := by
+  obtain ⟨declaration,declared⟩ := declared
   obtain ⟨environment,bound,outcome,attempt,framed⟩ :=
     Kernel.BatchPrepared.attemptFor (recipient := .activation before.nextActivation)
       (activation := before.nextActivation) (scope := before.world.nextRegion)
       (region := before.world.nextRegion) prepared inputs [] preparedValid
       (Kernel.BatchPrepared.of_compatible product facts nodup)
-  obtain ⟨declaration,declared,transported⟩ := entry environment
+  have transported : Execution.PreparesEntry program
+      ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
+        before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
+        [⟨function.declaration,environment⟩]⟩ function withRegion source inputs prepared :=
+    Execution.preparesEntry_callee_context calleeLifetime.1 calleeLifetime.2.1 calleeLifetime.2.2
+      prepares
   refine ⟨⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
       before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
       [⟨function.declaration,environment⟩]⟩,
@@ -3360,5 +3399,7 @@ theorem Execution.FinishesEntry.of_contextual {before after : World}
     (finished : Execution.FinishesReceiver before receiver access after) :
     Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after :=
   .contextual finished
+
+
 
 end Kernel
