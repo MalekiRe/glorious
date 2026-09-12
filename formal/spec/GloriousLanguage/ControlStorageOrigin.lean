@@ -152,6 +152,15 @@ theorem ReleaseCustodyLoans.root_support (world : World) (custody : ClaimCustody
     (ReleaseCustodyLoans world custody task).rootSupport = task.rootSupport :=
   ReleaseLoans.root_support _ _
 
+theorem _root_.Glorious.Language.RelinquishesCustody.nextRoot_eq {before after : World} {custody : ClaimCustody}
+    (relinquished : RelinquishesCustody before custody after) : after.nextRoot = before.nextRoot := by
+  cases relinquished
+  rfl
+
+theorem _root_.Glorious.Language.RelinquishesCustody.counter {before after : World} {custody : ClaimCustody}
+    (relinquished : RelinquishesCustody before custody after) : before.nextRoot ≤ after.nextRoot :=
+  Nat.le_of_eq (_root_.Glorious.Language.RelinquishesCustody.nextRoot_eq relinquished).symm
+
 theorem ArgumentInputs.root_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
     (well : world.WellFormed) (bounded : RootSupport.Below context.rootSupport world.nextRoot)

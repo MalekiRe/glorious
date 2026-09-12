@@ -3752,6 +3752,25 @@ theorem Kernel.BindsInputAt.owned_capture_step {program : RuntimeProgram} {recip
   | guardedAllocation _ formalEq _ _ _ _ => rw [formalEq] at resident; exact resident.elim
   | loan _ formalEq _ _ _ => rw [formalEq] at resident; exact resident.elim
 
+/-- Every admitted capture of a receiver sits at its own index: the capture
+projection builds each input with origin `.capture index` and storage the
+receiver's child at that same index, so the slot a binding empties is exactly the
+capture's index. -/
+theorem Kernel.Execution.ResidentCaptureInputs.slot {receiver : Address} {authority : Authority}
+    {access : Access} {formals : List Local} {input : InvocationInput}
+    (member : input ∈ Execution.ResidentCaptureInputs receiver authority access formals) :
+    ∃ index, input.origin = .capture index ∧ input.storage = receiver.child index := by
+  simp only [Execution.ResidentCaptureInputs,List.mem_map] at member
+  obtain ⟨⟨formal,index⟩, _, same⟩ := member
+  exact ⟨index, by rw [← same], by rw [← same]⟩
+
+theorem Kernel.Execution.CaptureInputs.slot {world : World} {receiver : Address} {authority : Authority}
+    {access : Access} {formals : List Local} {inputs : List InvocationInput}
+    (selected : Execution.CaptureInputs world receiver authority access formals inputs)
+    {input : InvocationInput} (member : input ∈ inputs) :
+    ∃ index, input.origin = .capture index ∧ input.storage = receiver.child index :=
+  Kernel.Execution.ResidentCaptureInputs.slot (by rw [← selected.1]; exact member)
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
