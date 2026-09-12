@@ -1234,3 +1234,62 @@ theorem CleanupRun.destroy_child {program : Kernel.Program} {host : Foreign.Mode
       head,owner,type,live,resources,slotHole,others⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- Ending one loan cannot break the destructor's owning-kind obligation: the
+killed row is not live afterwards, every other row is untouched. -/
+theorem World.Destroys.kinds_set_dead {world : World} {id : Identity} {loan : Loan}
+    (_found : world.loans.get id = some loan)
+    (kinds : ∀ key row, world.loans.get key = some row → row.live = true →
+      row.kind = .owning ∨ row.kind = .storageBorrow) :
+    ∀ key row, (world.loans.set id { loan with live := false }).get key = some row → row.live = true →
+      row.kind = .owning ∨ row.kind = .storageBorrow := by
+  intro key row selected live
+  by_cases same : key = id
+  · rw [same] at selected
+    rw [Table.get_set world.loans id { loan with live := false }] at selected
+    have rowEq : { loan with live := false } = row := Option.some.inj selected
+    subst rowEq
+    simp at live
+  · have beforeFound : world.loans.get key = some row := by
+      rwa [Table.get_set_other world.loans id key { loan with live := false } same] at selected
+    exact kinds key row beforeFound live
+
+/-- Ending one loan cannot break the destructor's ancestry obligation either: the
+killed row survives in the table, so every parent and guard row is still named. -/
+theorem World.Destroys.ancestry_set_dead {world : World} {id : Identity} {loan : Loan}
+    (found : world.loans.get id = some loan)
+    (ancestry : ∀ key row, world.loans.get key = some row →
+      (∀ parent, row.parent = some parent → world.loans.get parent ≠ none) ∧
+      (∀ guard ∈ row.guards, world.loans.get guard ≠ none)) :
+    ∀ key row, (world.loans.set id { loan with live := false }).get key = some row →
+      (∀ parent, row.parent = some parent →
+        (world.loans.set id { loan with live := false }).get parent ≠ none) ∧
+      (∀ guard ∈ row.guards, (world.loans.set id { loan with live := false }).get guard ≠ none) := by
+  intro key row selected
+  have beforeLookup : ∀ other, ((world.loans.set id { loan with live := false }).get other = none) →
+      world.loans.get other = none := by
+    intro other missing
+    by_cases same : other = id
+    · rw [same] at missing
+      rw [Table.get_set world.loans id { loan with live := false }] at missing
+      cases missing
+    · rwa [Table.get_set_other world.loans id other { loan with live := false } same] at missing
+  by_cases same : key = id
+  · rw [same] at selected
+    rw [Table.get_set world.loans id { loan with live := false }] at selected
+    have rowEq : { loan with live := false } = row := Option.some.inj selected
+    subst rowEq
+    refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+    · exact (ancestry id loan found).1 parent link |>.imp (beforeLookup parent)
+    · exact (ancestry id loan found).2 guard member |>.imp (beforeLookup guard)
+  · have beforeFound : world.loans.get key = some row := by
+      rwa [Table.get_set_other world.loans id key { loan with live := false } same] at selected
+    refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+    · exact (ancestry key row beforeFound).1 parent link |>.imp (beforeLookup parent)
+    · exact (ancestry key row beforeFound).2 guard member |>.imp (beforeLookup guard)
+
+end Glorious.Language.Execution
