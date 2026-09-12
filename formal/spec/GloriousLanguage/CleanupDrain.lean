@@ -731,3 +731,39 @@ theorem World.Destroys.end_loan {program : RuntimeProgram} {world : World} {addr
       exact ih index child selectedTree found
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Two different children of one address are incomparable by the prefix
+order: their field lists end in different indices. -/
+theorem Address.child_not_prefix {address : Address} {first second : Nat} (different : first ≠ second) :
+    ¬ (address.child first).Prefix (address.child second) := by
+  intro included
+  obtain ⟨_,_,suffix,shape⟩ := included
+  simp only [Address.child] at shape
+  have lengths : (address.fields ++ [second]).length = ((address.fields ++ [first]) ++ suffix).length := by
+    rw [shape]
+  simp only [List.length_append,List.length_cons,List.length_nil] at lengths
+  have empty : suffix = [] := by
+    cases suffix with
+    | nil => rfl
+    | cons head tail => simp at lengths
+  subst empty
+  simp only [List.append_nil] at shape
+  have equal := List.append_cancel_left shape
+  simp only [List.cons.injEq] at equal
+  exact different equal.1.symm
+
+/-- The prefix order is transitive, so a probe inside a descendant's subtree is
+reached from the ancestor too. -/
+theorem Address.Prefix.not_outer {outer inner probe : Address}
+    (included : outer.Prefix inner) (down : inner.Prefix probe) : outer.Prefix probe :=
+  ⟨included.1.trans down.1,included.2.1.trans down.2.1,
+    by
+      obtain ⟨firstSuffix,firstShape⟩ := included.2.2
+      obtain ⟨secondSuffix,secondShape⟩ := down.2.2
+      exact ⟨firstSuffix ++ secondSuffix,by rw [secondShape,firstShape,List.append_assoc]⟩⟩
+
+end Glorious.Language
