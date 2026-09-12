@@ -848,7 +848,18 @@ no live children of its own. The drain obligations are bridged across both chang
 the shell phase makes (the write by `World.write_value_update`'s shape, the restamp
 by the restamp lemmas), which is why a single loans equality was not enough.
 The recursion's step provider is the last piece, and its
-shape is now settled: the child's own run comes from `destroy_node`, and the
+shape is now settled (and one reduction short): `Value.atPath_replace` — that
+reading a path after replacing at it returns the replacement — is proved for the
+nil case and the two cons cases, and its residual goal is exactly
+`(do let child ← (Value.resident … (before.fields.set index replacement) …).fields[index]?.bind id; some child) = replacement`.
+The remaining work there is reduction, not proof: `Value.fields` and `Value.atPath`
+are both pattern-matching functions rather than projections, so the constructor
+inside `withFields` has to be reduced before `List.getElem?_set_self` (with the
+bound from `List.getElem?_eq_some_iff` on the shape's `found`) and the
+`Option.bind id` collapse can fire; `unfold` on all three names plus `dsimp only []`
+is the last thing that was tried and it still left the goal. Whatever finally
+closes it, the fact is worth having: with it the recursion's direct route works as
+described below. the child's own run comes from `destroy_node`, and the
 caller's-shell facts cannot be read off at the end because a node's runs change the
 value stored at the caller's path (the grandchildren live inside that value). Two
 routes exist and both are pure composition. The direct one adds a value-level fact
