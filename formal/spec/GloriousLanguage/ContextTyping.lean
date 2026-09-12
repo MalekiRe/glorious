@@ -201,6 +201,26 @@ theorem Retires.contextBindingsTyped {program : Kernel.Program} {before after : 
     Typing.ContextBindingsTyped program after source runtime :=
   typed.world (fun _ _ binding => retired.bindingStorageTyped binding)
 
+theorem EndsLoan.contextBindingsTyped {program : Kernel.Program} {before after : World} {id : Identity}
+    (ended : EndsLoan before id after) {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  typed.world (fun _ _ binding => ended.bindingStorageTyped binding)
+
+/-- Every actual close/release transition preserves retained contexts. The
+proof consumes their resident invocation guards and the existing EndsLoan
+admission, not an externally supplied inequality between loan identities. -/
+theorem Execution.LocalStep.loanRelease_contextBindingsTyped {program : Kernel.Program}
+    {before after : Execution.State} {event : Option Execution.Event}
+    (step : Execution.LocalStep program before event after)
+    (releasing : ∃ id next, before.task = .closeLoan id next ∨ before.task = .releaseLoan id next)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before.world source runtime) :
+    Typing.ContextBindingsTyped program after.world source runtime := by
+  cases step <;> obtain ⟨id,next,request | request⟩ := releasing
+  all_goals simp_all
+  all_goals apply EndsLoan.contextBindingsTyped <;> assumption
+
 theorem Execution.AtomStep.contextBindingsTyped {program : Kernel.Program} {before after : Execution.State} {event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before.world) (step : Execution.AtomStep program before event after)
@@ -354,6 +374,23 @@ theorem FreshRegion.preserves_contextBindingsTyped {program : Kernel.Program} {b
   exact typed.world (fun _ _ binding => binding.roots_loans (before := before)
     (after := { before with liveRegions := region :: before.liveRegions, nextRegion := region+1 }) rfl rfl)
 
+theorem Execution.Installs.preserves_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
+    {outer : Execution.Context} {syntaxNode : Kernel.Handler} {handler : Execution.InstalledHandler} {after : World}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before.world)
+    (installed : Execution.Installs program before outer syntaxNode handler after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before.world source runtime) :
+    Typing.ContextBindingsTyped program after source runtime := by
+  obtain ⟨_,_,_,_,_,_,_,_,one,two,_,captured,bound,retired,rfl,_⟩ := installed
+  have secondWorld := two.worldTyped (one.worldTyped worldTyped)
+  have secondContext := two.preserves_contextBindingsTyped (one.preserves_contextBindingsTyped typed)
+  have capturedWorld := captured.worldTyped valid inventory secondWorld
+  have capturedContext := captured.contextBindingsTyped valid inventory secondWorld secondContext
+  exact (capturedContext.world (fun _ _ binding =>
+    bound.preserves_bindingStorageType valid inventory capturedWorld binding)).world
+      (fun _ _ binding => retired.bindingStorageTyped binding)
+
 /-- Installation may move or borrow captures and retire the old temporary
 owners. The computation retains the same lexical declarations, whose actual
 availability is still checked by execution/resource admission. -/
@@ -365,15 +402,8 @@ theorem Execution.Installs.computation_contextBindingsTyped {program : Kernel.Pr
     (typed : Typing.ContextBindingsTyped program before.world source outer)
     (installed : Execution.Installs program before outer syntaxNode handler after) :
     Typing.ContextBindingsTyped program after source handler.computation := by
-  obtain ⟨first,second,sources,captures,captured,bindings,bound,disposed,one,two,_,capturedValues,boundValues,retired,rfl,rfl⟩ := installed
-  have firstWorld := one.worldTyped worldTyped
-  have secondWorld := two.worldTyped firstWorld
-  have secondContext := two.preserves_contextBindingsTyped (one.preserves_contextBindingsTyped typed)
-  have capturedWorld := capturedValues.worldTyped valid inventory secondWorld
-  have capturedContext := capturedValues.contextBindingsTyped valid inventory secondWorld secondContext
-  have boundContext := capturedContext.world (fun _ _ binding =>
-    boundValues.preserves_bindingStorageType valid inventory capturedWorld binding)
-  have retained := boundContext.world (fun _ _ binding => retired.bindingStorageTyped binding)
+  have retained := installed.preserves_contextBindingsTyped valid inventory worldTyped typed
+  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,rfl⟩ := installed
   exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
 
 /-- The handler's retained environment is produced by the same sequential
@@ -435,6 +465,14 @@ theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Pr
       exact admitted capture.type (List.mem_cons_of_mem _ (List.mem_cons_of_mem _
         (List.mem_map.mpr ⟨capture,present,rfl⟩)))
 
+theorem Execution.StartsClause.preserves_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
+    {handler : Execution.InstalledHandler} {context : Execution.Context} {after : World}
+    (started : Execution.StartsClause before handler context after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before.world source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  started.1.preserves_contextBindingsTyped typed
+
 /-- A handler clause gets a fresh cleanup activation but closes source names
 through its retained handler environment. These are different identities. -/
 theorem Execution.StartsClause.contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
@@ -442,11 +480,18 @@ theorem Execution.StartsClause.contextBindingsTyped {program : Kernel.Program} {
     (typed : Typing.ContextBindingsTyped program before.world source handler.environment)
     (started : Execution.StartsClause before handler runtime after) :
     Typing.ContextBindingsTyped program after source runtime := by
-  obtain ⟨created,rfl⟩ := started
-  have roots : after.roots = before.world.roots := by obtain ⟨_,_,rfl⟩ := created; rfl
-  have loans : after.loans = before.world.loans := by obtain ⟨_,rfl⟩ := created; rfl
-  have retained := typed.world (fun _ _ located => located.roots_loans roots loans)
+  have retained := started.preserves_contextBindingsTyped typed
+  obtain ⟨_,rfl⟩ := started
   exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
+
+theorem Execution.StartsResumptionClause.preserves_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
+    {handler : Execution.InstalledHandler} {lexical : Kernel.Local} {context : Execution.Context} {localSlot : Kernel.Local} {after : World}
+    (started : Execution.StartsResumptionClause before handler lexical context localSlot after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before.world source runtime) :
+    Typing.ContextBindingsTyped program after source runtime := by
+  obtain ⟨_,_,started,_⟩ := started
+  exact started.preserves_contextBindingsTyped typed
 
 theorem Execution.StartsResumptionClause.contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
     {handler : Execution.InstalledHandler} {source : Typing.Context} {runtime : Execution.Context} {after : World}

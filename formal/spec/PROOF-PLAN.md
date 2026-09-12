@@ -632,9 +632,85 @@ joinability for arbitrary kinded definitionally equal arguments, hiding the
 global confluence obligation in admission. That premise must be repaired to
 state actual semantic uniqueness, and its joining consumers must derive
 positive joining independently. The current checkpoint does not establish
-global confluence from that premise.
+global confluence from that premise. The following checkpoint repairs the
+actual admission condition to `SubstitutionsConvertible`, preserving binder
+keys and pointwise definitional equality. Selection uniqueness consumes this
+condition; the unsupported unconditional root-joining consequence is removed.
+Independently witnessed joining still yields unique expansion-normal endpoints
+and scalar identity in `DefinitionalNormalForms`. No global common-reduct
+existence is assumed or concluded.
 
 ## 3. Remaining boundary completeness and final audit
+
+The actual control-address provenance boundary is now closed through all six
+machine-step families. `ControlOrigin` defines support of current tasks, frames,
+callback sessions and captured control, including nested hook-cleanup tasks.
+Saved contexts, handlers and frames are bounded by the existing immutable
+capture frontier, not merely by the current world's allocation counter.
+`ControlOriginPreservation` establishes this combined control/suspension
+invariant for arbitrary runs, observed states, divergence prefixes and public
+reachable states. The canonical `InitialInvocation` contract consumes it;
+the empty-entry constructor derives supplied-input support and needs only
+caller-environment bounds. No alternate execution relation, new runtime
+inventory, post-state certificate or resource-admission premise supplies it.
+
+This repairs a real hole in the earlier suspension invariant: an incoming old
+suspension could otherwise keep a forged future address in its saved context
+even though its owned-root inventory was historically bounded. Both actual
+capture forms establish the new saved-control component, ordinary execution
+retains it, and final/copied replay derives current support from the same
+saved product and executable relocation map. `DropSuspension` now consumes the
+whole-run result to exclude the freshly allocated private hook handle from
+both old inventories and old saved control, as well as their cancellation
+root lists. This is historical address provenance, not unconditional storage
+liveness. Retained activation/scope ownership, arbitrary-body preservation of
+hidden handles and initialized normal-return lifetimes remain on the same
+unfinished dependency chain; transfer and cancellation may legitimately
+dispose abandoned frames. The current-source `DropSuspension` gate remains
+blocked by the capability-extraction failure recorded above; its integration
+is not included in the successful control/source-entry gate.
+
+Saved-home provenance now authenticates the actual cleanup roles as well.
+`FrameOwnsHome` is the authoritative home-based ownership judgment used by
+`FrameOwns`, delimited capture and abandoned-frame cleanup. `CaptureOrigin`
+requires each saved home to belong to the computation scope or a captured
+cleanup-owning frame; its previous arbitrary local/temporary-home fact is
+only a derived projection. Both capture producers and the complete suspension
+preservation chain consume this stricter contract. `SuspensionOwnership`
+proves that actual final and copied replay, including the protected argument
+move, reassign every inventory root to a frame actually reinstalled. Its
+whole-run consumer covers replay after arbitrary execution, and cancellation
+restores only authenticated homes. The same audit repaired `scopeReturn`:
+its cleanup selector now uses the popped frame's activation, not a potentially
+unrelated yielding context's activation; the actual transition's selected
+roots are proved owned by that frame. The current-source control-preservation
+gate passes 85 jobs with these dependencies. This does not yet establish
+retained caller-frame lifetime or saved loan-authority provenance; those are
+the next obligations in the same control/ownership invariant.
+
+The combined frozen control/ownership, retained-context, source-entry,
+predicate, runtime-equivariance and repaired-coherence dependency gate passed
+(111 jobs). The source-entry results cover ordinary/contextual/host callback
+function entry, both suspension-clause forms and their first actual pattern
+step. They consume the selected source body and the actual argument, capture
+and ordered pattern products. Disposal and proper-tail cleanup remain explicit
+scheduled continuations, not assumed lifetime-preserving execution.
+
+The lent-binding contract now retains an actual resident reference guard as
+well as the loan record. Real loan formation and input binding produce that
+guard; movement, construction and retirement preserve it, and the actual
+loan-release admission cannot end the guarded loan. Every effect and control
+transition preserves retained original contexts. Arbitrary destructive local
+or primitive transitions and relocated external bindings still require their
+retained-frame/guard-lifetime proof.
+
+A further general head audit remains open: an implementation generic not
+determined by its head can choose arbitrary associated results, and those
+results can make its own inferred arguments definitionally equal. Thus
+pointwise conversion alone is not the complete coherence contract. The next
+repair must establish actual generic determination at the head producer,
+without using the ambiguous associated results as inference evidence. The
+111-job gate establishes the stated theorems, not global confluence.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving

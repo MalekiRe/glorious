@@ -6,15 +6,6 @@ borrowing and ordinary owned-input binding. These are entry facts, not
 post-return certificates or an alternate invocation evaluator. -/
 namespace Glorious.Language
 
-theorem World.reserved_root_bound {world : World} {originBound : Identity}
-    (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
-    {place : ResolvedPlace} (found : world.availability.get id = some available)
-    (active : available.active = true) (member : place ∈ available.reserved) :
-    place.address.root < world.nextRoot := by
-  obtain ⟨root,selected⟩ := Option.isSome_iff_exists.mp
-    (((well.2.2.2.2.1 id available found).2.2.2 active).2 place member)
-  exact World.root_bound well (World.root_found selected).1
-
 theorem Allocates.canEndStorage {program : Program} {before after : World}
     {home region type layout mutable address}
     (well : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
@@ -168,6 +159,7 @@ theorem LocalStep.hook_entry_private {program : Kernel.Program} {before entering
       body.task = .run callee function.body ∧
       body.world.roots.get handle.root = some root ∧ root.live = true ∧ root.value = none ∧
       root.home = .temporary caller.activation caller.scope ∧ handle.fields = [] ∧
+      handle.root = before.world.nextRoot ∧
       CanEndStorage body.world handle.root ∧
       (∀ binding ∈ callee.environment, binding.address.root ≠ handle.root) := by
   have afterTyped := dispatch.worldTyped valid inventory typed
@@ -175,12 +167,16 @@ theorem LocalStep.hook_entry_private {program : Kernel.Program} {before entering
   | @destroyHook context _ authority next value _ function allocated handle after loan task stored _ _ selected temporary borrowed identity =>
     obtain ⟨root,found,home,whole,privateRoot⟩ := temporary.borrowed_handle_private typed.1 stored borrowed
     have live := (World.root_found found).2.1
+    have fresh : handle.root = before.world.nextRoot := by
+      obtain ⟨_,allocated⟩ := temporary
+      cases allocated
+      rfl
     cases entry <;> try contradiction
     case enter caller actual source callee final task entered =>
       cases task
       have moved := entered.owned_handle_private afterTyped rfl whole found privateRoot
       exact ⟨context,callee,function,authority,handle,loan,next,{ root with value := none },rfl,rfl,
-        moved.1,live,rfl,home,whole,moved.2.1,moved.2.2⟩
+        moved.1,live,rfl,home,whole,fresh,moved.2.1,moved.2.2⟩
 
 end Execution
 end Glorious.Language

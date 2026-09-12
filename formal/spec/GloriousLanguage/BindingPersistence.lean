@@ -1,11 +1,10 @@
 import GloriousLanguage.InputTyping
 import GloriousLanguage.LocalPreservation
-import GloriousLanguage.ConstructionPreservation
 
 /-! A local's declared storage type is not evidence that its contents can be
 read. Whole-root locals retain their allocation's type after movement or
-retirement; lent subobjects retain the actual invocation loan that keeps
-their location meaningful. A successful runtime read recovers usable typing.
+retirement; lent subobjects retain the actual invocation loan and a resident
+reference handle that prevents its release. A successful runtime read recovers usable typing.
 
 This is the persistent storage component of the source/runtime context
 boundary, not a second source analysis or a permission judgment. -/
@@ -18,7 +17,7 @@ inductive BindingStorageTyped (program : Program) (world : World) : Address → 
       (world.roots.get address.root).map Root.type = some type →
       BindingStorageTyped program world address type
   | lent {address type id loan} : world.loans.get id = some loan → loan.live = true →
-      loan.referent = address → AddressType program world address type →
+      loan.referent = address → world.References id → AddressType program world address type →
       BindingStorageTyped program world address type
 
 end Typing
@@ -26,10 +25,10 @@ end Typing
 theorem InvocationAddress.bindingStorageTyped {program : Program} {world : World} {address : Address} {type : Term}
     (origin : InvocationAddress world address) (located : AddressType program world address type) :
     Typing.BindingStorageTyped program world address type := by
-  rcases origin with whole | ⟨id,loan,found,live,referent⟩
+  rcases origin with whole | ⟨id,loan,found,live,referent,referenced⟩
   · obtain ⟨root,found,rfl⟩ := (AddressType.root_iff whole).mp located
     exact .root whole (by rw [(World.root_found found).1]; rfl)
-  · exact .lent found live referent located
+  · exact .lent found live referent referenced located
 
 theorem Typing.BindingStorageTyped.read {program : Kernel.Program} {world : World}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -45,7 +44,7 @@ theorem Typing.BindingStorageTyped.read {program : Kernel.Program} {world : Worl
         rw [(World.root_found found).1] at declared
         exact Option.some.inj declared
       exact (AddressType.root_iff whole).mpr ⟨root,found,atType⟩
-    | lent _ _ _ located => exact located
+    | lent _ _ _ _ located => exact located
   obtain ⟨offset,atOffset⟩ := located
   exact ⟨⟨offset,atOffset⟩,World.stores_typed typed.roots stored,
     atOffset.stored_type valid inventory typed.roots stored⟩
@@ -86,8 +85,9 @@ theorem Typing.BindingStorageTyped.roots_loans {program : Program} {before after
     Typing.BindingStorageTyped program after address type := by
   cases binding with
   | root whole declared => exact .root whole (by simpa only [roots] using declared)
-  | lent found live referent located =>
-    exact .lent (by simpa only [loans] using found) live referent (located.roots_congr roots)
+  | lent found live referent referenced located =>
+    exact .lent (by simpa only [loans] using found) live referent
+      (referenced.roots_congr roots) (located.roots_congr roots)
 
 theorem Typing.BindingStorageTyped.nextOwner {program : Program} {world : World}
     {address : Address} {type : Term} (binding : Typing.BindingStorageTyped program world address type) (next : Identity) :
@@ -95,7 +95,7 @@ theorem Typing.BindingStorageTyped.nextOwner {program : Program} {world : World}
   binding.roots_loans (before := world) (after := { world with nextOwner := next }) rfl rfl
 
 theorem Allocates.bindingStorageTyped {program : Program} {before after : World}
-    {home region type layout mutable address} (valid : before.WellFormed)
+    {home region type layout mutable address originBound} (valid : before.WellFormedWithOrigins originBound)
     (allocated : Allocates program before home region type layout mutable address after)
     {observed : Address} {expected : Term} (binding : Typing.BindingStorageTyped program before observed expected) :
     Typing.BindingStorageTyped program after observed expected := by
@@ -103,9 +103,10 @@ theorem Allocates.bindingStorageTyped {program : Program} {before after : World}
   | root whole declared =>
     obtain ⟨root,found,atType⟩ := Option.map_eq_some_iff.mp declared
     exact .root whole (by rw [allocated.roots valid found]; exact congrArg some atType)
-  | lent found live referent located =>
+  | lent found live referent referenced located =>
     have loan : after.loans = before.loans := by cases allocated; rfl
-    exact .lent (by simpa only [loan] using found) live referent (allocated.addressType valid located)
+    exact .lent (by simpa only [loan] using found) live referent
+      (allocated.references valid referenced) (allocated.addressType valid located)
 
 theorem Allocates.created_bindingStorageTyped {program : Program} {before after : World}
     {home region type layout mutable address}
@@ -114,19 +115,6 @@ theorem Allocates.created_bindingStorageTyped {program : Program} {before after 
   cases allocated
   exact .root rfl (by rw [Table.get_set]; rfl)
 
-theorem World.clear_bindingStorageTyped {program : Program} {before after : World}
-    {address : Address} {authority : Authority} (valid : before.WellFormed)
-    (permission : Permitted before authority .owned address) (written : before.write address none = some after)
-    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
-    Typing.BindingStorageTyped program after observed type := by
-  cases binding with
-  | root whole declared => exact .root whole (by rw [World.root_types_of_locations (World.write_locations written)]; exact declared)
-  | lent found live referent located =>
-    refine .lent (by simpa only [World.write_loans written] using found) live referent ?_
-    apply (World.write_address_types written ?_).mp located
-    rw [← referent]
-    exact permission.owned_no_loan_descendant (World.loanParents valid) found live
-
 theorem World.write_vacant_bindingStorageTyped {program : Program} {before after : World}
     {address : Address} {replacement : Option Value} (valid : before.WellFormed)
     (vacant : before.Vacant address) (written : before.write address replacement = some after)
@@ -134,11 +122,29 @@ theorem World.write_vacant_bindingStorageTyped {program : Program} {before after
     Typing.BindingStorageTyped program after observed type := by
   cases binding with
   | root whole declared => exact .root whole (by rw [World.root_types_of_locations (World.write_locations written)]; exact declared)
-  | lent found live referent located =>
-    refine .lent (by simpa only [World.write_loans written] using found) live referent ?_
+  | lent found live referent referenced located =>
+    refine .lent (by simpa only [World.write_loans written] using found) live referent
+      (World.write_vacant_references vacant written referenced) ?_
     apply (World.write_address_types written ?_).mp located
     rw [← referent]
     exact vacant.no_located_descendant (World.liveLoanLocations valid _ _ found live)
+
+theorem World.clear_nonreference_leaf_bindingStorageTyped {program : Program} {before after : World}
+    {address : Address} {value : Value} {authority : Authority}
+    (valid : before.WellFormed) (stored : before.Stores address value) (fields : value.fields = [])
+    (notReference : ∀ id, value.head ≠ .reference id)
+    (permission : Permitted before authority .owned address) (cleared : before.write address none = some after)
+    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
+    Typing.BindingStorageTyped program after observed type := by
+  cases binding with
+  | root whole declared =>
+    exact .root whole (by rw [World.root_types_of_locations (World.write_locations cleared)]; exact declared)
+  | lent found live referent referenced located =>
+    refine .lent (by simpa only [World.write_loans cleared] using found) live referent
+      (World.write_nonreference_leaf_references stored fields notReference cleared referenced) ?_
+    apply (World.write_address_types cleared ?_).mp located
+    rw [← referent]
+    exact permission.owned_no_loan_descendant (World.loanParents valid) found live
 
 theorem Transfers.bindingStorageTyped {program : Program} {before after : World}
     {authority source destination} (valid : before.WellFormed)
@@ -147,9 +153,9 @@ theorem Transfers.bindingStorageTyped {program : Program} {before after : World}
     Typing.BindingStorageTyped program after address type := by
   cases binding with
   | root whole declared => exact .root whole (by rw [World.root_types_of_locations transferred.locations]; exact declared)
-  | lent found live referent located =>
-    exact .lent (by simpa only [transferred.loans] using found) live referent
-      (transferred.invocation_addressType valid (Or.inr ⟨_,_,found,live,referent⟩) located)
+  | lent found live referent referenced located =>
+    exact .lent (by simpa only [transferred.loans] using found) live referent (transferred.references referenced)
+      (transferred.invocation_addressType valid (Or.inr ⟨_,_,found,live,referent,referenced⟩) located)
 
 theorem FormsLoan.bindingStorageTyped {program : Program} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination} (valid : before.WellFormed)
@@ -163,9 +169,9 @@ theorem FormsLoan.bindingStorageTyped {program : Program} {purpose : LoanPurpose
     | borrow _ _ _ _ _ _ _ _ _ written =>
       rw [World.root_types_of_locations (World.write_locations written)]
       exact declared
-  | lent found live referent located =>
-    exact .lent (borrowed.old_loan valid found) live referent
-      (borrowed.invocation_addressType valid (Or.inr ⟨_,_,found,live,referent⟩) located)
+  | lent found live referent referenced located =>
+    exact .lent (borrowed.old_loan valid found) live referent (borrowed.references referenced)
+      (borrowed.invocation_addressType valid (Or.inr ⟨_,_,found,live,referent,referenced⟩) located)
 
 theorem Copies.bindingStorageTyped {program : Program} {before after : World}
     {authority source destination} (valid : before.WellFormed)
@@ -177,8 +183,8 @@ theorem Copies.bindingStorageTyped {program : Program} {before after : World}
     have retained := World.write_vacant_bindingStorageTyped valid vacant written binding
     cases retained with
     | root whole declared => exact .root whole declared
-    | lent found live referent located =>
-      refine .lent found live referent ?_
+    | lent found live referent referenced located =>
+      refine .lent found live referent (referenced.roots_congr rfl) ?_
       apply AddressType.roots_congr _ located
       rfl
 
@@ -193,15 +199,15 @@ theorem Acquires.bindingStorageTyped {program : Program} {before after : World}
   | move _ _ _ moved => exact moved.bindingStorageTyped valid binding
 
 theorem NewValue.bindingStorageTyped {program : Program} {before after : World}
-    {destination type head sources} (valid : before.WellFormed)
+    {destination type head sources originBound} (valid : before.WellFormedWithOrigins originBound)
     (constructed : NewValue program before destination type head sources after)
     {address : Address} {expected : Term} (binding : Typing.BindingStorageTyped program before address expected) :
     Typing.BindingStorageTyped program after address expected := by
   cases binding with
   | root whole declared => exact .root whole (by rw [World.root_types_of_locations constructed.locations]; exact declared)
-  | @lent id loan found live referent located =>
+  | @lent id loan found live referent referenced located =>
     have loans := congrArg World.loans constructed.rest
-    refine .lent (by simpa only [loans] using found) live referent ?_
+    refine .lent (by simpa only [loans] using found) live referent (constructed.references referenced) ?_
     cases constructed with
     | construct vacant _ _ _ _ permissions cleared written =>
       have outside : ∀ source ∈ sources.map ResolvedPlace.address, ¬ source.ProperPrefix address := by
@@ -339,11 +345,24 @@ theorem Retires.bindingStorageTyped {program : Program} {before after : World} {
     Typing.BindingStorageTyped program after address type := by
   cases binding with
   | root whole declared => exact .root whole (by rw [retired.root_types]; exact declared)
-  | lent found live referent located =>
+  | lent found live referent referenced located =>
     have safe : CanEndStorage before id := by cases retired; assumption
     have loans : after.loans = before.loans := by cases retired; rfl
-    exact .lent (by simpa only [loans] using found) live referent
+    exact .lent (by simpa only [loans] using found) live referent (retired.references referenced)
       (retired.addressType (referent ▸ safe.1 _ _ found live) located)
+
+/-- Release consumes only loans without resident handles. The same actual
+guard carried by a lent binding therefore rules out ending its own loan. -/
+theorem EndsLoan.bindingStorageTyped {program : Program} {before after : World} {id : Identity}
+    (ended : EndsLoan before id after) {address : Address} {type : Term}
+    (binding : Typing.BindingStorageTyped program before address type) :
+    Typing.BindingStorageTyped program after address type := by
+  have roots : after.roots = before.roots := by cases ended; rfl
+  cases binding with
+  | root whole declared => exact .root whole (by simpa only [roots] using declared)
+  | lent found live referent referenced located =>
+    have guarded : InvocationAddress before address := Or.inr ⟨_,_,found,live,referent,referenced⟩
+    exact InvocationAddress.bindingStorageTyped (guarded.endsLoan ended) (located.roots_congr roots)
 
 theorem Execution.RetiresEmpty.bindingStorageTyped {program : Program} {before after : World}
     {retired : List Address} (disposed : Execution.RetiresEmpty before retired after)

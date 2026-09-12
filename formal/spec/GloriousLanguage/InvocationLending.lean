@@ -1,5 +1,6 @@
 import GloriousLanguage.ReceiverPreservation
 import GloriousLanguage.LocalPreservation
+import GloriousLanguage.ReferencePersistence
 
 /-! The actual invocation boundary owns its loans in the fresh callee.
 Receiver exclusion survives the common binding of every capture and argument;
@@ -41,6 +42,38 @@ theorem FormsLoan.excludes_parent_retained {program : Program} {purpose : LoanPu
     exact Nat.not_lt_of_ge (ancestry.identity_le (World.loanParents future)) (World.loanBounds valid oldFound)
 
 namespace Kernel
+
+theorem LendsResident.wellFormed {program : Language.Program} {before after : World}
+    {activation scope region address authority access lease permission}
+    (lent : LendsResident program activation scope region before address authority access lease permission after)
+    (valid : before.WellFormed) : after.WellFormed := by
+  cases lent with
+  | owned => exact valid
+  | lent _ _ allocated borrowed => exact borrowed.wellFormed (allocated.wellFormed valid)
+
+theorem BindsInput.wellFormed {program : Language.Program} {before after : World}
+    {activation scope region input binding}
+    (bound : BindsInput program activation scope region before input binding after)
+    (valid : before.WellFormed) : after.WellFormed := by
+  cases bound with
+  | lent _ _ _ _ _ lent => exact lent.wellFormed valid
+  | owned _ _ _ allocated transferred => exact transferred.wellFormed (allocated.wellFormed valid)
+
+theorem BindsInputs.wellFormed {program : Language.Program} {before after : World}
+    {activation scope region inputs bindings}
+    (bound : BindsInputs program activation scope region before inputs bindings after)
+    (valid : before.WellFormed) : after.WellFormed := by
+  induction bound with
+  | nil => exact valid
+  | cons first _ ih => exact ih (first.wellFormed valid)
+
+theorem BindsPattern.wellFormed {program : Language.Program} {before after : World}
+    {activation scope region localSlot source authority access binding}
+    (bound : BindsPattern program activation scope region before localSlot source authority access binding after)
+    (valid : before.WellFormed) : after.WellFormed := by
+  cases bound with
+  | owned bound => exact bound.wellFormed valid
+  | borrowed _ _ allocated borrowed => exact borrowed.wellFormed (allocated.wellFormed valid)
 
 theorem LendsResident.lent_authority {program : Language.Program} {before after : World}
     {activation scope region address authority access lease permission}
@@ -176,19 +209,102 @@ theorem BindsInput.root_retained {program : Language.Program} {before after : Wo
   | owned _ _ _ allocated transferred =>
     exact World.root_transport transferred.locations (allocated.root valid found)
 
-theorem BindsInputs.root_retained {program : Kernel.Program} {before after : World}
+theorem BindsInputs.root_retained {program : Language.Program} {before after : World}
     {activation scope region inputs bindings}
-    (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
-    (typed : Typing.WorldTyped program before)
-    (bound : BindsInputs program.declarations activation scope region before inputs bindings after)
+    (valid : before.WellFormed)
+    (bound : BindsInputs program activation scope region before inputs bindings after)
     {observed : Address} {root : Root} (found : before.root observed = some root) :
     ∃ changed, after.root observed = some changed ∧ changed.location = root.location := by
   induction bound generalizing root with
   | nil => exact ⟨root,found,rfl⟩
   | cons first _ ih =>
-    obtain ⟨middle,selected,location⟩ := first.root_retained typed.1 found
-    obtain ⟨changed,present,equal⟩ := ih (first.worldTyped valid inventory typed) selected
+    obtain ⟨middle,selected,location⟩ := first.root_retained valid found
+    obtain ⟨changed,present,equal⟩ := ih (first.wellFormed valid) selected
     exact ⟨changed,present,equal.trans location⟩
+
+/-- Each actual binding names live storage. This fact depends on allocation
+and transfer, not on a separately assumed typing of the output environment. -/
+theorem BindsInput.binding_root {program : Language.Program} {before after : World}
+    {activation scope region input binding}
+    (bound : BindsInput program activation scope region before input binding after)
+    (valid : before.WellFormed) : ∃ root, after.root binding.address = some root := by
+  cases bound with
+  | lent _ stored _ _ _ lent =>
+    obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
+    obtain ⟨changed,present,_⟩ := lent.root_retained valid found
+    exact ⟨changed,present⟩
+  | owned _ _ _ allocated transferred =>
+    obtain ⟨root,found,_,_,_⟩ := allocated.new_root
+    obtain ⟨changed,present,_⟩ := World.root_transport transferred.locations found
+    exact ⟨changed,present⟩
+
+theorem BindsInputs.binding_roots {program : Language.Program} {before after : World}
+    {activation scope region inputs bindings}
+    (bound : BindsInputs program activation scope region before inputs bindings after)
+    (valid : before.WellFormed) :
+    ∀ binding ∈ bindings, ∃ root, after.root binding.address = some root := by
+  induction bound with
+  | nil => simp
+  | cons first rest ih =>
+    intro binding member
+    rcases List.mem_cons.mp member with rfl | member
+    · obtain ⟨root,found⟩ := first.binding_root valid
+      obtain ⟨changed,present,_⟩ := rest.root_retained (first.wellFormed valid) found
+      exact ⟨changed,present⟩
+    · exact ih (first.wellFormed valid) binding member
+
+theorem BindsInputs.bindings_root_bound {program : Language.Program} {before after : World}
+    {activation scope region inputs bindings}
+    (bound : BindsInputs program activation scope region before inputs bindings after)
+    (valid : before.WellFormed) : ∀ binding ∈ bindings, binding.address.root < after.nextRoot := by
+  intro binding member
+  obtain ⟨root,found⟩ := bound.binding_roots valid binding member
+  exact World.root_bound (bound.wellFormed valid) (World.root_found found).1
+
+theorem BindsPattern.binding_root {program : Language.Program} {before after : World}
+    {activation scope region localSlot source authority access binding}
+    (bound : BindsPattern program activation scope region before localSlot source authority access binding after)
+    (valid : before.WellFormed) : ∃ root, after.root binding.address = some root := by
+  cases bound with
+  | owned bound => exact bound.binding_root valid
+  | borrowed _ _ allocated borrowed =>
+    obtain ⟨root,found,_,_,_⟩ := allocated.new_root
+    obtain ⟨changed,present,_⟩ := World.root_transport borrowed.locations found
+    exact ⟨changed,present⟩
+
+theorem BindsPattern.root_bound {program : Language.Program} {before after : World}
+    {activation scope region localSlot source authority access binding}
+    (bound : BindsPattern program activation scope region before localSlot source authority access binding after)
+    (valid : before.WellFormed) : binding.address.root < after.nextRoot := by
+  obtain ⟨root,found⟩ := bound.binding_root valid
+  exact World.root_bound (bound.wellFormed valid) (World.root_found found).1
+
+/-- The actual temporary allocation and loan formation jointly produce the
+invocation guard. Its resident handle, dynamic home and returned authority
+all refer to the same lease identity, not an independent ownership table. -/
+theorem LendsResident.lease_origin {program : Language.Program} {before after : World}
+    {activation scope region address authority access lease permission}
+    (lent : LendsResident program activation scope region before address authority access lease permission after)
+    (borrowed : access ≠ .owned) :
+    ∃ witness root owner mode type, lease = some witness ∧ permission = .loan witness.loan ∧
+      witness.handle.fields = [] ∧ after.root witness.handle = some root ∧
+      root.home = .temporary activation scope ∧ root.region = region ∧
+      after.Stores witness.handle (.resident owner (.reference mode (.runtimeRegion region) type)
+        (.reference witness.loan) true []) ∧
+      after.loans.get witness.loan = some ⟨witness.loan,authority.parentLoan,address,mode,region,true⟩ := by
+  cases lent with
+  | owned => exact False.elim (borrowed rfl)
+  | lent _ _ allocated formed =>
+    obtain ⟨original,selected,home,atRegion,whole⟩ := allocated.new_root
+    obtain ⟨retained,found,same⟩ := World.root_transport formed.locations selected
+    obtain ⟨type,stored,loan⟩ := formed.created_handle
+    refine ⟨_,retained,_,_,type,rfl,rfl,whole,found,?_,?_,stored,loan⟩
+    · have unchanged : retained.home = original.home := by
+        simpa only [Root.location] using congrArg Root.home same
+      exact unchanged.trans home
+    · have unchanged : retained.region = original.region := by
+        simpa only [Root.location] using congrArg Root.region same
+      exact unchanged.trans atRegion
 
 /-- The lifetime witness is real storage owned by the activation supplied to
 the common loan producer, with the same fresh identity recorded in the loan. -/
@@ -198,16 +314,8 @@ theorem LendsResident.lease_owned {program : Language.Program} {before after : W
     (borrowed : access ≠ .owned) :
     ∃ witness root, lease = some witness ∧ after.root witness.handle = some root ∧
       root.home = .temporary activation scope ∧ root.region = region ∧ witness.handle.fields = [] := by
-  cases lent with
-  | owned => exact False.elim (borrowed rfl)
-  | lent _ _ allocation formed =>
-    obtain ⟨root,selected,home,lifetime,whole⟩ := allocation.new_root
-    obtain ⟨changed,present,location⟩ := World.root_transport formed.locations selected
-    refine ⟨_,changed,rfl,present,?_,?_,whole⟩
-    · have same : changed.home = root.home := by simpa [Root.location] using congrArg Root.home location
-      exact same.trans home
-    · have same : changed.region = root.region := by simpa [Root.location] using congrArg Root.region location
-      exact same.trans lifetime
+  obtain ⟨witness,root,_,_,_,selected,_,whole,found,home,atRegion,_,_⟩ := lent.lease_origin borrowed
+  exact ⟨witness,root,selected,found,home,atRegion,whole⟩
 
 end Kernel
 
@@ -324,7 +432,7 @@ theorem EnterWorld.resident_lease_owned {program : Kernel.Program} {before : Sta
   cases preparation with
   | resident lent _ =>
     obtain ⟨witness,root,_,selected,home,region,_⟩ := Kernel.LendsResident.lease_owned lent borrowed
-    obtain ⟨changed,present,location⟩ := bound.root_retained valid inventory preparedTyped selected
+    obtain ⟨changed,present,location⟩ := bound.root_retained preparedTyped.1 selected
     have sameHome : changed.home = .temporary callee.activation callee.scope := by
       have same : changed.home = root.home := by simpa [Root.location] using congrArg Root.home location
       exact same.trans home

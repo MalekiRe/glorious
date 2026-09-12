@@ -9,18 +9,18 @@ namespace Glorious.Language
 
 open Kernel
 
-theorem Kernel.OwnedByActivation.activation_home {root : Root} {activation : Identity}
-    (owned : OwnedByActivation root activation) :
-    ∃ activation scope, root.home = .localSlot activation scope ∨ root.home = .temporary activation scope := by
+theorem Kernel.HomeOwnedByActivation.activation_home {home : Home} {activation : Identity}
+    (owned : HomeOwnedByActivation home activation) :
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
   rcases owned with ⟨scope,home⟩ | ⟨scope,home⟩
   · exact ⟨activation,scope,Or.inl home⟩
   · exact ⟨activation,scope,Or.inr home⟩
 
 namespace Execution
 
-theorem FrameOwns.activation_home {frame : Frame} {root : Root} (owned : FrameOwns frame root) :
-    ∃ activation scope, root.home = .localSlot activation scope ∨ root.home = .temporary activation scope := by
-  cases frame <;> simp only [FrameOwns] at owned
+theorem FrameOwnsHome.activation_home {frame : Frame} {home : Home} (owned : FrameOwnsHome frame home) :
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
+  cases frame <;> simp only [FrameOwnsHome] at owned
   all_goals first
     | exact owned.elim
     | exact owned.activation_home
@@ -28,6 +28,23 @@ theorem FrameOwns.activation_home {frame : Frame} {root : Root} (owned : FrameOw
     | (rcases owned with owned | ⟨_,owned⟩
        · first | exact owned.activation_home | exact ⟨_,_,owned⟩
        · exact owned.activation_home)
+
+theorem FrameOwns.activation_home {frame : Frame} {root : Root} (owned : FrameOwns frame root) :
+    ∃ activation scope, root.home = .localSlot activation scope ∨ root.home = .temporary activation scope :=
+  FrameOwnsHome.activation_home owned
+
+theorem CapturedHome.activation_home {handler : InstalledHandler} {inner : List Frame} {home : Home}
+    (owned : CapturedHome handler inner home) :
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
+  rcases owned with owned | ⟨frame,_,owned⟩
+  · exact ⟨_,_,owned⟩
+  · exact owned.activation_home
+
+theorem Suspension.CaptureOrigin.activationHomes {suspension : Suspension}
+    (origin : suspension.CaptureOrigin) (root : Identity) (home : Home)
+    (found : suspension.homes.get root = some home) :
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope :=
+  (origin.ownedHomes root home found).activation_home
 
 theorem DelimitedRoots.selected {world : World} {handler : InstalledHandler} {inner : List Frame}
     {kept roots : List Identity} (selected : DelimitedRoots world handler inner kept roots)
@@ -72,7 +89,8 @@ theorem DelimitedRoots.capture_origin {world : World} {handler : InstalledHandle
     {kept roots : List Identity} {homes : Table Home} {suspension : Suspension}
     (well : world.WellFormed) (selected : DelimitedRoots world handler inner kept roots)
     (saved : SaveHomes world roots homes) (rootList : suspension.roots = roots)
-    (savedHomes : suspension.homes = homes) (limit : suspension.captureRootLimit = world.nextRoot) :
+    (savedHomes : suspension.homes = homes) (limit : suspension.captureRootLimit = world.nextRoot)
+    (capturedHandler : suspension.handler = handler) (capturedFrames : suspension.frames = inner) :
     suspension.CaptureOrigin := by
   refine ⟨by simpa [rootList] using selected.1.1,?_,by simpa [savedHomes] using saved.unique well.1,?_,?_⟩
   · intro id member
@@ -88,10 +106,10 @@ theorem DelimitedRoots.capture_origin {world : World} {handler : InstalledHandle
       exact ⟨root.home,(saved.get_iff well.1).mpr ⟨member,root,found,rfl⟩⟩
   · intro id home found
     obtain ⟨member,root,rootAt,homeEq⟩ := (saved.get_iff well.1).mp (by simpa [savedHomes] using found)
-    obtain ⟨original,originalAt,_,activation,scope,owned⟩ := selected.selected member
+    obtain ⟨original,originalAt,_,_,owned⟩ := (selected.2 id).mp member
     have same : root = original := Option.some.inj (rootAt.symm.trans originalAt)
     subst original
-    exact ⟨activation,scope,homeEq ▸ owned⟩
+    simpa only [capturedHandler,capturedFrames] using homeEq ▸ owned
 
 theorem suspendRoots.get {world : World} {roots : List Identity} {suspension id : Identity} :
     (suspendRoots world roots suspension).roots.get id =
@@ -148,12 +166,12 @@ theorem EffectStep.created_capture {program : Kernel.Program} {before after : St
   | suspend task selected terminal quantity bound continuation routes started keptTransfer roots permission homes created plan suspension =>
     subst suspension
     have movedTyped := keptTransfer.worldTyped valid inventory (started.worldTyped typed)
-    refine ⟨_,Table.get_set _ _ _,roots.capture_origin movedTyped.1 homes rfl rfl rfl,?_⟩
+    refine ⟨_,Table.get_set _ _ _,roots.capture_origin movedTyped.1 homes rfl rfl rfl rfl rfl,?_⟩
     exact Nat.le_of_lt (Nat.lt_of_lt_of_eq (Nat.lt_succ_self _) created.root_counter.symm)
   | suspendTailArm task selected terminal quantity bound contains continuation routes started keptTransfer roots permission homes plan suspension =>
     subst suspension
     have movedTyped := keptTransfer.worldTyped valid inventory (started.worldTyped typed)
-    exact ⟨_,Table.get_set _ _ _,roots.capture_origin movedTyped.1 homes rfl rfl rfl,Nat.le_refl _⟩
+    exact ⟨_,Table.get_set _ _ _,roots.capture_origin movedTyped.1 homes rfl rfl rfl rfl rfl,Nat.le_refl _⟩
 
 theorem Suspension.CaptureOrigin.home_not_suspended {suspension : Suspension}
     (origin : suspension.CaptureOrigin) {root : Identity} {home : Home}
@@ -164,11 +182,12 @@ theorem Suspension.CaptureOrigin.home_not_suspended {suspension : Suspension}
 
 theorem Suspension.CaptureOrigin.transport {before after : Suspension} (origin : before.CaptureOrigin)
     (roots : after.roots = before.roots) (homes : after.homes = before.homes)
-    (limit : after.captureRootLimit = before.captureRootLimit) : after.CaptureOrigin := by
+    (limit : after.captureRootLimit = before.captureRootLimit)
+    (handler : after.handler = before.handler) (frames : after.frames = before.frames) : after.CaptureOrigin := by
   refine ⟨by simpa only [roots] using origin.roots,?_,by simpa only [homes] using origin.homes,?_,?_⟩
   · simpa only [roots,limit] using origin.bounded
   · simpa only [roots,homes] using origin.domain
-  · simpa only [homes] using origin.activationHomes
+  · simpa only [homes,handler,frames] using origin.ownedHomes
 
 theorem Suspension.CaptureOrigin.home_none {suspension : Suspension}
     (origin : suspension.CaptureOrigin) {root : Identity} (outside : root ∉ suspension.roots) :
@@ -251,9 +270,10 @@ theorem State.SuspensionsWellFormed.capture {before : State} {handler : Installe
     (selected : DelimitedRoots before.world handler inner kept roots) (saved : SaveHomes before.world roots homes)
     (accounted : suspension.Accounted) (identity : suspension.identity = before.nextContinuation)
     (_active : suspension.active = true) (rootList : suspension.roots = roots)
-    (savedHomes : suspension.homes = homes) (limit : suspension.captureRootLimit = before.world.nextRoot) :
+    (savedHomes : suspension.homes = homes) (limit : suspension.captureRootLimit = before.world.nextRoot)
+    (capturedHandler : suspension.handler = handler) (capturedFrames : suspension.frames = inner) :
     State.SuspensionsWellFormed { before with world := suspendRoots before.world roots before.nextContinuation, resumptions := before.resumptions.set before.nextContinuation suspension, nextContinuation := before.nextContinuation+1 } := by
-  have origin := selected.capture_origin well saved rootList savedHomes limit
+  have origin := selected.capture_origin well saved rootList savedHomes limit capturedHandler capturedFrames
   have fresh : ∀ rootId root, before.world.roots.get rootId = some root → root.home ≠ .suspended before.nextContinuation := by
     intro rootId root found home
     exact Nat.lt_irrefl _ (valid.homeFresh rootId root before.nextContinuation found home)
@@ -354,7 +374,8 @@ theorem State.SuspensionsWellFormed.restore_settled {before : State} {id : Ident
     (found : before.resumptions.get id = some suspension) (active : suspension.active = true)
     (accounted : settled.Accounted) (identity : settled.identity = id) (inactive : settled.active = false)
     (roots : settled.roots = suspension.roots) (homes : settled.homes = suspension.homes)
-    (limit : settled.captureRootLimit = suspension.captureRootLimit) :
+    (limit : settled.captureRootLimit = suspension.captureRootLimit)
+    (handler : settled.handler = suspension.handler) (frames : settled.frames = suspension.frames) :
     State.SuspensionsWellFormed { before with world := restoreRoots before.world suspension.homes, resumptions := before.resumptions.set id settled } := by
   refine ⟨valid.budgets.set accounted identity (valid.budgets.fresh id suspension found) (Nat.le_refl _) rfl,?_,?_,?_,?_⟩
   · intro target actual selected
@@ -362,7 +383,7 @@ theorem State.SuspensionsWellFormed.restore_settled {before : State} {id : Ident
     · subst target
       simp only [Table.get_set,Option.some.injEq] at selected
       subst actual
-      exact (valid.origin id suspension found).transport roots homes limit
+      exact (valid.origin id suspension found).transport roots homes limit handler frames
     · exact valid.origin target actual (by simpa only [Table.get_set_other _ _ _ _ same] using selected)
   · intro target actual selected
     by_cases same : target = id
@@ -391,7 +412,8 @@ theorem State.SuspensionsWellFormed.replace_budget {before : State} {id : Identi
     (found : before.resumptions.get id = some suspension)
     (accounted : replacement.Accounted) (identity : replacement.identity = id)
     (activity : replacement.active = suspension.active) (roots : replacement.roots = suspension.roots)
-    (homes : replacement.homes = suspension.homes) (limit : replacement.captureRootLimit = suspension.captureRootLimit) :
+    (homes : replacement.homes = suspension.homes) (limit : replacement.captureRootLimit = suspension.captureRootLimit)
+    (handler : replacement.handler = suspension.handler) (frames : replacement.frames = suspension.frames) :
     State.SuspensionsWellFormed { before with resumptions := before.resumptions.set id replacement } := by
   refine ⟨valid.budgets.set accounted identity (valid.budgets.fresh id suspension found) (Nat.le_refl _) rfl,?_,?_,?_,valid.homeFresh⟩
   · intro target actual selected
@@ -399,7 +421,7 @@ theorem State.SuspensionsWellFormed.replace_budget {before : State} {id : Identi
     · subst target
       simp only [Table.get_set,Option.some.injEq] at selected
       subst actual
-      exact (valid.origin id suspension found).transport roots homes limit
+      exact (valid.origin id suspension found).transport roots homes limit handler frames
     · exact valid.origin target actual (by simpa only [Table.get_set_other _ _ _ _ same] using selected)
   · intro target actual selected
     by_cases same : target = id
@@ -445,7 +467,7 @@ theorem EffectStep.cancel_suspensions {program : Kernel.Program} {before after :
   cases step with
   | @cancel context _ next suspension task found obligation optional cancelable =>
     have settled := valid.restore_settled found obligation.1 (obligation.cancel_accounted optional)
-      (valid.budgets.identity id suspension found) rfl rfl rfl rfl
+      (valid.budgets.identity id suspension found) rfl rfl rfl rfl rfl rfl
     exact ⟨settled.budgets.transport rfl (Nat.le_refl _),settled.origin,settled.frontier,settled.active,settled.homeFresh⟩
 
 /-- The last replay releases the original inventory, then executes the
@@ -458,7 +480,7 @@ theorem EffectStep.last_suspensions {program : Kernel.Program} {before after : S
     subst restored
     have identity := valid.budgets.identity _ _ found
     have settled := valid.restore_settled found obligation.1 (obligation.last_accounted remaining)
-      identity rfl rfl rfl rfl
+      identity rfl rfl rfl rfl rfl rfl
     exact settled.transport (restoreRoots.worldTyped typed).1 keptTransfer.suspensionExtension rfl (Nat.le_refl _)
 
 /-- Multi-shot replay leaves the original capture active and executes on
@@ -470,7 +492,7 @@ theorem EffectStep.copy_suspensions {program : Kernel.Program} {before after : S
   cases step with
   | resumeCopy task found obligation remaining copied keptTransfer =>
     have identity := valid.budgets.identity _ _ found
-    have replaced := valid.replace_budget found (obligation.copy_accounted remaining) identity rfl rfl rfl rfl
+    have replaced := valid.replace_budget found (obligation.copy_accounted remaining) identity rfl rfl rfl rfl rfl rfl
     have stored := copied.suspensionExtension typed.1 (valid.origin _ _ found)
     exact replaced.transport typed.1 (stored.trans keptTransfer.suspensionExtension) rfl
       (by rw [copied.result]; exact Nat.le_refl _)
@@ -491,6 +513,7 @@ theorem EffectStep.create_suspensions {program : Kernel.Program} {before after :
       (by simp [suspension]) (by simpa only [suspension] using permission.1) (by simpa only [suspension] using bound)
     have captured := movedValid.capture (suspension := newSuspension) movedTyped.1 roots homes accounted
       (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension])
+      (by simp [suspension]) (by simp [suspension])
     exact captured.transport (suspendRoots.worldTyped movedTyped).1 created.suspensionExtension rfl (Nat.le_refl _)
   | suspendTailArm task selected terminal quantity bound contains continuation routes started keptTransfer roots permission homes plan suspension =>
     rename_i newSuspension
@@ -501,6 +524,7 @@ theorem EffectStep.create_suspensions {program : Kernel.Program} {before after :
       (by simp [suspension]) (by simpa only [suspension] using permission.1) (by simpa only [suspension] using bound)
     have captured := movedValid.capture (suspension := newSuspension) movedTyped.1 roots homes accounted
       (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension])
+      (by simp [suspension]) (by simp [suspension])
     exact captured.transport (suspendRoots.worldTyped movedTyped).1 (.refl _) rfl (Nat.le_refl _)
 
 end Execution

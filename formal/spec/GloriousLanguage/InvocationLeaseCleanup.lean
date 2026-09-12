@@ -186,8 +186,8 @@ theorem Permitted.live_leaf {world : World} {id : Identity} {loan : Loan} {acces
   · exact False.elim (different (descendant.leaf_live_eq (World.loanParents valid) children selected active).symm)
   · exact ancestor
 
-/-- The actual invocation producer installs an ordinary reference resident,
-including its fieldless shape and the recorded child loan identity. -/
+/-- Cleanup consumes the resident projection of the same lease-origin
+product used by retained invocation contexts. -/
 theorem Kernel.LendsResident.lease_resident {program : Language.Program} {before after : World}
     {activation scope region address authority access lease permission}
     (lent : Kernel.LendsResident program activation scope region before address authority access lease permission after)
@@ -195,15 +195,8 @@ theorem Kernel.LendsResident.lease_resident {program : Language.Program} {before
     ∃ witness owner mode type, lease = some witness ∧ witness.handle.fields = [] ∧
       after.Stores witness.handle (.resident owner (.reference mode (.runtimeRegion region) type)
         (.reference witness.loan) true []) := by
-  cases lent with
-  | owned => exact False.elim (borrowed rfl)
-  | lent _ _ allocated formed =>
-    obtain ⟨_,_,_,_,whole⟩ := allocated.new_root
-    cases formed with
-    | borrow _ _ _ _ _ _ _ _ _ written =>
-      have read := World.write_read_inside written []
-      simp only [List.append_nil,Value.atPath] at read
-      exact ⟨_,_,_,_,rfl,whole,read⟩
+  obtain ⟨witness,root,owner,mode,type,selected,_,whole,_,_,_,stored,_⟩ := lent.lease_origin borrowed
+  exact ⟨witness,owner,mode,type,selected,whole,stored⟩
 
 theorem MayDispose.reference {program : Language.Program}
     (owner loan : Identity) (mode : Mutability) (region type : Term) :

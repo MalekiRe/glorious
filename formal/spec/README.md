@@ -11,9 +11,11 @@ Status: whole-specification draft, in its semantic repair and proof pass.
 General proofs now cover storage preservation for every executable transition
 and finite execution, invocation loan exclusion and physical lease cleanup,
 constructibility of recursive capabilities, typed public-value observations,
-and complete code-typing transport for snapshot region renaming. These are
+complete code-typing transport for snapshot region renaming, and current/saved
+control-address provenance through every machine step and finite run, with
+saved-home ownership and actual final/copied replay ownership. These are
 not full-language soundness or conformance: source lexical/type normalization,
-task/frame preservation, initialized return lifetimes, resource progress and
+task/frame typing and retained-frame liveness, initialized return lifetimes, resource progress and
 complete target contracts remain open. `PROOF-PLAN.md` records the current
 hardest-first dependency chain; `DRAFT.md` retains the earlier draft audit.
 The earlier compiler work remains reference material, not the foundation
@@ -33,6 +35,10 @@ or a dependency of this project.
 - `Effects`, `Relocation`, `Control`, `Contracts`: handlers, continuation
   quantities, snapshots, labels, guarded environments and body-checked
   invocation contracts.
+- `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
+  control-address support, canonical invocation admission and whole-run preservation.
+- `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
+  historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,
   layouts, provenance, machine leaves, explicit host models and target
   admission requirements.

@@ -16,6 +16,45 @@ theorem Table.get_map_keyed {α β : Type} (table : Table α) (f : Identity → 
     · simpa only [List.map_cons,Table.get,List.find?_cons,beq_eq_false_iff_ne.mpr same,
         Bool.false_eq_true,↓reduceIte,Option.map_map] using ih
 
+theorem World.rehome_get (before : World) (select : Identity → Root → Home) (id : Identity) :
+    ({ before with roots := before.roots.map (fun (key,root) =>
+      (key,{ root with home := select key root })) } : World).roots.get id =
+      (before.roots.get id).map (fun root => { root with home := select id root }) :=
+  Table.get_map_keyed before.roots (fun id (root : Root) => { root with home := select id root }) id
+
+theorem World.rehome_root (before : World) (select : Identity → Root → Home) (address : Address) :
+    ({ before with roots := before.roots.map (fun (id,root) =>
+      (id,{ root with home := select id root })) } : World).root address =
+      (before.root address).map (fun root => { root with home := select address.root root }) := by
+  unfold World.root
+  rw [World.rehome_get]
+  cases before.roots.get address.root with
+  | none => rfl
+  | some root => dsimp; split <;> rfl
+
+theorem World.rehome_read (before : World) (select : Identity → Root → Home) (address : Address) :
+    ({ before with roots := before.roots.map (fun (id,root) =>
+      (id,{ root with home := select id root })) } : World).read address = before.read address := by
+  unfold World.read
+  rw [World.rehome_root]
+  cases before.root address <;> rfl
+
+theorem World.rehome_addressOffset {program : Program} {before : World} (select : Identity → Root → Home)
+    {address : Address} {type : Term} {offset : Nat} (located : AddressOffset program before address type offset) :
+    AddressOffset program { before with roots := before.roots.map (fun (id,root) =>
+      (id,{ root with home := select id root })) } address type offset := by
+  induction located with
+  | @root id root found live =>
+    exact .root (root := { root with home := select id root }) (by rw [World.rehome_get,found]; rfl) live
+  | child _ field ih => exact .child ih (field.transport (by rw [World.rehome_read]))
+
+theorem World.rehome_addressType {program : Program} {before : World} (select : Identity → Root → Home)
+    {address : Address} {type : Term} (located : AddressType program before address type) :
+    AddressType program { before with roots := before.roots.map (fun (id,root) =>
+      (id,{ root with home := select id root })) } address type := by
+  obtain ⟨offset,located⟩ := located
+  exact ⟨offset,World.rehome_addressOffset select located⟩
+
 theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     (typed : Typing.WorldTyped program before) (select : Identity → Root → Home) :
     Typing.WorldTyped program
@@ -24,7 +63,7 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     { before with roots := before.roots.map (fun (id,root) => (id,{ root with home := select id root })) }
   change Typing.WorldTyped program after
   have selected : ∀ id, after.roots.get id = (before.roots.get id).map (fun root => { root with home := select id root }) :=
-    fun id => Table.get_map_keyed before.roots (fun id (root : Root) => { root with home := select id root }) id
+    World.rehome_get before select
   have origin : ∀ id root, after.roots.get id = some root →
       ∃ original, before.roots.get id = some original ∧ root = { original with home := select id original } := by
     intro id root found
@@ -32,20 +71,9 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     obtain ⟨original,found,same⟩ := Option.map_eq_some_iff.mp found
     exact ⟨original,found,same.symm⟩
   have atRoot : ∀ address, after.root address =
-      (before.root address).map (fun root => { root with home := select address.root root }) := by
-    intro address
-    unfold World.root
-    rw [selected]
-    cases before.roots.get address.root with
-    | none => rfl
-    | some root =>
-      dsimp
-      split <;> rfl
-  have reads : ∀ address, after.read address = before.read address := by
-    intro address
-    unfold World.read
-    rw [atRoot]
-    cases before.root address <;> rfl
+      (before.root address).map (fun root => { root with home := select address.root root }) :=
+    World.rehome_root before select
+  have reads : ∀ address, after.read address = before.read address := World.rehome_read before select
   have residents : ∀ address value, after.Resident address value ↔ before.Resident address value := by
     intro address value
     rw [World.resident_iff_stores,World.resident_iff_stores]
@@ -59,13 +87,8 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     · exact Or.inl ⟨value,by simpa only [World.Stores,reads] using found⟩
     · exact Or.inr (vacant address hole)
   have typedLocations : ∀ address type offset, AddressOffset program.declarations before address type offset →
-      AddressOffset program.declarations after address type offset := by
-    intro address type offset location
-    induction location with
-    | @root id root found live =>
-      have found : after.roots.get id = some { root with home := select id root } := by rw [selected,found]; rfl
-      exact .root (root := { root with home := select id root }) found live
-    | child _ field ih => exact .child ih (field.transport (by rw [reads]))
+      AddressOffset program.declarations after address type offset :=
+    fun _ _ _ located => World.rehome_addressOffset select located
   have pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after := by
     intro pointer valid id allocation
     obtain ⟨root,found,address,bound⟩ := valid id allocation
@@ -131,18 +154,21 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
 
 namespace Execution
 
+theorem suspendRoots.eq_rehome (before : World) (roots : List Identity) (id : Identity) :
+    suspendRoots before roots id = { before with roots := before.roots.map (fun (key,root) =>
+      (key,{ root with home := if key ∈ roots then .suspended id else root.home })) } := by
+  unfold suspendRoots
+  congr 1
+  apply List.map_congr_left
+  intro entry member
+  obtain ⟨key,root⟩ := entry
+  dsimp
+  split <;> rfl
+
 theorem suspendRoots.worldTyped {program : Kernel.Program} {before : World} {roots : List Identity} {id : Identity}
     (typed : Typing.WorldTyped program before) : Typing.WorldTyped program (suspendRoots before roots id) := by
-  have result := World.rehome_worldTyped typed (fun root original => if root ∈ roots then .suspended id else original.home)
-  have same : (before.roots.map (fun (key,root) =>
-      (key,{ root with home := if key ∈ roots then .suspended id else root.home }))) =
-      before.roots.map (fun (key,root) => (key,if key ∈ roots then { root with home := .suspended id } else root)) := by
-    apply List.map_congr_left
-    intro entry member
-    obtain ⟨key,root⟩ := entry
-    dsimp
-    split <;> rfl
-  simpa only [suspendRoots,same] using result
+  rw [suspendRoots.eq_rehome]
+  exact World.rehome_worldTyped typed (fun root original => if root ∈ roots then .suspended id else original.home)
 
 theorem restoreRoots.worldTyped {program : Kernel.Program} {before : World} {homes : Table Home}
     (typed : Typing.WorldTyped program before) : Typing.WorldTyped program (restoreRoots before homes) :=

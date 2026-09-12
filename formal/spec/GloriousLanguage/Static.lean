@@ -352,15 +352,22 @@ def DefinitionallyJoinable (program : Program) (context : Context) (left right :
 def SubstitutionsJoinable (program : Program) (context : Context) (left right : Substitution) : Prop :=
   ListRel (fun first second => first.1 = second.1 ∧ DefinitionallyJoinable program context first.2 second.2) left right
 
-/-- This admission check constrains common head solutions and inferred generic
-arguments, not the associated-type result whose determinism is proved from it. -/
+/-- Inferred solutions retain actual binder keys and agree modulo the
+language's definitional equality. Positive joining is a separate theorem
+obligation and is deliberately not built into declaration admission. -/
+def SubstitutionsConvertible (program : Program) (context : Context) (left right : Substitution) : Prop :=
+  ListRel (fun first second => first.1 = second.1 ∧ DefinitionallyEqual program context first.2 second.2) left right
+
+/-- Common legal heads must identify one declaration and one inferred solution
+modulo definitional equality. Requiring positive joining here would already
+assume conversion-to-joinability for arbitrary kinded generic arguments. -/
 def HeadSolutionsCoherent (program : Program) (context : Context) : Prop :=
   ∀ left right, Definition.implementation left ∈ program.declarations →
     Definition.implementation right ∈ program.declarations → left.trait = right.trait →
     ∀ arguments leftSub rightSub,
       MatchesImplHead program context left arguments leftSub →
       MatchesImplHead program context right arguments rightSub →
-      left.header.id = right.header.id ∧ SubstitutionsJoinable program context leftSub rightSub
+      left.header.id = right.header.id ∧ SubstitutionsConvertible program context leftSub rightSub
 
 def ConstraintsHold (program : Program) (context : Context) (substitution : Substitution)
     (requirements : List Constraint) : Prop :=

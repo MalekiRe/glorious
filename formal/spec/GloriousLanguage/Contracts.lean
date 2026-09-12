@@ -1,4 +1,5 @@
 import GloriousLanguage.Typing
+import GloriousLanguage.ControlOrigin
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
 The meaning below is intentionally semantic; it does not claim that an
@@ -58,7 +59,7 @@ def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop 
       (function.captures.length ≤ index ∧ input.origin = .argument (index-function.captures.length)))
 
 def InitialInvocation (program : Kernel.Program) (function : Function) (inputs : List InvocationInput) (state : State) : Prop :=
-  InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.SuspensionsWellFormed ∧
+  InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.ControlWellFormed ∧
   ∃ caller, state.task = .enter caller function (.supplied inputs) false ∧ state.frames = [] ∧
     caller.region ∈ state.world.liveRegions ∧ caller.activation < state.nextActivation ∧
     (∀ id root, state.world.roots.get id = some root → OwnedByActivation root state.nextActivation → root.live = false)

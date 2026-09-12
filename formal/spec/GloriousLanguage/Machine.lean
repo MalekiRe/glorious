@@ -146,6 +146,24 @@ inductive Frame where
       (lease : Option ReceiverLease) (next : Code)
   deriving Repr, Inhabited
 
+/-- Only cleanup-owning frame roles claim homes. A saved caller context is
+an access environment, not ownership of that caller's activation or scope. -/
+def FrameOwnsHome (frame : Frame) (home : Home) : Prop :=
+  match frame with
+  | .activation _ activation _ => HomeOwnedByActivation home activation
+  | .scope context scope _ => HomeOwnedByScope home context.activation scope
+  | .handler handler owns =>
+      HomeOwnedByScope home handler.computation.activation handler.computation.scope ∨
+      (owns = true ∧ HomeOwnedByActivation home handler.environment.activation)
+  | .serviced handler owns clause _ | .completion handler owns clause =>
+      HomeOwnedByActivation home clause.activation ∨
+      (owns = true ∧ HomeOwnedByActivation home handler.environment.activation)
+  | _ => False
+
+def CapturedHome (handler : InstalledHandler) (inner : List Frame) (home : Home) : Prop :=
+  HomeOwnedByScope home handler.computation.activation handler.computation.scope ∨
+    ∃ frame ∈ inner, FrameOwnsHome frame home
+
 def Frame.ownedRegions : Frame → List Identity
   | .activation _ _ region | .scope _ _ region => [region]
   | .handler installed owns => installed.computation.region :: (if owns then [installed.environment.region] else [])
@@ -211,8 +229,8 @@ structure Suspension.CaptureOrigin (suspension : Suspension) : Prop where
   bounded : ∀ root ∈ suspension.roots, root < suspension.captureRootLimit
   homes : suspension.homes.Unique
   domain : ∀ root, (∃ home, suspension.homes.get root = some home) ↔ root ∈ suspension.roots
-  activationHomes : ∀ root home, suspension.homes.get root = some home →
-    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope
+  ownedHomes : ∀ root home, suspension.homes.get root = some home →
+    CapturedHome suspension.handler suspension.frames home
 
 /-- The executable control invariant combines the existing budget component
 with capture provenance and active ownership of the current root inventory.
@@ -438,7 +456,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with world := after, task := .run inner body, frames := .scope context inner.scope inner.region :: before.frames }
   | scopeReturn {before context value outer scope region rest kept after roots} : before.task = .yield context value →
       before.frames = .scope outer scope region :: rest → Protect program outer before.world value .owner kept after →
-      ScopeRoots after context.activation scope [] roots → Suspensible after roots →
+      ScopeRoots after outer.activation scope [] roots → Suspensible after roots →
       LocalStep program before none { before with world := after, task := .cleanup context roots (.closeRegion region (.yield outer kept)), frames := rest }
   | label {before context lexical region result body inner selectedRegion} : before.task = .run context (.label lexical region result body) →
       context.instantiation.regions.get region = some selectedRegion →

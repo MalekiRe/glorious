@@ -164,7 +164,7 @@ theorem Registration.Valid.not_scope_cleanup {program : Kernel.Program} {world :
   obtain ⟨other,found,_,owned,_⟩ := (cleanup.2 registration.owner.root).mp member
   have same : root = other := Option.some.inj ((World.root_found selected).1.symm.trans found)
   subst other
-  rcases home with home | home <;> simp [OwnedByScope,home] at owned
+  rcases home with home | home <;> simp [OwnedByScope,HomeOwnedByScope,home] at owned
 
 theorem Registration.Valid.not_activation_cleanup {program : Kernel.Program} {world : World}
     {runtimes : List Identity} {registration : Registration} {activation : Identity} {kept roots : List Identity}
@@ -177,7 +177,7 @@ theorem Registration.Valid.not_activation_cleanup {program : Kernel.Program} {wo
   obtain ⟨other,found,_,owned,_⟩ := (cleanup.2 registration.owner.root).mp member
   have same : root = other := Option.some.inj ((World.root_found selected).1.symm.trans found)
   subst other
-  rcases home with home | home <;> simp [OwnedByActivation,home] at owned
+  rcases home with home | home <;> simp [OwnedByActivation,HomeOwnedByActivation,home] at owned
 
 /-- The actual resumed/continued host phase consumes the retention invariant
 at its cleanup boundary, rather than merely recording it on a side table. -/

@@ -34,21 +34,13 @@ def Routes (program : Kernel.Program) (before : State) (operation : DeclId)
   SelectsOperation program before.world handler operation arguments payload arm
 
 def FrameOwns (frame : Frame) (root : Root) : Prop :=
-  match frame with
-  | .activation _ activation _ => OwnedByActivation root activation
-  | .scope context scope _ => OwnedByScope root context.activation scope
-  | .handler handler owns =>
-      OwnedByScope root handler.computation.activation handler.computation.scope ∨
-      (owns = true ∧ OwnedByActivation root handler.environment.activation)
-  | .serviced handler owns clause _ | .completion handler owns clause =>
-      OwnedByActivation root clause.activation ∨ (owns = true ∧ OwnedByActivation root handler.environment.activation)
-  | _ => False
+  FrameOwnsHome frame root.home
 
 def DelimitedRoots (world : World) (handler : InstalledHandler) (inner : List Frame)
     (kept roots : List Identity) : Prop :=
   NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root,
     world.roots.get id = some root ∧ root.live = true ∧ id ∉ kept ∧
-    (OwnedByScope root handler.computation.activation handler.computation.scope ∨ ∃ frame ∈ inner, FrameOwns frame root)
+    CapturedHome handler inner root.home
 
 def SaveHomes (world : World) (roots : List Identity) (homes : Table Home) : Prop :=
   homes = (world.roots.filter (fun entry => entry.1 ∈ roots)).map (fun (id,root) => (id,root.home))

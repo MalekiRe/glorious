@@ -426,11 +426,17 @@ inductive BindsInputs (program : Language.Program) (activation scope region : Id
       BindsInputs program activation scope region middle rest bindings after →
       BindsInputs program activation scope region before (input :: rest) (binding :: bindings) after
 
+def HomeOwnedByActivation (home : Home) (activation : Identity) : Prop :=
+  (∃ scope, home = .localSlot activation scope) ∨ ∃ scope, home = .temporary activation scope
+
+def HomeOwnedByScope (home : Home) (activation scope : Identity) : Prop :=
+  home = .localSlot activation scope ∨ home = .temporary activation scope
+
 def OwnedByActivation (root : Root) (activation : Identity) : Prop :=
-  (∃ scope, root.home = .localSlot activation scope) ∨ ∃ scope, root.home = .temporary activation scope
+  HomeOwnedByActivation root.home activation
 
 def OwnedByScope (root : Root) (activation scope : Identity) : Prop :=
-  root.home = .localSlot activation scope ∨ root.home = .temporary activation scope
+  HomeOwnedByScope root.home activation scope
 
 def NewestFirst (world : World) (roots : List Identity) : Prop :=
   roots.Nodup ∧ ∀ (i j : Nat) a b left right, roots[i]? = some a → roots[j]? = some b →

@@ -49,13 +49,41 @@ theorem State.SuspensionsWellFormed.excludes_future_root {state : State} (valid 
     (future : state.world.nextRoot ≤ root) : root ∉ suspension.roots :=
   fun member => Nat.not_lt_of_ge future (valid.root_bound found member)
 
+/-- Later replay or settlement cannot add newly allocated storage to an old
+inventory. This consumes the same immutable metadata theorem as budgets. -/
+theorem Run.old_inventory_excludes_future_root {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id root : Identity} {original current : Suspension}
+    (valid : before.SuspensionsWellFormed) (run : Run program host before trace after)
+    (beforeAt : before.resumptions.get id = some original) (afterAt : after.resumptions.get id = some current)
+    (future : before.world.nextRoot ≤ root) : root ∉ current.roots := by
+  obtain ⟨retained,found,_,roots,_,_,_⟩ := run.retains_metadata valid.budgets beforeAt
+  have same : retained = current := Option.some.inj (found.symm.trans afterAt)
+  subst retained
+  rw [roots]
+  exact valid.excludes_future_root beforeAt future
+
+/-- An actual cancellation of a pre-existing suspension cannot schedule a
+freshly allocated root for destruction, even after arbitrary body execution. -/
+theorem Run.cancel_old_excludes_future_root {program : Kernel.Program} {host : Foreign.Model}
+    {before after canceled : State} {trace : List Event} {id root : Identity} {original : Suspension}
+    (valid : before.SuspensionsWellFormed) (run : Run program host before trace after)
+    (beforeAt : before.resumptions.get id = some original) (future : before.world.nextRoot ≤ root)
+    (cancellation : EffectStep program after (some (.cancel id)) canceled) :
+    ∀ context roots next, canceled.task = .cleanup context roots next → root ∉ roots := by
+  cases cancellation with
+  | cancel task currentAt active optional disposable =>
+    intro context roots next scheduled
+    have same := (Task.cleanup.inj scheduled).2.1
+    rw [← same]
+    exact run.old_inventory_excludes_future_root valid beforeAt currentAt future
+
 end Execution
 
 namespace Contracts
 
 theorem InitialInvocation.suspensions {program : Kernel.Program} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program function inputs state) : state.SuspensionsWellFormed := initial.2.2.1
+    (initial : InitialInvocation program function inputs state) : state.SuspensionsWellFormed := initial.2.2.1.suspensions
 
 theorem InitialInvocation.run_suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}

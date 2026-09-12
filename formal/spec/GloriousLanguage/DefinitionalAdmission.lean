@@ -58,7 +58,7 @@ theorem SelectsImpl.unique {program : Program} (valid : ProgramWellFormed progra
     {first second : ImplDefinition} {firstSub secondSub : Substitution}
     (left : SelectsImpl program context trait arguments firstNegative first firstSub)
     (right : SelectsImpl program context trait arguments secondNegative second secondSub) :
-    first = second ∧ SubstitutionsJoinable program context firstSub secondSub := by
+    first = second ∧ SubstitutionsConvertible program context firstSub secondSub := by
   cases left with
   | selected member trait _ matched _ =>
     cases right with

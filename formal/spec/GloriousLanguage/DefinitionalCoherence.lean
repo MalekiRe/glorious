@@ -76,7 +76,7 @@ theorem SelectsImpl.convertible_unique {program : Program} (valid : ProgramWellF
     (left : SelectsImpl program context trait firstArguments firstNegative first firstSub)
     (right : SelectsImpl program context trait secondArguments secondNegative second secondSub)
     (equal : ListRel (DefinitionallyEqual program context) firstArguments secondArguments) :
-    first = second ∧ SubstitutionsJoinable program context firstSub secondSub :=
+    first = second ∧ SubstitutionsConvertible program context firstSub secondSub :=
   (left.congr_query equal).unique valid right
 
 theorem Term.substitutions_reduce (program : Program) (context : Context) (term : Term)
@@ -148,54 +148,5 @@ theorem SubstitutionsJoinable.substitute {program : Program} {context : Context}
   obtain ⟨common,first,second⟩ := joinable.common
   exact ⟨term.substitute common,term.substitutions_reduce program context first,
     term.substitutions_reduce program context second⟩
-
-/-- Common redexes select the same declaration and join their inferred
-arguments. Simultaneous substitution transports those witnesses to the actual
-associated body; no associated-result equality is an admission premise. -/
-theorem DefinitionalStep.root_joinable {program : Program} (valid : ProgramWellFormed program)
-    {context : Context} {term first second : Term}
-    (left : DefinitionalStep program context term first) (right : DefinitionalStep program context term second) :
-    DefinitionallyJoinable program context first second := by
-  cases left with
-  | alias found instantiated _ substituted =>
-    cases right with
-    | alias otherFound otherInstance _ otherSubstitution =>
-      have sameDeclaration := Option.some.inj (found.symm.trans otherFound)
-      subst_vars
-      have sameSubstitution := instantiated.2.2.trans otherInstance.2.2.symm
-      subst_vars
-      have sameResult := substituted.2.1.trans otherSubstitution.2.1.symm
-      subst_vars
-      exact ⟨_,.refl,.refl⟩
-  | @projection trait member owners items associated ownerSub itemSub implementation implSub body value
-      domain selected memberBody substituted =>
-    generalize kindEquality : associated.kind = projectionKind at right
-    cases right with
-    | projection otherDomain otherSelected otherMember otherSubstitution =>
-      obtain ⟨rfl,rfl,rfl⟩ := domain.unique otherDomain
-      obtain ⟨rfl,arguments⟩ := selected.unique valid otherSelected
-      have sameBody := List.pair_value_unique (valid.associated_members_unique selected.declaration) memberBody otherMember
-      subst_vars
-      rw [substituted.2.1,otherSubstitution.2.1]
-      exact (arguments.append (.refl program context itemSub)).substitute _
-    | defaultProjection otherDomain otherSelected missing _ _ =>
-      obtain ⟨rfl,rfl,rfl⟩ := domain.unique otherDomain
-      obtain ⟨rfl,_⟩ := selected.unique valid otherSelected
-      exact False.elim (missing _ memberBody)
-  | @defaultProjection trait member owners items associated ownerSub itemSub implementation implSub body value
-      domain selected missing default substituted =>
-    generalize kindEquality : associated.kind = projectionKind at right
-    cases right with
-    | projection otherDomain otherSelected otherMember _ =>
-      obtain ⟨rfl,rfl,rfl⟩ := domain.unique otherDomain
-      obtain ⟨rfl,_⟩ := selected.unique valid otherSelected
-      exact False.elim (missing _ otherMember)
-    | defaultProjection otherDomain _ _ otherDefault otherSubstitution =>
-      obtain ⟨rfl,rfl,rfl⟩ := domain.unique otherDomain
-      have sameBody := Option.some.inj (default.symm.trans otherDefault)
-      subst_vars
-      have sameResult := substituted.2.1.trans otherSubstitution.2.1.symm
-      subst_vars
-      exact ⟨_,.refl,.refl⟩
 
 end Glorious.Language

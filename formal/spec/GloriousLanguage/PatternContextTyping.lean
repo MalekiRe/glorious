@@ -91,6 +91,27 @@ theorem Kernel.PatternPlan.nonBinding_segments {program : Language.Program} {wor
   all_goals simp_all [Kernel.PatternAction.boundLocal]
   all_goals split <;> simp_all [Kernel.PatternAction.boundLocal]
 
+theorem Kernel.PatternPlan.bindings_only {program : Language.Program} {world : World}
+    {address : Address} {authority : Authority} {access : Access} {pattern : Kernel.Pattern}
+    {actions : Kernel.PatternActions}
+    (planned : Kernel.PatternPlan program world address authority access pattern actions) :
+    ∀ action ∈ actions.bindings, ∃ localSlot address authority access,
+      action = .bind localSlot address authority access := by
+  refine Kernel.PatternPlan.rec
+    (motive_1 := fun _ _ _ _ actions _ => ∀ action ∈ actions.bindings,
+      ∃ localSlot address authority access, action = .bind localSlot address authority access)
+    (motive_2 := fun _ _ _ _ _ actions _ => ∀ action ∈ actions.bindings,
+      ∃ localSlot address authority access, action = .bind localSlot address authority access)
+    ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ planned
+  all_goals intros
+  all_goals simp_all
+  all_goals first
+  | exact ⟨_,_,_,_,rfl⟩
+  | rename_i firstIH lastIH action member
+    rcases member with first | later
+    · exact firstIH action first
+    · exact lastIH action later
+
 theorem Typing.PatternType.plan_bindingLocals {program : Language.Program} {context : Language.Context}
     {pattern : Kernel.Pattern} {type : Term} {access : Access} {locals : List Kernel.Local}
     (typed : Typing.PatternType program context pattern type access locals) (close : Term → Term)
@@ -178,6 +199,23 @@ theorem Typing.PatternType.scheduled_bindingLocals {program : Language.Program} 
   simp only [Execution.ScheduledPattern,List.filterMap_append,noBinders.1,noBinders.2,
     List.nil_append,List.append_nil,typed.plan_bindingLocals close planned]
 
+theorem Typing.PatternType.first_binding {program : Language.Program} {context : Language.Context}
+    {pattern : Kernel.Pattern} {type : Term} {access : Access} {localSlot : Kernel.Local} {locals : List Kernel.Local}
+    (typed : Typing.PatternType program context pattern type access (localSlot :: locals)) (close : Term → Term)
+    {world : World} {address : Address} {authority : Authority} {actualAccess : Access} {actions : Kernel.PatternActions}
+    (planned : Kernel.PatternPlan program world address authority actualAccess (pattern.mapTerms close) actions) :
+    ∃ source permission access rest,
+      actions.bindings = .bind (localSlot.mapTerms close) source permission access :: rest ∧
+      rest.filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms close) := by
+  have ordered := typed.plan_bindingLocals close planned
+  cases selected : actions.bindings with
+  | nil => simp only [selected,List.filterMap_nil,List.map_cons] at ordered; cases ordered
+  | cons first rest =>
+    obtain ⟨actual,source,permission,access,rfl⟩ := planned.bindings_only first (by rw [selected]; exact List.mem_cons_self)
+    simp only [selected,List.filterMap_cons,Kernel.PatternAction.boundLocal,List.map_cons] at ordered
+    obtain ⟨rfl,tail⟩ := List.cons.inj ordered
+    exact ⟨source,permission,access,rest,rfl,tail⟩
+
 /-- One actual pattern binding advances the same fold used by ArmsType and
 OperationArmsType. The body retains its original typing derivation. -/
 theorem Execution.LocalStep.patternBind_context {program : Kernel.Program} {before : Execution.State}
@@ -197,5 +235,38 @@ theorem Execution.LocalStep.patternBind_context {program : Kernel.Program} {befo
       (runtime.bind (runtime.local lexical) binding.address binding.authority) ∧
     Typing.CodeType program ((source.bind lexical).bindLocals remainingLocals) body result :=
   ⟨.patternBind running bound,bound.contextBindingsTyped worldTyped typed admitted,bodyTyped⟩
+
+/-- At the real binding segment, neither its first lexical binder nor its
+scope admission is supplied separately: both come from the source pattern
+and the actual plan. The executed step advances the same body-context fold. -/
+theorem Execution.LocalStep.plannedPatternBind_context {program : Kernel.Program}
+    {before after : Execution.State} {event : Option Execution.Event} {planningWorld : World}
+    {source : Typing.Context} {runtime : Execution.Context} {lexical : Kernel.Local} {locals : List Kernel.Local}
+    {pattern : Kernel.Pattern} {type : Term} {access actualAccess : Access} {address : Address} {authority : Authority}
+    {actions : Kernel.PatternActions} {body : Kernel.Code} {result : Term}
+    (valid : ProgramWellFormed program.declarations) (worldTyped : Typing.WorldTyped program before.world)
+    (typed : Typing.ContextBindingsTyped program before.world source runtime)
+    (patternTyped : Typing.PatternType program.declarations source.static pattern type access (lexical :: locals))
+    (admitted : type.Scoped source.static.scope)
+    (planned : Kernel.PatternPlan program.declarations planningWorld address authority actualAccess (pattern.mapTerms runtime.term) actions)
+    (bodyTyped : Typing.CodeType program (source.bindLocals (lexical :: locals)) body result)
+    (running : before.task = .pattern runtime (actions.bindings ++ actions.cleanup) body)
+    (step : Execution.LocalStep program before event after) :
+    ∃ inner rest, after.task = .pattern inner rest body ∧
+      Typing.ContextBindingsTyped program after.world (source.bind lexical) inner ∧
+      rest.filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms runtime.term) ∧
+      Typing.CodeType program ((source.bind lexical).bindLocals locals) body result := by
+  obtain ⟨address,authority,access,rest,first,remaining⟩ := patternTyped.first_binding runtime.term planned
+  have noBinders := planned.nonBinding_segments
+  have ordered : (rest ++ actions.cleanup).filterMap Kernel.PatternAction.boundLocal =
+      locals.map (Kernel.Local.mapTerms runtime.term) := by
+    rw [List.filterMap_append,remaining,noBinders.2,List.append_nil]
+  have localScoped := patternTyped.locals_scoped valid admitted lexical List.mem_cons_self
+  rw [first,List.cons_append] at running
+  cases step <;> simp_all
+  refine ⟨_,_,⟨rfl,rfl⟩,?_,?_,bodyTyped⟩
+  · exact (‹Kernel.BindsPattern _ _ _ _ _ _ _ _ _ _ _›).contextBindingsTyped worldTyped typed localScoped
+  · rw [List.filterMap_append,remaining]
+    simp_all
 
 end Glorious.Language

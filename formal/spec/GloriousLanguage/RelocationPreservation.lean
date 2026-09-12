@@ -59,6 +59,15 @@ theorem World.root_bound {world : World} {originBound : Identity}
     (found : world.roots.get id = some root) : id < world.nextRoot :=
   (valid.2.2.2.2.2.2.2.2.1 id root found).1
 
+theorem World.reserved_root_bound {world : World} {originBound : Identity}
+    (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
+    {place : ResolvedPlace} (found : world.availability.get id = some available)
+    (active : available.active = true) (member : place ∈ available.reserved) :
+    place.address.root < world.nextRoot := by
+  obtain ⟨root,selected⟩ := Option.isSome_iff_exists.mp
+    (((well.2.2.2.2.1 id available found).2.2.2 active).2 place member)
+  exact World.root_bound well (World.root_found selected).1
+
 theorem World.owner_bound {world : World} {originBound : Identity}
     (valid : world.WellFormedWithOrigins originBound) {address : Address} {value : Value}
     (resident : world.Resident address value) : value.owner < world.nextOwner :=

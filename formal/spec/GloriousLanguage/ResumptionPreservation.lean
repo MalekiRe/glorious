@@ -276,40 +276,50 @@ theorem ResumptionChange.uses {before after : State} {event : Option Event}
 /-- Existing suspension contracts are immutable even when aliases consume
 their budget, a copy is replayed, or the original is canceled. Freshness is
 essential: a new suspension cannot overwrite an older logical obligation. -/
-theorem ResumptionChange.retains {before after : State} {event : Option Event} {id : Identity} {suspension : Suspension}
+theorem ResumptionChange.retains_metadata {before after : State} {event : Option Event} {id : Identity} {suspension : Suspension}
     (change : ResumptionChange before event after) (valid : before.ResumptionsAccounted)
     (found : before.resumptions.get id = some suspension) :
     ∃ current, after.resumptions.get id = some current ∧ current.quantity = suspension.quantity ∧
+      current.roots = suspension.roots ∧ current.homes = suspension.homes ∧
+      current.captureRootLimit = suspension.captureRootLimit ∧
       (suspension.active = false → current.active = false) := by
   cases change with
-  | unchanged table _ _ _ => exact ⟨suspension,by simpa [table] using found,rfl,fun inactive => inactive⟩
+  | unchanged table _ _ _ => exact ⟨suspension,by simpa [table] using found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
   | create _ _ _ _ _ _ table _ =>
       have different := Nat.ne_of_lt (valid.fresh _ _ found)
-      exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ different] using found,rfl,fun inactive => inactive⟩
+      exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ different] using found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
   | @last _ target original previous active _ table _ =>
       by_cases same : id = target
       · subst target
         have equal := Option.some.inj (found.symm.trans previous)
         subst original
         exact ⟨{ suspension with remaining := 0, used := suspension.used+1, active := false },
-          by rw [table,Table.get_set],rfl,fun _ => rfl⟩
-      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,fun inactive => inactive⟩
+          by rw [table,Table.get_set],rfl,rfl,rfl,rfl,fun _ => rfl⟩
+      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
   | @copy _ target original previous active _ table _ =>
       by_cases same : id = target
       · subst target
         have equal := Option.some.inj (found.symm.trans previous)
         subst original
         exact ⟨{ suspension with remaining := suspension.remaining-1, used := suspension.used+1 },
-          by rw [table,Table.get_set],rfl,fun inactive => inactive⟩
-      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,fun inactive => inactive⟩
+          by rw [table,Table.get_set],rfl,rfl,rfl,rfl,fun inactive => inactive⟩
+      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
   | @cancel _ target original previous _ _ table _ =>
       by_cases same : id = target
       · subst target
         have equal := Option.some.inj (found.symm.trans previous)
         subst original
         exact ⟨{ suspension with remaining := 0, active := false },
-          by rw [table,Table.get_set],rfl,fun _ => rfl⟩
-      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,fun inactive => inactive⟩
+          by rw [table,Table.get_set],rfl,rfl,rfl,rfl,fun _ => rfl⟩
+      · exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ same] using found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
+
+theorem ResumptionChange.retains {before after : State} {event : Option Event} {id : Identity} {suspension : Suspension}
+    (change : ResumptionChange before event after) (valid : before.ResumptionsAccounted)
+    (found : before.resumptions.get id = some suspension) :
+    ∃ current, after.resumptions.get id = some current ∧ current.quantity = suspension.quantity ∧
+      (suspension.active = false → current.active = false) := by
+  obtain ⟨current,present,quantity,_,_,_,inactive⟩ := change.retains_metadata valid found
+  exact ⟨current,present,quantity,inactive⟩
 
 theorem Run.resumption_uses {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} (run : Run program host before trace after)
@@ -326,18 +336,30 @@ theorem Run.resumption_uses {program : Kernel.Program} {host : Foreign.Model}
       have rest := ih (step.resumptions_accounted valid)
       simpa [first,ReplayCount,Nat.add_assoc] using rest
 
+theorem Run.retains_metadata {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id : Identity} {suspension : Suspension}
+    (run : Run program host before trace after) (valid : before.ResumptionsAccounted)
+    (found : before.resumptions.get id = some suspension) :
+    ∃ current, after.resumptions.get id = some current ∧ current.quantity = suspension.quantity ∧
+      current.roots = suspension.roots ∧ current.homes = suspension.homes ∧
+      current.captureRootLimit = suspension.captureRootLimit ∧
+      (suspension.active = false → current.active = false) := by
+  induction run generalizing suspension with
+  | refl => exact ⟨suspension,found,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
+  | silent step _ ih | visible step _ ih =>
+      obtain ⟨middle,present,quantity,roots,homes,limit,settled⟩ := step.resumption_change.retains_metadata valid found
+      obtain ⟨current,present,quantity',roots',homes',limit',settled'⟩ := ih (step.resumptions_accounted valid) present
+      exact ⟨current,present,quantity'.trans quantity,roots'.trans roots,homes'.trans homes,limit'.trans limit,
+        fun inactive => settled' (settled inactive)⟩
+
 theorem Run.retains_resumption {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} {id : Identity} {suspension : Suspension}
     (run : Run program host before trace after) (valid : before.ResumptionsAccounted)
     (found : before.resumptions.get id = some suspension) :
     ∃ current, after.resumptions.get id = some current ∧ current.quantity = suspension.quantity ∧
       (suspension.active = false → current.active = false) := by
-  induction run generalizing suspension with
-  | refl => exact ⟨suspension,found,rfl,fun inactive => inactive⟩
-  | silent step _ ih | visible step _ ih =>
-      obtain ⟨middle,present,quantity,settled⟩ := step.resumption_change.retains valid found
-      obtain ⟨current,present,quantity',settled'⟩ := ih (step.resumptions_accounted valid) present
-      exact ⟨current,present,quantity'.trans quantity,fun inactive => settled' (settled inactive)⟩
+  obtain ⟨current,present,quantity,_,_,_,inactive⟩ := run.retains_metadata valid found
+  exact ⟨current,present,quantity,inactive⟩
 
 /-- A bound on every logical suspension, including those created during the
 run. Replaying through aliases counts against the same identity. -/
@@ -472,7 +494,7 @@ open Execution
 
 theorem InitialInvocation.resumptions_accounted {program : Kernel.Program} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} (initial : InitialInvocation program function inputs state) :
-    state.ResumptionsAccounted := initial.2.2.1.budgets
+    state.ResumptionsAccounted := initial.2.2.1.suspensions.budgets
 
 /-- The control invariant is constructible for arbitrary fresh invocations;
 it does not require an execution-safety certificate or a successful run. -/
@@ -483,11 +505,28 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {funct
     (homes : ∀ rootId root id, state.world.roots.get rootId = some root →
       root.home = .suspended id → id < state.nextContinuation)
     (task : state.task = .enter caller function (.supplied inputs) false)
+    (callerBounds : ∀ binding ∈ caller.environment, binding.address.root < state.world.nextRoot)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (fresh : ∀ id root, state.world.roots.get id = some root → Kernel.OwnedByActivation root state.nextActivation → root.live = false) :
-    InitialInvocation program function inputs state :=
-  ⟨inputsTyped,functionInputs,State.SuspensionsWellFormed.empty empty homes,caller,task,frames,region,activation,fresh⟩
+    InitialInvocation program function inputs state := by
+  refine ⟨inputsTyped,functionInputs,?_,caller,task,frames,region,activation,fresh⟩
+  refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_⟩
+  · rw [task]
+    apply RootSupport.below_append.mpr
+    constructor
+    · intro root member
+      obtain ⟨binding,present,rfl⟩ := List.mem_map.mp member
+      exact callerBounds binding present
+    · rw [EntrySource.rootSupport,RootSupport.below_flatMap]
+      intro input member
+      obtain ⟨value,stored,_⟩ := inputsTyped.2.2.1 input member
+      obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
+      exact RootSupport.below_cons.mpr
+        ⟨World.root_bound inputsTyped.1.1 (World.root_found found).1,RootSupport.below_nil _⟩
+  · simp [frames]
+  · intros
+    simp_all [Table.get]
 
 /-- The actual invocation contract supplies the initial control invariant;
 all finite-run budget and settlement conclusions are derived by preservation,
