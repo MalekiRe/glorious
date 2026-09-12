@@ -24,3 +24,5 @@ import GloriousLanguage.ExecutionPreservation
 import GloriousLanguage.InvocationLending
 import GloriousLanguage.PrimitiveDispatch
 import GloriousLanguage.RuntimeTypingEquivariance
+import GloriousLanguage.InvocationLeaseCleanup
+import GloriousLanguage.SemanticPreservation

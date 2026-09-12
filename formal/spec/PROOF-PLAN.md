@@ -354,6 +354,28 @@ Full code typing still requires transport of coverage over arbitrary typed
 worlds, and static implementation-head coherence needs repair before associated
 normalization can justify the source-to-runtime representation boundary.
 
+`InvocationLeaseCleanup` constructs the ordinary reference-destruction,
+recursive parent-release and root-retirement execution for the actual
+`LendsResident` handle. Its decreasing measure is the canonical loan-parent
+identity order. A referenced parent or a live child defers release; restoration
+is required only for unreferenced ancestors without live children off the
+released branch. An unrelated sibling's unique hole is not assumed initialized.
+The activation-cleanup consumer uses the actual selected root and retains full
+world typing. Capability-model existence and proof that a completed call
+restores and keeps its hidden handles private remain open prerequisites; the
+cleanup theorem does not assume its own termination or post-world typing.
+
+`SemanticPreservation` connects the public transition system to the actual
+execution relation in both directions, with exact filtered traces and identical
+reachable states. It derives storage typing for all public reachable states,
+finite observations and every state in an infinite execution. The redundant
+typed-post-world clause has been removed from `ResourceAdmissionAt`; it is now
+a theorem of execution, not another source admission condition. Public
+`WellFormed.no_invalid_reachable` consumes the result. This proves the storage
+part of public safety, not `TransitionSystem.Safe`: task/frame preservation,
+progress, initialized representable results and resource completion remain
+unfinished and must not be inferred from world typing alone.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

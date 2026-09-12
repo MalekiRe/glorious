@@ -108,11 +108,14 @@ def StateProgress (program : Kernel.Program) (host : Foreign.Model) (function : 
   (∃ result, state.task = .stopped result) ∨ (∃ reason, state.task = .fatal reason) ∨ MayAwait program function state ∨
     ∃ event after, Step program host state event after
 
+/-- The remaining path-sensitive obligations. Storage typing is not a second
+admission premise: `SemanticPreservation` derives it for every execution from
+well-formed declarations, the body inventory and the host's actual laws. -/
 def ResourceAdmissionAt (program : Kernel.Program) (function : Function) (access : Access) : Prop :=
   ∀ host inputs start trace finish,
     Foreign.Model.Lawful program host → InitialInvocation program function inputs start →
     (∀ input ∈ inputs, (∃ index, input.origin = .capture index) → input.access = access) → Run program host start trace finish →
-    Typing.WorldTyped program finish.world ∧ StateProgress program host function finish ∧
+    StateProgress program host function finish ∧
     (∀ result value, finish.task = .stopped result → finish.world.Stores result value →
       Subtype program.declarations ⟨[],[],0,default,false⟩ value.type function.signature.result) ∧
     (∀ result, finish.task = .stopped result →
