@@ -1251,6 +1251,26 @@ typing. Real clause-pattern planning and continuation-storage creation remain
 explicit dependent producer inputs; they are not complete transition premises.
 The strict 138-job handler/private/lifecycle dependency gate checks these
 constructed transitions and their actual public-observation consumers.
+Source dispatch now consumes `Typing.OperationArmMode`, the exact existing
+`OperationArmsType.cons` contract exposed by its common selected-arm projection.
+`MayAwait.source_execution` derives the terminal/tail/bound branch, declaration
+quantity, implicit one-use condition and explicit generative brand from that
+source derivation. It constructs the real effect step, preserves world typing
+and proves the actual clause's typed ordered binder cursor, retaining terminal
+cleanup as pending rather than claiming the body is already running. The
+terminal clause consumer no longer performs a second induction over arm typing;
+it projects that same contract. Snapshot code-typing transport checks against
+the shared source premise as well.
+The strict 155-job dependency gate covers source-driven construction, actual
+clause entry, elaboration, snapshot body transport, lifecycle preservation and
+private-hook preservation; no concrete example is used as proof evidence.
+The remaining bound-continuation obligation is not only physical allocation:
+the source arm and runtime operation signatures are related by actual argument
+conversion, while `CreatesContinuation` currently requires a syntactically exact
+continuation type. The callback still exposes that representation obligation;
+source mode selection does not prove signature syntax equality, unconditional
+allocation success or full handler progress. This boundary needs the actual
+source/runtime conversion transport and allocation failure contract.
 This strengthens semantic admission; it does not prove source resource progress.
 General ordered layout/allocation and loan readiness must still produce the
 payload preparation and residual permissions. Matching, clause binding and

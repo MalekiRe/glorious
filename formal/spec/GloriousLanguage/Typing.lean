@@ -267,6 +267,17 @@ def HandledInstances (program : Kernel.Program) (context : Language.Context)
     (handler : Handler) (instances : List Term) : Prop :=
   ∀ instanceTerm ∈ instances, CompletelyHandles program context handler instanceTerm
 
+/-- The source arm's result and continuation contract. Declaration typing is
+the sole producer; selected-clause typing and actual dispatch project this
+same evidence, including the implicit tail arm's exact one-use requirement. -/
+def OperationArmMode (operation : OperationDefinition) (signature : Signature)
+    (continuation : Option Local) (result output : Term) : Prop :=
+  (operation.terminal = true ∧ continuation = none ∧ output = result) ∨
+  (operation.terminal = false ∧ ∃ quantity, operation.quantity = some quantity ∧
+    ((continuation = none ∧ quantity.Contains 1 ∧ output = signature.result) ∨
+      (∃ localSlot brand, continuation = some localSlot ∧
+        localSlot.type = .continuation (.scopedBrand brand) signature.result result signature.effects quantity ∧ output = result)))
+
 mutual
   inductive CodeType (program : Kernel.Program) : Context → Code → Term → Prop where
     | result {context place actual result writable} : PlaceType program.declarations context place actual writable →
@@ -357,11 +368,7 @@ mutual
         program.declarations.operation id = some operation →
         CallSignature program.declarations context.static id (family ++ item) signature →
         PatternsType program.declarations context.static patterns signature.parameters .owned bindings →
-        ((operation.terminal = true ∧ continuation = none ∧ output = result) ∨
-          (operation.terminal = false ∧ ∃ quantity, operation.quantity = some quantity ∧
-            ((continuation = none ∧ quantity.Contains 1 ∧ output = signature.result) ∨
-              (∃ localSlot brand, continuation = some localSlot ∧
-                localSlot.type = .continuation (.scopedBrand brand) signature.result result signature.effects quantity ∧ output = result)))) →
+        OperationArmMode operation signature continuation result output →
         (∀ brand, continuation.bind Local.resumptionBrand = some brand → brand ∉ context.static.scope.brands) →
         TermsScoped (context.bindResumption continuation) (output :: continuation.toList.map (·.type)) →
         CodeType program ((context.bindResumption continuation).bindLocals (continuation.toList ++ bindings)) body output →

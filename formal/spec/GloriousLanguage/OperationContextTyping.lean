@@ -47,9 +47,11 @@ recheck an arm or infer a second list of payload binders. -/
 theorem Typing.OperationArmsType.member {program : Kernel.Program} {context : Typing.Context}
     {arms : List Kernel.OperationArm} {result : Term}
     (typed : Typing.OperationArmsType program context arms result) {arm : Kernel.OperationArm} (member : arm ∈ arms) :
-    ∃ signature locals output,
+    ∃ operation signature locals output,
+      program.declarations.operation arm.operation = some operation ∧
       Typing.CallSignature program.declarations context.static arm.operation arm.arguments signature ∧
       Typing.PatternsType program.declarations context.static arm.patterns signature.parameters .owned locals ∧
+      Typing.OperationArmMode operation signature arm.continuation result output ∧
       (∀ brand, arm.continuation.bind Kernel.Local.resumptionBrand = some brand → brand ∉ context.static.scope.brands) ∧
       Typing.TermsScoped (context.bindResumption arm.continuation) (output :: arm.continuation.toList.map (·.type)) ∧
       Typing.CodeType program ((context.bindResumption arm.continuation).bindLocals (arm.continuation.toList ++ locals)) arm.body output := by
@@ -57,9 +59,9 @@ theorem Typing.OperationArmsType.member {program : Kernel.Program} {context : Ty
   | nil => cases member
   | cons first rest ih =>
     cases typed with
-    | cons _ signature patterns _ fresh admitted body tail =>
+    | cons found signature patterns mode fresh admitted body tail =>
       rcases List.mem_cons.mp member with rfl | member
-      · exact ⟨_,_,_,signature,patterns,fresh,admitted,body⟩
+      · exact ⟨_,_,_,_,found,signature,patterns,mode,fresh,admitted,body⟩
       · exact ih tail member
 
 theorem Typing.Context.scoped_bindResumption {context : Typing.Context} {term : Term}
@@ -78,6 +80,14 @@ theorem SelectsOperation.member {program : Kernel.Program} {world : World} {hand
   obtain ⟨skipped,rest,arms,_⟩ := selected
   rw [arms]
   exact List.mem_append_right _ List.mem_cons_self
+
+theorem SelectsOperation.operation {program : Kernel.Program} {world : World} {handler : InstalledHandler}
+    {id : DeclId} {arguments : List Term} {payload : List ResolvedPlace} {arm : Kernel.OperationArm}
+    (selected : SelectsOperation program world handler id arguments payload arm) : arm.operation = id := by
+  obtain ⟨_,_,_,accepts,_⟩ := selected
+  have identity := accepts.1
+  cases arm
+  exact identity
 
 theorem Routes.handler_member {program : Kernel.Program} {before : State} {operation : DeclId}
     {arguments : List Term} {payload : List ResolvedPlace} {inner outer : List Frame}
@@ -177,7 +187,7 @@ theorem suspend_inputs_context {program : Kernel.Program} {before : State} {sour
       Typing.CodeType program (((source.bindResumption (some lexical)).bind lexical).bindLocals locals) arm.body output ∧
       (ScheduledPattern actions).filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms clause.term) ∧
       ∀ localSlot ∈ locals, localSlot.type.Scoped (source.bindResumption (some lexical)).static.scope := by
-  obtain ⟨selectedSignature,locals,output,signatureTyped,patternsTyped,fresh,admitted,bodyTyped⟩ := armsTyped.member selected.member
+  obtain ⟨_,selectedSignature,locals,output,_,signatureTyped,patternsTyped,_,fresh,admitted,bodyTyped⟩ := armsTyped.member selected.member
   rw [continuation] at fresh admitted bodyTyped
   have startedContext := started.contextBindingsTyped typed (fun brand found => fresh brand found)
   have withRegionTyped := started.worldTyped worldTyped
@@ -213,7 +223,7 @@ theorem suspend_tail_inputs_context {program : Kernel.Program} {before : State} 
       Typing.CodeType program (source.bindLocals locals) arm.body output ∧
       (ScheduledPattern actions).filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms clause.term) ∧
       ∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope := by
-  obtain ⟨signature,locals,output,signatureTyped,patternsTyped,_,_,bodyTyped⟩ := armsTyped.member selected.member
+  obtain ⟨_,signature,locals,output,_,signatureTyped,patternsTyped,_,_,_,bodyTyped⟩ := armsTyped.member selected.member
   have entered := started.contextBindingsTyped typed
   have movedContext := keptValues.contextBindingsTyped valid inventory (started.worldTyped worldTyped) entered
   refine ⟨locals,output,suspendRoots.contextBindingsTyped movedContext,?_,

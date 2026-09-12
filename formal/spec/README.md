@@ -51,8 +51,10 @@ or a dependency of this project.
   terminal/resumptive permission shared with actual effect execution; exact
   composition of callee-owned and caller-owned post-payload obligations.
 - `OperationExecution`: actual terminal, tail-arm and bound-resumption steps
-  constructed from those shares, with real clause/continuation readiness still
-  explicit; actual capture constructs the same request's lifecycle observation.
+  constructed from those shares and the selected source arm's common mode
+  contract, with post-world typing, the actual clause's typed binder cursor and
+  the same request's capture lifecycle. Pattern access and continuation
+  representation/allocation readiness remain explicit.
 - `RootSelection`, `LabelBoundary`: constructive reverse-creation cleanup lists
   for the common storage selection and actual label leave execution from
   callee/caller post-payload permissions, without assuming a completed step.

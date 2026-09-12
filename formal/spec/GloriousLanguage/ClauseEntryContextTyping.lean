@@ -32,20 +32,14 @@ theorem Typing.OperationArmsType.terminal_member {program : Kernel.Program} {con
       Typing.CallSignature program.declarations context.static arm.operation arm.arguments signature ∧
       Typing.PatternsType program.declarations context.static arm.patterns signature.parameters .owned locals ∧
       Typing.CodeType program (context.bindLocals locals) arm.body result := by
-  induction arms with
-  | nil => cases member
-  | cons first rest ih =>
-    cases typed with
-    | cons found signature patterns kind _ _ body tail =>
-      rcases List.mem_cons.mp member with rfl | member
-      · have same := Option.some.inj (found.symm.trans selected)
-        subst operation
-        rcases kind with ⟨_,continuation,output⟩ | ⟨notTerminal,_⟩
-        · refine ⟨_,_,signature,patterns,?_⟩
-          simpa only [continuation,output,Typing.Context.bindResumption,Option.bind,
-            Option.toList,List.nil_append,Kernel.OperationArm.body] using body
-        · simp_all
-      · exact ih tail member
+  obtain ⟨actual,signature,locals,output,found,signatureTyped,patterns,mode,_,_,body⟩ := typed.member member
+  have same := Option.some.inj (found.symm.trans selected)
+  subst actual
+  rcases mode with ⟨_,continuation,outputEq⟩ | ⟨notTerminal,_⟩
+  · refine ⟨signature,locals,signatureTyped,patterns,?_⟩
+    simpa only [continuation,outputEq,Typing.Context.bindResumption,Option.bind,
+      Option.toList,List.nil_append] using body
+  · simp_all
 
 namespace Kernel
 
@@ -77,14 +71,6 @@ theorem Typing.CompletionType.empty {program : Kernel.Program} {context : Typing
   | arms nonempty _ _ => exact False.elim (nonempty empty)
 
 namespace Execution
-
-theorem SelectsOperation.operation {program : Kernel.Program} {world : World} {handler : InstalledHandler}
-    {id : DeclId} {arguments : List Term} {payload : List ResolvedPlace} {arm : Kernel.OperationArm}
-    (selected : SelectsOperation program world handler id arguments payload arm) : arm.operation = id := by
-  obtain ⟨_,_,_,accepts,_⟩ := selected
-  have identity := accepts.1
-  cases arm
-  exact identity
 
 /-- Installation produces the completion-clause environment and its source
 input scope from HandlerType, through the real capture bindings. -/

@@ -1,5 +1,6 @@
 import GloriousLanguage.InvocationLifecycle
 import GloriousLanguage.EffectPreservation
+import GloriousLanguage.ClauseEntryContextTyping
 
 /-! Constructing real handler transitions from the common outward request.
 Payload preparation and cleanup/capture root selection are derived from the
@@ -139,5 +140,90 @@ theorem MayAwait.resumption_execution {program : Kernel.Program} {function : Fun
     handoff selectedRoots allowed saved constructed planned rfl
   exact ⟨_,step,step.worldTyped valid inventory typed,
     fun _ _ _ observed outcome => observed.capture_lifecycle outcome step⟩
+
+/-- Source arm typing chooses the actual execution rule. No caller supplies a
+terminal flag, one-use proof, continuation binder or generative brand. The
+constructed transition also establishes the real clause's typed binder cursor,
+behind terminal cleanup or at resumptive pattern entry. Pattern access and
+continuation representation/allocation remain explicit producer obligations. -/
+theorem MayAwait.source_execution {program : Kernel.Program} {function : Function}
+    {state : State} {boundary : InvocationBoundary} {context : Execution.Context}
+    {id : DeclId} {arguments : List Term} {payload : List ResolvedPlace}
+    {operation : OperationDefinition} {signature : Signature} {abandoned outer : List Frame}
+    {handler : InstalledHandler} {owns : Bool} {arm : OperationArm}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program state.world)
+    (awaiting : MayAwait program function state boundary)
+    (pending : state.task = .perform context id arguments payload)
+    (selected : OperationInstance program id arguments operation signature)
+    (route : Routes program state id arguments payload abandoned handler owns arm outer)
+    (handlers : ∀ handler owns, Frame.handler handler owns ∈ state.frames →
+      ∃ source result, Typing.ContextBindingsTyped program state.world source handler.environment ∧
+        Typing.OperationArmsType program source handler.syntaxNode.operations result)
+    (caller : ∀ disposition, OperationDisposition.Matches operation disposition →
+      boundary.OperationCallerPermission program state id arguments payload disposition)
+    (patterns : arm.continuation = none → ∀ clause withRegion kept moved,
+      StartsClause state handler clause withRegion → Protects program clause withRegion payload kept moved →
+      ∃ actions, PayloadPlan program.declarations moved kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions)
+    (continuations : ∀ quantity lexical, operation.quantity = some quantity → arm.continuation = some lexical →
+      ∀ clause localSlot withRegion kept moved roots,
+        StartsResumptionClause state handler lexical clause localSlot withRegion →
+        Protects program clause withRegion payload kept moved →
+        DelimitedRoots moved handler abandoned (kept.map Address.root) roots →
+        ∃ address created,
+          CreatesContinuation program clause (suspendRoots moved roots state.nextContinuation) state.nextContinuation
+            signature (clause.term handler.syntaxNode.result) signature.effects quantity localSlot address created ∧
+          ∃ actions, PayloadPlan program.declarations created kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions) :
+    ∃ after event, EffectStep program state event after ∧ Typing.WorldTyped program after.world ∧
+      (∃ source runtime actions body locals result,
+        Typing.ContextBindingsTyped program after.world source runtime ∧
+        Typing.CodeType program (source.bindLocals locals) body result ∧
+        (ScheduledPattern actions).filterMap PatternAction.boundLocal = locals.map (Local.mapTerms runtime.term) ∧
+        (∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope) ∧
+        ((event = none ∧ ∃ roots regions,
+          after.task = .cleanup context roots (CloseRegions regions (.pattern runtime (ScheduledPattern actions) body))) ∨
+         (event = some (.suspend state.nextContinuation) ∧ after.task = .pattern runtime (ScheduledPattern actions) body))) ∧
+      ∀ host start request, ObservationAt program host function boundary start state request →
+        request.outcome = .operation id arguments payload → event = some (.suspend state.nextContinuation) →
+        LifecycleObserves program host function
+          ⟨request,state.nextContinuation,[.suspend state.nextContinuation],after.world,.suspended⟩ := by
+  obtain ⟨source,result,_,armsTyped⟩ := handlers handler owns route.handler_member
+  obtain ⟨actual,sourceSignature,_,_,found,_,_,mode,_,_,_⟩ := armsTyped.member route.2.2.member
+  have actualFound : program.declarations.operation id = some operation := by
+    obtain ⟨_,found,_⟩ := selected
+    exact found
+  rw [route.2.2.operation] at found
+  have same := Option.some.inj (found.symm.trans actualFound)
+  subst actual
+  have constructed : ∃ after event, EffectStep program state event after ∧ Typing.WorldTyped program after.world ∧
+      (event = none ∨ event = some (.suspend state.nextContinuation)) ∧
+      ∀ host start request, ObservationAt program host function boundary start state request →
+        request.outcome = .operation id arguments payload → event = some (.suspend state.nextContinuation) →
+        LifecycleObserves program host function
+          ⟨request,state.nextContinuation,[.suspend state.nextContinuation],after.world,.suspended⟩ := by
+    rcases mode with ⟨terminal,absent,_⟩ | ⟨resumptive,quantity,quantityAt,tail | bound⟩
+    · obtain ⟨after,step,afterTyped⟩ := awaiting.terminal_execution valid inventory typed pending selected terminal absent
+        route (caller .terminal terminal) (patterns absent)
+      exact ⟨after,none,step,afterTyped,Or.inl rfl,fun _ _ _ _ _ impossible => by cases impossible⟩
+    · obtain ⟨absent,once,_⟩ := tail
+      obtain ⟨after,step,afterTyped,lifecycle⟩ := awaiting.tail_arm_execution valid inventory typed pending selected
+        resumptive quantityAt once absent route (caller (.resumptive quantity) ⟨resumptive,quantityAt⟩) (patterns absent)
+      exact ⟨after,_,step,afterTyped,Or.inr rfl,fun _ _ _ observed outcome _ => lifecycle _ _ _ observed outcome⟩
+    · obtain ⟨lexical,brand,present,localType,_⟩ := bound
+      have branded : lexical.resumptionBrand = some brand := by rw [Local.resumptionBrand,localType]
+      obtain ⟨after,step,afterTyped,lifecycle⟩ := awaiting.resumption_execution valid inventory typed pending selected
+        resumptive quantityAt present branded route (caller (.resumptive quantity) ⟨resumptive,quantityAt⟩)
+        (continuations quantity lexical quantityAt present)
+      exact ⟨after,_,step,afterTyped,Or.inr rfl,fun _ _ _ observed outcome _ => lifecycle _ _ _ observed outcome⟩
+  obtain ⟨after,event,step,afterTyped,events,lifecycle⟩ := constructed
+  refine ⟨after,event,step,afterTyped,?_,lifecycle⟩
+  rcases events with rfl | rfl
+  · obtain ⟨source,clause,inner,handler,owns,outer,roots,actions,arm,result,locals,_,_,task,
+      contextTyped,bodyTyped,binders,admitted⟩ := step.terminal_clause_context valid inventory typed handlers pending
+    exact ⟨source,clause,actions,arm.body,locals,result,contextTyped,bodyTyped,binders,admitted,
+      Or.inl ⟨rfl,roots,_,task⟩⟩
+  · obtain ⟨source,runtime,actions,body,locals,result,task,contextTyped,bodyTyped,binders,admitted⟩ :=
+      step.suspended_clause_context valid inventory typed handlers
+    exact ⟨source,runtime,actions,body,locals,result,contextTyped,bodyTyped,binders,admitted,Or.inr ⟨rfl,task⟩⟩
 
 end Glorious.Language.Contracts
