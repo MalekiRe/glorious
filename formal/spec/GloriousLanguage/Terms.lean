@@ -562,4 +562,32 @@ theorem substitution_kind {substitution : Substitution} {a b : Term}
     (proof : Substitutes substitution a b) : a.kind = b.kind := by
   exact proof.1
 
+/-- The single constructor-congruence proof for simultaneous substitution.
+Its consumers may retain positive reductions, row equations, or inspected
+development evidence; none has to reconstruct substitution independently. -/
+theorem Term.substitutions_related {relation : Term → Term → Prop}
+    (congruent : ∀ {left right}, SameHead left right → ListRel relation left.children right.children → relation left right)
+    (term : Term) {left right : Substitution}
+    (agree : ∀ id kind, relation ((left.get id).getD (.parameter id kind))
+      ((right.get id).getD (.parameter id kind))) :
+    relation (term.substitute left) (term.substitute right) := by
+  cases term
+  case parameter id kind => simpa only [Term.substitute] using agree id kind
+  all_goals apply congruent
+  all_goals first
+    | simp only [SameHead,Term.substitute,Term.mapChildren,List.map_map,Function.comp_def]
+    | skip
+  all_goals simp only [Term.children]
+  all_goals first
+    | exact .nil
+    | apply ListRel.maps; intro child _; exact child.substitutions_related congruent agree
+    | apply ListRel.append
+      all_goals apply ListRel.maps; intro child _; exact child.substitutions_related congruent agree
+    | repeat' apply ListRel.cons
+      all_goals first
+        | exact .nil
+        | exact Term.substitutions_related congruent _ agree
+        | apply ListRel.maps; intro child _; exact child.substitutions_related congruent agree
+termination_by term
+
 end Glorious.Language

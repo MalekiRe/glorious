@@ -148,6 +148,14 @@ theorem ListRel.append {relation : α → β → Prop} {as cs : List α} {bs ds 
   | nil => exact right
   | cons head _ ih => exact .cons head ih
 
+theorem ListRel.maps {α β γ : Type} {relation : β → γ → Prop} (values : List α) (left : α → β) (right : α → γ)
+    (related : ∀ value ∈ values, relation (left value) (right value)) :
+    ListRel relation (values.map left) (values.map right) := by
+  induction values with
+  | nil => exact .nil
+  | cons value values ih =>
+      exact .cons (related value (by simp)) (ih (fun member present => related member (by simp [present])))
+
 theorem ListRel.imp {α β : Type} {first second : α → β → Prop} {left : List α} {right : List β}
     (related : ListRel first left right) (implies : ∀ a b, first a b → second a b) :
     ListRel second left right := by

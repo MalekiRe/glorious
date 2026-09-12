@@ -88,25 +88,8 @@ theorem Term.substitutions_reduce (program : Program) (context : Context) (term 
     {left right : Substitution}
     (agree : ∀ id kind, DefinitionalReduction program context ((left.get id).getD (.parameter id kind))
       ((right.get id).getD (.parameter id kind))) :
-    DefinitionalReduction program context (term.substitute left) (term.substitute right) := by
-  cases term
-  case parameter id kind => simpa only [Term.substitute] using agree id kind
-  all_goals apply DefinitionalReduction.congr
-  all_goals first
-    | simp only [SameHead,Term.substitute,Term.mapChildren,List.map_map,Function.comp_def]
-    | skip
-  all_goals simp only [Term.children]
-  all_goals first
-    | exact .nil
-    | apply ListRel.maps; intro child _; exact child.substitutions_reduce program context agree
-    | apply ListRel.append
-      all_goals apply ListRel.maps; intro child _; exact child.substitutions_reduce program context agree
-    | repeat' apply ListRel.cons
-      all_goals first
-        | exact .nil
-        | exact Term.substitutions_reduce program context _ agree
-        | apply ListRel.maps; intro child _; exact child.substitutions_reduce program context agree
-termination_by term
+    DefinitionalReduction program context (term.substitute left) (term.substitute right) :=
+  term.substitutions_related DefinitionalReduction.congr agree
 
 theorem SubstitutionsJoinable.common {program : Program} {context : Context} {left right : Substitution}
     (joinable : SubstitutionsJoinable program context left right) :

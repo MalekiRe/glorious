@@ -86,25 +86,8 @@ theorem Term.substitutions_convert (program : Program) (context : Context) (term
     {left right : Substitution}
     (agree : ∀ id kind, DefinitionallyEqual program context ((left.get id).getD (.parameter id kind))
       ((right.get id).getD (.parameter id kind))) :
-    DefinitionallyEqual program context (term.substitute left) (term.substitute right) := by
-  cases term
-  case parameter id kind => simpa only [Term.substitute] using agree id kind
-  all_goals apply DefinitionallyEqual.congr
-  all_goals first
-    | simp only [SameHead,Term.substitute,Term.mapChildren,List.map_map,Function.comp_def]
-    | skip
-  all_goals simp only [Term.children]
-  all_goals first
-    | exact .nil
-    | apply ListRel.maps; intro child _; exact child.substitutions_convert program context agree
-    | apply ListRel.append
-      all_goals apply ListRel.maps; intro child _; exact child.substitutions_convert program context agree
-    | repeat' apply ListRel.cons
-      all_goals first
-        | exact .nil
-        | exact Term.substitutions_convert program context _ agree
-        | apply ListRel.maps; intro child _; exact child.substitutions_convert program context agree
-termination_by term
+    DefinitionallyEqual program context (term.substitute left) (term.substitute right) :=
+  term.substitutions_related DefinitionallyEqual.congr agree
 
 theorem Substitutes.congr_substitution {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {left right : Substitution} {before after : Term} (substituted : Substitutes left before after)

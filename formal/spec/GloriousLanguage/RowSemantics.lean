@@ -189,36 +189,11 @@ theorem RowEquivalent.substitute {left right : Term} (equal : RowEquivalent left
   · exact .nil
   · intro _ _ _ _ _ _ head tail; exact .cons head tail
 
-theorem ListRel.maps {α β γ : Type} {relation : β → γ → Prop} (values : List α) (left : α → β) (right : α → γ)
-    (related : ∀ value ∈ values, relation (left value) (right value)) :
-    ListRel relation (values.map left) (values.map right) := by
-  induction values with
-  | nil => exact .nil
-  | cons value values ih =>
-      exact .cons (related value (by simp)) (ih (fun member present => related member (by simp [present])))
-
 theorem Term.substitutions_rowEquivalent (term : Term) {left right : Substitution}
     (agree : ∀ id kind, RowEquivalent ((left.get id).getD (.parameter id kind))
       ((right.get id).getD (.parameter id kind))) :
-    RowEquivalent (term.substitute left) (term.substitute right) := by
-  cases term
-  case parameter id kind => simpa only [Term.substitute] using agree id kind
-  all_goals apply RowEquivalent.congr
-  all_goals first
-    | simp only [SameHead,Term.substitute,Term.mapChildren,List.map_map,Function.comp_def]
-    | skip
-  all_goals simp only [Term.children]
-  all_goals first
-    | exact .nil
-    | apply ListRel.maps; intro child _; exact child.substitutions_rowEquivalent agree
-    | apply ListRel.append
-      all_goals apply ListRel.maps; intro child _; exact child.substitutions_rowEquivalent agree
-    | repeat' apply ListRel.cons
-      all_goals first
-        | exact .nil
-        | exact Term.substitutions_rowEquivalent _ agree
-        | apply ListRel.maps; intro child _; exact child.substitutions_rowEquivalent agree
-termination_by term
+    RowEquivalent (term.substitute left) (term.substitute right) :=
+  term.substitutions_related RowEquivalent.congr agree
 
 theorem SemanticTerm.renameRuntimeRegions_kind (rename : Identity → Identity) (term : SemanticTerm) :
     (term.renameRuntimeRegions rename).kind = term.kind := by
