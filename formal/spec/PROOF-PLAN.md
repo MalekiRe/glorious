@@ -30,10 +30,12 @@ Work outward from the required invariant and its proof failures:
 
 `Preservation.lean` starts the general proof. It establishes root location/loan
 preservation and arbitrary-path address/field-offset preservation outside a
-write's proper ancestors. Retained reference typing follows under that explicit
-path condition, including a vacant referent. Deriving the condition from a
-complete live-loan invariant and proving whole-world/machine preservation remain
-open. `PreservationChecks` supplies a well-formed typed initial world and real
+write's proper ancestors. The strengthened parent/location invariant now derives
+that exclusion for transfers, so retained reference and unchanged value-tree
+typing transport no longer need the path condition as a hypothesis. Borrow,
+transfer and loan ending preserve the new loan sub-invariants. Full resident-tree
+replacement typing, whole-world validity and machine preservation remain open.
+`PreservationChecks` supplies a well-formed typed initial world and real
 whole-root and nested move-and-restore executions with a surviving unique handle;
 it does not establish source-program admission.
 

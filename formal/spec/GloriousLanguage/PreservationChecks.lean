@@ -58,7 +58,7 @@ private theorem occupants {address value} (resident : world.Resident address val
 
 private theorem worldValid : world.WellFormed := by
   refine ⟨by simp [world,Table.Unique],by simp [world,Table.Unique],by simp [world,Table.Unique],by decide,
-    ?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+    ?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
   · intro id available found
     simp [world,Table.get] at found
   · intro address value pack resident head
@@ -100,6 +100,16 @@ private theorem worldValid : world.WellFormed := by
     obtain ⟨rfl,rfl⟩ := firstMember
     obtain ⟨rfl,rfl⟩ := secondMember
     exact Or.inl .refl
+  · intro id resident parent found selected
+    have member := Table.mem_of_get found
+    simp [world] at member
+    obtain ⟨rfl,rfl⟩ := member
+    cases selected
+  · intro id resident found _
+    have member := Table.mem_of_get found
+    simp [world] at member
+    obtain ⟨rfl,rfl⟩ := member
+    exact Or.inl ⟨unitValue,rfl⟩
 
 private theorem referenceTyped (program : Kernel.Program) : Typing.ValueTyped program world referenceValue :=
   .reference (loan := loan) rfl rfl rfl rfl ⟨0,.root (root := sourceRoot) (id := 0) rfl rfl⟩
@@ -142,12 +152,25 @@ example (program : Kernel.Program) :
     moved.Stores handle referenceValue ∧ Typing.ValueTyped program moved referenceValue ∧
     moved.Vacant source ∧ ¬ moved.Initialized source ∧
     (∀ after, ¬ EndsLoan moved 0 after) ∧ Transfers program.declarations moved .owner destination source world := by
-  refine ⟨move _,rfl,(move program.declarations).reference_root_typed (loan := loan) rfl rfl (referenceTyped program),
+  refine ⟨move _,rfl,(move program.declarations).reference_preserved worldValid (referenceTyped program),
     ⟨vacantRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩,?_,?_,restore _⟩
   · rintro ⟨value,stored,_⟩
     cases stored
   · intro after
     exact hole_cannot_end (loan := loan) rfl (by rintro ⟨value,stored,_⟩; cases stored)
+
+example (program : Kernel.Program) : moved.LoanParents ∧ moved.LiveLoanLocations ∧
+    Typing.ValueTyped program moved referenceValue :=
+  ⟨(move program.declarations).loanParents (World.loanParents worldValid),
+    (move program.declarations).liveLoanLocations worldValid,
+    (referenceTyped program).transfer worldValid (move program.declarations)⟩
+
+private def cyclic : World := { world with loans := [(0,{ loan with parent := some 0 })] }
+
+example : ¬ cyclic.WellFormed := by
+  intro valid
+  obtain ⟨_,_,impossible,_⟩ := World.loanParents valid 0 { loan with parent := some 0 } 0 rfl rfl
+  exact Nat.lt_irrefl 0 impossible
 
 example (program : Kernel.Program) (host : Foreign.Model) (next : Task) :
     Run program host
@@ -268,6 +291,36 @@ law deliberately cannot be applied there. -/
 example : (outer.replace [0] none).bind (fun value => value.atPath [0,0]) = none ∧
     (⟨0,0,[0]⟩ : Address).ProperPrefix source := by
   exact ⟨rfl,⟨rfl,rfl,[0],rfl⟩,by decide⟩
+
+private def widened : Loan := ⟨1,some 0,⟨0,0,[]⟩,.unique,0,true⟩
+private def forged : World := { world with loans := [(0,loan),(1,widened)], nextLoan := 2 }
+
+/-- The permission rule alone really does trust the parent graph: this forged
+child authorizes consumption of its parent's proper storage ancestor. The
+strengthened authoritative world invariant rejects the graph itself. -/
+example : Permitted forged (.loan 1) .owned ⟨0,0,[]⟩ ∧ ¬ forged.WellFormed := by
+  constructor
+  · refine ⟨⟨root,rfl⟩,widened,rfl,rfl,rfl,rfl,⟨[],rfl⟩,(fun _ => rfl),?_⟩
+    intro other resident found _ different _ _
+    have member := Table.mem_of_get found
+    simp [forged] at member
+    rcases member with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩
+    · exact .parent (loan := widened) rfl rfl .refl
+    · exact False.elim (different rfl)
+  · intro valid
+    obtain ⟨ancestor,found,_,included,_⟩ := World.loanParents valid 1 widened 0 rfl rfl
+    have same : ancestor = loan := Option.some.inj (found.symm.trans (show forged.loans.get 0 = some loan from rfl))
+    subst ancestor
+    have impossible := included.length_le
+    contradiction
+
+private def missingAncestor : World := { world with roots := world.roots.set 0 { root with value := none } }
+
+example : ¬ missingAncestor.WellFormed := by
+  intro valid
+  have located := World.liveLoanLocations valid 0 loan rfl rfl
+  have vacant : missingAncestor.Vacant ⟨0,0,[]⟩ := ⟨{ root with value := none },rfl,Or.inl ⟨rfl,rfl⟩⟩
+  exact vacant.no_located_descendant located ⟨⟨rfl,rfl,[0,0],rfl⟩,by decide⟩
 
 end Nested
 

@@ -14,6 +14,15 @@ structure Address where
 def Address.child (address : Address) (field : Nat) : Address :=
   { address with fields := address.fields ++ [field] }
 
+/-- Geometric relations on the existing storage path, with generation and
+root identity retained. These are not new runtime identities. -/
+def Address.Prefix (ancestor descendant : Address) : Prop :=
+  ancestor.root = descendant.root ∧ ancestor.generation = descendant.generation ∧
+    ∃ suffix, descendant.fields = ancestor.fields ++ suffix
+
+def Address.ProperPrefix (ancestor descendant : Address) : Prop :=
+  ancestor.Prefix descendant ∧ ancestor.fields.length < descendant.fields.length
+
 def Address.Overlaps (a b : Address) : Prop :=
   a.root = b.root ∧ a.generation = b.generation ∧
     ((∃ suffix, a.fields = b.fields ++ suffix) ∨ ∃ suffix, b.fields = a.fields ++ suffix)
@@ -212,6 +221,11 @@ def World.Vacant (world : World) (address : Address) : Prop :=
      ∃ parent index value, address.fields = parent ++ [index] ∧ root.value = some value ∧
        ∃ container, value.atPath parent = some container ∧ container.fields[index]? = some none)
 
+/-- A live loan may point at a hole, but not beneath a missing ancestor.
+Both alternatives reuse the actual read/write storage model. -/
+def World.Located (world : World) (address : Address) : Prop :=
+  (∃ value, world.Stores address value) ∨ world.Vacant address
+
 def World.Resident (world : World) (address : Address) (value : Value) : Prop :=
   ∃ root whole, world.roots.get address.root = some root ∧ root.live = true ∧
     address.generation = root.generation ∧ root.value = some whole ∧ ResidentAt whole address.fields value
@@ -297,6 +311,17 @@ theorem reference_view_shared_carrier {world handle backing id mode permission a
   · cases shared_authority_cannot_strengthen writable
   · exact shared
 
+/-- Reborrows retain a live containing parent and cannot strengthen its mode.
+Fresh loan identities strictly order parent edges, excluding forged cycles. -/
+def World.LoanParents (world : World) : Prop :=
+  ∀ id loan parent, world.loans.get id = some loan → loan.parent = some parent →
+    ∃ ancestor, world.loans.get parent = some ancestor ∧ parent < id ∧
+      ancestor.referent.Prefix loan.referent ∧ (loan.mode = .unique → ancestor.mode = .unique) ∧
+      (loan.live = true → ancestor.live = true)
+
+def World.LiveLoanLocations (world : World) : Prop :=
+  ∀ id loan, world.loans.get id = some loan → loan.live = true → world.Located loan.referent
+
 def World.WellFormed (world : World) : Prop :=
   world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧
   world.liveRegions.Nodup ∧
@@ -326,7 +351,22 @@ def World.WellFormed (world : World) : Prop :=
     ∃ loan, world.loans.get id = some loan ∧ loan.live = true) ∧
   (∀ a b left right, world.loans.get a = some left → world.loans.get b = some right →
     left.live = true → right.live = true → left.referent.Overlaps right.referent →
-    left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a)
+    left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a) ∧
+  world.LoanParents ∧ world.LiveLoanLocations
+
+theorem World.loanParents {world : World} (valid : world.WellFormed) : world.LoanParents :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
+
+theorem World.liveLoanLocations {world : World} (valid : world.WellFormed) : world.LiveLoanLocations :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
+
+theorem World.loanBounds {world : World} (valid : world.WellFormed)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id < world.nextLoan :=
+  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.1
+
+theorem World.loanIdentity {world : World} (valid : world.WellFormed)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id = loan.identity :=
+  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).1
 
 theorem World.freshProof {world : World} (valid : world.WellFormed) :
     world.availability.get world.nextProof = none ∧

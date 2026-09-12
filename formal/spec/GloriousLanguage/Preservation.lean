@@ -6,8 +6,8 @@ it proves. The whole-machine preservation/progress proof is still in progress. -
 namespace Glorious.Language
 
 /-- Proof projection, not additional runtime state: nested field writes retain
-the resident's identity, type, constructor and shell-liveness. -/
-def Value.shell (value : Value) : Value := value.withFields []
+identity, type, constructor, shell-liveness and arity, but not field contents. -/
+def Value.shell (value : Value) : Value := value.withFields (List.replicate value.fields.length none)
 
 theorem Value.replace_cons_shape {before after : Value} {index : Nat} {path : List Nat}
     {replacement : Option Value} (written : before.replace (index :: path) replacement = some after) :
@@ -43,7 +43,8 @@ theorem Value.replace_shell {before after : Value} {path : List Nat} {replacemen
   cases path with
   | nil => exact False.elim (nonempty rfl)
   | cons index path =>
-      rcases Value.replace_cons_shape written with ⟨_,_,⟨_,rfl⟩ | ⟨_,_,_,_,rfl⟩⟩ <;> rfl
+      rcases Value.replace_cons_shape written with ⟨_,_,⟨_,rfl⟩ | ⟨_,_,_,_,rfl⟩⟩ <;>
+        simp [Value.shell,Value.withFields,Value.owner,Value.type,Value.head,Value.shellLive,Value.fields]
 
 /-- A write cannot change an ancestor's constructor or any sibling subtree.
 The excluded case is exactly an observation inside the replaced subtree. -/
@@ -76,6 +77,67 @@ theorem Value.replace_atPath_shell {before after : Value} {path observed : List 
               exact ih replaced restOutside
             · simp [Value.atPath,Value.withFields,Value.fields,List.getElem?_set_ne same]
 
+theorem Value.atPath_append (value : Value) (path suffix : List Nat) :
+    value.atPath (path ++ suffix) = value.atPath path >>= fun resident => resident.atPath suffix := by
+  induction path generalizing value with
+  | nil => rfl
+  | cons index path ih =>
+      simp only [List.cons_append,Value.atPath]
+      cases found : value.fields[index]?.join with
+      | none => rfl
+      | some child => exact ih child
+
+theorem World.read_append (world : World) (address : Address) (suffix : List Nat) :
+    world.read { address with fields := address.fields ++ suffix } =
+      world.read address >>= fun value => value.atPath suffix := by
+  simp [World.read,World.root,Value.atPath_append,Option.bind_assoc]
+
+theorem World.Stores.prefix {world : World} {ancestor descendant : Address} {value : Value}
+    (stored : world.Stores descendant value) (included : ancestor.Prefix descendant) :
+    ∃ resident, world.Stores ancestor resident := by
+  rcases included with ⟨root,generation,suffix,fields⟩
+  have addressEq : descendant = { ancestor with fields := ancestor.fields ++ suffix } := by
+    cases ancestor
+    cases descendant
+    simp_all
+  change world.read descendant = some value at stored
+  rw [addressEq,World.read_append] at stored
+  obtain ⟨resident,found,_⟩ := Option.bind_eq_some_iff.mp stored
+  exact ⟨resident,found⟩
+
+theorem World.Vacant.not_stored {world : World} {address : Address}
+    (vacant : world.Vacant address) : ¬ ∃ value, world.Stores address value := by
+  rcases vacant with ⟨root,selected,⟨fields,empty⟩ | ⟨parent,index,tree,fields,resident,container,found,empty⟩⟩
+  · rintro ⟨value,stored⟩
+    simp [World.Stores,World.read,selected,empty] at stored
+  · rintro ⟨value,stored⟩
+    simp [World.Stores,World.read,selected,resident,fields,Value.atPath_append,found,Value.atPath,empty] at stored
+
+theorem World.Located.ancestor_stored {world : World} {ancestor descendant : Address}
+    (located : world.Located descendant) (included : ancestor.ProperPrefix descendant) :
+    ∃ value, world.Stores ancestor value := by
+  rcases located with ⟨value,stored⟩ | ⟨root,selected,⟨fields,_⟩ | ⟨parent,index,tree,fields,resident,container,found,_⟩⟩
+  · exact stored.prefix included.1
+  · have length := included.2
+    simp [fields] at length
+  · have parentStored : world.Stores { descendant with fields := parent } container := by
+      change (world.root descendant >>= fun root => root.value >>= fun value => value.atPath parent) = some container
+      simp [selected,resident,found]
+    apply parentStored.prefix
+    refine ⟨included.1.1,included.1.2.1,?_⟩
+    have ancestorPrefix : ancestor.fields <+: descendant.fields :=
+      List.prefix_iff_exists_eq_append.mpr included.1.2.2
+    have parentPrefix : parent <+: descendant.fields := by rw [fields]; exact List.prefix_append _ _
+    have length : ancestor.fields.length ≤ parent.length := by
+      have strict := included.2
+      simp only [fields,List.length_append,List.length_singleton] at strict
+      omega
+    exact List.prefix_iff_exists_eq_append.mp (List.prefix_of_prefix_length_le ancestorPrefix parentPrefix length)
+
+theorem World.Vacant.no_located_descendant {world : World} {ancestor descendant : Address}
+    (vacant : world.Vacant ancestor) (located : world.Located descendant) : ¬ ancestor.ProperPrefix descendant :=
+  fun included => vacant.not_stored (located.ancestor_stored included)
+
 theorem Table.mem_of_get {α : Type} {table : Table α} {id : Identity} {value : α}
     (found : table.get id = some value) : (id,value) ∈ table := by
   induction table with
@@ -105,6 +167,51 @@ theorem World.root_found {world : World} {address : Address} {root : Root}
         subst resident
         exact ⟨rfl,by simpa using valid⟩
       next => contradiction
+
+theorem World.Located.root_iff {world : World} {address : Address} (whole : address.fields = []) :
+    world.Located address ↔ ∃ root, world.root address = some root := by
+  constructor
+  · rintro (⟨value,stored⟩ | ⟨root,selected,_⟩)
+    · exact ⟨_,(Option.bind_eq_some_iff.mp stored).choose_spec.1⟩
+    · exact ⟨root,selected⟩
+  · rintro ⟨root,selected⟩
+    cases resident : root.value with
+    | none => exact Or.inr ⟨root,selected,Or.inl ⟨whole,resident⟩⟩
+    | some value => exact Or.inl ⟨value,by simp [World.Stores,World.read,selected,resident,whole,Value.atPath]⟩
+
+theorem World.Located.child_iff {world : World} {address : Address} {index : Nat} :
+    world.Located (address.child index) ↔ ∃ value, world.Stores address value ∧ index < value.fields.length := by
+  constructor
+  · rintro (⟨value,stored⟩ | ⟨root,selected,⟨whole,_⟩ | ⟨parent,other,tree,fields,resident,container,found,empty⟩⟩)
+    · change world.read { address with fields := address.fields ++ [index] } = some value at stored
+      rw [World.read_append] at stored
+      obtain ⟨container,parentStored,childStored⟩ := Option.bind_eq_some_iff.mp stored
+      have field : container.fields[index]? = some (some value) :=
+        Option.join_eq_some_iff.mp (by simpa [Value.atPath] using childStored)
+      exact ⟨container,parentStored,(List.getElem?_eq_some_iff.mp field).1⟩
+    · simp [Address.child] at whole
+    · change address.fields ++ [index] = parent ++ [other] at fields
+      obtain ⟨parentEq,indexEq⟩ := List.append_inj' fields rfl
+      subst parent
+      have same : index = other := List.singleton_inj.mp indexEq
+      subst other
+      refine ⟨container,?_,(List.getElem?_eq_some_iff.mp empty).1⟩
+      have selectedParent : world.root address = some root := selected
+      simp [World.Stores,World.read,selectedParent,resident,found]
+  · rintro ⟨container,stored,bound⟩
+    obtain ⟨field,found⟩ : ∃ field, container.fields[index]? = some field :=
+      ⟨container.fields[index],List.getElem?_eq_getElem bound⟩
+    cases field with
+    | some value =>
+        apply Or.inl
+        refine ⟨value,?_⟩
+        change world.read { address with fields := address.fields ++ [index] } = some value
+        rw [World.read_append,stored]
+        simp [Value.atPath,found]
+    | none =>
+        obtain ⟨root,selected,rest⟩ := Option.bind_eq_some_iff.mp stored
+        obtain ⟨tree,resident,path⟩ := Option.bind_eq_some_iff.mp rest
+        exact Or.inr ⟨root,selected,Or.inr ⟨address.fields,index,tree,rfl,resident,container,path,found⟩⟩
 
 /-- Even a nested write changes only the resident tree, never the declared
 storage location, layout, generation, region or liveness of its root. -/
@@ -136,6 +243,22 @@ theorem World.write_value_update {before after : World} {address : Address} {val
 
 def Root.location (root : Root) : Root := { root with value := none }
 
+theorem World.root_transport {before after : World} {address : Address} {root : Root}
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
+    (selected : before.root address = some root) :
+    ∃ resident, after.root address = some resident ∧ resident.location = root.location := by
+  obtain ⟨found,live,generation⟩ := World.root_found selected
+  have location := locations address.root
+  rw [found] at location
+  cases changed : after.roots.get address.root with
+  | none => simp [changed] at location
+  | some resident =>
+      rw [changed] at location
+      have same := Option.some.inj location
+      have residentGeneration : resident.generation = root.generation := by simpa [Root.location] using congrArg Root.generation same
+      have residentLive : resident.live = root.live := by simpa [Root.location] using congrArg Root.live same
+      exact ⟨resident,by simp [World.root,changed,residentLive,live,residentGeneration,generation],same⟩
+
 theorem World.write_locations {before after : World} {address : Address} {value : Option Value}
     (written : before.write address value = some after) (id : Identity) :
     (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
@@ -151,21 +274,160 @@ theorem World.write_loans {before after : World} {address : Address} {value : Op
   rcases World.write_value_update written with ⟨_,_,_,rfl⟩
   rfl
 
-/-- Geometric proof predicates over the existing address path. They carry no
-additional storage identity or independently inferred field information. -/
-def Address.Prefix (ancestor descendant : Address) : Prop :=
-  ancestor.root = descendant.root ∧ ancestor.generation = descendant.generation ∧
-    ∃ suffix, descendant.fields = ancestor.fields ++ suffix
-
-def Address.ProperPrefix (ancestor descendant : Address) : Prop :=
-  ancestor.Prefix descendant ∧ ancestor.fields.length < descendant.fields.length
-
 theorem Address.Prefix.child {ancestor descendant : Address} (included : ancestor.Prefix descendant) (index : Nat) :
     ancestor.ProperPrefix (descendant.child index) := by
   rcases included with ⟨root,generation,suffix,fields⟩
   refine ⟨⟨root,generation,suffix ++ [index],?_⟩,?_⟩
   · simp [Address.child,fields,List.append_assoc]
   · simp [Address.child,fields]
+
+theorem Address.Prefix.refl (address : Address) : address.Prefix address := ⟨rfl,rfl,[],by simp⟩
+
+theorem Address.Prefix.trans {first middle last : Address}
+    (left : first.Prefix middle) (right : middle.Prefix last) : first.Prefix last := by
+  rcases left with ⟨root,generation,suffix,fields⟩
+  rcases right with ⟨nextRoot,nextGeneration,nextSuffix,nextFields⟩
+  exact ⟨root.trans nextRoot,generation.trans nextGeneration,suffix ++ nextSuffix,
+    by simp [nextFields,fields,List.append_assoc]⟩
+
+theorem Address.Prefix.length_le {first last : Address} (included : first.Prefix last) :
+    first.fields.length ≤ last.fields.length := by
+  rcases included with ⟨_,_,suffix,fields⟩
+  simp [fields]
+
+theorem Address.Prefix.overlaps {first last : Address} (included : first.Prefix last) : first.Overlaps last :=
+  ⟨included.1,included.2.1,Or.inr included.2.2⟩
+
+theorem AncestorLoan.containment {world : World} {ancestor descendant : Identity} {first last : Loan}
+    (parents : world.LoanParents) (ancestry : AncestorLoan world ancestor descendant)
+    (foundFirst : world.loans.get ancestor = some first) (foundLast : world.loans.get descendant = some last) :
+    first.referent.Prefix last.referent := by
+  induction ancestry generalizing last with
+  | refl =>
+      have same := Option.some.inj (foundFirst.symm.trans foundLast)
+      subst last
+      exact .refl _
+  | @parent parent child loan found selected _ ih =>
+      have same := Option.some.inj (found.symm.trans foundLast)
+      subst last
+      obtain ⟨middle,located,_,included,_,_⟩ := parents child loan parent found selected
+      exact (ih located).trans included
+
+theorem AncestorLoan.identity_le {world : World} {ancestor descendant : Identity}
+    (parents : world.LoanParents) (ancestry : AncestorLoan world ancestor descendant) : ancestor ≤ descendant := by
+  induction ancestry with
+  | refl => exact Nat.le_refl _
+  | parent found selected _ ih =>
+      obtain ⟨_,_,bound,_⟩ := parents _ _ _ found selected
+      exact Nat.le_trans ih (Nat.le_of_lt bound)
+
+theorem AncestorLoan.antisymm {world : World} {left right : Identity}
+    (parents : world.LoanParents) (forward : AncestorLoan world left right) (backward : AncestorLoan world right left) :
+    left = right := Nat.le_antisymm (forward.identity_le parents) (backward.identity_le parents)
+
+theorem Permitted.parentLoan {world : World} {authority : Authority} {requested : Access} {address : Address} {id : Identity}
+    (permitted : Permitted world authority requested address) (selected : authority.parentLoan = some id) :
+    ∃ loan, world.loans.get id = some loan ∧ loan.live = true ∧ loan.referent.Prefix address ∧
+      (requested ≠ .shared → loan.mode = .unique) := by
+  induction authority with
+  | owner => cases selected
+  | loan actual =>
+      have equal : actual = id := Option.some.inj selected
+      subst actual
+      obtain ⟨_,loan,found,live,root,generation,path,mode,_⟩ := permitted
+      exact ⟨loan,found,live,⟨root,generation,path⟩,mode⟩
+  | shared backing ih => exact ih permitted.2.2 selected
+
+/-- A consumption authorized by the actual loan graph cannot remove a proper
+ancestor of a live loan. This derives the source framing condition rather than
+assuming that the after-world is safe. -/
+theorem Permitted.owned_no_loan_descendant {world : World} {authority : Authority} {address : Address}
+    (parents : world.LoanParents) (permitted : Permitted world authority .owned address)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) (live : loan.live = true) :
+    ¬ address.ProperPrefix loan.referent := by
+  rintro ⟨included,longer⟩
+  cases authority with
+  | owner => exact permitted.2 id loan found live included.overlaps (Or.inl (by decide))
+  | shared backing => cases permitted.2.1
+  | loan activeId =>
+      obtain ⟨_,active,selected,_,root,generation,path,_,conflicts⟩ := permitted
+      have activeContains : active.referent.Prefix address := ⟨root,generation,path⟩
+      by_cases same : id = activeId
+      · subst id
+        have equal := Option.some.inj (selected.symm.trans found)
+        subst loan
+        have bound := activeContains.length_le
+        omega
+      · have ancestor := conflicts id loan found live same included.overlaps (Or.inl (by decide))
+        have bound := ((ancestor.containment parents found selected).trans activeContains).length_le
+        omega
+
+theorem Borrows.loanParents {program : Program} {before after : World} {authority mode region referent destination}
+    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after) :
+    after.LoanParents := by
+  cases borrowed with
+  | borrow _ _ _ _ permitted _ _ parentEq _ =>
+      intro id loan parent found selected
+      by_cases fresh : id = before.nextLoan
+      · subst id
+        simp only [Table.get_set] at found
+        cases found
+        obtain ⟨ancestor,parentFound,parentLive,included,parentMode⟩ :=
+          permitted.parentLoan (parentEq.symm.trans selected)
+        have bound := World.loanBounds valid parentFound
+        refine ⟨ancestor,?_,bound,included,?_,fun _ => parentLive⟩
+        · simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)] using parentFound
+        · intro unique
+          change mode = .unique at unique
+          exact parentMode (by simp [unique])
+      · have oldFound : before.loans.get id = some loan := by
+          simpa only [Table.get_set_other _ _ _ _ fresh] using found
+        obtain ⟨ancestor,parentFound,bound,included,parentMode,parentLive⟩ := World.loanParents valid id loan parent oldFound selected
+        refine ⟨ancestor,?_,bound,included,parentMode,parentLive⟩
+        simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid parentFound))] using parentFound
+
+theorem EndsLoan.loanParents {before after : World} {id : Identity}
+    (valid : before.WellFormed) (ended : EndsLoan before id after) : after.LoanParents := by
+  cases ended with
+  | restored selected _ _ _ children =>
+      intro child loan parent found link
+      by_cases changed : child = id
+      · subst child
+        simp only [Table.get_set] at found
+        cases found
+        obtain ⟨ancestor,parentFound,bound,included,parentMode,_⟩ := World.loanParents valid _ _ _ selected link
+        refine ⟨ancestor,?_,bound,included,parentMode,?_⟩
+        · simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)] using parentFound
+        · intro impossible
+          cases impossible
+      · have oldFound : before.loans.get child = some loan := by
+          simpa only [Table.get_set_other _ _ _ _ changed] using found
+        obtain ⟨ancestor,parentFound,bound,included,parentMode,parentLive⟩ := World.loanParents valid _ _ _ oldFound link
+        by_cases parentChanged : parent = id
+        · subst parent
+          have same := Option.some.inj (selected.symm.trans parentFound)
+          subst ancestor
+          refine ⟨_,Table.get_set _ _ _,bound,included,parentMode,?_⟩
+          have identity := World.loanIdentity valid oldFound
+          have dead := children loan (by simpa [← identity] using oldFound) link
+          intro live
+          simp [live] at dead
+        · exact ⟨ancestor,by simpa only [Table.get_set_other _ _ _ _ parentChanged] using parentFound,
+            bound,included,parentMode,parentLive⟩
+
+theorem EndsLoan.liveLoanLocations {before after : World} {id : Identity}
+    (locations : before.LiveLoanLocations) (ended : EndsLoan before id after) : after.LiveLoanLocations := by
+  cases ended with
+  | restored _ _ _ _ _ =>
+      intro child loan found live
+      by_cases changed : child = id
+      · subst child
+        simp only [Table.get_set] at found
+        cases found
+        cases live
+      · have oldFound : before.loans.get child = some loan := by
+          simpa only [Table.get_set_other _ _ _ _ changed] using found
+        exact locations child loan oldFound live
 
 theorem World.write_read_shell {before after : World} {address observed : Address} {value : Option Value}
     (written : before.write address value = some after) (outside : ¬ address.Prefix observed) :
@@ -212,6 +474,57 @@ theorem World.write_read_shell {before after : World} {address observed : Addres
         subst after
         simp [World.read,World.root,Table.get_set_other _ _ _ _ sameRoot]
 
+theorem World.Located.transport {before after : World} {mutation address : Address}
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
+    (shells : ∀ observed, ¬ mutation.Prefix observed →
+      (after.read observed).map Value.shell = (before.read observed).map Value.shell)
+    (outside : ¬ mutation.ProperPrefix address) (located : before.Located address) : after.Located address := by
+  rcases address with ⟨id,generation,fields⟩
+  rcases List.eq_nil_or_concat fields with whole | ⟨parent,index,whole⟩
+  · subst fields
+    obtain ⟨root,selected⟩ := (World.Located.root_iff rfl).mp located
+    obtain ⟨resident,found,_⟩ := World.root_transport locations selected
+    exact (World.Located.root_iff rfl).mpr ⟨resident,found⟩
+  · simp only [List.concat_eq_append] at whole
+    subst fields
+    change before.Located ((⟨id,generation,parent⟩ : Address).child index) at located
+    obtain ⟨container,stored,bound⟩ := World.Located.child_iff.mp located
+    have parentOutside : ¬ mutation.Prefix ⟨id,generation,parent⟩ := fun included => outside (included.child index)
+    have framed := shells ⟨id,generation,parent⟩ parentOutside
+    rw [stored] at framed
+    cases found : after.read ⟨id,generation,parent⟩ with
+    | none => simp [found] at framed
+    | some resident =>
+        rw [found] at framed
+        have same := Option.some.inj framed
+        have arity : resident.fields.length = container.fields.length := by
+          simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) same
+        exact World.Located.child_iff.mpr ⟨resident,found,by omega⟩
+
+theorem World.write_located {before after : World} {mutation address : Address} {value : Option Value}
+    (written : before.write mutation value = some after) (outside : ¬ mutation.ProperPrefix address)
+    (located : before.Located address) : after.Located address :=
+  located.transport (World.write_locations written) (fun _ => World.write_read_shell written) outside
+
+theorem Borrows.liveLoanLocations {program : Program} {before after : World} {authority mode region referent destination}
+    (locations : before.LiveLoanLocations) (borrowed : Borrows program before authority mode region referent destination after) :
+    after.LiveLoanLocations := by
+  cases borrowed with
+  | borrow stored _ _ _ _ vacant _ _ written =>
+      intro id loan found live
+      by_cases fresh : id = before.nextLoan
+      · subst id
+        simp only [Table.get_set] at found
+        cases found
+        have located : before.Located referent := Or.inl ⟨_,stored⟩
+        have result := World.write_located written (vacant.no_located_descendant located) located
+        exact result
+      · have oldFound : before.loans.get id = some loan := by
+          simpa only [Table.get_set_other _ _ _ _ fresh] using found
+        have located := locations id loan oldFound live
+        have result := World.write_located written (vacant.no_located_descendant located) located
+        exact result
+
 theorem Transfers.locations {program : Program} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) (id : Identity) :
     (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
@@ -224,6 +537,28 @@ theorem Transfers.loans {program : Program} {before after : World} {authority so
   cases transfer with
   | move _ _ _ _ _ _ clear install =>
       exact (World.write_loans install).trans (World.write_loans clear)
+
+theorem Transfers.loanParents {program : Program} {before after : World} {authority source destination}
+    (parents : before.LoanParents) (transfer : Transfers program before authority source destination after) :
+    after.LoanParents := by simpa [World.LoanParents,transfer.loans] using parents
+
+theorem Transfers.liveLoanLocations {program : Program} {before after : World} {authority source destination}
+    (valid : before.WellFormed) (transfer : Transfers program before authority source destination after) :
+    after.LiveLoanLocations := by
+  have loans := transfer.loans
+  cases transfer with
+  | move _ _ permission vacant _ _ clear install =>
+      intro id loan found live
+      have oldFound : before.loans.get id = some loan := by simpa [loans] using found
+      have located := World.liveLoanLocations valid id loan oldFound live
+      have sourceOutside := permission.owned_no_loan_descendant (World.loanParents valid) oldFound live
+      have destinationOutside := vacant.no_located_descendant located
+      exact World.write_located install destinationOutside (World.write_located clear sourceOutside located)
+
+theorem Transfers.destination_vacant {program : Program} {before after : World} {authority source destination}
+    (transfer : Transfers program before authority source destination after) : before.Vacant destination := by
+  cases transfer
+  assumption
 
 theorem Transfers.destination_type {program : Program} {before after : World} {authority source destination value}
     (transfer : Transfers program before authority source destination after) (stored : before.Stores source value) :
@@ -270,19 +605,9 @@ theorem AddressType.root_transport {program : Program} {before after : World} {a
     (whole : address.fields = []) (typed : AddressType program before address type) :
     AddressType program after address type := by
   rcases (AddressType.root_iff whole).mp typed with ⟨root,selected,typeEq⟩
-  obtain ⟨found,live,generation⟩ := World.root_found selected
-  have location := locations address.root
-  rw [found] at location
-  cases changed : after.roots.get address.root with
-  | none => simp [changed] at location
-  | some resident =>
-      rw [changed] at location
-      have same := Option.some.inj location
-      have residentType : resident.type = root.type := by simpa [Root.location] using congrArg Root.type same
-      have residentGeneration : resident.generation = root.generation := by simpa [Root.location] using congrArg Root.generation same
-      have residentLive : resident.live = root.live := by simpa [Root.location] using congrArg Root.live same
-      apply (AddressType.root_iff whole).mpr
-      exact ⟨resident,by simp [World.root,changed,residentLive,live,residentGeneration,generation],residentType.trans typeEq⟩
+  obtain ⟨resident,found,same⟩ := World.root_transport locations selected
+  have residentType : resident.type = root.type := by simpa [Root.location] using congrArg Root.type same
+  exact (AddressType.root_iff whole).mpr ⟨resident,found,residentType.trans typeEq⟩
 
 theorem Transfers.root_types {program : Program} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) {address : Address} {type : Term}
@@ -391,5 +716,56 @@ theorem Transfers.reference_root_typed {program : Kernel.Program} {before after 
     Typing.ValueTyped program after (.resident owner (.reference mode region type) (.reference id) live []) := by
   apply transfer.reference_typed found ?_ ?_ typed <;>
     rintro ⟨_,length⟩ <;> simp [whole] at length
+
+/-- No framing condition and no typed post-state are assumed: both forbidden
+ancestor cases follow from the pre-state's actual live-loan invariant. -/
+theorem Transfers.reference_preserved {program : Kernel.Program} {before after : World}
+    {authority source destination owner mode region type id live}
+    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
+    (typed : Typing.ValueTyped program before
+      (.resident owner (.reference mode region type) (.reference id) live [])) :
+    Typing.ValueTyped program after (.resident owner (.reference mode region type) (.reference id) live []) := by
+  cases typed with
+  | aggregate head _ =>
+      rcases head with ⟨_,_,impossible⟩ | ⟨_,_,_,_,_,_,impossible,_⟩ | ⟨_,_,_,_,_,_,_,impossible,_⟩ <;> cases impossible
+  | reference selected active modeEq regionEq located =>
+      have sourceOutside := transfer.permission.owned_no_loan_descendant (World.loanParents valid) selected active
+      have destinationOutside := transfer.destination_vacant.no_located_descendant
+        (World.liveLoanLocations valid _ _ selected active)
+      exact .reference (by simpa [transfer.loans] using selected) active modeEq regionEq
+        ((transfer.address_types sourceOutside destinationOutside).mp located)
+
+theorem Transfers.availability {program : Program} {before after : World} {authority source destination}
+    (transfer : Transfers program before authority source destination after) : after.availability = before.availability := by
+  cases transfer with
+  | move _ _ _ _ _ _ clear install =>
+      rcases World.write_value_update clear with ⟨_,_,_,middle⟩
+      rcases World.write_value_update install with ⟨_,_,_,finish⟩
+      simp [finish,middle]
+
+theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : World}
+    {authority source destination value}
+    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
+    (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
+  refine Typing.ValueTyped.rec
+    (motive_1 := fun value _ => Typing.ValueTyped program after value)
+    (motive_2 := fun fields types _ => Typing.FieldsTyped program after fields types)
+    ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ typed
+  · exact fun {_ _} => .unit
+  · exact fun {_ _ _} checked => .scalar checked
+  · exact fun {_ _ _ _ _ _} head _ fields => .aggregate head fields
+  · exact fun {_ _ _ _ _ _ _} found active mode region located =>
+      transfer.reference_preserved valid (.reference found active mode region located)
+  · exact fun {_ _ _ _ _} bound => .pointer bound
+  · exact fun {_ _ _ _ _ _} selected _ fields => .callable selected fields
+  · exact fun {_ _ _ _ _ _} selected => .operation selected
+  · exact fun {_ _ _ _ _} => .label
+  · exact fun {_ _ _ _} type => .continuation type
+  · intro owner brand region id live available found brandEq idEq regionEq
+    exact .available (by simpa [transfer.availability] using found) brandEq idEq regionEq
+  · exact fun {_ _ _ _ _ _ _} _ brand region length distinct fields => .bindings fields brand region length distinct
+  · exact .nil
+  · exact fun {_ _ _} _ fields => .hole fields
+  · exact fun {_ _ _ _} _ type _ value fields => .resident value type fields
 
 end Glorious.Language

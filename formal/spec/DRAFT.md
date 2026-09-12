@@ -442,3 +442,42 @@ authoritative invariant is the next dependency of unrestricted reference and
 whole-world preservation. Control-state preservation, derived resource
 admission, progress and source-admitted nonvacuity remain open. No broad compiler
 or library gate was run or changed.
+
+## Live-loan invariants and unrestricted reference transport
+
+`lake build` passes all 38 jobs, including the strengthened positive and negative
+preservation checks and all existing source/control/borrowing checks.
+
+World validity now requires each parent edge to identify an older, containing
+loan, with a live parent whenever the child is live and no strengthening from
+shared to unique. It also requires every live referent to be a real occupied
+or vacant location: a loan can point at a hole, but not beneath a missing
+ancestor. These predicates inspect the existing loan table and read/vacancy
+relations, not a parallel lifetime or storage analysis.
+
+`Preservation` proves parent containment along arbitrary ancestor chains and
+antisymmetry of those chains. Actual consumption permission then prevents a
+transfer's source from being a proper ancestor of any live referent. A vacant
+destination cannot contain such a referent either. Borrow creation, transfer
+and loan ending preserve the new parent/location sub-invariants; no well-formed
+post-state premise is added to those rules or proofs.
+
+The framing projection now preserves field arity as well as identity, type,
+constructor and shell-liveness. This establishes general location preservation
+through writes, including writes to an already vacant referent itself. Retained
+reference typing follows from a well-formed pre-state and the actual transfer,
+with no additional ancestor-exclusion hypothesis. Mutual induction transports
+typing of unchanged value trees too, including nested reference fields, closure
+captures and resident binding metadata. This is not yet a proof that every
+newly modified resident tree or the entire after-world is well formed.
+
+The concrete typed-world move/restore witness uses the stronger theorem. New
+negative witnesses reject a self-parent cycle, a forged reborrow that widens its
+parent's storage extent, and a live loan beneath a missing ancestor. The widened
+reborrow witness also proves the old permission relation really would trust
+that malformed graph; the correction is in the authoritative state invariant,
+not a consumer-specific ban.
+
+Whole-world replacement/ownership preservation, complete control-state validity,
+snapshot replay, compositional resource admission, progress and source-admitted
+nonvacuity remain unfinished. No compiler or library acceptance gate was changed.
