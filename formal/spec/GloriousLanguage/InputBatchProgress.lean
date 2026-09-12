@@ -3633,6 +3633,57 @@ theorem Kernel.ClaimsAllocation.stores {recipient : ClaimCustody} {before after 
     after.Stores observed value :=
   World.Stores.of_roots (Kernel.ClaimsAllocation.roots_eq claimed) stored
 
+/-- An allocation writes one fresh root into the roots table, so every other
+address's row is untouched: the transport that carries the receiver's shell
+across the allocation a lending or binding performs. This is what lets the
+lent binding's own allocation leave the receiver's stored shell alone. -/
+theorem Kernel.Allocates.stores_other {program : RuntimeProgram} {before after : World}
+    {home : Home} {region : Identity} {type : Term} {layout : Layout} {mutable : Bool}
+    {address observed : Address} {shell : Value}
+    (allocated : Allocates program.declarations before home region type layout mutable address after)
+    (stored : before.Stores observed shell) (different : address.root ≠ observed.root) :
+    after.Stores observed shell := by
+  rw [World.Stores] at stored ⊢
+  cases allocated with
+  | fresh =>
+      unfold World.read World.root
+      rw [Table.get_set_other _ _ _ _ (Ne.symm different)]
+      exact stored
+
+/-- A formed loan writes only the vacant destination, so an address apart from
+that destination keeps its row: the congruence the borrowed-capture binding needs
+after its own allocation. -/
+theorem Kernel.FormsLoan.stores_other {program : RuntimeProgram} {purpose : LoanPurpose}
+    {before after : World} {authority : Authority} {mode : Mutability} {region : Identity}
+    {referent destination : Address}
+    (formed : FormsLoan program purpose before authority mode region referent destination after)
+    {observed : Address} {shell : Value} (stored : before.Stores observed shell)
+    (apart : ¬ destination.Overlaps observed) :
+    after.Stores observed shell := by
+  cases formed with
+  | borrow _ _ _ _ _ _ _ _ _ _ written => exact stored.write_other written apart
+
+/-- A borrowed capture keeps the receiver's row: the lend's own allocation is
+transported by the fresh-root fact and its loan formation writes only the fresh
+handle, which is apart from the receiver because the handle sits at the
+allocation world's next root. -/
+theorem Kernel.LendsResident.stores {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {address : Address} {authority otherAuthority : Authority}
+    {access : Access} {lease : Option InvocationLease}
+    (lent : LendsResident program activation scope region before address authority access lease
+      otherAuthority after)
+    {observed : Address} {shell : Value} (stored : before.Stores observed shell)
+    (different : before.nextRoot ≠ observed.root) :
+    after.Stores observed shell := by
+  cases lent with
+  | owned => exact stored
+  | lent _ _ _ allocatedRule formed =>
+      have freshRoot := (Allocates.fresh_root allocatedRule).1
+      have allocStored := Kernel.Allocates.stores_other allocatedRule stored
+        (by rw [freshRoot]; exact different)
+      exact Kernel.FormsLoan.stores_other formed allocStored
+        (World.not_overlaps_of_root_ne (by rw [freshRoot]; exact different))
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
