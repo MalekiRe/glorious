@@ -289,6 +289,27 @@ theorem CleanupRun.destroy_fields_holes {program : Kernel.Program} {host : Forei
       refine .silent (by simp [Task.Cleanup]) (Or.inl (LocalStep.destroyVacant rfl (vacant field (by simp)))) ?_
       exact ih rfl (fun other member => vacant other (by simp [member]))
 
+/-- The nested field loop: each scheduled child is destroyed by its own run and
+the loop then continues with the remaining indices, so the shell reaches
+`finishShell` with every field disposed by real steps. -/
+theorem CleanupRun.destroy_fields_loop {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {address : Address} {authority : Authority}
+    {indices : List Nat} {next : Task}
+    (task : before.task = .destroyFields context address authority indices next)
+    (step : ∀ (field : Nat) (rest : List Nat) (state : State),
+      state.task = .destroy context (address.child field) authority (.destroyFields context address authority rest next) →
+      ∃ middle, CleanupRun program host state [] middle ∧
+        middle.task = .destroyFields context address authority rest next ∧
+        (∀ other ∈ rest, middle.world.Vacant (address.child other))) :
+    ∃ after, CleanupRun program host before [] after ∧ after.task = .finishShell address authority next := by
+  induction indices generalizing before with
+  | nil => exact ⟨_, CleanupRun.fields_done task, rfl⟩
+  | cons field rest ih =>
+      obtain ⟨middle, run, running, vacant⟩ :=
+        step field rest ({ before with task := .destroy context (address.child field) authority (.destroyFields context address authority rest next) }) rfl
+      obtain ⟨after, restRun, finished⟩ := ih running
+      exact ⟨after, (CleanupRun.field_next task).append run |>.append restRun, finished⟩
+
 /-- The whole non-vacant structural destruction of one captured root, with the
 real machine steps: the captured shell is structurally destroyed field by
 field, the resident owner's custody is relinquished through the discharge
