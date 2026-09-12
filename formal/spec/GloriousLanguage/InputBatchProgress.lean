@@ -4,6 +4,7 @@ import GloriousLanguage.ReferenceTransferPreservation
 import GloriousLanguage.LoanCompatibility
 import GloriousLanguage.LoanResourceRows
 import GloriousLanguage.BindingPersistence
+import GloriousLanguage.ResidentMutationPreservation
 
 /-! The one authoritative pre-state product for an ordered batch of ordinary
 invocation inputs, and the ordered binder that consumes it.
@@ -3342,5 +3343,22 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
   cases outcome
   · exact finishes bound
   · rfl
+
+
+/-- The receiver-shell consumption producers: the exact source-level evidence a
+caller has after the ordered binder produced its world. -/
+theorem Execution.FinishesEntry.of_resident {before after : World}
+    {receiver : ResolvedPlace} {access : Access}
+    {arguments : List Kernel.InvocationInput}
+    (finished : Execution.FinishesReceiver before receiver access after) :
+    Execution.FinishesEntry before (.resident receiver access arguments) after :=
+  .resident finished
+
+theorem Execution.FinishesEntry.of_contextual {before after : World}
+    {receiver witness : ResolvedPlace} {access witnessAccess : Access}
+    {inputs : List Kernel.InvocationInput}
+    (finished : Execution.FinishesReceiver before receiver access after) :
+    Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after :=
+  .contextual finished
 
 end Kernel
