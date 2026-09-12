@@ -811,3 +811,76 @@ end Glorious.Language
 namespace Glorious.Language
 
 open Kernel
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The footprint a node's destruction leaves: outside its own subtree no stored
+value and no root row changes, the loan table keeps every row it had, and every
+live row of the result is a live row of the original with the same kind, mode and
+referent. -/
+structure World.DestroyFrame (before after : World) (outside : Address) : Prop where
+  reads : ∀ probe, ¬ outside.Prefix probe → after.read probe = before.read probe
+  roots : ∀ probe, ¬ outside.Prefix probe → after.root probe = before.root probe
+  rows : ∀ key row, after.loans.get key = some row → ∃ original, before.loans.get key = some original ∧
+    original.parent = row.parent ∧ original.guards = row.guards
+  present : ∀ key original, before.loans.get key = some original → ∃ row, after.loans.get key = some row
+  liveness : ∀ key row, after.loans.get key = some row → row.live = true →
+    ∃ original, before.loans.get key = some original ∧ original.live = true ∧
+      original.kind = row.kind ∧ original.mode = row.mode ∧ original.referent = row.referent
+
+/-- A subtree whose slots all lie outside a destruction frame's sphere keeps its
+whole inventory in the produced world. -/
+theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after : World}
+    {address outside : Address} (tree : World.Destroys program before address)
+    (frame : World.DestroyFrame before after outside)
+    (excluded : ∀ probe, address.Prefix probe → ¬ outside.Prefix probe) :
+    World.Destroys program after address := by
+  revert frame excluded
+  induction tree with
+  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+    intro frame excluded
+    have atRoot : ¬ outside.Prefix addr := excluded addr ⟨rfl,rfl,⟨[],by simp⟩⟩
+    have childExcluded (index : Nat) :
+        ∀ probe, (addr.child index).Prefix probe → ¬ outside.Prefix probe :=
+      fun probe included => excluded probe
+        (Address.Prefix.not_outer (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included)
+    refine .resident ?_ disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_
+    · show after.read addr = some value
+      rw [frame.reads addr atRoot]
+      exact stored
+    · refine ⟨?_,fun key row selected live overlap conflict => ?_⟩
+      · obtain ⟨root,rootFound⟩ := permission.1
+        exact ⟨root,by rw [frame.roots addr atRoot]; exact rootFound⟩
+      · obtain ⟨original,originalFound,originalLive,_,sameMode,sameReferent⟩ :=
+          frame.liveness key row selected live
+        refine permission.2 key original originalFound originalLive (sameReferent ▸ overlap) ?_
+        rcases conflict with nonshared | unique
+        · exact Or.inl nonshared
+        · exact Or.inr (by rw [sameMode]; exact unique)
+    · intro key row selected live
+      obtain ⟨original,originalFound,originalLive,sameKind,_,_⟩ := frame.liveness key row selected live
+      rw [← sameKind]
+      exact kinds key original originalFound originalLive
+    · intro key row selected
+      obtain ⟨original,originalFound,sameParent,sameGuards⟩ := frame.rows key row selected
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have linkOriginal : original.parent = some parent := by rw [sameParent]; exact link
+        have held := (ancestry key original originalFound).1 parent linkOriginal
+        intro missing
+        obtain ⟨beforeRow,beforeFound⟩ := Option.ne_none_iff_exists'.mp held
+        obtain ⟨afterRow,afterFound⟩ := frame.present parent beforeRow beforeFound
+        rw [afterFound] at missing
+        cases missing
+      · have memberOriginal : guard ∈ original.guards := by rw [sameGuards]; exact member
+        have held := (ancestry key original originalFound).2 guard memberOriginal
+        intro missing
+        obtain ⟨beforeRow,beforeFound⟩ := Option.ne_none_iff_exists'.mp held
+        obtain ⟨afterRow,afterFound⟩ := frame.present guard beforeRow beforeFound
+        rw [afterFound] at missing
+        cases missing
+    · intro index child selected
+      exact ih index child selected frame (childExcluded index)
+
+end Glorious.Language

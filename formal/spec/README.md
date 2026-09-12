@@ -304,13 +304,22 @@ or a dependency of this project.
   the next sibling is read in; `CleanupRun.destroy_tree` then follows by induction
   on the tree with that footprint conjunct carried through the field loop. The
   address half of that push-down is checked: `Address.child_not_prefix` (different
-  children are prefix-incomparable), `Address.Prefix.not_outer` (the order is
-  transitive) and `Address.child_prefix_grandchild` (a descendant of one child is
-  only reached from that child). What remains is the frame itself
-  (`World.DestroyFrame` with its outside-the-subtree read/root/loan clauses), its
-  transport `World.Destroys.of_destroy_frame` (which also needs a
-  prefixes-are-comparable lemma to derive `excluded` from `i ≠ j`), and the frame's
-  proof by induction over a node's own `CleanupRun`.
+  children are prefix-incomparable), `Address.Prefix.not_outer` (transitivity),
+  `Address.child_prefix_grandchild` (a descendant of one child is only reached from
+  that child) and `Address.Prefix.comparable`; the inventory's readiness clauses
+  now read the raw loan table so the transport is conversion-free; and the frame
+  itself is checked: `World.DestroyFrame` (outside the subtree neither the read nor
+  the resolved root changes, the loan table keeps every row, and every live row of
+  the result is a live row of the original with the same kind, mode and referent)
+  with `World.Destroys.of_destroy_frame` transporting a whole subtree's inventory
+  across it, which subsumes `write_disjoint` and `end_loan` as single-step
+  instances. What remains: the frame's composition along a run (`DestroyFrame`
+  transitivity) and its per-rule instances for the destructor chain
+  (destroyStructural/fieldNext/fieldsDone change nothing; the shell write and the
+  relinquishment satisfy the outside clauses and keep every row, with the restamp
+  parent/guard lemmas; each `releaseLoan` ending is a kill), then the reversed-index
+  loop and `CleanupRun.destroy_tree`, then the composition with
+  `cleanup_root_shell_retired`.
 - `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
   `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
   and `source_execution` now take a `Typing.ScopeReading` indexed by the actual
