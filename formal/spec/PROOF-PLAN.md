@@ -1451,6 +1451,30 @@ logical-context witness remains a producer admission bug to repair; positive
 physical success and explicit exhaustion still have to reach all real runtime
 allocation sites. Full target/ABI coverage and resource progress remain open.
 
+The ordinary allocation admission bug is now repaired at `Allocates.fresh`:
+its real witness is an assumption-free, binder-free runtime layout retaining
+the original module and unsafe metadata. It no longer permits a fabricated
+logical context to select a physical representation. The actual raw-buffer
+preservation construction uses that same stronger witness; the preserved
+borrow example's witness was mechanically migrated but the example was not run.
+
+`LayoutContext` proves general layout transport by actual logical cut and then
+derives runtime metadata transport with the same kinding domain. `AllocationLayout`
+derives layout/query and actual encoding agreement from allocation itself.
+Positive base, alignment and bounded physical extent give both usize bounds,
+consumed by actual `Execution.Step.layout_allocated_safe_unique_progress`.
+This theorem needs no separate representability premise, but still requires
+the real vacant destination and an actual allocated instance of the queried
+type. It does not claim allocation always succeeds.
+
+The released fresh source-only 153-job gate passes for allocation/layout
+integration, actual source operation execution and runtime code equivariance;
+the integrated source was compared exactly to that checked release. No examples
+or aggregate soundness gate were run. The next allocator boundary must share
+positive request and physical-extent evidence between success and explicit
+exhaustion, and carry successful ordered handoff prefixes into actual terminal
+resource failures. Missing layout or ownership proof must never imply exhaustion.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

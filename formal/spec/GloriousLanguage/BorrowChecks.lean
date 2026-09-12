@@ -105,7 +105,7 @@ private theorem allocateHandle {program : Language.Program}
     (capacity : 8 ≤ program.input.target.maximumObjectBytes) :
     Allocates program world (.localSlot 2 1) 1 localSlot.type referenceLayout false handle allocated := by
   refine .fresh (base := 8) (by decide) ?_ ⟨⟨3,rfl⟩,by decide,by simp [referenceLayout]⟩ capacity
-    ⟨⟨[],[],0,default,false,{}⟩,?_⟩ (by decide) (by decide) ?_ ?_
+    ⟨default,false,?_⟩ (by decide) (by decide) ?_ ?_
   · intro id occurs
     change Occurs (.runtimeRegion id) (.reference .shared (.runtimeRegion 0) .unit) at occurs
     cases occurs with

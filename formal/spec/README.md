@@ -141,7 +141,11 @@ or a dependency of this project.
 - `RepresentationCoherence`, `LayoutExecution`: actual encoded values retain
   that layout and exact byte length; the real layout query is deterministic,
   with storage-safe progress conditional on a representable layout and a
-  real vacant result destination. Allocation admission/exhaustion remains open.
+  real vacant result destination.
+- `LayoutContext`, `AllocationLayout`: actual allocation admits only a closed
+  runtime layout; logical cut transports caller metadata. Physical admission
+  supplies usize bounds, and allocation, encoding and layout queries agree.
+  Explicit exhaustion at all runtime allocation sites remains open.
 - `Specification`, `Checks`: aggregate language/implementation obligations
   and foundational positive/negative regression propositions.
 

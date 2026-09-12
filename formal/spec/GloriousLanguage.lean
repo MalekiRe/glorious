@@ -45,6 +45,8 @@ import GloriousLanguage.LayoutValidity
 import GloriousLanguage.LayoutCoherence
 import GloriousLanguage.RepresentationCoherence
 import GloriousLanguage.LayoutExecution
+import GloriousLanguage.LayoutContext
+import GloriousLanguage.AllocationLayout
 import GloriousLanguage.PublicValues
 import GloriousLanguage.RuntimeWorldEquivariance
 import GloriousLanguage.RuntimeCoverageEquivariance
