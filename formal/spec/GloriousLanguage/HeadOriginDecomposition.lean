@@ -7,7 +7,7 @@ outside it. The theorem does not normalize terms or assume injectivity of
 definitional equality; its source edge remains actual positive reduction. -/
 namespace Glorious.Language
 
-private theorem ListRel.set_at {α : Type} {relation : α → α → Prop}
+theorem ListRel.set_at {α : Type} {relation : α → α → Prop}
     (reflexive : ∀ value, relation value value) {values : List α} {index : Nat} {before after : α}
     (found : values[index]? = some before) (related : relation before after) :
     ListRel relation values (values.set index after) := by
@@ -53,6 +53,13 @@ theorem StructuralHeadOrigin.infers {program : Program} {sourceContext context :
   induction origin with
   | parameter kind => exact .parameter kind
   | child structural same sourceAt queryAt _ ih => exact .child structural same sourceAt queryAt ih
+
+theorem StructuralHeadOrigin.source_path {binder : Binder} {template query value : Term}
+    (origin : StructuralHeadOrigin binder template query value) :
+    StructuralHeadOrigin binder template template (.parameter binder.id binder.kind) := by
+  induction origin with
+  | parameter => exact .parameter rfl
+  | child structural _ sourceAt _ _ ih => exact .child structural rfl sourceAt sourceAt ih
 
 theorem StructuralHeadOrigin.source_occurs {binder : Binder} {template query value : Term}
     (origin : StructuralHeadOrigin binder template query value) :

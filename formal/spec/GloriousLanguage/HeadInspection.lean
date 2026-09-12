@@ -1,80 +1,12 @@
-import GloriousLanguage.HeadOriginDecomposition
+import GloriousLanguage.FullHeadInspection
 
-/-! A well-founded source-inspection certificate derived from the existing
-finite origin judgments. Every annotated edge has genuine positive evidence;
-this does not produce a second source matcher. Query conversions and logical
-requirements do not become source-inspection dependencies. Every recursive
-inspection is justified by an actual selected origin. -/
+/-! One authoritative full-source inspection minimum. The finite producer
+retains actual head-query conversions; legacy weak evidence is obtained only
+by erasing that full certificate at the same minimum. Logical requirements
+are not declaration-expansion dependencies. -/
 namespace Glorious.Language
 
-mutual
-  /-- Each generic has one actual source exposure. The projection steps in
-  these exposures recursively carry inspected implementation evidence. -/
-  inductive ImplementationInspectionAt (program : Program) : Nat → ImplDefinition → Prop where
-    | inspected {level implementation} :
-        (∀ binder ∈ implementation.generics, HeadInspectionOriginAt program level implementation binder) →
-        ImplementationInspectionAt program level implementation
-
-  /-- One source exposure retains its exact head position and positive proof.
-  This constructor keeps recursive occurrences explicit at their indices. -/
-  inductive HeadInspectionOriginAt (program : Program) : Nat → ImplDefinition → Binder → Prop where
-    | exposed {level implementation binder} {index : Nat} {template expanded : Term}
-        {reduced : DefinitionalReduction program implementation.context template expanded} :
-        implementation.arguments[index]? = some template → HeadInspectionReductionAt program level reduced →
-        StructuralHeadOrigin binder expanded expanded (.parameter binder.id binder.kind) →
-        HeadInspectionOriginAt program level implementation binder
-
-  /-- This certificate retains a genuine root-step proof. Only the chosen
-  implementation's source inspections are recursive dependencies. -/
-  inductive HeadInspectionStepAt (program : Program) :
-      Nat → {context : Context} → {left right : Term} → DefinitionalStep program context left right → Prop where
-    | alias {level context id declaration arguments substitution value}
-        {found : program.alias id = some declaration}
-        {instantiated : Instantiates declaration.generics arguments substitution}
-        {kinded : ∀ argument ∈ arguments, Kinding program context argument argument.kind}
-        {substituted : Substitutes substitution declaration.value value} :
-        HeadInspectionStepAt program level (.alias found instantiated kinded substituted)
-    | projection {level bound context trait member owners items associated ownerSub itemSub implementation implSub body value}
-        {domain : ProjectionDomain program context trait member owners items associated ownerSub itemSub}
-        {selected : SelectsImpl program context trait owners false implementation implSub}
-        {present : (member,body) ∈ implementation.associated}
-        {substituted : Substitutes (implSub ++ itemSub) body value} :
-        ImplementationInspectionAt program level implementation → level < bound →
-        HeadInspectionStepAt program bound (.projection domain selected present substituted)
-    | defaultProjection {level bound context trait member owners items associated ownerSub itemSub implementation implSub body value}
-        {domain : ProjectionDomain program context trait member owners items associated ownerSub itemSub}
-        {selected : SelectsImpl program context trait owners false implementation implSub}
-        {absent : ∀ body, (member,body) ∉ implementation.associated}
-        {default : associated.defaultValue = some body}
-        {substituted : Substitutes (ownerSub ++ itemSub) body value} :
-        ImplementationInspectionAt program level implementation → level < bound →
-        HeadInspectionStepAt program bound (.defaultProjection domain selected absent default substituted)
-
-  /-- A source-inspection certificate includes an authoritative positive
-  reduction and actual ordered child proofs. Proof irrelevance does not make
-  this a syntactic trace or assign a size to an arbitrary proof term. -/
-  inductive HeadInspectionReductionAt (program : Program) :
-      Nat → {context : Context} → {left right : Term} → DefinitionalReduction program context left right → Prop where
-    | refl {level context term} : HeadInspectionReductionAt program level (DefinitionalReduction.refl (context := context) (term := term))
-    | step {level context left right} {stepped : DefinitionalStep program context left right} :
-        HeadInspectionStepAt program level stepped → HeadInspectionReductionAt program level (.step stepped)
-    | trans {level context left middle right}
-        {first : DefinitionalReduction program context left middle}
-        {second : DefinitionalReduction program context middle right} :
-        HeadInspectionReductionAt program level first → HeadInspectionReductionAt program level second →
-        HeadInspectionReductionAt program level (.trans first second)
-    | congrChildren {level context left right} {same : SameHead left right}
-        {children : ∀ (index : Nat) first second, left.children[index]? = some first → right.children[index]? = some second →
-          DefinitionalReduction program context first second} :
-        (∀ (index : Nat) first second leftAt rightAt,
-          HeadInspectionReductionAt program level (children index first second leftAt rightAt)) →
-        HeadInspectionReductionAt program level (.congrChildren same children)
-    | row {level context left right} {equivalent : RowEquivalent left right} :
-        HeadInspectionReductionAt program level (DefinitionalReduction.row (context := context) equivalent)
-end
-
-def ImplementationInspected (program : Program) (implementation : ImplDefinition) : Prop :=
-  ∃ level, ImplementationInspectionAt program level implementation
+abbrev ImplementationInspected := FullImplementationInspected
 
 def HeadInspectionOrigin (program : Program) (implementation : ImplDefinition) (binder : Binder) : Prop :=
   ∃ level, HeadInspectionOriginAt program level implementation binder
@@ -113,15 +45,21 @@ noncomputable def ImplementationInspected.level {program : Program} {implementat
   classical
   exact Classical.choose (exists_least_nat inspected)
 
-theorem ImplementationInspected.minimum {program : Program} {implementation : ImplDefinition}
+theorem ImplementationInspected.full_minimum {program : Program} {implementation : ImplDefinition}
     (inspected : ImplementationInspected program implementation) :
-    ImplementationInspectionAt program inspected.level implementation := by
+    FullImplementationInspectionAt program inspected.level implementation := by
   classical
   exact (Classical.choose_spec (exists_least_nat inspected)).1
 
+/-- Weak clients receive erasure at the one full-source minimum, never an
+independently minimized source-only certificate. -/
+theorem ImplementationInspected.minimum {program : Program} {implementation : ImplDefinition}
+    (inspected : ImplementationInspected program implementation) :
+    ImplementationInspectionAt program inspected.level implementation := inspected.full_minimum.erase
+
 theorem ImplementationInspected.level_le {program : Program} {implementation : ImplDefinition}
     (inspected : ImplementationInspected program implementation) {level : Nat}
-    (certificate : ImplementationInspectionAt program level implementation) : inspected.level ≤ level := by
+    (certificate : FullImplementationInspectionAt program level implementation) : inspected.level ≤ level := by
   classical
   exact (Classical.choose_spec (exists_least_nat inspected)).2 level certificate
 
@@ -134,7 +72,7 @@ def InspectionPrecedes (program : Program) (first second : ImplDefinition) : Pro
 
 theorem ImplementationInspected.precedes_of_lower {program : Program} {first second : ImplDefinition}
     (parent : ImplementationInspected program second) {level : Nat}
-    (child : ImplementationInspectionAt program level first) (lower : level < parent.level) :
+    (child : FullImplementationInspectionAt program level first) (lower : level < parent.level) :
     InspectionPrecedes program first second :=
   ⟨⟨level,child⟩,parent,Nat.lt_of_le_of_lt (ImplementationInspected.level_le ⟨level,child⟩ child) lower⟩
 
@@ -236,28 +174,9 @@ theorem ImplementationInspectionAt.monotone {program : Program} {implementation 
   cases inspected with
   | inspected origins => exact .inspected (fun binder present => (origins binder present).monotone higher)
 
-private theorem List.exists_uniform_bound {α : Type} (values : List α) (predicate : α → Nat → Prop)
-    (monotone : ∀ value first second, first ≤ second → predicate value first → predicate value second)
-    (each : ∀ value ∈ values, ∃ level, predicate value level) :
-    ∃ bound, ∀ value ∈ values, predicate value bound := by
-  induction values with
-  | nil => exact ⟨0,fun _ present => False.elim (List.not_mem_nil present)⟩
-  | cons value rest ih =>
-    obtain ⟨first,head⟩ := each value List.mem_cons_self
-    obtain ⟨second,tail⟩ := ih (fun value present => each value (List.mem_cons_of_mem _ present))
-    refine ⟨max first second,?_⟩
-    intro actual present
-    rcases List.mem_cons.mp present with rfl | inside
-    · exact monotone _ first _ (Nat.le_max_left _ _) head
-    · exact monotone actual second _ (Nat.le_max_right _ _) (tail actual inside)
-
 theorem ImplementationInspected.inspected {program : Program} {implementation : ImplDefinition}
-    (origins : ∀ binder ∈ implementation.generics, HeadInspectionOrigin program implementation binder) :
-    ImplementationInspected program implementation := by
-  obtain ⟨level,inspected⟩ := List.exists_uniform_bound implementation.generics
-    (fun binder level => HeadInspectionOriginAt program level implementation binder)
-    (fun _ _ _ higher origin => origin.monotone higher) origins
-  exact ⟨level,.inspected inspected⟩
+    (origins : ∀ binder ∈ implementation.generics, FullHeadInspectionOrigin program implementation binder) :
+    ImplementationInspected program implementation := FullImplementationInspected.inspected origins
 
 theorem HeadInspectionOrigin.exposed {program : Program} {implementation : ImplDefinition} {binder : Binder}
     {index : Nat} {template expanded : Term}
@@ -286,7 +205,7 @@ theorem HeadInspectionStep.projection {program : Program} {context : Context}
     HeadInspectionStep program (.projection domain selected present substituted) := by
   obtain ⟨level,certificate⟩ := inspected
   exact ⟨level+1,.projection (domain := domain) (selected := selected) (present := present)
-    (substituted := substituted) certificate (Nat.lt_succ_self _)⟩
+    (substituted := substituted) certificate.erase (Nat.lt_succ_self _)⟩
 
 theorem HeadInspectionStep.defaultProjection {program : Program} {context : Context}
     {trait member : DeclId} {owners items : List Term} {associated : AssociatedDefinition}
@@ -299,7 +218,7 @@ theorem HeadInspectionStep.defaultProjection {program : Program} {context : Cont
     HeadInspectionStep program (.defaultProjection domain selected absent default substituted) := by
   obtain ⟨level,certificate⟩ := inspected
   exact ⟨level+1,.defaultProjection (domain := domain) (selected := selected) (absent := absent)
-    (default := default) (substituted := substituted) certificate (Nat.lt_succ_self _)⟩
+    (default := default) (substituted := substituted) certificate.erase (Nat.lt_succ_self _)⟩
 
 theorem HeadInspectionReduction.refl {program : Program} {context : Context} {term : Term} :
     HeadInspectionReduction program (DefinitionalReduction.refl (context := context) (term := term)) := ⟨0,.refl⟩
@@ -319,6 +238,9 @@ theorem HeadInspectionReduction.trans {program : Program} {context : Context} {l
   exact ⟨max firstLevel secondLevel,.trans (firstCertificate.monotone (Nat.le_max_left _ _))
     (secondCertificate.monotone (Nat.le_max_right _ _))⟩
 
+private def InspectedReductionAtBetween (program : Program) (context : Context) (level : Nat) (left right : Term) : Prop :=
+  ∃ reduced : DefinitionalReduction program context left right, HeadInspectionReductionAt program level reduced
+
 theorem HeadInspectionReduction.congrChildren {program : Program} {context : Context} {left right : Term}
     {same : SameHead left right}
     {children : ∀ (index : Nat) first second, left.children[index]? = some first → right.children[index]? = some second →
@@ -326,130 +248,35 @@ theorem HeadInspectionReduction.congrChildren {program : Program} {context : Con
     (inspected : ∀ (index : Nat) first second leftAt rightAt,
       HeadInspectionReduction program (children index first second leftAt rightAt)) :
     HeadInspectionReduction program (.congrChildren same children) := by
-  let predicate := fun index level => ∀ first second leftAt rightAt,
-    HeadInspectionReductionAt program level (children index first second leftAt rightAt)
-  have bounded : ∀ index ∈ List.range left.children.length, ∃ level, predicate index level := by
-    intro index _
-    cases leftAt : left.children[index]? with
-    | none =>
-      exact ⟨0,fun _ _ found _ => False.elim (by rw [leftAt] at found; cases found)⟩
-    | some first =>
-      cases rightAt : right.children[index]? with
-      | none =>
-        exact ⟨0,fun _ _ _ found => False.elim (by rw [rightAt] at found; cases found)⟩
-      | some second =>
-        obtain ⟨level,certificate⟩ := inspected index first second leftAt rightAt
-        refine ⟨level,?_⟩
-        intro actual other firstAt secondAt
-        obtain rfl := Option.some.inj (leftAt.symm.trans firstAt)
-        obtain rfl := Option.some.inj (rightAt.symm.trans secondAt)
-        exact certificate
-  obtain ⟨level,certificates⟩ := List.exists_uniform_bound (List.range left.children.length) predicate
-    (fun _ _ _ higher all first second leftAt rightAt => (all first second leftAt rightAt).monotone higher) bounded
+  have pairs : ListRel (fun left right => ∃ level, InspectedReductionAtBetween program context level left right)
+      left.children right.children := ListRel.of_at same.children_length (fun index first second firstAt secondAt => by
+        obtain ⟨level,certificate⟩ := inspected index first second firstAt secondAt
+        exact ⟨level,children index first second firstAt secondAt,certificate⟩)
+  obtain ⟨level,bounded⟩ := pairs.exists_uniform (fun _ _ _ _ higher ⟨reduced,certificate⟩ =>
+    ⟨reduced,certificate.monotone higher⟩)
   exact ⟨level,.congrChildren (same := same) (children := children)
-    (fun index first second leftAt rightAt => certificates index
-      (List.mem_range.mpr (List.getElem?_eq_some_iff.mp leftAt).1) first second leftAt rightAt)⟩
+    (fun _ _ _ firstAt secondAt => (bounded.at firstAt secondAt).choose_spec)⟩
 
 theorem HeadInspectionReduction.row {program : Program} {context : Context} {left right : Term}
     {equivalent : RowEquivalent left right} :
     HeadInspectionReduction program (DefinitionalReduction.row (context := context) equivalent) :=
   ⟨0,.row (equivalent := equivalent)⟩
 
-private def InspectedReductionBetween (program : Program) (context : Context) (left right : Term) : Prop :=
-  ∃ reduced : DefinitionalReduction program context left right, HeadInspectionReduction program reduced
-
-private theorem InspectedReductionBetween.reflexive (program : Program) (context : Context) (term : Term) :
-    InspectedReductionBetween program context term term := ⟨.refl,.refl⟩
-
-private theorem InspectedReductionBetween.congr {program : Program} {context : Context} {left right : Term}
-    (same : SameHead left right)
-    (children : ListRel (InspectedReductionBetween program context) left.children right.children) :
-    InspectedReductionBetween program context left right := by
-  classical
-  let reductions := fun index first second (leftAt : left.children[index]? = some first)
-      (rightAt : right.children[index]? = some second) => Classical.choose (children.at leftAt rightAt)
-  exact ⟨.congrChildren same reductions,
-    .congrChildren (same := same) (children := reductions)
-      (fun _ _ _ leftAt rightAt => Classical.choose_spec (children.at leftAt rightAt))⟩
-
-/-- Any actual caller origin supplies a well-founded inspection of its fixed
-source head. The caller query and its conversions are not consulted to invent
-an exposure; they are discarded only after the actual source edge is retained. -/
+/-- The weak origin interface is a forgetful consumer of full finite
+inspection, not another origin extraction or a second source minimum. -/
 theorem InfersHeadArgument.inspected_origin {program : Program} {context : Context}
     {implementation : ImplDefinition} {arguments : List Term} {binder : Binder} {value : Term}
     (inferred : InfersHeadArgument program context implementation arguments binder value) :
     HeadInspectionOrigin program implementation binder := by
-  apply InfersHeadArgument.rec
-    (motive_1 := fun _ _ _ _ => True)
-    (motive_2 := fun _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ _ => True)
-    (motive_4 := fun _ _ _ _ implementation _ _ => ImplementationInspected program implementation)
-    (motive_5 := fun _ _ _ _ => True)
-    (motive_6 := fun _ _ _ _ => True)
-    (motive_7 := fun _ _ _ _ => True)
-    (motive_8 := fun _ _ _ => True)
-    (motive_9 := fun _ _ _ _ => True)
-    (motive_10 := fun _ _ _ stepped => HeadInspectionStep program stepped)
-    (motive_11 := fun _ _ _ _ => True)
-    (motive_12 := fun _ _ _ reduced => HeadInspectionReduction program reduced)
-    (motive_13 := fun _ implementation _ _ _ => ImplementationInspected program implementation)
-    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
-    (motive_15 := fun sourceContext _ binder template _ _ _ =>
-      ∃ (expanded : Term) (reduced : DefinitionalReduction program sourceContext template expanded),
-        HeadInspectionReduction program reduced ∧
-          StructuralHeadOrigin binder expanded expanded (.parameter binder.id binder.kind))
-    (motive_16 := fun _ implementation _ binder _ _ => HeadInspectionOrigin program implementation binder)
-    <;> try assumption
-  all_goals intros
-  all_goals try exact True.intro
-  case selected _ _ _ _ _ _ _ _ _ _ _ inspected _ => exact inspected
-  case alias _ _ _ _ _ _ found instantiated kinded substituted =>
-    exact .alias (found := found) (instantiated := instantiated) (kinded := kinded) (substituted := substituted)
-  case projection _ _ _ _ _ _ _ _ _ _ _ _ domain selected present substituted _ inspected =>
-    exact .projection (domain := domain) (selected := selected) (present := present) (substituted := substituted) inspected
-  case defaultProjection _ _ _ _ _ _ _ _ _ _ _ _ domain selected absent default substituted _ inspected =>
-    exact .defaultProjection (domain := domain) (selected := selected) (absent := absent)
-      (default := default) (substituted := substituted) inspected
-  case refl => exact .refl
-  case step _ _ _ stepped inspected => exact .step (stepped := stepped) inspected
-  case trans _ _ _ _ first second firstInspected secondInspected =>
-    exact .trans (first := first) (second := second) firstInspected secondInspected
-  case congrChildren _ _ _ same children inspected => exact .congrChildren (same := same) (children := children) inspected
-  case row _ _ _ equivalent => exact .row (equivalent := equivalent)
-  case inferred _ implementation _ values _ _ instantiated _ _ _ _ _ _ origins =>
-    apply ImplementationInspected.inspected
-    intro binder member
-    obtain ⟨index,binderAt⟩ := List.mem_iff_getElem?.mp member
-    cases valueAt : values[index]? with
-    | none =>
-      have firstBound := (List.getElem?_eq_some_iff.mp binderAt).1
-      have secondBound := List.getElem?_eq_none_iff.mp valueAt
-      have lengths := instantiated.2.1.length_eq
-      omega
-    | some value => exact origins index binder value binderAt valueAt
-  case parameter => exact ⟨_,.refl,.refl,.parameter rfl⟩
-  case child _ sourceContext _ template _ _ _ _ _ structural _ sourceAt _ _ ih =>
-    obtain ⟨expanded,reduced,inspected,path⟩ := ih
-    obtain ⟨rebuilt,same,rebuiltAt,reduction,certificate⟩ := Term.child_related
-      (relation := InspectedReductionBetween program sourceContext)
-      (InspectedReductionBetween.reflexive program sourceContext)
-      InspectedReductionBetween.congr sourceAt ⟨reduced,inspected⟩
-    exact ⟨rebuilt,reduction,certificate,
-      .child (same.structuralHead_iff.mp structural) rfl rebuiltAt rebuiltAt path⟩
-  case sourceReduction _ _ _ _ _ _ _ reduced _ inspected ih =>
-    obtain ⟨expanded,later,laterInspected,path⟩ := ih
-    exact ⟨expanded,reduced.trans later,.trans inspected laterInspected,path⟩
-  case queryConversion _ _ _ _ _ _ _ _ _ _ ih => exact ih
-  case argument _ _ _ _ _ _ _ _ sourceAt _ _ ih =>
-    obtain ⟨expanded,reduced,inspected,path⟩ := ih
-    exact .exposed (reduced := reduced) sourceAt inspected path
+  obtain ⟨level,certificate⟩ := inferred.full_inspected_origin
+  exact ⟨level,certificate.erase⟩
 
 /-- Source admission already supplies all finite origins needed by this
 well-founded inspection certificate, at the implementation's exact context. -/
 theorem ProgramWellFormed.implementation_inspected {program : Program} (valid : ProgramWellFormed program)
     {implementation : ImplDefinition} (declared : Definition.implementation implementation ∈ program.declarations) :
     ImplementationInspected program implementation :=
-  .inspected (fun binder present => (valid.implementation_head_determined declared binder present).inspected_origin)
+  .inspected (fun binder present => (valid.implementation_head_determined declared binder present).full_inspected_origin)
 
 theorem HeadInspectionOrigin.source_exposure {program : Program} {implementation : ImplDefinition} {binder : Binder}
     (origin : HeadInspectionOrigin program implementation binder) :
@@ -461,19 +288,27 @@ theorem HeadInspectionOrigin.source_exposure {program : Program} {implementation
   cases certificate with
   | exposed sourceAt inspected path => exact ⟨_,_,_,_,sourceAt,⟨level,inspected⟩,path⟩
 
-/-- These exposures come from the exact minimum whole-head certificate.
-Every projection certificate encountered inside them therefore carries an
-implementation whose own minimum is strictly earlier by `precedes_of_lower`. -/
+/-- The actual source exposure comes from the unique full whole-head
+minimum. All query conversions used inside its source roots remain present. -/
+theorem ImplementationInspected.minimum_full_source_exposure {program : Program} {implementation : ImplDefinition}
+    (inspected : ImplementationInspected program implementation) {binder : Binder} (member : binder ∈ implementation.generics) :
+    ∃ (index : Nat) (template expanded : Term)
+      (reduced : DefinitionalReduction program implementation.context template expanded),
+      implementation.arguments[index]? = some template ∧ FullHeadInspectionReductionAt program inspected.level reduced ∧
+        StructuralHeadOrigin binder expanded expanded (.parameter binder.id binder.kind) := by
+  cases inspected.full_minimum with
+  | inspected origins =>
+    cases origins binder member with
+    | exposed sourceAt certificate path => exact ⟨_,_,_,_,sourceAt,certificate,path⟩
+
 theorem ImplementationInspected.minimum_source_exposure {program : Program} {implementation : ImplDefinition}
     (inspected : ImplementationInspected program implementation) {binder : Binder} (member : binder ∈ implementation.generics) :
     ∃ (index : Nat) (template expanded : Term)
       (reduced : DefinitionalReduction program implementation.context template expanded),
       implementation.arguments[index]? = some template ∧ HeadInspectionReductionAt program inspected.level reduced ∧
         StructuralHeadOrigin binder expanded expanded (.parameter binder.id binder.kind) := by
-  cases inspected.minimum with
-  | inspected origins =>
-    cases origins binder member with
-    | exposed sourceAt certificate path => exact ⟨_,_,_,_,sourceAt,certificate,path⟩
+  obtain ⟨index,template,expanded,reduced,sourceAt,certificate,path⟩ := inspected.minimum_full_source_exposure member
+  exact ⟨index,template,expanded,reduced,sourceAt,certificate.erase,path⟩
 
 theorem ImplementationInspected.source_exposure {program : Program} {implementation : ImplDefinition}
     (inspected : ImplementationInspected program implementation) {binder : Binder} (member : binder ∈ implementation.generics) :

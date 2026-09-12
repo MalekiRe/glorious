@@ -81,6 +81,8 @@ import GloriousLanguage.HeadInspectionInstantiation
 import GloriousLanguage.InspectionResiduals
 import GloriousLanguage.InspectionPaths
 import GloriousLanguage.InspectionPathResiduals
+import GloriousLanguage.DefinitionalChurchRosser
+import GloriousLanguage.DefinitionalSeparation
 import GloriousLanguage.RootReductionJoining
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence

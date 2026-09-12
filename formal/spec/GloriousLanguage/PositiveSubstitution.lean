@@ -10,7 +10,7 @@ positive relation as arbitrary equality. Internal unkinded congruence nodes
 use the same guarded proof-model map as capability substitution. -/
 namespace Glorious.Language
 
-private theorem Instantiates.guarded_substitution_table {program : Program} {source target : Context}
+theorem Instantiates.guarded_substitution_table {program : Program} {source target : Context}
     {binders : List Binder} {values : List Term} {inner : Substitution}
     (instantiated : Instantiates binders values inner)
     (typed : ∀ value ∈ values, Kinding program source value value.kind) (outer : Substitution)
@@ -24,6 +24,74 @@ private theorem Instantiates.guarded_substitution_table {program : Program} {sou
     rw [instantiated.2.2] at member
     exact (List.of_mem_zip member).2
   rw [SubstitutionAtomModel.kinded_eq (typed entry.2 present) outer parameters]
+
+/-- Projection-domain substitution has one producer shared by ordinary and
+fully inspected root transport. Actual lexical instantiations and all
+quantified logical requirements are preserved together. -/
+theorem ProjectionDomain.map_substitute {program : Program} (valid : ProgramWellFormed program)
+    {source target : Context} {trait member : DeclId} {owners items : List Term} {associated : AssociatedDefinition}
+    {ownerSub itemSub : Substitution}
+    (domain : ProjectionDomain program source trait member owners items associated ownerSub itemSub)
+    (sourceKinded : ∀ requirement ∈ source.assumptions, ConstraintKinded program source requirement)
+    (targetKinded : ∀ requirement ∈ target.assumptions, ConstraintKinded program target requirement)
+    (outer : Substitution)
+    (parameters : ∀ binder ∈ source.binders,
+      Kinding program target ((Term.parameter binder.id binder.kind).substitute outer) binder.kind)
+    (levels : source.universeLevel ≤ target.universeLevel)
+    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
+    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands)
+    (assumptions : ∀ requirement ∈ source.assumptions, EntailsSubstitution program target outer requirement) :
+    ProjectionDomain program target trait member (owners.map (SubstitutionAtomModel.term outer))
+      (items.map (SubstitutionAtomModel.term outer)) associated
+      (ownerSub.map (fun entry => (entry.1,SubstitutionAtomModel.term outer entry.2)))
+      (itemSub.map (fun entry => (entry.1,SubstitutionAtomModel.term outer entry.2))) := by
+  let map := SubstitutionAtomModel.term outer
+  let mapSub := fun (substitution : Substitution) => substitution.map (fun entry => (entry.1,map entry.2))
+  have mapKinds : ∀ term, (map term).kind = term.kind := SubstitutionAtomModel.kind outer
+  have mappedKind {term : Term} {kind : Kind} (typed : Kinding program source term kind) :
+      Kinding program target (map term) kind := by
+    change Kinding program target (SubstitutionAtomModel.term outer term) kind
+    rw [SubstitutionAtomModel.kinded_eq typed outer parameters]
+    exact typed.substitute outer parameters levels regions brands
+  change ProjectionDomain program target trait member (owners.map map) (items.map map) associated (mapSub ownerSub) (mapSub itemSub)
+  cases domain with
+  | valid found member associatedFound owner ownerInst itemInst typed ownerRequirements itemRequirements =>
+    have traitAdmitted := valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.trait_lookup found))
+    have itemAdmitted := valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))
+    obtain ⟨sourceTrait,sourceFound,itemPredicates⟩ := itemAdmitted.2.2
+    rw [owner,found] at sourceFound
+    cases Option.some.inj sourceFound
+    obtain ⟨sourceTrait,sourceFound,_,unique,_⟩ := itemAdmitted.2.1
+    rw [owner,found] at sourceFound
+    cases Option.some.inj sourceFound
+    refine .valid found member associatedFound owner
+      (ownerInst.map_values map (fun term _ => mapKinds term))
+      (itemInst.map_values map (fun term _ => mapKinds term)) ?_ ?_ ?_
+    · intro term present
+      rw [← List.map_append] at present
+      obtain ⟨original,inside,rfl⟩ := List.mem_map.mp present
+      simpa only [mapKinds] using mappedKind (typed original inside)
+    · intro requirement present
+      have ownerTyped := fun value inside => typed value (List.mem_append_left items inside)
+      rw [show mapSub ownerSub = ownerSub.map (fun entry => (entry.1,entry.2.substitute outer)) from
+        ownerInst.guarded_substitution_table ownerTyped outer parameters]
+      exact (ownerRequirements requirement present).substitute_values valid sourceKinded targetKinded
+        (traitAdmitted.2.2 requirement present) ownerInst ownerTyped outer parameters (Nat.zero_le _)
+        (fun _ member => False.elim (List.not_mem_nil member))
+        (fun _ member => False.elim (List.not_mem_nil member)) levels regions brands assumptions
+    · intro requirement present
+      have fullInstance := ownerInst.append itemInst unique
+      have tables := fullInstance.guarded_substitution_table typed outer parameters
+      simp only [List.map_append] at tables
+      change EntailsSubstitution program target (mapSub ownerSub ++ mapSub itemSub) requirement
+      rw [show mapSub ownerSub ++ mapSub itemSub =
+        (ownerSub ++ itemSub).map (fun entry => (entry.1,entry.2.substitute outer)) from
+          by simpa only [mapSub,List.map_append] using tables]
+      exact (itemRequirements requirement present).substitute_values valid sourceKinded targetKinded
+        (itemPredicates requirement present) fullInstance typed outer parameters (Nat.zero_le _)
+        (fun _ member => False.elim (List.not_mem_nil member))
+        (fun _ member => False.elim (List.not_mem_nil member)) levels regions brands assumptions
+
 
 theorem DefinitionalStep.map_substitute_inspected {program : Program} (valid : ProgramWellFormed program)
     {source target : Context} {left right : Term} (stepped : DefinitionalStep program source left right)
@@ -186,41 +254,8 @@ theorem DefinitionalStep.map_substitute_inspected {program : Program} (valid : P
   case domainValid context traitId memberId owners items declaration associated ownerSub itemSub
       found member associatedFound owner ownerInst itemInst typed ownerRequirements itemRequirements _ _ sameContext =>
     cases sameContext
-    have traitAdmitted := valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.trait_lookup found))
-    have itemAdmitted := valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))
-    obtain ⟨sourceTrait,sourceFound,itemPredicates⟩ := itemAdmitted.2.2
-    rw [owner,found] at sourceFound
-    cases Option.some.inj sourceFound
-    obtain ⟨sourceTrait,sourceFound,_,unique,_⟩ := itemAdmitted.2.1
-    rw [owner,found] at sourceFound
-    cases Option.some.inj sourceFound
-    refine .valid found member associatedFound owner
-      (ownerInst.map_values map (fun term _ => mapKinds term))
-      (itemInst.map_values map (fun term _ => mapKinds term)) ?_ ?_ ?_
-    · intro term present
-      rw [← List.map_append] at present
-      obtain ⟨original,inside,rfl⟩ := List.mem_map.mp present
-      simpa only [mapKinds] using mappedKind (typed original inside)
-    · intro requirement present
-      have ownerTyped := fun value inside => typed value (List.mem_append_left items inside)
-      rw [show mapSub ownerSub = ownerSub.map (fun entry => (entry.1,entry.2.substitute outer)) from
-        ownerInst.guarded_substitution_table ownerTyped outer parameters]
-      exact (ownerRequirements requirement present).substitute_values valid sourceKinded targetKinded
-        (traitAdmitted.2.2 requirement present) ownerInst ownerTyped outer parameters (Nat.zero_le _)
-        (fun _ member => False.elim (List.not_mem_nil member))
-        (fun _ member => False.elim (List.not_mem_nil member)) levels regions brands assumptions
-    · intro requirement present
-      have fullInstance := ownerInst.append itemInst unique
-      have tables := fullInstance.guarded_substitution_table typed outer parameters
-      simp only [List.map_append] at tables
-      change EntailsSubstitution program target (mapSub ownerSub ++ mapSub itemSub) requirement
-      rw [show mapSub ownerSub ++ mapSub itemSub =
-        (ownerSub ++ itemSub).map (fun entry => (entry.1,entry.2.substitute outer)) from
-          by simpa only [mapSub,List.map_append] using tables]
-      exact (itemRequirements requirement present).substitute_values valid sourceKinded targetKinded
-        (itemPredicates requirement present) fullInstance typed outer parameters (Nat.zero_le _)
-        (fun _ member => False.elim (List.not_mem_nil member))
-        (fun _ member => False.elim (List.not_mem_nil member)) levels regions brands assumptions
+    exact (ProjectionDomain.valid found member associatedFound owner ownerInst itemInst typed ownerRequirements itemRequirements).map_substitute
+      valid sourceKinded targetKinded outer parameters levels regions brands assumptions
   case parameter _ _ _ _ same sameContext => cases sameContext; exact .parameter ((mapKinds _).trans same)
   case child _ _ _ _ _ _ _ _ _ structural same leftAt rightAt _ ih sameContext =>
     cases sameContext

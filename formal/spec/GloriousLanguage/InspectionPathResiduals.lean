@@ -20,9 +20,44 @@ private theorem ListRel.choose_right {α β γ : Type} {relation : α → β →
       choose a (List.mem_cons_of_mem _ member) b (List.mem_cons_of_mem _ present) pair)
     exact ⟨c :: middle,.cons first tail,.cons second rest⟩
 
-/-- All changed generic values come from the same fixed reads in the actual
-changed query. Full instantiation, target kinding, and table alignment are
-derived together from the old selection inputs. -/
+/-- Actual readable values instantiate one aligned raw generic table.
+Readiness, kinding, and the table relation are produced together. -/
+theorem ImplementationInspected.instantiate_reads {program : Program} (valid : ProgramWellFormed program)
+    {context : Context} {implementation : ImplDefinition} (inspected : ImplementationInspected program implementation)
+    {changed : List Term} {values : List Term} {substitution : Substitution}
+    (instantiated : Instantiates implementation.generics values substitution)
+    (kinded : ∀ value ∈ values, Kinding program context value value.kind)
+    {relation : Term → Term → Prop}
+    (converts : ∀ left right, relation left right → DefinitionallyEqual program context left right)
+    (reads : ∀ binder (member : binder ∈ implementation.generics), ∃ value,
+      (inspected.path binder member).read changed = some value ∧
+      relation ((substitution.get binder.id).getD (.parameter binder.id binder.kind)) value) :
+    ∃ newValues newSub, Instantiates implementation.generics newValues newSub ∧
+      (∀ value ∈ newValues, Kinding program context value value.kind) ∧ inspected.Ready changed newSub ∧
+      ListRel (fun first second => first.1 = second.1 ∧ relation first.2 second.2) substitution newSub := by
+  have alignment : ListRel (fun binder value => substitution.get binder.id = some value) implementation.generics values :=
+    ListRel.of_at instantiated.2.1.length_eq (fun _ _ _ binderAt valueAt => instantiated.binder_lookup_at binderAt valueAt)
+  let result := fun binder value => ∀ member : binder ∈ implementation.generics,
+    (inspected.path binder member).read changed = some value
+  obtain ⟨newValues,related,readable⟩ := ListRel.choose_right (result := result) alignment (by
+    intro binder member value _ lookup
+    obtain ⟨next,readNext,related⟩ := reads binder member
+    rw [lookup] at related
+    exact ⟨next,related,fun _ => readNext⟩)
+  have transport : ListRel (KindTransport program context) values newValues :=
+    related.imp (fun _ _ pair kind typed => ((converts _ _ pair).kinding_iff valid kind).mp typed)
+  have nextInst := instantiated.kind_transport kinded transport
+  refine ⟨newValues,_,nextInst,transport.arguments_kinded_right kinded,?_,instantiated.related_values related⟩
+  intro binder member
+  obtain ⟨index,binderAt⟩ := List.mem_iff_getElem?.mp member
+  have bound : index < newValues.length := by
+    rw [← readable.length_eq]
+    exact (List.getElem?_eq_some_iff.mp binderAt).1
+  have valueAt : newValues[index]? = some newValues[index] := List.getElem?_eq_getElem bound
+  exact (readable.at binderAt valueAt member).trans (nextInst.binder_lookup_at binderAt valueAt).symm
+
+/-- All changed generic values follow the same fixed reads in the changed
+query. The common table producer also serves ordinary-root completion. -/
 theorem ImplementationInspected.Ready.relate_values {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {implementation : ImplDefinition} {inspected : ImplementationInspected program implementation}
     {arguments changed : List Term} {values : List Term} {substitution : Substitution}
@@ -37,30 +72,54 @@ theorem ImplementationInspected.Ready.relate_values {program : Program} (valid :
     ∃ newValues newSub, Instantiates implementation.generics newValues newSub ∧
       (∀ value ∈ newValues, Kinding program context value value.kind) ∧ inspected.Ready changed newSub ∧
       ListRel (fun first second => first.1 = second.1 ∧ relation first.2 second.2) substitution newSub := by
-  have alignment : ListRel (fun binder value => substitution.get binder.id = some value) implementation.generics values :=
-    ListRel.of_at instantiated.2.1.length_eq (fun _ _ _ binderAt valueAt => instantiated.binder_lookup_at binderAt valueAt)
-  let result := fun binder value => ∀ member : binder ∈ implementation.generics,
-    (inspected.path binder member).read changed = some value
-  obtain ⟨newValues,related,readable⟩ := ListRel.choose_right (result := result) alignment (by
-    intro binder member value _ lookup
-    have read : (inspected.path binder member).read arguments = some value := (ready binder member).trans lookup
-    obtain ⟨next,readNext,related⟩ := (inspected.path binder member).read_related decomposes queries read
-    exact ⟨next,related,fun _ => readNext⟩)
-  have transport : ListRel (KindTransport program context) values newValues :=
-    related.imp (fun _ _ pair kind typed => ((converts _ _ pair).kinding_iff valid kind).mp typed)
-  have nextInst := instantiated.kind_transport kinded transport
-  refine ⟨newValues,_,nextInst,transport.arguments_kinded_right kinded,?_,instantiated.related_values related⟩
+  apply inspected.instantiate_reads valid instantiated kinded converts
   intro binder member
-  obtain ⟨index,binderAt⟩ := List.mem_iff_getElem?.mp member
-  have bound : index < newValues.length := by
-    rw [← readable.length_eq]
-    exact (List.getElem?_eq_some_iff.mp binderAt).1
-  have valueAt : newValues[index]? = some newValues[index] := List.getElem?_eq_getElem bound
-  exact (readable.at binderAt valueAt member).trans (nextInst.binder_lookup_at binderAt valueAt).symm
+  obtain ⟨value,_,_,lookup⟩ := instantiated.binder_lookup member
+  have read : (inspected.path binder member).read arguments = some value := (ready binder member).trans lookup
+  obtain ⟨next,readNext,related⟩ := (inspected.path binder member).read_related decomposes queries read
+  exact ⟨next,readNext,by simpa only [lookup,Option.getD_some] using related⟩
 
-/-- Existing source admission reconstructs selection for the changed values
-read from the changed query. Logical requirement graphs are transported by
-the proved substitution rule, including all quantified binder masks. -/
+/-- Changing actual generic values and queries uses one admitted-selection
+constructor. All quantified requirement graphs are transported by the
+existing logical substitution rule. -/
+theorem SelectsImpl.with_related_values {program : Program} (valid : ProgramWellFormed program)
+    {context : Context} {trait : DeclId} {arguments changed : List Term} {negative : Bool}
+    {implementation : ImplDefinition} {substitution newSub : Substitution} {newValues : List Term}
+    (selected : SelectsImpl program context trait arguments negative implementation substitution)
+    (contextKinded : ∀ requirement ∈ context.assumptions, ConstraintKinded program context requirement)
+    (nextInst : Instantiates implementation.generics newValues newSub)
+    (nextKinded : ∀ value ∈ newValues, Kinding program context value value.kind)
+    (tables : ListRel (fun first second => first.1 = second.1 ∧
+      DefinitionallyEqual program context first.2 second.2) substitution newSub)
+    (queries : ListRel (DefinitionallyEqual program context) arguments changed) :
+    SelectsImpl program context trait changed negative implementation newSub := by
+  cases selected with
+  | selected declared traitIs negativeIs matched requirements =>
+    cases traitIs
+    cases negativeIs
+    cases matched with
+    | inferred _ _ graph lengths head _ =>
+      have lookups := tables.substitution_getD_related (fun _ => .refl)
+      have requirementsNext : ∀ requirement ∈ implementation.requirements,
+          EntailsSubstitution program context newSub requirement := by
+        intro requirement member
+        exact (requirements requirement member).convert_logical_substitution valid contextKinded
+          (tables.imp (fun _ _ pair => And.intro pair.1 (.definitional pair.2)))
+      have actual : ListRel (fun term value => value = term.substitute substitution)
+          implementation.arguments (implementation.arguments.map (Term.substitute substitution)) := by
+        simpa only [List.map_id] using ListRel.maps implementation.arguments id (Term.substitute substitution) (fun _ _ => rfl)
+      have specialized := ListRel.functional (fun _ _ _ first second => first.trans second.symm)
+        (graph.imp (fun _ _ graph => graph.2.1)) actual
+      have oldHead : ListRel (DefinitionallyEqual program context)
+          (implementation.arguments.map (Term.substitute substitution)) arguments := by
+        rw [← specialized]
+        exact ListRel.of_at lengths head
+      have newOld := ListRel.maps implementation.arguments (Term.substitute newSub) (Term.substitute substitution)
+        (fun term _ => term.substitutions_convert program context (fun id kind => (lookups id kind).symm))
+      have newHead := newOld.transitive (fun _ _ _ first second => first.trans second)
+        (oldHead.transitive (fun _ _ _ first second => first.trans second) queries)
+      exact SelectsImpl.of_admitted_head valid declared contextKinded nextInst nextKinded newHead requirementsNext
+
 theorem SelectsImpl.relate_inspected_query {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {trait : DeclId} {arguments changed : List Term} {negative : Bool}
     {implementation : ImplDefinition} {substitution : Substitution}
@@ -75,36 +134,11 @@ theorem SelectsImpl.relate_inspected_query {program : Program} (valid : ProgramW
     ∃ newSub, SelectsImpl program context trait changed negative implementation newSub ∧
       inspected.Ready changed newSub ∧
       ListRel (fun first second => first.1 = second.1 ∧ relation first.2 second.2) substitution newSub := by
-  cases selected with
-  | selected declared traitIs negativeIs matched requirements =>
-    cases traitIs
-    cases negativeIs
-    cases matched with
-    | inferred instantiated kinded graph lengths head _ =>
-      obtain ⟨newValues,newSub,nextInst,nextKinded,nextReady,tables⟩ :=
-        ready.relate_values valid instantiated kinded converts decomposes queries
-      have converted := tables.imp (fun _ _ pair => And.intro pair.1 (converts _ _ pair.2))
-      have lookups := converted.substitution_getD_related (fun _ => .refl)
-      have requirementsNext : ∀ requirement ∈ implementation.requirements,
-          EntailsSubstitution program context newSub requirement := by
-        intro requirement member
-        exact (requirements requirement member).convert_logical_substitution valid contextKinded
-          (converted.imp (fun _ _ pair => And.intro pair.1 (.definitional pair.2)))
-      have actual : ListRel (fun term value => value = term.substitute substitution)
-          implementation.arguments (implementation.arguments.map (Term.substitute substitution)) := by
-        simpa only [List.map_id] using ListRel.maps implementation.arguments id (Term.substitute substitution) (fun _ _ => rfl)
-      have specialized := ListRel.functional (fun _ _ _ first second => first.trans second.symm)
-        (graph.imp (fun _ _ graph => graph.2.1)) actual
-      have oldHead : ListRel (DefinitionallyEqual program context)
-          (implementation.arguments.map (Term.substitute substitution)) arguments := by
-        rw [← specialized]
-        exact ListRel.of_at lengths head
-      have newOld := ListRel.maps implementation.arguments (Term.substitute newSub) (Term.substitute substitution)
-        (fun term _ => term.substitutions_convert program context (fun id kind => (lookups id kind).symm))
-      have newHead := newOld.transitive (fun _ _ _ first second => first.trans second)
-        (oldHead.transitive (fun _ _ _ first second => first.trans second) (queries.imp converts))
-      exact ⟨newSub,SelectsImpl.of_admitted_head valid declared contextKinded nextInst nextKinded newHead requirementsNext,
-        nextReady,tables⟩
+  obtain ⟨values,instantiated,kinded⟩ := selected.instantiates
+  obtain ⟨newValues,newSub,nextInst,nextKinded,nextReady,tables⟩ :=
+    ready.relate_values valid instantiated kinded converts decomposes queries
+  exact ⟨newSub,selected.with_related_values valid contextKinded nextInst nextKinded
+    (tables.imp (fun _ _ pair => And.intro pair.1 (converts _ _ pair.2))) (queries.imp converts),nextReady,tables⟩
 
 theorem PathInspectedStep.alias_argument_relation {program : Program} {valid : ProgramWellFormed program}
     {relation : Term → Term → Prop} {context : Context} {id : DeclId} {arguments changed : List Term} {value : Term}

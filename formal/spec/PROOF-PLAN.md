@@ -1340,6 +1340,42 @@ capability-inversion failure; its entire gate is not certified by the successful
 lower invocation/private proof closure. No example or aggregate soundness claim
 is used to bridge these remaining obligations.
 
+The ordinary conversion boundary is now closed by `DefinitionalChurchRosser`.
+`FullHeadInspection` extracts one finite certificate from the actual static
+derivation, retaining each projection's real head-query conversions alongside
+its strictly earlier full source inspection. `HeadInspection` now minimizes
+only that full certificate; legacy weak evidence is its same-level erasure,
+not a second source matcher or independent minimum. `FullInspectionSubstitution`
+replays the exact chosen source path in the actual caller at that same level.
+Projection-domain transport and related generic tables share their existing
+producers with ordinary reduction and selection.
+
+`InspectionParallel` proves the finite complete-development triangle and diamond,
+including all structural row equations. It recurses only over proper source
+children, not over freshly expanded recursive declaration bodies. Canonical
+confluence then joins the finite family of actual source-path exposures in
+`InspectionCompletion`, which reconstructs real selection at their common query.
+The full certificate's own induction handles query conversions; a separate
+strict induction on the one full source minimum handles caller replay.
+Consequently `DefinitionallyEqual.joinable` and `DefinitionalReduction.confluence`
+produce common reducts in the original positive language relation from only
+program well-formedness and kinded actual context assumptions. Neither global
+termination nor a desired simulation or injectivity conclusion is assumed.
+
+`DefinitionalSeparation` consumes this result for structural constructor/child
+decomposition, nominal identity, scalar discrimination, row-equivalent normal
+forms and positive agreement of selected generic tables. The actual definitional
+quotient and assumption-free logical scalar equality use these conclusions.
+Arbitrary lexical equality assumptions are not declared scalar-consistent.
+Conversion-safe capability inversion, layout/ABI consumers and full resource
+progress remain unfinished; the higher Drop gate is not certified by this
+conversion theorem or its successful lower consumers.
+The fresh source-only integration gate passes 223 jobs with warnings as errors,
+covering ordinary conversion and residuals, source handler construction,
+scalar storage progress, elaboration, runtime body typing, whole-execution
+preservation, invocation lifecycle and private-hook preservation. Neither
+examples nor the known failing higher Drop dependency are counted as passing.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

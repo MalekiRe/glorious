@@ -88,7 +88,7 @@ structure HeadInspectionPath (program : Program) (implementation : ImplDefinitio
   expanded : Term
   sourceAt : implementation.arguments[argument]? = some template
   reduced : DefinitionalReduction program implementation.context template expanded
-  certificate : HeadInspectionReductionAt program level reduced
+  certificate : FullHeadInspectionReductionAt program level reduced
   children : List Nat
   parameterAt : expanded.structuralAt children = some (.parameter binder.id binder.kind)
 
@@ -96,7 +96,7 @@ noncomputable def ImplementationInspected.path {program : Program} {implementati
     (inspected : ImplementationInspected program implementation) (binder : Binder) (member : binder ∈ implementation.generics) :
     HeadInspectionPath program implementation binder inspected.level := by
   apply Classical.choice
-  obtain ⟨argument,template,expanded,reduced,sourceAt,certificate,origin⟩ := inspected.minimum_source_exposure member
+  obtain ⟨argument,template,expanded,reduced,sourceAt,certificate,origin⟩ := inspected.minimum_full_source_exposure member
   obtain ⟨children,parameterAt,_⟩ := origin.fixed_path
   exact ⟨⟨argument,template,expanded,sourceAt,reduced,certificate,children,parameterAt⟩⟩
 

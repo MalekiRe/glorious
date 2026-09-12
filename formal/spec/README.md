@@ -109,14 +109,22 @@ or a dependency of this project.
   origins, including determining alias/projection expansions.
 - `HeadOriginInstantiation`, `RootReductionJoining`: instantiated positive
   source origins and root-pair reduction to joining actual selected generic
-  tables; global parallel moves and confluence remain unproved.
+  tables, consumed by the complete conversion proof below.
 - `HeadInspection`, `HeadInspectionInstantiation`, `InspectionResiduals`:
   source-admitted finite inspection dependencies, preserved through actual caller
-  instantiation and root/child and row/root residuals. Query-premise joining and
-  global confluence remain open.
+  instantiation and root/child and row/root residuals.
 - `InspectionPaths`, `InspectionPathResiduals`: fixed paths extracted from those
   source inspections identify actual raw generic values and update actual
-  selection through query residuals. Ordinary-to-path-ready simulation remains open.
+  selection through query residuals and a shared raw-table producer.
+- `FullHeadInspection`, `FullInspectionSubstitution`, `InspectionCompletion`:
+  one full source-inspection minimum retains actual query conversions and derives
+  ordinary-to-path-ready completion under real caller instantiation.
+- `InspectionParallel`, `InspectionConfluence`, `DefinitionalChurchRosser`:
+  ordinary definitional equality has actual positive common reducts, with no
+  normalization or simulation assumption. `DefinitionalSeparation` consumes this
+  in constructor, scalar, normal-form and actual definitional-quotient proofs.
+  Conversion-safe capability inversion and runtime representation consumers
+  remain separate obligations; arbitrary lexical equality is not assumed consistent.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,
