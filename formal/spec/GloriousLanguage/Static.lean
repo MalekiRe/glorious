@@ -488,7 +488,7 @@ def SignatureWellFormed (program : Program) (module : ModuleId) (signature : Sig
   (∀ i binder defaultValue, signature.generics[i]? = some binder → binder.defaultValue = some defaultValue →
     WellKinded program { context with binders := signature.generics.take i } defaultValue binder.kind)
 
-def DeclarationWellFormed (program : Program) : Definition → Prop
+def DeclarationShapeWellFormed (program : Program) : Definition → Prop
   | .data data =>
     let context : Context := ⟨data.generics,data.requirements,0,data.header.module,false⟩
     (data.generics.map (·.id)).Nodup ∧ (data.variants.map (·.header.name)).Nodup ∧
@@ -533,6 +533,12 @@ def DeclarationWellFormed (program : Program) : Definition → Prop
   | .fixity fixity => fixity.precedence ≤ 255 ∧
     ∃ function, program.function fixity.target = some function ∧ Visible function.header fixity.header.module
   | .environment environment => environment.brand.kind = .brand ∧ environment.region.kind = .region
+
+/-- Source templates are checked before runtime instantiation. Runtime atoms
+remain well-kinded in execution judgments, but cannot occur literally in the
+immutable declarations those judgments instantiate. -/
+def DeclarationWellFormed (program : Program) (definition : Definition) : Prop :=
+  definition.Lexical ∧ DeclarationShapeWellFormed program definition
 
 def ProgramWellFormed (program : Program) : Prop :=
   SourceClosure program ∧ (program.declarations.map (·.header.id)).Nodup ∧

@@ -182,6 +182,38 @@ def Definition.header : Definition → Header
   | .global d => d.header | .module d => d.header | .import d => d.header | .fixity d => d.header
   | .environment d => d.header
 
+def Signature.terms (signature : Signature) : List Term :=
+  signature.result :: signature.effects :: signature.parameters ++
+    signature.constraints.flatMap Constraint.terms ++
+    signature.generics.flatMap (fun binder => binder.defaultValue.toList)
+
+def InvocationRelation.terms (relation : InvocationRelation) : List Term :=
+  relation.receiver :: relation.access :: relation.result :: relation.effects :: relation.after :: relation.arguments
+
+/-- Complete semantic template projection. In particular, captures, generic
+defaults and published invocation contracts belong to the declaration and
+cannot smuggle an execution-specific identity into its immutable meaning. -/
+def Definition.terms : Definition → List Term
+  | .data entry =>
+      (entry.variants.flatMap (·.fields)).map (·.type) ++ entry.quantitySource.toList ++
+        entry.requirements.flatMap Constraint.terms ++ entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .alias entry => entry.value :: entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .function entry => entry.signature.terms ++ entry.captures ++ entry.invocations.flatMap InvocationRelation.terms
+  | .trait entry => entry.requirements.flatMap Constraint.terms ++ entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .associated entry => entry.defaultValue.toList ++ entry.requirements.flatMap Constraint.terms ++
+      entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .implementation entry => entry.arguments ++ entry.associated.map Prod.snd ++
+      entry.requirements.flatMap Constraint.terms ++ entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .effect entry => entry.requirements.flatMap Constraint.terms ++ entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .operation entry => entry.signature.terms
+  | .constant entry => entry.type :: entry.value :: entry.generics.flatMap (fun binder => binder.defaultValue.toList)
+  | .global entry => [entry.type]
+  | .environment entry => entry.brand :: entry.region :: entry.residents
+  | .module _ | .import _ | .fixity _ => []
+
+def Definition.Lexical (definition : Definition) : Prop :=
+  ∀ term ∈ definition.terms, term.Lexical
+
 structure Package where
   id : Identity
   name : String

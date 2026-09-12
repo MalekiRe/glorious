@@ -382,7 +382,7 @@ theorem Borrows.loanParents {program : Program} {before after : World} {authorit
     (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after) :
     after.LoanParents := by
   cases borrowed with
-  | borrow _ _ _ _ permitted _ _ parentEq _ =>
+  | borrow _ _ _ _ _ permitted _ _ parentEq _ =>
       intro id loan parent found selected
       by_cases fresh : id = before.nextLoan
       · subst id
@@ -526,7 +526,7 @@ theorem Borrows.liveLoanLocations {program : Program} {before after : World} {au
     (locations : before.LiveLoanLocations) (borrowed : Borrows program before authority mode region referent destination after) :
     after.LiveLoanLocations := by
   cases borrowed with
-  | borrow stored _ _ _ _ vacant _ _ written =>
+  | borrow stored _ _ _ _ _ vacant _ _ written =>
       intro id loan found live
       by_cases fresh : id = before.nextLoan
       · subst id
@@ -759,10 +759,14 @@ theorem Transfers.availability {program : Program} {before after : World} {autho
       rcases World.write_value_update install with ⟨_,_,_,finish⟩
       simp [finish,middle]
 
-theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : World}
-    {authority source destination value}
-    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
-    (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
+theorem Typing.ValueTyped.transport {program : Kernel.Program} {before after : World} {value : Value}
+    (typed : Typing.ValueTyped program before value)
+    (references : ∀ id loan, before.loans.get id = some loan → loan.live = true →
+      after.loans.get id = some loan ∧ ∀ type, AddressType program.declarations before loan.referent type →
+        AddressType program.declarations after loan.referent type)
+    (proofs : after.availability = before.availability)
+    (pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after) :
+    Typing.ValueTyped program after value := by
   refine Typing.ValueTyped.rec
     (motive_1 := fun value _ => Typing.ValueTyped program after value)
     (motive_2 := fun fields types _ => Typing.FieldsTyped program after fields types)
@@ -770,19 +774,32 @@ theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : Wo
   · exact fun {_ _} => .unit
   · exact fun {_ _ _} checked => .scalar checked
   · exact fun {_ _ _ _ _ _} head _ fields => .aggregate head fields
-  · exact fun {_ _ _ _ _ _ _} found active mode region located =>
-      transfer.reference_preserved valid (.reference found active mode region located)
-  · exact fun {_ _ _ _ _} bound origin => .pointer bound (origin.transport transfer.locations)
+  · intro owner mode region type id loan live found active modeEq regionEq located
+    obtain ⟨selected,types⟩ := references id loan found active
+    exact .reference selected active modeEq regionEq (types type located)
+  · exact fun {_ _ _ _ _} bound origin => .pointer bound (pointers _ origin)
   · exact fun {_ _ _ _ _ _} selected _ fields => .callable selected fields
   · exact fun {_ _ _ _ _ _} selected => .operation selected
   · exact fun {_ _ _ _ _} => .label
   · exact fun {_ _ _ _} type => .continuation type
   · intro owner brand region id live available found brandEq idEq regionEq
-    exact .available (by simpa [transfer.availability] using found) brandEq idEq regionEq
+    exact .available (by simpa [proofs] using found) brandEq idEq regionEq
   · exact fun {_ _ _ _ _ _ _} _ brand region length distinct fields => .bindings fields brand region length distinct
   · exact .nil
   · exact fun {_ _ _} _ fields => .hole fields
   · exact fun {_ _ _ _} _ type _ value fields => .resident value type fields
+
+theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : World}
+    {authority source destination value}
+    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
+    (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
+  apply typed.transport ?_ transfer.availability (fun _ origin => origin.transport transfer.locations)
+  intro id loan found active
+  have sourceOutside := transfer.permission.owned_no_loan_descendant (World.loanParents valid) found active
+  have destinationOutside := transfer.destination_vacant.no_located_descendant
+    (World.liveLoanLocations valid _ _ found active)
+  exact ⟨by simpa [transfer.loans] using found,
+    fun _ located => (transfer.address_types sourceOutside destinationOutside).mp located⟩
 
 theorem Value.replace_cons {before child changed : Value} {index : Nat} {path : List Nat}
     {replacement : Option Value} (found : before.fields[index]? = some (some child))

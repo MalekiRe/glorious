@@ -54,7 +54,7 @@ inductive Task where
   | enter (context : Context) (function : Function) (inputs : List InvocationInput) (tail : Bool)
   | destroy (context : Context) (address : Address) (authority : Authority) (next : Task)
   | destroyFields (context : Context) (address : Address) (authority : Authority) (fields : List Nat) (next : Task)
-  | finishShell (address : Address) (next : Task)
+  | finishShell (address : Address) (authority : Authority) (next : Task)
   | retire (root : Identity) (next : Task)
   | cleanup (context : Context) (roots : List Identity) (next : Task)
   | closeRegion (region : Identity) (next : Task)
@@ -191,7 +191,8 @@ inductive Protects (program : Kernel.Program) (context : Context) :
 def RegionCanEnd (world : World) (region : Identity) : Prop :=
   (∀ id root, world.roots.get id = some root → root.live = true → root.region ≠ region) ∧
   (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.region ≠ region) ∧
-  (∀ id available, world.availability.get id = some available → available.active = true → available.region ≠ region)
+  (∀ id available, world.availability.get id = some available → available.active = true → available.region ≠ region) ∧
+  (∀ address value pack, world.Resident address value → value.head = .bindings pack → pack.region ≠ region)
 
 def RegionEnds (before : World) (region : Identity) (after : World) : Prop :=
   RegionCanEnd before region ∧ after = { before with liveRegions := before.liveRegions.filter (· != region) }
@@ -390,12 +391,13 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before (some (.destroy address value.owner))
         { before with world := cleared, task := .releaseLoan id next }
   | fieldsDone {before context address authority next} : before.task = .destroyFields context address authority [] next →
-      LocalStep program before none { before with task := .finishShell address next }
+      LocalStep program before none { before with task := .finishShell address authority next }
   | fieldNext {before context address authority field fields next} :
       before.task = .destroyFields context address authority (field :: fields) next →
       LocalStep program before none { before with task := .destroy context (address.child field) authority (.destroyFields context address authority fields next) }
-  | shellDone {before address next value after} : before.task = .finishShell address next →
+  | shellDone {before address authority next value after} : before.task = .finishShell address authority next →
       before.world.Stores address value → (∀ field ∈ value.fields, field = none) →
+      Permitted before.world authority .owned address →
       before.world.write address none = some after →
       LocalStep program before (some (.destroy address value.owner)) { before with world := after, task := next }
   | retire {before id next after} : before.task = .retire id next → Retires before.world id after →

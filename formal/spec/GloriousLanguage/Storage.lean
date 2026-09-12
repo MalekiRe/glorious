@@ -496,7 +496,7 @@ inductive Acquires (program : Program) : World → Authority → Bool → Addres
 inductive Borrows (program : Program) :
     World → Authority → Mutability → Identity → Address → Address → World → Prop where
   | borrow {before authority mode region referent destination value after parent} :
-      before.Stores referent value →
+      before.Stores referent value → AddressType program before referent value.type →
       (mode = .shared → value.Initialized) → region ∈ before.liveRegions →
       Addressable program ⟨[],[],0,default,false⟩ value.type →
       Permitted before authority (if mode = .shared then .shared else .unique) referent →
@@ -538,7 +538,9 @@ def MayDispose (program : Program) (value : Value) : Prop :=
     (∀ hook, DropHook program resident.type (some hook) → resident.Initialized)
 
 def CanEndStorage (world : World) (rootId : Identity) : Prop :=
-  ∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ≠ rootId
+  (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ≠ rootId) ∧
+  (∀ id available, world.availability.get id = some available → available.active = true →
+    ∀ place ∈ available.reserved, place.address.root ≠ rootId)
 
 inductive Retires : World → Identity → World → Prop where
   | vacant {before id root} : before.roots.get id = some root → root.live = true → root.value = none →

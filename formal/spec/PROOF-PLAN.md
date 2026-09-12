@@ -93,6 +93,35 @@ remain part of the same unfinished full control-state invariant.
 
 ## 2. Source and normative adequacy
 
+Storage creation and teardown now compose through the real cleanup steps.
+`AllocationPreservation` proves fresh empty storage preserves all world facts
+and typing. `BorrowPreservation` proves the new handle, changed enclosing
+aggregates and the full parent/alias graph stay valid, consuming actual
+referent-location typing from the repaired borrow producer. Invocation/pattern
+input binding consumes these results.
+
+`LifecyclePreservation` proves general nested clearing, storage retirement,
+loan ending, reservation deactivation and region closure preserve world typing.
+The proofs exposed and repaired missing lifetime guards for active reservations
+and resident binding packs. Buffer release now uses that same region-closure
+relation, and shell cleanup retains and rechecks its access authority.
+`CleanupPreservation` derives `Step.cleanup_worldTyped` for all actual cleanup
+task transitions, including cancellation and destructor-handle creation, and
+lifts it over cleanup run segments. This does not prove progress, completion,
+resource discharge or arbitrary destructor-body execution: those still require
+the full invocation/frame/control-state invariant, including generic drop-hook
+admission. Neither an admissible post-state nor resource admission supplies
+these storage-preservation conclusions.
+
+The immutable declaration admission now excludes literal execution identities
+through its complete semantic term projection, including captures, defaults
+and invocation contracts. `InstantiationEquivariance` consumes that correction
+to prove kinded substitution, nominal constructor fields and callable capture
+fields commute with runtime-region relocation. Full snapshot value typing is
+still open: quantified entailment requires a supported permutation action,
+and the sealed environment ledger and external-referent lifetime contracts
+need coherent runtime instantiation and control support.
+
 The scalar producer boundary now has general integer-operation totality and
 result-range proofs in `ScalarPreservation`: every supported integer arity
 produces a valid result or an explicit fault. Scalar result validity follows

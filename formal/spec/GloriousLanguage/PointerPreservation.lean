@@ -102,8 +102,9 @@ theorem BulkMove.pointer_origin {pointer : RawPointer} {before after : World} {s
 theorem ReleasesBuffer.pointer_origin {pointer released : RawPointer} {program : Program} {before after : World} {domain : Identity}
     (origin : pointer.Origin before) (release : ReleasesBuffer program before released domain after) : pointer.Origin after := by
   cases release with
-  | release _ _ _ _ _ _ _ _ _ _ _ _ written retired =>
+  | release _ _ _ _ _ _ _ _ _ _ _ _ written retired closed =>
       have coherent := (origin.write written).retire retired
+      obtain ⟨_,rfl⟩ := closed
       exact coherent
 
 theorem ReallocatesBuffer.origin {program : Program} {before after : World} {old result : RawPointer}

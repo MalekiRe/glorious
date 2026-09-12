@@ -39,7 +39,7 @@ theorem Program.Constructor.variant_unique {program : Program} {id : DeclId}
     (Or.inr (Or.inl ⟨data,right,⟨b.1,b.2.1,rfl⟩,rfl⟩)) (a.2.2.trans b.2.2.symm)
   have member : Definition.data data ∈ program.declarations :=
     List.mem_of_find?_eq_some (Program.data_lookup a.1)
-  have distinct := (valid.2.2.2.2.1 _ member).2.1
+  have distinct := (valid.2.2.2.2.1 _ member).2.2.1
   obtain ⟨i,hi,atLeft⟩ := List.mem_iff_getElem.mp a.2.1
   obtain ⟨j,hj,atRight⟩ := List.mem_iff_getElem.mp b.2.1
   have nameEq := congrArg Header.name headerEq

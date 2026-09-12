@@ -1,3 +1,5 @@
 import GloriousLanguage.Checks
 import GloriousLanguage.ResumptionPreservation
 import GloriousLanguage.ScalarPreservation
+import GloriousLanguage.CleanupPreservation
+import GloriousLanguage.InstantiationEquivariance

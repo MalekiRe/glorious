@@ -122,6 +122,17 @@ inductive Occurs : Term → Term → Prop where
   | here {term} : Occurs term term
   | child {needle parent child} : child ∈ parent.children → Occurs needle child → Occurs needle parent
 
+/-- Immutable declaration templates contain lexical identities and kinded
+parameters, never identities allocated by a particular runtime execution. -/
+def Term.Lexical (term : Term) : Prop :=
+  (∀ id, ¬ Occurs (.runtimeRegion id) term) ∧
+  (∀ brand, ¬ Occurs (.runtimeBrand brand) term)
+
+theorem Term.Lexical.child {parent child : Term} (lexical : parent.Lexical)
+    (member : child ∈ parent.children) : child.Lexical :=
+  ⟨fun id occurs => lexical.1 id (.child member occurs),
+    fun brand occurs => lexical.2 brand (.child member occurs)⟩
+
 abbrev Substitution := Table Term
 
 def Term.substitute (substitution : Substitution) : Term → Term
@@ -229,6 +240,17 @@ def Constraint.mapTerms (f : Term → Term) : Constraint → Constraint
   | .quantified binders requirements =>
       .quantified (binders.map (fun binder => { binder with defaultValue := binder.defaultValue.map f }))
         (requirements.map (Constraint.mapTerms f))
+
+/-- All semantic terms of a constraint, including defaults under quantifiers.
+Declaration admission and instantiation proofs inspect this same projection. -/
+def Constraint.terms : Constraint → List Term
+  | .equal a b | .outlives a b | .typeOutlives a b | .rowIncludes a b => [a,b]
+  | .implements _ arguments _ => arguments
+  | .use type _ => [type]
+  | .callable receiver arguments result effects _ => receiver :: result :: effects :: arguments
+  | .runsIn receiver access arguments after _ => receiver :: access :: after :: arguments
+  | .quantified binders requirements =>
+      binders.flatMap (fun binder => binder.defaultValue.toList) ++ requirements.flatMap Constraint.terms
 
 def Constraint.substitute (substitution : Substitution) : Constraint → Constraint
   | .equal a b => .equal (a.substitute substitution) (b.substitute substitution)

@@ -117,7 +117,8 @@ private theorem allocateHandle {program : Language.Program}
 private theorem borrowHandle (program : Language.Program) :
     Borrows program allocated .owner .shared 0 source handle borrowed := by
   refine .borrow (before := allocated) (authority := .owner) (mode := .shared) (region := 0)
-    (referent := source) (destination := handle) (value := unitValue) (parent := none) rfl (fun _ => unitInitialized)
+    (referent := source) (destination := handle) (value := unitValue) (parent := none) rfl
+    ⟨0,.root (root := sourceRoot) (id := 0) rfl rfl⟩ (fun _ => unitInitialized)
     (by decide) .unit ?_ ⟨handleRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := handleRoot) (id := 1) rfl rfl⟩ rfl rfl
   refine ⟨⟨sourceRoot,rfl⟩,?_⟩
   intro id loan found

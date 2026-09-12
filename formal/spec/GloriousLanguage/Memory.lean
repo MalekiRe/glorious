@@ -189,13 +189,12 @@ def BulkMove (before : World) (sources destinations : List Address) (after : Wor
     Clears before sources cleared ∧ InstallsResidents cleared destinations residents after
 
 inductive ReleasesBuffer (program : Language.Program) : World → RawPointer → Identity → World → Prop where
-  | release {before pointer domain id root value cleared retired} : pointer.allocation = some id → pointer.offset = 0 →
+  | release {before pointer domain id root value cleared retired after} : pointer.allocation = some id → pointer.offset = 0 →
       pointer.domain = some domain → before.roots.get id = some root → root.live = true →
       root.home = .allocation domain → root.generation = pointer.generation → root.base = pointer.address →
       root.value = some value → value.shellLive = false → (∀ field ∈ value.fields, field = none) →
       CanEndStorage before id → before.write ⟨id,root.generation,[]⟩ none = some cleared → Retires cleared id retired →
-      ReleasesBuffer program before pointer domain
-        { retired with liveRegions := retired.liveRegions.filter (· != root.region) }
+      Execution.RegionEnds retired root.region after → ReleasesBuffer program before pointer domain after
 
 def ReallocatesBuffer (program : Language.Program) (before : World) (old : RawPointer)
     (domain : Identity) (element : Term) (newCount base : Nat) (result : RawPointer) (after : World) : Prop :=
@@ -230,9 +229,9 @@ theorem vacant_release_has_no_live_loan {program : Language.Program} {before aft
     (allocation : pointer.allocation = some id) (found : before.loans.get loan.identity = some loan)
     (live : loan.live = true) : loan.referent.root ≠ id := by
   cases released with
-  | release selected _ _ _ _ _ _ _ _ _ _ safe _ _ =>
+  | release selected _ _ _ _ _ _ _ _ _ _ safe _ _ _ =>
     have same := Option.some.inj (allocation.symm.trans selected)
     subst same
-    exact safe loan.identity loan found live
+    exact safe.1 loan.identity loan found live
 
 end Glorious.Language.Memory
