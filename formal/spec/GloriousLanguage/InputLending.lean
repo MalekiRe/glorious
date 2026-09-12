@@ -206,7 +206,7 @@ theorem BindsInputsFor.loan_retained {recipient : ClaimCustody} {footprint : Lis
   | nil => exact ⟨loan,found,rfl⟩
   | cons _ first _ ih =>
       obtain ⟨middle,selected,same⟩ := first.loan_retained valid found
-      obtain ⟨current,present,shape⟩ := ih (first.wellFormed valid) selected
+      obtain ⟨current,present,shape⟩ := ih (loan := middle) (first.wellFormed valid) selected
       exact ⟨current,present,shape.trans same⟩
 
 theorem BindsInputAt.excludes_parent_retained {recipient : ClaimCustody} {program : RuntimeProgram}
@@ -247,6 +247,31 @@ theorem BindsInputsFor.lent_parent_exclusive {recipient : ClaimCustody} {footpri
         (fun _ _ found => rest.loan_retained middleValid found)
     · exact ih middleValid member
 
+/-- Lent-input exclusivity holds in any later world that retains the binder's
+rows, up to their permission projection. The bound row the binder created for
+the input is still present and unique there. -/
+theorem BindsInputsFor.lent_parent_exclusive_retained {recipient : ClaimCustody} {footprint : List Address}
+    {program : RuntimeProgram} {before after later : World}
+    {activation scope region inputs bindings} {input : InvocationInput} {requested : Access}
+    (valid : before.WellFormed) (future : later.WellFormed)
+    (bound : BindsInputsFor program recipient activation scope region footprint before inputs bindings after)
+    (member : input ∈ inputs) (borrowed : input.access ≠ .owned)
+    (conflict : requested ≠ .shared ∨ input.access = .unique)
+    (retained : ∀ id loan, after.loans.get id = some loan →
+      ∃ current, later.loans.get id = some current ∧ current.permissionState = loan.permissionState) :
+    ¬ Permitted later input.authority requested input.storage := by
+  induction bound using Kernel.BindsInputsFor.inductionOn with
+  | nil => simp at member
+  | cons _ first rest ih =>
+    have middleValid := first.wellFormed valid
+    rcases List.mem_cons.mp member with rfl | member
+    · refine first.excludes_parent_retained valid future borrowed conflict ?_
+      intro id loan found
+      obtain ⟨middleRow,atAfter,shape1⟩ := rest.loan_retained middleValid found
+      obtain ⟨current,atLater,shape2⟩ := retained id middleRow atAfter
+      exact ⟨current,atLater,shape2.trans shape1⟩
+    · exact ih middleValid member retained
+
 theorem LendsResident.root_retained {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
     (valid : before.WellFormed)
@@ -286,8 +311,36 @@ theorem BindsInputsFor.root_retained {recipient : ClaimCustody} {footprint : Lis
     obtain ⟨changed,present,equal⟩ := ih (first.wellFormed valid) selected
     exact ⟨changed,present,equal.trans location⟩
 
-/-- Each actual binding names live storage. This fact depends on allocation
-and transfer, not on a separately assumed typing of the output environment. -/
+theorem BindsInputsAttemptFor.loan_retained {recipient : ClaimCustody} {footprint : List Address} {program : RuntimeProgram} {before after : World}
+    {activation scope region inputs bindings} {outcome : Kernel.PreparationOutcome}
+    (valid : before.WellFormed)
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    {id : Identity} {loan : Loan} (found : before.loans.get id = some loan) :
+    ∃ current, after.loans.get id = some current ∧ current.permissionState = loan.permissionState := by
+  induction bound generalizing loan with
+  | nil => exact ⟨loan,found,rfl⟩
+  | cons _ first _ ih =>
+      obtain ⟨middle,selected,same⟩ := first.loan_retained valid found
+      obtain ⟨current,present,shape⟩ := ih (first.wellFormed valid) selected
+      exact ⟨current,present,shape.trans same⟩
+  | exhausted => exact ⟨loan,found,rfl⟩
+
+/-- The ordered outcome-indexed fold retains root locations on every prefix;
+an exhausted attempt leaves its input world unchanged. -/
+theorem BindsInputsAttemptFor.root_retained {recipient : ClaimCustody} {footprint : List Address} {program : RuntimeProgram} {before after : World}
+    {activation scope region inputs bindings} {outcome : Kernel.PreparationOutcome}
+    (valid : before.WellFormed)
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    {observed : Address} {root : Root} (found : before.root observed = some root) :
+    ∃ changed, after.root observed = some changed ∧ changed.location = root.location := by
+  induction bound generalizing root with
+  | nil => exact ⟨root,found,rfl⟩
+  | cons _ first _ ih =>
+      obtain ⟨middle,selected,location⟩ := first.root_retained valid found
+      obtain ⟨changed,present,equal⟩ := ih (first.wellFormed valid) selected
+      exact ⟨changed,present,equal.trans location⟩
+  | exhausted => exact ⟨root,found,rfl⟩
+
 theorem BindsInputAt.binding_root {recipient : ClaimCustody} {program : RuntimeProgram} {before after : World}
     {activation scope region input binding}
     (bound : BindsInputAt program recipient activation scope region before input binding after)

@@ -541,6 +541,18 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
     (task : state.task = .enter caller function (.supplied inputs) false)
     (callerBounds : ∀ binding ∈ caller.environment, binding.address.root < state.world.nextRoot)
     (callerAuthorities : ∀ binding ∈ caller.environment, binding.authority.Recorded state.world.loans)
+    /- The caller's bound invocation-resource contracts contribute to its
+    structural support. For an actual entry context these repeat the bound
+    environment, so they follow from the two environment facts above. -/
+    (callerContractBounds : ∀ contract ∈ caller.resourceContracts,
+      ∀ binding ∈ contract.inputs, binding.address.root < state.world.nextRoot)
+    (callerContractAuthorities : ∀ contract ∈ caller.resourceContracts,
+      ∀ binding ∈ contract.inputs, binding.authority.Recorded state.world.loans)
+    /- Authority provenance is an admission condition on the invocation's own
+    inputs: `ReadyFor` derives it for resident, storage and allocation inputs,
+    but a storage-borrow input handed over through a shared backing authority
+    names no row for that backing, so the caller must supply it. -/
+    (inputAuthorities : ∀ input ∈ inputs, input.authority.Recorded state.world.loans)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (activationHomes : state.world.ActivationsBelow state.nextActivation)
@@ -551,26 +563,70 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
   · rw [task]
     apply RootSupport.below_append.mpr
     constructor
-    · intro root member
-      obtain ⟨binding,present,rfl⟩ := List.mem_map.mp member
-      exact callerBounds binding present
+    · rw [Context.rootSupport,RootSupport.below_append]
+      constructor
+      · intro root member
+        obtain ⟨binding,present,same⟩ := List.mem_map.mp member
+        simpa only [← same] using callerBounds binding present
+      · intro root member
+        obtain ⟨contract,selected,inner⟩ := List.mem_flatMap.mp member
+        obtain ⟨binding,present,same⟩ := List.mem_map.mp inner
+        simpa only [← same] using callerContractBounds contract selected binding present
     · rw [EntrySource.rootSupport,RootSupport.below_flatMap]
       intro input member
-      obtain ⟨value,stored,_⟩ := inputsTyped.2.2.1 input member
-      obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
-      exact RootSupport.below_cons.mpr
-        ⟨World.root_bound inputsTyped.1.1 (World.root_found found).1,RootSupport.below_nil _⟩
+      have ready := (inputsTyped.2.2.2.2 input member).1
+      have bound : input.storage.root < state.world.nextRoot := by
+        cases formal : input.formal with
+        | resident localSlot =>
+          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
+          obtain ⟨_,_,_,_,_,permitted⟩ := ready
+          unfold Permitted at permitted
+          obtain ⟨rooted,_⟩ := permitted
+          obtain ⟨root,found⟩ := rooted
+          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
+        | storage type =>
+          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
+          obtain ⟨_,_,permitted⟩ := ready
+          unfold Permitted at permitted
+          obtain ⟨rooted,_⟩ := permitted
+          obtain ⟨root,found⟩ := rooted
+          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
+        | allocation type =>
+          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
+          obtain ⟨_,_,claim,_⟩ := ready
+          obtain ⟨_,_,_,_,_,_,_,_,_,_,found,_⟩ := claim
+          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
+        | loan type =>
+          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
+          obtain ⟨_,_,identity,loan,rows,live,_,referent,_⟩ := ready
+          have located : state.world.Located input.storage := by
+            rw [← referent]
+            exact World.liveLoanLocations (valid := inputsTyped.1.1) identity loan rows live
+          obtain ⟨root,found⟩ : ∃ root, state.world.root input.storage = some root := by
+            cases located with
+            | inl packed =>
+              obtain ⟨value,stored⟩ := packed
+              obtain ⟨root,found,rest⟩ := Option.bind_eq_some_iff.mp stored
+              exact ⟨root,found⟩
+            | inr vacant => obtain ⟨root,found,rest⟩ := vacant; exact ⟨root,found⟩
+          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
+      simpa only [Kernel.InvocationInput.rootSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bound
   · simp [frames]
   · intros
     simp_all [Table.get]
   · rw [task]
     apply AuthoritySupport.recorded_append.mpr
     constructor
-    · exact AuthoritySupport.recorded_map.mpr callerAuthorities
+    · rw [Context.authoritySupport,AuthoritySupport.recorded_append]
+      constructor
+      · exact AuthoritySupport.recorded_map.mpr callerAuthorities
+      · rw [AuthoritySupport.recorded_flatMap]
+        intro contract member
+        rw [AuthoritySupport.recorded_map]
+        exact callerContractAuthorities contract member
     · rw [EntrySource.authoritySupport,AuthoritySupport.recorded_map]
       intro input member
-      obtain ⟨_,_,_,_,permission⟩ := inputsTyped.2.2.1 input member
-      exact permission.recorded
+      exact inputAuthorities input member
   · simp [frames]
   · intros
     simp_all [Table.get]

@@ -1,8 +1,10 @@
 import GloriousLanguage.ForeignPreservation
 
 /-! Authority metadata of the actual host mutation producers. Fresh roots do
-not replace an existing storage home. Existing loan records are unchanged
-except for ordinary release; new loans originate in the selected source. -/
+not replace an existing storage home. A producer may add loan rows (exterior
+allocation, buffer allocation, reference formation) or rewrite existing rows
+in place (claim release, return, loan end); it never drops a recorded row, and
+it never turns a dead row into a live one. -/
 namespace Glorious.Language
 
 open Kernel Execution Memory
@@ -29,6 +31,16 @@ theorem World.HomeExtension.of_locations {before after : World}
   have same := congrArg (Option.map Root.home) (locations id)
   simpa only [Option.map_map,Function.comp_def,Root.location] using same
 
+/-- Home extension depends only on the root table and the root frontier, so an
+administrative loan-table update transports it unchanged. -/
+theorem World.HomeExtension.congr_roots {before middle after : World}
+    (extended : before.HomeExtension middle) (roots : after.roots = middle.roots)
+    (nextRoot : after.nextRoot = middle.nextRoot) : before.HomeExtension after := by
+  refine ⟨?_,?_⟩
+  · rw [nextRoot]; exact extended.counter
+  · intro id bound
+    rw [roots]; exact extended.homes id bound
+
 structure World.AuthorityStable (before after : World) : Prop where
   homes : before.HomeExtension after
   loans : after.loans = before.loans
@@ -49,6 +61,13 @@ theorem World.write_authorityStable {before after : World} {address : Address} {
   ⟨.of_locations (Nat.le_of_eq (congrArg World.nextRoot (World.write_rest written)).symm)
       (World.write_locations written),World.write_loans written⟩
 
+/-- A row-preserving loan relation keeps every recorded authority: the actual
+claim-release, relinquishment and return producers rewrite rows in place. -/
+theorem Authority.Recorded.rewrite_loans {authority : Authority} {before after : Table Loan}
+    (records : ∀ id loan, before.get id = some loan → ∃ current, after.get id = some current)
+    (recorded : authority.Recorded before) : authority.Recorded after :=
+  recorded.transport records
+
 theorem Allocates.authorityStable {program : Program} {before after : World}
     {home region type layout mutable address}
     (allocated : Allocates program before home region type layout mutable address after) : before.AuthorityStable after := by
@@ -56,46 +75,47 @@ theorem Allocates.authorityStable {program : Program} {before after : World}
   exact ⟨⟨Nat.le_succ _,fun id bound => by
     simp only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)]⟩,rfl⟩
 
-theorem Transfers.authorityStable {program : Program} {before after : World} {authority source destination}
+theorem Transfers.authorityStable {program : RuntimeProgram} {before after : World} {authority source destination}
     (transferred : Transfers program before authority source destination after) : before.AuthorityStable after := by
   cases transferred with
-  | move _ _ _ _ _ _ clear install => exact (World.write_authorityStable clear).trans (World.write_authorityStable install)
+  | move _ _ _ _ _ _ _ clear install =>
+    exact (World.write_authorityStable clear).trans (World.write_authorityStable install)
 
-theorem Copies.authorityStable {program : Program} {before after : World} {authority source destination}
+theorem Copies.authorityStable {program : RuntimeProgram} {before after : World} {authority source destination}
     (copied : Copies program before authority source destination after) : before.AuthorityStable after := by
   cases copied with
-  | copy _ _ _ _ _ _ written =>
+  | copy _ _ _ _ _ _ _ written =>
     have stable := World.write_authorityStable written
     exact ⟨⟨stable.homes.counter,stable.homes.homes⟩,stable.loans⟩
 
-theorem Acquires.authorityStable {program : Program} {before after : World} {authority force source destination}
+theorem Acquires.authorityStable {program : RuntimeProgram} {before after : World} {authority force source destination}
     (acquired : Acquires program before authority force source destination after) : before.AuthorityStable after := by
   cases acquired with
   | explicitMove moved => exact moved.authorityStable
   | copy copied => exact copied.authorityStable
   | move _ _ _ moved => exact moved.authorityStable
 
-theorem NewValue.authorityStable {program : Program} {before after : World} {destination type head sources}
+theorem NewValue.authorityStable {program : RuntimeProgram} {before after : World} {destination type head sources}
     (constructed : NewValue program before destination type head sources after) : before.AuthorityStable after :=
   ⟨.of_locations (Nat.le_of_eq (congrArg World.nextRoot constructed.rest).symm) constructed.locations,
     by have same := congrArg World.loans constructed.rest; exact same⟩
 
-theorem FormsLoan.homeExtension {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.homeExtension {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     before.HomeExtension after := by
   apply World.HomeExtension.of_locations ?_ borrowed.locations
   cases borrowed with
-  | borrow _ _ _ _ _ _ _ _ _ written => exact (World.write_authorityStable written).homes.counter
+  | borrow _ _ _ _ _ _ _ _ _ _ written => exact (World.write_authorityStable written).homes.counter
 
-theorem FormsLoan.recorded {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.recorded {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     (saved : Authority) (recorded : saved.Recorded before.loans) : saved.Recorded after.loans := by
   cases borrowed
   exact recorded.set _ _
 
-theorem FormsLoan.loan_origin {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.loan_origin {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination} {id : Identity} {loan : Loan}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     (found : after.loans.get id = some loan) :
@@ -108,15 +128,86 @@ theorem FormsLoan.loan_origin {program : Program} {purpose : LoanPurpose} {befor
     exact Or.inr rfl
   · exact Or.inl (by simpa only [Table.get_set_other _ _ _ _ same] using found)
 
-theorem EndsLoan.homeExtension {before after : World} {id : Identity} (ended : EndsLoan before id after) :
-    before.HomeExtension after := by
+theorem EndsLoan.homeExtension {program : RuntimeProgram} {before after : World} {id : Identity}
+    (ended : EndsLoan program before id after) : before.HomeExtension after := by
   cases ended
   exact ⟨Nat.le_refl _,fun _ _ => rfl⟩
 
-theorem EndsLoan.recorded {before after : World} {id : Identity} (ended : EndsLoan before id after)
+theorem EndsLoan.recorded {program : RuntimeProgram} {before after : World} {id : Identity}
+    (ended : EndsLoan program before id after)
     (authority : Authority) (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
   cases ended
   exact recorded.set _ _
+
+/-- Ending a loan removes only that row's liveness, so a live row after the
+transition is the same row of the pre-state. -/
+theorem EndsLoan.loan_live_before {program : RuntimeProgram} {before after : World} {id : Identity}
+    (ended : EndsLoan program before id after) {key : Identity} {loan : Loan}
+    (found : after.loans.get key = some loan) (live : loan.live = true) :
+    before.loans.get key = some loan := by
+  cases ended with
+  | restored selected _ _ _ _ _ _ _ =>
+    by_cases same : key = id
+    · subst key
+      rw [Table.get_set] at found
+      cases found
+      exact absurd live (by simp)
+    · exact by simpa only [Table.get_set_other _ _ _ _ same] using found
+
+theorem ReturnsStorageLoan.homeExtension {before after : World} {id : Identity}
+    (returned : ReturnsStorageLoan before id after) : before.HomeExtension after := by
+  cases returned
+  exact ⟨Nat.le_refl _,fun _ _ => rfl⟩
+
+theorem ReturnsStorageLoan.recorded {before after : World} {id : Identity}
+    (returned : ReturnsStorageLoan before id after)
+    (authority : Authority) (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
+  cases returned
+  exact recorded.set _ _
+
+theorem ReleasesStorageClaims.homeExtension {before after : World} {place : ResolvedPlace}
+    (released : ReleasesStorageClaims before place after) : before.HomeExtension after := by
+  cases released
+  exact .of_locations (Nat.le_refl _) (by intro id; rfl)
+
+/-- The released loan table is the pre-state table with the rows of the
+retired root's closure marked dead; this is the same map as `as_liveness`,
+written with the projection shape used by lookup lemmas. -/
+theorem ReleasesStorageClaims.get_map {before after : World} {place : ResolvedPlace}
+    (released : ReleasesStorageClaims before place after) (id : Identity) :
+    after.loans.get id = (before.loans.get id).map
+      (fun loan => { loan with live := decide (loan.referent.root ≠ place.address.root) && loan.live }) := by
+  rw [released.as_liveness]
+  exact Table.get_map_values before.loans
+    (fun loan => { loan with live := decide (loan.referent.root ≠ place.address.root) && loan.live }) id
+
+theorem ReleasesStorageClaims.recorded {before after : World} {place : ResolvedPlace}
+    (released : ReleasesStorageClaims before place after) (authority : Authority)
+    (recorded : authority.Recorded before.loans) : authority.Recorded after.loans :=
+  Authority.Recorded.rewrite_loans (fun id loan found => by
+    rw [released.get_map,found]
+    exact ⟨_,rfl⟩) recorded
+
+/-- Claim release marks only the retired root's rows dead, so a live row keeps
+its pre-state referent. -/
+theorem ReleasesStorageClaims.loan_live_before {before after : World} {place : ResolvedPlace}
+    (released : ReleasesStorageClaims before place after) {id : Identity} {loan : Loan}
+    (found : after.loans.get id = some loan) (live : loan.live = true) :
+    ∃ original, before.loans.get id = some original ∧ original.live = true ∧
+      loan.referent = original.referent := by
+  rw [released.get_map] at found
+  cases original : before.loans.get id with
+  | none => rw [original] at found; exact absurd found (by simp)
+  | some row =>
+    rw [original] at found
+    simp only [Option.map_some,Option.some.injEq] at found
+    cases found
+    by_cases same : row.referent.root = place.address.root
+    · simp only [same,ne_eq,not_true_eq_false,decide_false,Bool.false_and] at live
+      exact absurd live Bool.false_ne_true
+    · have decided : decide (row.referent.root ≠ place.address.root) = true := by
+        simp only [decide_eq_true_eq]; exact same
+      exact ⟨row,rfl,(by simpa only [decided,Bool.true_and] using live),rfl⟩
 
 theorem Retires.authorityStable {before after : World} {id : Identity} (retired : Retires before id after) :
     before.AuthorityStable after := by
@@ -131,7 +222,7 @@ theorem Retires.authorityStable {before after : World} {id : Identity} (retired 
 
 theorem Execution.RegionEnds.authorityStable {before after : World} {region : Identity}
     (ended : RegionEnds before region after) : before.AuthorityStable after := by
-  rcases ended with ⟨_,_,_,rfl⟩
+  rcases ended with ⟨_,_,_,_,rfl⟩
   exact ⟨⟨Nat.le_refl _,fun _ _ => rfl⟩,rfl⟩
 
 theorem Clears.authorityStable {before after : World} {addresses : List Address}
@@ -144,134 +235,259 @@ theorem Memory.InstallsResidents.authorityStable {program : Program} {before aft
   ⟨.of_locations (Nat.le_of_eq (congrArg World.nextRoot installed.rest).symm) installed.locations,
     by have same := congrArg World.loans installed.rest; exact same⟩
 
-theorem Memory.BulkMove.authorityStable {program : Program} {before after : World} {sources destinations}
+theorem Memory.BulkMove.authorityStable {program : RuntimeProgram} {before after : World} {sources destinations}
     (moved : BulkMove program before sources destinations after) : before.AuthorityStable after := by
   obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
   exact cleared.authorityStable.trans installed.authorityStable
 
-theorem Memory.AllocatesBuffer.authorityStable {program : Program} {before after : World}
-    {domain element count base pointer}
-    (allocated : AllocatesBuffer program before domain element count base pointer after) : before.AuthorityStable after := by
+/-- Buffer allocation installs a fresh owning row for its physical extent, so
+it preserves every recorded authority and the home of every earlier root
+without claiming the loan table is literally unchanged. -/
+theorem Memory.AllocatesBuffer.homeExtension {program : Program} {custody : ClaimCustody}
+    {before after : World} {domain element count base pointer allocation}
+    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) :
+    before.HomeExtension after := by
+  cases allocated with
+  | fresh request extent =>
+    exact ⟨Nat.le_succ _,fun id bound => by
+      simp only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)]⟩
+
+theorem Memory.AllocatesBuffer.recorded {program : Program} {custody : ClaimCustody}
+    {before after : World} {domain element count base pointer allocation}
+    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after)
+    (authority : Authority) (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
   cases allocated
-  exact ⟨⟨Nat.le_succ _,fun id bound => by
-    simp only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)]⟩,rfl⟩
+  exact recorded.set _ _
 
-theorem Memory.ReleasesBuffer.authorityStable {program : Program} {before after : World} {pointer domain}
-    (released : ReleasesBuffer program before pointer domain after) : before.AuthorityStable after := by
+/-- A live buffer-allocation row is either an earlier live row or the claim on
+the freshly allocated root. -/
+theorem Memory.AllocatesBuffer.loan_live_before {program : Program} {custody : ClaimCustody}
+    {before after : World} {domain element count base pointer allocation} {id : Identity} {loan : Loan}
+    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after)
+    (found : after.loans.get id = some loan) (live : loan.live = true) :
+    (∃ original, before.loans.get id = some original ∧ original.live = true ∧
+      loan.referent = original.referent) ∨ before.nextRoot ≤ loan.referent.root := by
+  cases allocated with
+  | fresh request extent =>
+    by_cases same : id = before.nextLoan
+    · subst id
+      simp only [Table.get_set,Option.some.injEq] at found
+      cases found
+      exact Or.inr (Nat.le_refl _)
+    · exact Or.inl ⟨loan,by simpa only [Table.get_set_other _ _ _ _ same] using found,live,rfl⟩
+
+theorem Memory.ReleasesBuffer.homeExtension {program : Program} {before after : World}
+    {allocation : ResolvedPlace} {pointer : RawPointer} {domain : Identity}
+    (released : ReleasesBuffer program before allocation pointer domain after) : before.HomeExtension after := by
   cases released with
-  | release _ _ _ _ _ _ _ _ _ _ _ _ written retired ended =>
-    exact (World.write_authorityStable written).trans (retired.authorityStable.trans ended.authorityStable)
+  | release ready rootAt shellLive resources fields claims canEnd written retiredRel endedRel =>
+    exact claims.homeExtension.trans
+      ((World.write_authorityStable written).homes.trans
+        (retiredRel.authorityStable.homes.trans endedRel.authorityStable.homes))
 
-theorem Memory.ReallocatesBuffer.authorityStable {program : Program} {before after : World}
-    {old domain element count base result}
-    (reallocated : ReallocatesBuffer program before old domain element count base result after) : before.AuthorityStable after := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_,moved,released⟩ := reallocated
-  exact allocated.authorityStable.trans (moved.authorityStable.trans released.authorityStable)
+theorem Memory.ReleasesBuffer.recorded {program : Program} {before after : World}
+    {allocation : ResolvedPlace} {pointer : RawPointer} {domain : Identity}
+    (released : ReleasesBuffer program before allocation pointer domain after) (authority : Authority)
+    (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
+  cases released with
+  | release ready rootAt shellLive resources fields claims canEnd written retiredRel endedRel =>
+    exact ((World.write_authorityStable written).trans
+      (retiredRel.authorityStable.trans endedRel.authorityStable)).recorded authority
+      (claims.recorded authority recorded)
 
-theorem Memory.RawRead.authorityStable {program : Program} {before after : World} {pointer type copy destination}
-    (read : RawRead program before pointer type copy destination after) : before.AuthorityStable after := by
+/-- Buffer release only removes liveness from the retired allocation's claim. -/
+theorem Memory.ReleasesBuffer.loan_live_before {program : Program} {before after : World}
+    {allocation : ResolvedPlace} {pointer : RawPointer} {domain : Identity}
+    (released : ReleasesBuffer program before allocation pointer domain after) {id : Identity} {loan : Loan}
+    (found : after.loans.get id = some loan) (live : loan.live = true) :
+    ∃ original, before.loans.get id = some original ∧ original.live = true ∧
+      loan.referent = original.referent := by
+  cases released with
+  | release ready rootAt shellLive resources fields claims canEnd written retiredRel endedRel =>
+    rename_i unclaimed cleared retired
+    have same : after.loans = unclaimed.loans := by
+      rw [endedRel.authorityStable.loans,retiredRel.authorityStable.loans,
+        (World.write_authorityStable written).loans]
+    rw [same] at found
+    exact claims.loan_live_before found live
+
+theorem Memory.ReallocatesBuffer.homeExtension {program : RuntimeProgram} {custody : ClaimCustody}
+    {before after : World} {oldAllocation : ResolvedPlace} {old : RawPointer} {domain : Identity}
+    {element : Term} {newCount : Nat} {base : Nat} {result : RawPointer} {allocation : ResolvedPlace}
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element newCount base result
+      allocation after) : before.HomeExtension after := by
+  cases reallocated with
+  | grow ready allocatedRel movedRel releasedRel =>
+    exact allocatedRel.homeExtension.trans (movedRel.authorityStable.homes.trans releasedRel.homeExtension)
+
+theorem Memory.ReallocatesBuffer.recorded {program : RuntimeProgram} {custody : ClaimCustody}
+    {before after : World} {oldAllocation : ResolvedPlace} {old : RawPointer} {domain : Identity}
+    {element : Term} {newCount : Nat} {base : Nat} {result : RawPointer} {allocation : ResolvedPlace}
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element newCount base result
+      allocation after) (authority : Authority) (recorded : authority.Recorded before.loans) :
+    authority.Recorded after.loans := by
+  cases reallocated with
+  | grow ready allocatedRel movedRel releasedRel =>
+    exact releasedRel.recorded authority
+      (movedRel.authorityStable.recorded authority (allocatedRel.recorded authority recorded))
+
+/-- Reallocation composes buffer allocation, the physical move and the old
+allocation's release; only the fresh root's claim is new. -/
+theorem Memory.ReallocatesBuffer.loan_live_before {program : RuntimeProgram} {custody : ClaimCustody}
+    {before after : World} {oldAllocation : ResolvedPlace} {old : RawPointer} {domain : Identity}
+    {element : Term} {newCount : Nat} {base : Nat} {result : RawPointer} {allocation : ResolvedPlace}
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element newCount base result
+      allocation after) {id : Identity} {loan : Loan}
+    (found : after.loans.get id = some loan) (live : loan.live = true) :
+    (∃ original, before.loans.get id = some original ∧ original.live = true ∧
+      loan.referent = original.referent) ∨ before.nextRoot ≤ loan.referent.root := by
+  cases reallocated with
+  | grow ready allocatedRel movedRel releasedRel =>
+    obtain ⟨original,liveInMoved,originalLive,referent⟩ := releasedRel.loan_live_before found live
+    rename_i allocated moved
+    have inAllocated : allocated.loans.get id = some original := by
+      simpa only [movedRel.authorityStable.loans] using liveInMoved
+    rcases allocatedRel.loan_live_before inAllocated originalLive with earlier | fresh
+    · obtain ⟨older,olderAt,olderLive,olderReferent⟩ := earlier
+      exact Or.inl ⟨older,olderAt,olderLive,referent.trans olderReferent⟩
+    · exact Or.inr (by rw [referent]; exact fresh)
+
+theorem Memory.RawRead.authorityStable {program : RuntimeProgram} {before after : World}
+    {source : ResolvedPlace} {pointer : RawPointer} {type : Term} {copy : Bool} {destination : Address}
+    (read : RawRead program before source pointer type copy destination after) : before.AuthorityStable after := by
   cases read with
   | read _ _ _ action =>
     rcases action with ⟨_,copied⟩ | ⟨_,moved⟩
     · exact copied.authorityStable
     · exact moved.authorityStable
 
-theorem Memory.RawWrite.authorityStable {program : Program} {before after : World} {authority source pointer type}
-    (written : RawWrite program before authority source pointer type after) : before.AuthorityStable after := by
+theorem Memory.RawWrite.authorityStable {program : RuntimeProgram} {before after : World}
+    {source destination : ResolvedPlace} {pointer : RawPointer} {type : Term}
+    (written : RawWrite program before source destination pointer type after) : before.AuthorityStable after := by
   cases written with
-  | write _ _ _ _ _ moved => exact moved.authorityStable
+  | write _ _ _ _ _ _ moved => exact moved.authorityStable
 
 namespace Foreign
 
+/-- Every recorded authority of the actual host mutation survives that
+mutation. Exterior allocation and buffer allocation add rows; nothing removes
+one. -/
 theorem Mutation.recorded {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    (changed : Mutation program policy before after) (authority : Authority)
+    {action : MutationAction}
+    (changed : Mutation program policy before action after) (authority : Authority)
     (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
   cases changed with
-  | allocate _ allocated => exact allocated.authorityStable.recorded authority recorded
+  | allocate _ _ allocated => exact allocated.authorityStable.recorded authority recorded
   | scalar _ stored => exact stored.2.2.authorityStable.recorded authority recorded
   | unit _ stored => exact stored.2.authorityStable.recorded authority recorded
   | pointer _ _ _ _ stored => exact stored.2.authorityStable.recorded authority recorded
   | aggregate _ _ _ _ constructed => exact constructed.authorityStable.recorded authority recorded
   | acquire _ _ acquired => exact acquired.authorityStable.recorded authority recorded
   | borrow _ _ borrowed => exact borrowed.recorded authority recorded
-  | allocateBuffer _ allocated => exact allocated.authorityStable.recorded authority recorded
-  | reallocateBuffer _ _ reallocated => exact reallocated.authorityStable.recorded authority recorded
-  | releaseBuffer _ _ released => exact released.authorityStable.recorded authority recorded
-  | rawRead _ _ read => exact read.authorityStable.recorded authority recorded
-  | rawWrite _ _ written => exact written.authorityStable.recorded authority recorded
-  | rawBorrow _ _ borrowed => cases borrowed with | borrow _ _ _ _ formed => exact formed.recorded authority recorded
+  | allocateBuffer _ allocated => exact allocated.recorded authority recorded
+  | reallocateBuffer _ _ _ reallocated => exact reallocated.recorded authority recorded
+  | releaseBuffer _ _ _ released => exact released.recorded authority recorded
+  | rawRead _ _ _ read => exact read.authorityStable.recorded authority recorded
+  | rawWrite _ _ _ written => exact written.authorityStable.recorded authority recorded
+  | rawBorrow _ _ _ borrowed => cases borrowed with | borrow _ _ _ _ formed => exact formed.recorded authority recorded
   | bulkMove _ _ moved => exact moved.authorityStable.recorded authority recorded
   | retire _ _ retired => exact retired.authorityStable.recorded authority recorded
   | endLoan ended => exact ended.recorded authority recorded
+  | allocateExterior _ _ allocated =>
+      exact (allocated.authorityStable.recorded authority recorded).set _ _
 
 theorem Mutation.homeExtension {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    (changed : Mutation program policy before after) : before.HomeExtension after := by
+    {action : MutationAction}
+    (changed : Mutation program policy before action after) : before.HomeExtension after := by
   cases changed with
-  | allocate _ allocated => exact allocated.authorityStable.homes
+  | allocate _ _ allocated => exact allocated.authorityStable.homes
   | scalar _ stored => exact stored.2.2.authorityStable.homes
   | unit _ stored => exact stored.2.authorityStable.homes
   | pointer _ _ _ _ stored => exact stored.2.authorityStable.homes
   | aggregate _ _ _ _ constructed => exact constructed.authorityStable.homes
   | acquire _ _ acquired => exact acquired.authorityStable.homes
   | borrow _ _ borrowed => exact borrowed.homeExtension
-  | allocateBuffer _ allocated => exact allocated.authorityStable.homes
-  | reallocateBuffer _ _ reallocated => exact reallocated.authorityStable.homes
-  | releaseBuffer _ _ released => exact released.authorityStable.homes
-  | rawRead _ _ read => exact read.authorityStable.homes
-  | rawWrite _ _ written => exact written.authorityStable.homes
-  | rawBorrow _ _ borrowed => cases borrowed with | borrow _ _ _ _ formed => exact formed.homeExtension
+  | allocateBuffer _ allocated => exact allocated.homeExtension
+  | reallocateBuffer _ _ _ reallocated => exact reallocated.homeExtension
+  | releaseBuffer _ _ _ released => exact released.homeExtension
+  | rawRead _ _ _ read => exact read.authorityStable.homes
+  | rawWrite _ _ _ written => exact written.authorityStable.homes
+  | rawBorrow _ _ _ borrowed => cases borrowed with | borrow _ _ _ _ formed => exact formed.homeExtension
   | bulkMove _ _ moved => exact moved.authorityStable.homes
   | retire _ _ retired => exact retired.authorityStable.homes
   | endLoan ended => exact ended.homeExtension
+  | allocateExterior _ _ allocated => exact (allocated.authorityStable.homes).congr_roots rfl rfl
 
-theorem Mutations.homeExtension {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    (changed : Mutations program policy before after) : before.HomeExtension after := by
+theorem Mutations.homeExtension {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World} {produced actions}
+    (changed : Mutations program custody policy before produced actions after) : before.HomeExtension after := by
   induction changed with
   | refl => exact .refl _
   | cons first _ last => exact first.homeExtension.trans last
 
+/-- A live loan after an actual host mutation traces to a pre-state live loan of
+the same referent, a place published by the same mutation's authority policy, a
+raw pointer origin, or a claim on a root the mutation itself freshly allocated.
+Liveness-removing producers (loan end, claim release) introduce no live row. -/
 theorem Mutation.liveLoan_origin {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    {id : Identity} {loan : Loan} (changed : Mutation program policy before after)
+    {action : MutationAction} {id : Identity} {loan : Loan} (changed : Mutation program policy before action after)
     (found : after.loans.get id = some loan) (live : loan.live = true) :
-    before.loans.get id = some loan ∨
+    (∃ original, before.loans.get id = some original ∧ original.live = true ∧
+        loan.referent = original.referent) ∨
       (∃ authority, policy.place before ⟨loan.referent,authority⟩) ∨
-      ∃ pointer type, PointsTo program.declarations before pointer loan.referent type := by
-  have unchanged (stable : before.AuthorityStable after) : before.loans.get id = some loan := by
-    simpa only [stable.loans] using found
+      (∃ pointer type, PointsTo program.declarations before pointer loan.referent type) ∨
+      before.nextRoot ≤ loan.referent.root := by
+  have kept (stable : before.AuthorityStable after) :
+      before.loans.get id = some loan := by simpa only [stable.loans] using found
+  have recorded (stable : before.AuthorityStable after) :
+      ∃ original, before.loans.get id = some original ∧ original.live = true ∧
+        loan.referent = original.referent := ⟨loan,kept stable,live,rfl⟩
   cases changed with
-  | allocate _ allocated => exact Or.inl (unchanged allocated.authorityStable)
-  | scalar _ stored => exact Or.inl (unchanged stored.2.2.authorityStable)
-  | unit _ stored => exact Or.inl (unchanged stored.2.authorityStable)
-  | pointer _ _ _ _ stored => exact Or.inl (unchanged stored.2.authorityStable)
-  | aggregate _ _ _ _ constructed => exact Or.inl (unchanged constructed.authorityStable)
-  | acquire _ _ acquired => exact Or.inl (unchanged acquired.authorityStable)
-  | allocateBuffer _ allocated => exact Or.inl (unchanged allocated.authorityStable)
-  | reallocateBuffer _ _ reallocated => exact Or.inl (unchanged reallocated.authorityStable)
-  | releaseBuffer _ _ released => exact Or.inl (unchanged released.authorityStable)
-  | rawRead _ _ read => exact Or.inl (unchanged read.authorityStable)
-  | rawWrite _ _ written => exact Or.inl (unchanged written.authorityStable)
-  | bulkMove _ _ moved => exact Or.inl (unchanged moved.authorityStable)
-  | retire _ _ retired => exact Or.inl (unchanged retired.authorityStable)
+  | allocate _ _ allocated => exact Or.inl (recorded allocated.authorityStable)
+  | scalar _ stored => exact Or.inl (recorded stored.2.2.authorityStable)
+  | unit _ stored => exact Or.inl (recorded stored.2.authorityStable)
+  | pointer _ _ _ _ stored => exact Or.inl (recorded stored.2.authorityStable)
+  | aggregate _ _ _ _ constructed => exact Or.inl (recorded constructed.authorityStable)
+  | acquire _ _ acquired => exact Or.inl (recorded acquired.authorityStable)
+  | rawRead _ _ _ read => exact Or.inl (recorded read.authorityStable)
+  | rawWrite _ _ _ written => exact Or.inl (recorded written.authorityStable)
+  | bulkMove _ _ moved => exact Or.inl (recorded moved.authorityStable)
+  | retire _ _ retired => exact Or.inl (recorded retired.authorityStable)
   | borrow accessible _ borrowed =>
     rcases borrowed.loan_origin found with original | referent
-    · exact Or.inl original
+    · exact Or.inl ⟨loan,original,live,rfl⟩
     · exact Or.inr (Or.inl ⟨_,by simpa only [referent] using accessible⟩)
-  | rawBorrow _ _ borrowed =>
+  | rawBorrow _ _ _ borrowed =>
     cases borrowed with
     | borrow points _ _ _ borrowed =>
       rcases borrowed.loan_origin found with original | referent
-      · exact Or.inl original
-      · exact Or.inr (Or.inr ⟨_,_,by simpa only [referent] using points⟩)
-  | endLoan ended =>
-    rename_i key
-    cases ended with
-    | restored original _ _ _ _ =>
-      by_cases same : id = key
+      · exact Or.inl ⟨loan,original,live,rfl⟩
+      · exact Or.inr (Or.inr (Or.inl ⟨_,_,by simpa only [referent] using points⟩))
+  | allocateBuffer _ allocated =>
+    rcases allocated.loan_live_before found live with earlier | fresh
+    · exact Or.inl earlier
+    · exact Or.inr (Or.inr (Or.inr fresh))
+  | allocateExterior _ _ allocated =>
+    cases allocated with
+    | fresh request extent =>
+      by_cases same : id = before.nextLoan
       · subst id
         simp only [Table.get_set,Option.some.injEq] at found
-        subst loan
-        cases live
-      · exact Or.inl (by simpa only [Table.get_set_other _ _ _ _ same] using found)
+        cases found
+        exact Or.inr (Or.inr (Or.inr (Nat.le_refl _)))
+      · refine Or.inl ?_
+        rw [Table.get_set_other _ _ _ _ same] at found
+        exact ⟨loan,(by simpa only [(Allocates.authorityStable (Allocates.fresh request extent)).loans]
+          using found),live,rfl⟩
+  | reallocateBuffer _ _ _ reallocated =>
+    rcases reallocated.loan_live_before found live with earlier | fresh
+    · exact Or.inl earlier
+    · exact Or.inr (Or.inr (Or.inr fresh))
+  | releaseBuffer _ _ _ released =>
+    obtain ⟨original,found',originalLive,referent⟩ := released.loan_live_before found live
+    exact Or.inl ⟨original,found',originalLive,referent⟩
+  | endLoan ended =>
+    exact Or.inl ⟨loan,ended.loan_live_before found live,live,rfl⟩
 
 end Foreign
 end Glorious.Language

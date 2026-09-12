@@ -1,4 +1,5 @@
 import GloriousLanguage.BorrowPreservation
+import GloriousLanguage.LifecyclePreservation
 import GloriousLanguage.RehomePreservation
 
 /-! Preservation for the actual machine cleanup tasks, including cancellation,
@@ -18,15 +19,24 @@ inductive CleanupWorldChange (program : Kernel.Program) : World → World → Pr
   | unchanged {world} : CleanupWorldChange program world world
   | clear {before after address authority} : Permitted before authority .owned address →
       before.write address none = some after → CleanupWorldChange program before after
+  /-- Returning storage-loan custody precedes the actual shell write; the
+  write is performed on the relinquished world, not on the old loan table. -/
+  | relinquished {before relinquished after address authority custody} :
+      Permitted before authority .owned address →
+      RelinquishesCustody before custody relinquished →
+      relinquished.write address none = some after → CleanupWorldChange program before after
   | transfer {before after source destination authority} :
-      Transfers program.declarations before authority source destination after → CleanupWorldChange program before after
+      Transfers program before authority source destination after → CleanupWorldChange program before after
+  /-- Destructor entry forms the actual destructor lease, not a source borrow. -/
   | hook {before allocated after context type handle authority referent} :
       Temporary program context (.reference .unique (.runtimeRegion context.region) type) before handle allocated →
-      Borrows program.declarations allocated authority .unique context.region referent handle after →
+      FormsLoan program .destructor allocated authority .unique context.region referent handle after →
       CleanupWorldChange program before after
   | retire {before after id} : Retires before id after → CleanupWorldChange program before after
   | region {before after id} : RegionEnds before id after → CleanupWorldChange program before after
-  | loan {before after id} : EndsLoan before id after → CleanupWorldChange program before after
+  | loan {before after id} : EndsLoan program before id after → CleanupWorldChange program before after
+  | storageReturn {before after id} : ReturnsStorageLoan before id after →
+      CleanupWorldChange program before after
   | restore {before homes} : CleanupWorldChange program before (restoreRoots before homes)
   | reservation {before cleared address authority id available} : before.availability.get id = some available →
       Permitted before authority .owned address → before.write address none = some cleared →
@@ -46,15 +56,20 @@ theorem LocalStep.cleanup_change {program : Kernel.Program} {before after : Stat
   case destroyReference => apply CleanupWorldChange.clear <;> assumption
   case fieldsDone => exact .unchanged
   case fieldNext => exact .unchanged
-  case shellDone => apply CleanupWorldChange.clear <;> assumption
+  case shellDone permission relinquished written =>
+    exact .relinquished permission relinquished written
   case retire retired => exact .retire retired
   case regionEnd closed => exact .region closed
   case loanEnd closed => exact .loan closed
   case loanAlreadyEnded => exact .unchanged
   case releaseReferenced => exact .unchanged
+  case releaseResourceHeld => exact .unchanged
   case releaseBorrowed => exact .unchanged
+  case releaseOwnedClaim => exact .unchanged
+  case releaseStorageRetained => exact .unchanged
   case releaseRoot => apply CleanupWorldChange.loan; assumption
   case releaseChild => apply CleanupWorldChange.loan; assumption
+  case releaseStorageReturned returned => exact .storageReturn returned
   case releaseAlreadyEnded => exact .unchanged
 
 theorem Step.cleanup_change {program : Kernel.Program} {host : Foreign.Model}
@@ -79,11 +94,14 @@ theorem CleanupWorldChange.worldTyped {program : Kernel.Program} {before after :
   cases changed with
   | unchanged => exact typed
   | clear permission written => exact World.clear_worldTyped typed permission written
+  | relinquished permission relinquished written =>
+      exact World.clear_worldTyped (relinquished.worldTyped typed) (relinquished.permitted permission) written
   | transfer moved => exact moved.worldTyped valid inventory typed
   | hook allocated borrowed => exact borrowed.worldTyped valid inventory (allocated.worldTyped typed)
   | retire retired => exact retired.worldTyped typed
   | region closed => exact closed.worldTyped typed
   | loan closed => exact closed.worldTyped typed
+  | storageReturn returned => exact returned.worldTyped typed
   | restore => exact restoreRoots.worldTyped typed
   | reservation found permission written =>
       have cleared := World.clear_worldTyped typed permission written

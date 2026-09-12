@@ -380,6 +380,21 @@ theorem RelinquishesCustody.permitted {before after : World} {custody : ClaimCus
   permission.permissionState_transport (by cases relinquished; rfl)
     (fun _ _ => relinquished.retained) (fun _ _ => relinquished.reflected)
 
+/-- The reflected direction: a permission in the relinquished world was already
+present. Custody administration and the return request move with the loan, never
+the loan's permission geometry. -/
+theorem RelinquishesCustody.permitted_reflected {before after : World} {custody : ClaimCustody}
+    {authority : Authority} {access : Access} {address : Address}
+    (relinquished : RelinquishesCustody before custody after) (permission : Permitted after authority access address) :
+    Permitted before authority access address :=
+  permission.permissionState_transport (by cases relinquished; rfl)
+    (fun _ _ found => by
+      obtain ⟨witness,selected,shape⟩ := relinquished.reflected found
+      exact ⟨witness,selected,shape.symm⟩)
+    (fun _ _ found => by
+      obtain ⟨witness,selected,shape⟩ := relinquished.retained found
+      exact ⟨witness,selected,shape.symm⟩)
+
 theorem RequestsStorageReturn.retained {before after : World} {requested : Identity}
     (request : RequestsStorageReturn before requested after)
     {identity : Identity} {loan : Loan} (selected : before.loans.get identity = some loan) :
