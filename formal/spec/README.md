@@ -270,10 +270,10 @@ inventory rather than accepting a separately supplied unrelated AST.
 Use the pinned toolchain to build the changed proof targets by name, for example
 the current recovered checkpoint
 
-`lake build GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.LabelExecution GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
+`lake build GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 
-which passes 212 jobs (the same list without the two compatibility modules
-passes 210). Warnings are errors and implicit identifier creation is
+which passes 215 jobs (the same list without the two compatibility modules
+passes 213). Warnings are errors and implicit identifier creation is
 disabled. The default aggregate also includes the preserved `Checks`; examples
 are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed

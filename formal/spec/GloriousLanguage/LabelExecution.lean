@@ -1,6 +1,7 @@
 import GloriousLanguage.Contracts
 import GloriousLanguage.ControlContextTyping
 import GloriousLanguage.PatternContextTyping
+import GloriousLanguage.SourceAddress
 
 /-! A label request is consumed by actual leave or actual resource exhaustion.
 The selected delimiter retains its source result derivation. Payload storage
@@ -84,8 +85,9 @@ theorem Typing.ContextBindingsTyped.label_frame_step {program : Kernel.Program} 
 namespace Execution
 
 /-- Successful leave preserves the exact resident and obtains its owned home
-through actual Protect. The positive before-address fact supplies physical
-payload typing; no post-state type, transfer or allocation is an input. -/
+through actual Protect. The source place derivation, its runtime location and
+the actual payload resident supply the physical payload type; no post-state
+type, transfer, allocation or requested address type is an input. -/
 theorem ControlStep.leave_source_result {program : Kernel.Program} {before after : State}
     {caller target : Context} {brand region : Identity} {argument : ResolvedPlace}
     {inner outer : List Frame} {type actual : Term}
@@ -94,13 +96,19 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     (pending : before.task = .leave caller brand argument)
     (route : LabelRoute before.frames brand inner target region type outer)
     (label : Typing.InstalledLabelTyped program before.world target brand region type)
-    (physical : AddressType program.declarations before.world argument.address actual)
+    {placeSource : Typing.Context} {place : Kernel.Place} {writable : Bool}
+    (bindings : Typing.ContextBindingsTyped program before.world placeSource caller)
+    (conversion : Typing.SourceConversionClosed program.declarations placeSource.static caller)
+    (representation : Typing.TargetRepresentation program before.world caller)
+    (argumentTyped : Typing.PlaceType program.declarations placeSource place actual writable)
+    (resolved : Kernel.ResolvesPlace before.world caller.environment place argument.address argument.authority)
     (step : ControlStep program before none after) :
     ∃ kept value roots source result,
       after.frames = outer ∧
       after.task = .cleanup caller roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield target kept)) ∧
       before.world.Stores argument.address value ∧ after.world.Stores kept value ∧ value.Initialized ∧
-      Typing.ValueTyped program after.world value ∧ value.type = actual ∧
+      Typing.ValueTyped program after.world value ∧
+      DefinitionallyEqual program.declarations caller.static value.type (caller.term actual) ∧
       value.ResourcesAccessible program after.world .owned ∧ Permitted after.world .owner .owned kept ∧
       Typing.ContextBindingsTyped program after.world source target ∧ result.Scoped source.static.scope ∧
       target.term result = type ∧ AbandonedRoots after.world inner [kept.root] roots ∧
@@ -111,14 +119,15 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     obtain ⟨rfl,rfl,rfl,rfl,rfl⟩ := actualRoute.functional route
     have original := handoff
     obtain ⟨value,_,stored,_,_⟩ := original
-    obtain ⟨offset,located⟩ := physical
-    have valueType := located.stored_type valid inventory typed.roots stored
-    obtain ⟨source,lexical,sourceRegion,result,body,contextTyped,sourceTyped,closed,_⟩ := label
+    obtain ⟨source,lexical,sourceRegion,result,body,contextTyped,sourceTyped,closedLabel,_⟩ := label
+    have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed conversion
+      representation bindings argumentTyped resolved stored
+    have valueAgrees := Typing.AddressTyped.resident_type valid inventory typed derived stored
     have movedTyped := handoff.worldTyped valid inventory typed
     obtain ⟨kept,initialized,resources,permission⟩ := handoff.handed_off typed.1 stored
     exact ⟨_,value,_,source,result,rfl,rfl,stored,kept,initialized,
-      World.stores_typed movedTyped.roots kept,valueType,resources,permission,
-      handoff.contextBindingsTyped typed contextTyped,sourceTyped.result_scoped,closed,selected,allowed⟩
+      World.stores_typed movedTyped.roots kept,valueAgrees,resources,permission,
+      handoff.contextBindingsTyped typed contextTyped,sourceTyped.result_scoped,closedLabel,selected,allowed⟩
 
 end Execution
 
@@ -147,11 +156,11 @@ theorem ObservationAt.label_caller_step {program : Kernel.Program} {host : Forei
   | some event => exact .visible actual .refl
 
 /-- General source-compatible label consumption. Source PlaceType/Subtype are
-the actual single-argument derivation. The explicit before AddressType is its
-physical-source preflight; deriving it for every arbitrary source projection
-and interpreting source assumptions is a separate open typing obligation.
-This theorem does not assume a successful Protect, a typed output, or a
-runtime Subtype after erasing the source assumptions. -/
+the actual single-argument derivation; the physical payload typing is derived
+from the source place through the actual resolution, the world target
+representation and the runtime closing law. This theorem does not assume a
+successful Protect, a typed output, a requested address type, or a runtime
+Subtype after erasing the source assumptions. -/
 theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
     {caller target : Execution.Context} {brand region : Identity} {argument : ResolvedPlace}
     {inner outer : List Frame} {type actual expected : Term} {source : Typing.Context}
@@ -162,10 +171,11 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     (route : LabelRoute state.frames brand inner target region type outer)
     (label : Typing.InstalledLabelTyped program state.world target brand region type)
     (sourceTyped : Typing.ContextBindingsTyped program state.world source caller)
+    (conversion : Typing.SourceConversionClosed program.declarations source.static caller)
+    (representation : Typing.TargetRepresentation program state.world caller)
     (argumentTyped : Typing.PlaceType program.declarations source place actual writable)
     (subtype : Subtype program.declarations source.static actual expected)
     (resolved : ResolvesPlace state.world caller.environment place argument.address argument.authority)
-    (physical : AddressType program.declarations state.world argument.address (caller.term actual))
     (selectedType : caller.term expected = type)
     (callerPermission : boundary.LabelCallerPermission program state brand argument) :
     ∃ after event, ControlStep program state event after ∧ Typing.WorldTyped program after.world ∧
@@ -177,7 +187,8 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
         after.task = .cleanup caller roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield target kept)) ∧
         ResolvesPlace state.world caller.environment place argument.address argument.authority ∧
         state.world.Stores argument.address value ∧ after.world.Stores kept value ∧ value.Initialized ∧
-        Typing.ValueTyped program after.world value ∧ value.type = caller.term actual ∧
+        Typing.ValueTyped program after.world value ∧
+        DefinitionallyEqual program.declarations caller.static value.type (caller.term actual) ∧
         Subtype program.declarations source.static actual expected ∧ caller.term expected = target.term result ∧
         value.ResourcesAccessible program after.world .owned ∧ Permitted after.world .owner .owned kept ∧
         Typing.ContextBindingsTyped program after.world targetSource target ∧ result.Scoped targetSource.static.scope ∧
@@ -199,7 +210,8 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
   · right
     obtain ⟨kept,value,roots,targetSource,result,frames,task,original,stored,initialized,valueTyped,valueType,
       resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩ :=
-      step.leave_source_result valid inventory typed pending route label physical
+      step.leave_source_result valid inventory typed pending route label sourceTyped conversion
+        representation argumentTyped resolved
     exact ⟨kept,value,roots,targetSource,result,rfl,frames,task,resolved,original,stored,initialized,valueTyped,valueType,
       subtype,selectedType.trans closed.symm,resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩
   · exact Or.inl fatal

@@ -163,12 +163,29 @@ successful protection. `LabelReady` retains the actual first matching
 before-world and the actual fatal-resource event. `LabelRoute.functional` fixes
 the selected delimiter so source result evidence for a later same-brand label
 cannot be substituted. `ControlStep.leave_source_result` and
-`MayTransfer.source_execution` keep source `PlaceType`/`Subtype`, the explicit
-before `AddressType` of the resolved payload and the caller permission contract
-as hypotheses and return them as source evidence in the conclusion; no runtime
-equality or `Subtype` after erasing source assumptions is invented, and
+`MayTransfer.source_execution` no longer assume the payload's before
+`AddressType`. The located declared type is derived from the source
+interpretation — the source place's `PlaceType`, its actual `ResolvesPlace`
+resolution, the caller's `ContextBindingsTyped` and the world
+`TargetRepresentation` obligation — and the conclusion relates the returned
+value's type to the caller's translated label type by `DefinitionallyEqual`
+(the definitional theory over the runtime image), so no requested address type,
+runtime equality or post-erasure `Subtype` is invented, and
 `ObservationAt.label_caller_step` extends the same real run with the caller
-event.
+event. The runtime closing law `Typing.SourceConversionClosed` is a stated
+premise, not a derived theorem: only its definitional fragment (structural
+steps, rows and alias expansion, including
+`ScopeInstantiation.definitionalStep_alias`) is proved, the general
+`Equal`-to-runtime-image derivation and the projection transport
+`Typing.ProjectionStepConversion` remain recorded obligations, and the bridge
+consumes the law without weakening it. `GloriousLanguage.ScopedAtomTransport`
+carries the scoped-atom homomorphism transport
+(`ScopeInstantiation.map_kinding`, `.substituted_values`,
+`.rowEquivalent_term`), `SourceInterpretation` records the interpretation
+vocabulary, and `SourceAddress` supplies the projection-to-address bridge
+(`Typing.ResolvesProjections.addressTyped`,
+`Typing.ContextBindingsTyped.place_addressTyped`,
+`Typing.AddressTyped.resident_type`, `Typing.ValueTyped.reference_referent`).
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

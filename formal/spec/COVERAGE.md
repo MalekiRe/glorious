@@ -247,6 +247,27 @@ source-only tree; the same base without this chunk passes the recovered targets
 with the identical whole-library failure set (thirteen modules, unchanged error
 text).
 
+The source-interpretation release adds three modules
+(`ScopedAtomTransport`, `SourceInterpretation`, `SourceAddress`) and migrates
+`LabelExecution`'s label-argument consumer. The migration deletes the assumed
+payload `AddressType`: the located declared type is derived from the source
+place (`PlaceType` plus its actual `ResolvesPlace` resolution), the caller's
+`ContextBindingsTyped` and the world `TargetRepresentation`, and the value type
+is related to the caller's translated label type by `DefinitionallyEqual`
+rather than syntactic identity. Two semantic premises are stated, not derived:
+`Typing.SourceConversionClosed`, whose definitional fragment (structural steps,
+rows and alias expansion, including
+`ScopeInstantiation.definitionalStep_alias`) is proved while the general
+runtime-image derivation and the projection transport
+`Typing.ProjectionStepConversion` remain recorded obligations, and
+`Typing.TargetRepresentation`, which requires that every located declared type
+is a structural head and that every source field step has its actual physical
+field offset. Neither premise is weakened by the bridge, no declaration of the
+previous tree is dropped, and no other module consumes the two changed
+theorems. The composed strict gate including `SourceAddress` and `LabelExecution`
+passes 215 jobs from a fresh source-only tree (213 without the two compatibility
+modules).
+
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody
