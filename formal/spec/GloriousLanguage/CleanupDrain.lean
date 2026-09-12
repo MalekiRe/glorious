@@ -1327,3 +1327,25 @@ theorem Permitted.of_loans {world after : World} {requested : Access} {address :
     permission.2 id loan (shrink id loan found live) live overlap conflict⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- The ownership permission survives the custody's pending-return restamp: the
+restamp rewrites the loan table only, and a restamped row keeps the live flag,
+referent and mode the permission's obligation is about, with the root existence
+re-read at the restamped world. -/
+theorem Permitted.of_requestReturns {world : World} {custody : ClaimCustody} {requested : Access}
+    {address : Address} (permission : Permitted world .owner requested address)
+    (existence : ∃ root, (world.RequestReturns custody).root address = some root) :
+    Permitted (world.RequestReturns custody) .owner requested address :=
+  ⟨existence,fun id loan found live overlap conflict => by
+    rw [World.RequestReturns.get_eq] at found
+    obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+    rw [← same,World.restamp_live] at live
+    rw [← same,World.restamp_referent] at overlap
+    rw [← same,World.restamp_mode] at conflict
+    exact permission.2 id original originalFound live overlap conflict⟩
+
+end Glorious.Language.Execution
