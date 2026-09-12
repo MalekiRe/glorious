@@ -1,3 +1,5 @@
+import GloriousLanguage.BufferSlotConstruction
+import GloriousLanguage.BulkMoveConstruction
 import GloriousLanguage.CleanupDestruction
 import GloriousLanguage.TransferPreservation
 import GloriousLanguage.ForeignRootFraming
@@ -1116,5 +1118,21 @@ theorem World.Stores.write_child_none {before after : World} {address : Address}
   · exact List.getElem?_set_self bound
   · intro other different
     exact List.getElem?_set_ne (Ne.symm different)
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- A clear at one child slot leaves another child slot of the same parent
+vacant: sibling slots do not overlap, so the write is apart from the observed one
+and vacancy survives. This is what lets a field loop carry the vacancies it has
+already produced across the later children's clears. -/
+theorem World.Vacant.write_child_other {before after : World} {address : Address} {index other : Nat}
+    {value : Option Value} (vacant : before.Vacant (address.child other))
+    (written : before.write (address.child index) value = some after) (different : index ≠ other) :
+    after.Vacant (address.child other) :=
+  World.Vacant.write_disjoint vacant written (Address.child_not_overlaps different)
 
 end Glorious.Language
