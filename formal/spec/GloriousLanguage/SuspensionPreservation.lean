@@ -101,15 +101,15 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.suspensions {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+theorem InvocationStart.suspensions {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program host function inputs state) : state.SuspensionsWellFormed := initial.2.2.1.suspensions
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) : state.SuspensionsWellFormed := initial.2.2.1.suspensions
 
-theorem InitialInvocation.run_suspensions {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) : finish.SuspensionsWellFormed :=
   run.suspensions valid inventory lawful initial.1.1 initial.suspensions
 
@@ -119,13 +119,13 @@ theorem Observes.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program host function observation.input start ∧
+    ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
-      finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧
+      finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧
       start.SuspensionsWellFormed ∧ finish.SuspensionsWellFormed := by
-  obtain ⟨start,finish,initial,before,run,after,outcome⟩ := observed
-  exact ⟨start,finish,initial,before,run,after,outcome,initial.suspensions,
-    initial.run_suspensions valid inventory lawful run⟩
+  obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
+  exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.suspensions,
+    initial.run_suspensions valid inventory lawful run.execution⟩
 
 theorem Diverges.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
@@ -133,8 +133,9 @@ theorem Diverges.suspensions {program : Kernel.Program} {host : Foreign.Model}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
     ∀ n, (states n).SuspensionsWellFormed := by
+  obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
-  exact infinite.1.run_suspensions valid inventory lawful (Execution.Run.prefix infinite.2 n)
+  exact initial.run_suspensions valid inventory lawful (InvocationRun.prefix steps n).execution
 
 end Contracts
 

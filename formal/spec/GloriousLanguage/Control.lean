@@ -249,4 +249,13 @@ inductive Run (program : Kernel.Program) (host : Foreign.Model) : State → List
   | visible {before middle after event trace} : Step program host before (some event) middle → Run program host middle trace after →
       Run program host before (event :: trace) after
 
+theorem Run.append {program : Kernel.Program} {host : Foreign.Model}
+    {before middle after : State} {first last : List Event}
+    (left : Run program host before first middle) (right : Run program host middle last after) :
+    Run program host before (first ++ last) after := by
+  induction left with
+  | refl => exact right
+  | silent step _ ih => exact .silent step (ih right)
+  | visible step _ ih => exact .visible step (ih right)
+
 end Glorious.Language.Execution

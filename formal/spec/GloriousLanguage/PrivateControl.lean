@@ -71,11 +71,12 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.avoids_root {program : Langu
     exact nested
 
 /-- An executable context stays outside the caller activation. A pending
-yield may name that caller only when no inner frame remains. Forbidden
-operation/label dispatch cannot be smuggled into an event-free task. -/
+yield may name that caller only when no inner frame remains. Operation routing
+is checked at the actual invocation boundary, not forbidden by this invariant. -/
 def Task.PrivateActivation (owner : Identity) (returning : Bool) : Task → Prop
   | .run context _ | .atom context _ _ _ | .apply context _ _ | .enter context _ _ _
-  | .pattern context _ _ | .resume context _ _ _ | .primitive context _ _ _ _ _ => context.activation ≠ owner
+  | .pattern context _ _ | .perform context _ _ _ | .resume context _ _ _
+  | .primitive context _ _ _ _ _ => context.activation ≠ owner
   | .yield context _ => returning = true ∨ context.activation ≠ owner
   | .destroy context _ _ next | .destroyFields context _ _ _ next
   | .cleanup context _ next | .cancel context _ next =>
@@ -84,7 +85,7 @@ def Task.PrivateActivation (owner : Identity) (returning : Bool) : Task → Prop
   | .releaseLoan _ next | .transfer _ _ _ next => next.PrivateActivation owner returning
   | .finishClause handler _ _ _ => owner ∉ handler.activationSupport
   | .foreign session _ | .foreignCallbackReturned session _ _ _ => session.call.context.activation ≠ owner
-  | .perform _ _ _ _ | .leave _ _ _ => False
+  | .leave _ _ _ => False
   | .stopped _ | .fatal _ => True
 
 def Frame.PrivateActivation (owner : Identity) (returning : Bool) : Frame → Prop
@@ -105,6 +106,29 @@ def PrivateFrames (owner : Identity) : List Frame → Prop
 def PrivateControl (id owner : Identity) (inner : List Frame) (task : Task) : Prop :=
   id ∉ task.rootSupport ∧ id ∉ inner.flatMap Frame.rootSupport ∧
     task.PrivateActivation owner inner.isEmpty ∧ PrivateFrames owner inner
+
+theorem Frame.PrivateActivation.not_owns_temporary {frame : Frame} {owner scope : Identity}
+    {returning : Bool} (privateOwner : frame.PrivateActivation owner returning) :
+    ¬ FrameOwnsHome frame (.temporary owner scope) := by
+  cases frame <;>
+    simp_all [Frame.PrivateActivation,FrameOwnsHome,HomeOwnedByActivation,HomeOwnedByScope,
+      InstalledHandler.activationSupport,ne_comm]
+
+theorem PrivateFrames.member {owner : Identity} {frames : List Frame} {frame : Frame}
+    (privateOwners : PrivateFrames owner frames) (member : frame ∈ frames) :
+    ∃ returning, frame.PrivateActivation owner returning := by
+  induction frames with
+  | nil => cases member
+  | cons first rest ih =>
+      rcases List.mem_cons.mp member with rfl | member
+      · exact ⟨rest.isEmpty,privateOwners.1⟩
+      · exact ih privateOwners.2 member
+
+theorem PrivateFrames.append_right {owner : Identity} {first last : List Frame}
+    (privateOwners : PrivateFrames owner (first ++ last)) : PrivateFrames owner last := by
+  induction first with
+  | nil => exact privateOwners
+  | cons _ _ ih => exact ih privateOwners.2
 
 theorem PrivateControl.binding_outside {id owner : Identity} {inner rest : List Frame} {task : Task}
     {caller context : Context} {address handle destination : Address} {authority : Authority} {loan : Identity}

@@ -209,39 +209,34 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function}
+theorem InvocationStart.callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function}
     {inputs : List InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program host function inputs state) : host.CallbacksWellFormed state := by
-  obtain ⟨caller,task,frames,_⟩ := initial.2.2.2.2
-  constructor
-  · simp only [Execution.State.CallbackControl,task,frames,Execution.Task.CallbackCovers,
-      Execution.FramesCallbackCovers,and_self]
-  · intro runtime member
-    simp only [Execution.State.callbackRuntimes,task,frames,Execution.Task.callbackRuntimes,
-      Foreign.AmbientRuntimes.nil,List.nil_append,List.not_mem_nil] at member
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) : host.CallbacksWellFormed state :=
+  initial.2.2.2.2.1
 
-theorem InitialInvocation.run_callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function}
+theorem InvocationStart.run_callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function}
     {inputs : List InvocationInput} {start finish : Execution.State} {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) : host.CallbacksWellFormed finish :=
   run.callbacks valid inventory lawful initial.1.1 initial.suspensions initial.callbacks
 
 theorem Observes.callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program host function observation.input start ∧
+    ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
-      finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧ host.CallbacksWellFormed finish := by
-  obtain ⟨start,finish,initial,before,run,after,outcome⟩ := observed
-  exact ⟨start,finish,initial,before,run,after,outcome,initial.run_callbacks valid inventory lawful run⟩
+      finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧ host.CallbacksWellFormed finish := by
+  obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
+  exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.run_callbacks valid inventory lawful run.execution⟩
 
 theorem Diverges.callbacks {program : Kernel.Program} {host : Foreign.Model} {function : Function}
     {inputs : List InvocationInput} {states : Nat → Execution.State} {events : Nat → Option Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
     (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
-    ∀ n, host.CallbacksWellFormed (states n) :=
-  fun n => infinite.1.run_callbacks valid inventory lawful (Execution.Run.prefix infinite.2 n)
+    ∀ n, host.CallbacksWellFormed (states n) := by
+  obtain ⟨boundary,initial,steps⟩ := infinite
+  exact fun n => initial.run_callbacks valid inventory lawful (InvocationRun.prefix steps n).execution
 
 end Contracts
 

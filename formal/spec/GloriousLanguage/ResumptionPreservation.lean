@@ -31,6 +31,7 @@ inductive ResumptionChange : State → Option Event → State → Prop where
   | unchanged {before after event} : after.resumptions = before.resumptions →
       after.nextContinuation = before.nextContinuation →
       (∀ id last, event ≠ some (.replay id last)) → (∀ id, event ≠ some (.cancel id)) →
+      (∀ id, event ≠ some (.suspend id)) →
       ResumptionChange before event after
   | create {before after suspension} : suspension.identity = before.nextContinuation →
       suspension.original = true → suspension.active = true → suspension.used = 0 →
@@ -54,7 +55,7 @@ theorem EffectStep.resumption_change {program : Kernel.Program} {before after : 
     (step : EffectStep program before event after) : ResumptionChange before event after := by
   cases step
   all_goals first
-    | exact .unchanged rfl rfl (by intros; simp) (by intros; simp)
+    | exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
     | skip
   case suspend =>
     rename_i permission _ _ _ suspension
@@ -90,14 +91,15 @@ theorem Step.resumption_change {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event} (step : Step program host before event after) :
     ResumptionChange before event after := by
   rcases step with localStep | atom | effect | control | primitive | foreign
-  · cases localStep <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp)
+  · cases localStep <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
   · cases atom <;> exact .unchanged rfl rfl
       (by intros; simp <;> split <;> (try split) <;> simp)
       (by intros; simp <;> split <;> (try split) <;> simp)
+      (by intros; simp <;> split <;> (try split) <;> simp)
   · exact effect.resumption_change
-  · cases control <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp)
-  · cases primitive <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp)
-  · cases foreign <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp)
+  · cases control <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
+  · cases primitive <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
+  · cases foreign <;> exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
 
 theorem State.ResumptionsAccounted.empty {state : State} (empty : state.resumptions = []) : state.ResumptionsAccounted := by
   constructor
@@ -188,7 +190,7 @@ theorem ActiveObligation.cancel_accounted {suspension : Suspension} (active : Ac
 theorem ResumptionChange.accounted {before after : State} {event : Option Event}
     (change : ResumptionChange before event after) (valid : before.ResumptionsAccounted) : after.ResumptionsAccounted := by
   cases change with
-  | unchanged table counter _ _ => exact valid.transport table (Nat.le_of_eq counter.symm)
+  | unchanged table counter _ _ _ => exact valid.transport table (Nat.le_of_eq counter.symm)
   | create identity original active used surface bound table counter =>
       apply valid.set (id := before.nextContinuation) ?_ identity
         (by rw [counter]; exact Nat.lt_succ_self _) (by rw [counter]; exact Nat.le_succ _) table
@@ -251,7 +253,7 @@ theorem ResumptionChange.uses {before after : State} {event : Option Event}
     (change : ResumptionChange before event after) (valid : before.ResumptionsAccounted) (id : Identity) :
     after.resumptionUses id = before.resumptionUses id + ReplayEvent id event := by
   cases change with
-  | unchanged table _ absent _ => simp [State.resumptionUses,table,ReplayEvent.absent absent]
+  | unchanged table _ absent _ _ => simp [State.resumptionUses,table,ReplayEvent.absent absent]
   | create _ _ _ used _ _ table _ =>
       by_cases same : id = before.nextContinuation
       · subst id
@@ -285,7 +287,7 @@ theorem ResumptionChange.retains_metadata {before after : State} {event : Option
       current.context = suspension.context ∧ current.handler = suspension.handler ∧ current.frames = suspension.frames ∧
       (suspension.active = false → current.active = false) := by
   cases change with
-  | unchanged table _ _ _ => exact ⟨suspension,by simpa [table] using found,rfl,rfl,rfl,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
+  | unchanged table _ _ _ _ => exact ⟨suspension,by simpa [table] using found,rfl,rfl,rfl,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
   | create _ _ _ _ _ _ table _ =>
       have different := Nat.ne_of_lt (valid.fresh _ _ found)
       exact ⟨suspension,by simpa [table,Table.get_set_other _ _ _ _ different] using found,rfl,rfl,rfl,rfl,rfl,rfl,rfl,fun inactive => inactive⟩
@@ -363,6 +365,23 @@ theorem Run.retains_resumption {program : Kernel.Program} {host : Foreign.Model}
   obtain ⟨current,present,quantity,_,_,_,_,_,_,inactive⟩ := run.retains_metadata valid found
   exact ⟨current,present,quantity,inactive⟩
 
+/-- The saved invocation origin is unchanged; only its quantitative lifecycle
+fields may advance. This consumes the existing metadata-preservation producer. -/
+theorem Run.retains_origin {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id : Identity} {suspension : Suspension}
+    (run : Run program host before trace after) (valid : before.ResumptionsAccounted)
+    (found : before.resumptions.get id = some suspension) :
+    ∃ current, after.resumptions.get id = some current ∧
+      current = { suspension with remaining := current.remaining, used := current.used, active := current.active } := by
+  obtain ⟨current,present,quantity,roots,homes,limit,context,handler,frames,_⟩ := run.retains_metadata valid found
+  have after := run.resumptions_accounted valid
+  have identity := (after.identity id current present).trans (valid.identity id suspension found).symm
+  have original := (after.accounted id current present).original.trans (valid.accounted id suspension found).original.symm
+  refine ⟨current,present,?_⟩
+  cases current
+  cases suspension
+  simp_all
+
 /-- A bound on every logical suspension, including those created during the
 run. Replaying through aliases counts against the same identity. -/
 theorem Run.replay_budget {program : Kernel.Program} {host : Foreign.Model}
@@ -391,15 +410,36 @@ theorem ResumptionChange.replay_active {before after : State} {id : Identity} {l
     (change : ResumptionChange before (some (.replay id last)) after) :
     ∃ suspension, before.resumptions.get id = some suspension ∧ suspension.active = true := by
   cases change with
-  | unchanged _ _ absent _ => exact False.elim (absent id last rfl)
+  | unchanged _ _ absent _ _ => exact False.elim (absent id last rfl)
   | last found active _ _ _ | copy found active _ _ _ => exact ⟨_,found,active.1⟩
 
 theorem ResumptionChange.cancel_optional {before after : State} {id : Identity}
     (change : ResumptionChange before (some (.cancel id)) after) :
     ∃ suspension, before.resumptions.get id = some suspension ∧ suspension.quantity.lower = 0 := by
   cases change with
-  | unchanged _ _ _ absent => exact False.elim (absent id rfl)
+  | unchanged _ _ _ absent _ => exact False.elim (absent id rfl)
   | cancel found _ optional _ _ => exact ⟨_,found,optional⟩
+
+/-- Every actual suspend event creates the very next continuation identity.
+The unchanged projection cannot masquerade as a suspension event. -/
+theorem ResumptionChange.suspend_created {before after : State} {id : Identity}
+    (change : ResumptionChange before (some (.suspend id)) after) :
+    id = before.nextContinuation ∧ ∃ suspension,
+      after.resumptions.get id = some suspension ∧ suspension.identity = id ∧
+      suspension.original = true ∧ suspension.active = true ∧ suspension.used = 0 := by
+  cases change with
+  | unchanged _ _ _ _ absent => exact False.elim (absent id rfl)
+  | create identity original active used _ _ table _ =>
+    exact ⟨rfl,_,by rw [table,Table.get_set],identity,original,active,used⟩
+
+theorem ResumptionChange.cancel_started {before after : State} {id : Identity}
+    (change : ResumptionChange before (some (.cancel id)) after) :
+    ∃ suspension, before.resumptions.get id = some suspension ∧ suspension.active = true ∧
+      suspension.quantity.lower = 0 ∧
+      after.resumptions.get id = some { suspension with remaining := 0, active := false } := by
+  cases change with
+  | unchanged _ _ _ absent _ => exact False.elim (absent id rfl)
+  | cancel found active optional table _ => exact ⟨_,found,active.1,optional,by rw [table,Table.get_set]⟩
 
 theorem ResumptionChange.spent_no_replay {before after : State} {event : Option Event} {id : Identity} {suspension : Suspension}
     (change : ResumptionChange before event after) (found : before.resumptions.get id = some suspension)
@@ -461,15 +501,6 @@ theorem Run.exact_no_cancel {program : Kernel.Program} {host : Foreign.Model}
       · exact first (congrArg some same.symm)
       · exact rest inside
 
-theorem Run.append {program : Kernel.Program} {host : Foreign.Model}
-    {before middle after : State} {first last : List Event}
-    (left : Run program host before first middle) (right : Run program host middle last after) :
-    Run program host before (first ++ last) after := by
-  induction left with
-  | refl => exact right
-  | silent step _ ih => exact .silent step (ih right)
-  | visible step _ ih => exact .visible step (ih right)
-
 theorem Run.of_step {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event} (step : Step program host before event after) :
     Run program host before event.toList after := by
@@ -494,8 +525,8 @@ namespace Contracts
 
 open Execution
 
-theorem InitialInvocation.resumptions_accounted {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
-    {inputs : List Kernel.InvocationInput} {state : State} (initial : InitialInvocation program host function inputs state) :
+theorem InvocationStart.resumptions_accounted {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+    {inputs : List Kernel.InvocationInput} {state : State} {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) :
     state.ResumptionsAccounted := initial.2.2.1.suspensions.budgets
 
 /-- The control invariant is constructible for arbitrary fresh invocations;
@@ -512,9 +543,10 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
     (callerAuthorities : ∀ binding ∈ caller.environment, binding.authority.Recorded state.world.loans)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
-    (activationHomes : state.world.ActivationsBelow state.nextActivation) :
+    (activationHomes : state.world.ActivationsBelow state.nextActivation)
+    (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     InitialInvocation program host function inputs state := by
-  refine ⟨inputsTyped,functionInputs,?_,registry,caller,task,frames,region⟩
+  apply InvocationStart.isolated inputsTyped functionInputs ?_ registry task frames region allowed
   refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_,?_⟩
   · rw [task]
     apply RootSupport.below_append.mpr
@@ -552,9 +584,9 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
 /-- The actual invocation contract supplies the initial control invariant;
 all finite-run budget and settlement conclusions are derived by preservation,
 independently of `ResourceAdmission` and of host/world typing assumptions. -/
-theorem InitialInvocation.resumption_safety {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+theorem InvocationStart.resumption_safety {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {before after : State} {trace : List Event}
-    (initial : InitialInvocation program host function inputs before) (run : Run program host before trace after) :
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary before) (run : Run program host before trace after) :
     after.ResumptionsAccounted ∧ ∀ id suspension, after.resumptions.get id = some suspension →
       (∀ upper, suspension.quantity.upper = some upper → before.resumptionUses id + ReplayCount id trace ≤ upper) ∧
       (suspension.active = false → suspension.quantity.Contains (before.resumptionUses id + ReplayCount id trace)) := by
@@ -571,7 +603,8 @@ theorem Diverges.resumption_safety {program : Kernel.Program} {host : Foreign.Mo
     (states length).ResumptionsAccounted ∧ ∀ id suspension, (states length).resumptions.get id = some suspension →
       ∀ upper, suspension.quantity.upper = some upper →
         (states 0).resumptionUses id + ReplayCount id ((List.range length).filterMap events) ≤ upper := by
-  have safe := diverges.1.resumption_safety (Run.prefix diverges.2 length)
+  obtain ⟨boundary,initial,steps⟩ := diverges
+  have safe := initial.resumption_safety (InvocationRun.prefix steps length).execution
   exact ⟨safe.1,fun id suspension found => (safe.2 id suspension found).1⟩
 
 end Contracts

@@ -231,11 +231,12 @@ when a payload contains an operation value or captured/contextual residents. -/
 theorem mayAwait_finished {program : Kernel.Program} {function : Kernel.Function} {state : Execution.State}
     (typed : Typing.WorldTyped program state.world) (awaiting : Contracts.MayAwait program function state) :
     ∃ result, Finished program function state result := by
-  obtain ⟨context,id,arguments,payload,operation,signature,task,selected,row,inputs,unrouted,suspended⟩ := awaiting
+  have admission := awaiting
+  obtain ⟨context,id,arguments,payload,operation,signature,task,selected,row,inputs,outward,permission⟩ := awaiting
   have payloads : ∃ residents observations,
       ListRel (fun source value => state.world.Stores source.address value) payload residents ∧
         ListRel (Reveals state.world) residents observations := by
-    clear task unrouted
+    clear task outward permission admission
     induction payload with
     | nil => exact ⟨[],[],.nil,.nil⟩
     | cons source rest ih =>
@@ -244,9 +245,7 @@ theorem mayAwait_finished {program : Kernel.Program} {function : Kernel.Function
       exact ⟨value :: residents,observed :: observations,.cons stored restStored,.cons revealed restRevealed⟩
   obtain ⟨residents,observations,stored,revealed⟩ := payloads
   exact ⟨.outward id arguments observations,Or.inr (Or.inr
-    ⟨context,id,arguments,payload,residents,observations,task,
-      ⟨context,id,arguments,payload,operation,signature,task,selected,row,inputs,unrouted,suspended⟩,
-      stored,revealed,rfl⟩)⟩
+    ⟨context,id,arguments,payload,residents,observations,task,admission,stored,revealed,rfl⟩)⟩
 
 theorem finished_stopped_iff {program : Kernel.Program} {function : Kernel.Function} {state : Execution.State}
     {address : Address} (typed : Typing.WorldTyped program state.world) (stopped : state.task = .stopped address) :
@@ -263,12 +262,6 @@ theorem finished_stopped_iff {program : Kernel.Program} {function : Kernel.Funct
   · exact Finished.of_stopped typed stopped
 
 end Specification
-
-theorem Execution.Step.not_stopped {program : Kernel.Program} {host : Foreign.Model}
-    {before after : Execution.State} {event : Option Execution.Event} {address : Address}
-    (step : Execution.Step program host before event after) (stopped : before.task = .stopped address) : False := by
-  rcases step with step | step | step | step | step | step <;>
-    cases step <;> simp_all only [reduceCtorEq]
 
 namespace Specification
 
@@ -292,11 +285,13 @@ theorem resourceAdmission_safe_iff {program : Kernel.Program} {host : Foreign.Mo
     have typed := reachable_worldTyped valid inventory lawful reachable
     refine ⟨fun invalid => invalid typed,?_⟩
     obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
-    have progress := (admitted host inputs start trace state lawful initial inputAccess run).1
-    rcases progress with ⟨address,stopped⟩ | ⟨reason,fatal⟩ | awaiting | ⟨event,after,step⟩
+    have progress := (admitted host inputs .isolated start trace state lawful initial inputAccess
+      (Contracts.invocation_isolated run)).1
+    rcases progress with ⟨address,stopped⟩ | ⟨reason,fatal⟩ | awaiting | transfer | ⟨event,after,_,step⟩
     · exact Or.inl (Finished.of_stopped typed stopped (results state reachable address stopped))
     · exact Or.inl ⟨.fatal reason,Or.inr (Or.inl ⟨reason,fatal,rfl⟩)⟩
     · exact Or.inl (mayAwait_finished typed awaiting)
+    · exact False.elim transfer
     · exact Or.inr ⟨event.bind publicEvent,after,event,step,rfl⟩
 
 theorem WellFormed.safe_iff_initialized_returns {program : Kernel.Program} (well : WellFormed program)

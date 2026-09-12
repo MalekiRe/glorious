@@ -116,7 +116,7 @@ theorem EffectStep.ordinary_suspensions {program : Kernel.Program} {before after
   have change := step.resumption_change
   have table : after.resumptions = before.resumptions ∧ after.nextContinuation = before.nextContinuation := by
     cases change with
-    | unchanged table counter _ _ => exact ⟨table,counter⟩
+    | unchanged table counter _ _ _ => exact ⟨table,counter⟩
     | create => exact False.elim (notCapture _ rfl)
     | last => exact False.elim (notReplay _ _ rfl)
     | copy => exact False.elim (notReplay _ _ rfl)

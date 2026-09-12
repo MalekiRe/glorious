@@ -1,4 +1,5 @@
 import GloriousLanguage.Specification
+import GloriousLanguage.DropObservation
 import GloriousLanguage.DropCapabilities
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.ResumptionPreservation
@@ -18,27 +19,6 @@ theorem PrincipalOf.drop_mayDiscard {program : Program} {id : DeclId} {data : Da
     subst same
     exact discard (by simp [drops])
 
-namespace Contracts
-
-theorem DropContract.observes_safe {program : Kernel.Program} {host : Foreign.Model}
-    {self region : Term} {function : Kernel.Function} {observation : Observation}
-    (contract : DropContract program self region function) (lawful : Foreign.Model.Lawful program host)
-    (observed : Observes program host function observation) :
-    DropTraceSafe observation.before observation.input observation.events := by
-  obtain ⟨start,finish,initial,before,run,_⟩ := observed
-  simpa only [before] using contract.2.1 host observation.input start observation.events finish lawful initial run
-
-/-- Divergence does not exempt a hook from the destructor restrictions.
-Every finite prefix of its actual infinite execution satisfies the same rule. -/
-theorem DropContract.diverges_safe {program : Kernel.Program} {host : Foreign.Model}
-    {self region : Term} {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
-    {states : Nat → Execution.State} {events : Nat → Option Execution.Event}
-    (contract : DropContract program self region function) (lawful : Foreign.Model.Lawful program host)
-    (diverges : Diverges program host function inputs states events) (length : Nat) :
-    DropTraceSafe (states 0).world inputs ((List.range length).filterMap events) :=
-  contract.2.1 host inputs (states 0) _ (states length) lawful diverges.1 (Execution.Run.prefix diverges.2 length)
-
-end Contracts
 
 namespace Specification
 

@@ -101,6 +101,15 @@ theorem FormsLoan.references {program : Program} {purpose : LoanPurpose} {before
   | borrow _ _ _ _ _ _ vacant _ _ written =>
     exact (World.write_vacant_references vacant written referenced).roots_congr rfl
 
+theorem FormsLoan.region_live {program : Program} {purpose : LoanPurpose} {before after : World}
+    {authority mode region referent destination}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
+    region ∈ after.liveRegions := by
+  cases borrowed with
+  | borrow _ _ _ live _ _ _ _ _ written =>
+    have same := congrArg World.liveRegions (World.write_rest written)
+    simpa only [same] using live
+
 /-- The handle and loan record come from the same actual formation write.
 All invocation and source-reference witnesses project this single product. -/
 theorem FormsLoan.created_handle {program : Program} {purpose : LoanPurpose} {before after : World}

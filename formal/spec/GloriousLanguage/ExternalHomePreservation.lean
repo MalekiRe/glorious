@@ -391,11 +391,11 @@ namespace Contracts
 /-- Canonical admitted invocation consumes the new-record origin result.
 Pre-existing registry records still require their own initial storage evidence;
 the invocation's historical-authority check alone does not supply it. -/
-theorem InitialInvocation.run_new_retained_cleanup_separation {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_new_retained_cleanup_separation {program : Kernel.Program} {host : Foreign.Model}
     {function : Function} {inputs : List InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event} {registration : Foreign.Registration}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) (new : registration ∉ host.registrations start.hostState)
     (member : registration ∈ host.registrations finish.hostState) (active : registration.active = true)
     (retained : registration.retained = true) :

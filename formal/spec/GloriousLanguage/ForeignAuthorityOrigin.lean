@@ -194,27 +194,27 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.host_authorities {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+theorem InvocationStart.host_authorities {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program host function inputs state) : host.AuthoritiesRecorded state.world state.hostState :=
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) : host.AuthoritiesRecorded state.world state.hostState :=
   initial.2.2.2.1
 
-theorem InitialInvocation.run_host_authorities {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_host_authorities {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) : host.AuthoritiesRecorded finish.world finish.hostState :=
   run.host_authorities valid inventory lawful initial.1.1 initial.control initial.host_authorities
 
 /-- Canonical invocation consumes the whole-execution origin theorem: an
 active callback is an exact admitted initial record or has an actual grant on
 this invocation, including grants made around source callback execution. -/
-theorem InitialInvocation.run_registration_origin {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_registration_origin {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event} {registration : Foreign.Registration}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish)
     (member : registration ∈ host.registrations finish.hostState) (active : registration.active = true) :
     registration ∈ host.registrations start.hostState ∨
@@ -228,13 +228,13 @@ theorem Observes.host_authorities {program : Kernel.Program} {host : Foreign.Mod
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program host function observation.input start ∧
+    ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
-      finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧
+      finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧
       host.AuthoritiesRecorded start.world start.hostState ∧ host.AuthoritiesRecorded finish.world finish.hostState := by
-  obtain ⟨start,finish,initial,before,run,after,outcome⟩ := observed
-  exact ⟨start,finish,initial,before,run,after,outcome,initial.host_authorities,
-    initial.run_host_authorities valid inventory lawful run⟩
+  obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
+  exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.host_authorities,
+    initial.run_host_authorities valid inventory lawful run.execution⟩
 
 theorem Diverges.host_authorities {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
@@ -242,8 +242,9 @@ theorem Diverges.host_authorities {program : Kernel.Program} {host : Foreign.Mod
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
     ∀ n, host.AuthoritiesRecorded (states n).world (states n).hostState := by
+  obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
-  exact infinite.1.run_host_authorities valid inventory lawful (Execution.Run.prefix infinite.2 n)
+  exact initial.run_host_authorities valid inventory lawful (InvocationRun.prefix steps n).execution
 
 end Contracts
 

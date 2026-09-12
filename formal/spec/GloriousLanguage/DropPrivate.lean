@@ -1,12 +1,14 @@
 import GloriousLanguage.DropHandle
+import GloriousLanguage.DropInvocation
 import GloriousLanguage.PrivatePreservation
 
 /-! Actual destructor dispatch and ordinary owned-input entry produce the
 private stack/slot invariant consumed by complete-machine preservation.
-The ambient run's control restrictions remain an explicit semantic premise. -/
+The actual selected Drop contract supplies interval control restrictions; the
+caller stack and host exposure are retained throughout. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open Kernel Contracts
 
 theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.Model}
     {before entering body : State} {address : Address} {hook : DeclId}
@@ -18,6 +20,7 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
     ∃ (caller callee : Context) (function : Function) (authority : Authority)
       (handle : Address) (loan : Identity) (next : Task) (root : Root) (inner : List Frame),
       before.task = .destroy caller address authority next ∧
+      entering.frames = .hook caller address authority handle loan next :: before.frames ∧
       body.task = .run callee function.body ∧
       body.frames = inner ++ .hook caller address authority handle loan next :: before.frames ∧
       root.home = .temporary caller.activation caller.scope ∧ root.live = true ∧
@@ -50,7 +53,7 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
     exact bindings binding present same
   let inner := FreshNamedFrame function callee entering.nextBrand callee.region ++
     [.activation { caller with unsafeAllowed := false } callee.activation callee.region]
-  refine ⟨caller,callee,function,authority,handle,loan,next,root,inner,startTask,task,?_,home,live,whole,
+  refine ⟨caller,callee,function,authority,handle,loan,next,root,inner,startTask,frames,task,?_,home,live,whole,
     fresh,freshLoan,⟨found,vacant,safe,by intro domain; simp [home]⟩,outerOutside,?_⟩
   · rw [bodyFrames,frames]
     simp only [inner,List.append_assoc,List.cons_append,List.nil_append]
@@ -61,38 +64,106 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
         And.intro (FreshNamedFrame.avoids_root calleeOutside) callerOutside
     · exact PrivateFrames.fresh_named calleeFresh ⟨⟨calleeFresh,Or.inl rfl⟩,True.intro⟩
 
-/-- For the actual allocated hook handle, either the body still holds its
-guard and private slot, or its first real guard return is found inside the
-given run. The invariant is derived at entry and propagated, not supplied as
-an after-body certificate. Ambient trace admission is not inferred by erasing
-the caller's frames or host exposure. -/
-theorem LocalStep.hook_body_private_until_return {program : Kernel.Program} {host : Foreign.Model}
-    {before entering body after : State} {address : Address} {hook : DeclId} {trace : List Event}
+/-- Every prefix of the actual admitted hook interval preserves the allocated
+private handle and its guard. Restrictions come from the selected declaration's
+Drop contract, not a caller-supplied trace-safety premise. Internally handled
+operations, including terminal operations, use the real routing relation. -/
+theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : Foreign.Model}
+    {before entering body : State} {address : Address} {hook : DeclId}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (drops : Specification.DropsAdmitted program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (admitted : before.ControlWellFormed)
+    (registry : host.AuthoritiesRecorded before.world before.hostState)
+    (callbacks : host.CallbacksWellFormed before)
     (dispatch : LocalStep program before (some (.hookEnter address hook)) entering)
-    (entry : LocalStep program entering none body) (run : Run program host body trace after)
-    (safe : ∀ event ∈ trace, (∀ brand, event ≠ .leave brand) ∧
-      (∀ key last, event ≠ .replay key last) ∧ (∀ operation arguments, event ≠ .perform operation arguments)) :
+    (entry : LocalStep program entering none body) :
     ∃ (caller : Context) (authority : Authority) (handle : Address) (loan : Identity) (next : Task) (root : Root),
       before.task = .destroy caller address authority next ∧ root.live = true ∧ handle.fields = [] ∧
       handle.root = before.world.nextRoot ∧ loan = before.world.nextLoan ∧
       root.home = .temporary caller.activation caller.scope ∧
-      ((∃ remaining, after.frames = remaining ++ .hook caller address authority handle loan next :: before.frames ∧
-        after.world.PrivateSlot handle.root root ∧ PrivateControl handle.root caller.activation remaining after.task) ∨
-      (∃ returning returned first last,
-        trace = first ++ last ∧ Run program host body first returning ∧
-        LocalStep program returning none returned ∧ Run program host returned last after ∧
-        returning.frames = .hook caller address authority handle loan next :: before.frames ∧ returned.frames = before.frames ∧
-        returning.world.PrivateSlot handle.root root ∧ returned.world.PrivateSlot handle.root root ∧
-        PrivateControl handle.root caller.activation [] returning.task)) := by
-  obtain ⟨caller,callee,function,authority,handle,loan,next,root,inner,startTask,_,frames,home,live,whole,
+      let boundary := InvocationBoundary.caller { caller with unsafeAllowed := false }
+        (.hook caller address authority handle loan next :: before.frames)
+      ∀ trace after, InvocationRun program host boundary body trace after →
+        ∃ remaining, after.frames = remaining ++ .hook caller address authority handle loan next :: before.frames ∧
+          after.world.PrivateSlot handle.root root ∧ PrivateControl handle.root caller.activation remaining after.task ∧
+          (boundary.Inside program after ∨ ∃ result, boundary.Normal after result) := by
+  classical
+  obtain ⟨caller,callee,function,authority,handle,loan,next,root,inner,startTask,entryFrames,_,frames,home,live,whole,
       fresh,freshLoan,slot,outerOutside,privateControl⟩ := dispatch.hook_body_private valid inventory lawful typed admitted entry
+  obtain ⟨actualCaller,actualFunction,actualAuthority,actualHandle,actualLoan,actualNext,value,
+      _,_,selected,_,actualFrames,initial⟩ :=
+    dispatch.hook_invocation_start valid inventory lawful typed admitted registry callbacks
+  have sameGuard := Frame.hook.inj (List.cons.inj (entryFrames.symm.trans actualFrames)).1
+  obtain ⟨rfl,_,rfl,rfl,rfl,rfl⟩ := sameGuard
+  rw [entryFrames] at initial
+  have contract := drops.contracts _ _ _ _ selected
   have entered : Run program host before [.hookEnter address hook] body :=
     .visible (Or.inl dispatch) (.silent (Or.inl entry) .refl)
-  exact ⟨caller,authority,handle,loan,next,root,startTask,live,whole,fresh,freshLoan,home,
-    run.private_until_guard_pop valid inventory lawful (entered.worldTyped valid inventory lawful typed)
-      (entered.controlWellFormed valid inventory lawful typed admitted) slot home privateControl frames outerOutside safe⟩
+  refine ⟨caller,authority,handle,loan,next,root,startTask,live,whole,
+    fresh,freshLoan,home,?_⟩
+  dsimp only
+  intro trace after run
+  have interval : InvocationRun program host
+      (.caller { caller with unsafeAllowed := false }
+        (.hook caller address authority handle loan next :: before.frames)) entering trace after :=
+    .silent ⟨initial.inside,Or.inl entry⟩ run
+  have safe := (contract.2.1 host _ _ entering trace after lawful initial interval).1.1
+  obtain ⟨remaining,afterFrames,afterSlot,afterControl⟩ :=
+    run.private_guard valid inventory lawful (entered.worldTyped valid inventory lawful typed)
+    (entered.controlWellFormed valid inventory lawful typed admitted) slot home privateControl frames outerOutside
+    (fun event member => ⟨(safe event member).1,(safe event member).2.2,(safe event member).2.1⟩)
+  refine ⟨remaining,afterFrames,afterSlot,afterControl,?_⟩
+  by_cases handoff : (InvocationBoundary.caller { caller with unsafeAllowed := false }
+      (.hook caller address authority handle loan next :: before.frames)).Handoff after
+  · apply Or.inr
+    have progress := (contract.2.2.2 host _ _ entering trace after lawful initial
+      (by intro input member _; cases List.mem_singleton.mp member; rfl) interval).1
+    exact progress.handoff_normal handoff
+  · refine Or.inl ⟨⟨remaining,afterFrames⟩,handoff,?_,?_⟩
+    · intro context operation arguments payload pending
+      exact contract.interval_perform_internal lawful initial interval pending
+    · intro context brand result pending
+      have impossible := afterControl.2.2.1
+      rw [pending] at impossible
+      exact False.elim impossible
+
+/-- An arbitrary real machine run factors before the first normal return to
+the hook's caller. The prefix retains the private slot and guard; the suffix
+is unrestricted caller execution. This follows from actual Drop admission,
+not an assumed restriction on the whole ambient trace. -/
+theorem LocalStep.hook_body_private_until_return {program : Kernel.Program} {host : Foreign.Model}
+    {before entering body after : State} {address : Address} {hook : DeclId} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (drops : Specification.DropsAdmitted program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (admitted : before.ControlWellFormed)
+    (registry : host.AuthoritiesRecorded before.world before.hostState)
+    (callbacks : host.CallbacksWellFormed before)
+    (dispatch : LocalStep program before (some (.hookEnter address hook)) entering)
+    (entry : LocalStep program entering none body) (run : Run program host body trace after) :
+    ∃ (caller : Context) (authority : Authority) (handle : Address) (loan : Identity) (next : Task) (root : Root),
+      before.task = .destroy caller address authority next ∧ root.live = true ∧ handle.fields = [] ∧
+      handle.root = before.world.nextRoot ∧ loan = before.world.nextLoan ∧
+      root.home = .temporary caller.activation caller.scope ∧
+      let boundary := InvocationBoundary.caller { caller with unsafeAllowed := false }
+        (.hook caller address authority handle loan next :: before.frames)
+      ∃ first last finish remaining, trace = first ++ last ∧
+        InvocationRun program host boundary body first finish ∧ Run program host finish last after ∧
+        finish.frames = remaining ++ .hook caller address authority handle loan next :: before.frames ∧
+        finish.world.PrivateSlot handle.root root ∧ PrivateControl handle.root caller.activation remaining finish.task ∧
+        (finish = after ∨ ∃ result, boundary.Normal finish result) := by
+  obtain ⟨caller,authority,handle,loan,next,root,task,live,whole,fresh,freshLoan,home,privatePrefix⟩ :=
+    dispatch.hook_body_admitted_private valid inventory drops lawful typed admitted registry callbacks entry
+  refine ⟨caller,authority,handle,loan,next,root,task,live,whole,fresh,freshLoan,home,?_⟩
+  dsimp only
+  obtain ⟨first,last,finish,events,interval,rest,exit⟩ := invocation_first_exit
+    (boundary := .caller { caller with unsafeAllowed := false }
+      (.hook caller address authority handle loan next :: before.frames)) run
+  obtain ⟨remaining,frames,slot,control,closed⟩ := privatePrefix first finish interval
+  refine ⟨first,last,finish,remaining,events,interval,rest,frames,slot,control,?_⟩
+  rcases exit with outside | ⟨_,same⟩
+  · exact closed.elim (fun inside => False.elim (outside inside)) Or.inr
+  · exact Or.inl same
 
 end Glorious.Language.Execution

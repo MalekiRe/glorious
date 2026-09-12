@@ -125,23 +125,23 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.control {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+theorem InvocationStart.control {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program host function inputs state) : state.ControlWellFormed := initial.2.2.1
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) : state.ControlWellFormed := initial.2.2.1
 
-theorem InitialInvocation.caller_activation_bound {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.caller_activation_bound {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
     {caller : Execution.Context}
-    (initial : InitialInvocation program host function inputs state)
+    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state)
     (task : state.task = .enter caller function (.supplied inputs) false) : caller.activation < state.nextActivation := by
   have bounded := initial.control.activations.task
   simpa only [task,Execution.Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bounded
 
-theorem InitialInvocation.run_control {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) : finish.ControlWellFormed :=
   run.controlWellFormed valid inventory lawful initial.1.1 initial.control
 
@@ -149,13 +149,13 @@ theorem Observes.control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program host function observation.input start ∧
+    ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
-      finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧
+      finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧
       start.ControlWellFormed ∧ finish.ControlWellFormed := by
-  obtain ⟨start,finish,initial,before,run,after,outcome⟩ := observed
-  exact ⟨start,finish,initial,before,run,after,outcome,initial.control,
-    initial.run_control valid inventory lawful run⟩
+  obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
+  exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.control,
+    initial.run_control valid inventory lawful run.execution⟩
 
 theorem Diverges.control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
@@ -163,8 +163,9 @@ theorem Diverges.control {program : Kernel.Program} {host : Foreign.Model}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
     ∀ n, (states n).ControlWellFormed := by
+  obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
-  exact infinite.1.run_control valid inventory lawful (Execution.Run.prefix infinite.2 n)
+  exact initial.run_control valid inventory lawful (InvocationRun.prefix steps n).execution
 
 end Contracts
 

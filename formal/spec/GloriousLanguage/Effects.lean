@@ -90,6 +90,23 @@ def StartsResumptionClause (before : State) (handler : InstalledHandler) (lexica
     context = outer.bindBrand brand (.resumption before.nextContinuation) ∧
     localSlot = context.local lexical
 
+/-- The allocation coordinates common to ordinary and resumption clauses.
+The retained handler environment and resumption brand do not change the home
+which the actual ordered payload handoff allocates. -/
+structure OperationPayloadContext (before : State) (context : Context) (withRegion : World) : Prop where
+  fresh : FreshRegion before.world before.world.nextRegion withRegion
+  activation : context.activation = before.nextActivation
+  scope : context.scope = before.world.nextRegion
+  region : context.region = before.world.nextRegion
+
+/-- Actual payload protection, including every ordered transfer and its output
+homes. Admission quantifies over this same preparation used by effect steps;
+it does not inspect an invented post-payload world. -/
+def PreparedOperationPayload (program : Kernel.Program) (before : State) (payload : List ResolvedPlace)
+    (context : Context) (kept : List Address) (moved : World) : Prop :=
+  ∃ withRegion, OperationPayloadContext before context withRegion ∧
+    Protects program context withRegion payload kept moved
+
 inductive PayloadPlan (program : Language.Program) (world : World) :
     List Address → List Pattern → PatternActions → Prop where
   | nil : PayloadPlan program world [] [] ⟨[],[],[]⟩
@@ -118,6 +135,25 @@ def SuspendPermission (program : Kernel.Program) (world : World) (roots : List I
   (quantity.lower = 0 → Cancelable program.declarations world roots) ∧
   (∀ n, quantity.upper = some n → 1 < n → Replayable program.declarations world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame)
 
+/-- The selected operation determines disposition, independently of whether
+the accepting delimiter is internal to an invocation or belongs to its caller. -/
+inductive OperationDisposition where
+  | terminal
+  | resumptive (quantity : Quantity)
+  deriving Repr, Inhabited
+
+def OperationDisposition.Matches (operation : OperationDefinition) : OperationDisposition → Prop
+  | .terminal => operation.terminal = true
+  | .resumptive quantity => operation.terminal = false ∧ operation.quantity = some quantity
+
+/-- One permission contract for actual delimited execution and an outward
+request's share of that same execution. These specializations retain the
+ordinary cleanup and snapshot predicates, including exact replay quantities. -/
+def OperationDisposition.Permits (program : Kernel.Program) (world : World) (roots : List Identity)
+    (frames : List Frame) : OperationDisposition → Prop
+  | .terminal => Cancelable program.declarations world roots
+  | .resumptive quantity => SuspendPermission program world roots quantity frames
+
 def SuspensionRegions (suspension : Suspension) : List Identity :=
   (suspension.frames.flatMap Frame.ownedRegions ++ [suspension.handler.computation.region]).eraseDups
 
@@ -144,7 +180,8 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       OperationInstance program id arguments operation signature → operation.terminal = true → arm.continuation = none →
       Routes program before id arguments payload inner handler owns arm outer → StartsClause before handler clause withRegion →
       Protects program clause withRegion payload kept moved →
-      DelimitedRoots moved handler inner (kept.map Address.root) roots → Cancelable program.declarations moved roots →
+      DelimitedRoots moved handler inner (kept.map Address.root) roots →
+      OperationDisposition.Permits program moved roots inner .terminal →
       PayloadPlan program.declarations moved kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
       EffectStep program before none { before with world := moved, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions ++ [handler.computation.region]) (.pattern clause (ScheduledPattern actions) arm.body)), frames := .serviced handler owns clause none :: outer, nextActivation := before.nextActivation+1 }
   | suspend {before context id arguments payload inner handler owns arm outer operation signature quantity bound
@@ -154,7 +191,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       arm.continuation = some lexical → Routes program before id arguments payload inner handler owns arm outer →
       StartsResumptionClause before handler lexical clause localSlot withRegion → Protects program clause withRegion payload kept moved →
       DelimitedRoots moved handler inner (kept.map Address.root) roots →
-      SuspendPermission program moved roots quantity inner → SaveHomes moved roots homes →
+      OperationDisposition.Permits program moved roots inner (.resumptive quantity) → SaveHomes moved roots homes →
       CreatesContinuation program clause (suspendRoots moved roots before.nextContinuation) before.nextContinuation
         signature (clause.term handler.syntaxNode.result) signature.effects quantity localSlot address created →
       PayloadPlan program.declarations created kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
@@ -167,7 +204,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       arm.continuation = none → Routes program before id arguments payload inner handler owns arm outer →
       StartsClause before handler clause withRegion → Protects program clause withRegion payload kept moved →
       DelimitedRoots moved handler inner (kept.map Address.root) roots →
-      SuspendPermission program moved roots quantity inner → SaveHomes moved roots homes →
+      OperationDisposition.Permits program moved roots inner (.resumptive quantity) → SaveHomes moved roots homes →
       PayloadPlan program.declarations moved kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
       suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,moved.nextRoot,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with world := suspendRoots moved roots before.nextContinuation, task := .pattern clause (ScheduledPattern actions) arm.body, frames := .tailResume clause before.nextContinuation :: .serviced handler owns clause (some before.nextContinuation) :: outer, resumptions := before.resumptions.set before.nextContinuation suspension, nextContinuation := before.nextContinuation+1, nextActivation := before.nextActivation+1 }

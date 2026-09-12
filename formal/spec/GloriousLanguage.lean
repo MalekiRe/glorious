@@ -22,6 +22,11 @@ import GloriousLanguage.SnapshotControlTyping
 import GloriousLanguage.ScalarExecution
 import GloriousLanguage.ExecutionPreservation
 import GloriousLanguage.InvocationLending
+import GloriousLanguage.InvocationInputs
+import GloriousLanguage.InvocationBoundary
+import GloriousLanguage.OperationBoundary
+import GloriousLanguage.InvocationLifecycle
+import GloriousLanguage.InvocationLifecyclePreservation
 import GloriousLanguage.PrimitiveDispatch
 import GloriousLanguage.RuntimeTypingEquivariance
 import GloriousLanguage.InvocationLeaseCleanup
@@ -43,6 +48,8 @@ import GloriousLanguage.ScopeClosing
 import GloriousLanguage.ContextTyping
 import GloriousLanguage.DropReturn
 import GloriousLanguage.DropHandle
+import GloriousLanguage.DropInvocation
+import GloriousLanguage.DropObservation
 import GloriousLanguage.ProjectionKinding
 import GloriousLanguage.DefinitionalCoherence
 import GloriousLanguage.LogicalEvidence
@@ -63,6 +70,9 @@ import GloriousLanguage.FreshParametricity
 import GloriousLanguage.LogicalInstantiation
 import GloriousLanguage.HeadOriginInstantiation
 import GloriousLanguage.HeadOriginSubstitution
+import GloriousLanguage.HeadInspection
+import GloriousLanguage.HeadInspectionInstantiation
+import GloriousLanguage.InspectionResiduals
 import GloriousLanguage.RootReductionJoining
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence

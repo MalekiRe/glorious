@@ -1,4 +1,5 @@
 import GloriousLanguage.DropDispatch
+import GloriousLanguage.DropInvocation
 import GloriousLanguage.SemanticPreservation
 import GloriousLanguage.InvocationLeaseCleanup
 
@@ -48,19 +49,6 @@ theorem World.stores_outside_unit {world : World} {unitAddress address : Address
     exact nonunit (equal ▸ rfl)
   | cons => simp [path,Value.atPath,Value.fields] at resident
 
-namespace Contracts
-
-theorem DropContract.normal_borrow_returned {program : Kernel.Program} {host : Foreign.Model}
-    {self region : Term} {function : Kernel.Function} {observation : Observation}
-    {result : Address} {input : Kernel.InvocationInput} {value : Value} {id : Identity} {original : Loan}
-    (contract : DropContract program self region function) (lawful : host.Lawful program)
-    (observed : Observes program host function observation) (normal : observation.outcome = .normal result)
-    (member : input ∈ observation.input) (stored : observation.before.Stores input.storage value)
-    (head : value.head = .reference id) (loan : observation.before.loans.get id = some original) :
-    DropBorrowReturned self observation.after id original :=
-  contract.2.2.1 host observation lawful observed result normal input member value id original stored head loan
-
-end Contracts
 
 namespace Execution
 
@@ -184,10 +172,10 @@ end Execution
 namespace Contracts
 
 /-- Composition of the checked application, actual normal observation and
-ordinary returned-hook suffix. Initial storage typing comes from the observed
-invocation and preservation, not an assumed post-world. Private result and
-vacant-handle provenance are the remaining caller-frame inputs; no standalone
-observation theorem is misrepresented as a general stack-embedding proof. -/
+ordinary returned-hook suffix. The observation now retains its actual ambient
+invocation boundary; storage typing follows by preservation, not an assumed
+post-world. Private result and vacant-handle provenance remain required here;
+the stronger end-to-end administrative cleanup theorem is still open. -/
 theorem DropContract.normal_return_cleanup {program : Kernel.Program} {host : Foreign.Model}
     {self region : Term} {hook : DeclId} {arguments : List Term}
     {declaration : FunctionDefinition} {substitution : Substitution}

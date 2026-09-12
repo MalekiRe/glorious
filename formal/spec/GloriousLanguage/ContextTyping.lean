@@ -1,5 +1,6 @@
 import GloriousLanguage.BindingPersistence
 import GloriousLanguage.PredicateScope
+import GloriousLanguage.InvocationInputs
 
 /-! The source body's one local environment is related to the actual runtime
 environment. Entry constructs this relation from input recipes, fresh scope
@@ -58,36 +59,6 @@ theorem Kernel.Instance.locals_scopeClosed {program : Kernel.Program} (valid : P
     exact List.mem_map.mpr ⟨localSlot,parameter,rfl⟩
 
 namespace Execution
-
-/-- Only formal selection is required here. Access, initialization and
-storage are checked by the existing recipe and binding producers. -/
-def EntrySource.HasFormals (function : Kernel.Function) : EntrySource → Prop
-  | .supplied inputs => inputs.map (·.formal) = function.captures ++ function.parameters
-  | .resident _ _ arguments => arguments.map (·.formal) = function.parameters
-  | .contextual _ _ _ _ inputs => inputs.map (·.formal) = function.captures ++ function.parameters
-
-theorem ArgumentInputs.formals {world : World} {context : Context} {index : Nat}
-    {formals : List Kernel.Local} {places : List Kernel.Place} {inputs : List Kernel.InvocationInput}
-    (selected : ArgumentInputs world context index formals places inputs) : inputs.map (·.formal) = formals := by
-  induction selected with
-  | nil => rfl
-  | cons _ _ _ ih => simp only [List.map_cons,ih]
-
-theorem CaptureInputs.formals {world : World} {receiver : Address} {authority : Authority} {access : Access}
-    {formals : List Kernel.Local} {inputs : List Kernel.InvocationInput}
-    (selected : CaptureInputs world receiver authority access formals inputs) : inputs.map (·.formal) = formals := by
-  rw [selected.1]
-  simp only [List.map_map,Function.comp_def,List.zipIdx_map_fst]
-
-theorem PreparesEntry.formals {program : Kernel.Program} {context : Context} {function : Kernel.Function}
-    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput}
-    (prepared : PreparesEntry program context function before source inputs after)
-    (formals : source.HasFormals function) : inputs.map (·.formal) = function.captures ++ function.parameters := by
-  cases prepared with
-  | supplied => exact formals
-  | resident _ captures =>
-    simpa only [List.map_append,captures.formals,EntrySource.HasFormals] using congrArg (function.captures ++ ·) formals
-  | contextual => exact formals
 
 theorem ArgumentInputs.resident_formals {world : World} {context : Context} {function : Kernel.Function}
     {places : List Kernel.Place} {inputs : List Kernel.InvocationInput}

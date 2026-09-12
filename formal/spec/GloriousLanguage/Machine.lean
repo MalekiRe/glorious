@@ -360,10 +360,25 @@ inductive ArgumentInputs (world : World) (context : Context) :
       ArgumentInputs world context index (formal :: formals) (place :: places)
         (⟨.argument index,formal,address,authority,.owned⟩ :: rest)
 
+/-- The one ordered resident-capture projection, shared by actual capture
+selection and observations of the original invocation recipe. Lending may
+change authority, never the selected field, formal, origin or access. -/
+def ResidentCaptureInputs (receiver : Address) (authority : Authority) (access : Access)
+    (formals : List Local) : List InvocationInput :=
+  formals.zipIdx.map (fun (formal,index) => ⟨.capture index,formal,receiver.child index,authority,access⟩)
+
 def CaptureInputs (world : World) (receiver : Address) (authority : Authority) (access : Access)
     (formals : List Local) (inputs : List InvocationInput) : Prop :=
-  inputs = formals.zipIdx.map (fun (formal,index) => ⟨.capture index,formal,receiver.child index,authority,access⟩) ∧
+  inputs = ResidentCaptureInputs receiver authority access formals ∧
   ∀ input ∈ inputs, world.Initialized input.storage ∧ Permitted world input.authority access input.storage
+
+/-- Inputs at the actual entry state, before fresh callee-owned lending.
+Supplied and contextual recipes already retain their input product. Resident
+captures use the incoming receiver authority, not its later child loan. -/
+def EntrySource.originalInputs (function : Function) : EntrySource → List InvocationInput
+  | .supplied inputs | .contextual _ _ _ _ inputs => inputs
+  | .resident receiver access arguments =>
+      ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments
 
 /-- Every real source of invocation inputs is prepared under the same fresh
 callee lifetime. Resident captures project the newly lent receiver authority;

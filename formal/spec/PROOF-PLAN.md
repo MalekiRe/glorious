@@ -1133,6 +1133,122 @@ residuals and generic-origin subderivations must provide a well-founded proof
 of common positive reducts. No global confluence, constructor separation,
 conversion-safe Drop inversion or full-language soundness is claimed here.
 
+`HeadInspection` derives a finite source-inspection certificate from the actual
+admitted determining origins. A whole implementation's canonical minimum
+inspection level induces a well-founded strict dependency order; it is not a
+normalization measure or a size assigned to arbitrary equality proofs.
+`HeadInspectionInstantiation` retains paired genuine source/caller positive
+expansions at that same minimum. The actual admitted-head construction consumes
+them. Root-step substitution uses the single mutual selection/predicate
+transport, and ordinary reduction/conversion delegate to that producer.
+The frozen source-only 69-job gate checks this integrated source/caller endpoint.
+
+`InspectionResiduals` now carries independent source-inspection bounds through
+actual root/child squares: the residual root retains the original root bound,
+while the body residual retains the child bound. Row/root residuals preserve
+the original bound as well. `Term.substitutions_related` is the common
+constructor-congruence producer for these residuals, positive substitution,
+conversion and row equivalence; the three superseded walks were removed.
+The frozen 68-job dependency closure verifies the migrated consumers. Full
+positive strip/parallel moves and conversion-to-joining remain open, including
+control of arbitrary query-equality premises. These inspection levels alone
+are not a proof of global confluence or constructor separation.
+
+`InvocationBoundary` now gives the actual caller-delimited invocation interval.
+Its steps are guarded instances of the one `Execution.Step`, retaining the
+complete ambient stack, callback sessions and host exposure. Non-tail entry
+records the actual caller continuation; proper-tail entry takes its real outer
+continuation from `TailFrames`. Normal return is the saved context and ambient
+suffix before the caller consumes its result. Any yield at that suffix stops
+the interval; a wrong return context cannot pass progress admission. Internal
+operation and label classification use the existing `Routes` and `LabelRoute`
+producers, including their barriers, rather than a second delimiter matcher.
+Every actual run factors at its first interval exit, even if later execution
+re-enters a similar stack. Isolated execution is the same relation's specialization.
+
+`InvocationStart` admits the actual entry recipe, ordered original inputs,
+current control/authority invariants, callback runtime liveness, live caller
+region and unsafe-call permission. `InvocationInputs` proves that the actual
+receiver/capture preparation retains the same formal, origin and access
+coordinates. Ordinary arguments are owned inputs. The shared capture projection
+produces both original and prepared coordinates, with lending changing authority
+rather than reconstructing capture identity. `Observes`, `Diverges`, resource
+admission and their real preservation consumers now use the common interval.
+Internal suspension and cancellation remain trace events, not invocation exits.
+`LifecycleObserves` separately correlates the SAME outward request and actual
+caller-side capture with its suspended continuation or later cancellation
+initiation. Request events and caller/lifecycle events have separate attribution;
+their composition is proved to be the original whole-machine run. The derived
+interface and its exact characterization consume both observation forms.
+`InvocationLifecyclePreservation` proves the same saved continuation origin
+survives intervening caller execution and copied replays; cancellation requires
+that original quantity to be optional. World typing and Drop's exclusion of
+escaped lifecycles are derived through the real execution/prefix witnesses.
+Cancellation initiation is not completion of arbitrary destructor cleanup.
+The old table-entry and internal-prefix-event exit classifications are removed.
+Outward label progress requires an executable transfer; missing routing evidence
+does not authorize an invalid destination or abandonment.
+
+`OperationBoundary` replaces the former pre-payload suspension-only check.
+`MayAwait` now retains the actual selected operation's terminal or resumptive
+disposition and a nonvacuous ordered `Protects` preparation. Its actual fresh
+clause home can be retargeted without changing the protected addresses or output
+world. Admission requires the callee frame prefix to be foreign-barrier-free,
+and checks its actual `AbandonedRoots` after protecting the payload, excluding
+the same kept roots as real effect execution. The shared disposition permission
+is `Cancelable` for terminal operations and the actual quantity-indexed
+`SuspendPermission` for resumptive ones. Real effect rules consume this product.
+
+The actual `Routes` producer locates an outward delimiter in the ambient suffix.
+The admitted callee share and caller `DelimitedRoots` share compose to exactly
+the full handler permission, including replayable frames; with callee admission,
+caller permission is equivalent to full-handler permission. Isolated invocations
+use this same frame-owned boundary with an empty ambient suffix. Neither absent
+routing nor impossible payload preparation makes the predicate vacuously true.
+`PublicValues` retains the complete admission when observing outward payloads.
+This strengthens semantic admission; it does not prove source resource progress.
+General ordered layout/allocation and loan readiness must still produce the
+payload preparation and residual permissions. Matching, clause binding and
+continuation creation remain separate obligations of complete handler progress.
+
+`DropInvocation` derives this admission from actual `destroyHook` dispatch,
+including the freshly allocated and borrowed argument handle and unchanged
+caller stack. `DropObservation` applies the selected Drop contract directly to
+these ambient prefixes. The former blanket ban on all performance events is
+removed: a pending operation must have its real accepting delimiter inside the
+invocation. `PrivateEffectPreservation` now carries internally handled terminal
+operations through their real routing, payload and abandoned-frame cleanup.
+`PrivatePreservation` covers all six transition families and excludes a hook
+pop by the invocation's current handoff guard, not an after-state certificate.
+
+`DropPrivate.hook_body_admitted_private` connects actual dispatch and ordinary
+entry to preservation throughout every admitted interval. Its trace restrictions
+are derived from the selected Drop admission, not supplied as an independent
+ambient-run hypothesis. `hook_body_private_until_return` then factors an arbitrary
+actual body run before its first normal caller handoff, preserving the private
+slot and guard at that boundary while retaining an unrestricted original caller
+suffix. The earlier no-performance whole-run restriction and its superseded
+private-run induction have been removed.
+
+The fresh source-only combined dependency gate passes 189 jobs with warnings
+as errors, including the interval/private-hook theorem, operation-boundary
+composition, actual lifecycle origin, preservation/public-observation consumers
+and the current source-inspection/residual proofs. This does not check the
+known failing higher Drop inversion dependency or the aggregate examples.
+
+This does not establish full invocation progress or full Drop conformance.
+Resource progress and initialized normal-return lifetimes still need their
+compositional control/ownership proof. Resident/contextual lending readiness and
+erased resource-input custody still require positive initial origin obligations;
+the raw resource producer repair must supply those, not assume entry success.
+The event-only Drop field-move condition remains overbroad and incomplete: actual
+silent input/aggregate handoffs and host transactions need their authoritative
+storage-effect product before the normative proper-field rule is established.
+The higher Drop cleanup consumer remains behind the recorded conversion-safe
+capability-inversion failure; its entire gate is not certified by the successful
+lower invocation/private proof closure. No example or aggregate soundness claim
+is used to bridge these remaining obligations.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

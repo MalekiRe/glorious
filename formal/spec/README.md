@@ -40,6 +40,16 @@ or a dependency of this project.
 - `Effects`, `Relocation`, `Control`, `Contracts`: handlers, continuation
   quantities, snapshots, labels, guarded environments and body-checked
   invocation contracts.
+- `InvocationInputs`, `InvocationBoundary`, `DropInvocation`: the actual entry
+  recipe's common input coordinates and caller-delimited execution intervals;
+  destructor dispatch establishes admission without erasing ambient frames or
+  host exposure. Existing preservation and observation consumers use this boundary.
+- `InvocationLifecycle`, `InvocationLifecyclePreservation`: escaped continuation
+  creation and cancellation initiation tied to the same actual outward request;
+  separate caller traces and preserved capture identity, not internal-event exits.
+- `OperationBoundary`: nonvacuous ordered payload protection and the selected
+  terminal/resumptive permission shared with actual effect execution; exact
+  composition of callee-owned and caller-owned post-payload obligations.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
   and whole-run preservation.
@@ -56,7 +66,9 @@ or a dependency of this project.
   actual registration-owner origin and source cleanup/cancellation separation.
 - `PrivateStorage`, the private-preservation producer modules, `DropPrivate`:
   actual hook allocation/input entry and complete-machine caller-slot preservation
-  up to the first real guard pop, under the ambient trace's control restrictions.
+  up to the first normal caller handoff. The actual selected Drop contract supplies
+  interval restrictions, internally handled terminal operations are covered, and
+  the original caller suffix is unrestricted.
 - `PredicateInterpretation`, `PredicateScope`, `MatchEntryContextTyping`: hygienic
   predicate semantics and source-derived scope through actual selected-arm entry.
 - `ClosedDefinitionalEquality`, `HeadOriginDecomposition`: assumption-free equality
@@ -86,6 +98,10 @@ or a dependency of this project.
 - `HeadOriginInstantiation`, `RootReductionJoining`: instantiated positive
   source origins and root-pair reduction to joining actual selected generic
   tables; global parallel moves and confluence remain unproved.
+- `HeadInspection`, `HeadInspectionInstantiation`, `InspectionResiduals`:
+  source-admitted finite inspection dependencies, preserved through actual caller
+  instantiation and root/child and row/root residuals. Query-premise joining and
+  global confluence remain open.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

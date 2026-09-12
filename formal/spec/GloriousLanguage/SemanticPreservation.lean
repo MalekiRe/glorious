@@ -1,5 +1,6 @@
 import GloriousLanguage.Specification
 import GloriousLanguage.ExecutionPreservation
+import GloriousLanguage.InvocationLifecycle
 
 /-! The public transition system consumes preservation of the actual executable
 relation. Its finite traces are exactly the public projections of internal
@@ -10,11 +11,11 @@ namespace Glorious.Language
 
 namespace Contracts
 
-theorem InitialInvocation.run_worldTyped {program : Kernel.Program} {host : Foreign.Model}
+theorem InvocationStart.run_worldTyped {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
+    (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
     (run : Execution.Run program host start trace finish) : Typing.WorldTyped program finish.world :=
   run.worldTyped valid inventory lawful initial.1.1
 
@@ -23,8 +24,21 @@ theorem Observes.worldTyped {program : Kernel.Program} {host : Foreign.Model}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
     Typing.WorldTyped program observation.before ∧ Typing.WorldTyped program observation.after := by
-  obtain ⟨start,finish,initial,before,run,after,_⟩ := observed
-  exact ⟨before ▸ initial.1.1,after ▸ initial.run_worldTyped valid inventory lawful run⟩
+  obtain ⟨boundary,start,finish,initial,before,run,after,_⟩ := observed
+  exact ⟨before ▸ initial.1.1,after ▸ initial.run_worldTyped valid inventory lawful run.execution⟩
+
+/-- Escaped lifecycle states are typed by the same actual whole-machine run,
+including caller execution. Their events are not folded into the callee's
+request trace or justified by an assumed typed lifecycle endpoint. -/
+theorem LifecycleObserves.worldTyped {program : Kernel.Program} {host : Foreign.Model}
+    {function : Kernel.Function} {observation : LifecycleObservation}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (observed : LifecycleObserves program host function observation) :
+    Typing.WorldTyped program observation.request.before ∧
+      Typing.WorldTyped program observation.request.after ∧ Typing.WorldTyped program observation.after := by
+  obtain ⟨boundary,start,finish,initial,before,run,after⟩ := observed.execution
+  exact ⟨before ▸ initial.1.1,(observed.request_observed.worldTyped valid inventory lawful).2,
+    after ▸ initial.run_worldTyped valid inventory lawful run⟩
 
 theorem Diverges.worldTyped {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
@@ -32,10 +46,11 @@ theorem Diverges.worldTyped {program : Kernel.Program} {host : Foreign.Model}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
     ∀ n, Typing.WorldTyped program (states n).world := by
+  obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
   induction n with
-  | zero => exact infinite.1.1.1
-  | succ n ih => exact (infinite.2 n).worldTyped valid inventory lawful ih
+  | zero => exact initial.1.1
+  | succ n ih => exact (steps n).2.worldTyped valid inventory lawful ih
 
 end Contracts
 
