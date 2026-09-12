@@ -97,11 +97,12 @@ def Model.Lawful (program : Kernel.Program) (model : Model) : Prop :=
       contract.retainable before operands loan.referent ∨ loan.region ∈ before.liveRegions)
 
 inductive Step (program : Kernel.Program) (model : Model) : State → Option Event → State → Prop where
-  | enter {before context destination binding arguments operands next imported contract state} :
+  | enter {before context destination binding arguments operands next imported contract state addresses prepared} :
       before.task = .primitive context destination binding arguments operands next →
-      Selected program model binding imported contract → contract.precondition before.world operands →
-      model.start binding.declaration before.world operands state →
-      Step program model before none { before with task := .foreign context destination binding operands state next }
+      Selected program model binding imported contract →
+      Protects program context before.world operands addresses prepared →
+      contract.precondition prepared addresses → model.start binding.declaration prepared addresses state →
+      Step program model before none { before with world := prepared, task := .foreign context destination binding addresses state next }
   | host {before context destination binding operands state next imported contract observation after nextState} :
       before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after .continue nextState →

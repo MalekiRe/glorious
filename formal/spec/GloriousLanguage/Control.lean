@@ -21,15 +21,10 @@ def AbandonedRoots (world : World) (frames : List Frame) (kept roots : List Iden
   NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root,
     world.roots.get id = some root ∧ root.live = true ∧ id ∉ kept ∧ ∃ frame ∈ frames, FrameOwns frame root
 
-def DisposesReservations (context : Context) (places : List ReservedPlace) (next : Task) : Task :=
+def DisposesReservations (context : Context) (places : List ResolvedPlace) (next : Task) : Task :=
   places.foldr (fun place task => .destroy context place.address place.authority task) next
 
-def Reservations (world : World) (environment : Environment)
-    (places : List Place) (reserved : List ReservedPlace) : Prop :=
-  ListRel (fun place entry => ResolvesPlace world environment place entry.address entry.authority ∧
-    Permitted world entry.authority .shared entry.address) places reserved
-
-def ReservationInputs (world : World) (reserved : List ReservedPlace) (access : Access)
+def ReservationInputs (world : World) (reserved : List ResolvedPlace) (access : Access)
     (formals : List Local) (inputs : List InvocationInput) : Prop :=
   reserved.length = formals.length ∧
   inputs = (formals.zip reserved).zipIdx.map
@@ -101,7 +96,7 @@ def PacksBindings (program : Kernel.Program) (context : Context) (before : World
     (bindings.map (fun entry => entry.1.id)).Nodup ∧
     NewValue program.declarations allocated pack type
       (.bindings ⟨before.nextProof,context.region,bindings.map (fun entry => entry.1.id),[⟨resultOrigin,pattern,positive⟩]⟩)
-      (bindings.map Prod.snd) created ∧
+      (bindings.map (fun entry => ⟨entry.2,.owner⟩)) created ∧
     after = { created with nextProof := before.nextProof+1 }
 
 inductive UnitFields (program : Kernel.Program) (context : Context) :
@@ -138,7 +133,8 @@ inductive TestResult (program : Kernel.Program) (context : Context) :
       CarrierFields program context packed (if positive then carrier.positive else carrier.negative) dataArguments pack
         (if positive then carrier.positiveBindings else carrier.negativeBindings) fields assembled →
       NewValue program.declarations assembled destination type
-        (.constructor (if positive then carrier.positive else carrier.negative)) fields after →
+        (.constructor (if positive then carrier.positive else carrier.negative))
+        (fields.map (fun address => ⟨address,.owner⟩)) after →
       TestResult program context before destination type pattern positive observations after
 
 inductive ControlStep (program : Kernel.Program) : State → Option Event → State → Prop where
@@ -147,17 +143,17 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       ResolvesPlace before.world context.environment call.callee receiver authority → before.world.Stores receiver value →
       value.head = .label brand → Permitted before.world authority .shared receiver →
       (∃ place, call.arguments = [place] ∧ ResolvesPlace before.world context.environment place argument permission) →
-      ControlStep program before (some (.leave brand)) { before with task := .leave context brand argument }
+      ControlStep program before (some (.leave brand)) { before with task := .leave context brand ⟨argument,permission⟩ }
   | leave {before context brand argument inner outerContext region type outer kept after roots} :
       before.task = .leave context brand argument → LabelRoute before.frames brand inner outerContext region type outer →
-      Protect program outerContext before.world argument .owner kept after →
+      Protect program outerContext before.world argument.address argument.authority kept after →
       AbandonedRoots after inner [kept.root] roots → Cancelable program.declarations after roots →
       ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield outerContext kept)) }
   | reserve {before context lexical bound localSlot brand places next reserved allocated destination after layout} :
       before.task = .run context (.reserve lexical brand places next) →
       bound = context.bindBrand brand (.proof before.world.nextProof) → localSlot = bound.local lexical →
-      Reservations before.world context.environment places reserved →
-      (reserved.map ReservedPlace.address).Nodup →
+      ResolvedOperands before.world context.environment places reserved →
+      (reserved.map ResolvedPlace.address).Nodup →
       (∀ a ∈ reserved, ∀ b ∈ reserved, a.address ≠ b.address → ¬ a.address.Overlaps b.address) →
       (∀ id available, before.world.availability.get id = some available → available.active = true →
         ∀ a ∈ available.reserved, ∀ b ∈ reserved, ¬ a.address.Overlaps b.address) →
@@ -178,9 +174,9 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       ControlStep program before none { before with task := .destroy context address authority (.run context next) }
   | primitiveCloseAvailable {before context destination binding arguments source next value id} :
       before.task = .primitive context destination binding arguments [source] next → binding.primitive = some .availableClose →
-      before.world.Stores source value → value.head = .available id →
+      before.world.Stores source.address value → value.head = .available id →
       ControlStep program before none
-        { before with task := .destroy context source .owner (.atom context destination (.constant (.constantTuple [])) next) }
+        { before with task := .destroy context source.address source.authority (.atom context destination (.constant (.constantTuple [])) next) }
   | destroyAvailable {before context address authority next value id available cleared} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.head = .available id →
       before.world.availability.get id = some available → ReservationCanClose program before.world available →

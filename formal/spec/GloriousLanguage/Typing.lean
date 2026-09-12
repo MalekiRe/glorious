@@ -220,7 +220,8 @@ def CompletelyHandles (program : Kernel.Program) (context : Language.Context)
     ∀ operationId ∈ family.operations, ∀ itemArguments operation signature,
       Execution.OperationInstance program operationId (arguments ++ itemArguments) operation signature →
       ∀ world payload, WorldTyped program world →
-        ListRel (fun address type => ∃ value, world.Stores address value ∧ value.type = type ∧ value.Initialized)
+        ListRel (fun source type => Permitted world source.authority .shared source.address ∧
+          ∃ value, world.Stores source.address value ∧ value.type = type ∧ value.Initialized)
           payload signature.parameters →
         ∃ arm ∈ handler.operations, Execution.ArmAccepts program world context operationId (arguments ++ itemArguments) payload arm
 

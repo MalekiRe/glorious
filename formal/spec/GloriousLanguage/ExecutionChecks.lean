@@ -39,7 +39,7 @@ example (context : Execution.Context) (destination : Address) (binding : Runtime
   exact fun impossible => impossible
 
 example (program : Kernel.Program) (world : World) (operation : DeclId)
-    (arguments : List Term) (payload : List Address) (context : Execution.Context) (destination : Address)
+    (arguments : List Term) (payload : List ResolvedPlace) (context : Execution.Context) (destination : Address)
     (binding : RuntimeBinding) (operands : List Address) (state : List Nat) (next : Code) :
     ¬ Bypasses program world operation arguments payload (.hostCallback context destination binding operands state next) := by
   exact fun impossible => impossible

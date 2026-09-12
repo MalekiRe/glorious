@@ -8,25 +8,26 @@ namespace Glorious.Language.Execution
 open Kernel
 
 def ArmAccepts (program : Kernel.Program) (world : World) (context : Language.Context)
-    (operation : DeclId) (arguments : List Term) (payload : List Address) (arm : OperationArm) : Prop :=
+    (operation : DeclId) (arguments : List Term) (payload : List ResolvedPlace) (arm : OperationArm) : Prop :=
   arm.operation = operation ∧ ListRel (Equal program.declarations context) arguments arm.arguments ∧
-  ListRel (Matches program.declarations world) payload arm.patterns
+  ListRel (fun source pattern => Permitted world source.authority .shared source.address ∧
+    Matches program.declarations world source.address pattern) payload arm.patterns
 
 def SelectsOperation (program : Kernel.Program) (world : World) (handler : InstalledHandler)
-    (operation : DeclId) (arguments : List Term) (payload : List Address) (arm : OperationArm) : Prop :=
+    (operation : DeclId) (arguments : List Term) (payload : List ResolvedPlace) (arm : OperationArm) : Prop :=
   ∃ skipped rest,
     handler.syntaxNode.operations = skipped ++ arm :: rest ∧
     ArmAccepts program world handler.environment.static operation arguments payload (arm.closeHead handler.environment.instantiation) ∧
     ∀ earlier ∈ skipped, ¬ ArmAccepts program world handler.environment.static operation arguments payload (earlier.closeHead handler.environment.instantiation)
 
 def Bypasses (program : Kernel.Program) (world : World) (operation : DeclId)
-    (arguments : List Term) (payload : List Address) : Frame → Prop
+    (arguments : List Term) (payload : List ResolvedPlace) : Frame → Prop
   | .handler handler _ => ¬ ∃ arm, SelectsOperation program world handler operation arguments payload arm
   | .foreign _ | .hostCallback .. => False
   | _ => True
 
 def Routes (program : Kernel.Program) (before : State) (operation : DeclId)
-    (arguments : List Term) (payload : List Address) (inner : List Frame) (handler : InstalledHandler)
+    (arguments : List Term) (payload : List ResolvedPlace) (inner : List Frame) (handler : InstalledHandler)
     (owns : Bool) (arm : OperationArm) (outer : List Frame) : Prop :=
   before.frames = inner ++ .handler handler owns :: outer ∧
   (∀ frame ∈ inner, Bypasses program before.world operation arguments payload frame) ∧
@@ -91,14 +92,6 @@ def StartsResumptionClause (before : State) (handler : InstalledHandler) (lexica
     context = outer.bindBrand brand (.resumption before.nextContinuation) ∧
     localSlot = context.local lexical
 
-inductive Protects (program : Kernel.Program) (context : Context) :
-    World → List Address → List Address → World → Prop where
-  | nil {world} : Protects program context world [] [] world
-  | cons {before source sources destination destinations middle after} :
-      Protect program context before source .owner destination middle →
-      Protects program context middle sources destinations after →
-      Protects program context before (source :: sources) (destination :: destinations) after
-
 inductive PayloadPlan (program : Language.Program) (world : World) :
     List Address → List Pattern → PatternActions → Prop where
   | nil : PayloadPlan program world [] [] ⟨[],[],[]⟩
@@ -153,7 +146,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       ResolvesPlace before.world context.environment call.callee receiver authority →
       before.world.Stores receiver value → value.head = .operation id arguments →
       Permitted before.world authority .shared receiver → OperationInstance program id arguments operation signature →
-      signature = call.signature → Addresses before.world context.environment call.arguments payload →
+      signature = call.signature → ResolvedOperands before.world context.environment call.arguments payload →
       EffectStep program before (some (.perform id arguments)) { before with task := .perform context id arguments payload }
   | terminal {before context id arguments payload inner handler owns arm outer operation signature clause withRegion
       kept moved roots actions} : before.task = .perform context id arguments payload →
@@ -192,20 +185,20 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       ResolvesPlace before.world context.environment call.callee receiver authority →
       before.world.Stores receiver value → value.head = .continuation id → Permitted before.world authority .shared receiver →
       (∃ place, call.arguments = [place] ∧ ResolvesPlace before.world context.environment place argument permission) →
-      EffectStep program before none { before with task := .resume context id argument tail }
+      EffectStep program before none { before with task := .resume context id ⟨argument,permission⟩ tail }
   | tailArmReturn {before context value caller id rest} : before.task = .yield context value →
       before.frames = .tailResume caller id :: rest →
-      EffectStep program before none { before with task := .resume caller id value false, frames := rest }
+      EffectStep program before none { before with task := .resume caller id ⟨value,.owner⟩ false, frames := rest }
   | resumeLast {before caller id argument suspension after kept transferred} :
       before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
       ActiveObligation suspension → suspension.remaining = 1 →
       after = restoreRoots before.world suspension.homes →
-      Protect program suspension.context after argument .owner kept transferred →
+      Protect program suspension.context after argument.address argument.authority kept transferred →
       EffectStep program before (some (.replay id true)) { before with world := transferred, task := .yield suspension.context kept, frames := suspension.frames ++ [.handler suspension.handler false,.resumed caller] ++ before.frames, resumptions := before.resumptions.set id { suspension with remaining := 0, used := suspension.used+1, active := false } }
   | resumeCopy {before caller id argument suspension map copied kept transferred} :
       before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
       ActiveObligation suspension → 1 < suspension.remaining → CopiesSnapshot program before suspension map copied →
-      Protect program (map.context suspension.context) copied.world argument .owner kept transferred →
+      Protect program (map.context suspension.context) copied.world argument.address argument.authority kept transferred →
       EffectStep program before (some (.replay id false)) { copied with world := transferred, task := .yield (map.context suspension.context) kept, frames := suspension.frames.map map.frame ++ [.handler (map.installed suspension.handler) false,.resumed caller] ++ before.frames, resumptions := before.resumptions.set id { suspension with remaining := suspension.remaining-1, used := suspension.used+1 } }
   | resumeReturns {before context value caller rest kept after} : before.task = .yield context value →
       before.frames = .resumed caller :: rest → Protect program caller before.world value .owner kept after →

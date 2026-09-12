@@ -62,14 +62,14 @@ inductive Task where
   | releaseLoan (loan : Identity) (next : Task)
   | transfer (source : Address) (authority : Authority) (destination : Address) (next : Task)
   | pattern (context : Context) (actions : List PatternAction) (body : Code)
-  | perform (context : Context) (operation : DeclId) (arguments : List Term) (payload : List Address)
-  | resume (context : Context) (continuation : Identity) (argument : Address) (tail : Bool)
+  | perform (context : Context) (operation : DeclId) (arguments : List Term) (payload : List ResolvedPlace)
+  | resume (context : Context) (continuation : Identity) (argument : ResolvedPlace) (tail : Bool)
   | cancel (context : Context) (continuation : Identity) (next : Task)
   | finishClause (handler : InstalledHandler) (ownsEnvironment : Bool)
       (continuation : Option Identity) (result : Address)
-  | leave (context : Context) (brand : Identity) (argument : Address)
+  | leave (context : Context) (brand : Identity) (argument : ResolvedPlace)
   | primitive (context : Context) (destination : Address) (binding : RuntimeBinding)
-      (arguments : List Term) (operands : List Address) (next : Code)
+      (arguments : List Term) (operands : List ResolvedPlace) (next : Code)
   | foreign (context : Context) (destination : Address) (binding : RuntimeBinding)
       (operands : List Address) (hostState : List Nat) (next : Code)
   | stopped (result : Address)
@@ -160,6 +160,17 @@ def Protect (program : Kernel.Program) (outer : Context) (before : World)
   ∃ value allocated, before.Stores source value ∧ Temporary program outer value.type before destination allocated ∧
     Transfers allocated authority source destination after
 
+/-- Ordered by-value handoff. The new homes are owned only after transferring
+each input under its retained authority; source evaluation has already done
+any implicit Copy required by the source expression. -/
+inductive Protects (program : Kernel.Program) (context : Context) :
+    World → List ResolvedPlace → List Address → World → Prop where
+  | nil {world} : Protects program context world [] [] world
+  | cons {before source sources destination destinations middle after} :
+      Protect program context before source.address source.authority destination middle →
+      Protects program context middle sources destinations after →
+      Protects program context before (source :: sources) (destination :: destinations) after
+
 def RegionCanEnd (world : World) (region : Identity) : Prop :=
   (∀ id root, world.roots.get id = some root → root.live = true → root.region ≠ region) ∧
   (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.region ≠ region) ∧
@@ -168,11 +179,10 @@ def RegionCanEnd (world : World) (region : Identity) : Prop :=
 def RegionEnds (before : World) (region : Identity) (after : World) : Prop :=
   RegionCanEnd before region ∧ after = { before with liveRegions := before.liveRegions.filter (· != region) }
 
-inductive Addresses (world : World) (environment : Environment) : List Place → List Address → Prop where
-  | nil : Addresses world environment [] []
-  | cons {place places address authority addresses} : ResolvesPlace world environment place address authority →
-      Permitted world authority .shared address → Addresses world environment places addresses →
-      Addresses world environment (place :: places) (address :: addresses)
+def ResolvedOperands (world : World) (environment : Environment)
+    (places : List Place) (operands : List ResolvedPlace) : Prop :=
+  ListRel (fun place entry => ResolvesPlace world environment place entry.address entry.authority ∧
+    Permitted world entry.authority .shared entry.address) places operands
 
 inductive ArgumentInputs (world : World) (context : Context) :
     Nat → List Local → List Place → List InvocationInput → Prop where

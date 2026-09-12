@@ -331,3 +331,45 @@ compatible original provenance remain unfinished. The primitive-operand boundary
 also still drops resolved authorities into bare addresses; sealed operations
 must not inherit invented owner permission from that path. Other source,
 control-state, metatheory and normative-adequacy obligations remain open.
+
+## Resolved operand authority through consumption boundaries
+
+`lake build` passes all 36 jobs, including `AuthorityChecks`. Resolved places
+now retain their address and authority in a shared `ResolvedPlace` product.
+The former address-only operand relation and separate reservation-resolution
+relation were removed; construction, primitive dispatch, effect dispatch and
+availability reservations consume `ResolvedOperands`. Shared invocation views
+remain shared even when the world has no corresponding loan-table entry.
+
+Aggregate construction consumes each field under its retained authority and
+requires pairwise nonoverlap, not merely distinct paths. Thus it cannot consume
+both a container and its child. Freshly acquired closure/pattern/carrier
+temporaries explicitly supply their actual owner authority. Scalar and pointer
+reads require the operand's shared permission; raw writes use its original
+consumption permission. Availability-close dispatch retains that permission
+when scheduling real destruction.
+
+Operation payloads, label arguments and continuation arguments carry the same
+product until checked transfer. Handler matching and complete-handler coverage
+retain readable operand evidence. Ordered payload protection shares the existing
+storage transfer relation; foreign entry uses it before passing new owned
+temporary addresses to the host model. Outward waiting requires initialized,
+consumable payloads, so an unhandled operation does not turn an unusable shared
+argument into a valid terminal observation. Contract outcomes retain authority;
+public observations reveal residents without inventing it.
+
+The new checks cover shared invocation binding through actual primitive
+dispatch, readable shared scalars, owned and unique-loan aggregate construction,
+rejection of overlapping input trees, and rejection of shared consumption by
+construction, raw writes, foreign entry, handled operations, labels and
+continuations. The control checks additionally prove that availability-close
+scheduling preserves shared authority. The negative control checks quantify over
+arbitrary frames and resumption state, rather than depending on absent handlers
+or missing continuations.
+
+These are boundary proofs and execution witnesses, not full source-admitted
+nonvacuity or general preservation/progress. Complete foreign resource lifecycle,
+snapshot/control-state validity, source elaboration coverage, sealed binding
+projection/combination and hidden context arguments remain unfinished, alongside
+the broader metatheory and normative-adequacy audit. No compiler or library
+acceptance gate was changed or run.

@@ -9,8 +9,8 @@ open Kernel Execution
 
 inductive Outcome where
   | normal (result : Address)
-  | label (brand : Identity) (result : Address)
-  | operation (id : DeclId) (arguments : List Term) (payload : List Address)
+  | label (brand : Identity) (result : ResolvedPlace)
+  | operation (id : DeclId) (arguments : List Term) (payload : List ResolvedPlace)
   | suspended (continuation : Identity)
   | canceled (continuation : Identity)
   | fault (reason : Fatal)
@@ -99,6 +99,8 @@ def MayAwait (program : Kernel.Program) (function : Function) (state : State) : 
   ∃ context id arguments payload operation signature,
     state.task = .perform context id arguments payload ∧ OperationInstance program id arguments operation signature ∧
     RowSubset program.declarations context.static signature.effects function.signature.effects ∧
+    (∀ source ∈ payload, state.world.Initialized source.address ∧
+      Permitted state.world source.authority .owned source.address) ∧
     (∀ inner handler owns arm outer, ¬ Routes program state id arguments payload inner handler owns arm outer) ∧
     Suspensible state.world (state.world.roots.map Prod.fst)
 

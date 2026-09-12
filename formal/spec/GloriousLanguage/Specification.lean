@@ -111,7 +111,8 @@ def Finished (program : Kernel.Program) (function : Function) (state : State) (r
   (∃ reason, state.task = .fatal reason ∧ result = .fatal reason) ∨
   (∃ context id arguments payload residents publicScope,
     state.task = .perform context id arguments payload ∧ Contracts.MayAwait program function state ∧
-    ListRel (World.Stores state.world) payload residents ∧ ListRel (Reveals state.world) residents publicScope ∧ result = .outward id arguments publicScope)
+    ListRel (fun source value => state.world.Stores source.address value) payload residents ∧
+    ListRel (Reveals state.world) residents publicScope ∧ result = .outward id arguments publicScope)
 
 def Semantics (program : Kernel.Program) (host : Foreign.Model) (function : Function) (inputs : List InvocationInput) :
     TransitionSystem PublicEvent Result where

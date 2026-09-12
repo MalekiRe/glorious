@@ -157,7 +157,9 @@ def Authority.parentLoan : Authority → Option Identity
   | .loan id => some id
   | .shared backing => backing.parentLoan
 
-structure ReservedPlace where
+/-- A resolved storage location always travels with its access authority.
+An address alone is not permission to consume the resident. -/
+structure ResolvedPlace where
   address : Address
   authority : Authority
   deriving Repr, Inhabited
@@ -166,7 +168,7 @@ structure Availability where
   identity : Identity
   brand : Term
   region : Identity
-  reserved : List ReservedPlace
+  reserved : List ResolvedPlace
   active : Bool
   deriving Repr, Inhabited
 
@@ -356,13 +358,13 @@ inductive Clears : World → List Address → World → Prop where
   | cons {before address rest middle after} : before.write address none = some middle →
       Clears middle rest after → Clears before (address :: rest) after
 
-inductive NewValue (program : Program) : World → Address → Term → ValueHead → List Address → World → Prop where
+inductive NewValue (program : Program) : World → Address → Term → ValueHead → List ResolvedPlace → World → Prop where
   | construct {before destination type head sources residents taken after} : before.Vacant destination →
-      ListRel (World.Stores before) sources residents →
+      ListRel (fun source value => before.Stores source.address value) sources residents →
       (∀ resident ∈ residents, resident.Initialized) →
-      (sources.map (fun address => (address.root,address.fields))).Nodup →
-      (∀ source ∈ sources, Permitted before .owner .owned source ∧ source ≠ destination) →
-      Clears before sources taken →
+      sources.Pairwise (fun left right => ¬ left.address.Overlaps right.address) →
+      (∀ source ∈ sources, Permitted before source.authority .owned source.address ∧ ¬ source.address.Overlaps destination) →
+      Clears before (sources.map ResolvedPlace.address) taken →
       taken.write destination (some (.resident before.nextOwner type head true (residents.map some))) = some after →
       NewValue program before destination type head sources { after with nextOwner := before.nextOwner+1 }
 
@@ -372,6 +374,17 @@ inductive Transfers : World → Authority → Address → Address → World → 
       before.Vacant destination → ¬ source.Overlaps destination →
       before.write source none = some cleared → cleared.write destination (some value) = some after →
       Transfers before authority source destination after
+
+theorem Transfers.permission {before authority source destination after}
+    (transfer : Transfers before authority source destination after) :
+    Permitted before authority .owned source := by cases transfer; assumption
+
+theorem NewValue.inputPermission {program before destination type head sources after}
+    (constructed : NewValue program before destination type head sources after)
+    {source : ResolvedPlace} (member : source ∈ sources) :
+    Permitted before source.authority .owned source.address := by
+  cases constructed with
+  | construct _ _ _ _ permissions _ _ => exact (permissions source member).1
 
 inductive Copies (program : Program) : World → Authority → Address → Address → World → Prop where
   | copy {before authority source destination value cloned next after} :

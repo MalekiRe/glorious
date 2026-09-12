@@ -84,7 +84,8 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
         { before with world := after, task := .run context next }
   | construct {before context destination type variant fields next sources residents head after} :
       before.task = .atom context destination (.construct type variant fields) next →
-      Addresses before.world context.environment fields sources → ListRel (World.Stores before.world) sources residents →
+      ResolvedOperands before.world context.environment fields sources →
+      ListRel (fun source value => before.world.Stores source.address value) sources residents →
       ConstructorHead program.declarations type variant (residents.map Value.type) head →
       DestinationType before.world destination type → NewValue program.declarations before.world destination type head sources after →
       AtomStep program before none { before with world := after, task := .run context next }
@@ -93,7 +94,8 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       Captures program context before.world captures sources captured →
       ListRel (fun formal address => ∃ value, captured.Stores address value ∧ value.type = formal.type) function.captures sources →
       DestinationType captured destination (.callable id arguments) →
-      NewValue program.declarations captured destination (.callable id arguments) (.callable id arguments) sources after →
+      NewValue program.declarations captured destination (.callable id arguments) (.callable id arguments)
+        (sources.map (fun address => ⟨address,.owner⟩)) after →
       AtomStep program before none { before with world := after, task := sources.foldr (fun address nextTask => .retire address.root nextTask) (.run context next) }
   | function {before context destination id arguments next function after} :
       before.task = .atom context destination (.function id arguments) next → Instance program id arguments function →
@@ -114,7 +116,7 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
   | primitive {before context destination id arguments operands next binding addresses} :
       before.task = .atom context destination (.primitive id arguments operands) next →
       binding ∈ program.declarations.input.manifest.bindings → binding.declaration = id →
-      Addresses before.world context.environment operands addresses →
+      ResolvedOperands before.world context.environment operands addresses →
       (binding.signature.unsafeAllowed = true → context.unsafeAllowed = true) →
       AtomStep program before none { before with task := .primitive context destination binding arguments addresses next }
 

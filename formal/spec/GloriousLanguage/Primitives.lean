@@ -7,13 +7,15 @@ namespace Glorious.Language.Execution
 
 open Kernel Memory
 
-def ScalarAt (world : World) (address : Address) (scalar : ScalarValue) : Prop :=
-  ∃ value, world.Stores address value ∧ value.head = .scalar scalar ∧ value.Initialized
+def ScalarAt (world : World) (source : ResolvedPlace) (scalar : ScalarValue) : Prop :=
+  Permitted world source.authority .shared source.address ∧
+  ∃ value, world.Stores source.address value ∧ value.head = .scalar scalar ∧ value.Initialized
 
-def PointerAt (world : World) (address : Address) (pointer : RawPointer) : Prop :=
-  ∃ value, world.Stores address value ∧ value.head = .pointer pointer ∧ value.Initialized
+def PointerAt (world : World) (source : ResolvedPlace) (pointer : RawPointer) : Prop :=
+  Permitted world source.authority .shared source.address ∧
+  ∃ value, world.Stores source.address value ∧ value.head = .pointer pointer ∧ value.Initialized
 
-inductive ScalarValues (world : World) : List Address → List ScalarValue → Prop where
+inductive ScalarValues (world : World) : List ResolvedPlace → List ScalarValue → Prop where
   | nil : ScalarValues world [] []
   | cons {address addresses scalar scalars} : ScalarAt world address scalar → ScalarValues world addresses scalars →
       ScalarValues world (address :: addresses) (scalar :: scalars)
@@ -169,7 +171,8 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       PrimitiveStep program before none { before with world := after, task := .run context next }
   | rawWrite {before context destination binding type source pointerAddress next pointer written after} :
       before.task = .primitive context destination binding [type] [source,pointerAddress] next → binding.primitive = some .rawWrite →
-      PointerAt before.world pointerAddress pointer → RawWrite program.declarations before.world source pointer type written →
+      PointerAt before.world pointerAddress pointer →
+      RawWrite program.declarations before.world source.authority source.address pointer type written →
       StoresUnit program written destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
   | rawBorrow {before context destination binding type pointerAddress next pointer mode after} :

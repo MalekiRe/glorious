@@ -92,11 +92,26 @@ example (program : Kernel.Program) (event : Option Event) (after : State) :
 example (program : Kernel.Program) (binding : RuntimeBinding)
     (selected : binding.primitive = some .availableClose) :
     ControlStep program
-      { world := unitWorld, task := .primitive context destination binding [] [source] .abort }
+      { world := unitWorld, task := .primitive context destination binding [] [⟨source,.owner⟩] .abort }
       none
       { world := unitWorld, task := .destroy context source .owner
           (.atom context destination (.constant (.constantTuple [])) .abort) } :=
-  .primitiveCloseAvailable rfl selected rfl rfl
+  .primitiveCloseAvailable (source := ⟨source,.owner⟩) (value := witness)
+    (before := { world := unitWorld, task := .primitive context destination binding [] [⟨source,.owner⟩] .abort })
+    rfl selected rfl rfl
+
+/-- Dispatch may schedule cleanup through a lent view, but must not turn it
+into owner authority. The shared view consequently cannot execute destruction. -/
+example (program : Kernel.Program) (binding : RuntimeBinding) (backing : Authority)
+    (selected : binding.primitive = some .availableClose) :
+    ControlStep program
+      { world := unitWorld, task := .primitive context destination binding [] [⟨source,.shared backing⟩] .abort }
+      none
+      { world := unitWorld, task := .destroy context source (.shared backing)
+          (.atom context destination (.constant (.constantTuple [])) .abort) } :=
+  .primitiveCloseAvailable (source := ⟨source,.shared backing⟩) (value := witness)
+    (before := { world := unitWorld, task := .primitive context destination binding [] [⟨source,.shared backing⟩] .abort })
+    rfl selected rfl rfl
 
 example (program : Kernel.Program) (world : World) (context : Execution.Context)
     (call : Invocation) (selected : EnvironmentAccess) (tail : Bool) (event : Option Event) (after : State)

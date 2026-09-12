@@ -184,11 +184,11 @@ inductive RawRead (program : Language.Program) : World → RawPointer → Term �
         copy = false ∧ Transfers before .owner source destination after) →
       RawRead program before pointer type copy destination after
 
-inductive RawWrite (program : Language.Program) : World → Address → RawPointer → Term → World → Prop where
-  | write {before source pointer type destination after layout value} : before.Stores source value → value.type = type →
+inductive RawWrite (program : Language.Program) : World → Authority → Address → RawPointer → Term → World → Prop where
+  | write {before authority source pointer type destination after layout value} : before.Stores source value → value.type = type →
       PointsTo program before pointer destination type → LayoutOf program ⟨[],[],0,default,true⟩ type layout →
-      RawRange program before pointer layout.size layout.alignment → Transfers before .owner source destination after →
-      RawWrite program before source pointer type after
+      RawRange program before pointer layout.size layout.alignment → Transfers before authority source destination after →
+      RawWrite program before authority source pointer type after
 
 inductive RawBorrow (program : Language.Program) :
     World → RawPointer → Term → Mutability → Identity → Address → World → Prop where
