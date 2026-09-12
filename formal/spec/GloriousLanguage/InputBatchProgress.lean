@@ -3386,6 +3386,37 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
   · rfl
 
 
+/-- The supplied-source entry endpoint with no finishing assumptions at all: the
+binder's own world is the entry's after-world, because a supplied entry owns no
+receiver shell to retire. -/
+theorem Kernel.EntryBatch.enterWorldAttempt.supplied {program : Kernel.Program}
+    {before : Execution.State} {caller : Execution.Context} {function : Kernel.Function}
+    {supplied : List InvocationInput} {withRegion prepared : World}
+    {inputs : List InvocationInput} (callee : Execution.Context)
+    (calleeLifetime : callee.activation = before.nextActivation ∧
+      callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
+    (prepares : Execution.PreparesEntry program callee function withRegion (.supplied supplied) inputs prepared)
+    (fresh : FreshRegion before.world before.world.nextRegion withRegion)
+    (preparedValid : prepared.WellFormed)
+    (incoming : IncomingResources program function prepared inputs)
+    (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
+      before.world.nextRegion prepared inputs)
+    (facts : ∀ input ∈ inputs, InputFramed program prepared input)
+    (nodup : inputs.Nodup)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ context after outcome,
+      Execution.EnterWorldAttempt program before caller function (.supplied supplied) context after outcome :=
+  Kernel.EntryBatch.enterWorldAttempt (consumed := fun bound => bound)
+    (finishes := fun _ => Execution.FinishesEntry.supplied) callee calleeLifetime declared
+    prepares fresh preparedValid incoming product facts nodup callerUnsafe
+
+/-- A supplied entry finishes at the very world the binder produced: it owns no
+receiver shell to retire, so the endpoint's supplied branch needs no write. -/
+theorem Execution.FinishesEntry.supplied {world : World} {inputs : List Kernel.InvocationInput} :
+    Execution.FinishesEntry world (.supplied inputs) world :=
+  .supplied
+
 /-- The receiver-shell consumption producers: the exact source-level evidence a
 caller has after the ordered binder produced its world. -/
 theorem Execution.FinishesEntry.of_resident {before after : World}
@@ -3770,6 +3801,51 @@ theorem Kernel.Execution.CaptureInputs.slot {world : World} {receiver : Address}
     {input : InvocationInput} (member : input ∈ inputs) :
     ∃ index, input.origin = .capture index ∧ input.storage = receiver.child index :=
   Kernel.Execution.ResidentCaptureInputs.slot (by rw [← selected.1]; exact member)
+
+/-- The bridge from the fold's per-slot holes to an all-holes shell: if every
+slot of the admitted shell is in the cleared list and the shell's length is
+unchanged, then every field of the resulting shell is a hole. This is what turns
+`attemptFor_shell`'s cleared-slot invariant into the emptiness the finishing
+consumes, with the slot coverage supplied by the admitted receiver. -/
+theorem Kernel.Cleared.fields_all_none {shell changed : Value} {cleared : List Nat}
+    (lengths : changed.fields.length = shell.fields.length)
+    (holes : ∀ slot ∈ cleared, changed.fields[slot]? = some none)
+    (covers : ∀ slot, slot < shell.fields.length → slot ∈ cleared) :
+    ∀ field ∈ changed.fields, field = none := by
+  intro field member
+  obtain ⟨index, found⟩ := List.mem_iff_getElem?.mp member
+  have bound : index < changed.fields.length := (List.getElem?_eq_some_iff.mp found).1
+  have indexBound : index < shell.fields.length := by rw [← lengths]; exact bound
+  have atCleared := holes index (covers index indexBound)
+  rw [atCleared] at found
+  exact (Option.some.inj found).symm
+
+/-- The capture projection numbers its inputs exactly by their position: every
+admitted capture's index is below the capture count, so the slots the ordering
+clears are precisely the capture positions. -/
+theorem Kernel.Execution.ResidentCaptureInputs.index_bound {receiver : Address}
+    {authority : Authority} {access : Access} {formals : List Local} {input : InvocationInput}
+    (member : input ∈ Execution.ResidentCaptureInputs receiver authority access formals) :
+    ∃ index, input.origin = .capture index ∧ index < formals.length ∧
+      input.storage = receiver.child index := by
+  simp only [Execution.ResidentCaptureInputs,List.mem_map] at member
+  obtain ⟨⟨formal,index⟩, pairMember, same⟩ := member
+  have shaped := List.mem_zipIdx pairMember
+  exact ⟨index, by rw [← same], by simpa using shaped.2.1, by rw [← same]⟩
+
+/-- The converse of the numbering: every position below the capture count is the
+index of an admitted capture whose storage is the receiver's child at that
+position. This is the slot coverage the all-holes bridge needs. -/
+theorem Kernel.Execution.ResidentCaptureInputs.covers {receiver : Address} {authority : Authority}
+    {access : Access} {formals : List Local} {slot : Nat} (bound : slot < formals.length) :
+    ∃ input ∈ Execution.ResidentCaptureInputs receiver authority access formals,
+      input.origin = .capture slot ∧ input.storage = receiver.child slot := by
+  refine ⟨⟨.capture slot,formals[slot],receiver.child slot,authority,access⟩,?_,rfl,rfl⟩
+  simp only [Execution.ResidentCaptureInputs,List.mem_map]
+  refine ⟨(formals[slot],slot),?_,rfl⟩
+  rw [List.mem_iff_getElem]
+  exact ⟨slot,by simpa using bound,
+    by simp [List.getElem_zipIdx]⟩
 
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
