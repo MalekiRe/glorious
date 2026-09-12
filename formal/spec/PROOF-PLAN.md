@@ -817,7 +817,13 @@ parent shell as the same shell with that one slot a hole at any depth
 vacant (`World.Vacant.write_child_other`). What the loop must still be
 restructured to carry is what those facts let it carry — the parent shell it is
 emptying and the vacancies it has produced — and the last environmental fact
-remains the custody hand-off.
+remains the custody hand-off. One composition detail is now known and worth
+recording: a child's destruction step does not end at its clear, because the
+clear leaves the state at `ReleaseCustodyLoans` and the drain
+(`CleanupRun.release_custody_returns`) then changes the world again (it only kills
+loans, and it reports `LoanReleaseFrame`), so the parent-shell fact obtained by
+applying `World.Stores.write_child_none` to the clear must be transported across
+that drain before the loop can carry it.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered
