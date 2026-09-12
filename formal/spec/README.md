@@ -287,6 +287,19 @@ or a dependency of this project.
   with the prefix law chaining the apartness). The recursion theorem
   (`CleanupRun.destroy_tree`) that consumes them is NOT yet stated; the remaining
   transports are an ending-row step, the `RequestReturns` map and `Retires`.
+- `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
+  `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
+  and `source_execution` now take a `Typing.ScopeReading` indexed by the actual
+  source context instead of a supplied `SourceInterpreted`, and
+  `ProjectionStepConversion` is deleted as a false contract. The producer
+  `Typing.ScopeReading.of_cut` is proved but has no call site and is only
+  satisfiable for a decoded source context, so the reading is still assumed at
+  those endpoints and none of the four has a caller. Completion requires the
+  image map `t ↦ instantiation.term (t.substitute outer)` with its entailments
+  read at the image (a general `Entails` transport, or a consumer contract that
+  reads `.entailed`-shaped equalities from the assumptions), driven by the
+  in-tree `Kernel.Instance` / `ConstraintsHold` evidence, plus callsite wiring
+  and the `World.LayoutRealized` threading at those sites.
 - `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
   is discharged from each input's own readiness (permitted rows, the allocation
   claim's owning row, the erased port's handed chain), with the one shape
