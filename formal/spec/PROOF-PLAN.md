@@ -797,7 +797,21 @@ arbitrary parent loans survive. `DropReturn` consumes actual normal observations
 and constructs the ordinary unit-result/handle cleanup suffix to the current
 receiver's reverse field cleanup. `DropHandle` derives saved-handle vacancy
 and privacy at actual function entry. Preserving that private caller state
-through arbitrary hook bodies and completing nested field cleanup remain open.
+through arbitrary hook bodies remains open, and so does assembling the recursive
+destructor run: the nested field loop itself is now real
+(`CleanupRun.destroy_fields_loop` runs each scheduled child's own destruction and
+carries the remaining indices' vacancy), and the destructor frame instances its
+siblings need are `World.DestroyFrame.of_write`, `.of_requestReturns` and
+`.of_kill` composed by `.trans`, with `World.Destroys.write_disjoint`,
+`.requestReturns` and `.end_loan` at the tree level. What is still missing is the
+theorem that supplies that loop's per-child step from the child's own
+`World.Destroys` tree: the child's structural premises are already inside its own
+tree (`Destroys.resident` carries its stored shell, disposal permission and
+shell/head facts), the shell write is `World.Stores.write_exists` rather than an
+assumption, and the parent-slot clearing is that same write, so the only
+environmental fact left to thread per node is the custody hand-off
+(`CustodyHandedOff (.resident value.owner)`), whose per-node threading is the
+statement design that remains.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered
