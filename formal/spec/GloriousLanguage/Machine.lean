@@ -1,4 +1,4 @@
-import GloriousLanguage.Instantiation
+import GloriousLanguage.Drop
 
 /-! Unbounded small-step execution. Control holds addresses into `World`,
 never hidden copies of owners. Effects and machine leaves extend these tasks
@@ -445,8 +445,8 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       before.world.Vacant address → LocalStep program before none { before with task := next }
   | destroyHook {before context address authority next value hook function withHandle handle after loan} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.shellLive = true →
-      MayDispose program.declarations value → DropHook program.declarations value.type (some hook) →
-      Instance program hook [] function → function.parameters.length = 1 → function.captures = [] →
+      MayDispose program.declarations value →
+      DropInstance program value.type (.runtimeRegion context.region) hook function →
       Temporary program context (.reference .unique (.runtimeRegion context.region) value.type) before.world handle withHandle →
       Borrows program.declarations withHandle authority .unique context.region address handle after → loan = withHandle.nextLoan →
       LocalStep program before (some (.hookEnter address hook)) { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle loan next :: before.frames }

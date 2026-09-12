@@ -418,6 +418,20 @@ open: unrestricted rigid-name admission and the missing relationship between
 body lifetime binders and outward signatures must be repaired at their actual
 producer before a sound copied-frame/control invariant can be established.
 
+`DropApplication` now selects the actual generic destructor declaration using
+the nominal resident and independent borrowing region. Declaration admission
+requires a selection for every supported nominal application, rather than
+checking an uninstantiated result and effect row. `DropDispatch` consumes the
+body inventory and ordinary function admission to construct the executable
+hook instance, fresh owned reference input and typed hook-entry transition.
+The old zero-argument specialization is removed. Destructor restrictions now
+hold for all finite execution prefixes, including prefixes of divergence;
+they are not conditional on a hook reaching a final observation. The nominal
+discard restriction follows from the authoritative capability equation.
+Capability-domain admission, receiver restoration and complete destructor
+execution/cleanup progress remain open. The frozen destructor batch and its
+execution/public-safety consumers passed the targeted Lean gate (59 jobs).
+
 Associated defaults now specialize under the owning trait's checked binder
 substitution, followed by the associated item's own substitution. The selected
 implementation's substitution no longer interprets a trait-owned default body.

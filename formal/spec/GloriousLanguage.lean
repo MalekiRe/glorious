@@ -31,3 +31,4 @@ import GloriousLanguage.PublicValues
 import GloriousLanguage.RuntimeWorldEquivariance
 import GloriousLanguage.RuntimeCoverageEquivariance
 import GloriousLanguage.RuntimeBodyTyping
+import GloriousLanguage.DropDispatch

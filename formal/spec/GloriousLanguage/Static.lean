@@ -497,8 +497,7 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
     (∀ variant ∈ data.variants, (variant.fields.map (·.header.name)).Nodup ∧
       ∀ field ∈ variant.fields, WellKinded program context field.type .type ∧ field.header.module = data.header.module) ∧
     (data.quantitySource.isSome = true → data.invariant.isSome = true) ∧
-    (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function ∧
-      function.signature.effects = .row [] [] ∧ function.signature.result = .unit)
+    (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function)
   | .alias alias => WellKinded program ⟨alias.generics,[],0,alias.header.module,false⟩ alias.value .type
   | .function function => SignatureWellFormed program function.header.module function.signature ∧
     function.parameters.length = function.signature.parameters.length ∧ function.parameters.Nodup ∧

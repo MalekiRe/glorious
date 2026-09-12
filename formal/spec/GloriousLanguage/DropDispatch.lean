@@ -1,0 +1,190 @@
+import GloriousLanguage.Specification
+import GloriousLanguage.CapabilityModels
+import GloriousLanguage.LocalPreservation
+import GloriousLanguage.ResumptionPreservation
+
+/-! Admitted destructor declarations dispatch through the ordinary function
+instance and machine hook-entry rules. Neither an executable body, a zero-arg
+specialization, nor an after-world typing judgment is an admission premise. -/
+namespace Glorious.Language
+
+theorem PrincipalOf.drop_mayDiscard {program : Program} {id : DeclId} {data : DataDefinition}
+    {arguments : List Term} {hook : DeclId} {principal : Principal}
+    (selected : program.data id = some data) (drops : data.dropHook = some hook)
+    (capability : PrincipalOf program (.nominal id arguments) principal) : principal.MayDiscard := by
+  cases principalOf_equation.mp capability with
+  | nominal found _ _ _ _ _ _ discard =>
+    have same := Option.some.inj (found.symm.trans selected)
+    subst same
+    exact discard (by simp [drops])
+
+namespace Contracts
+
+theorem DropContract.observes_safe {program : Kernel.Program} {host : Foreign.Model}
+    {self region : Term} {function : Kernel.Function} {observation : Observation}
+    (contract : DropContract program self region function) (lawful : Foreign.Model.Lawful program host)
+    (observed : Observes program host function observation) :
+    DropTraceSafe observation.before observation.input observation.events := by
+  obtain ⟨start,finish,initial,before,run,_⟩ := observed
+  simpa only [before] using contract.2.1 host observation.input start observation.events finish lawful initial run
+
+/-- Divergence does not exempt a hook from the destructor restrictions.
+Every finite prefix of its actual infinite execution satisfies the same rule. -/
+theorem DropContract.diverges_safe {program : Kernel.Program} {host : Foreign.Model}
+    {self region : Term} {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
+    {states : Nat → Execution.State} {events : Nat → Option Execution.Event}
+    (contract : DropContract program self region function) (lawful : Foreign.Model.Lawful program host)
+    (diverges : Diverges program host function inputs states events) (length : Nat) :
+    DropTraceSafe (states 0).world inputs ((List.range length).filterMap events) :=
+  contract.2.1 host inputs (states 0) _ (states length) lawful diverges.1 (Execution.Run.prefix diverges.2 length)
+
+end Contracts
+
+namespace Specification
+
+/-- The actual body inventory and checked function admission complete the
+declaration-level application. Every generic nominal argument and the actual
+borrow region are retained by the selected parameter type. -/
+theorem DropsAdmitted.dispatch {program : Kernel.Program}
+    (inventory : Kernel.BodyInventory program) (functions : FunctionsAdmitted program)
+    (admitted : DropsAdmitted program) {id : DeclId} {data : DataDefinition} {hook : DeclId}
+    {arguments : List Term} {substitution : Substitution} {region : Term}
+    (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
+    (instantiated : Instantiates data.generics arguments substitution)
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
+    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ region .region) :
+    ∃ function, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
+      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function := by
+  obtain ⟨hookArguments,declaration,hookSubstitution,application⟩ :=
+    admitted.applications id data hook arguments substitution region selected drops instantiated kinded requirements regionKinded
+  obtain ⟨function,bodyInstance,signature,captures⟩ := Kernel.DropApplication.body inventory application
+  have typed := (functions hook hookArguments function bodyInstance).1
+  have parameterTypes := typed.choose_spec.2.1
+  have dispatch : Kernel.DropInstance program (.nominal id arguments) region hook function :=
+    ⟨Or.inl ⟨id,arguments,data,rfl,selected,drops⟩,⟨hookArguments,bodyInstance⟩,signature,captures,parameterTypes⟩
+  exact ⟨function,dispatch,typed,admitted.contracts _ _ _ _ dispatch⟩
+
+theorem WellFormed.drop_dispatch {program : Kernel.Program} (valid : WellFormed program)
+    {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
+    {substitution : Substitution} {region : Term}
+    (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
+    (instantiated : Instantiates data.generics arguments substitution)
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
+    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ region .region) :
+    ∃ function, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
+      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function :=
+  valid.drops.dispatch valid.inventory valid.functions selected drops instantiated kinded requirements regionKinded
+
+end Specification
+
+namespace Execution
+
+/-- The hook's fresh handle is an owned invocation input, not merely a
+well-typed resident. Existing loans cannot name its fresh storage identity,
+and the new loan names the original receiver rather than the handle. -/
+theorem Temporary.borrowed_handle {program : Kernel.Program} {before withHandle after : World}
+    {context : Context} {value : Value} {referent handle : Address} {authority : Authority}
+    (well : before.WellFormed) (stored : before.Stores referent value)
+    (allocated : Temporary program context (.reference .unique (.runtimeRegion context.region) value.type)
+      before handle withHandle)
+    (borrowed : Borrows program.declarations withHandle authority .unique context.region referent handle after) :
+    ∃ resident, after.Stores handle resident ∧ resident.Initialized ∧
+      resident.type = .reference .unique (.runtimeRegion context.region) value.type ∧
+      Permitted after .owner .owned handle := by
+  obtain ⟨layout,allocation⟩ := allocated
+  have fresh : handle.root = before.nextRoot := by cases allocation; rfl
+  have loans : withHandle.loans = before.loans := by cases allocation; rfl
+  have referentBound : referent.root < before.nextRoot := by
+    obtain ⟨root,_,found,_⟩ := World.resident_iff_stores.mpr stored
+    exact World.root_bound well found
+  cases borrowed with
+  | @borrow actual middle parent found _ _ _ _ _ _ _ _ written =>
+    have original : actual = value := Option.some.inj
+      (found.symm.trans ((allocation.read well referent).trans stored))
+    subst actual
+    have handleStored := World.write_read_inside written []
+    simp only [List.append_nil,Value.atPath] at handleStored
+    have finalStored :
+        ({ middle with loans := withHandle.loans.set withHandle.nextLoan ⟨withHandle.nextLoan,parent,referent,.unique,context.region,true⟩, nextOwner := withHandle.nextOwner+1, nextLoan := withHandle.nextLoan+1 }).Stores handle
+          (.resident withHandle.nextOwner (.reference .unique (.runtimeRegion context.region) value.type)
+            (.reference withHandle.nextLoan) true []) := handleStored
+    refine ⟨_,finalStored,?_,rfl,?_⟩
+    · intro path resident inside
+      cases inside with
+      | root => exact ⟨rfl,by simp [Value.fields]⟩
+      | field selected _ => simp [Value.fields] at selected
+    · constructor
+      · exact (Option.bind_eq_some_iff.mp finalStored).imp fun _ selected => selected.1
+      · intro id loan selected live overlap _
+        by_cases same : id = withHandle.nextLoan
+        · subst id
+          have identity : loan = ⟨withHandle.nextLoan,parent,referent,.unique,context.region,true⟩ :=
+            Option.some.inj (selected.symm.trans (Table.get_set _ _ _))
+          subst loan
+          have impossible : before.nextRoot = referent.root := fresh.symm.trans overlap.1
+          exact Nat.lt_irrefl _ (impossible ▸ referentBound)
+        · have old : before.loans.get id = some loan := by
+            simpa only [Table.get_set_other _ _ _ _ same,loans] using selected
+          have bound := World.live_loan_root_bound well old live
+          have impossible : before.nextRoot = loan.referent.root := fresh.symm.trans overlap.1
+          exact Nat.lt_irrefl _ (impossible ▸ bound)
+
+/-- Progress at the hook-dispatch boundary. Allocation and borrowing are
+the actual resource prerequisites; admitted declarations produce the body.
+The hook itself may diverge, so this does not assume cleanup termination. -/
+theorem destroyHook_progress {program : Kernel.Program} {before : State} {context : Context}
+    {address : Address} {authority : Authority} {next : Task} {value : Value}
+    {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
+    {substitution : Substitution} {handle : Address} {withHandle after : World}
+    (valid : Specification.WellFormed program) (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .destroy context address authority next)
+    (stored : before.world.Stores address value) (live : value.shellLive = true)
+    (nominal : value.type = .nominal id arguments) (disposable : MayDispose program.declarations value)
+    (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
+    (instantiated : Instantiates data.generics arguments substitution)
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
+    (allocated : Temporary program context (.reference .unique (.runtimeRegion context.region) value.type)
+      before.world handle withHandle)
+    (borrowed : Borrows program.declarations withHandle authority .unique context.region address handle after) :
+    ∃ function formal,
+      function.parameters = [formal] ∧ formal.type = .reference .unique (.runtimeRegion context.region) value.type ∧
+      Contracts.DropContract program value.type (.runtimeRegion context.region) function ∧
+      Contracts.FunctionInputs function [⟨.argument 0,formal,handle,.owner,.owned⟩] ∧
+      Contracts.InputsTyped program [⟨.argument 0,formal,handle,.owner,.owned⟩] after ∧
+      LocalStep program before (some (.hookEnter address hook))
+        { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,formal,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle withHandle.nextLoan next :: before.frames } ∧
+      Typing.WorldTyped program after := by
+  obtain ⟨function,dispatch,_,contract⟩ := valid.drop_dispatch selected drops instantiated kinded requirements
+    (Kinding.runtimeRegion (id := context.region))
+  rw [← nominal] at dispatch contract
+  obtain ⟨formal,parameters,formalType⟩ := dispatch.2.2.parameter
+  have step := LocalStep.destroyHook task stored live disposable dispatch allocated borrowed rfl
+  simp only [parameters,List.head!] at step
+  have afterTyped := LocalStep.worldTyped valid.declarations valid.inventory typed step
+  obtain ⟨resident,handleStored,initialized,residentType,permission⟩ :=
+    allocated.borrowed_handle typed.1 stored borrowed
+  have captures := dispatch.2.2.2.1
+  refine ⟨function,formal,parameters,formalType,contract,?_,?_,step,afterTyped⟩
+  · constructor
+    · simp [parameters,captures]
+    · intro index input found
+      cases index with
+      | zero =>
+        simp only [List.getElem?_cons_zero,Option.some.injEq] at found
+        subst input
+        exact Or.inr ⟨by simp [captures],by simp [captures]⟩
+      | succ => simp at found
+  · refine ⟨afterTyped,by simp,?_,?_⟩
+    · intro input member
+      simp only [List.mem_singleton] at member
+      subst input
+      exact ⟨resident,handleStored,initialized,residentType.trans formalType.symm,permission⟩
+    · intro left first right last different _
+      simp only [List.mem_singleton] at first last
+      exact False.elim (different (first.trans last.symm))
+
+end Execution
+end Glorious.Language

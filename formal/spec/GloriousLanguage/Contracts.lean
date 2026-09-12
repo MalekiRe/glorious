@@ -165,15 +165,21 @@ def ClosedResult (observation : Observation) : Prop :=
     ∀ id available, observation.after.availability.get id = some available → available.active = true →
       ∃ original, observation.before.availability.get id = some original ∧ original = available
 
-def DropContract (program : Kernel.Program) (function : Function) : Prop :=
-  function.signature.effects = .row [] [] ∧ function.signature.result = .unit ∧
-  (∀ host observation, Foreign.Model.Lawful program host → Observes program host function observation →
-    (∀ event ∈ observation.events,
+def DropTraceSafe (before : World) (inputs : List InvocationInput) (events : List Event) : Prop :=
+    (∀ event ∈ events,
       (∀ brand, event ≠ .leave brand) ∧ (∀ id, event ≠ .suspend id) ∧
       (∀ id last, event ≠ .replay id last) ∧ (∀ operation arguments, event ≠ .perform operation arguments)) ∧
-    (∀ input ∈ observation.input, ∀ value id loan, observation.before.Stores input.storage value → value.head = .reference id →
-      observation.before.loans.get id = some loan →
-      ∀ source destination, Event.move source destination ∈ observation.events → ¬ source.Overlaps loan.referent)) ∧
+    (∀ input ∈ inputs, ∀ value id loan, before.Stores input.storage value → value.head = .reference id →
+      before.loans.get id = some loan →
+      ∀ source destination, Event.move source destination ∈ events → ¬ source.Overlaps loan.referent)
+
+/-- Destructor restrictions are safety properties of every actual execution
+prefix, including a hook that subsequently diverges and has no final outcome. -/
+def DropContract (program : Kernel.Program) (self region : Term) (function : Function) : Prop :=
+  DropFunction self region function ∧
+  (∀ host inputs start events finish, Foreign.Model.Lawful program host →
+    InitialInvocation program function inputs start → Run program host start events finish →
+    DropTraceSafe start.world inputs events) ∧
   ResourceAdmission program function
 
 theorem exact_interface_is_derived (program : Kernel.Program) (function : Function) :

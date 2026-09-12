@@ -37,11 +37,10 @@ def FunctionsAdmitted (program : Kernel.Program) : Prop :=
     Typing.FunctionType program function ∧ Contracts.ResourceAdmission program function ∧
     (∀ host observation, Foreign.Model.Lawful program host → Contracts.Observes program host function observation → Contracts.ClosedResult observation)
 
-def DropsAdmitted (program : Kernel.Program) : Prop :=
-  ∀ data hook arguments function,
-    program.declarations.data data.header.id = some data → data.dropHook = some hook → Instance program hook arguments function →
-    Contracts.DropContract program function ∧
-    (∀ principal typeArguments, PrincipalOf program.declarations (.nominal data.header.id typeArguments) principal → principal.MayDiscard)
+structure DropsAdmitted (program : Kernel.Program) : Prop where
+  applications : DropApplications program.declarations
+  contracts : ∀ self region hook function, DropInstance program self region hook function →
+    Contracts.DropContract program self region function
 
 structure WellFormed (program : Kernel.Program) : Prop where
   declarations : ProgramWellFormed program.declarations
