@@ -826,10 +826,15 @@ applying `World.Stores.write_child_none` to the clear must be transported across
 that drain before the loop can carry it. Four plumbing details of that step
 theorem are now known and are recorded so the next attempt does not rediscover
 them — and all four are applied in the landed `CleanupRun.destroy_child`, which
-executes one child's destruction, drain and parent re-read in a single run; what
-that theorem leaves is the loop restatement that uses it (carrying the parent
-shell it now returns and the vacancies), and the per-node custody threading. The
-details, for reference: reconcile the child's own shell witness with the supplied
+executes one child's destruction, drain and parent re-read in a single run. The
+loop that uses it is also landed: `CleanupRun.destroy_fields_tree` carries the
+parent shell through the schedule, so it ends at `finishShell` with exactly the
+scheduled fields emptied and every unscheduled slot as it started (the indices
+must be duplicate-free, which the machine's reverse `List.range` schedule
+supplies). What remains is the node-level assembly — structural destruction, that
+loop with the children's runs as its step, then the shell now that all slots are
+holes, then the drain to the caller's continuation — plus the per-node custody
+threading. The details, for reference: reconcile the child's own shell witness with the supplied
 shell (`simpa only [← valueEq] using treeX` for the disposal permission, the shell
 flag and the three head exclusions); bridge the drain's `kinds`/`ancestry` from
 the restamped world to the cleared world (`clearedLoans` by
