@@ -3925,4 +3925,5 @@ theorem Kernel.BatchPrepared.attemptFor_framed {program : RuntimeProgram} {recip
           (fun place member => framed place (List.mem_cons_of_mem _ member)),shellAfter⟩
       · exact ⟨[],world,.exhausted,.exhausted prepared.ready exhausted,prepared.outputs,shell⟩
 
+
 end Kernel
