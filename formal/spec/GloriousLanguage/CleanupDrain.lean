@@ -1041,3 +1041,49 @@ theorem World.Destroys.requestReturns {program : RuntimeProgram} {world : World}
       exact ih index child selected
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Ending one loan is a frame: the row is kept with its parent and guards, the
+killed row is not live afterwards so the live-row facts carry over, and neither
+the reads nor the resolved roots move. -/
+theorem World.DestroyFrame.of_kill {before : World} {id : Identity} {loan : Loan} {outside : Address}
+    (found : before.loans.get id = some loan) :
+    World.DestroyFrame before { before with loans := before.loans.set id { loan with live := false } }
+      outside where
+  reads := fun probe outside' => rfl
+  roots := fun probe outside' => rfl
+  rows := fun key row selected => by
+    dsimp only [] at selected
+    by_cases same : key = id
+    · rw [same] at selected
+      rw [Table.get_set before.loans id { loan with live := false }] at selected
+      have rowEq : { loan with live := false } = row := Option.some.inj selected
+      subst rowEq
+      rw [same]
+      exact ⟨loan, found, rfl, rfl⟩
+    · have beforeFound : before.loans.get key = some row := by
+        rwa [Table.get_set_other before.loans id key { loan with live := false } same] at selected
+      exact ⟨row, beforeFound, rfl, rfl⟩
+  present := fun key original found' => by
+    dsimp only []
+    by_cases same : key = id
+    · rw [same]
+      exact ⟨{ loan with live := false }, by rw [Table.get_set before.loans id { loan with live := false }]⟩
+    · exact ⟨original, by rw [Table.get_set_other before.loans id key { loan with live := false } same]; exact found'⟩
+  liveness := fun key row selected live => by
+    dsimp only [] at selected
+    by_cases same : key = id
+    · rw [same] at selected
+      rw [Table.get_set before.loans id { loan with live := false }] at selected
+      have rowEq : { loan with live := false } = row := Option.some.inj selected
+      subst rowEq
+      rw [same]
+      simp at live
+    · have beforeFound : before.loans.get key = some row := by
+        rwa [Table.get_set_other _ _ _ _ same] at selected
+      exact ⟨row, beforeFound, live, rfl, rfl, rfl⟩
+
+end Glorious.Language
