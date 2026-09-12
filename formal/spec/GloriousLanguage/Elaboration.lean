@@ -208,7 +208,8 @@ mutual
         PatternExpression program context (.constructor path sourceArguments fields remainder) (.nominal data.header.id arguments) access
           (.constructor header.id patterns) bindings
     | reference {mode source region type pattern bindings access} :
-        PatternExpression program context source type (if mode = .shared then .shared else .unique) pattern bindings →
+        PatternExpression program context source type
+          (if access = .shared ∨ mode = .shared then .shared else .unique) pattern bindings →
         PatternExpression program context (.reference mode source) (.reference mode region type) access (.reference mode pattern) bindings
     | record {path sourceArguments fields remainder header data variant arguments substitution types ordered patterns bindings access} :
         Qualified program.declarations context.typed.static.module .value path header → program.declarations.Constructor header.id data variant →

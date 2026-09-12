@@ -2,6 +2,7 @@ import GloriousLanguage.Specification
 import GloriousLanguage.BasicChecks
 import GloriousLanguage.ExecutionChecks
 import GloriousLanguage.ControlChecks
+import GloriousLanguage.BorrowChecks
 import GloriousLanguage.SourceChecks
 import GloriousLanguage.RepresentationChecks
 

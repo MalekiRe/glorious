@@ -126,11 +126,16 @@ mutual
         (operations.map map.operationArm) (captures.map (Capture.mapTerms map.term))
 end
 
+def Relocation.authority (map : Relocation) : Authority → Authority
+  | .owner => .owner
+  | .loan id => .loan (map.loan id)
+  | .shared backing => .shared (map.authority backing)
+
 def Relocation.context (map : Relocation) (context : Context) : Context :=
   { context with
     environment := context.environment.map (fun binding => { binding with
       address := map.address binding.address
-      authority := match binding.authority with | .owner => .owner | .loan id => .loan (map.loan id) })
+      authority := map.authority binding.authority })
     activation := map.activation context.activation
     scope := map.scope context.scope
     region := map.region context.region
@@ -188,14 +193,21 @@ def SnapshotFrame : Frame → Prop
   | .label .. | .hook .. | .foreign .. | .hostCallback .. | .serviced .. => False
   | _ => True
 
+/-- A live captured handle retains its ancestor loans even after an ancestor's
+last handle was destroyed. Relocating only visible handles would orphan that
+same borrow graph in a replay. External referents remain unrelocated. -/
+def SnapshotLoan (world : World) (roots : List Identity) (id : Identity) : Prop :=
+  ∃ loan descendant address value,
+    world.loans.get id = some loan ∧ loan.live = true ∧ loan.referent.root ∈ roots ∧
+    address.root ∈ roots ∧ world.Resident address value ∧ value.head = .reference descendant ∧
+    AncestorLoan world id descendant
+
 def SnapshotMap (program : Kernel.Program) (before : State) (suspension : Suspension) (map : Relocation) : Prop :=
   map.roots = suspension.roots ∧ map.rootBase = before.world.nextRoot ∧ map.ownerBase = before.world.nextOwner ∧
   map.loanBase = before.world.nextLoan ∧ map.regionBase = before.world.nextRegion ∧
   map.activationBase = before.nextActivation ∧ map.handlerBase = before.nextHandler ∧
   map.scopeBase = before.world.nextRegion ∧
-  (∀ id, id ∈ map.loans ↔ ∃ loan address value,
-    before.world.loans.get id = some loan ∧ loan.live = true ∧ loan.referent.root ∈ map.roots ∧
-    address.root ∈ map.roots ∧ before.world.Resident address value ∧ value.head = .reference id) ∧
+  (∀ id, id ∈ map.loans ↔ SnapshotLoan before.world map.roots id) ∧
   (∀ id, id ∈ map.regions ↔
     id ∈ suspension.frames.flatMap Frame.ownedRegions ++ [suspension.context.region,suspension.handler.computation.region] ∨
     ∃ rootId root, rootId ∈ map.roots ∧ before.world.roots.get rootId = some root ∧ root.region = id) ∧

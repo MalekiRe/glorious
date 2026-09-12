@@ -112,7 +112,19 @@ structure Loan where
 
 inductive Authority where
   | owner | loan (identity : Identity)
+  /-- A lent shared place retains its backing authority, but never its
+  permission to mutate or consume. This is an access view, not a new owner
+  or a source reference loan. -/
+  | shared (backing : Authority)
   deriving DecidableEq, BEq, Repr, Inhabited
+
+def Authority.lend (authority : Authority) (access : Access) : Authority :=
+  if access = .shared then .shared authority else authority
+
+def Authority.parentLoan : Authority → Option Identity
+  | .owner => none
+  | .loan id => some id
+  | .shared backing => backing.parentLoan
 
 structure ReservedPlace where
   address : Address
@@ -203,7 +215,27 @@ def Permitted (world : World) (authority : Authority) (requested : Access) (addr
        (∃ suffix, address.fields = active.referent.fields ++ suffix) ∧
        (requested ≠ .shared → active.mode = .unique) ∧
        ∀ other loan, world.loans.get other = some loan → loan.live = true → other ≠ id →
-         address.Overlaps loan.referent → Conflict requested loan.mode → AncestorLoan world other id)
+         address.Overlaps loan.referent → Conflict requested loan.mode → AncestorLoan world other id
+   | .shared backing => requested = .shared ∧ Permitted world backing requested address)
+
+/-- Loading a unique handle through a shared place does not recover unique
+referent access. All dereference consumers use this same view selection. -/
+def ReferenceView (world : World) (handle : Address) (authority : Authority)
+    (id : Identity) (mode : Mutability) (permission : Authority) (access : Access) : Prop :=
+  (mode = .shared ∧ permission = .loan id ∧ access = .shared) ∨
+  (mode = .unique ∧ Permitted world authority .unique handle ∧ permission = .loan id ∧ access = .unique) ∨
+  (mode = .unique ∧ ¬ Permitted world authority .unique handle ∧ permission = .shared (.loan id) ∧ access = .shared)
+
+theorem shared_authority_cannot_strengthen {world backing requested address}
+    (permission : Permitted world (.shared backing) requested address) : requested = .shared :=
+  permission.2.1
+
+theorem reference_view_shared_carrier {world handle backing id mode permission access}
+    (view : ReferenceView world handle (.shared backing) id mode permission access) : access = .shared := by
+  rcases view with ⟨_,_,shared⟩ | ⟨_,writable,_,_⟩ | ⟨_,_,_,shared⟩
+  · exact shared
+  · cases shared_authority_cannot_strengthen writable
+  · exact shared
 
 def World.WellFormed (world : World) : Prop :=
   world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧ world.bindings.Unique ∧
@@ -325,7 +357,7 @@ inductive Borrows (program : Program) :
       Addressable program ⟨[],[],0,default,false⟩ value.type →
       Permitted before authority (if mode = .shared then .shared else .unique) referent →
       before.Vacant destination →
-      parent = (match authority with | .owner => none | .loan id => some id) →
+      parent = authority.parentLoan →
       before.write destination (some (.resident before.nextOwner
         (.reference mode (.runtimeRegion region) value.type) (.reference before.nextLoan) true [])) = some after →
       Borrows program before authority mode region referent destination

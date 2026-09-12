@@ -107,7 +107,8 @@ mutual
           (data.nonExhaustive = true → context.module.package = data.header.module.package) ∧ ∀ field ∈ variant.fields, Visible field.header context.module) →
         PatternType program context (.constructor id patterns) (.nominal data.header.id arguments) access bindings
     | reference {mode region type pattern access bindings} :
-        PatternType program context pattern type (if mode = .shared then .shared else .unique) bindings →
+        PatternType program context pattern type
+          (if access = .shared ∨ mode = .shared then .shared else .unique) bindings →
         PatternType program context (.reference mode pattern) (.reference mode region type) access bindings
 
   inductive PatternsType (program : Language.Program) (context : Language.Context) :

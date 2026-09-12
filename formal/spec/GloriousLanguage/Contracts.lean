@@ -42,9 +42,6 @@ structure Observation where
   after : World
   outcome : Outcome
 
-def ContextInputs (context : Execution.Context) (inputs : List InvocationInput) : Prop :=
-  context.environment = inputs.map (fun input => ⟨input.formal.id,input.storage,input.authority⟩)
-
 def InputsTyped (program : Kernel.Program) (inputs : List InvocationInput) (world : World) : Prop :=
   Typing.WorldTyped program world ∧
   (inputs.map (fun input => input.formal.id)).Nodup ∧

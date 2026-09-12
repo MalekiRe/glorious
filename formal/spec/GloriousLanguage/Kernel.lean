@@ -169,10 +169,11 @@ inductive ResolvesProjections (world : World) :
       ResolvesProjections world base authority (.field field :: projections) result permission
   | vacantField {base authority field value} : world.Stores base value → value.fields[field]? = some none →
       ResolvesProjections world base authority [.field field] (base.child field) authority
-  | dereference {base authority projections value id loan result permission} :
+  | dereference {base authority projections value id loan result permission view access} :
       world.Stores base value → value.head = .reference id → value.Initialized → Permitted world authority .shared base →
       world.loans.get id = some loan → loan.live = true →
-      ResolvesProjections world loan.referent (.loan id) projections result permission →
+      ReferenceView world base authority id loan.mode view access →
+      ResolvesProjections world loan.referent view projections result permission →
       ResolvesProjections world base authority (.dereference :: projections) result permission
 
 inductive ResolvesPlace (world : World) (environment : Environment) : Place → Address → Authority → Prop where
@@ -261,9 +262,11 @@ mutual
         PatternPlan program world address authority access pattern
           ⟨(if access = .owned then [.consumeShell address authority] else []) ++ actions.shells,
             actions.bindings, actions.cleanup ++ (if access = .owned then [.dispose address authority] else [])⟩
-    | reference {address authority access pattern mode value id loan actions} : world.Stores address value →
+    | reference {address authority access pattern mode value id loan actions view nestedAccess} : world.Stores address value →
         value.head = .reference id → world.loans.get id = some loan → loan.mode = mode → loan.live = true →
-        PatternPlan program world loan.referent (.loan id) (if mode = .shared then .shared else .unique) pattern actions →
+        value.Initialized → Permitted world (authority.lend access) .shared address →
+        ReferenceView world address (authority.lend access) id mode view nestedAccess →
+        PatternPlan program world loan.referent view nestedAccess pattern actions →
         PatternPlan program world address authority access (.reference mode pattern)
           ⟨actions.shells,actions.bindings,actions.cleanup ++ (if access = .owned then [.dispose address authority] else [])⟩
 
@@ -293,14 +296,31 @@ structure InvocationInput where
 Lent capture storage remains the original object, including zero-sized fields. -/
 inductive BindsInput (program : Language.Program) (activation scope region : Identity) :
     World → InvocationInput → Binding → World → Prop where
-  | lent {world input} : input.access ≠ .owned →
+  | lent {world input value} : input.access ≠ .owned →
+      world.Stores input.storage value → value.Initialized → value.type = input.formal.type →
       Permitted world input.authority input.access input.storage →
       BindsInput program activation scope region world input
-        ⟨input.formal.id,input.storage,input.authority⟩ world
-  | owned {before input address allocated after layout} : input.access = .owned →
+        ⟨input.formal.id,input.storage,input.authority.lend input.access⟩ world
+  | owned {before input address allocated after layout value} : input.access = .owned →
+      before.Stores input.storage value → value.type = input.formal.type →
       Allocates program before (.localSlot activation scope) region input.formal.type layout input.formal.mutable address allocated →
       Transfers allocated input.authority input.storage address after →
       BindsInput program activation scope region before input ⟨input.formal.id,address,.owner⟩ after
+
+/-- Pattern borrowing constructs a reference value, unlike a lent invocation
+input, whose formal still denotes the original resident type and storage. -/
+inductive BindsPattern (program : Language.Program) (activation scope region : Identity) :
+    World → Local → Address → Authority → Access → Binding → World → Prop where
+  | owned {before localSlot source authority binding after} :
+      BindsInput program activation scope region before
+        ⟨.argument 0,localSlot,source,authority,.owned⟩ binding after →
+      BindsPattern program activation scope region before localSlot source authority .owned binding after
+  | borrowed {before localSlot source authority mode loanRegion value address allocated after layout} :
+      before.Stores source value → localSlot.type = .reference mode (.runtimeRegion loanRegion) value.type →
+      Allocates program before (.localSlot activation scope) region localSlot.type layout localSlot.mutable address allocated →
+      Borrows program allocated authority mode loanRegion source address after →
+      BindsPattern program activation scope region before localSlot source authority
+        (if mode = .shared then .shared else .unique) ⟨localSlot.id,address,.owner⟩ after
 
 inductive BindsInputs (program : Language.Program) (activation scope region : Identity) :
     World → List InvocationInput → Environment → World → Prop where
@@ -332,7 +352,7 @@ theorem borrowed_capture_keeps_storage {program : Language.Program} {activation 
     (bound : BindsInput program activation scope region world input binding after) :
     binding.address = input.storage ∧ after = world := by
   cases bound with
-  | lent _ _ => exact ⟨rfl,rfl⟩
-  | owned owned _ _ => exact False.elim (borrowed owned)
+  | lent _ _ _ _ _ => exact ⟨rfl,rfl⟩
+  | owned owned _ _ _ _ => exact False.elim (borrowed owned)
 
 end Glorious.Language.Kernel

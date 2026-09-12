@@ -61,9 +61,11 @@ mutual
         (pattern = .tuple fields ∨ pattern = .array fields ∨ ∃ id, pattern = .constructor id fields) →
         ObservedFields program world address authority 0 fields bindings →
         ObservedBindings program world address authority pattern bindings
-    | reference {world address authority value id loan mode pattern bindings} : world.Stores address value → value.head = .reference id →
+    | reference {world address authority value id loan mode pattern bindings view access} : world.Stores address value → value.head = .reference id →
         world.loans.get id = some loan → loan.mode = mode → loan.live = true →
-        ObservedBindings program world loan.referent (.loan id) pattern bindings →
+        value.Initialized → Permitted world authority .shared address →
+        ReferenceView world address authority id mode view access →
+        ObservedBindings program world loan.referent view pattern bindings →
         ObservedBindings program world address authority (.reference mode pattern) bindings
 
   inductive ObservedFields (program : Kernel.Program) :

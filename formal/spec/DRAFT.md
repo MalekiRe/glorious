@@ -252,3 +252,46 @@ Binding-pack address/provenance relocation, sealed projection/combination and
 complete control-state validity also remain open. The concrete transition
 regression is not a fully source-admitted whole-program nonvacuity theorem.
 Compiler and library files/tests were left untouched.
+
+## Lent access views and executable borrowed patterns
+
+`lake build` passes all 34 jobs, including `BorrowChecks`. The common invocation
+binding rule now retains a shared access view of the original authority. It
+does not mint an owner or allocate a second resident. Ordinary and captured
+inputs both check their actual resident type at binding. Shared input views
+cannot mutate or consume the resident; unique inputs retain their backing
+authority and existing reusable-post-state obligations. These invocation views
+are not extra source-reference loans with an artificially shortened lifetime.
+The unused direct-environment `ContextInputs` reconstruction was removed.
+
+Dereference projection, executable pattern planning and observational binding
+selection share `ReferenceView`. Reading a unique reference through a shared
+carrier cannot recover unique referent access. Source pattern elaboration and
+structural pattern typing preserve this shared access through nested reference
+patterns. Snapshot context relocation retains the view's backing loan identity
+and its access restriction.
+
+Borrowed pattern binding now allocates a real reference handle through `Borrows`;
+owned pattern binding still uses ordinary input transfer. The handle's allocation
+region and its declared loan region remain distinct. Destruction releases a
+reference loan through the existing graph: another handle or a live child keeps
+it alive, and releasing the last child subsequently releases an orphan parent.
+Explicit loan-ending remains strict, including initialization/restoration and
+live-child checks. All ordinary, label-exit and cancellation cleanup consumers
+use this same reference destruction path. Snapshot loan selection now includes
+live ancestors of captured handles rather than dropping handle-less parents.
+
+Checked witnesses cover actual machine pattern binding, typed reference storage,
+shared/unique invocation inputs, shared-carrier dereferencing, parent retention,
+successive child/parent cleanup, and snapshot ancestry. Negative propositions
+exclude shared mutation/consumption, permission strengthening and ending a loan
+with a live child. These are concrete boundary witnesses, not a fully admitted
+source-program nonvacuity or a general cleanup/snapshot simulation theorem.
+
+Remaining obligations include general source-to-runtime coercion/normalization
+of input values (binding now rejects a mismatched resident instead of silently
+installing it), proof of reusable unique invocation post-states, complete
+control-state validity, binding-pack provenance/relocation and sealed operations,
+and nonmaterialized correlated callable representation. Full source coverage,
+preservation/progress and normative adequacy remain open. No compiler/library
+files or acceptance gates were changed or run.

@@ -59,6 +59,7 @@ inductive Task where
   | cleanup (context : Context) (roots : List Identity) (next : Task)
   | closeRegion (region : Identity) (next : Task)
   | closeLoan (loan : Identity) (next : Task)
+  | releaseLoan (loan : Identity) (next : Task)
   | transfer (source : Address) (authority : Authority) (destination : Address) (next : Task)
   | pattern (context : Context) (actions : List PatternAction) (body : Code)
   | perform (context : Context) (operation : DeclId) (arguments : List Term) (payload : List Address)
@@ -319,8 +320,8 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with task := .run context body }
   | patternBind {before context localSlot address authority access rest body binding after} :
       before.task = .pattern context (.bind localSlot address authority access :: rest) body →
-      BindsInput program.declarations context.activation context.scope context.region before.world
-        ⟨.argument 0,localSlot,address,authority,access⟩ binding after →
+      BindsPattern program.declarations context.activation context.scope context.region before.world
+        localSlot address authority access binding after →
       LocalStep program before none { before with world := after, task := .pattern (context.bind localSlot binding.address binding.authority) rest body }
   | patternShell {before context address authority rest body after} :
       before.task = .pattern context (.consumeShell address authority :: rest) body →
@@ -355,12 +356,12 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       (∀ id, value.head ≠ .continuation id) → (∀ id, value.head ≠ .reference id) →
       (∀ id, value.head ≠ .available id) →
       LocalStep program before none { before with task := .destroyFields context address authority (List.range value.fields.length).reverse next }
-  | destroyReference {before context address authority next value id cleared following} :
+  | destroyReference {before context address authority next value id cleared} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.head = .reference id →
       MayDispose program.declarations value → Permitted before.world authority .owned address →
       before.world.write address none = some cleared →
-      (cleared.References id ∧ following = next ∨ ¬ cleared.References id ∧ following = .closeLoan id next) →
-      LocalStep program before (some (.destroy address value.owner)) { before with world := cleared, task := following }
+      LocalStep program before (some (.destroy address value.owner))
+        { before with world := cleared, task := .releaseLoan id next }
   | fieldsDone {before context address authority next} : before.task = .destroyFields context address authority [] next →
       LocalStep program before none { before with task := .finishShell address next }
   | fieldNext {before context address authority field fields next} :
@@ -377,6 +378,21 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
   | loanEnd {before id next after} : before.task = .closeLoan id next → EndsLoan before.world id after →
       LocalStep program before (some (.loanEnd id)) { before with world := after, task := next }
   | loanAlreadyEnded {before id next loan} : before.task = .closeLoan id next →
+      before.world.loans.get id = some loan → loan.live = false →
+      LocalStep program before none { before with task := next }
+  | releaseReferenced {before id next} : before.task = .releaseLoan id next → before.world.References id →
+      LocalStep program before none { before with task := next }
+  | releaseBorrowed {before id next child} : before.task = .releaseLoan id next →
+      ¬ before.world.References id → before.world.loans.get child.identity = some child →
+      child.parent = some id → child.live = true →
+      LocalStep program before none { before with task := next }
+  | releaseRoot {before id next loan after} : before.task = .releaseLoan id next →
+      before.world.loans.get id = some loan → loan.parent = none → EndsLoan before.world id after →
+      LocalStep program before (some (.loanEnd id)) { before with world := after, task := next }
+  | releaseChild {before id next loan parent after} : before.task = .releaseLoan id next →
+      before.world.loans.get id = some loan → loan.parent = some parent → EndsLoan before.world id after →
+      LocalStep program before (some (.loanEnd id)) { before with world := after, task := .releaseLoan parent next }
+  | releaseAlreadyEnded {before id next loan} : before.task = .releaseLoan id next →
       before.world.loans.get id = some loan → loan.live = false →
       LocalStep program before none { before with task := next }
   | endLoan {before context handle next address authority value id} : before.task = .run context (.endLoan handle next) →
