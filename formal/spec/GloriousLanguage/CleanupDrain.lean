@@ -485,6 +485,63 @@ namespace Glorious.Language
 
 open Kernel
 
+/-- Two different children of one address are incomparable by the prefix
+order: their field lists end in different indices. -/
+theorem Address.child_not_prefix {address : Address} {first second : Nat} (different : first ≠ second) :
+    ¬ (address.child first).Prefix (address.child second) := by
+  intro included
+  obtain ⟨_,_,suffix,shape⟩ := included
+  simp only [Address.child] at shape
+  have lengths : (address.fields ++ [second]).length = ((address.fields ++ [first]) ++ suffix).length := by
+    rw [shape]
+  simp only [List.length_append,List.length_cons,List.length_nil] at lengths
+  have empty : suffix = [] := by
+    cases suffix with
+    | nil => rfl
+    | cons head tail => simp at lengths
+  subst empty
+  simp only [List.append_nil] at shape
+  have equal := List.append_cancel_left shape
+  simp only [List.cons.injEq] at equal
+  exact different equal.1.symm
+
+/-- The prefix order is transitive, so a probe inside a descendant's subtree is
+reached from the ancestor too. -/
+theorem Address.Prefix.not_outer {outer inner probe : Address}
+    (included : outer.Prefix inner) (down : inner.Prefix probe) : outer.Prefix probe :=
+  ⟨included.1.trans down.1,included.2.1.trans down.2.1,
+    by
+      obtain ⟨firstSuffix,firstShape⟩ := included.2.2
+      obtain ⟨secondSuffix,secondShape⟩ := down.2.2
+      exact ⟨firstSuffix ++ secondSuffix,by rw [secondShape,firstShape,List.append_assoc]⟩⟩
+
+
+/-- A descendant of one child of an address can only be reached from the same
+child: the field lists must agree in the index that follows the shared prefix. -/
+theorem Address.child_prefix_grandchild {address : Address} {first second index : Nat}
+    (included : (address.child first).Prefix ((address.child second).child index)) : first = second := by
+  obtain ⟨_,_,suffix,shape⟩ := included
+  simp only [Address.child,List.append_assoc,List.singleton_append] at shape
+  have equal := List.append_cancel_left shape
+  simp only [List.cons.injEq] at equal
+  exact equal.1.symm
+
+
+/-- Two prefixes of one address are comparable, because both extend the same
+field list. -/
+theorem Address.Prefix.comparable {first second probe : Address}
+    (firstIn : first.Prefix probe) (secondIn : second.Prefix probe) :
+    first.Prefix second ∨ second.Prefix first := by
+  obtain ⟨firstSuffix,firstShape⟩ := firstIn.2.2
+  obtain ⟨secondSuffix,secondShape⟩ := secondIn.2.2
+  have same : first.fields ++ firstSuffix = second.fields ++ secondSuffix := by
+    rw [← firstShape,← secondShape]
+  rcases List.append_eq_append_iff.mp same with ⟨shared,firstEq,_⟩ | ⟨shared,secondEq,_⟩
+  · left
+    exact ⟨firstIn.1.trans secondIn.1.symm,firstIn.2.1.trans secondIn.2.1.symm,⟨shared,firstEq⟩⟩
+  · right
+    exact ⟨secondIn.1.trans firstIn.1.symm,secondIn.2.1.trans firstIn.2.1.symm,⟨shared,secondEq⟩⟩
+
 /-- The recursive destructor's tree inventory: a stored disposable shell (no
 pending drop hook, no continuation/reference/available head, owning permission at
 its own address, and the pending-return readiness the drain reads for the custody
@@ -496,12 +553,11 @@ inductive World.Destroys (program : RuntimeProgram) (world : World) : Address �
       (∀ inner, value.head ≠ .continuation inner) → (∀ inner, value.head ≠ .reference inner) →
       (∀ inner, value.head ≠ .available inner) →
       Permitted world .owner .owned address →
-      (∀ id loan, (world.RequestReturns (.resident value.owner)).loans.get id = some loan →
+      (∀ id loan, world.loans.get id = some loan →
         loan.live = true → loan.kind = .owning ∨ loan.kind = .storageBorrow) →
-      (∀ id loan, (world.RequestReturns (.resident value.owner)).loans.get id = some loan →
-        (∀ parent, loan.parent = some parent →
-          (world.RequestReturns (.resident value.owner)).loans.get parent ≠ none) ∧
-        (∀ guard ∈ loan.guards, (world.RequestReturns (.resident value.owner)).loans.get guard ≠ none)) →
+      (∀ id loan, world.loans.get id = some loan →
+        (∀ parent, loan.parent = some parent → world.loans.get parent ≠ none) ∧
+        (∀ guard ∈ loan.guards, world.loans.get guard ≠ none)) →
       (∀ (index : Nat) (child : Value), value.fields[index]? = some (some child) →
         World.Destroys program world (address.child index)) →
       World.Destroys program world address
@@ -536,17 +592,13 @@ theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World}
         permission.2 id loan (by simpa only [loansAfter] using found) live overlap conflict⟩
     refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_
     · intro id loan found live
-      have previous : (world.RequestReturns (.resident value.owner)).loans.get id = some loan := by
-        simpa only [World.RequestReturns,loansAfter] using found
-      exact kinds id loan previous live
+      exact kinds id loan (by simpa only [loansAfter] using found) live
     · intro id loan found
-      have previous : (world.RequestReturns (.resident value.owner)).loans.get id = some loan := by
-        simpa only [World.RequestReturns,loansAfter] using found
       refine ⟨fun parent link => ?_,fun guard member => ?_⟩
-      · have held := (ancestry id loan previous).1 parent link
-        simpa only [World.RequestReturns,loansAfter] using held
-      · have held := (ancestry id loan previous).2 guard member
-        simpa only [World.RequestReturns,loansAfter] using held
+      · have held := (ancestry id loan (by simpa only [loansAfter] using found)).1 parent link
+        simpa only [loansAfter] using held
+      · have held := (ancestry id loan (by simpa only [loansAfter] using found)).2 guard member
+        simpa only [loansAfter] using held
     · intro index child selected
       exact ih index child selected
         (fun probe included => deep probe (Address.Prefix.trans (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included))
@@ -683,130 +735,79 @@ namespace Glorious.Language
 
 open Kernel
 
-/-- Ending one loan leaves a destructible resident destructible: the ending
-only kills a row, so the owning permission's exclusion still holds (a raw-table
-clause), and every pending-return clause reading a living row reads an earlier
-living row through the relinquishment frame. -/
+/-- Ending one loan leaves a destructible resident destructible: the ending only
+kills a row, so the owning permission's exclusion and the pending-return clauses,
+both read from the raw loan table, still hold. -/
 theorem World.Destroys.end_loan {program : RuntimeProgram} {world : World} {address : Address}
     (tree : World.Destroys program world address) {id : Identity} {loan : Loan}
     (found : world.loans.get id = some loan) :
     World.Destroys program { world with loans := world.loans.set id { loan with live := false } } address := by
   revert found
   induction tree with
-  | @resident addressTree value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
     intro found
+    have kept {key : Identity} {row : Loan} (different : key ≠ id)
+        (selected : (world.loans.set id { loan with live := false }).get key = some row) :
+        world.loans.get key = some row := by
+      rw [Table.get_set_other _ _ _ _ different] at selected
+      exact selected
     refine .resident stored disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_
-    · refine ⟨?_,fun key row selected live overlap conflict => ?_⟩
-      · obtain ⟨root,rootFound⟩ := permission.1
-        exact ⟨root,by simpa only [World.root] using rootFound⟩
-      · by_cases same : key = id
-        · have selectedSet : (world.loans.set id { loan with live := false }).get key = some row := selected
-          rw [same] at selectedSet
-          rw [Table.get_set] at selectedSet
-          cases selectedSet
-          exact absurd live (by simp)
-        · have selectedSet : (world.loans.set id { loan with live := false }).get key = some row := selected
-          exact permission.2 key row (by rw [Table.get_set_other _ _ _ _ same] at selectedSet; exact selectedSet)
-            live overlap conflict
+    · refine ⟨permission.1,fun key row selected live overlap conflict => ?_⟩
+      by_cases same : key = id
+      · have dead : (world.loans.set id { loan with live := false }).get key = some row := selected
+        rw [same,Table.get_set] at dead
+        cases dead
+        exact absurd live (by simp)
+      · exact permission.2 key row (kept same selected) live overlap conflict
     · intro key row selected live
-      obtain ⟨previous,previousFound,sameKind,_,_,_,previousLive⟩ :=
-        World.RequestReturns.frame_set (custody := .resident value.owner) (key := key) (row := row)
-          found selected
-      rw [← sameKind]
-      exact kinds key previous previousFound (previousLive live)
+      by_cases same : key = id
+      · have dead : (world.loans.set id { loan with live := false }).get key = some row := selected
+        rw [same,Table.get_set] at dead
+        cases dead
+        exact absurd live (by simp)
+      · exact kinds key row (kept same selected) live
     · intro key row selected
-      obtain ⟨previous,previousFound,_,_,sameParent,sameGuards,_⟩ :=
-        World.RequestReturns.frame_set (custody := .resident value.owner) (key := key) (row := row)
-          found selected
-      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
-      · have linkPrevious : previous.parent = some parent := by rw [sameParent]; exact link
-        have held := (ancestry key previous previousFound).1 parent linkPrevious
-        intro missing
-        exact held (World.RequestReturns.frame_set_none (custody := .resident value.owner) found missing)
-      · have memberPrevious : guard ∈ previous.guards := by rw [sameGuards]; exact member
-        have held := (ancestry key previous previousFound).2 guard memberPrevious
-        intro missing
-        exact held (World.RequestReturns.frame_set_none (custody := .resident value.owner) found missing)
-    · intro index child selectedTree
-      exact ih index child selectedTree found
+      by_cases same : key = id
+      · have dead : (world.loans.set id { loan with live := false }).get key = some row := selected
+        rw [same,Table.get_set] at dead
+        have rowEq : row = { loan with live := false } := Option.some.inj dead.symm
+        subst rowEq
+        refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+        · have justLive : ({ loan with live := false } : Loan).parent = loan.parent := rfl
+          have linkOriginal : loan.parent = some parent := by rw [← justLive]; exact link
+          have held := (ancestry id loan found).1 parent linkOriginal
+          intro missing
+          by_cases parentIs : parent = id
+          · rw [parentIs,Table.get_set] at missing
+            cases missing
+          · exact held (by simpa only [Table.get_set_other _ _ _ _ parentIs] using missing)
+        · have justGuards : ({ loan with live := false } : Loan).guards = loan.guards := rfl
+          have memberOriginal : guard ∈ loan.guards := by rw [← justGuards]; exact member
+          have held := (ancestry id loan found).2 guard memberOriginal
+          intro missing
+          by_cases guardIs : guard = id
+          · rw [guardIs,Table.get_set] at missing
+            cases missing
+          · exact held (by simpa only [Table.get_set_other _ _ _ _ guardIs] using missing)
+      · have previousFound : world.loans.get key = some row := kept same selected
+        refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+        · have held := (ancestry key row previousFound).1 parent link
+          intro missing
+          by_cases parentIs : parent = id
+          · rw [parentIs,Table.get_set] at missing
+            cases missing
+          · exact held (by simpa only [Table.get_set_other _ _ _ _ parentIs] using missing)
+        · have held := (ancestry key row previousFound).2 guard member
+          intro missing
+          by_cases guardIs : guard = id
+          · rw [guardIs,Table.get_set] at missing
+            cases missing
+          · exact held (by simpa only [Table.get_set_other _ _ _ _ guardIs] using missing)
+    · intro index child selected
+      exact ih index child selected found
 
 end Glorious.Language
 
 namespace Glorious.Language
 
 open Kernel
-
-/-- Two different children of one address are incomparable by the prefix
-order: their field lists end in different indices. -/
-theorem Address.child_not_prefix {address : Address} {first second : Nat} (different : first ≠ second) :
-    ¬ (address.child first).Prefix (address.child second) := by
-  intro included
-  obtain ⟨_,_,suffix,shape⟩ := included
-  simp only [Address.child] at shape
-  have lengths : (address.fields ++ [second]).length = ((address.fields ++ [first]) ++ suffix).length := by
-    rw [shape]
-  simp only [List.length_append,List.length_cons,List.length_nil] at lengths
-  have empty : suffix = [] := by
-    cases suffix with
-    | nil => rfl
-    | cons head tail => simp at lengths
-  subst empty
-  simp only [List.append_nil] at shape
-  have equal := List.append_cancel_left shape
-  simp only [List.cons.injEq] at equal
-  exact different equal.1.symm
-
-/-- The prefix order is transitive, so a probe inside a descendant's subtree is
-reached from the ancestor too. -/
-theorem Address.Prefix.not_outer {outer inner probe : Address}
-    (included : outer.Prefix inner) (down : inner.Prefix probe) : outer.Prefix probe :=
-  ⟨included.1.trans down.1,included.2.1.trans down.2.1,
-    by
-      obtain ⟨firstSuffix,firstShape⟩ := included.2.2
-      obtain ⟨secondSuffix,secondShape⟩ := down.2.2
-      exact ⟨firstSuffix ++ secondSuffix,by rw [secondShape,firstShape,List.append_assoc]⟩⟩
-
-end Glorious.Language
-
-namespace Glorious.Language
-
-open Kernel
-
-/-- A descendant of one child of an address can only be reached from the same
-child: the field lists must agree in the index that follows the shared prefix. -/
-theorem Address.child_prefix_grandchild {address : Address} {first second index : Nat}
-    (included : (address.child first).Prefix ((address.child second).child index)) : first = second := by
-  obtain ⟨_,_,suffix,shape⟩ := included
-  simp only [Address.child,List.append_assoc,List.singleton_append] at shape
-  have equal := List.append_cancel_left shape
-  simp only [List.cons.injEq] at equal
-  exact equal.1.symm
-
-end Glorious.Language
-
-namespace Glorious.Language
-
-open Kernel
-
-/-- Two prefixes of one address are comparable, because both extend the same
-field list. -/
-theorem Address.Prefix.comparable {first second probe : Address}
-    (firstIn : first.Prefix probe) (secondIn : second.Prefix probe) :
-    first.Prefix second ∨ second.Prefix first := by
-  obtain ⟨firstSuffix,firstShape⟩ := firstIn.2.2
-  obtain ⟨secondSuffix,secondShape⟩ := secondIn.2.2
-  have same : first.fields ++ firstSuffix = second.fields ++ secondSuffix := by
-    rw [← firstShape,← secondShape]
-  rcases List.append_eq_append_iff.mp same with ⟨shared,firstEq,_⟩ | ⟨shared,secondEq,_⟩
-  · left
-    exact ⟨firstIn.1.trans secondIn.1.symm,firstIn.2.1.trans secondIn.2.1.symm,⟨shared,firstEq⟩⟩
-  · right
-    exact ⟨secondIn.1.trans firstIn.1.symm,secondIn.2.1.trans firstIn.2.1.symm,⟨shared,secondEq⟩⟩
-
-end Glorious.Language
-
-namespace Glorious.Language
-
-open Kernel
-
-end Glorious.Language
