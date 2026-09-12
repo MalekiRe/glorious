@@ -1154,6 +1154,24 @@ positive strip/parallel moves and conversion-to-joining remain open, including
 control of arbitrary query-equality premises. These inspection levels alone
 are not a proof of global confluence or constructor separation.
 
+`InspectionPaths` extracts fixed ordered determining paths from those actual
+minimum source exposures. Reading a fixed path identifies the raw generic table
+of a path-ready ordinary selection; the proof does not infer raw identity from
+definitional conversion. `PathInspectedStep.root_equal` consumes those identities
+for real root expansions. `InspectionPathResiduals` updates the raw values when
+queries change, transports their requirements and constructs the real replacement
+selection and substituted body. Child and row residuals consume that producer.
+The common `RowEquivalent.root_relation_residuals` now handles ordinary,
+inspection-ranked and path-ready roots, removing the duplicate row induction.
+
+This is a proof-only subrelation of existing execution of static reductions,
+not a replacement source semantics. The strict 70-job dependency gate checks
+the residual batch. The decisive remaining obligation is ordinary admitted
+reduction/conversion simulation through these fixed source paths, including
+positive exposure of query constructors and control of whole-query conversion
+premises. Raw path-ready root identity alone does not establish ordinary
+confluence, constructor separation or conversion-safe capability inversion.
+
 `InvocationBoundary` now gives the actual caller-delimited invocation interval.
 Its steps are guarded instances of the one `Execution.Step`, retaining the
 complete ambient stack, callback sessions and host exposure. Non-tail entry

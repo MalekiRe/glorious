@@ -151,18 +151,21 @@ private theorem ListRel.row_symm {left right : List Term} (related : ListRel Row
   | nil => exact .nil
   | cons head _ tail => exact .cons head.symm tail
 
-private theorem RowEquivalent.step_residuals {program : Program} (valid : ProgramWellFormed program)
-    {context : Context} {left right : Term} (equivalent : RowEquivalent left right) :
-    (∀ value, DefinitionalStep program context left value →
-      ∃ result, DefinitionalStep program context right result ∧ RowEquivalent value result) ∧
-    (∀ value, DefinitionalStep program context right value →
-      ∃ result, DefinitionalStep program context left result ∧ RowEquivalent value result) := by
+/-- Row transport is a property of a root relation and its actual child
+residuals. Proof-only restrictions on declared roots reuse this same closure
+argument; they do not reconstruct row semantics independently. -/
+theorem RowEquivalent.root_relation_residuals {root : Term → Term → Prop}
+    (notRow : ∀ instances tails value, ¬ root (.row instances tails) value)
+    (childrenResidual : ∀ {term value changed}, root term value → SameHead term changed →
+      ListRel RowEquivalent term.children changed.children →
+      ∃ result, root changed result ∧ RowEquivalent value result)
+    {left right : Term} (equivalent : RowEquivalent left right) :
+    (∀ value, root left value → ∃ result, root right result ∧ RowEquivalent value result) ∧
+    (∀ value, root right value → ∃ result, root left result ∧ RowEquivalent value result) := by
   apply RowEquivalent.rec
     (motive_1 := fun left right _ =>
-      (∀ value, DefinitionalStep program context left value →
-        ∃ result, DefinitionalStep program context right result ∧ RowEquivalent value result) ∧
-      (∀ value, DefinitionalStep program context right value →
-        ∃ result, DefinitionalStep program context left result ∧ RowEquivalent value result))
+      (∀ value, root left value → ∃ result, root right result ∧ RowEquivalent value result) ∧
+      (∀ value, root right value → ∃ result, root left result ∧ RowEquivalent value result))
     (motive_2 := fun _ _ _ => True)
   · intro term
     constructor <;> intro value step <;> exact ⟨value,step,.refl⟩
@@ -179,16 +182,16 @@ private theorem RowEquivalent.step_residuals {program : Program} (valid : Progra
       obtain ⟨result,steppedAgain,changedAgain⟩ := first.2 middle stepped
       exact ⟨result,steppedAgain,changed.trans changedAgain⟩
   · intro _ _ same children _
-    exact ⟨fun _ step => step.row_children_residual valid same children,
-      fun _ step => step.row_children_residual valid same.symm children.row_symm⟩
+    exact ⟨fun _ step => childrenResidual step same children,
+      fun _ step => childrenResidual step same.symm children.row_symm⟩
   · intros
-    constructor <;> intro value step <;> cases step
+    constructor <;> intro value step <;> exact False.elim (notRow _ _ value step)
   · intros
-    constructor <;> intro value step <;> cases step
+    constructor <;> intro value step <;> exact False.elim (notRow _ _ value step)
   · intros
-    constructor <;> intro value step <;> cases step
+    constructor <;> intro value step <;> exact False.elim (notRow _ _ value step)
   · intros
-    constructor <;> intro value step <;> cases step
+    constructor <;> intro value step <;> exact False.elim (notRow _ _ value step)
   · exact True.intro
   · intros; exact True.intro
   · exact equivalent
@@ -200,6 +203,7 @@ theorem DefinitionalStep.row_residual {program : Program} (valid : ProgramWellFo
     {context : Context} {term value changed : Term} (step : DefinitionalStep program context term value)
     (equivalent : RowEquivalent term changed) :
     ∃ result, DefinitionalStep program context changed result ∧ RowEquivalent value result :=
-  (equivalent.step_residuals valid).1 value step
+  (equivalent.root_relation_residuals (fun _ _ _ impossible => by cases impossible)
+    (fun root same children => root.row_children_residual valid same children)).1 value step
 
 end Glorious.Language

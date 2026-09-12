@@ -76,6 +76,8 @@ import GloriousLanguage.HeadOriginSubstitution
 import GloriousLanguage.HeadInspection
 import GloriousLanguage.HeadInspectionInstantiation
 import GloriousLanguage.InspectionResiduals
+import GloriousLanguage.InspectionPaths
+import GloriousLanguage.InspectionPathResiduals
 import GloriousLanguage.RootReductionJoining
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence

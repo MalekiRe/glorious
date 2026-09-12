@@ -95,55 +95,6 @@ theorem HeadInspectionStepAt.children_residual {program : Program} (valid : Prog
     (fun _ _ reduced => reduced.choose.equal)
     (fun term _ _ agree => term.substitutions_inspected program context childLevel agree) same children
 
-private theorem RowEquivalent.inspected_step_residuals {program : Program} (valid : ProgramWellFormed program)
-    {context : Context} {left right : Term} (equivalent : RowEquivalent left right) :
-    ∀ level,
-      (∀ value (stepped : DefinitionalStep program context left value), HeadInspectionStepAt program level stepped →
-        ∃ result, (∃ residual : DefinitionalStep program context right result, HeadInspectionStepAt program level residual) ∧
-          RowEquivalent value result) ∧
-      (∀ value (stepped : DefinitionalStep program context right value), HeadInspectionStepAt program level stepped →
-        ∃ result, (∃ residual : DefinitionalStep program context left result, HeadInspectionStepAt program level residual) ∧
-          RowEquivalent value result) := by
-  apply RowEquivalent.rec
-    (motive_1 := fun left right _ => ∀ level,
-      (∀ value (stepped : DefinitionalStep program context left value), HeadInspectionStepAt program level stepped →
-        ∃ result, (∃ residual : DefinitionalStep program context right result, HeadInspectionStepAt program level residual) ∧
-          RowEquivalent value result) ∧
-      (∀ value (stepped : DefinitionalStep program context right value), HeadInspectionStepAt program level stepped →
-        ∃ result, (∃ residual : DefinitionalStep program context left result, HeadInspectionStepAt program level residual) ∧
-          RowEquivalent value result))
-    (motive_2 := fun _ _ _ => True)
-  · intro term level
-    constructor <;> intro value stepped certificate <;> exact ⟨value,⟨stepped,certificate⟩,.refl⟩
-  · intro _ _ _ ih level
-    exact ⟨(ih level).2,(ih level).1⟩
-  · intro _ _ _ _ _ first second level
-    constructor
-    · intro value stepped certificate
-      obtain ⟨middle,⟨next,nextCertificate⟩,changed⟩ := (first level).1 value stepped certificate
-      obtain ⟨result,residual,changedAgain⟩ := (second level).1 middle next nextCertificate
-      exact ⟨result,residual,changed.trans changedAgain⟩
-    · intro value stepped certificate
-      obtain ⟨middle,⟨next,nextCertificate⟩,changed⟩ := (second level).2 value stepped certificate
-      obtain ⟨result,residual,changedAgain⟩ := (first level).2 middle next nextCertificate
-      exact ⟨result,residual,changed.trans changedAgain⟩
-  · intro _ _ same children _ level
-    constructor
-    · intro _ _ certificate
-      exact certificate.children_relation valid (fun _ => .refl) (fun _ _ equivalent => .row equivalent)
-        (fun term _ _ agree => term.substitutions_rowEquivalent agree) same children
-    · intro _ _ certificate
-      exact certificate.children_relation valid (fun _ => .refl) (fun _ _ equivalent => .row equivalent)
-        (fun term _ _ agree => term.substitutions_rowEquivalent agree) same.symm
-        (children.swap.imp (fun _ _ equivalent => equivalent.symm))
-  · intros; constructor <;> intro value stepped _ <;> cases stepped
-  · intros; constructor <;> intro value stepped _ <;> cases stepped
-  · intros; constructor <;> intro value stepped _ <;> cases stepped
-  · intros; constructor <;> intro value stepped _ <;> cases stepped
-  · exact True.intro
-  · intros; exact True.intro
-  · exact equivalent
-
 /-- Row permutation, flattening and duplication retain an actual root
 residual at the original source-inspection level. -/
 theorem HeadInspectionStepAt.row_residual {program : Program} (valid : ProgramWellFormed program)
@@ -151,6 +102,12 @@ theorem HeadInspectionStepAt.row_residual {program : Program} (valid : ProgramWe
     {level : Nat} (certificate : HeadInspectionStepAt program level stepped) (equivalent : RowEquivalent term changed) :
     ∃ result, (∃ residual : DefinitionalStep program context changed result, HeadInspectionStepAt program level residual) ∧
       RowEquivalent value result :=
-  (equivalent.inspected_step_residuals valid level).1 value stepped certificate
+  (equivalent.root_relation_residuals
+    (root := fun left right => ∃ root : DefinitionalStep program context left right,
+      HeadInspectionStepAt program level root)
+    (fun _ _ _ impossible => by obtain ⟨root,_⟩ := impossible; cases root)
+    (fun ⟨_,rootCertificate⟩ same children => rootCertificate.children_relation valid
+      (fun _ => .refl) (fun _ _ equivalent => .row equivalent)
+      (fun term _ _ agree => term.substitutions_rowEquivalent agree) same children)).1 value ⟨stepped,certificate⟩
 
 end Glorious.Language

@@ -108,6 +108,9 @@ or a dependency of this project.
   source-admitted finite inspection dependencies, preserved through actual caller
   instantiation and root/child and row/root residuals. Query-premise joining and
   global confluence remain open.
+- `InspectionPaths`, `InspectionPathResiduals`: fixed paths extracted from those
+  source inspections identify actual raw generic values and update actual
+  selection through query residuals. Ordinary-to-path-ready simulation remains open.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,
