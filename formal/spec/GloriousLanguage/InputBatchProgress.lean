@@ -3563,6 +3563,76 @@ theorem Kernel.Transfers.slot_hole {program : RuntimeProgram} {before after : Wo
       refine ⟨changed,?_,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩
       exact clearedStores.write_other install apart
 
+/-- The owned binding of a capture is the operation that empties the capture's
+slot: the rule allocates the fresh destination (whose root is the allocation
+world's nextRoot, hence apart from the receiver's root), transfers the resident
+capture out of the receiver's child slot, and so leaves the receiver storing the
+same shell with that slot a hole. The apartness premise is the freshness the
+allocation presupposes, stated in root form. -/
+theorem Kernel.BindsInputAt.owned_slot {program : RuntimeProgram}
+    {activation scope region : Identity} {before allocated after : World}
+    {input : InvocationInput} {address : Address} {layout : Layout}
+    (allocatedRule : Allocates program.declarations before (.localSlot activation scope) region
+      input.formal.type layout input.formal.mutable address allocated)
+    (transfer : Transfers program allocated input.authority input.storage address after)
+    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
+    (storageIs : input.storage = receiver.child index)
+    (stored : allocated.Stores receiver shell)
+    (freshApart : before.nextRoot ≠ receiver.root) :
+    ∃ changed, after.Stores receiver changed ∧ changed.head = shell.head ∧
+      changed.owner = shell.owner ∧ changed.type = shell.type ∧
+      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
+  obtain ⟨freshRoot,_⟩ := Allocates.fresh_root allocatedRule
+  have apart : ¬ address.Overlaps receiver :=
+    World.not_overlaps_of_root_ne (by rw [freshRoot]; exact freshApart)
+  exact Kernel.Transfers.slot_hole transfer whole storageIs stored apart
+
+/-- The two whole-allocation handoffs leave the roots table alone, so the
+receiver's stored shell crosses them unchanged: the congruence that lets the
+allocation and loan bindings keep every shell slot exactly as the binding found
+it. -/
+theorem Kernel.TransfersAllocation.stores {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (moved : TransfersAllocation recipient before place after)
+    {address : Address} {value : Value} (stored : before.Stores address value) :
+    after.Stores address value :=
+  World.Stores.of_roots (TransfersAllocation.roots_eq moved) stored
+
+theorem Kernel.TransfersStorageLoan.stores {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (moved : TransfersStorageLoan recipient before place after)
+    {address : Address} {value : Value} (stored : before.Stores address value) :
+    after.Stores address value :=
+  World.Stores.of_roots (TransfersStorageLoan.roots_eq moved) stored
+
+/-- The two claim relations write only the loan table's bookkeeping, so they
+leave the roots table alone and the receiver's stored shell crosses them
+unchanged. These are the congruences the storage and guarded-allocation bindings
+need to keep every shell slot exactly as the binding found it. -/
+theorem Kernel.ClaimsStorage.roots_eq {custody : ClaimCustody} {before after : World}
+    {authority : Authority} {access : Access} {address : Address} {created : Identity}
+    (claimed : ClaimsStorage custody before authority access address created after) :
+    after.roots = before.roots := by cases claimed; rfl
+
+theorem Kernel.ClaimsStorage.stores {custody : ClaimCustody} {before after : World}
+    {authority : Authority} {access : Access} {address : Address} {created : Identity}
+    (claimed : ClaimsStorage custody before authority access address created after)
+    {observed : Address} {value : Value} (stored : before.Stores observed value) :
+    after.Stores observed value :=
+  World.Stores.of_roots (Kernel.ClaimsStorage.roots_eq claimed) stored
+
+theorem Kernel.ClaimsAllocation.roots_eq {recipient : ClaimCustody} {before after : World}
+    {authority : Authority} {address : Address} {created : Identity}
+    (claimed : ClaimsAllocation recipient before authority address created after) :
+    after.roots = before.roots := by cases claimed; rfl
+
+theorem Kernel.ClaimsAllocation.stores {recipient : ClaimCustody} {before after : World}
+    {authority : Authority} {address : Address} {created : Identity}
+    (claimed : ClaimsAllocation recipient before authority address created after)
+    {observed : Address} {value : Value} (stored : before.Stores observed value) :
+    after.Stores observed value :=
+  World.Stores.of_roots (Kernel.ClaimsAllocation.roots_eq claimed) stored
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
