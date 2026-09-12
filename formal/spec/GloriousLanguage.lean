@@ -19,6 +19,8 @@ import GloriousLanguage.SnapshotPlacement
 import GloriousLanguage.SnapshotPlacementConstruction
 import GloriousLanguage.SnapshotReplayConstruction
 import GloriousLanguage.SnapshotReplayProgress
+import GloriousLanguage.SuspensionContent
+import GloriousLanguage.SuspensionRetention
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation

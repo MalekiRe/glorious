@@ -300,6 +300,23 @@ is not derivable. No statement is weakened and no previously derivable fact is
 assumed. Verified exact: the four modules check as 80 jobs, and the composed
 gate including them passes 224 jobs from a fresh source-only tree.
 
+The suspension boundary's captured-product release is integrated:
+`SuspensionAdmission` records the suspend rules' own admission (their
+`SuspendPermission` supplies the replayable roots and snapshot frames of the
+suspension they create, and every step's actual resumption-table change retains
+a previously stored suspension's captured product), `SuspensionContent` builds
+the captured content as a real product of the actual capture, replay and
+cancellation storage operations (`DelimitedRoots.replayable_suspendRoots`,
+`Suspension.restore_replayable`, the rehoming and fresh-root frames for
+`Replayable`/`Suspensible`/`Cancelable`/`Authority.Replayable` and
+`Value.ResourcesClosed`/`LoansRestored`/`InvariantClosed`), and
+`SuspensionRetention` delegates the retention of a stored suspension's captured
+product to `ResumptionChange.retains_metadata`. No wrapper is presented as a
+completed admission: the lane deleted the unused `Suspension.Admitted` wrapper
+rather than claim it. Residual, recorded: the dead-loan frontier bound, the
+live-control/captured-root separation needed to freeze captured content across
+intervening steps, and control-region liveness plus external scoping.
+
 The authoritative alias contract is landed: `FieldOffset` gains the `alias`
 constructor, so an alias application's physical field offsets are its actual
 expansion's (`program.alias` supplies the declaration, the checked
