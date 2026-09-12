@@ -19,6 +19,12 @@ structure Context where
 def Context.bind (context : Context) (localSlot : Local) : Context :=
   { context with locals := localSlot :: context.locals.filter (fun previous => previous.id != localSlot.id) }
 
+/-- Pattern and clause inputs are installed in execution order. Each binder
+uses the same shadowing operation as an ordinary local; concatenating locals
+would retain shadowed declarations and disagree with sequential execution. -/
+def Context.bindLocals (context : Context) (locals : List Local) : Context :=
+  locals.foldl Context.bind context
+
 def Context.bindRegion (context : Context) (id : Identity) : Context :=
   { context with static := { context.static with scope := context.static.scope.bindRegion id } }
 
@@ -329,7 +335,7 @@ mutual
     | nil {context input output} : ArmsType program context [] input output
     | cons {context pattern body arms input output bindings} :
         PatternType program.declarations context.static pattern input .owned bindings → (bindings.map (·.id)).Nodup →
-        CodeType program { context with locals := bindings ++ context.locals } body output → ArmsType program context arms input output →
+        CodeType program (context.bindLocals bindings) body output → ArmsType program context arms input output →
         ArmsType program context (.clause pattern body :: arms) input output
 
   inductive HandlerType (program : Kernel.Program) : Context → Handler → Term → Term → Prop where
@@ -358,7 +364,7 @@ mutual
                 localSlot.type = .continuation (.scopedBrand brand) signature.result result signature.effects quantity ∧ output = result)))) →
         (∀ brand, continuation.bind Local.resumptionBrand = some brand → brand ∉ context.static.scope.brands) →
         TermsScoped (context.bindResumption continuation) (output :: continuation.toList.map (·.type)) →
-        CodeType program { context.bindResumption continuation with locals := bindings ++ continuation.toList ++ context.locals } body output →
+        CodeType program ((context.bindResumption continuation).bindLocals (continuation.toList ++ bindings)) body output →
         OperationArmsType program context rest result →
         OperationArmsType program context (.clause id family item patterns continuation body :: rest) result
 end

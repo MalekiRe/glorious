@@ -87,7 +87,7 @@ def RunsInEnvironment (program : Language.Program) (context : Language.Context)
     (call : Invocation) (receiver brand region : Term) (residents : List Term) : Prop :=
   ∃ selected, call.environment = some selected ∧
     WellKinded program context selected.region .region ∧
-    RegionIncludes context.assumptions region selected.region ∧
+    Entails program context (.outlives region selected.region) ∧
     Entails program context (.callable (call.receiver.type selected.region receiver)
       call.signature.parameters call.signature.result call.signature.effects call.signature.unsafeAllowed) ∧
     Entails program context (.runsIn (call.receiver.type selected.region receiver)

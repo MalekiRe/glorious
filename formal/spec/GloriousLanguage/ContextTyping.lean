@@ -1,5 +1,4 @@
-import GloriousLanguage.InputTyping
-import GloriousLanguage.LocalPreservation
+import GloriousLanguage.BindingPersistence
 
 /-! The source body's one local environment is related to the actual runtime
 environment. Entry constructs this relation from input recipes, fresh scope
@@ -122,8 +121,9 @@ end Execution
 
 namespace Typing
 
-/-- Scoped local storage typing only. This does not assert initialization,
-loan permission, active labels or that arbitrary execution can make progress. -/
+/-- Scoped declared local storage. Retired whole-root slots retain their
+declared type; only a successful runtime read recovers usable value typing.
+This does not grant loan permission, active labels or execution progress. -/
 structure ContextBindingsTyped (program : Kernel.Program) (world : World)
     (source : Context) (runtime : Execution.Context) : Prop where
   moduleEq : runtime.module = source.static.module
@@ -132,7 +132,7 @@ structure ContextBindingsTyped (program : Kernel.Program) (world : World)
   distinct : (source.locals.map (·.id)).Nodup
   admitted : ∀ localSlot ∈ source.locals, localSlot.type.Scoped source.static.scope
   bindings : ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
-    AddressType program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment
+    BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment
 
 end Typing
 
@@ -160,7 +160,7 @@ theorem Typing.ContextBindingsTyped.selects {program : Kernel.Program} {world : 
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {localSlot : Kernel.Local} (member : localSlot ∈ source.locals) :
     ∃ binding, runtime.environment.Selects localSlot.id binding ∧
-      AddressType program.declarations world binding.address (runtime.term localSlot.type) := by
+      Typing.BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type) := by
   have related := typed.bindings
   have ids : runtime.environment.map (·.localSlot) = source.locals.map (·.id) := by
     generalize source.locals = locals at related ⊢
@@ -172,14 +172,61 @@ theorem Typing.ContextBindingsTyped.selects {program : Kernel.Program} {world : 
   obtain ⟨binding,present,identity,located⟩ := related.member_left member
   exact ⟨binding,identity ▸ Kernel.Environment.selects_of_nodup distinct present,located⟩
 
+theorem Typing.ContextBindingsTyped.read_local {program : Kernel.Program} {world : World}
+    {source : Typing.Context} {runtime : Execution.Context}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program world) (typed : Typing.ContextBindingsTyped program world source runtime)
+    {localSlot : Kernel.Local} (member : localSlot ∈ source.locals) {binding : Kernel.Binding} {value : Value}
+    (selected : runtime.environment.Selects localSlot.id binding) (stored : world.Stores binding.address value) :
+    Typing.ValueTyped program world value ∧ value.type = runtime.term localSlot.type := by
+  obtain ⟨actual,found,storage⟩ := typed.selects member
+  have same := selected.2.2 actual found.1 found.2.1
+  subst actual
+  exact (storage.read valid inventory worldTyped stored).2
+
 theorem Typing.ContextBindingsTyped.world {program : Kernel.Program} {before after : World}
     {source : Typing.Context} {runtime : Execution.Context}
     (typed : Typing.ContextBindingsTyped program before source runtime)
-    (preserved : ∀ address type, AddressType program.declarations before address type →
-      AddressType program.declarations after address type) :
+    (preserved : ∀ address type, Typing.BindingStorageTyped program.declarations before address type →
+      Typing.BindingStorageTyped program.declarations after address type) :
     Typing.ContextBindingsTyped program after source runtime := by
   exact ⟨typed.moduleEq,typed.unsafeEq,typed.covers,typed.distinct,typed.admitted,
     typed.bindings.imp (fun _ _ pair => ⟨pair.1,preserved _ _ pair.2⟩)⟩
+
+/-- Retiring a moved/discarded owner does not remove its lexical declaration
+or pretend that the retired address remains readable. -/
+theorem Retires.contextBindingsTyped {program : Kernel.Program} {before after : World} {id : Identity}
+    (retired : Retires before id after) {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  typed.world (fun _ _ binding => retired.bindingStorageTyped binding)
+
+theorem Execution.AtomStep.contextBindingsTyped {program : Kernel.Program} {before after : Execution.State} {event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before.world) (step : Execution.AtomStep program before event after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before.world source runtime) :
+    Typing.ContextBindingsTyped program after.world source runtime :=
+  typed.world (fun _ _ binding => step.bindingStorageTyped valid inventory worldTyped binding)
+
+theorem Execution.Captures.contextBindingsTyped {program : Kernel.Program} {before after : World}
+    {context : Execution.Context} {captures addresses}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before)
+    (captured : Execution.Captures program context before captures addresses after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  typed.world (fun _ _ binding => captured.bindingStorageTyped valid inventory worldTyped binding)
+
+theorem Execution.Captures.length_eq {program : Kernel.Program} {context : Execution.Context}
+    {before after : World} {captures addresses}
+    (captured : Execution.Captures program context before captures addresses after) :
+    captures.length = addresses.length := by
+  induction captured with
+  | nil => rfl
+  | owned _ _ _ _ _ ih => exact congrArg Nat.succ ih
+  | borrowed _ _ _ _ _ _ ih => exact congrArg Nat.succ ih
 
 theorem Typing.ContextBindingsTyped.result_scopeClosed {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
@@ -193,7 +240,7 @@ theorem Typing.ContextBindingsTyped.bind {program : Kernel.Program} {world : Wor
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {localSlot : Kernel.Local} {address : Address} {authority : Authority}
     (admitted : localSlot.type.Scoped source.static.scope)
-    (located : AddressType program.declarations world address (runtime.term localSlot.type)) :
+    (located : Typing.BindingStorageTyped program.declarations world address (runtime.term localSlot.type)) :
     Typing.ContextBindingsTyped program world (source.bind localSlot)
       (runtime.bind (runtime.local localSlot) address authority) := by
   refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,?_⟩
@@ -224,7 +271,7 @@ theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world 
   · have related := typed.bindings
     have admitted := typed.admitted
     change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
-      AddressType program.declarations world binding.address ((runtime.bindBrand lexical brand).term localSlot.type))
+      Typing.BindingStorageTyped program.declarations world binding.address ((runtime.bindBrand lexical brand).term localSlot.type))
       source.locals runtime.environment
     generalize source.locals = locals at related admitted ⊢
     generalize runtime.environment = environment at related ⊢
@@ -249,7 +296,7 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
   · have related := typed.bindings
     have admitted := typed.admitted
     change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
-      AddressType program.declarations world binding.address ((runtime.bindRegion lexical region).term localSlot.type))
+      Typing.BindingStorageTyped program.declarations world binding.address ((runtime.bindRegion lexical region).term localSlot.type))
       source.locals runtime.environment
     generalize source.locals = locals at related admitted ⊢
     generalize runtime.environment = environment at related ⊢
@@ -257,7 +304,7 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
     | nil => exact .nil
     | @cons localSlot binding locals bindings first rest ih =>
       refine ListRel.cons ⟨first.1,?_⟩ ?_
-      · change AddressType program.declarations world binding.address ((runtime.bindRegion lexical region).term localSlot.type)
+      · change Typing.BindingStorageTyped program.declarations world binding.address ((runtime.bindRegion lexical region).term localSlot.type)
         rw [runtime.bindRegion_term fresh (admitted localSlot List.mem_cons_self)]
         exact first.2
       · exact ih (fun localSlot member => admitted localSlot (List.mem_cons_of_mem _ member))
@@ -273,7 +320,20 @@ theorem Allocates.contextBindingsTyped {program : Kernel.Program} {before after 
       (runtime.term localSlot.type) layout localSlot.mutable address after) :
     Typing.ContextBindingsTyped program after (source.bind localSlot)
       (runtime.bind (runtime.local localSlot) address) := by
-  exact (typed.world (fun _ _ located => allocated.addressType world located)).bind admitted allocated.created_addressType
+  exact (typed.world (fun _ _ located => allocated.bindingStorageTyped world located)).bind admitted allocated.created_bindingStorageTyped
+
+theorem Kernel.BindsPattern.contextBindingsTyped {program : Kernel.Program} {before after : World}
+    {source : Typing.Context} {runtime : Execution.Context} {localSlot : Kernel.Local}
+    {address : Address} {authority : Authority} {access : Access} {binding : Kernel.Binding}
+    (worldTyped : Typing.WorldTyped program before)
+    (typed : Typing.ContextBindingsTyped program before source runtime)
+    (admitted : localSlot.type.Scoped source.static.scope)
+    (bound : Kernel.BindsPattern program.declarations runtime.activation runtime.scope runtime.region before
+      (runtime.local localSlot) address authority access binding after) :
+    Typing.ContextBindingsTyped program after (source.bind localSlot)
+      (runtime.bind (runtime.local localSlot) binding.address binding.authority) :=
+  (typed.world (fun _ _ storage => bound.preserves_bindingStorageType worldTyped.1 storage)).bind
+    admitted (bound.bindingStorageType worldTyped).2
 
 theorem FreshRegion.contextBindingsTyped {program : Kernel.Program} {before after : World}
     {source : Typing.Context} {runtime : Execution.Context}
@@ -283,7 +343,97 @@ theorem FreshRegion.contextBindingsTyped {program : Kernel.Program} {before afte
     Typing.ContextBindingsTyped program after (source.bindRegion lexical)
       { runtime.bindRegion lexical region with scope := region, region := region } := by
   have roots : after.roots = before.roots := by obtain ⟨_,_,rfl⟩ := created; rfl
-  exact (typed.world (fun _ _ located => located.roots_congr roots)).bindRegion fresh region
+  have loans : after.loans = before.loans := by obtain ⟨_,rfl⟩ := created; rfl
+  exact (typed.world (fun _ _ located => located.roots_loans roots loans)).bindRegion fresh region
+
+theorem FreshRegion.preserves_contextBindingsTyped {program : Kernel.Program} {before after : World}
+    {source : Typing.Context} {runtime : Execution.Context} {region : Identity}
+    (created : FreshRegion before region after) (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime := by
+  obtain ⟨_,rfl⟩ := created
+  exact typed.world (fun _ _ binding => binding.roots_loans (before := before)
+    (after := { before with liveRegions := region :: before.liveRegions, nextRegion := region+1 }) rfl rfl)
+
+/-- Installation may move or borrow captures and retire the old temporary
+owners. The computation retains the same lexical declarations, whose actual
+availability is still checked by execution/resource admission. -/
+theorem Execution.Installs.computation_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
+    {outer : Execution.Context} {syntaxNode : Kernel.Handler} {handler : Execution.InstalledHandler} {after : World}
+    {source : Typing.Context}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before.world)
+    (typed : Typing.ContextBindingsTyped program before.world source outer)
+    (installed : Execution.Installs program before outer syntaxNode handler after) :
+    Typing.ContextBindingsTyped program after source handler.computation := by
+  obtain ⟨first,second,sources,captures,captured,bindings,bound,disposed,one,two,_,capturedValues,boundValues,retired,rfl,rfl⟩ := installed
+  have firstWorld := one.worldTyped worldTyped
+  have secondWorld := two.worldTyped firstWorld
+  have secondContext := two.preserves_contextBindingsTyped (one.preserves_contextBindingsTyped typed)
+  have capturedWorld := capturedValues.worldTyped valid inventory secondWorld
+  have capturedContext := capturedValues.contextBindingsTyped valid inventory secondWorld secondContext
+  have boundContext := capturedContext.world (fun _ _ binding =>
+    boundValues.preserves_bindingStorageType valid inventory capturedWorld binding)
+  have retained := boundContext.world (fun _ _ binding => retired.bindingStorageTyped binding)
+  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
+
+/-- The handler's retained environment is produced by the same sequential
+input binding used at function entry. Source captures are closed exactly once
+through the outer lexical map, and temporary retirement preserves their
+declared storage types without asserting read availability. -/
+theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
+    {outer : Execution.Context} {syntaxNode : Kernel.Handler} {handler : Execution.InstalledHandler} {after : World}
+    {source : Typing.Context} {input result : Term}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before.world)
+    (typed : Typing.ContextBindingsTyped program before.world source outer)
+    (handlerTyped : Typing.HandlerType program source syntaxNode input result)
+    (installed : Execution.Installs program before outer syntaxNode handler after) :
+    Typing.ContextBindingsTyped program after
+      { source with locals := Execution.CaptureLocals syntaxNode.captures } handler.environment := by
+  obtain ⟨first,second,sources,captures,captured,bindings,bound,disposed,one,two,captureMap,capturedValues,boundValues,retired,rfl,rfl⟩ := installed
+  have capturedWorld := capturedValues.worldTyped valid inventory (two.worldTyped (one.worldTyped worldTyped))
+  have checked := boundValues.bindingStorageTypes valid inventory capturedWorld
+  have aligned : (((Execution.CaptureLocals captures).zip sources).map (fun (localSlot,address) =>
+      (⟨.capture 0,localSlot,address,.owner,.owned⟩ : Kernel.InvocationInput))).map (·.formal) =
+      Execution.CaptureLocals captures := by
+    simp only [List.map_map,Function.comp_def]
+    exact List.map_fst_zip (by
+      simpa only [Execution.CaptureLocals,List.length_map] using (Nat.le_of_eq capturedValues.length_eq))
+  have declared : ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+      Typing.BindingStorageTyped program.declarations after binding.address localSlot.type)
+      (Execution.CaptureLocals captures) bindings := by
+    rw [← aligned]
+    clear aligned boundValues
+    generalize (((Execution.CaptureLocals captures).zip sources).map (fun (localSlot,address) =>
+      (⟨.capture 0,localSlot,address,.owner,.owned⟩ : Kernel.InvocationInput))) = inputs at checked ⊢
+    induction checked with
+    | nil => exact .nil
+    | cons head _ ih => exact .cons ⟨head.1,retired.bindingStorageTyped head.2⟩ ih
+  have transport : ∀ (lexical : List Kernel.Capture) (environment : Kernel.Environment),
+      ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+        Typing.BindingStorageTyped program.declarations after binding.address localSlot.type)
+        (Execution.CaptureLocals (lexical.map (Kernel.Capture.mapTerms outer.term))) environment →
+      ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+        Typing.BindingStorageTyped program.declarations after binding.address (outer.term localSlot.type))
+        (Execution.CaptureLocals lexical) environment := by
+    intro lexical
+    induction lexical with
+    | nil => intro environment related; cases related; exact .nil
+    | cons capture rest ih =>
+      intro environment related
+      cases related with
+      | cons head tail => exact .cons head (ih _ tail)
+  have declared := transport syntaxNode.captures bindings (captureMap ▸ declared)
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared⟩
+  · cases handlerTyped with
+    | attached captureTyped _ _ _ =>
+      simpa only [Execution.CaptureLocals,Kernel.Handler.captures,List.map_map,Function.comp_def] using captureTyped.2
+  · intro localSlot member
+    cases handlerTyped with
+    | attached _ admitted _ _ =>
+      obtain ⟨capture,present,rfl⟩ := List.mem_map.mp member
+      exact admitted capture.type (List.mem_cons_of_mem _ (List.mem_cons_of_mem _
+        (List.mem_map.mpr ⟨capture,present,rfl⟩)))
 
 /-- A handler clause gets a fresh cleanup activation but closes source names
 through its retained handler environment. These are different identities. -/
@@ -294,7 +444,8 @@ theorem Execution.StartsClause.contextBindingsTyped {program : Kernel.Program} {
     Typing.ContextBindingsTyped program after source runtime := by
   obtain ⟨created,rfl⟩ := started
   have roots : after.roots = before.world.roots := by obtain ⟨_,_,rfl⟩ := created; rfl
-  have retained := typed.world (fun _ _ located => located.roots_congr roots)
+  have loans : after.loans = before.world.loans := by obtain ⟨_,rfl⟩ := created; rfl
+  have retained := typed.world (fun _ _ located => located.roots_loans roots loans)
   exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
 
 theorem Execution.StartsResumptionClause.contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
@@ -361,13 +512,13 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
     Typing.ContextBindingsTyped program after (Typing.FunctionContext function runtime.module) runtime := by
   obtain ⟨withRegion,prepared,inputs,environment,declaration,_,fresh,prepares,bound,rfl,_⟩ := entered
   have aligned := prepares.formals formals
-  have checked := bound.inputTypes valid inventory (prepares.worldTyped valid inventory (fresh.worldTyped worldTyped))
+  have checked := bound.bindingStorageTypes valid inventory (prepares.worldTyped valid inventory (fresh.worldTyped worldTyped))
   have closed := selected.locals_scopeClosed valid inventory functionTyped
   refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_⟩
   · intro localSlot member
     exact (closed localSlot member).scoped _
   · change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
-      AddressType program.declarations after binding.address
+      Typing.BindingStorageTyped program.declarations after binding.address
         ((function.entryScope before.world.nextRegion before.nextBrand).term localSlot.type))
       (function.captures ++ function.parameters) environment
     have inputClosed : ∀ input ∈ inputs, input.formal.type.ScopeClosed := by
@@ -382,6 +533,6 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
     | cons first _ ih =>
       refine .cons ⟨first.1,?_⟩ (ih (fun input member => inputClosed input (List.mem_cons_of_mem _ member)))
       rw [ScopeInstantiation.term_fixed _ _ (inputClosed _ List.mem_cons_self)]
-      exact first.2.2
+      exact first.2
 
 end Glorious.Language

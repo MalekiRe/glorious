@@ -5,6 +5,15 @@ handler cases consume actual semantic coverage transport, including its
 universally quantified typed-world obligations. -/
 namespace Glorious.Language
 
+theorem RegionPermutation.typingContext_bindLocals (permutation : RegionPermutation) (context : Typing.Context)
+    (locals : List Kernel.Local) : permutation.typingContext (context.bindLocals locals) =
+      (permutation.typingContext context).bindLocals (locals.map (Kernel.Local.mapTerms permutation.term)) := by
+  induction locals generalizing context with
+  | nil => rfl
+  | cons localSlot rest ih =>
+    simpa only [Typing.Context.bindLocals,List.foldl_cons,List.map_cons,permutation.typingContext_bind] using
+      ih (context.bind localSlot)
+
 theorem RegionPermutation.typingContext_bindRegion (permutation : RegionPermutation) (context : Typing.Context)
     (id : Identity) : permutation.typingContext (context.bindRegion id) =
       (permutation.typingContext context).bindRegion id := rfl
@@ -141,7 +150,7 @@ theorem Typing.CodeType.permute {program : Kernel.Program} (valid : ProgramWellF
   · intro context pattern body arms input output bindings patternTyped distinct _ _ ihBody ihArms
     refine .cons (patternTyped.permute valid permutation) ?_ ?_ ihArms
     · simpa only [List.map_map,Function.comp_def,Kernel.Local.mapTerms] using distinct
-    · simpa only [RegionPermutation.typingContext,List.map_append] using ihBody
+    · simpa only [permutation.typingContext_bindLocals] using ihBody
   · intro context result completion operations captures input types captureTyped admitted _ _ ihCompletion ihOperations
     refine .attached (captureTyped.permute valid permutation) ?_ ?_ ?_
     · simpa only [List.map_cons,List.map_map,Function.comp_def,Kernel.Capture.mapTerms] using admitted.permute permutation
@@ -174,8 +183,8 @@ theorem Typing.CodeType.permute {program : Kernel.Program} (valid : ProgramWellF
         simpa only [Option.map,Option.bind,permutation.local_resumptionBrand] using selected
     · simpa only [List.map_cons,List.map_map,Function.comp_def,Kernel.Local.mapTerms,Option.toList_map,
         permutation.typingContext_bindResumption] using admitted.permute permutation
-    · rw [permutation.typingContext_locals,permutation.typingContext_bindResumption] at ihBody
-      simpa only [List.map_append,Option.toList_map,RegionPermutation.typingContext] using ihBody
+    · rw [permutation.typingContext_bindLocals,permutation.typingContext_bindResumption] at ihBody
+      simpa only [List.map_append,Option.toList_map] using ihBody
 
 theorem Typing.FunctionType.permute {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
     (inventory : Kernel.BodyInventory program) {function : Kernel.Function}

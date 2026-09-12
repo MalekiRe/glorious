@@ -42,3 +42,6 @@ import GloriousLanguage.DropReturn
 import GloriousLanguage.DropHandle
 import GloriousLanguage.ProjectionKinding
 import GloriousLanguage.DefinitionalCoherence
+import GloriousLanguage.LogicalEvidence
+import GloriousLanguage.PatternContextTyping
+import GloriousLanguage.SuspensionPreservation

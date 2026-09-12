@@ -109,7 +109,7 @@ theorem FreshRegion.suspensionExtension {before after : World} {id : Identity}
   rcases fresh with ⟨_,rfl⟩
   exact .of_roots (Nat.le_refl _) rfl
 
-theorem RegionEnds.suspensionExtension {before after : World} {id : Identity}
+theorem Execution.RegionEnds.suspensionExtension {before after : World} {id : Identity}
     (ended : RegionEnds before id after) : before.SuspensionExtension after := by
   rcases ended with ⟨_,rfl⟩
   exact .of_roots (Nat.le_refl _) rfl
@@ -164,5 +164,110 @@ theorem Execution.ConsumesReceiver.suspensionExtension {before after : World}
   cases consumed with
   | lent => exact .refl _
   | owned _ _ _ _ written => exact World.write_suspensionExtension written
+
+theorem Kernel.BindsInput.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+    {before after : World} {input : InvocationInput} {binding : Binding}
+    (bound : BindsInput program activation scope region before input binding after) : before.SuspensionExtension after := by
+  cases bound with
+  | lent _ _ _ _ _ borrowed => exact borrowed.suspensionExtension
+  | owned _ _ _ allocated transferred =>
+    exact (allocated.suspensionExtension (by intro id; simp)).trans transferred.suspensionExtension
+
+theorem Kernel.BindsInputs.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+    {before after : World} {inputs : List InvocationInput} {bindings : Environment}
+    (bound : BindsInputs program activation scope region before inputs bindings after) : before.SuspensionExtension after := by
+  induction bound with
+  | nil => exact .refl _
+  | cons first _ ih => exact first.suspensionExtension.trans ih
+
+theorem Kernel.BindsPattern.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+    {before after : World} {localSlot : Local} {source : Address} {authority : Authority} {access : Access} {binding : Binding}
+    (bound : BindsPattern program activation scope region before localSlot source authority access binding after) :
+    before.SuspensionExtension after := by
+  cases bound with
+  | owned bound => exact bound.suspensionExtension
+  | borrowed _ _ allocated borrowed =>
+    exact (allocated.suspensionExtension (by intro id; simp)).trans borrowed.suspensionExtension
+
+theorem Deconstructs.suspensionExtension {program : Program} {context : Language.Context}
+    {before after : World} {authority : Authority} {address : Address}
+    (consumed : Deconstructs program context before authority address after) : before.SuspensionExtension after := by
+  cases consumed with
+  | shell _ _ _ _ written => exact World.write_suspensionExtension written
+
+theorem Execution.PreparesEntry.suspensionExtension {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    (prepared : PreparesEntry program callee function before source inputs after) : before.SuspensionExtension after := by
+  cases prepared with
+  | supplied => exact .refl _
+  | resident lent _ => exact lent.suspensionExtension
+  | contextual receiver witness => exact receiver.suspensionExtension.trans witness.suspensionExtension
+
+theorem Execution.EnterWorld.suspensionExtension {program : Kernel.Program} {before : State} {after : World}
+    {caller context : Context} {function : Kernel.Function} {source : EntrySource}
+    (entered : EnterWorld program before caller function source context after) : before.world.SuspensionExtension after := by
+  obtain ⟨_,_,_,_,_,_,fresh,prepared,bound,_,_⟩ := entered
+  exact fresh.suspensionExtension.trans (prepared.suspensionExtension.trans bound.suspensionExtension)
+
+theorem Execution.Captures.suspensionExtension {program : Kernel.Program} {context : Context}
+    {before after : World} {captures : List Capture} {addresses : List Address}
+    (captured : Captures program context before captures addresses after) : before.SuspensionExtension after := by
+  induction captured with
+  | nil => exact .refl _
+  | owned _ _ allocated acquired _ ih => exact allocated.suspensionExtension.trans (acquired.suspensionExtension.trans ih)
+  | borrowed _ _ _ allocated borrowed _ ih => exact allocated.suspensionExtension.trans (borrowed.suspensionExtension.trans ih)
+
+theorem Execution.RetiresEmpty.suspensionExtension {before after : World} {addresses : List Address}
+    (retired : RetiresEmpty before addresses after) : before.SuspensionExtension after := by
+  induction retired with
+  | nil => exact .refl _
+  | cons _ retired _ ih => exact retired.suspensionExtension.trans ih
+
+theorem Execution.Installs.suspensionExtension {program : Kernel.Program} {before : State}
+    {outer : Context} {syntaxNode : Handler} {handler : InstalledHandler} {after : World}
+    (installed : Installs program before outer syntaxNode handler after) : before.world.SuspensionExtension after := by
+  obtain ⟨_,_,_,_,_,_,_,_,one,two,_,captured,bound,retired,rfl,_⟩ := installed
+  exact one.suspensionExtension.trans (two.suspensionExtension.trans
+    (captured.suspensionExtension.trans (bound.suspensionExtension.trans retired.suspensionExtension)))
+
+theorem Execution.CopiesObservations.suspensionExtension {program : Kernel.Program} {context : Context}
+    {before after : World} {observations : List (Local × Address × Authority)} {bindings : List (Local × Address)}
+    (copied : CopiesObservations program context before observations bindings after) : before.SuspensionExtension after := by
+  induction copied with
+  | nil => exact .refl _
+  | copy _ _ allocated copied _ ih => exact allocated.suspensionExtension.trans (copied.suspensionExtension.trans ih)
+  | borrow _ _ allocated borrowed _ ih => exact allocated.suspensionExtension.trans (borrowed.suspensionExtension.trans ih)
+
+theorem Execution.PacksBindings.suspensionExtension {program : Kernel.Program} {context : Context}
+    {before after : World} {pattern resultOrigin positive bindings pack}
+    (packed : PacksBindings program context before pattern resultOrigin positive bindings pack after) :
+    before.SuspensionExtension after := by
+  obtain ⟨allocated,created,type,_,temporary,_,constructed,rfl⟩ := packed
+  exact (temporary.suspensionExtension.trans constructed.suspensionExtension).trans (.of_roots (Nat.le_refl _) rfl)
+
+theorem Execution.UnitFields.suspensionExtension {program : Kernel.Program} {context : Context}
+    {before after : World} {types : List Term} {index : Option Nat} {pack : Address} {fields : List Address}
+    (assembled : UnitFields program context before types index pack fields after) : before.SuspensionExtension after := by
+  induction assembled with
+  | done => exact .refl _
+  | selected _ _ _ ih => exact ih
+  | unitBefore allocated created _ ih | unitAfter allocated created _ ih =>
+    exact allocated.suspensionExtension.trans (created.2.suspensionExtension.trans ih)
+
+theorem Execution.TestResult.suspensionExtension {program : Kernel.Program} {context : Context}
+    {before after : World} {destination type pattern positive observations}
+    (tested : TestResult program context before destination type pattern positive observations after) :
+    before.SuspensionExtension after := by
+  cases tested with
+  | result _ _ copied packed fields constructed =>
+    exact copied.suspensionExtension.trans (packed.suspensionExtension.trans
+      (fields.choose_spec.2.2.2.2.suspensionExtension.trans constructed.suspensionExtension))
+
+theorem Execution.ConsumesAvailability.suspensionExtension {before after : World}
+    {address : Address} {id : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address id access after) : before.SuspensionExtension after := by
+  cases consumed with
+  | lent => exact .refl _
+  | owned _ written => exact (World.write_suspensionExtension written).trans (.of_roots (Nat.le_refl _) rfl)
 
 end Glorious.Language

@@ -543,6 +543,42 @@ root. This boundary passed its targeted Lean dependency gate (62 jobs).
 Copied replay and preservation through the remaining source-step families
 are still required before claiming the invariant for arbitrary execution.
 
+That suspension preservation chain is now closed for the sole executable
+step relation. The actual copied snapshot cannot introduce a suspended home:
+its relocated roots use the original capture's saved local/temporary homes.
+`SuspensionSource` covers local, atomic, control and effect transitions;
+`PrimitiveSuspensionOwnership` covers every primitive branch. The general
+`SuspensionPreservation` theorem composes all six families into finite runs,
+actual observations, finite divergence prefixes and public reachable states.
+It needs initial world/suspension well-formedness and actual host laws, not
+`ResourceAdmission` or a post-state ownership certificate. Its current-source
+dependency gate passed (74 jobs). The remaining drop/control problem is
+retained hidden-handle and frame lifetime, not suspension inventory preservation.
+
+Local binding types now persist across movement and retirement of whole
+root slots. The actual sequential input and handler producers construct this
+canonical relation, and successful reads consume real selection and storage.
+Pattern/clause typing previously concatenated bindings despite execution's
+sequential shadowing; both now use the common `Context.bindLocals` fold.
+`PatternContextTyping` proves the scheduled pattern binding order and actual
+binding-step context production. Live loan-backed subobjects still require
+their retained invocation lifetime; whole-frame preservation remains open.
+
+Positive definitional conversion now preserves full kinding, including row
+equivalence and contextual reduction. Logical predicate transport uses one
+template's actual capture-admissible substitutions and pointwise lexical
+equality. Entailment, reference lifetime subtyping, type-outlives and RunsIn
+consume that evidence; quantified assumptions have actual instantiation
+elimination. Projection domains transport once the destination substitution
+is capture-admissible. This last condition is not generally conversion-stable
+under syntactic capture rejection: hygienic predicate substitution and general
+declaration predicate-kinding admission remain actual producer repairs, before
+the still-open global confluence theorem. The logical/runtime-equivariance
+dependency gate passed (37 jobs).
+
+The combined frozen suspension, pattern/context, logical-evidence and runtime
+equivariance checkpoint passed its targeted dependency gate (90 jobs).
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

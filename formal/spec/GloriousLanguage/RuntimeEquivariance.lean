@@ -446,17 +446,6 @@ theorem Kinding.permute {program : Program} {context : Context} {term : Term} {k
   case principal => exact .principal
   case static => exact .static
 
-theorem RegionIncludes.permute {assumptions : List Constraint} {long short : Term}
-    (included : RegionIncludes assumptions long short) (permutation : RegionPermutation) :
-    RegionIncludes (assumptions.map permutation.constraint) (permutation.term long) (permutation.term short) := by
-  induction included with
-  | refl => exact .refl
-  | static => simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using
-      (RegionIncludes.static (assumptions := assumptions.map permutation.constraint) (region := permutation.term _))
-  | assumed member => exact .assumed (List.mem_map.mpr ⟨_,member,by
-      simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
-  | trans _ _ first second => exact .trans first second
-
 theorem RegionPermutation.term_children (permutation : RegionPermutation) (term : Term) :
     (permutation.term term).children = term.children.map permutation.term := by
   cases term <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions,Term.children,
@@ -600,19 +589,22 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
         (permutation.substitution ownerSub) (permutation.substitution itemSub))
     (motive_13 := fun left right _ => ListRel (Equal program (permutation.context context))
       (left.map permutation.term) (right.map permutation.term))
-    (motive_14 := fun left right _ => ListRel (DefinitionallyEqual program (permutation.context context))
+    (motive_14 := fun left right _ => ConstraintCongruence (Equal program (permutation.context context))
+      (permutation.constraint left) (permutation.constraint right))
+    (motive_15 := fun left right _ => ListRel (DefinitionallyEqual program (permutation.context context))
       (left.map permutation.term) (right.map permutation.term))
-    (motive_15 := fun left right _ => ListRel (DefinitionalReduction program (permutation.context context))
+    (motive_16 := fun left right _ => ListRel (DefinitionalReduction program (permutation.context context))
       (left.map permutation.term) (right.map permutation.term))
-    ?refl ?symm ?trans ?congr ?assumed ?definitional
-    ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances
+    ?refl ?symm ?trans ?congr ?assumed ?equalEntailed ?definitional
+    ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances ?rowEntailed
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
-    ?available ?bindings ?equal_1 ?checkedCallable ?checkedRunsIn ?assumed_3 ?equality ?outlives ?typeOutlives
-    ?rows ?implementation ?use ?quantified ?instantiated
+    ?available ?bindings ?equal_1 ?typeEntailed ?checkedCallable ?checkedRunsIn ?assumed_3 ?constraintCongr ?equality
+    ?outlivesRefl ?outlivesStatic ?outlivesTrans ?typeOutlives
+    ?rows ?implementation ?use ?quantified ?quantifiedInstance ?instantiated
     ?stepAlias ?stepProjection ?stepDefault
     ?defRefl ?defSymm ?defTrans ?defCongr ?defStep ?defRow
     ?redRefl ?redStep ?redTrans ?redCongr ?redRow
-    ?matched ?domainValid ?nil ?cons ?defNil ?defCons ?redNil ?redCons entailed
+    ?matched ?domainValid ?nil ?cons ?constraintSubstitution ?defNil ?defCons ?redNil ?redCons entailed
   all_goals intros
   all_goals try simp only [RegionPermutation.term,Term.renameRuntimeRegions,RegionPermutation.constraint,Constraint.mapTerms,
     List.map_cons,List.map_nil]
@@ -626,6 +618,7 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
       exact children)
   case assumed member => exact .assumed (List.mem_map.mpr ⟨_,member,by
     simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
+  case equalEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
   case definitional _ ih => exact .definitional ih
   case rowDuplicate _ ih => exact .rowDuplicate ih
   case tailDuplicate _ ih => exact .tailDuplicate ih
@@ -648,12 +641,13 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
     refine .instances ?_ ?_
     · intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact instances original present
     · intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact tails original present
+  case rowEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
   case assumed_2 member => exact .assumed (List.mem_map.mpr ⟨_,member,by
     simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
   case scalar => exact .scalar
   case unit => exact .unit
   case pointer => exact .pointer
-  case reference included => exact .reference (included.permute permutation)
+  case reference _ included => exact .reference (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using included)
   case bottom => exact .bottom
   case tuple _ fields =>
     exact .tuple (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
@@ -668,16 +662,25 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
   case callable selected _ fields =>
     exact .callable (selected.permute valid permutation)
       (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
-  case label included => exact .label (included.permute permutation)
-  case environment included _ fields =>
-    exact .environment (included.permute permutation)
-      (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
+  case label _ included => exact .label (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using included)
+  case environment =>
+    apply TypeOutlives.environment
+    · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
+        (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
+    · intro term member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      exact (by assumption : ∀ field ∈ _, TypeOutlives program (permutation.context context) (permutation.term field) _) original present
   case available _ environment =>
     exact .available (by simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using environment)
-  case bindings included _ fields =>
-    exact .bindings (included.permute permutation)
-      (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
+  case bindings =>
+    apply TypeOutlives.bindings
+    · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
+        (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
+    · intro term member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      exact (by assumption : ∀ field ∈ _, TypeOutlives program (permutation.context context) (permutation.term field) _) original present
   case equal_1 _ _ equal previous => exact .equal equal previous
+  case typeEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
   case checkedCallable found member receiver arguments result effects =>
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup found))
     have invocation : ∀ (term : Term), term ∈ _ → term.Lexical := fun term present => lexical term (by
@@ -699,8 +702,13 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
       (permutation.substitutes_lexical_list (fun term present => invocation term (by simp [InvocationRelation.terms,present])) arguments)
       (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) after)
   case assumed_3 member => exact .assumed (List.mem_map.mpr ⟨_,member,rfl⟩)
+  case constraintCongr _ _ congruent previous => exact .congr congruent previous
   case equality _ equal => exact .equality equal
-  case outlives included => exact .outlives (included.permute permutation)
+  case outlivesRefl => exact .outlivesRefl
+  case outlivesStatic => exact .outlivesStatic
+  case outlivesTrans _ _ first second =>
+    exact .outlivesTrans (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using first)
+      (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using second)
   case typeOutlives _ outlives => exact .typeOutlives outlives
   case rows _ subset => exact .rows subset
   case implementation _ selected => exact .implementation selected
@@ -721,6 +729,24 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
     have transported := allInstances _ _ originalInstantiation originalKinds original inOriginal
     simpa only [permutation.substitution_involutive,RegionPermutation.constraint,RegionPermutation.term] using transported
   case instantiated substituted _ holds => exact .instantiated (permutation.substitute_constraint substituted) holds
+  case quantifiedInstance _ instantiated kinded present substituted quantified =>
+    simp only [RegionPermutation.constraint,Constraint.mapTerms] at quantified
+    refine .quantifiedInstance quantified ((instantiated.permute permutation).permute_binders permutation) ?_
+      (List.mem_map.mpr ⟨_,present,rfl⟩) (permutation.substitute_constraint substituted)
+    intro term member
+    obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
+    simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
+  case constraintSubstitution template left right leftSub rightSub _ before after pairs =>
+    refine .substitution (leftSub := permutation.substitution leftSub) (rightSub := permutation.substitution rightSub) ?_
+      (permutation.substitute_constraint before) (permutation.substitute_constraint after)
+    intro id kind
+    have lookup (substitution : Substitution) :
+        ((permutation.substitution substitution).get id).getD (.parameter id kind) =
+          permutation.term ((substitution.get id).getD (.parameter id kind)) := by
+      rw [RegionPermutation.substitution,Table.get_map_values]
+      cases substitution.get id <;> simp only [Option.map,Option.getD,RegionPermutation.term,Term.renameRuntimeRegions]
+    rw [lookup,lookup]
+    exact pairs id kind
   case stepAlias found instantiated kinded substituted =>
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.alias_lookup found))
     refine .alias found (instantiated.permute permutation) ?_
@@ -799,27 +825,21 @@ theorem Equal.permute {program : Program} (valid : ProgramWellFormed program) {c
     Equal program (permutation.context context) (permutation.term a) (permutation.term b) := by
   have transported := (Entails.equality equal).permute valid permutation
   simp only [RegionPermutation.constraint,Constraint.mapTerms] at transported
-  cases transported with
-  | assumed member => exact .assumed member
-  | equality equal => exact equal
+  exact .entailed transported
 
 theorem TypeOutlives.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {type region : Term} (outlives : TypeOutlives program context type region) (permutation : RegionPermutation) :
     TypeOutlives program (permutation.context context) (permutation.term type) (permutation.term region) := by
   have transported := (Entails.typeOutlives outlives).permute valid permutation
   simp only [RegionPermutation.constraint,Constraint.mapTerms] at transported
-  cases transported with
-  | assumed member => exact .assumed member
-  | typeOutlives previous => exact previous
+  exact .entailed transported
 
 theorem RowSubset.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {required allowed : Term} (subset : RowSubset program context required allowed) (permutation : RegionPermutation) :
     RowSubset program (permutation.context context) (permutation.term required) (permutation.term allowed) := by
   have transported := (Entails.rows subset).permute valid permutation
   simp only [RegionPermutation.constraint,Constraint.mapTerms] at transported
-  cases transported with
-  | assumed member => exact .assumed member
-  | rows previous => exact previous
+  exact .entailed transported
 
 theorem EntailsSubstitution.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {substitution : Substitution} {constraint : Constraint}

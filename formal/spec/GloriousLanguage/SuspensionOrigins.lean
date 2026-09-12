@@ -384,6 +384,58 @@ theorem State.SuspensionsWellFormed.restore_settled {before : State} {id : Ident
     subst root
     exact valid.homeFresh rootId original suspensionId originalAt home
 
+/-- Changing an active replay budget retains the same historical inventory
+and the same actual ownership. The budget theorem remains authoritative. -/
+theorem State.SuspensionsWellFormed.replace_budget {before : State} {id : Identity}
+    {suspension replacement : Suspension} (valid : before.SuspensionsWellFormed)
+    (found : before.resumptions.get id = some suspension)
+    (accounted : replacement.Accounted) (identity : replacement.identity = id)
+    (activity : replacement.active = suspension.active) (roots : replacement.roots = suspension.roots)
+    (homes : replacement.homes = suspension.homes) (limit : replacement.captureRootLimit = suspension.captureRootLimit) :
+    State.SuspensionsWellFormed { before with resumptions := before.resumptions.set id replacement } := by
+  refine ⟨valid.budgets.set accounted identity (valid.budgets.fresh id suspension found) (Nat.le_refl _) rfl,?_,?_,?_,valid.homeFresh⟩
+  · intro target actual selected
+    by_cases same : target = id
+    · subst target
+      simp only [Table.get_set,Option.some.injEq] at selected
+      subst actual
+      exact (valid.origin id suspension found).transport roots homes limit
+    · exact valid.origin target actual (by simpa only [Table.get_set_other _ _ _ _ same] using selected)
+  · intro target actual selected
+    by_cases same : target = id
+    · subst target
+      simp only [Table.get_set,Option.some.injEq] at selected
+      subst actual
+      simpa only [limit] using valid.frontier id suspension found
+    · exact valid.frontier target actual (by simpa only [Table.get_set_other _ _ _ _ same] using selected)
+  · intro target actual selected active
+    by_cases same : target = id
+    · subst target
+      simp only [Table.get_set,Option.some.injEq] at selected
+      subst actual
+      simpa only [roots] using valid.active id suspension found (activity ▸ active)
+    · exact valid.active target actual (by simpa only [Table.get_set_other _ _ _ _ same] using selected) active
+
+/-- Copied roots are restored to their actual saved local/temporary homes
+before relocation. A copy cannot impersonate another suspended inventory. -/
+theorem CopiesSnapshot.suspensionExtension {program : Kernel.Program} {before after : State}
+    {suspension : Suspension} {map : Relocation} (well : before.world.WellFormed)
+    (origin : suspension.CaptureOrigin) (copied : CopiesSnapshot program before suspension map after) :
+    before.world.SuspensionExtension after.world := by
+  rw [copied.result]
+  refine ⟨Nat.le_add_left _ _,?_,?_⟩
+  · intro id root _ _ found _
+    rw [Relocation.old_root found]; rfl
+  · intro id root suspensionId found home
+    rcases Relocation.root_origin well.1 found with original | ⟨old,original,originalAt,member,idEq,rootEq⟩
+    · exact ⟨root,original,rfl⟩
+    · obtain ⟨saved,savedAt⟩ := (origin.domain old).mpr (by simpa only [copied.relocation.roots] using member)
+      obtain ⟨activation,scope,localHome | temporaryHome⟩ := origin.activationHomes old saved savedAt
+      · simp only [rootEq,Relocation.rootValue,savedAt,Option.getD_some,localHome,Relocation.home] at home
+        cases home
+      · simp only [rootEq,Relocation.rootValue,savedAt,Option.getD_some,temporaryHome,Relocation.home] at home
+        cases home
+
 /-- Cancellation really restores saved homes before scheduling destruction.
 This is the complete unified invariant for that transition, not a cleanup
 postcondition assumed by the cancellation instruction. -/
@@ -408,6 +460,20 @@ theorem EffectStep.last_suspensions {program : Kernel.Program} {before after : S
     have settled := valid.restore_settled found obligation.1 (obligation.last_accounted remaining)
       identity rfl rfl rfl rfl
     exact settled.transport (restoreRoots.worldTyped typed).1 keptTransfer.suspensionExtension rfl (Nat.le_refl _)
+
+/-- Multi-shot replay leaves the original capture active and executes on
+fresh local copies. Both old and newly allocated suspended-home origins are
+accounted for by the actual finite relocation. -/
+theorem EffectStep.copy_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before (some (.replay id false)) after) : after.SuspensionsWellFormed := by
+  cases step with
+  | resumeCopy task found obligation remaining copied keptTransfer =>
+    have identity := valid.budgets.identity _ _ found
+    have replaced := valid.replace_budget found (obligation.copy_accounted remaining) identity rfl rfl rfl rfl
+    have stored := copied.suspensionExtension typed.1 (valid.origin _ _ found)
+    exact replaced.transport typed.1 (stored.trans keptTransfer.suspensionExtension) rfl
+      (by rw [copied.result]; exact Nat.le_refl _)
 
 /-- Both executable capture forms preserve the entire suspension invariant,
 including new continuation allocation after the captured root limit. -/

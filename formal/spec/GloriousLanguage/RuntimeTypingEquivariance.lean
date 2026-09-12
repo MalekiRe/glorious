@@ -89,9 +89,11 @@ theorem Subtype.permute {program : Program} (valid : ProgramWellFormed program) 
   · intro type kinded
     exact .bottom (kinded.permute valid permutation)
   · intro long short a b included _ ih
-    exact .shared (included.permute permutation) ih
+    exact .shared (by simpa only [RegionPermutation.constraint,Constraint.mapTerms,RegionPermutation.term]
+      using included.permute valid permutation) ih
   · intro long short a b included equal
-    exact .unique (included.permute permutation) (equal.permute valid permutation)
+    exact .unique (by simpa only [RegionPermutation.constraint,Constraint.mapTerms,RegionPermutation.term]
+      using included.permute valid permutation) (equal.permute valid permutation)
   · intro a b _ fields
     exact .tuple fields
   · intro a b n m _ equal ih
@@ -237,7 +239,9 @@ theorem Kernel.RunsInEnvironment.permute {program : Language.Program} (valid : P
     Kernel.RunsInEnvironment program (permutation.context context) (call.mapTerms permutation.term)
       (permutation.term receiver) (permutation.term brand) (permutation.term region) (residents.map permutation.term) := by
   obtain ⟨selected,environment,kinded,included,callable,runs,after⟩ := runs
-  refine ⟨selected.mapTerms permutation.term,?_,kinded.permute valid permutation,included.permute permutation,?_,?_,?_⟩
+  refine ⟨selected.mapTerms permutation.term,?_,kinded.permute valid permutation,
+    by simpa only [RegionPermutation.constraint,Constraint.mapTerms,EnvironmentAccess.mapTerms]
+      using included.permute valid permutation,?_,?_,?_⟩
   · simp only [Kernel.Invocation.mapTerms,Kernel.Invocation.transformTerms,environment,Option.map]
   · simpa only [RegionPermutation.constraint,Constraint.mapTerms,permutation.access_type,
       Kernel.Invocation.mapTerms,Kernel.Invocation.transformTerms,Signature.mapTerms,Kernel.EnvironmentAccess.mapTerms]

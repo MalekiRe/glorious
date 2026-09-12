@@ -419,13 +419,6 @@ def Visible (header : Header) (requester : ModuleId) : Prop :=
   | .privateScope => Descendant requester header.module
   | .parent => Descendant requester { header.module with path := header.module.path.dropLast }
 
-inductive RegionIncludes (assumptions : List Constraint) : Term → Term → Prop where
-  | refl {region} : RegionIncludes assumptions region region
-  | static {region} : RegionIncludes assumptions .staticRegion region
-  | assumed {a b} : Constraint.outlives a b ∈ assumptions → RegionIncludes assumptions a b
-  | trans {a b c} : RegionIncludes assumptions a b → RegionIncludes assumptions b c →
-      RegionIncludes assumptions a c
-
 def NoLeak (universeLevel : Nat) (term : Term) : Prop :=
   ∀ id kind level, Occurs (.rigid id kind level) term → level ≤ universeLevel
 

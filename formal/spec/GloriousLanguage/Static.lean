@@ -150,6 +150,17 @@ structure CapabilityModel (program : Program) where
 def PrincipalOf (program : Program) (type : Term) (principal : Principal) : Prop :=
   ∃ model : CapabilityModel program, model.principal type = some principal
 
+/-- Logical replacement shares the existing predicate template and its two
+actual capture-admissible simultaneous substitutions. In particular, quantified
+binder identities are masked by `SubstituteConstraint`, while the predicate
+constructor, quantities, trait polarity and unsafe annotations remain fixed. -/
+inductive ConstraintCongruence (relation : Term → Term → Prop) : Constraint → Constraint → Prop where
+  | substitution {template left right leftSub rightSub} :
+      (∀ id kind, relation ((leftSub.get id).getD (.parameter id kind))
+        ((rightSub.get id).getD (.parameter id kind))) →
+      SubstituteConstraint leftSub template left → SubstituteConstraint rightSub template right →
+      ConstraintCongruence relation left right
+
 mutual
   inductive Equal (program : Program) (context : Context) : Term → Term → Prop where
     | refl {a} : Equal program context a a
@@ -157,6 +168,7 @@ mutual
     | trans {a b c} : Equal program context a b → Equal program context b c → Equal program context a c
     | congr {a b} : SameHead a b → ListRel (Equal program context) a.children b.children → Equal program context a b
     | assumed {a b} : Constraint.equal a b ∈ context.assumptions → Equal program context a b
+    | entailed {a b} : Entails program context (.equal a b) → Equal program context a b
     | definitional {a b} : DefinitionallyEqual program context a b → Equal program context a b
     | rowDuplicate {a b rest tails} : Equal program context a b →
         Equal program context (.row (a :: b :: rest) tails) (.row (a :: rest) tails)
@@ -186,13 +198,15 @@ mutual
     | trans {a b c} : RowSubset program context a b → RowSubset program context b c → RowSubset program context a c
     | instances {instances tails allowed} : (∀ instanceTerm ∈ instances, RowMember program context instanceTerm allowed) →
         (∀ tail ∈ tails, RowSubset program context tail allowed) → RowSubset program context (.row instances tails) allowed
+    | entailed {required allowed} : Entails program context (.rowIncludes allowed required) →
+        RowSubset program context required allowed
 
   inductive TypeOutlives (program : Program) (context : Context) : Term → Term → Prop where
     | assumed {type region} : Constraint.typeOutlives type region ∈ context.assumptions → TypeOutlives program context type region
     | scalar {type region} : TypeOutlives program context (.scalar type) region
     | unit {region} : TypeOutlives program context .unit region
     | pointer {mode type region} : TypeOutlives program context (.rawPointer mode type) region
-    | reference {mode long type short} : RegionIncludes context.assumptions long short →
+    | reference {mode long type short} : Entails program context (.outlives long short) →
         TypeOutlives program context (.reference mode long type) short
     | bottom {region} : TypeOutlives program context .bottom region
     | tuple {fields region} : (∀ field ∈ fields, TypeOutlives program context field region) →
@@ -207,17 +221,18 @@ mutual
     | callable {id arguments fields region} : CallableFields program id arguments fields →
         (∀ field ∈ fields, TypeOutlives program context field region) →
         TypeOutlives program context (.callable id arguments) region
-    | label {brand long result short} : RegionIncludes context.assumptions long short →
+    | label {brand long result short} : Entails program context (.outlives long short) →
         TypeOutlives program context (.label brand long result) short
-    | environment {brand long residents short} : RegionIncludes context.assumptions long short →
+    | environment {brand long residents short} : Entails program context (.outlives long short) →
         (∀ field ∈ residents, TypeOutlives program context field short) →
         TypeOutlives program context (.environment brand long residents) short
     | available {brand long residents short} : TypeOutlives program context (.environment brand long residents) short →
         TypeOutlives program context (.available brand long residents) short
-    | bindings {brand long fields short} : RegionIncludes context.assumptions long short →
+    | bindings {brand long fields short} : Entails program context (.outlives long short) →
         (∀ field ∈ fields, TypeOutlives program context field short) →
         TypeOutlives program context (.bindings brand long fields) short
     | equal {a b region} : Equal program context a b → TypeOutlives program context a region → TypeOutlives program context b region
+    | entailed {type region} : Entails program context (.typeOutlives type region) → TypeOutlives program context type region
 
   inductive Entails (program : Program) (context : Context) : Constraint → Prop where
     | checkedCallable {function relation substitution receiver arguments result effects} :
@@ -231,8 +246,13 @@ mutual
         ListRel (Substitutes substitution) relation.arguments arguments → Substitutes substitution relation.after after →
         Entails program context (.runsIn receiver access arguments after relation.unsafeAllowed)
     | assumed {constraint} : constraint ∈ context.assumptions → Entails program context constraint
+    | congr {before after} : ConstraintCongruence (Equal program context) before after →
+        Entails program context before → Entails program context after
     | equality {a b} : Equal program context a b → Entails program context (.equal a b)
-    | outlives {a b} : RegionIncludes context.assumptions a b → Entails program context (.outlives a b)
+    | outlivesRefl {region} : Entails program context (.outlives region region)
+    | outlivesStatic {region} : Entails program context (.outlives .staticRegion region)
+    | outlivesTrans {a b c} : Entails program context (.outlives a b) → Entails program context (.outlives b c) →
+        Entails program context (.outlives a c)
     | typeOutlives {type region} : TypeOutlives program context type region → Entails program context (.typeOutlives type region)
     | rows {allowed required} : RowSubset program context required allowed → Entails program context (.rowIncludes allowed required)
     | implementation {trait arguments negative implementation substitution} :
@@ -245,6 +265,10 @@ mutual
           (∀ value ∈ values, Kinding program context value value.kind) →
           ∀ requirement ∈ requirements, EntailsSubstitution program context substitution requirement) →
         Entails program context (.quantified binders requirements)
+    | quantifiedInstance {binders requirements values substitution requirement result} :
+        Entails program context (.quantified binders requirements) → Instantiates binders values substitution →
+        (∀ value ∈ values, Kinding program context value value.kind) → requirement ∈ requirements →
+        SubstituteConstraint substitution requirement result → Entails program context result
 
   inductive EntailsSubstitution (program : Program) (context : Context) : Substitution → Constraint → Prop where
     | instantiated {substitution requirement result} : SubstituteConstraint substitution requirement result →
@@ -411,9 +435,9 @@ mutual
   inductive Subtype (program : Program) (context : Context) : Term → Term → Prop where
     | equal {a b} : Equal program context a b → Subtype program context a b
     | bottom {type} : WellKinded program context type .type → Subtype program context .bottom type
-    | shared {long short a b} : RegionIncludes context.assumptions long short → Subtype program context a b →
+    | shared {long short a b} : Entails program context (.outlives long short) → Subtype program context a b →
         Subtype program context (.reference .shared long a) (.reference .shared short b)
-    | unique {long short a b} : RegionIncludes context.assumptions long short → Equal program context a b →
+    | unique {long short a b} : Entails program context (.outlives long short) → Equal program context a b →
         Subtype program context (.reference .unique long a) (.reference .unique short b)
     | tuple {a b} : ListRel (Subtype program context) a b → Subtype program context (.tuple a) (.tuple b)
     | array {a b n m} : Subtype program context a b → Equal program context n m →
