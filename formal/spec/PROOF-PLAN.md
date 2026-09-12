@@ -831,22 +831,29 @@ loop that uses it is also landed: `CleanupRun.destroy_fields_tree` carries the
 parent shell through the schedule, so it ends at `finishShell` with exactly the
 scheduled fields emptied and every unscheduled slot as it started (the indices
 must be duplicate-free, which the machine's reverse `List.range` schedule
-supplies). What remains is the node-level assembly — structural destruction, that
-loop with the children's runs as its step, then the shell now that all slots are
-holes, then the drain to the caller's continuation — plus the per-node custody
-threading. One feared obstruction turns out not to exist: no `MayDispose`
-transport over a cleared parent is needed, because `MayDispose` is checked by the
-machine only at the start of a node's destruction (where the shell still has its
-fields) and the shell phase takes `stored`, `cleared`, the permission and the
-custody hand-off rather than the disposal permission. What the shell phase does
-need from the initial facts is the ownership permission re-derived at the final
-world — and since a child's run is a restamp plus a write plus a drain, the
-permission is threaded through the loop rather than transported in one step: the
-restamp half by `Permitted.of_requestReturns` (the restamped row keeps live,
-referent and mode), the ending half by `Permitted.of_loans` (monotonicity in the
-live rows), each with the root existence re-read from the final `Stores`. So the
-shell-tracking loop's step must carry the permission along with the shell, and the
-same is true of the custody hand-off, which is likewise a loans-table fact. The drain's kinds/ancestry come from the node's own
+supplies). What remains is the recursion proper. The node
+theorem is landed: `CleanupRun.destroy_node` runs one node's structural
+destruction, its shell-tracking field loop over the reverse range (the stored
+children supplied by a uniform step), the emptied shell's clear with the
+permission and custody threaded, and the drain of that custody's pending returns
+to the caller's continuation. What it takes as a hypothesis is the step that
+destroys one stored child, and supplying that step from the tree's own children is
+the last composition: the child's own run comes from `destroy_node` recursively
+(with its machine premises from its own tree and its custody supplied per node),
+and the caller's-shell half — that child's slot now a hole, head, owner, type,
+liveness flag, resources, length and every other slot as the caller held them —
+comes from the child's own final clear through `World.Stores.write_child_none`,
+which is exactly the shape `CleanupRun.destroy_child` already has for a child with
+no live children of its own. The drain obligations are bridged across both changes
+the shell phase makes (the write by `World.write_value_update`'s shape, the restamp
+by the restamp lemmas), which is why a single loans equality was not enough.
+The details, for reference: reconcile a node's own shell witness with the supplied
+one by `simpa only [valueEq] using treeX`; state the drain's obligations at the
+world they are used in and bridge them twice, once for the shell write and once for
+the restamp; make run traces existential; and pin every implicit parameter
+(`program`, `host`, `value`, `after`, `custody`, `next`) on the rules being
+applied, because an unpinned implicit silently becomes a metavariable and the
+failure surfaces much later as an unprovable equality. The drain's kinds/ancestry come from the node's own
 tree by those same two lemmas. The details, for reference: reconcile the child's own shell witness with the supplied
 shell (`simpa only [← valueEq] using treeX` for the disposal permission, the shell
 flag and the three head exclusions); bridge the drain's `kinds`/`ancestry` from
