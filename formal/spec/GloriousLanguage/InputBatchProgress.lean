@@ -3432,4 +3432,44 @@ structure Kernel.ReceiverApart (receiver : Address) (world : World)
   storage : ∀ input ∈ inputs, ¬ input.storage.Overlaps receiver
   frontier : receiver.root < world.nextRoot
 
+
+
+/-- Setting one entry to a hole keeps a list of holes all holes. -/
+theorem List.allNone_set {α : Type} {list : List (Option α)}
+    (all : ∀ value ∈ list, value = none) (index : Nat) :
+    ∀ value ∈ list.set index none, value = none := by
+  induction list generalizing index with
+  | nil => intro value member; simp at member
+  | cons head tail ih =>
+      have headNone : head = none := all head List.mem_cons_self
+      cases index with
+      | zero =>
+          intro value member
+          simp only [List.set_cons_zero,List.mem_cons] at member
+          rcases member with same | later
+          · simp [same]
+          · exact all value (List.mem_cons_of_mem head later)
+      | succ index =>
+          intro value member
+          simp only [List.set_cons_succ,List.mem_cons] at member
+          rcases member with same | later
+          · simp [same,headNone]
+          · exact ih (fun value member => all value (List.mem_cons_of_mem head member)) index value later
+
+/-- A clearing write inside a value all of whose fields are holes leaves every
+field of the result a hole: this is the projection the receiver shell needs
+when a pending capture's storage lies under the receiver. -/
+theorem Value.replace_fields_none {before after : Value} {index : Nat} {path : List Nat}
+    (written : before.replace (index :: path) none = some after)
+    (noneBefore : ∀ field ∈ before.fields, field = none) :
+    ∀ field ∈ after.fields, field = none := by
+  rcases Value.replace_cons_shape written with
+    ⟨slot,found,⟨_,rfl⟩ | ⟨child,changed,atSlot,_,rfl⟩⟩
+  · intro field member
+    have member' : field ∈ List.set before.fields index none := by
+      simpa only [Value.fields,Value.withFields] using member
+    exact List.allNone_set noneBefore index field member'
+  · exact absurd (noneBefore slot (List.mem_of_getElem? found))
+      (by rw [atSlot]; simp)
+
 end Kernel
