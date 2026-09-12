@@ -521,7 +521,30 @@ assumed safe post-state. These are general Lean-verified theorems, independent
 of the concrete examples already present.
 
 The next soundness boundary is replay/cancellation and its control-state
-invariant. Snapshot copying still assumes its resulting world's invariant;
-that premise must be derived from the source state and actual relocation.
-Other storage transitions, whole-machine preservation/progress, compositional
-resource admission and normative adequacy remain unfinished.
+invariant. Other storage transitions, whole-machine preservation/progress,
+compositional resource admission and normative adequacy remain unfinished.
+
+## Derived snapshot world invariant
+
+`RelocationPreservation.lean` proves `CopiesSnapshot.wellFormed` from the
+pre-state's world invariant and the actual relocation contract. The executable
+`CopiesSnapshot` relation no longer requires a well-formed output as a premise.
+The proof covers old and copied roots/residents, fresh identities, physical
+disjointness, region bounds, binding facts, owner uniqueness, references and
+the full loan parent/exclusivity/location invariants. `SnapshotMap` and
+`CopiesSnapshot` expose their existing semantic premises as named fields;
+there is no second relocation inventory or assumed safety certificate.
+
+The proof exposed a reference-lifetime mismatch: region relocation could change
+a copied handle while an external referent caused its loan to remain unchanged.
+`SnapshotLoan` now selects captured shared handles and their shared ancestors,
+regardless of whether the referent is copied. Unique ancestors are not copied;
+`loanValue` preserves their parent edges instead of dropping them. The general
+reference-target theorem proves agreement of both relocated referent and loan
+region, and exclusivity preservation derives the required ancestry of copied
+shared loans beneath external unique loans.
+
+This boundary was verified through general Lean proofs, without adding concrete
+test examples. Full relocated value typing, static semantic equivariance,
+control-state validity, replay/cancellation completion and whole-language
+soundness remain unproved.

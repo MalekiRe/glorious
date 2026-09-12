@@ -190,51 +190,61 @@ def Relocation.rootValue (map : Relocation) (id : Identity) (root : Root) : Root
   { root with home := map.home root.home, region := map.region root.region, type := map.term root.type, value := root.value.map map.value, base := (map.physical.get id).getD root.base }
 
 def Relocation.loanValue (map : Relocation) (loan : Loan) : Loan :=
-  { loan with identity := map.loan loan.identity, parent := loan.parent.bind (fun id => if id ∈ map.loans then some (map.loan id) else none), referent := map.address loan.referent, region := map.region loan.region }
+  { loan with
+    identity := map.loan loan.identity
+    parent := loan.parent.map map.loan
+    referent := map.address loan.referent
+    region := map.region loan.region }
 
 def SnapshotFrame : Frame → Prop
   | .label .. | .hook .. | .foreign .. | .hostCallback .. | .serviced .. => False
   | _ => True
 
-/-- A live captured handle retains its ancestor loans even after an ancestor's
-last handle was destroyed. Relocating only visible handles would orphan that
-same borrow graph in a replay. External referents remain unrelocated. -/
+/-- Captured shared handles and their shared ancestors receive fresh loans,
+including handles of external storage: the handle's region may be relocated
+even when its referent is not. Unique ancestors remain external and parent
+edges retain them; copying a shared child cannot duplicate unique authority. -/
 def SnapshotLoan (world : World) (roots : List Identity) (id : Identity) : Prop :=
   ∃ loan descendant address value,
-    world.loans.get id = some loan ∧ loan.live = true ∧ loan.referent.root ∈ roots ∧
+    world.loans.get id = some loan ∧ loan.live = true ∧ loan.mode = .shared ∧
     address.root ∈ roots ∧ world.Resident address value ∧ value.head = .reference descendant ∧
     AncestorLoan world id descendant
 
-def SnapshotMap (program : Kernel.Program) (before : State) (suspension : Suspension) (map : Relocation) : Prop :=
-  map.roots = suspension.roots ∧ map.rootBase = before.world.nextRoot ∧ map.ownerBase = before.world.nextOwner ∧
-  map.loanBase = before.world.nextLoan ∧ map.regionBase = before.world.nextRegion ∧
-  map.activationBase = before.nextActivation ∧ map.handlerBase = before.nextHandler ∧
-  map.scopeBase = before.world.nextRegion ∧
-  (∀ id, id ∈ map.owners ↔ ∃ address value,
-    before.world.Resident address value ∧ address.root ∈ map.roots ∧ value.owner = id) ∧
-  (∀ id, id ∈ map.loans ↔ SnapshotLoan before.world map.roots id) ∧
-  (∀ id, id ∈ map.regions ↔
+structure SnapshotMap (program : Kernel.Program) (before : State) (suspension : Suspension) (map : Relocation) : Prop where
+  roots : map.roots = suspension.roots
+  rootBase : map.rootBase = before.world.nextRoot
+  ownerBase : map.ownerBase = before.world.nextOwner
+  loanBase : map.loanBase = before.world.nextLoan
+  regionBase : map.regionBase = before.world.nextRegion
+  activationBase : map.activationBase = before.nextActivation
+  handlerBase : map.handlerBase = before.nextHandler
+  scopeBase : map.scopeBase = before.world.nextRegion
+  owners : ∀ id, id ∈ map.owners ↔ ∃ address value,
+    before.world.Resident address value ∧ address.root ∈ map.roots ∧ value.owner = id
+  loans : ∀ id, id ∈ map.loans ↔ SnapshotLoan before.world map.roots id
+  regions : ∀ id, id ∈ map.regions ↔
     id ∈ suspension.frames.flatMap Frame.ownedRegions ++ [suspension.context.region,suspension.handler.computation.region] ∨
-    ∃ rootId root, rootId ∈ map.roots ∧ before.world.roots.get rootId = some root ∧ root.region = id) ∧
-  (∀ id ∈ map.regions, id ∈ before.world.liveRegions) ∧
-  (∀ id, id ∈ map.activations ↔
+    ∃ rootId root, rootId ∈ map.roots ∧ before.world.roots.get rootId = some root ∧ root.region = id
+  liveRegions : ∀ id ∈ map.regions, id ∈ before.world.liveRegions
+  activations : ∀ id, id ∈ map.activations ↔
     (∃ caller region, Frame.activation caller id region ∈ suspension.frames) ∨
     ∃ rootId home scope, rootId ∈ map.roots ∧ suspension.homes.get rootId = some home ∧
-      (home = .localSlot id scope ∨ home = .temporary id scope)) ∧
-  (∀ id, id ∈ map.scopes ↔ id = suspension.handler.computation.scope ∨
+      (home = .localSlot id scope ∨ home = .temporary id scope)
+  scopes : ∀ id, id ∈ map.scopes ↔ id = suspension.handler.computation.scope ∨
     (∃ caller region, Frame.scope caller id region ∈ suspension.frames) ∨
     ∃ rootId home activation, rootId ∈ map.roots ∧ suspension.homes.get rootId = some home ∧
-      (home = .localSlot activation id ∨ home = .temporary activation id)) ∧
-  (∀ id, id ∈ map.handlers ↔ ∃ handler owns, Frame.handler handler owns ∈ suspension.frames ∧ handler.identity = id) ∧
-  map.physical.Unique ∧ map.physical.map Prod.fst = map.roots ∧
-  (∀ id root, id ∈ map.roots → before.world.roots.get id = some root → ∃ base,
+      (home = .localSlot activation id ∨ home = .temporary activation id)
+  handlers : ∀ id, id ∈ map.handlers ↔ ∃ handler owns, Frame.handler handler owns ∈ suspension.frames ∧ handler.identity = id
+  physicalUnique : map.physical.Unique
+  physicalRoots : map.physical.map Prod.fst = map.roots
+  physical : ∀ id root, id ∈ map.roots → before.world.roots.get id = some root → ∃ base,
     map.physical.get id = some base ∧ 0 < base ∧ base % root.layout.alignment = 0 ∧
     base+root.layout.size < 2^program.declarations.input.target.pointerBits ∧
-    DisjointStorage before.world base root.layout.size) ∧
-  (∀ a b left right x y, a ∈ map.roots → b ∈ map.roots → a ≠ b →
+    DisjointStorage before.world base root.layout.size
+  disjoint : ∀ a b left right x y, a ∈ map.roots → b ∈ map.roots → a ≠ b →
     before.world.roots.get a = some left → before.world.roots.get b = some right →
     map.physical.get a = some x → map.physical.get b = some y →
-    left.layout.size = 0 ∨ right.layout.size = 0 ∨ x+left.layout.size ≤ y ∨ y+right.layout.size ≤ x)
+    left.layout.size = 0 ∨ right.layout.size = 0 ∨ x+left.layout.size ≤ y ∨ y+right.layout.size ≤ x
 
 def Relocation.copyWorld (map : Relocation) (world : World) (homes : Table Home) : World :=
   { world with
@@ -248,16 +258,24 @@ def Relocation.copyWorld (map : Relocation) (world : World) (homes : Table Home)
     nextLoan := map.loanBase + world.nextLoan
     nextRegion := map.regionBase + world.nextRegion }
 
-def CopiesSnapshot (program : Kernel.Program) (before : State) (suspension : Suspension)
-    (map : Relocation) (after : State) : Prop :=
-  Replayable program.declarations before.world suspension.roots ∧
-  (∀ frame ∈ suspension.frames, SnapshotFrame frame) ∧ SnapshotMap program before suspension map ∧
-  map.roots.Nodup ∧ map.owners.Nodup ∧ map.loans.Nodup ∧ map.regions.Nodup ∧ map.activations.Nodup ∧ map.scopes.Nodup ∧ map.handlers.Nodup ∧
-  after = { before with
+/-- The executable relocation contract. Its output invariant is proved in
+`RelocationPreservation`, not required as permission to execute the copy. -/
+structure CopiesSnapshot (program : Kernel.Program) (before : State) (suspension : Suspension)
+    (map : Relocation) (after : State) : Prop where
+  replayable : Replayable program.declarations before.world suspension.roots
+  frames : ∀ frame ∈ suspension.frames, SnapshotFrame frame
+  relocation : SnapshotMap program before suspension map
+  roots : map.roots.Nodup
+  owners : map.owners.Nodup
+  loans : map.loans.Nodup
+  regions : map.regions.Nodup
+  activations : map.activations.Nodup
+  scopes : map.scopes.Nodup
+  handlers : map.handlers.Nodup
+  result : after = { before with
     world := map.copyWorld before.world suspension.homes
     nextActivation := map.activationBase + before.nextActivation
-    nextHandler := map.handlerBase + before.nextHandler } ∧
-  after.world.WellFormed
+    nextHandler := map.handlerBase + before.nextHandler }
 
 theorem relocation_preserves_holes (map : Relocation) (value : Value) :
     (map.value value).fields.map Option.isSome = value.fields.map Option.isSome := by

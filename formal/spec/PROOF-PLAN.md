@@ -56,6 +56,14 @@ and nested move-and-restore executions; they are not the general soundness proof
 or evidence of source-program admission. Following the current working method,
 further work prioritizes general obligations, not additional examples.
 
+`RelocationPreservation` now derives the entire world invariant for snapshot
+copying. `CopiesSnapshot` no longer assumes its output is well formed. The
+proof required repairing the shared-loan graph: copied handles receive fresh
+shared loans even for external referents, and parent edges retain unselected
+unique ancestors. This establishes world-invariant preservation and correct
+reference target/region relocation, not full relocated value typing or the
+complete control-state/replay/cancellation theorem. Those remain active.
+
 ## 2. Source and normative adequacy
 
 After the soundness foundation, prove that elaboration and observations give
