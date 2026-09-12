@@ -138,6 +138,20 @@ theorem Captures.root_support {program : Kernel.Program} {context : Context} {be
     exact ⟨Nat.lt_of_lt_of_le allocated.root_bound
       (Nat.le_trans borrowed.suspensionExtension.counter rest.suspensionExtension.counter),ih⟩
 
+/-- The loan-release fold only schedules retirements: `Task.rootSupport` of a
+`releaseLoan` step is the continuation's, so the fold never widens the support
+of the task it wraps. -/
+theorem ReleaseLoans.root_support (identities : List Identity) (task : Task) :
+    (ReleaseLoans identities task).rootSupport = task.rootSupport := by
+  unfold ReleaseLoans
+  induction identities.eraseDups with
+  | nil => rfl
+  | cons head tail ih => exact ih
+
+theorem ReleaseCustodyLoans.root_support (world : World) (custody : ClaimCustody) (task : Task) :
+    (ReleaseCustodyLoans world custody task).rootSupport = task.rootSupport :=
+  ReleaseLoans.root_support _ _
+
 theorem ArgumentInputs.root_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
     (well : world.WellFormed) (bounded : RootSupport.Below context.rootSupport world.nextRoot)
