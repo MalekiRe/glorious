@@ -1,4 +1,5 @@
 import GloriousLanguage.CleanupDestruction
+import GloriousLanguage.TransferPreservation
 import GloriousLanguage.ForeignRootFraming
 import GloriousLanguage.InvocationLeaseCleanup
 
@@ -1085,5 +1086,35 @@ theorem World.DestroyFrame.of_kill {before : World} {id : Identity} {loan : Loan
     · have beforeFound : before.loans.get key = some row := by
         rwa [Table.get_set_other _ _ _ _ same] at selected
       exact ⟨row, beforeFound, live, rfl, rfl, rfl⟩
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- A clear at one child slot re-reads its parent shell: the parent survives as
+the same shell whose one slot is now a hole, with head, owner, type, liveness flag
+and resources untouched and every other slot preserved. The parent may sit at any
+depth, which is what a nested resident's slot clearing needs (the receiver-shaped
+version states it only at a root address). -/
+theorem World.Stores.write_child_none {before after : World} {address : Address} {index : Nat}
+    {shell : Value} (stored : before.Stores address shell)
+    (written : before.write (address.child index) none = some after) :
+    ∃ changed, after.Stores address changed ∧ changed.head = shell.head ∧ changed.owner = shell.owner ∧
+      changed.type = shell.type ∧ changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
+  obtain ⟨parent,slot,storedParent,slotFound,rewritten⟩ := World.write_child_shape written
+  have same : parent = shell := (Option.some.inj (stored.symm.trans storedParent)).symm
+  subst parent
+  have bound : index < shell.fields.length := (List.getElem?_eq_some_iff.mp slotFound).1
+  refine ⟨shell.withFields (shell.fields.set index none),?_,rfl,rfl,rfl,rfl,rfl,?_,?_⟩
+  · show after.read address = some (shell.withFields (shell.fields.set index none))
+    have read := World.write_read_inside rewritten []
+    simpa [Value.atPath] using read
+  · exact List.getElem?_set_self bound
+  · intro other different
+    exact List.getElem?_set_ne (Ne.symm different)
 
 end Glorious.Language
