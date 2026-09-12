@@ -3507,8 +3507,8 @@ theorem Kernel.Permitted.owner_compatible {world : World} {authority : Authority
     (apart : ¬ receiver.Overlaps referent)
     (parentAbsent : ∀ identity, authority.parentLoan = some identity → identity ∉ guards)
     (absent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority → carrier ∉ guards)
-    (referentApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
-      world.loans.get carrier = some loan → ¬ loan.referent.Overlaps referent) :
+    (referentApart : ∀ carrier loan, world.loans.get carrier = some loan →
+      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps referent) :
     authority.LoanCompatible world .owned receiver referent mode guards := by
   revert permitted apart parentAbsent absent referentApart
   induction authority with
@@ -3526,10 +3526,10 @@ theorem Kernel.Permitted.owner_compatible {world : World} {authority : Authority
       intro permitted apart parentAbsent absent referentApart
       refine ⟨ih permitted.2.1 apart (fun identity same => parentAbsent identity same)
         (fun carrier' member => absent carrier' (List.mem_cons_of_mem carrier member))
-        (fun carrier' loan member found =>
-          referentApart carrier' loan (List.mem_cons_of_mem carrier member) found),?_⟩
+        (fun carrier' loan found member =>
+          referentApart carrier' loan found (List.mem_cons_of_mem carrier member)),?_⟩
       · intro loan found
-        exact ⟨fun overlap => False.elim (referentApart carrier loan List.mem_cons_self found overlap),
+        exact ⟨fun overlap => False.elim (referentApart carrier loan found List.mem_cons_self overlap),
           fun member => False.elim (absurd member (absent carrier List.mem_cons_self))⟩
 
 
@@ -3551,8 +3551,8 @@ theorem Kernel.ReceiverFramed.lent_step {program : RuntimeProgram} {activation s
       identity ∉ input.authority.guardLoans before)
     (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
       carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
-      before.loans.get carrier = some loan → ¬ loan.referent.Overlaps input.storage)
+    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
+      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
     (framed : ReceiverFramed before receiver authority head) :
     ReceiverFramed after receiver authority head := by
   obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
@@ -3584,7 +3584,7 @@ theorem Kernel.ReceiverFramed.lent_step {program : RuntimeProgram} {activation s
             (Authority.guardLoans_congr (Allocates.loans allocProof) inputAuthority).symm ▸
               (Authority.LoanCompatible.loans_congr (Allocates.loans allocProof)
                 (Kernel.Permitted.owner_compatible permitted missing parentAbsent carriersAbsent
-                  referentsApart))
+                  (fun carrier loan found member => referentsApart carrier loan found member)))
           exact ⟨⟨value,(World.Stores.root_other written apartRoot).mp allocatedStored,
             headAt,live,fields,resources⟩,
             FormsLoan.permitted allocatedValid formedCopy allocatedPermitted compatible⟩
@@ -3686,8 +3686,8 @@ theorem Kernel.ReceiverFramed.storage_step {recipient : ClaimCustody}
       key ∉ input.authority.guardLoans before)
     (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
       carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
-      before.loans.get carrier = some loan → ¬ loan.referent.Overlaps input.storage)
+    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
+      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
     (framed : ReceiverFramed before receiver authority head) :
     ReceiverFramed after receiver authority head := by
   obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
@@ -3700,7 +3700,7 @@ theorem Kernel.ReceiverFramed.storage_step {recipient : ClaimCustody}
       have compat : authority.LoanCompatible before .owned receiver input.storage
           (if input.access = .shared then .shared else .unique) (input.authority.guardLoans before) :=
         Kernel.Permitted.owner_compatible permitted (Address.not_overlaps_symm apart)
-          parentAbsent carriersAbsent referentsApart
+          parentAbsent carriersAbsent (fun carrier loan found member => referentsApart carrier loan found member)
       refine ⟨⟨value,World.Stores.of_roots rfl stored,headAt,live,fields,resources⟩,?_⟩
       exact Permitted.fresh_loan valid
         (locations := World.LocationExtension.of_roots
@@ -3721,8 +3721,8 @@ theorem Kernel.ReceiverFramed.guarded_step {recipient : ClaimCustody}
       key ∉ input.authority.guardLoans before)
     (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
       carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
-      before.loans.get carrier = some loan → ¬ loan.referent.Overlaps input.storage)
+    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
+      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
     (framed : ReceiverFramed before receiver authority head) :
     ReceiverFramed after receiver authority head := by
   obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
@@ -3735,7 +3735,7 @@ theorem Kernel.ReceiverFramed.guarded_step {recipient : ClaimCustody}
       have compat : authority.LoanCompatible before .owned receiver input.storage
           .unique (input.authority.guardLoans before) :=
         Kernel.Permitted.owner_compatible permitted (Address.not_overlaps_symm apart)
-          parentAbsent carriersAbsent referentsApart
+          parentAbsent carriersAbsent (fun carrier loan found member => referentsApart carrier loan found member)
       refine ⟨⟨value,World.Stores.of_roots rfl stored,headAt,live,fields,resources⟩,?_⟩
       exact Permitted.fresh_loan valid
         (locations := World.LocationExtension.of_roots
@@ -3756,8 +3756,8 @@ theorem Kernel.ReceiverFramed.step {program : RuntimeProgram} {recipient : Claim
       identity ∉ input.authority.guardLoans before)
     (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
       carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
-      before.loans.get carrier = some loan → ¬ loan.referent.Overlaps input.storage)
+    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
+      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
     (framed : ReceiverFramed before receiver authority head) :
     ReceiverFramed after receiver authority head := by
   cases bound with
