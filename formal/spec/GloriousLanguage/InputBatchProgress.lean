@@ -3,6 +3,7 @@ import GloriousLanguage.HandoffPreservation
 import GloriousLanguage.ReferenceTransferPreservation
 import GloriousLanguage.LoanCompatibility
 import GloriousLanguage.LoanResourceRows
+import GloriousLanguage.StorageWrites
 import GloriousLanguage.BindingPersistence
 import GloriousLanguage.ResidentMutationPreservation
 
@@ -3400,6 +3401,19 @@ theorem Execution.FinishesEntry.of_contextual {before after : World}
     (finished : Execution.FinishesReceiver before receiver access after) :
     Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after :=
   .contextual finished
+
+/-- The actual successor of a consumed receiver shell: the marked shell the
+preparation installed is stored at the receiver port, so the retirement is a
+real world write at that exact address - no successor is assumed. -/
+theorem Execution.FinishesReceiver.owned_of_stored {world : World} {receiver : ResolvedPlace}
+    {value : Value} (stored : world.Stores receiver.address value)
+    (marked : value.shellLive = false)
+    (callable : ∃ identity arguments, value.head = .callable identity arguments)
+    (holes : ∀ field ∈ value.fields, field = none) (resources : value.resources = [])
+    (permitted : Permitted world receiver.authority .owned receiver.address) :
+    ∃ after, Execution.FinishesReceiver world receiver .owned after := by
+  obtain ⟨after,cleared⟩ := stored.write_exists none
+  exact ⟨after,.owned stored marked callable holes resources permitted cleared⟩
 
 /-- A lent receiver needs no poststate evidence at all: the admitted lending
 access itself finishes the entry at the very world the binder produced. -/
