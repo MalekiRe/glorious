@@ -329,18 +329,19 @@ structure has no instance anywhere in the tree, so the field is additive and
 changes no existing definition.
 
 Post-cancellation cleanup is now executed rather than only classified:
-`CleanupExecution` proves that the machine's own `cleanupRoot`, `destroyVacant`
-and `retire` steps actually retire every captured root of a cancelled
-suspension, and connects that to the real cancel rule. It provides the two
-`RegionCanEnd` transport facts the chain needs (ending a region leaves the roots,
-loans and reservations unchanged; retiring storage only removes one root's
-liveness and its now-empty value), composes cleanup segments along their traces,
-and proves the per-root and whole-list retirement runs. The residual readiness is
-exact and named: the captured-root list is duplicate free, and every captured
-root is live, empty and endable in the restored world. Vacancy through the
-destructor chain for non-vacant captured residents, ending the suspension's own
-live loans first, and executing the scheduled region closure (which reuses the
-same shape and the two transport facts proved here) remain open.
+`CleanupExecution` proves that the machine's own `cleanupRoot`, `destroyVacant`,
+`retire`, `regionEnd` and `cleanupDone` steps actually retire every captured root
+of a cancelled suspension and then close every region it captured, reaching the
+task the cancel scheduled, and connects that whole run to the real cancel rule
+(`EffectStep.cancel_roots_execution` / `CleanupRun.cleanup_execution`). It
+provides the two `RegionCanEnd` transport facts the chain needs (ending a region
+leaves the roots, loans and reservations unchanged; retiring storage only removes
+one root's liveness and its now-empty value) and composes cleanup segments along
+their traces. The residual readiness is exact and named: the captured-root list
+is duplicate free, every captured root is live, empty and endable in the restored
+world, and every scheduled region can end there. Vacancy through the destructor
+chain for non-vacant captured residents and ending the suspension's own live
+loans first remain open.
 
 The replay/reconstruction release adds five modules and exactly three new
 `EffectStep` constructors, all fatal-resource steps, so a failed replay does not

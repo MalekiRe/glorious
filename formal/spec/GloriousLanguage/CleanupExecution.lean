@@ -165,4 +165,52 @@ theorem EffectStep.cancel_roots_execution {program : Kernel.Program} {host : For
   exact ⟨middle,.cancel id :: trace,
     ⟨Run.visible (Or.inr (Or.inr (Or.inl cancelled))) (CleanupRun.run execution),taskAfter⟩⟩
 
+/-- Every scheduled region is actually closed in order, on the fold the cancel
+step built. -/
+theorem CleanupRun.close_regions {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {regions : List Identity} {next : Task}
+    (task : before.task = List.foldr Task.closeRegion next regions)
+    (ready : ∀ region ∈ regions, ∃ after, RegionEnds before.world region after) :
+    ∃ (after : State) (trace : List Event), CleanupRun program host before trace after ∧ after.task = next := by
+  induction regions generalizing before with
+  | nil => exact ⟨before,[],CleanupRun.refl,by simpa using task⟩
+  | cons region rest ih =>
+    obtain ⟨closed,ended⟩ := ready region (by simp)
+    let restState : State := { before with world := closed, task := List.foldr Task.closeRegion next rest }
+    have restTask : restState.task = List.foldr Task.closeRegion next rest := by simp only [restState]
+    have restReady : ∀ other ∈ rest, ∃ after, RegionEnds closed other after := by
+      intro other member
+      obtain ⟨_,safe⟩ := ready other (by simp [member])
+      exact ⟨{ closed with liveRegions := closed.liveRegions.filter (· != other) },
+        RegionCanEnd.of_regionEnd safe.1 ended,rfl⟩
+    obtain ⟨middle,trace,run,taskAfter⟩ := ih (before := restState) restTask restReady
+    have step : Step program host before none restState :=
+      Or.inl (LocalStep.regionEnd (by simpa using task) ended)
+    exact ⟨middle,trace,CleanupRun.silent (by simp [Task.Cleanup,task]) step run,taskAfter⟩
+
+/-- The whole post-cancel cleanup chain: the captured roots are retired, then the
+suspension's regions are closed, reaching the task the cancel step scheduled. -/
+theorem CleanupRun.cleanup_execution {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {roots regions : List Identity} {next : Task}
+    (task : before.task = .cleanup context roots (CloseRegions regions next))
+    (rootNodup : roots.Nodup)
+    (rootReady : ∀ id ∈ roots, ∃ root, before.world.roots.get id = some root ∧ root.live = true ∧
+      root.value = none ∧ CanEndStorage before.world id)
+    (regionReady : ∀ region ∈ regions.eraseDups, ∃ after, RegionEnds before.world region after) :
+    ∃ (after : State) (trace : List Event), CleanupRun program host before trace after ∧ after.task = next := by
+  obtain ⟨middle,rootsTrace,retired,taskAfter,monotone⟩ := CleanupRun.retire_all task rootNodup rootReady
+  let opened : State := { middle with task := List.foldr Task.closeRegion next regions.eraseDups }
+  have openedTask : opened.task = List.foldr Task.closeRegion next regions.eraseDups := by simp only [opened]
+  have unwrap : Step program host middle none opened :=
+    Or.inl (LocalStep.cleanupDone (by simpa only [CloseRegions] using taskAfter))
+  have regionReady' : ∀ region ∈ regions.eraseDups, ∃ after, RegionEnds opened.world region after := by
+    intro region member
+    obtain ⟨_,safe⟩ := regionReady region member
+    exact ⟨{ middle.world with liveRegions := middle.world.liveRegions.filter (· != region) },
+      monotone region safe.1,by simp only [opened]⟩
+  obtain ⟨final,regionTrace,closed,taskFinal⟩ :=
+    CleanupRun.close_regions (before := opened) openedTask regionReady'
+  exact ⟨final,rootsTrace ++ regionTrace,
+    retired.append (CleanupRun.silent (by simp [Task.Cleanup,taskAfter]) unwrap closed),taskFinal⟩
+
 end Glorious.Language.Execution

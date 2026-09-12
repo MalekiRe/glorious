@@ -306,15 +306,16 @@ steps and executing the post-cancel cleanup chain remain open.
 
 ## 1c. Post-cancellation cleanup execution
 
-`CleanupExecution` executes the cleanup chain cancellation schedules. The
-machine's `cleanupRoot`, `destroyVacant` and `retire` rules actually retire every
-captured root, composed along the real traces; `EffectStep.cancel_roots_execution`
-connects the real cancel rule to that run, ending at the scheduled region
-closures. The module also proves the two `RegionCanEnd` transport facts the chain
-needs. Residual readiness is exact: duplicate-free captured roots, each live,
-empty and endable in the restored world. Remaining: vacancy through the
-destructor chain for non-vacant captured residents, ending the suspension's live
-loans first, and executing the region closure itself.
+`CleanupExecution` executes the whole cleanup chain cancellation schedules: the
+machine's `cleanupRoot`, `destroyVacant` and `retire` rules retire every captured
+root and its `cleanupDone` and `regionEnd` rules then close every captured
+region, composed along the real traces, reaching the task the cancel preserved;
+`EffectStep.cancel_roots_execution` connects the real cancel rule to that run. The
+module also proves the two `RegionCanEnd` transport facts the chain needs.
+Residual readiness is exact: duplicate-free captured roots, each live, empty and
+endable in the restored world, and every scheduled region endable there.
+Remaining: vacancy through the destructor chain for non-vacant captured residents
+and ending the suspension's own live loans first.
 
 ## 2. Source and normative adequacy
 
