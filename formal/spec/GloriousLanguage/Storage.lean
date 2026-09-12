@@ -26,6 +26,25 @@ structure RawPointer where
   domain : Option Identity
   deriving DecidableEq, BEq, Repr, Inhabited
 
+structure PatternFact where
+  resultOrigin : Identity
+  pattern : Identity
+  positive : Bool
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+/-- Sealed metadata travels with the resident binding fields. Field identities
+are relative positions, never addresses of a previous carrier. Copy preserves
+the context brand, just as copying any other branded value preserves its type. -/
+structure BindingPack where
+  brand : Identity
+  region : Identity
+  fields : List Identity
+  facts : List PatternFact
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+def BindingPack.mapOrigins (map : Identity → Identity) (pack : BindingPack) : BindingPack :=
+  { pack with facts := pack.facts.map (fun fact => { fact with resultOrigin := map fact.resultOrigin }) }
+
 inductive ValueHead where
   | unit
   | scalar (value : ScalarValue)
@@ -38,7 +57,7 @@ inductive ValueHead where
   | label (brand : Identity)
   | continuation (identity : Identity)
   | available (identity : Identity)
-  | bindings (identity : Identity)
+  | bindings (pack : BindingPack)
   deriving Repr, Inhabited
 
 inductive Value where
@@ -54,6 +73,18 @@ def Value.fields : Value → List (Option Value) | .resident _ _ _ _ fields => f
 
 def Value.withFields (value : Value) (fields : List (Option Value)) : Value :=
   .resident value.owner value.type value.head value.shellLive fields
+
+mutual
+  def Value.mapBindingOrigins (map : Identity → Identity) : Value → Value
+    | .resident owner type head live fields => .resident owner type
+        (match head with | .bindings pack => .bindings (pack.mapOrigins map) | head => head)
+        live (Value.mapFieldOrigins map fields)
+
+  def Value.mapFieldOrigins (map : Identity → Identity) : List (Option Value) → List (Option Value)
+    | [] => []
+    | none :: rest => none :: Value.mapFieldOrigins map rest
+    | some value :: rest => some (value.mapBindingOrigins map) :: Value.mapFieldOrigins map rest
+end
 
 def Value.atPath : Value → List Nat → Option Value
   | value, [] => some value
@@ -139,21 +170,10 @@ structure Availability where
   active : Bool
   deriving Repr, Inhabited
 
-structure BindingPack where
-  identity : Identity
-  pattern : Identity
-  resultOrigin : Identity
-  positive : Bool
-  region : Identity
-  fields : List (Identity × Address)
-  protectingLoans : List Identity
-  deriving Repr, Inhabited
-
 structure World where
   roots : Table Root := []
   loans : Table Loan := []
   availability : Table Availability := []
-  bindings : Table BindingPack := []
   liveRegions : List Identity := []
   nextRoot : Identity := 0
   nextOwner : Identity := 0
@@ -238,13 +258,16 @@ theorem reference_view_shared_carrier {world handle backing id mode permission a
   · exact shared
 
 def World.WellFormed (world : World) : Prop :=
-  world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧ world.bindings.Unique ∧
+  world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧
   world.liveRegions.Nodup ∧
   (∀ id available, world.availability.get id = some available →
     id = available.identity ∧ id < world.nextProof ∧ available.brand = .runtimeBrand (.proof id) ∧
     (available.active = true → available.region ∈ world.liveRegions ∧
       ∀ place ∈ available.reserved, (world.root place.address).isSome = true)) ∧
-  (∀ id pack, world.bindings.get id = some pack → id = pack.identity ∧ id < world.nextProof) ∧
+  (∀ address value pack, world.Resident address value → value.head = .bindings pack →
+    pack.brand < world.nextProof ∧ pack.region ∈ world.liveRegions ∧
+    pack.fields.length = value.fields.length ∧ pack.fields.Nodup ∧
+    ∀ fact ∈ pack.facts, fact.resultOrigin < world.nextOwner) ∧
   (∀ address value, world.Resident address value → value.owner < world.nextOwner) ∧
   (∀ a b x y, world.Resident a x → world.Resident b y → x.owner = y.owner → a = b) ∧
   (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
@@ -266,31 +289,48 @@ def World.WellFormed (world : World) : Prop :=
     left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a)
 
 theorem World.freshProof {world : World} (valid : world.WellFormed) :
-    world.availability.get world.nextProof = none ∧ world.bindings.get world.nextProof = none := by
-  rcases valid with ⟨_,_,_,_,_,availableBounds,packBounds,_⟩
+    world.availability.get world.nextProof = none ∧
+    ∀ address value pack, world.Resident address value → value.head = .bindings pack → pack.brand ≠ world.nextProof := by
+  rcases valid with ⟨_,_,_,_,availableBounds,packBounds,_⟩
   constructor
   · cases found : world.availability.get world.nextProof with
     | none => rfl
     | some available =>
       have impossible := (availableBounds world.nextProof available found).2.1
       exact False.elim (Nat.lt_irrefl world.nextProof impossible)
-  · cases found : world.bindings.get world.nextProof with
-    | none => rfl
-    | some pack =>
-      have impossible := (packBounds world.nextProof pack found).2
-      exact False.elim (Nat.lt_irrefl world.nextProof impossible)
+  · intro address value pack resident head equal
+    have bound := (packBounds address value pack resident head).1
+    rw [equal] at bound
+    exact Nat.lt_irrefl world.nextProof bound
 
 mutual
-  inductive CopyValue (program : Program) : Nat → Value → Nat → Value → Prop where
-    | resident {next owner type head fields copied finish} : PrincipalOf program type .duplicable →
-        CopyFields program (next+1) fields finish copied →
-        CopyValue program next (.resident owner type head true fields) finish (.resident next type head true copied)
+  inductive CopyTree (program : Program) : Nat → Value → Nat → Value → Table Identity → Prop where
+    | resident {next owner type head fields copied finish origins} : PrincipalOf program type .duplicable →
+        CopyFields program (next+1) fields finish copied origins →
+        CopyTree program next (.resident owner type head true fields) finish (.resident next type head true copied)
+          ((owner,next) :: origins)
 
-  inductive CopyFields (program : Program) : Nat → List (Option Value) → Nat → List (Option Value) → Prop where
-    | nil {next} : CopyFields program next [] next []
-    | cons {next middle finish value copied rest copies} : CopyValue program next value middle copied →
-        CopyFields program middle rest finish copies → CopyFields program next (some value :: rest) finish (some copied :: copies)
+  inductive CopyFields (program : Program) : Nat → List (Option Value) → Nat → List (Option Value) → Table Identity → Prop where
+    | nil {next} : CopyFields program next [] next [] []
+    | cons {next middle finish value copied rest copies first later} : CopyTree program next value middle copied first →
+        CopyFields program middle rest finish copies later →
+        CopyFields program next (some value :: rest) finish (some copied :: copies) (first ++ later)
 end
+
+/-- The copy traversal produces the owner renaming used by sealed result
+facts. A fact referring outside the copied subtree keeps its original origin;
+copying a whole result updates the origin together with that result's owner. -/
+inductive CopyValue (program : Program) : Nat → Value → Nat → Value → Prop where
+  | copy {next value finish raw origins} : CopyTree program next value finish raw origins → origins.Unique →
+      CopyValue program next value finish (raw.mapBindingOrigins (fun id => (origins.get id).getD id))
+
+theorem Value.mapBindingOrigins_type (value : Value) (map : Identity → Identity) :
+    (value.mapBindingOrigins map).type = value.type := by cases value; rfl
+
+theorem CopyValue.type_eq {program : Program} {next value finish copied}
+    (copy : CopyValue program next value finish copied) : copied.type = value.type := by
+  cases copy with
+  | copy tree _ => cases tree; rfl
 
 def DisjointStorage (world : World) (base size : Nat) : Prop :=
   ∀ id root, world.roots.get id = some root → root.live = true →

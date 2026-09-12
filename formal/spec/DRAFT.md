@@ -295,3 +295,39 @@ control-state validity, binding-pack provenance/relocation and sealed operations
 and nonmaterialized correlated callable representation. Full source coverage,
 preservation/progress and normative adequacy remain open. No compiler/library
 files or acceptance gates were changed or run.
+
+## Resident binding metadata and copied result provenance
+
+`lake build` passes all 35 jobs, including `BindingChecks`. Binding metadata
+now resides in the binding value's head alongside its actual resident fields.
+The former `World.bindings` side table, absolute field addresses, and duplicate
+protecting-loan list were removed. Binder identities select relative field
+positions; moves preserve the sealed metadata and carry the fields through
+ordinary storage transfer. Reference fields retain their loans through the
+existing reference graph, without a second ownership/lifetime inventory.
+
+Pattern facts record the actual result owner created by carrier construction,
+not the unrelated proof-number counter. Guard interpretation requires a live
+resident pack, so destroyed packs no longer leave historical table entries that
+can authorize a guard. World validity checks the resident pack's brand bound,
+region, field cardinality, distinct binder identities and origin bounds. The
+fresh-proof theorem now excludes existing resident pack brands directly.
+
+The common source-copy traversal produces an owner-renaming product together
+with the copied tree. That product updates embedded result facts: copying a
+whole result renames its owner and the nested pack's corresponding origin;
+copying only a pack retains origins outside the copied subtree. Source Copy
+preserves the context brand and type rather than minting a different type.
+`CopyValue.type_eq` proves type preservation for this operation. Snapshot
+relocation maps pack regions and only those result origins whose owners are
+actually selected for copying, using the same checked snapshot map.
+
+Concrete checks cover result movement and old-address invalidation, guard
+retention/death, whole-result and standalone-pack copying, and typed snapshot
+relocation. These establish this representation/consumer repair, not general
+storage preservation or source-admitted whole-program nonvacuity. Compiler-sealed
+projection/combination, hidden binding-argument elaboration and joins with
+compatible original provenance remain unfinished. The primitive-operand boundary
+also still drops resolved authorities into bare addresses; sealed operations
+must not inherit invented owner permission from that path. Other source,
+control-state, metatheory and normative-adequacy obligations remain open.

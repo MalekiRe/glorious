@@ -187,9 +187,10 @@ mutual
     | available {owner brand region id live available} : world.availability.get id = some available → available.brand = brand →
         brand = .runtimeBrand (.proof id) → region = .runtimeRegion available.region →
         ValueTyped program world (.resident owner (.available brand region) (.available id) live [])
-    | bindings {owner brand region id live fields types pack} : world.bindings.get id = some pack → FieldsTyped program world fields types →
-        brand = .runtimeBrand (.proof id) → region = .runtimeRegion pack.region →
-        fields.length = pack.fields.length → ValueTyped program world (.resident owner (.bindings brand region types) (.bindings id) live fields)
+    | bindings {owner brand region live fields types pack} : FieldsTyped program world fields types →
+        brand = .runtimeBrand (.proof pack.brand) → region = .runtimeRegion pack.region →
+        fields.length = pack.fields.length → pack.fields.Nodup →
+        ValueTyped program world (.resident owner (.bindings brand region types) (.bindings pack) live fields)
 
   inductive FieldsTyped (program : Kernel.Program) (world : World) : List (Option Value) → List Term → Prop where
     | nil : FieldsTyped program world [] []

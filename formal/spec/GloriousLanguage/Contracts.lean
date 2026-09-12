@@ -30,8 +30,9 @@ def Guard.Holds (world : World) : Guard → Prop
   | .always => True
   | .constructor origin path variant => ∃ address value selected,
       world.Resident address value ∧ value.owner = origin ∧ value.atPath path = some selected ∧ selected.head = .constructor variant
-  | .pattern origin patternId positive => ∃ id pack,
-      world.bindings.get id = some pack ∧ pack.resultOrigin = origin ∧ pack.pattern = patternId ∧ pack.positive = positive
+  | .pattern origin patternId positive => ∃ address value pack,
+      world.Resident address value ∧ value.shellLive = true ∧ value.head = .bindings pack ∧
+      ⟨origin,patternId,positive⟩ ∈ pack.facts
   | .and left right => left.Holds world ∧ right.Holds world
   | .or left right => left.Holds world ∨ right.Holds world
 

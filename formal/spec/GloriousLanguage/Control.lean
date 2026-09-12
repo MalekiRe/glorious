@@ -78,29 +78,31 @@ mutual
 end
 
 inductive CopiesObservations (program : Kernel.Program) (context : Context) :
-    World → List (Local × Address × Authority) → List (Local × Address) → List Identity → World → Prop where
-  | nil {world} : CopiesObservations program context world [] [] [] world
-  | copy {before localSlot source authority rest destination allocated copied bindings loans after value} :
+    World → List (Local × Address × Authority) → List (Local × Address) → World → Prop where
+  | nil {world} : CopiesObservations program context world [] [] world
+  | copy {before localSlot source authority rest destination allocated copied bindings after value} :
       before.Stores source value → localSlot.type = value.type → Temporary program context localSlot.type before destination allocated →
       Copies program.declarations allocated authority source destination copied →
-      CopiesObservations program context copied rest bindings loans after →
-      CopiesObservations program context before ((localSlot,source,authority) :: rest) ((localSlot,destination) :: bindings) loans after
-  | borrow {before localSlot source authority rest destination allocated borrowed bindings loans after value mode} :
+      CopiesObservations program context copied rest bindings after →
+      CopiesObservations program context before ((localSlot,source,authority) :: rest) ((localSlot,destination) :: bindings) after
+  | borrow {before localSlot source authority rest destination allocated borrowed bindings after value mode} :
       before.Stores source value → localSlot.type = .reference mode (.runtimeRegion context.region) value.type →
       Temporary program context localSlot.type before destination allocated →
       Borrows program.declarations allocated authority mode context.region source destination borrowed →
-      CopiesObservations program context borrowed rest bindings loans after →
-      CopiesObservations program context before ((localSlot,source,authority) :: rest) ((localSlot,destination) :: bindings)
-        (allocated.nextLoan :: loans) after
+      CopiesObservations program context borrowed rest bindings after →
+      CopiesObservations program context before ((localSlot,source,authority) :: rest) ((localSlot,destination) :: bindings) after
 
 def PacksBindings (program : Kernel.Program) (context : Context) (before : World) (pattern : Identity)
-    (positive : Bool) (bindings : List (Local × Address)) (loans : List Identity)
+    (resultOrigin : Identity) (positive : Bool) (bindings : List (Local × Address))
     (pack : Address) (after : World) : Prop :=
   ∃ allocated created type,
     type = .bindings (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion context.region) (bindings.map (fun entry => entry.1.type)) ∧
     Temporary program context type before pack allocated ∧
-    NewValue program.declarations allocated pack type (.bindings before.nextProof) (bindings.map Prod.snd) created ∧
-    after = { created with nextProof := before.nextProof+1, bindings := created.bindings.set before.nextProof ⟨before.nextProof,pattern,before.nextProof,positive,context.region, bindings.zipIdx.map (fun (entry,index) => (entry.1.id,pack.child index)),loans⟩ }
+    (bindings.map (fun entry => entry.1.id)).Nodup ∧
+    NewValue program.declarations allocated pack type
+      (.bindings ⟨before.nextProof,context.region,bindings.map (fun entry => entry.1.id),[⟨resultOrigin,pattern,positive⟩]⟩)
+      (bindings.map Prod.snd) created ∧
+    after = { created with nextProof := before.nextProof+1 }
 
 inductive UnitFields (program : Kernel.Program) (context : Context) :
     World → List Term → Option Nat → Address → List Address → World → Prop where
@@ -129,10 +131,10 @@ def CarrierFields (program : Kernel.Program) (context : Context) (before : World
 
 inductive TestResult (program : Kernel.Program) (context : Context) :
     World → Address → Term → Identity → Bool → List (Local × Address × Authority) → World → Prop where
-  | result {before destination type pattern positive observations carrier dataArguments copied bindings loans packed pack fields assembled after} :
+  | result {before destination type pattern positive observations carrier dataArguments copied bindings packed pack fields assembled after} :
       program.declarations.input.manifest.testCarrier = some carrier → type = .nominal carrier.declaration dataArguments →
-      CopiesObservations program context before observations bindings loans copied →
-      PacksBindings program context copied pattern positive bindings loans pack packed →
+      CopiesObservations program context before observations bindings copied →
+      PacksBindings program context copied pattern assembled.nextOwner positive bindings pack packed →
       CarrierFields program context packed (if positive then carrier.positive else carrier.negative) dataArguments pack
         (if positive then carrier.positiveBindings else carrier.negativeBindings) fields assembled →
       NewValue program.declarations assembled destination type

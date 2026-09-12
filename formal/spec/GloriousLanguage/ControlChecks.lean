@@ -116,7 +116,9 @@ example {world reserved access formals inputs input}
   rfl
 
 example {world : World} (valid : world.WellFormed) :
-    world.availability.get world.nextProof = none ∧ world.bindings.get world.nextProof = none := World.freshProof valid
+    world.availability.get world.nextProof = none ∧
+    ∀ address value pack, world.Resident address value → value.head = .bindings pack → pack.brand ≠ world.nextProof :=
+  World.freshProof valid
 
 example (world : World) (address : Address) (id : Identity) :
     ConsumesAvailability world address id .shared world := .lent (by decide)

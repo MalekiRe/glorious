@@ -9,6 +9,7 @@ open Kernel
 
 structure Relocation where
   roots : List Identity
+  owners : List Identity
   loans : List Identity
   regions : List Identity
   activations : List Identity
@@ -28,6 +29,7 @@ def relocateId (selected : List Identity) (base id : Identity) : Identity :=
   if id ∈ selected then base + id else id
 
 def Relocation.root (map : Relocation) := relocateId map.roots map.rootBase
+def Relocation.owner (map : Relocation) := relocateId map.owners map.ownerBase
 def Relocation.loan (map : Relocation) := relocateId map.loans map.loanBase
 def Relocation.region (map : Relocation) := relocateId map.regions map.regionBase
 def Relocation.activation (map : Relocation) := relocateId map.activations map.activationBase
@@ -174,6 +176,7 @@ mutual
          | .callable id arguments => .callable id (arguments.map map.term)
          | .operation id arguments => .operation id (arguments.map map.term)
          | .pointer pointer => .pointer (map.pointer pointer)
+         | .bindings pack => .bindings { pack.mapOrigins map.owner with region := map.region pack.region }
          | other => other)
         live (map.values fields)
 
@@ -207,6 +210,8 @@ def SnapshotMap (program : Kernel.Program) (before : State) (suspension : Suspen
   map.loanBase = before.world.nextLoan ∧ map.regionBase = before.world.nextRegion ∧
   map.activationBase = before.nextActivation ∧ map.handlerBase = before.nextHandler ∧
   map.scopeBase = before.world.nextRegion ∧
+  (∀ id, id ∈ map.owners ↔ ∃ address value,
+    before.world.Resident address value ∧ address.root ∈ map.roots ∧ value.owner = id) ∧
   (∀ id, id ∈ map.loans ↔ SnapshotLoan before.world map.roots id) ∧
   (∀ id, id ∈ map.regions ↔
     id ∈ suspension.frames.flatMap Frame.ownedRegions ++ [suspension.context.region,suspension.handler.computation.region] ∨
@@ -247,7 +252,7 @@ def CopiesSnapshot (program : Kernel.Program) (before : State) (suspension : Sus
     (map : Relocation) (after : State) : Prop :=
   Replayable program.declarations before.world suspension.roots ∧
   (∀ frame ∈ suspension.frames, SnapshotFrame frame) ∧ SnapshotMap program before suspension map ∧
-  map.roots.Nodup ∧ map.loans.Nodup ∧ map.regions.Nodup ∧ map.activations.Nodup ∧ map.scopes.Nodup ∧ map.handlers.Nodup ∧
+  map.roots.Nodup ∧ map.owners.Nodup ∧ map.loans.Nodup ∧ map.regions.Nodup ∧ map.activations.Nodup ∧ map.scopes.Nodup ∧ map.handlers.Nodup ∧
   after = { before with
     world := map.copyWorld before.world suspension.homes
     nextActivation := map.activationBase + before.nextActivation
