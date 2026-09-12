@@ -2,6 +2,7 @@ import GloriousLanguage.ReceiverPreservation
 import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.StorageFraming
 import GloriousLanguage.InvocationLending
+import GloriousLanguage.CapabilityModels
 
 /-! Invocation lease cleanup uses the actual reference destruction and
 releaseLoan machine path. Parent release is deferred and revisited after a
@@ -203,7 +204,7 @@ theorem Kernel.LendsResident.lease_resident {program : Language.Program} {before
       simp only [List.append_nil,Value.atPath] at read
       exact ⟨_,_,_,_,rfl,whole,read⟩
 
-theorem MayDispose.reference {program : Language.Program} (model : CapabilityModel program)
+theorem MayDispose.reference {program : Language.Program}
     (owner loan : Identity) (mode : Mutability) (region type : Term) :
     MayDispose program (.resident owner (.reference mode region type) (.reference loan) true []) := by
   intro path value resident
@@ -212,8 +213,8 @@ theorem MayDispose.reference {program : Language.Program} (model : CapabilityMod
     constructor
     · intro _
       cases mode with
-      | shared => exact ⟨.duplicable,⟨model,(model.equations _ _).mpr .shared⟩,by simp [Principal.MayDiscard,Principal.Permits]⟩
-      | unique => exact ⟨.affine,⟨model,(model.equations _ _).mpr .unique⟩,by simp [Principal.MayDiscard,Principal.Permits]⟩
+      | shared => exact ⟨.duplicable,PrincipalOf.shared program region type,by simp [Principal.MayDiscard,Principal.Permits]⟩
+      | unique => exact ⟨.affine,PrincipalOf.unique program region type,by simp [Principal.MayDiscard,Principal.Permits]⟩
     · intro hook _
       intro path value resident
       cases resident with
@@ -398,7 +399,7 @@ theorem lendsResident_cleanup {program : Kernel.Program} {host : Foreign.Model}
     (initial : World) (before : State) (context : Context) (next : Task)
     {address : Address} {authority permission : Authority} {access : Access} {lease : Option Kernel.InvocationLease}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (model : CapabilityModel program.declarations) (initialTyped : Typing.WorldTyped program initial)
+    (initialTyped : Typing.WorldTyped program initial)
     (lent : Kernel.LendsResident program.declarations context.activation context.scope context.region
       initial address authority access lease permission before.world)
     (borrowed : access ≠ .owned)
@@ -423,7 +424,7 @@ theorem lendsResident_cleanup {program : Kernel.Program} {host : Foreign.Model}
       _ = _ := by rw [generation,whole]
   obtain ⟨world,trace,run,finalTyped,retired⟩ := referenceRoot_cleanup (host := host) before context next
     valid inventory typed (restored witness selected) found live rootValue rfl
-    (MayDispose.reference model owner witness.loan mode (.runtimeRegion context.region) type) (safe witness selected)
+    (MayDispose.reference owner witness.loan mode (.runtimeRegion context.region) type) (safe witness selected)
   refine ⟨witness,world,trace,selected,?_,finalTyped,retired⟩
   simpa only [← sameAddress] using run
 

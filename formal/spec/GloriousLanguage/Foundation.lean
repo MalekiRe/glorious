@@ -114,6 +114,15 @@ theorem ListRel.append {relation : α → β → Prop} {as cs : List α} {bs ds 
   | nil => exact right
   | cons head _ ih => exact .cons head ih
 
+theorem ListRel.functional {α β : Type} {relation : α → β → Prop} {left : List α} {first second : List β}
+    (functional : ∀ a b c, relation a b → relation a c → b = c)
+    (a : ListRel relation left first) (b : ListRel relation left second) : first = second := by
+  induction a generalizing second with
+  | nil => cases b; rfl
+  | cons head tail ih =>
+      cases b with
+      | cons other rest => simp only [functional _ _ _ head other,ih rest]
+
 abbrev Table (α : Type) := List (Identity × α)
 
 def Table.get (table : Table α) (key : Identity) : Option α :=

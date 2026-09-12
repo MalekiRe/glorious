@@ -423,15 +423,6 @@ theorem NewValue.worldTyped {program : Kernel.Program} {before after : World} {d
   have checked := constructed.worldTypedWithOrigins valid inventory (typed.mono (Nat.le_succ _)) headReferences headPacks headTyped
   simpa only [Typing.WorldTyped,congrArg World.nextOwner constructed.rest] using checked
 
-theorem ListRel.functional {α β : Type} {relation : α → β → Prop} {left : List α} {first second : List β}
-    (functional : ∀ a b c, relation a b → relation a c → b = c)
-    (a : ListRel relation left first) (b : ListRel relation left second) : first = second := by
-  induction a generalizing second with
-  | nil => cases b; rfl
-  | cons head tail ih =>
-      cases b with
-      | cons other rest => simp only [functional _ _ _ head other,ih rest]
-
 theorem Typing.FieldsTyped.present {program : Kernel.Program} {world : World} {values : List Value}
     (typed : ∀ value ∈ values, Typing.ValueTyped program world value) :
     Typing.FieldsTyped program world (values.map some) (values.map Value.type) := by

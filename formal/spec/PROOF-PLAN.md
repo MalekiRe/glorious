@@ -361,9 +361,19 @@ identity order. A referenced parent or a live child defers release; restoration
 is required only for unreferenced ancestors without live children off the
 released branch. An unrelated sibling's unique hole is not assumed initialized.
 The activation-cleanup consumer uses the actual selected root and retains full
-world typing. Capability-model existence and proof that a completed call
-restores and keeps its hidden handles private remain open prerequisites; the
-cleanup theorem does not assume its own termination or post-world typing.
+world typing. Proof that a completed call restores and keeps its hidden handles
+private remains open; the cleanup theorem does not assume its own termination
+or post-world typing.
+
+`CapabilityModels` constructs the greatest model of the existing recursive
+capability equations for every declaration program. Equation functionality
+and permission monotonicity establish the fixed point over all post-fixed
+assignments, without an acyclic-type assumption or an independent type walker.
+Unsupported equations remain unknown, not permission. The prior existential
+`PrincipalOf` judgment selects exactly this unique greatest answer. Invocation
+lease disposal now consumes the constructed shared/unique principals and no
+longer assumes a capability model. Generic destructor dispatch still needs its
+actual checked specialization carried from the nominal resident to hook entry.
 
 `SemanticPreservation` connects the public transition system to the actual
 execution relation in both directions, with exact filtered traces and identical
