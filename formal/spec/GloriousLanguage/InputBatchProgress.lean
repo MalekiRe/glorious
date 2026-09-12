@@ -3636,7 +3636,7 @@ theorem Kernel.ReceiverFramed.owned_step {program : RuntimeProgram} {activation 
 /-- The whole-allocation custody handoff leaves the receiver shell and its owner
 permission alone: no value is written and the one rewritten row keeps its
 permission projection. -/
-theorem Kernel.ReceiverFramed.allocation_step {_program : RuntimeProgram} {recipient : ClaimCustody}
+theorem Kernel.ReceiverFramed.allocation_step {recipient : ClaimCustody}
     {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
     {head : ValueHead}
     (_valid : before.WellFormed)
@@ -3654,7 +3654,7 @@ theorem Kernel.ReceiverFramed.allocation_step {_program : RuntimeProgram} {recip
 
 /-- The erased storage-loan handoff leaves the receiver shell and its owner
 permission alone, by the same argument. -/
-theorem Kernel.ReceiverFramed.loan_step {_program : RuntimeProgram} {recipient : ClaimCustody}
+theorem Kernel.ReceiverFramed.loan_step {recipient : ClaimCustody}
     {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
     {head : ValueHead}
     (_valid : before.WellFormed)
@@ -3676,7 +3676,7 @@ theorem Kernel.ReceiverFramed.loan_step {_program : RuntimeProgram} {recipient :
 permission alone: the loan table gains one storage-borrow row at the frontier,
 no value is written, and the fresh row is compatible with the receiver's owner
 permission through the pre-state authority data. -/
-theorem Kernel.ReceiverFramed.storage_step {_program : RuntimeProgram} {recipient : ClaimCustody}
+theorem Kernel.ReceiverFramed.storage_step {recipient : ClaimCustody}
     {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
     {head : ValueHead} {identity : Identity} {type : Term} {created : Identity}
     (valid : before.WellFormed) (_formal : input.formal = .storage identity type)
@@ -3711,9 +3711,9 @@ theorem Kernel.ReceiverFramed.storage_step {_program : RuntimeProgram} {recipien
 /-- The guarded-allocation claim leaves the receiver shell and its owner
 permission alone by the same argument, with the fresh row being an owning claim
 at the frontier and no value written. -/
-theorem Kernel.ReceiverFramed.guarded_step {_program : RuntimeProgram} {recipient : ClaimCustody}
+theorem Kernel.ReceiverFramed.guarded_step {recipient : ClaimCustody}
     {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead} {_identity : Identity} {_type : Term} {created : Identity}
+    {head : ValueHead} {created : Identity}
     (valid : before.WellFormed)
     (claimed : ClaimsAllocation recipient before input.authority input.storage created after)
     (apart : ¬ input.storage.Overlaps receiver)
@@ -3741,5 +3741,40 @@ theorem Kernel.ReceiverFramed.guarded_step {_program : RuntimeProgram} {recipien
         (locations := World.LocationExtension.of_roots
           (before := before) (after := guardedClaimWorld before input claimRoot recipient) rfl)
         (loans := loans) permitted (fun _ => compat)
+
+
+/-- Every actual binding rule leaves the receiver shell and its owner permission
+framed: the six rule-specific branches composed under one dispatcher. -/
+theorem Kernel.ReceiverFramed.step {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {receiver : Address} {authority : Authority} {head : ValueHead}
+    (valid : before.WellFormed)
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (apart : ¬ input.storage.Overlaps receiver)
+    (frontier : receiver.root < before.nextRoot)
+    (parentAbsent : ∀ identity, authority.parentLoan = some identity →
+      identity ∉ input.authority.guardLoans before)
+    (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
+      carrier ∉ input.authority.guardLoans before)
+    (referentsApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
+      before.loans.get carrier = some loan → ¬ loan.referent.Overlaps input.storage)
+    (framed : ReceiverFramed before receiver authority head) :
+    ReceiverFramed after receiver authority head := by
+  cases bound with
+  | lent ready borrowed resident stored initialized type permission lent =>
+      exact Kernel.ReceiverFramed.lent_step valid borrowed lent apart frontier parentAbsent
+        carriersAbsent referentsApart framed
+  | owned ready owning resident stored type allocation transferred =>
+      exact Kernel.ReceiverFramed.owned_step valid owning allocation transferred apart frontier framed
+  | storage ready formal locatedType claimed =>
+      exact Kernel.ReceiverFramed.storage_step valid formal claimed apart parentAbsent carriersAbsent
+        referentsApart framed
+  | allocation ready formal owning locatedType transferred =>
+      exact Kernel.ReceiverFramed.allocation_step valid transferred framed
+  | guardedAllocation ready formal owning authorityEq locatedType claimed =>
+      exact Kernel.ReceiverFramed.guarded_step valid claimed apart parentAbsent carriersAbsent
+        referentsApart framed
+  | loan ready formal owning locatedType transferred =>
+      exact Kernel.ReceiverFramed.loan_step valid transferred framed
 
 end Kernel
