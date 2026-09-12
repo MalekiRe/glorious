@@ -639,6 +639,11 @@ theorem World.restamp_referent (custody : ClaimCustody) (loan : Loan) :
   unfold World.restamp
   by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
 
+theorem World.restamp_mode (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).mode = loan.mode := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
 theorem World.restamp_parent (custody : ClaimCustody) (loan : Loan) :
     (World.restamp custody loan).parent = loan.parent := by
   unfold World.restamp
@@ -945,5 +950,38 @@ theorem World.DestroyFrame.of_write {before after : World} {outside target : Add
     refine ⟨row,?_,live,rfl,rfl,rfl⟩
     rw [World.write_rest written] at found
     exact found
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The relinquishment restamp is a frame: it rewrites the loan table only,
+keeping every row, its parent and guards, and the kind, mode and referent of
+every live row, while the reads and the resolved roots do not move at all. -/
+theorem World.DestroyFrame.of_requestReturns {before : World} {custody : ClaimCustody} {outside : Address} :
+    World.DestroyFrame before (before.RequestReturns custody) outside where
+  reads := fun probe outside' => rfl
+  roots := fun probe outside' => rfl
+  rows := fun key row found => by
+    rw [World.RequestReturns.get_eq] at found
+    obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+    refine ⟨original,originalFound,?_,?_⟩
+    · rw [← same,World.restamp_parent]
+    · rw [← same,World.restamp_guards]
+  present := fun key original found => by
+    refine ⟨World.restamp custody original,?_⟩
+    rw [World.RequestReturns.get_eq,found]
+    rfl
+  liveness := fun key row found live => by
+    rw [World.RequestReturns.get_eq] at found
+    obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+    refine ⟨original,originalFound,?_,?_,?_,?_⟩
+    · rw [← same,World.restamp_live] at live
+      exact live
+    · rw [← same,World.restamp_kind]
+    · rw [← same,World.restamp_mode]
+    · rw [← same,World.restamp_referent]
 
 end Glorious.Language
