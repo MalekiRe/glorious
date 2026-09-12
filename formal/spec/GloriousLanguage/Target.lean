@@ -350,6 +350,24 @@ inductive FloatCalculation (width : FloatWidth) : FloatOperation → List Nat �
       decodeFloat width c = some (.finite sc mc ec) →
       Rounded width (((binaryFraction sa ma ea).multiply (binaryFraction sb mb eb)).add (binaryFraction sc mc ec))
         ((sa != sb) && sc) result → FloatCalculation width .fusedMultiplyAdd [a,b,c] result
+  /-- Reusing multiplication and addition is exact only when an input to the
+  product is already infinite: it cannot round an otherwise finite product
+  before adding the third operand. Invalid zero-times-infinity propagates the
+  canonical NaN through the ordinary arithmetic rules. -/
+  | fusedInfiniteProduct {a b c product result} :
+      (∃ sign, decodeFloat width a = some (.infinity sign) ∨
+        decodeFloat width b = some (.infinity sign)) →
+      FloatCalculation width .multiply [a,b] product →
+      FloatCalculation width .add [product,c] result →
+      FloatCalculation width .fusedMultiplyAdd [a,b,c] result
+  /-- The exact product of two finite inputs is finite even when a separately
+  rounded multiplication would overflow. An infinite addend therefore wins
+  without first performing that potentially overflowing multiplication. -/
+  | fusedInfiniteAddend {a b c sa sb sc ma mb ea eb} :
+      decodeFloat width a = some (.finite sa ma ea) →
+      decodeFloat width b = some (.finite sb mb eb) →
+      decodeFloat width c = some (.infinity sc) →
+      FloatCalculation width .fusedMultiplyAdd [a,b,c] c
   | sqrtZero {a sign exponent} : decodeFloat width a = some (.finite sign 0 exponent) →
       FloatCalculation width .squareRoot [a] a
   | sqrtInfinity {a} : decodeFloat width a = some (.infinity false) → FloatCalculation width .squareRoot [a] a

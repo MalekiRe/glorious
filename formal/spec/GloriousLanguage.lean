@@ -1,2 +1,3 @@
 import GloriousLanguage.Checks
 import GloriousLanguage.ResumptionPreservation
+import GloriousLanguage.ScalarPreservation

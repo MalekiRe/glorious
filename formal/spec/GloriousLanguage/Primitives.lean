@@ -101,6 +101,9 @@ inductive ScalarConversion (target : TargetProfile) : ScalarValue → Scalar →
       ScalarConversion target (.integer sign width value) .character (.error .invalidValue)
   | characterInteger {value sign width} : Source.UnicodeScalar value → IntegerRange target sign width value →
       ScalarConversion target (.character value) (.integer sign width) (.ok (.integer sign width value))
+  | characterIntegerOverflow {value sign width} : Source.UnicodeScalar value →
+      ¬ IntegerRange target sign width value →
+      ScalarConversion target (.character value) (.integer sign width) (.error .arithmetic)
 
 inductive PrimitiveCalculation (target : TargetProfile) : Primitive → List Term → List ScalarValue → Except Fatal ScalarValue → Prop where
   | integer {op sign width overflow integers result} :

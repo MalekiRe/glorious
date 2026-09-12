@@ -93,6 +93,17 @@ remain part of the same unfinished full control-state invariant.
 
 ## 2. Source and normative adequacy
 
+The scalar producer boundary now has general integer-operation totality and
+result-range proofs in `ScalarPreservation`: every supported integer arity
+produces a valid result or an explicit fault. Scalar result validity follows
+from operand/destination validity. Fused multiply-add now covers nonfinite
+inputs without rounding a finite product before the addition, and character
+narrowing has an explicit out-of-range outcome. These corrections are consumed
+by the actual primitive-calculation relation. General finite floating-point
+rounding/square-root existence and the distinction between trapping machine
+conversion and the library's conversion policies remain open; this is not a
+claim of complete scalar or source-library conversion semantics.
+
 After the soundness foundation, prove that elaboration and observations give
 the normative language meaning. This includes complete source coverage,
 contextual/implicit captures and arguments, sealed binding provenance, generic
