@@ -1136,3 +1136,5 @@ theorem World.Vacant.write_child_other {before after : World} {address : Address
   World.Vacant.write_disjoint vacant written (Address.child_not_overlaps different)
 
 end Glorious.Language
+
+end Glorious.Language
