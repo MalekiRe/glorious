@@ -532,6 +532,17 @@ registration/suspension, drop return/handle, context/scope typing, runtime body
 equivariance, definitional coherence/kinding and execution/public safety. The
 gate proof-checks this boundary; it does not establish the open general results.
 
+The suspension-origin invariant is now preserved by both actual capture
+instructions, final replay, cancellation and every foreign transition.
+`SuspensionOrigins` derives the capture frontier and saved-home domain from
+actual delimited-root selection; `SuspensionStorage` composes the existing
+storage producers. `ForeignSuspensionOwnership` consumes that shared product
+through host mutations and both ordinary callback handoffs. Reverse foreign
+root provenance is derived too: a host cannot introduce a newly suspended
+root. This boundary passed its targeted Lean dependency gate (62 jobs).
+Copied replay and preservation through the remaining source-step families
+are still required before claiming the invariant for arbitrary execution.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target
