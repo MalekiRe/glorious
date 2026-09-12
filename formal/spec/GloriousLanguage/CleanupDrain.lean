@@ -985,3 +985,59 @@ theorem World.DestroyFrame.of_requestReturns {before : World} {custody : ClaimCu
     · rw [← same,World.restamp_referent]
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The custody's pending-return restamp leaves a destructible subtree
+destructible: the stored shell is untouched (the restamp rewrites the loan table
+only), the ownership permission reads the after table through the restamp, the
+live rows keep their owning kind, and parent and guard rows are still present
+because the restamp maps `some` to `some`. -/
+theorem World.Destroys.requestReturns {program : RuntimeProgram} {world : World} {address : Address}
+    (tree : World.Destroys program world address) (custody : ClaimCustody) :
+    World.Destroys program (world.RequestReturns custody) address := by
+  induction tree with
+  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+    have storedAfter : (world.RequestReturns custody).Stores address value := by
+      show (world.RequestReturns custody).read address = some value
+      rw [show (world.RequestReturns custody).read address = world.read address from rfl]
+      exact stored
+    have located : ∃ root, (world.RequestReturns custody).root address = some root :=
+      (Option.bind_eq_some_iff.mp storedAfter).imp fun _ found => found.1
+    have permissionAfter : Permitted (world.RequestReturns custody) .owner .owned address :=
+      ⟨located,fun id loan found live overlap conflict => by
+        rw [World.RequestReturns.get_eq] at found
+        obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+        rw [← same,World.restamp_live] at live
+        rw [← same,World.restamp_referent] at overlap
+        rw [← same,World.restamp_mode] at conflict
+        exact permission.2 id original originalFound live overlap conflict⟩
+    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_
+    · intro id loan found live
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      rw [← same,World.restamp_live] at live
+      rw [← same,World.restamp_kind]
+      exact kinds id original originalFound live
+    · intro id loan found
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have linkOriginal : original.parent = some parent := by rw [← same,World.restamp_parent] at link; exact link
+        have held := (ancestry id original originalFound).1 parent linkOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+      · have memberOriginal : guard ∈ original.guards := by
+          rw [← same,World.restamp_guards] at member
+          exact member
+        have held := (ancestry id original originalFound).2 guard memberOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+    · intro index child selected
+      exact ih index child selected
+
+end Glorious.Language
