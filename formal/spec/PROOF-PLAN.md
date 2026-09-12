@@ -215,12 +215,15 @@ through the complete relocated-value typing theorem below.
 
 `FloatRounding` proves finite rounding existence over an exact finite format
 grid, with nearest-even selection and explicit overflow/nonfinite outcomes.
-`FloatProgress` consumes it for every floating calculation except square root
-and for all floating-destination conversion policies. `ScalarProgress` now
-derives valid results or explicit faults for every admitted nonsquare-root
-scalar calculation; its earlier nonfloating theorem is a corollary. Square-root
-existence, full floating determinism, result-storage progress and checked
-source-library result construction remain open.
+`FloatProgress` consumes it for nonsquare-root floating calculations and all
+floating-destination conversion policies. `FloatSqrt` proves the remaining
+square-root existence obligation from rational isolation: exact midpoint-grid
+roots use point intervals, while other roots have a tie-free interval whose
+entire contents round to the same result. Exceptional inputs are covered too.
+`ScalarProgress` now derives valid results or explicit faults for every admitted
+scalar calculation; its earlier restricted theorems are corollaries. Full
+floating determinism, result-storage progress and checked source-library
+result construction remain open.
 
 The actual memory producers now require supported element regions, a
 representable pointer-width element count, and old/new array element agreement

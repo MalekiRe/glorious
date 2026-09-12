@@ -2,7 +2,8 @@ import GloriousLanguage.FloatRounding
 
 /-! Floating calculation progress consumes the proved existence of the same
 rounding relation used by the machine leaves. The exact product of an FMA is
-never rounded independently. Square-root isolation is a separate obligation. -/
+never rounded independently. `FloatSqrt` proves square-root isolation and then
+combines these nonsquare-root cases into full floating progress. -/
 namespace Glorious.Language
 
 theorem Fraction.add_valid {left right : Fraction} (leftValid : left.Valid) (rightValid : right.Valid) :
