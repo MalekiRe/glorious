@@ -3482,6 +3482,54 @@ def Kernel.ReceiverFramed (world : World) (receiver : Address) (authority : Auth
     (∀ field ∈ value.fields, field = none) ∧ value.resources = []) ∧
   Permitted world authority .owned receiver
 
-end Kernel
 
-end Glorious.Language
+
+/-- The carrier identities a borrowed authority opens through, outermost first:
+the recursion-friendly view of the authority data that the formed row's guard
+list must miss. -/
+def Kernel.authorityCarriers : Authority → List Identity
+  | .owner => []
+  | .loan _ => []
+  | .shared backing => Kernel.authorityCarriers backing
+  | .guarded backing carrier => carrier :: Kernel.authorityCarriers backing
+
+/-- A receiver owner permission survives a formed fresh row. The three
+pre-state facts about the forming authority are: the authority's own parent
+identity is absent from the formed row's guard list, every carrier identity of
+the authority is absent from it, and every carrier's live referent is apart from
+the formed row's referent. These are properties of the authority data that forms
+the row (the same data FormsLoan's own compatibility input speaks about), not
+poststate callbacks. -/
+theorem Kernel.Permitted.owner_compatible {world : World} {authority : Authority}
+    {receiver referent : Address} {mode : Mutability} {guards : List Identity}
+    (permitted : Permitted world authority .owned receiver)
+    (apart : ¬ receiver.Overlaps referent)
+    (parentAbsent : ∀ identity, authority.parentLoan = some identity → identity ∉ guards)
+    (absent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority → carrier ∉ guards)
+    (referentApart : ∀ carrier loan, carrier ∈ Kernel.authorityCarriers authority →
+      world.loans.get carrier = some loan → ¬ loan.referent.Overlaps referent) :
+    authority.LoanCompatible world .owned receiver referent mode guards := by
+  revert permitted apart parentAbsent absent referentApart
+  induction authority with
+  | owner =>
+      intro permitted apart parentAbsent absent referentApart
+      exact fun overlap => False.elim (apart overlap)
+  | loan identity =>
+      intro permitted apart parentAbsent absent referentApart
+      refine ⟨fun overlap => False.elim (apart overlap),
+        fun member => False.elim (absurd member (parentAbsent identity rfl))⟩
+  | shared backing _ =>
+      intro permitted apart parentAbsent absent referentApart
+      exact absurd permitted.2.1 (by simp)
+  | guarded backing carrier ih =>
+      intro permitted apart parentAbsent absent referentApart
+      refine ⟨ih permitted.2.1 apart (fun identity same => parentAbsent identity same)
+        (fun carrier' member => absent carrier' (List.mem_cons_of_mem carrier member))
+        (fun carrier' loan member found =>
+          referentApart carrier' loan (List.mem_cons_of_mem carrier member) found),?_⟩
+      · intro loan found
+        exact ⟨fun overlap => False.elim (referentApart carrier loan List.mem_cons_self found overlap),
+          fun member => False.elim (absurd member (absent carrier List.mem_cons_self))⟩
+
+
+end Kernel
