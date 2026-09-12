@@ -388,40 +388,51 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
     (step : ∀ (field : Nat) (rest : List Nat) (state : State) {parent : Value},
       state.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) →
       state.world.Stores address parent →
+      (permission : Permitted state.world .owner .owned address) →
+      (handed : state.world.CustodyHandedOff (.resident parent.owner)) →
       ∃ after parent', CleanupRun program host state [] after ∧
         after.task = .destroyFields context address .owner rest next ∧
         after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
         (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
         parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
         parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
+        Permitted after.world .owner .owned address ∧
+        after.world.CustodyHandedOff (.resident parent.owner) ∧
         (∀ other ∈ rest, after.world.Vacant (address.child other))) :
     ∀ (before : State) (parent : Value), before.task = .destroyFields context address .owner indices next →
       indices.Nodup → before.world.Stores address parent →
+      (permission : Permitted before.world .owner .owned address) →
+      (handed : before.world.CustodyHandedOff (.resident parent.owner)) →
       ∃ trace after parent', CleanupRun program host before trace after ∧
         after.task = .finishShell address .owner next ∧ after.world.Stores address parent' ∧
         (∀ field ∈ indices, parent'.fields[field]? = some none) ∧
         (∀ field, field ∉ indices → parent'.fields[field]? = parent.fields[field]?) ∧
         parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
-        parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources := by
+        parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
+        Permitted after.world .owner .owned address ∧
+        after.world.CustodyHandedOff (.resident parent.owner) := by
   induction indices with
   | nil =>
-      intro before parent task nodup stored
+      intro before parent task nodup stored permission handed
       exact ⟨_,{ before with task := .finishShell address .owner next },parent,CleanupRun.fields_done task,rfl,
-        by simpa using stored,by simp,by intro field _; rfl,rfl,rfl,rfl,rfl,rfl⟩
+        by simpa using stored,by simp,by intro field _; rfl,rfl,rfl,rfl,rfl,rfl,
+        by simpa using permission,by simpa using handed⟩
   | cons field rest ih =>
-      intro before parent task nodup stored
+      intro before parent task nodup stored permission handed
       obtain ⟨notRest, nodupRest⟩ := List.nodup_cons.mp nodup
       have moved := CleanupRun.field_next (program := program) (host := host) (before := before) (context := context)
         (address := address) (field := field) (fields := rest) (next := next) task
       obtain ⟨scheduled, movedRun, schedTask, schedWorld⟩ : ∃ scheduled, CleanupRun program host before [] scheduled ∧
           scheduled.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) ∧
           scheduled.world = before.world := ⟨_,moved,rfl,rfl⟩
-      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, vacant⟩ :=
+      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, midPermission, midHanded, vacant⟩ :=
         step field rest scheduled (parent := parent) schedTask (by rw [schedWorld]; exact stored)
-      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq⟩ :=
-        ih middle middleParent running nodupRest midStored
+          (by rw [schedWorld]; exact permission) (by rw [schedWorld]; exact handed)
+      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, finalPermission, finalHanded⟩ :=
+        ih middle middleParent running nodupRest midStored midPermission (by rw [← midOwner] at midHanded; exact midHanded)
       refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_,
-        ownerEq.trans midOwner,headEq.trans midHead,typeEq.trans midType,liveEq.trans midLive,resEq.trans midRes⟩
+        ownerEq.trans midOwner,headEq.trans midHead,typeEq.trans midType,liveEq.trans midLive,resEq.trans midRes,
+        finalPermission,(by rw [midOwner] at finalHanded; exact finalHanded)⟩
       · intro other member
         rcases List.mem_cons.mp member with same | member
         · have notMember : other ∉ rest := by rw [same]; exact notRest
