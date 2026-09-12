@@ -570,3 +570,28 @@ This is not full relocated value typing: declaration-instantiation equivariance
 and external-referent lifetime support remain prerequisites of that theorem.
 Control-state validity, replay/cancellation and noncircular whole-machine
 soundness remain the active larger obligation.
+
+## Whole-machine resumption budgets and trace safety
+
+`ResumptionPreservation.lean` proves the quantitative suspension invariant for
+the sole executable `Step` and for arbitrary `Run`s. The actual entry contract
+now excludes duplicate, misidentified, stale-counter or inconsistently accounted
+resumption tables. A general empty-table construction establishes this input
+invariant without assuming the safety of any execution.
+
+The proof derives suspension mutations from the actual effect rules and proves
+all other step families leave the budget state unchanged. New suspensions
+cannot overwrite existing obligations. For every identity, the increase in its
+stored use count equals the number of replay events in the trace; this covers
+aliases, returning replay, last use, cancellation and identities created mid-run.
+Consequently the declared upper bound holds throughout finite executions and
+every finite prefix of divergent ones. Inactive budgets cannot replay again,
+settlement satisfies the declared quantity, and exact obligations cannot be
+canceled at a later point in a run. The invocation and divergence contracts
+consume these general preservation results without `ResourceAdmission`.
+
+General Lean proof checking was used, with no new or routinely run test examples.
+The proved settlement is of the logical budget: cancellation cleanup can still
+be pending. Full frame/environment validity, lifetime support, complete normal
+clause discharge, physical cleanup progress and noncircular whole-machine
+soundness remain unproved.

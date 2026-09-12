@@ -128,6 +128,23 @@ structure State where
   nextContinuation : Identity := 0
   deriving Repr, Inhabited
 
+/-- One logical budget belongs to the suspension identity, not to each alias
+of its handle. An inactive budget has been consumed or canceled, although
+cancellation cleanup may still be pending. An active one retains a positive
+remainder of its original finite budget. -/
+structure Suspension.Accounted (suspension : Suspension) : Prop where
+  original : suspension.original = true
+  quantity : suspension.quantity.SurfaceResumption
+  active : suspension.active = true → 0 < suspension.remaining ∧
+    suspension.quantity.upper = some (suspension.remaining + suspension.used)
+  settled : suspension.active = false → suspension.remaining = 0 ∧ suspension.quantity.Contains suspension.used
+
+structure State.ResumptionsAccounted (state : State) : Prop where
+  unique : state.resumptions.Unique
+  identity : ∀ id suspension, state.resumptions.get id = some suspension → suspension.identity = id
+  fresh : ∀ id suspension, state.resumptions.get id = some suspension → id < state.nextContinuation
+  accounted : ∀ id suspension, state.resumptions.get id = some suspension → suspension.Accounted
+
 inductive Event where
   | allocate (address : Address)
   | move (source destination : Address)

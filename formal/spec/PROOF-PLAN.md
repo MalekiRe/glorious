@@ -76,6 +76,21 @@ No post-state typing assumption is added. Full snapshot typing still requires
 declaration-instantiation equivariance and lifetime support for external
 referents; the control-state/replay/cancellation obligation remains open.
 
+`ResumptionPreservation` now establishes the quantitative control invariant
+for every actual machine-step family, every finite run and every finite prefix
+of an infinite execution. The real invocation entry contract requires unique,
+fresh, consistently identified suspension budgets; a general constructor proves
+the condition for empty initial tables. Existing budgets cannot be overwritten
+by new suspensions. Trace replay counts equal the increase of the actual table's
+use count, including identities created during the run. Replay through aliases
+therefore cannot exceed the declared upper bound; inactive budgets have lawful
+quantities and cannot be replayed again, and exact obligations cannot be
+canceled later in the run. No resource admission or typed post-state supplies
+these conclusions. This is budget/lifecycle safety, not physical cancellation
+completion or proof that every normally returning clause discharges its pending
+obligations. Frame ownership, reference-lifetime support and cleanup progress
+remain part of the same unfinished full control-state invariant.
+
 ## 2. Source and normative adequacy
 
 After the soundness foundation, prove that elaboration and observations give
