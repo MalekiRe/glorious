@@ -375,6 +375,58 @@ theorem CleanupRun.destroy_shell {program : Kernel.Program} {host : Foreign.Mode
     rfl stored (List.eq_none_of_getElem? holes) permission handed
   exact ⟨_,after,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish),rfl,rfl,written⟩
 
+/-- The nested field loop with the parent shell tracked: each scheduled child is
+destroyed by its own run (its slot left a hole, every other slot as the parent
+held it) and the loop continues with the remaining indices, so the shell reaches
+`finishShell` with exactly the scheduled fields emptied. The indices are
+duplicate-free, which is what the machine's schedule supplies (the reverse of
+`List.range`), so a slot emptied by one step is never re-opened by a later one.
+The state between the scheduling step and the child's run is reified as a
+variable, which is what lets the runs append without a record literal in the way. -/
+theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreign.Model}
+    {context : Context} {address : Address} {indices : List Nat} {next : Task}
+    (step : ∀ (field : Nat) (rest : List Nat) (state : State) {parent : Value},
+      state.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) →
+      state.world.Stores address parent →
+      ∃ after parent', CleanupRun program host state [] after ∧
+        after.task = .destroyFields context address .owner rest next ∧
+        after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
+        (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
+        (∀ other ∈ rest, after.world.Vacant (address.child other))) :
+    ∀ (before : State) (parent : Value), before.task = .destroyFields context address .owner indices next →
+      indices.Nodup → before.world.Stores address parent →
+      ∃ trace after parent', CleanupRun program host before trace after ∧
+        after.task = .finishShell address .owner next ∧ after.world.Stores address parent' ∧
+        (∀ field ∈ indices, parent'.fields[field]? = some none) ∧
+        (∀ field, field ∉ indices → parent'.fields[field]? = parent.fields[field]?) := by
+  induction indices with
+  | nil =>
+      intro before parent task nodup stored
+      exact ⟨_,{ before with task := .finishShell address .owner next },parent,CleanupRun.fields_done task,rfl,
+        by simpa using stored,by simp,by intro field _; rfl⟩
+  | cons field rest ih =>
+      intro before parent task nodup stored
+      obtain ⟨notRest, nodupRest⟩ := List.nodup_cons.mp nodup
+      have moved := CleanupRun.field_next (program := program) (host := host) (before := before) (context := context)
+        (address := address) (field := field) (fields := rest) (next := next) task
+      obtain ⟨scheduled, movedRun, schedTask, schedWorld⟩ : ∃ scheduled, CleanupRun program host before [] scheduled ∧
+          scheduled.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) ∧
+          scheduled.world = before.world := ⟨_,moved,rfl,rfl⟩
+      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, vacant⟩ :=
+        step field rest scheduled (parent := parent) schedTask (by rw [schedWorld]; exact stored)
+      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched⟩ :=
+        ih middle middleParent running nodupRest midStored
+      refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_⟩
+      · intro other member
+        rcases List.mem_cons.mp member with same | member
+        · have notMember : other ∉ rest := by rw [same]; exact notRest
+          exact (untouched other notMember).trans (by rw [same]; exact slotHole)
+        · exact holes other member
+      · intro other missing
+        have notMember : other ∉ rest := by intro member; exact missing (List.mem_cons_of_mem _ member)
+        have notHead : other ≠ field := by intro same; subst same; exact missing (by simp)
+        exact (untouched other notMember).trans (others other notHead)
+
 /-- The whole non-vacant structural destruction of one captured root, with the
 real machine steps: the captured shell is structurally destroyed field by
 field, the resident owner's custody is relinquished through the discharge
