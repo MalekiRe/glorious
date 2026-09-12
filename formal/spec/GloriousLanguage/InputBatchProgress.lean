@@ -4127,6 +4127,74 @@ theorem Kernel.Authority.carriers_lt {world : World} (valid : world.WellFormed)
       · exact ih recorded.1 carrier' later
 
 
+/-- The ordered fold of the receiver's captured shell: every pending capture is
+an owned resident input at a receiver slot, so each binding empties its own slot,
+and every slot that was already empty stays empty. This is the cleared-slot
+invariant the finishing consumes, stated with the accumulated clear list so it
+composes without any distinctness side condition. -/
+theorem Kernel.BatchPrepared.attemptFor_shell {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {receiver : Address} :
+    ∀ (world : World) (pending : List InvocationInput) (outputs : List (Binding × InvocationInput))
+      (shell : Value) (cleared : List Nat),
+      world.WellFormed →
+      BatchPrepared program footprint region world pending outputs →
+      world.Stores receiver shell → receiver.fields = [] → receiver.root < world.nextRoot →
+      (∀ slot ∈ cleared, shell.fields[slot]? = some none) →
+      (∀ input ∈ pending, input.access = .owned ∧ input.formal.IsResident ∧
+        ∃ index, input.storage = receiver.child index) →
+      ∃ environment after outcome changed,
+        BindsInputsAttemptFor program recipient activation scope region footprint world pending
+          environment after outcome ∧ after.Stores receiver changed ∧
+        changed.head = shell.head ∧ changed.owner = shell.owner ∧ changed.type = shell.type ∧
+        changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+        (∀ slot ∈ cleared, changed.fields[slot]? = some none) := by
+  intro world pending
+  induction pending generalizing world with
+  | nil =>
+      intro outputs shell cleared valid prepared stored whole frontier prior captures
+      exact ⟨[],world,.complete,shell,.nil,stored,rfl,rfl,rfl,rfl,rfl,prior⟩
+  | cons input rest ih =>
+      intro outputs shell cleared valid prepared stored whole frontier prior captures
+      have headReady : input.Ready program world := prepared.ready.member List.mem_cons_self
+      rcases BindsInputAt.success_or_exhausted valid headReady
+        (prepared.requests input List.mem_cons_self) with ⟨binding,middle,bound⟩ | exhausted
+      · have middleValid : middle.WellFormed :=
+          BindsInputAt.wellFormed (recipient := recipient) (activation := activation)
+            (scope := scope) bound valid
+        have headCapture := captures input List.mem_cons_self
+        have middleFrontier : receiver.root < middle.nextRoot :=
+          Nat.lt_of_lt_of_le frontier (BindsInputAt.nextRoot_le bound)
+        obtain ⟨index,storageAt⟩ := headCapture.2.2
+        obtain ⟨changed,middleStored,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩ :=
+          BindsInputAt.owned_capture_step bound headCapture.1 headCapture.2.1 whole
+            storageAt stored frontier
+        have middlePrior : ∀ slot ∈ index :: cleared, changed.fields[slot]? = some none := by
+          intro slot member
+          rcases List.mem_cons.mp member with same | later
+          · rw [same]; exact hole
+          · by_cases sameIndex : slot = index
+            · rw [sameIndex]; exact hole
+            · rw [others slot sameIndex]; exact prior slot later
+        have restCaptures : ∀ other ∈ rest, other.access = .owned ∧ other.formal.IsResident ∧
+            ∃ index, other.storage = receiver.child index :=
+          fun other member => captures other (List.mem_cons_of_mem input member)
+        obtain ⟨environment,after,outcome,refolded,attempt,afterStored,afterHead,afterOwner,
+          afterType,afterLive,afterResources,afterCleared⟩ :=
+          ih middle (⟨binding,input⟩ :: outputs) changed (index :: cleared) middleValid
+            (prepared.step valid middleValid bound) middleStored whole middleFrontier
+            middlePrior restCaptures
+        refine ⟨binding :: environment,after,outcome,refolded,
+          .cons prepared.ready bound attempt,afterStored,?_,?_,?_,?_,?_,?_⟩
+        · rw [afterHead,headEq]
+        · rw [afterOwner,ownerEq]
+        · rw [afterType,typeEq]
+        · rw [afterLive,liveEq]
+        · rw [afterResources,resourcesEq]
+        · intro slot member
+          exact afterCleared slot (List.mem_cons_of_mem index member)
+      · exact ⟨[],world,.exhausted,shell,.exhausted prepared.ready exhausted,stored,
+          rfl,rfl,rfl,rfl,rfl,prior⟩
+
 /-- The ordered fold also returns the receiver shell and its owner permission
 for the world it stopped at: the receiver framing is threaded through the
 induction with the per-step premises (address apartness, frontier bound and the
