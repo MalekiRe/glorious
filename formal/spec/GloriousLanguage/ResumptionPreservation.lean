@@ -1,5 +1,6 @@
 import GloriousLanguage.PointerPreservation
 import GloriousLanguage.Contracts
+import GloriousLanguage.InputAuthorityProvenance
 
 /-! The whole-machine resumption budget invariant and trace accounting.
 The transition classification below is derived from the real `Step`, never
@@ -551,11 +552,14 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
       ∀ binding ∈ contract.inputs, binding.address.root < state.world.nextRoot)
     (callerContractAuthorities : ∀ contract ∈ caller.resourceContracts,
       ∀ binding ∈ contract.inputs, binding.authority.Recorded state.world.loans)
-    /- Authority provenance is an admission condition on the invocation's own
-    inputs: `ReadyFor` derives it for resident, storage and allocation inputs,
-    but a storage-borrow input handed over through a shared backing authority
-    names no row for that backing, so the caller must supply it. -/
-    (inputAuthorities : ∀ input ∈ inputs, input.authority.Recorded state.world.loans)
+    /- Authority provenance is not a separate admission condition: each input's
+    readiness already names the rows its authority records, because a permitted
+    address names its rows (`Permitted.recorded`), an allocation input names the
+    owning row of its claim, and an erased port's handed share chain is
+    loan-headed. Only that last shape is named here, and it is the actual shape
+    the binder produces (`ClaimsStorage`/`TransfersStorageLoan` pass the
+    caller's own claim). -/
+    (inputHeaded : ∀ input ∈ inputs, input.authority.SharedHeaded)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (activationHomes : state.world.ActivationsBelow state.nextActivation)
@@ -629,7 +633,7 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
         exact callerContractAuthorities contract member
     · rw [EntrySource.authoritySupport,AuthoritySupport.recorded_map]
       intro input member
-      exact inputAuthorities input member
+      exact InvocationInput.ReadyFor.recorded (inputsTyped.2.2.2.2 input member).1 (inputHeaded input member)
   · simp [frames]
   · intros
     simp_all [Table.get]

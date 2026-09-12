@@ -313,9 +313,22 @@ cancellation storage operations (`DelimitedRoots.replayable_suspendRoots`,
 `SuspensionRetention` delegates the retention of a stored suspension's captured
 product to `ResumptionChange.retains_metadata`. No wrapper is presented as a
 completed admission: the lane deleted the unused `Suspension.Admitted` wrapper
-rather than claim it. Residual, recorded: the dead-loan frontier bound, the
-live-control/captured-root separation needed to freeze captured content across
-intervening steps, and control-region liveness plus external scoping.
+rather than claim it. The capture release closes the dead-loan frontier bound
+rather than recording it: the fresh-root frame's side condition is now the
+machine's own live-loan law (`World.loan_referent_bound`, `World.loan_referent_ne`,
+`World.exists_root_of_root`), the value's `LoansRestored` closure is threaded
+through the frame family (`Value.LoansRestored.reachable` makes it hereditary
+along the reachability graph), and `SuspensionCapture` produces the admission at
+the real suspend instructions (`EffectStep.capture_replayable` through
+`CreatesContinuation.replayable` over the actual handle allocation) plus the
+loan-table-only control-replayability transports
+(`Authority.Replayable.congr_loans`, `CreatesContinuation.controlReplayable`,
+`suspendRoots.controlReplayable`). Residual, recorded: the live-control/captured-root
+separation needed to freeze captured content across intervening steps, the
+control-replayability clause of the disposition admission (whose only real
+producer is the `MayAwait`/`Permits` chain, so it is not added to the rule),
+control-region liveness for the captured frames' owned regions, and external
+scoping of `SnapshotMap.externalReferentsScoped`.
 
 The authoritative alias contract is landed: `FieldOffset` gains the `alias`
 constructor, so an alias application's physical field offsets are its actual
@@ -345,7 +358,8 @@ no value, creating no loan and leaving every read of the resident unchanged). Th
 structure has no instance anywhere in the tree, so the field is additive and
 changes no existing definition.
 
-Post-cancellation cleanup is now executed rather than only classified:
+Post-cancellation cleanup is executed rather than only classified, on the
+non-vacant resident path as well as the cleared one:
 `CleanupExecution` proves that the machine's own `cleanupRoot`, `destroyVacant`,
 `retire`, `regionEnd` and `cleanupDone` steps actually retire every captured root
 of a cancelled suspension and then close every region it captured, reaching the
@@ -354,11 +368,65 @@ task the cancel scheduled, and connects that whole run to the real cancel rule
 provides the two `RegionCanEnd` transport facts the chain needs (ending a region
 leaves the roots, loans and reservations unchanged; retiring storage only removes
 one root's liveness and its now-empty value) and composes cleanup segments along
-their traces. The residual readiness is exact and named: the captured-root list
-is duplicate free, every captured root is live, empty and endable in the restored
-world, and every scheduled region can end there. Vacancy through the destructor
-chain for non-vacant captured residents and ending the suspension's own live
-loans first remain open.
+their traces.
+
+`CleanupDestruction` runs the destructor and loan-ending rules themselves and
+reports the state each actually produces: `destroyStructural` (a real shell with
+real fields and the nested `destroyFields` continuation in reverse index order),
+`destroyReference` (the cleared slot plus the `releaseLoan` the rule schedules),
+`destroyHook` (the destructor lease and hook entry), `Run.hook_returned` (the
+continuation the machine schedules when the hook yields: both retirements, the
+loan close and the field continuation), `CleanupRun.shell_done` (the relinquished
+write and the pending release list of the shell's owner), and the
+`releaseLoan`/`closeLoan` endings. `CleanupRun.cleanup_root_shell` composes them
+into the real chain for a captured root holding a live shell, from the `.cleanup`
+task to the relinquished write and pending release list, and
+`CleanupRun.destroy_fields_holes` executes the field loop of the structural rule.
+
+The admission products those steps consume are no longer unowned.
+`CustodyDischarge` carries the live owning claims of one custody together with
+the successor row each actually received through the entry binder's own
+`ClaimsAllocation` step (`HandedOffClaim.of_claimsAllocation`, retained across
+later insertions by `HandedOffClaim.retained`), and produces the whole-table
+`World.CustodyHandedOff` that `RelinquishesCustody`/`shellDone` consumes
+(`CustodyHandedOff.of_discharge`). The same module's `World.ReferenceFree` is the
+closed stored-value inventory that makes `ReturnsStorageLoan` and `EndsLoan`
+executable without per-step reference premises
+(`ReturnsStorageLoan.of_referenceFree`, `EndsLoan.of_referenceFree`), and it is
+retained by the actual retirements and region closures
+(`ReferenceFree.of_retires`, `ReferenceFree.of_regionEnds`).
+
+Readiness is derived rather than assumed. `World.RootClear` reads the three real
+tables (`loans`, `availability`, `roots`) instead of `CanEndStorage`, yields the
+`CanEndStorage` the retirement needs (`RootClear.canEndStorage`) and the
+`.owner .owned` permission the structural destructor needs
+(`RootClear.owner_permission`); its loan clause is itself derived from the
+endings that actually discharged a root (`RootClear.of_ended_loan`), and it is
+transported by the shell write (`RootClear.of_write`). `RegionCanEnd.of_discharged`
+likewise derives a region's readiness from the retirements and loan endings the
+cleanup performed.
+
+Residual, exact: (a) a captured value whose field stores a further resident needs
+the destructor recursion over the stored tree — each real field's own `.destroy`
+continuation is the same machine rule and is executed here, but the recursion
+across the value tree is not yet assembled; (b) the pending-return list
+`shellDone` schedules drains row by row
+(`release_storage_returned`/`release_already_ended`) and the list-to-retirement
+composition is not yet stated; (c) executing a declared drop hook's arbitrary
+body remains the whole-machine control obligation recorded by
+`CleanupPreservation`, while that path's entry and return outcomes are now
+reported here.
+
+Also landed: input authority provenance is derived rather than admitted.
+`InputAuthorityProvenance` discharges the recorded-authority condition of
+`InputsTyped` from the readiness that admitted each input
+(`InvocationInput.ReadyFor.recorded`, over `Permitted.recorded`, the allocation
+claim's owning row, and the erased port's handed chain). The one shape readiness
+cannot name — a storage port handed over through a share of a guard — is stated
+exactly as a headed-share condition (`Authority.SharedHeaded`, the shape
+`ClaimsStorage`/`TransfersStorageLoan` actually pass), and
+`InitialInvocation.of_empty_resumptions` now takes that condition in place of a
+blanket "every input's authority is recorded" hypothesis.
 
 The replay/reconstruction release adds five modules and exactly three new
 `EffectStep` constructors, all fatal-resource steps, so a failed replay does not
@@ -377,16 +445,17 @@ actual `Protect` or the real fatal-resource exhaustion steps, and executes the
 real cancel step from the source `Cancelable` admission without granting any
 extent, copy, Protect or cancellation permission. The three new constructors
 needed arms at exactly three sites, all present here. `Suspension.PhysicalAdmission`
-names the suspend-time source product that replay-time `Replayable` needs; moving
-that admission across intervening steps and the actual post-cancel cleanup
-execution remain open and are owned by the suspension and frame/cleanup lanes
-respectively.
+names the suspend-time source product that replay-time `Replayable` needs; the
+actual post-cancel cleanup execution is now constructed on the non-vacant
+resident path as recorded above, while moving that admission across intervening
+steps remains open and is owned by the suspension lane.
 
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody
 interference contract; independent initial input permissions are insufficient.
 Label and other allocation sites, remaining raw primitive progress, physical replay,
-cancellation execution and task/frame preservation/progress remain open.
+the destructor recursion over nested stored residents, the pending-return-list
+drain to retirement, and task/frame preservation/progress remain open.
 Storage preservation and source-conditional replay admission do not prove
 those obligations or replace the unfinished source resource-soundness theorem.

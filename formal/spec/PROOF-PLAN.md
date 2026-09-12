@@ -302,7 +302,15 @@ three new `EffectStep` constructors are fatal-resource only, so a failed replay
 does not consume the suspension budget, and they required new arms at exactly
 three consumer sites. `Suspension.PhysicalAdmission` names the suspend-time
 product that replay-time `Replayable` needs; carrying it across intervening
-steps and executing the post-cancel cleanup chain remain open.
+steps remains open, while the post-cancel cleanup chain is now executed (section
+1c). The capture release closes the fresh frame's dead-loan bound instead of
+recording it: the side condition is the machine's own live-loan law, the value's
+`LoansRestored` closure is threaded through the frame family and made hereditary
+along the reachability graph, `SuspensionCapture` produces the admission at the
+real suspend instructions (`EffectStep.capture_replayable` through the actual
+continuation-handle allocation) and transports delimiter control replayability
+through the capture relocation and the allocation. Captured-content freezing,
+control-region liveness and external scoping remain open.
 
 ## 1c. Post-cancellation cleanup execution
 
@@ -312,10 +320,45 @@ root and its `cleanupDone` and `regionEnd` rules then close every captured
 region, composed along the real traces, reaching the task the cancel preserved;
 `EffectStep.cancel_roots_execution` connects the real cancel rule to that run. The
 module also proves the two `RegionCanEnd` transport facts the chain needs.
-Residual readiness is exact: duplicate-free captured roots, each live, empty and
-endable in the restored world, and every scheduled region endable there.
-Remaining: vacancy through the destructor chain for non-vacant captured residents
-and ending the suspension's own live loans first.
+
+`CleanupDestruction` runs the destructor and loan-ending rules themselves and
+reports the state each actually produces: `destroyStructural` with a real shell
+and its nested `destroyFields` continuation, `destroyFields_holes` for the field
+loop, `destroyReference` with the cleared slot and the scheduled `releaseLoan`,
+`destroyHook` with the destructor lease and hook entry, `Run.hook_returned` with
+the continuation the machine schedules when the hook yields, `shell_done` with
+the relinquished write and the pending release list, and the
+`releaseLoan`/`closeLoan` endings. `CleanupRun.cleanup_root_shell` composes them
+for a captured root holding a live shell, from the `.cleanup` task to the
+relinquished write and pending release list.
+
+The admission products those rules consume are produced rather than assumed.
+`CustodyDischarge` enumerates the live owning claims of a custody with the
+successor row each received through the entry binder's own `ClaimsAllocation`
+step and yields the whole-table `World.CustodyHandedOff` consumed by
+`RelinquishesCustody`/`shellDone`; `World.ReferenceFree` is the closed
+stored-value inventory that discharges the reference premises of
+`ReturnsStorageLoan`/`EndsLoan` and is retained by the actual retirements and
+region closures. Readiness is derived: `World.RootClear` reads the three real
+tables instead of `CanEndStorage`, yields both the retirement's `CanEndStorage`
+and the destructor's `.owner .owned` permission, can itself be derived from the
+endings that discharged a root, and is transported by the shell write;
+`RegionCanEnd.of_discharged` derives a region's readiness from the retirements
+and loan endings performed.
+
+Remaining, exact: the destructor recursion over a stored resident whose field
+holds a further resident (each field's own `.destroy` continuation is the same
+machine rule and is executed here, but the recursion across the value tree is
+not assembled), the drain of the pending-return list to the retirement task, and
+the execution of a declared drop hook's arbitrary body, which is the
+whole-machine control obligation recorded by `CleanupPreservation`.
+
+Input authority provenance is derived too: `InputAuthorityProvenance` discharges
+the recorded-authority condition of `InputsTyped` from each input's own
+readiness, with the one shape readiness cannot name (an erased port handed over
+through a share of a guard) stated exactly as the headed-share condition the
+binder actually passes, and `InitialInvocation.of_empty_resumptions` now takes
+that condition instead of a blanket recorded-rows hypothesis.
 
 ## 2. Source and normative adequacy
 

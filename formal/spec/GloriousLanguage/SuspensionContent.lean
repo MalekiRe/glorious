@@ -474,15 +474,19 @@ theorem Value.InvariantClosed.fresh {program : RuntimeProgram} {before after : W
     | _ => exact closed
 
 /-- Reachability in the enlarged world maps back to the source world: no edge of
-the graph names the fresh root, because every recorded loan of a resident that is
-closed in the source has a referent below the frontier the fresh root is taken
-from and every reference edge is such a loan. -/
+the graph names the fresh root. Both kinds of edge carry the machine's own
+provenance for their loan: a reference head is covered by the value's
+`LoansRestored` closure, which the real loan-ending rules maintain by requiring
+that no resident names the loan being ended, and a resource binding is covered
+by `HeldBy`, which records a live loan. A dead row therefore never appears as an
+edge and needs no referent bound of its own. -/
 theorem Value.ReachableResident.outside {program : RuntimeProgram} {before after : World}
     {fresh : Identity} {value : Value}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
-    (closed : value.ResourcesClosed program before) :
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
+    (closed : value.ResourcesClosed program before)
+    (restored : value.LoansRestored program before) :
     ∀ {resident : Value} {current : Authority} {access : Access},
       value.ReachableResident after .owner .shared resident current access →
       value.ReachableResident before .owner .shared resident current access := by
@@ -491,7 +495,12 @@ theorem Value.ReachableResident.outside {program : RuntimeProgram} {before after
   | resident located => exact .resident located
   | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
       have foundBefore : before.loans.get parent = some loan := by simpa only [← loans] using found
-      have outside : loan.referent.root ≠ fresh := avoid parent loan foundBefore
+      obtain ⟨liveLoan,liveAt,liveLive,_⟩ :=
+        restored parent parentAuthority parentAccess ⟨carrier,ih,reference⟩
+      have same : liveLoan = loan := Option.some.inj (liveAt.symm.trans foundBefore)
+      have outside : loan.referent.root ≠ fresh := by
+        rw [← same]
+        exact avoid parent liveLoan liveAt liveLive
       have view := Authority.referenceView_same_loans loans parentAuthority parent
         (ReferenceAccess parentAccess loan.mode)
       simpa only [view] using
@@ -502,7 +511,7 @@ theorem Value.ReachableResident.outside {program : RuntimeProgram} {before after
       obtain ⟨identity,loan,found,live,referent⟩ := StorageBinding.HeldBy.referent_recorded held
       have outside : binding.address.root ≠ fresh := by
         rw [← referent]
-        exact avoid identity loan found
+        exact avoid identity loan found live
       have view := Authority.resourceView_same_loans loans current binding accessAt
       simpa only [view] using
         Value.ReachableResident.resource ih member ((World.stores_of_rows rows outside).mp stored) located
@@ -537,6 +546,20 @@ theorem Value.ResourcesClosed.reachable {program : RuntimeProgram} {world : Worl
   obtain ⟨final,finalAccess,nested⟩ := nested.rebase base acc
   exact closed child final finalAccess (prior.trans nested)
 
+/-- The restoration closure of a value is inherited by every reachable
+resident: a reference view of a resident reachable from the value is a reference
+view of the value, after rebasing both to the same base authority. -/
+theorem Value.LoansRestored.reachable {program : RuntimeProgram} {world : World}
+    {value resident : Value} {authority current : Authority} {incoming access : Access}
+    (restored : value.LoansRestored program world)
+    (reached : value.ReachableResident world authority incoming resident current access) :
+    resident.LoansRestored program world := by
+  intro identity target targetAccess view
+  obtain ⟨carrier,reachedAt,head⟩ := view
+  obtain ⟨base,acc,prior⟩ := reached.rebase .owner .shared
+  obtain ⟨mid,midAccess,nested⟩ := reachedAt.rebase base acc
+  exact restored identity mid midAccess ⟨carrier,prior.trans nested,head⟩
+
 theorem World.resident_of_rows {before after : World} {fresh : Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     {address : Address} {value : Value} (outside : address.root ≠ fresh) :
@@ -548,74 +571,85 @@ theorem World.resident_of_rows {before after : World} {fresh : Identity}
     exact ⟨root,whole,by rw [rows address.root outside]; exact found,live,generation,contents,located⟩
 
 /-- Closed resources are retained when an unrelated fresh root is added, provided
-no recorded loan names a root at or above the frontier the fresh root is taken
-from. -/
+every live recorded loan avoids that root. The reference-head arm of an
+invariant's support uses the resident's own restoration closure, so no dead row
+referent is ever consumed. -/
 theorem Value.ResourcesClosed.fresh {program : RuntimeProgram} {before after : World} {value : Value}
     {fresh : Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
-    (closed : value.ResourcesClosed program before) :
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
+    (closed : value.ResourcesClosed program before)
+    (restored : value.LoansRestored program before) :
     value.ResourcesClosed program after := by
   intro resident current access reached
-  have reachedBefore := Value.ReachableResident.outside rows loans avoid closed reached
+  have reachedBefore := Value.ReachableResident.outside rows loans avoid closed restored reached
   obtain ⟨held,declared⟩ := closed resident current access reachedBefore
   have residentClosed : resident.ResourcesClosed program before := closed.reachable reachedBefore
+  have residentRestored : resident.LoansRestored program before := restored.reachable reachedBefore
   have support : ∀ address, resident.Support before address → address.root ≠ fresh := by
     intro address supported
     obtain ⟨carrier,authorityAt,accessAt,reachedAt,reference | ⟨binding,member,same⟩⟩ := supported
     · obtain ⟨identity,loan,headAt,found,referent⟩ := reference
+      obtain ⟨currentLoan,currentAt,currentLive,_⟩ :=
+        residentRestored identity authorityAt accessAt ⟨carrier,reachedAt,headAt⟩
+      have sameLoan : currentLoan = loan := Option.some.inj (currentAt.symm.trans found)
+      subst sameLoan
       rw [← referent]
-      exact avoid identity loan found
+      exact avoid identity currentLoan currentAt currentLive
     · have carrierClosed : carrier.ResourcesClosed program before :=
         Value.ResourcesClosed.reachable (closed := residentClosed) (reached := reachedAt)
       obtain ⟨identity,loan,found,live,referent⟩ := StorageBinding.HeldBy.referent_recorded
         ((carrierClosed carrier .owner .shared (.resident .root)).1 binding member)
       rw [← same,← referent]
-      exact avoid identity loan found
+      exact avoid identity loan found live
   refine ⟨fun binding member => StorageBinding.HeldBy.fresh rows loans ?_ (held binding member),?_⟩
   · obtain ⟨identity,loan,found,live,referent⟩ := StorageBinding.HeldBy.referent_recorded (held binding member)
     rw [← referent]
-    exact avoid identity loan found
+    exact avoid identity loan found live
   · exact Value.InvariantClosed.fresh rows support declared
 
 theorem Value.LoansRestored.fresh {program : RuntimeProgram} {before after : World} {value : Value}
     {fresh : Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
     (closed : value.ResourcesClosed program before)
     (restored : value.LoansRestored program before) :
     value.LoansRestored program after := by
   intro identity authority access reached
   obtain ⟨resident,reachedAt,head⟩ := reached
+  have carrierBefore := Value.ReachableResident.outside rows loans avoid closed restored reachedAt
   obtain ⟨loan,found,live,initialized,referentClosed⟩ :=
-    restored identity authority access
-      ⟨resident,Value.ReachableResident.outside rows loans avoid closed reachedAt,head⟩
-  have outside : loan.referent.root ≠ fresh := avoid identity loan found
+    restored identity authority access ⟨resident,carrierBefore,head⟩
+  have outside : loan.referent.root ≠ fresh := avoid identity loan found live
   obtain ⟨target,stored,ready⟩ := initialized
   refine ⟨loan,by rw [loans]; exact found,live,⟨target,(World.stores_of_rows rows outside).mpr stored,ready⟩,?_⟩
   intro referent referentStored
+  have referentBefore : before.Stores loan.referent referent :=
+    (World.stores_of_rows rows outside).mp referentStored
+  have referentRestored : referent.LoansRestored program before :=
+    restored.reachable (Value.ReachableResident.referent carrierBefore head found referentBefore ResidentAt.root)
   exact Value.ResourcesClosed.fresh rows loans avoid
-    (referentClosed referent ((World.stores_of_rows rows outside).mp referentStored))
+    (referentClosed referent referentBefore) referentRestored
 
 theorem World.ResourcesClosed.fresh {program : RuntimeProgram} {before after : World} {fresh : Identity}
     {address : Address}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
     (outside : address.root ≠ fresh) (closed : World.ResourcesClosed program before address) :
     World.ResourcesClosed program after address := by
   intro value stored
   obtain ⟨resources,restored⟩ := closed value ((World.stores_of_rows rows outside).mp stored)
-  exact ⟨Value.ResourcesClosed.fresh rows loans avoid resources,
+  exact ⟨Value.ResourcesClosed.fresh rows loans avoid resources restored,
     Value.LoansRestored.fresh rows loans avoid resources restored⟩
 
 theorem Suspensible.fresh {program : RuntimeProgram} {before after : World} {fresh : Identity}
     {roots : List Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
     (outside : fresh ∉ roots)
     (suspensible : Suspensible program before roots) :
     Suspensible program after roots := by
@@ -629,7 +663,7 @@ theorem Suspensible.fresh {program : RuntimeProgram} {before after : World} {fre
       · exact Or.inr ⟨address,value,member,
           (World.resident_of_rows rows (fun same => outside (same ▸ member))).mp resident,head⟩
     obtain ⟨initialized,closed⟩ := suspensible.1 id loan foundBefore live kind touchedBefore
-    have referentOutside : loan.referent.root ≠ fresh := avoid id loan foundBefore
+    have referentOutside : loan.referent.root ≠ fresh := avoid id loan foundBefore live
     obtain ⟨value,stored,ready⟩ := initialized
     exact ⟨⟨value,(World.stores_of_rows rows referentOutside).mpr stored,ready⟩,
       World.ResourcesClosed.fresh rows loans avoid referentOutside closed⟩
@@ -637,14 +671,14 @@ theorem Suspensible.fresh {program : RuntimeProgram} {before after : World} {fre
     have outside' : address.root ≠ fresh := fun same => outside (same ▸ member)
     obtain ⟨closed,restored⟩ := suspensible.2 address value member
       ((World.resident_of_rows rows outside').mp resident)
-    exact ⟨Value.ResourcesClosed.fresh rows loans avoid closed,
+    exact ⟨Value.ResourcesClosed.fresh rows loans avoid closed restored,
       Value.LoansRestored.fresh rows loans avoid closed restored⟩
 
 theorem Replayable.fresh {program : RuntimeProgram} {before after : World} {fresh : Identity}
     {roots : List Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans)
-    (avoid : ∀ id loan, before.loans.get id = some loan → loan.referent.root ≠ fresh)
+    (avoid : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.referent.root ≠ fresh)
     (outside : fresh ∉ roots)
     (replayable : Replayable program before roots) :
     Replayable program after roots := by
@@ -663,6 +697,32 @@ theorem Replayable.fresh {program : RuntimeProgram} {before after : World} {fres
 -- above the frontier are absent, and the machine's own allocation and write move
 -- no other identity. ForeignRootFraming proves the same two framing lemmas, but
 -- that module does not currently build in main, so they are reproved here.
+
+/-- A live root read is backed by a row of the actual root table; this is the
+only projection the loan law needs. -/
+theorem World.exists_root_of_root {world : World} {address : Address} {value : Root}
+    (found : world.root address = some value) : ∃ root, world.roots.get address.root = some root := by
+  unfold World.root at found
+  exact (Option.bind_eq_some_iff.mp found).imp fun _ selected => selected.1
+
+/-- The machine's own loan law, consumed as the fresh frame's side condition: a
+live recorded loan has a stored referent, hence a referent root below the current
+frontier. Dead rows carry no frontier law, and none is needed: neither kind of
+edge of a closed value's graph names one. -/
+theorem World.loan_referent_bound {world : World} (well : world.WellFormed)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) (live : loan.live = true) :
+    loan.referent.root < world.nextRoot := by
+  obtain ⟨value,rooted⟩ := Option.isSome_iff_exists.mp
+    ((well.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.2 live).2
+  obtain ⟨root,rootAt⟩ := World.exists_root_of_root rooted
+  exact World.root_bound well rootAt
+
+/-- A live loan's referent also avoids every identity at or above the frontier,
+which is exactly the side condition of the fresh-root frame. -/
+theorem World.loan_referent_ne {world : World} (well : world.WellFormed)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) (live : loan.live = true)
+    {fresh : Identity} (above : world.nextRoot ≤ fresh) : loan.referent.root ≠ fresh :=
+  Nat.ne_of_lt (Nat.lt_of_lt_of_le (World.loan_referent_bound well found live) above)
 
 /-- Rows above the allocation frontier are absent, so adding the fresh root
 leaves every other identity untouched. -/

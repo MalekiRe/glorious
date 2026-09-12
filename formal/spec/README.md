@@ -231,7 +231,39 @@ or a dependency of this project.
   copied/external graph proof derives nominal closure and transitive reference
   restoration, retaining old external allocation ownership. Actual copied
   roots inherit suspension/replay admission and source-admitted cancellation.
-  Construction of a physical replay and cancellation execution remain open.
+  Construction of a physical replay remains open; the post-cancel cleanup
+  execution is now constructed (below).
+- `CustodyDischarge`, `CleanupDestruction`: the two admission products the
+  cleanup rules consume are produced rather than assumed — the discharge
+  inventory enumerates a custody's live owning claims with the successor row
+  each received through the entry binder's own `ClaimsAllocation` step and
+  yields the whole-table `World.CustodyHandedOff` that
+  `RelinquishesCustody`/`shellDone` needs, and `World.ReferenceFree` is the
+  closed stored-value inventory that discharges the reference premises of
+  `ReturnsStorageLoan`/`EndsLoan`, retained by the actual retirements and
+  region closures. `CleanupDestruction` runs the destructor and loan-ending
+  rules themselves (structural, reference and declared-hook dispatch, the
+  field loop, `shellDone`, the endings) and reports each actual outcome, and
+  `CleanupRun.cleanup_root_shell` composes them for a captured root holding a
+  live shell. Readiness is derived: `World.RootClear` reads the real
+  `loans`/`availability`/`roots` tables instead of `CanEndStorage` and yields
+  both the retirement's endability and the destructor's owning permission, its
+  loan clause follows from the endings that discharged a root, and
+  `RegionCanEnd.of_discharged` derives a region's readiness from the
+  retirements and endings performed. The destructor recursion over nested
+  stored residents, the pending-return-list drain to retirement, and arbitrary
+  drop-hook body execution remain open.
+- `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
+  is discharged from each input's own readiness (permitted rows, the allocation
+  claim's owning row, the erased port's handed chain), with the one shape
+  readiness cannot name stated exactly as the headed-share condition the binder
+  passes; `InitialInvocation.of_empty_resumptions` consumes that instead of a
+  blanket recorded-rows hypothesis.
+- `SuspensionCapture`: the suspend-time capture admission produced from the real
+  suspend instructions and the actual continuation-handle allocation, with the
+  fresh frame's side condition taken from the machine's live-loan law and the
+  value's restoration closure made hereditary; captured-content freezing across
+  intervening steps, control-region liveness and external scoping remain open.
 - `BulkMovePreservation`, `MemoryPreservation`, `ForeignPreservation`,
   `SemanticPreservation`: real resident snapshots, raw custody and indexed host
   transactions compose into storage preservation for every actual step/run and
@@ -270,10 +302,10 @@ inventory rather than accepting a separately supplied unrelated AST.
 Use the pinned toolchain to build the changed proof targets by name, for example
 the current recovered checkpoint
 
-`lake build GloriousLanguage.CleanupExecution GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
+`lake build GloriousLanguage.CleanupExecution GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.CustodyDischarge GloriousLanguage.CleanupDestruction GloriousLanguage.InputAuthorityProvenance GloriousLanguage.SuspensionCapture GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 
-which passes 225 jobs (the same list without the two compatibility modules
-passes 224); the four frame consumers alone check as 80 jobs. Warnings are errors and implicit identifier creation is
+which passes 232 jobs from a fresh source-only tree. The four frame consumers
+alone check as 80 jobs. Warnings are errors and implicit identifier creation is
 disabled. The default aggregate also includes the preserved `Checks`; examples
 are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed
@@ -281,10 +313,13 @@ specification.
 
 The whole library is not green and is not claimed to be. Named targets that
 currently fail at this revision are `BasicChecks`, `BindingChecks`,
-`ExecutionChecks`, `ControlChecks`, `PreservationChecks`, `SourceChecks`,
-`AllocationLayout`, `FunctionEntryContextTyping` and `ScalarMachine`; they are
-stale consumers outside the checked dependency graph and are not evidence for
-or against the recovered boundary. `PublicValues`, `RuntimeWorldEquivariance`,
+`BorrowChecks`, `ExecutionChecks`, `ControlChecks`, `PreservationChecks`,
+`SourceChecks`, `AllocationLayout`, `FunctionEntryContextTyping`,
+`ScalarMachine`, `DropDispatch`, `ForeignRootFraming` and
+`InvocationLeaseCleanup`; they are stale consumers of earlier storage/task
+shapes, outside the checked dependency graph, and are not evidence for
+or against the recovered boundary. That failing set is unchanged from the
+pristine revision this checkpoint was composed on. `PublicValues`, `RuntimeWorldEquivariance`,
 `CleanupPreservation`, `ForeignEvolution`, `InvocationLending` and
 `ResumptionPreservation` left that list: each was migrated to the current
 storage, task, entry-attempt and public-observation shapes and now check inside

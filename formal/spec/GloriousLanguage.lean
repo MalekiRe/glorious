@@ -4,6 +4,9 @@ import GloriousLanguage.ScalarPreservation
 import GloriousLanguage.ConversionPreservation
 import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.CleanupExecution
+import GloriousLanguage.CustodyDischarge
+import GloriousLanguage.CleanupDestruction
+import GloriousLanguage.InputAuthorityProvenance
 import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.CopyResourcePreservation
@@ -21,6 +24,7 @@ import GloriousLanguage.SnapshotReplayConstruction
 import GloriousLanguage.SnapshotReplayProgress
 import GloriousLanguage.SuspensionContent
 import GloriousLanguage.SuspensionRetention
+import GloriousLanguage.SuspensionCapture
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
