@@ -40,8 +40,9 @@ private theorem resolved : ResolvesPlace world context.environment ⟨17,[]⟩ s
   intro other member _
   simpa [context] using member
 
-private theorem transferred : Transfers world .owner source destination moved := by
-  refine .move (value := witness) (cleared := cleared) rfl initialized ?_ ?_ ?_ rfl rfl
+private theorem transferred (program : Language.Program) : Transfers program world .owner source destination moved := by
+  refine .move (value := witness) (cleared := cleared) rfl initialized ?_ ?_ ?_
+    ⟨0,.root (root := vacant) (id := 11) rfl rfl⟩ rfl rfl
   · refine ⟨⟨home,rfl⟩,?_⟩
     intro id loan found
     simp [world, Table.get] at found
@@ -55,7 +56,7 @@ example (program : Kernel.Program) :
       { world := world, task := .atom context destination (.available ⟨17,[]⟩) .abort }
       (some (.move source destination))
       { world := moved, task := .run context .abort } :=
-  .available rfl resolved rfl rfl transferred
+  .available rfl resolved rfl rfl (transferred _)
 
 example (program : Kernel.Program) :
     Typing.AtomType program ⟨default,[⟨17,witnessType,false⟩],[],.row [] [],none⟩

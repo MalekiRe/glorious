@@ -166,7 +166,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       before.task = .atom context destination (.available place) next →
       ResolvesPlace before.world context.environment place source authority →
       before.world.Stores source value → value.head = .available id →
-      Transfers before.world authority source destination after →
+      Transfers program.declarations before.world authority source destination after →
       ControlStep program before (some (.move source destination)) { before with world := after, task := .run context next }
   | closeAvailable {before context place next address authority value id} :
       before.task = .run context (.closeAvailable place next) → ResolvesPlace before.world context.environment place address authority →
@@ -230,7 +230,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
   | bindings {before context destination place id next source authority value after} : before.task = .atom context destination (.bindings place) next →
       ResolvesPlace before.world context.environment place source authority →
       before.world.Stores source value → value.head = .bindings id →
-      Transfers before.world authority source destination after →
+      Transfers program.declarations before.world authority source destination after →
       ControlStep program before (some (.move source destination)) { before with world := after, task := .run context next }
 
 /-- This is the sole executable transition relation consumed by typing,

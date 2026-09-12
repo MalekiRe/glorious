@@ -54,8 +54,8 @@ example (program : Kernel.Program) (binding : RuntimeBinding)
       { world := world, task := .primitive context destination binding [] [⟨source,.shared .owner⟩] .abort } :=
   .primitive rfl member rfl operands (by simp [safe])
 
-private theorem noSharedTransfer {world : World} {source destination : Address} {backing : Authority} {after : World} :
-    ¬ Transfers world (.shared backing) source destination after := by
+private theorem noSharedTransfer {program : Language.Program} {world : World} {source destination : Address} {backing : Authority} {after : World} :
+    ¬ Transfers program world (.shared backing) source destination after := by
   intro transfer
   cases shared_authority_cannot_strengthen transfer.permission
 
@@ -102,7 +102,8 @@ example (program : Language.Program) :
     NewValue program world destination (.tuple [.unit]) .tuple [⟨source,.owner⟩] packed := by
   refine .construct (before := world) (destination := destination) (sources := [⟨source,.owner⟩])
     (taken := cleared) (residents := [unitValue])
-    ⟨emptyRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ (.cons rfl .nil) ?_ (by simp) ?_ (.cons rfl .nil) rfl
+    ⟨emptyRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := emptyRoot) (id := 1) rfl rfl⟩
+    (.cons rfl .nil) ?_ (by simp) ?_ (.cons rfl .nil) rfl
   · intro resident member
     simp at member
     subst resident
@@ -120,7 +121,7 @@ example (program : Language.Program) (world after : World) (parent destination :
       [⟨parent,authority⟩,⟨parent.child index,authority⟩] after := by
   intro constructed
   cases constructed with
-  | construct _ _ _ disjoint _ _ _ =>
+  | construct _ _ _ _ disjoint _ _ _ =>
       have apart := (List.pairwise_cons.mp disjoint).1 ⟨parent.child index,authority⟩ (by simp)
       exact apart ⟨rfl,rfl,Or.inr ⟨[index],rfl⟩⟩
 
@@ -209,7 +210,8 @@ example (program : Language.Program) :
     exact conflict (Or.inr rfl)
   · refine .construct (before := loanWorld) (destination := destination) (sources := [⟨source,.loan 0⟩])
       (taken := loanCleared) (residents := [unitValue])
-      ⟨emptyRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ (.cons rfl .nil) ?_ (by simp) ?_ (.cons rfl .nil) rfl
+      ⟨emptyRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := emptyRoot) (id := 1) rfl rfl⟩
+      (.cons rfl .nil) ?_ (by simp) ?_ (.cons rfl .nil) rfl
     · intro resident member
       simp at member
       subst resident

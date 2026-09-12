@@ -170,7 +170,7 @@ mutual
         FieldsTyped program world fields types → ValueTyped program world (.resident owner type head live fields)
     | reference {owner mode region type id loan live} : world.loans.get id = some loan → loan.live = true → loan.mode = mode →
         region = .runtimeRegion loan.region →
-        (∃ value, world.Stores loan.referent value ∧ value.type = type) →
+        AddressType program.declarations world loan.referent type →
         ValueTyped program world (.resident owner (.reference mode region type) (.reference id) live [])
     | pointer {owner mode type pointer live} : pointer.address < 2^program.declarations.input.target.pointerBits →
         ValueTyped program world (.resident owner (.rawPointer mode type) (.pointer pointer) live [])

@@ -111,7 +111,7 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
   | result {before context destination binding operands state next imported contract observation after result nextState transferred} :
       before.task = .foreign context destination binding operands state next → Selected program model binding imported contract →
       model.step binding.declaration before.world operands state observation after (.result result) nextState →
-      Transfers after .owner result destination transferred →
+      Transfers program.declarations after .owner result destination transferred →
       Step program model before (some (.host imported.symbol state observation))
         { before with world := transferred, task := .run context next }
   | callback {before context destination binding operands state next imported contract observation after id arguments inputs nextState function} :

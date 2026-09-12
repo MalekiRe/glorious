@@ -23,37 +23,6 @@ structure RuntimeAddresses where
   continuation : Identity → Nat
   codeIdentity : Identity
 
-inductive FieldOffset (program : Language.Program) (world : World) :
-    Address → Term → Nat → Term → Nat → Prop where
-  | tuple {address fields index type layouts layout offset} : fields[index]? = some type →
-      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
-      layout.offsets[index]? = some offset → FieldOffset program world address (.tuple fields) index type offset
-  | bindings {address brand region fields index type layouts layout offset} : fields[index]? = some type →
-      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
-      layout.offsets[index]? = some offset → FieldOffset program world address (.bindings brand region fields) index type offset
-  | callable {address id arguments fields index type layouts layout offset} : CallableFields program id arguments fields →
-      fields[index]? = some type → ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts →
-      AggregateLayout (program.input.target.codeIdentityLayout :: layouts) layout →
-      layout.offsets[index+1]? = some offset → FieldOffset program world address (.callable id arguments) index type offset
-  | array {address element sign width count index layout} : 0 ≤ count → index < count.toNat →
-      LayoutOf program ⟨[],[],0,default,false⟩ element layout →
-      FieldOffset program world address (.array element (.constant (.integer sign width count))) index element
-        (index * alignUp layout.size layout.alignment)
-  | nominal {address id arguments data variant substitution types index type layout offset value} :
-      program.Constructor variant.header.id data variant → data.header.id = id →
-      Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
-      types[index]? = some type → LayoutOf program ⟨[],[],0,data.header.module,false⟩ (.nominal id arguments) layout →
-      world.Stores address value → value.head = .constructor variant.header.id →
-      (data.isEnum = false ∧ layout.offsets[index]? = some offset ∨
-        ∃ (tag : Nat) (offsets : List Nat), data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
-      FieldOffset program world address (.nominal id arguments) index type offset
-
-inductive AddressOffset (program : Language.Program) (world : World) : Address → Term → Nat → Prop where
-  | root {id root} : world.roots.get id = some root → root.live = true →
-      AddressOffset program world ⟨id,root.generation,[]⟩ root.type 0
-  | child {address container offset index type childOffset} : AddressOffset program world address container offset →
-      FieldOffset program world address container index type childOffset →
-      AddressOffset program world (address.child index) type (offset+childOffset)
 
 def PhysicalAddress (program : Language.Program) (world : World) (address : Address) (type : Term) (physical : Nat) : Prop :=
   Addressable program ⟨[],[],0,default,false⟩ type ∧
@@ -181,13 +150,13 @@ inductive RawRead (program : Language.Program) : World → RawPointer → Term �
   | read {before pointer type copy source destination after layout} : PointsTo program before pointer source type →
       LayoutOf program ⟨[],[],0,default,true⟩ type layout → RawRange program before pointer layout.size layout.alignment →
       (copy = true ∧ Copies program before .owner source destination after ∨
-        copy = false ∧ Transfers before .owner source destination after) →
+        copy = false ∧ Transfers program before .owner source destination after) →
       RawRead program before pointer type copy destination after
 
 inductive RawWrite (program : Language.Program) : World → Authority → Address → RawPointer → Term → World → Prop where
   | write {before authority source pointer type destination after layout value} : before.Stores source value → value.type = type →
       PointsTo program before pointer destination type → LayoutOf program ⟨[],[],0,default,true⟩ type layout →
-      RawRange program before pointer layout.size layout.alignment → Transfers before authority source destination after →
+      RawRange program before pointer layout.size layout.alignment → Transfers program before authority source destination after →
       RawWrite program before authority source pointer type after
 
 inductive RawBorrow (program : Language.Program) :

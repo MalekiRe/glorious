@@ -158,7 +158,7 @@ def Temporary (program : Kernel.Program) (context : Context) (type : Term)
 def Protect (program : Kernel.Program) (outer : Context) (before : World)
     (source : Address) (authority : Authority) (destination : Address) (after : World) : Prop :=
   ∃ value allocated, before.Stores source value ∧ Temporary program outer value.type before destination allocated ∧
-    Transfers allocated authority source destination after
+    Transfers program.declarations allocated authority source destination after
 
 /-- Ordered by-value handoff. The new homes are owned only after transferring
 each input under its retained authority; source evaluation has already done
@@ -269,7 +269,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       Permitted before.world permission .unique target → ¬ target.Overlaps value →
       LocalStep program before none { before with task := .destroy context target permission (.transfer value authority target (.run context next)) }
   | transfer {before source authority destination next after} : before.task = .transfer source authority destination next →
-      Transfers before.world authority source destination after →
+      Transfers program.declarations before.world authority source destination after →
       LocalStep program before (some (.move source destination)) { before with world := after, task := next }
   | invoke {before context lexical result call next destination allocated layout} :
       before.task = .run context (.invoke lexical call next) → result = context.local lexical →
@@ -297,7 +297,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       (∀ input ∈ inputs, input.access ≠ .owned → input.storage.root ∉ roots) →
       LocalStep program before (some (.tail caller.activation context.activation)) { before with world := after, task := .cleanup caller roots (CloseRegions regions (.run context function.body)), frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation outer context.activation context.region :: rest, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
   | bindReturn {before context value caller destination next rest after} : before.task = .yield context value →
-      before.frames = .binding caller destination next :: rest → Transfers before.world .owner value destination after →
+      before.frames = .binding caller destination next :: rest → Transfers program.declarations before.world .owner value destination after →
       LocalStep program before (some (.move value destination))
         { before with world := after, task := .retire value.root (.run caller next), frames := rest }
   | activationReturn {before context value outer activation region rest kept after roots} :

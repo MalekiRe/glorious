@@ -118,7 +118,7 @@ private theorem borrowHandle (program : Language.Program) :
     Borrows program allocated .owner .shared 0 source handle borrowed := by
   refine .borrow (before := allocated) (authority := .owner) (mode := .shared) (region := 0)
     (referent := source) (destination := handle) (value := unitValue) (parent := none) rfl (fun _ => unitInitialized)
-    (by decide) .unit ?_ ⟨handleRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ rfl rfl
+    (by decide) .unit ?_ ⟨handleRoot,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := handleRoot) (id := 1) rfl rfl⟩ rfl rfl
   refine ⟨⟨sourceRoot,rfl⟩,?_⟩
   intro id loan found
   simp [allocated, world, Table.get] at found
@@ -142,7 +142,8 @@ example {program : Kernel.Program} (pointer : program.declarations.input.target.
 example (program : Kernel.Program) :
     borrowed.Stores handle referenceValue ∧ Typing.ValueTyped program borrowed referenceValue := by
   refine ⟨rfl,?_⟩
-  exact .reference (loan := ⟨0,none,source,.shared,0,true⟩) rfl rfl rfl rfl ⟨unitValue,rfl,rfl⟩
+  exact .reference (loan := ⟨0,none,source,.shared,0,true⟩) rfl rfl rfl rfl
+    ⟨0,.root (root := sourceRoot) (id := 0) rfl rfl⟩
 
 example (program : Kernel.Program) :
     Typing.PatternType program.declarations ⟨[],[],0,default,false⟩

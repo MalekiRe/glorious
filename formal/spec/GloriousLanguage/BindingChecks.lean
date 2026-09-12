@@ -49,16 +49,16 @@ private theorem readable (access : Access) : Permitted world .owner access sourc
   intro id loan found
   simp [world, Table.get] at found
 
-private theorem transferResult : Transfers world .owner source destination moved := by
+private theorem transferResult (program : Language.Program) : Transfers program world .owner source destination moved := by
   refine .move (value := resultValue) (cleared := cleared) rfl resultInitialized (readable .owned)
-    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ?_ rfl rfl
+    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ?_ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩ rfl rfl
   simp [source, destination, Address.Overlaps]
 
 /-- The pack's field is at the new carrier's child path. No address metadata
 needs rewriting, and the old field address no longer reads a resident. -/
-example : Transfers world .owner source destination moved ∧
+example (program : Language.Program) : Transfers program world .owner source destination moved ∧
     moved.Stores ((destination.child 0).child 0) fieldValue ∧
-    moved.read ((source.child 0).child 0) = none := ⟨transferResult,rfl,rfl⟩
+    moved.read ((source.child 0).child 0) = none := ⟨transferResult program,rfl,rfl⟩
 
 example : Contracts.Guard.Holds moved (.pattern 10 50 true) := by
   refine ⟨destination.child 0,packValue,metadata,?_,rfl,rfl,by simp [metadata]⟩
@@ -100,7 +100,7 @@ example {program : Language.Program} (model : CapabilityModel program) :
     Copies program world .owner source destination copiedWorld := by
   exact .copy (before := world) (source := source) (destination := destination)
     (value := resultValue) (cloned := copiedResult) rfl resultInitialized (readable .shared)
-    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ (copyResult model) rfl
+    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩ (copyResult model) rfl
 
 example : Contracts.Guard.Holds copiedWorld (.pattern 20 50 true) := by
   refine ⟨destination.child 0,copiedPack,copiedMetadata,?_,rfl,rfl,by simp [copiedMetadata]⟩

@@ -219,6 +219,44 @@ def World.Resident (world : World) (address : Address) (value : Value) : Prop :=
 def World.References (world : World) (identity : Identity) : Prop :=
   ∃ address value, world.Resident address value ∧ value.head = .reference identity
 
+inductive FieldOffset (program : Language.Program) (world : World) :
+    Address → Term → Nat → Term → Nat → Prop where
+  | tuple {address fields index type layouts layout offset} : fields[index]? = some type →
+      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
+      layout.offsets[index]? = some offset → FieldOffset program world address (.tuple fields) index type offset
+  | bindings {address brand region fields index type layouts layout offset} : fields[index]? = some type →
+      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
+      layout.offsets[index]? = some offset → FieldOffset program world address (.bindings brand region fields) index type offset
+  | callable {address id arguments fields index type layouts layout offset} : CallableFields program id arguments fields →
+      fields[index]? = some type → ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts →
+      AggregateLayout (program.input.target.codeIdentityLayout :: layouts) layout →
+      layout.offsets[index+1]? = some offset → FieldOffset program world address (.callable id arguments) index type offset
+  | array {address element sign width count index layout} : 0 ≤ count → index < count.toNat →
+      LayoutOf program ⟨[],[],0,default,false⟩ element layout →
+      FieldOffset program world address (.array element (.constant (.integer sign width count))) index element
+        (index * alignUp layout.size layout.alignment)
+  | nominal {address id arguments data variant substitution types index type layout offset value} :
+      program.Constructor variant.header.id data variant → data.header.id = id →
+      Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
+      types[index]? = some type → LayoutOf program ⟨[],[],0,data.header.module,false⟩ (.nominal id arguments) layout →
+      world.Stores address value → value.head = .constructor variant.header.id →
+      (data.isEnum = false ∧ layout.offsets[index]? = some offset ∨
+        ∃ (tag : Nat) (offsets : List Nat), data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
+      FieldOffset program world address (.nominal id arguments) index type offset
+
+inductive AddressOffset (program : Language.Program) (world : World) : Address → Term → Nat → Prop where
+  | root {id root} : world.roots.get id = some root → root.live = true →
+      AddressOffset program world ⟨id,root.generation,[]⟩ root.type 0
+  | child {address container offset index type childOffset} : AddressOffset program world address container offset →
+      FieldOffset program world address container index type childOffset →
+      AddressOffset program world (address.child index) type (offset+childOffset)
+
+/-- The declared location type survives a vacant resident. This is a view of
+the same address-layout derivation used by physical addressing, not a second
+field-shape walker or a guess based on initialized contents. -/
+def AddressType (program : Program) (world : World) (address : Address) (type : Term) : Prop :=
+  ∃ offset, AddressOffset program world address type offset
+
 inductive AncestorLoan (world : World) : Identity → Identity → Prop where
   | refl {identity} : AncestorLoan world identity identity
   | parent {ancestor parent child loan} : world.loans.get child = some loan → loan.parent = some parent →
@@ -360,6 +398,7 @@ inductive Clears : World → List Address → World → Prop where
 
 inductive NewValue (program : Program) : World → Address → Term → ValueHead → List ResolvedPlace → World → Prop where
   | construct {before destination type head sources residents taken after} : before.Vacant destination →
+      AddressType program before destination type →
       ListRel (fun source value => before.Stores source.address value) sources residents →
       (∀ resident ∈ residents, resident.Initialized) →
       sources.Pairwise (fun left right => ¬ left.address.Overlaps right.address) →
@@ -368,15 +407,16 @@ inductive NewValue (program : Program) : World → Address → Term → ValueHea
       taken.write destination (some (.resident before.nextOwner type head true (residents.map some))) = some after →
       NewValue program before destination type head sources { after with nextOwner := before.nextOwner+1 }
 
-inductive Transfers : World → Authority → Address → Address → World → Prop where
+inductive Transfers (program : Program) : World → Authority → Address → Address → World → Prop where
   | move {before authority source destination value cleared after} :
       before.Stores source value → value.Initialized → Permitted before authority .owned source →
       before.Vacant destination → ¬ source.Overlaps destination →
+      AddressType program before destination value.type →
       before.write source none = some cleared → cleared.write destination (some value) = some after →
-      Transfers before authority source destination after
+      Transfers program before authority source destination after
 
-theorem Transfers.permission {before authority source destination after}
-    (transfer : Transfers before authority source destination after) :
+theorem Transfers.permission {program before authority source destination after}
+    (transfer : Transfers program before authority source destination after) :
     Permitted before authority .owned source := by cases transfer; assumption
 
 theorem NewValue.inputPermission {program before destination type head sources after}
@@ -384,22 +424,23 @@ theorem NewValue.inputPermission {program before destination type head sources a
     {source : ResolvedPlace} (member : source ∈ sources) :
     Permitted before source.authority .owned source.address := by
   cases constructed with
-  | construct _ _ _ _ permissions _ _ => exact (permissions source member).1
+  | construct _ _ _ _ _ permissions _ _ => exact (permissions source member).1
 
 inductive Copies (program : Program) : World → Authority → Address → Address → World → Prop where
   | copy {before authority source destination value cloned next after} :
       before.Stores source value → value.Initialized → Permitted before authority .shared source →
-      before.Vacant destination → CopyValue program before.nextOwner value next cloned →
+      before.Vacant destination → AddressType program before destination value.type →
+      CopyValue program before.nextOwner value next cloned →
       before.write destination (some cloned) = some after →
       Copies program before authority source destination { after with nextOwner := next }
 
 inductive Acquires (program : Program) : World → Authority → Bool → Address → Address → World → Prop where
-  | explicitMove {before authority source destination after} : Transfers before authority source destination after →
+  | explicitMove {before authority source destination after} : Transfers program before authority source destination after →
       Acquires program before authority true source destination after
   | copy {before authority source destination after} : Copies program before authority source destination after →
       Acquires program before authority false source destination after
   | move {before authority source destination after value principal} : before.Stores source value →
-      PrincipalOf program value.type principal → principal ≠ .duplicable → Transfers before authority source destination after →
+      PrincipalOf program value.type principal → principal ≠ .duplicable → Transfers program before authority source destination after →
       Acquires program before authority false source destination after
 
 inductive Borrows (program : Program) :
@@ -410,6 +451,7 @@ inductive Borrows (program : Program) :
       Addressable program ⟨[],[],0,default,false⟩ value.type →
       Permitted before authority (if mode = .shared then .shared else .unique) referent →
       before.Vacant destination →
+      AddressType program before destination (.reference mode (.runtimeRegion region) value.type) →
       parent = authority.parentLoan →
       before.write destination (some (.resident before.nextOwner
         (.reference mode (.runtimeRegion region) value.type) (.reference before.nextLoan) true [])) = some after →
@@ -492,11 +534,11 @@ theorem hole_cannot_end {before after : World} {id loan}
     subst same
     exact hole initialized
 
-theorem move_preserves_owner {before after : World} {authority source destination value}
-    (found : before.Stores source value) (moved : Transfers before authority source destination after) :
+theorem move_preserves_owner {program : Program} {before after : World} {authority source destination value}
+    (found : before.Stores source value) (moved : Transfers program before authority source destination after) :
     ∃ cleared, before.write source none = some cleared ∧ cleared.write destination (some value) = some after := by
   cases moved with
-  | move selected _ _ _ _ clear install =>
+  | move selected _ _ _ _ _ clear install =>
     have same := Option.some.inj (found.symm.trans selected)
     subst same
     exact ⟨_,clear,install⟩

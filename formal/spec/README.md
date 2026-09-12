@@ -8,10 +8,12 @@ language rules as application code. Machine and foreign boundaries are
 explicit contracts.
 
 Status: initial whole-specification draft, in its semantic repair pass.
-The latest complete `lake build` passes (36 build jobs), including source
+The latest complete `lake build` passes (38 build jobs), including source
 elaboration, origins, the aggregate and `Checks`, with warnings as errors
 and implicit identifier creation disabled. This is not a full-language
 conformance result. See `DRAFT.md` for checked gates and remaining defects.
+Work now follows the hardest-first order in `PROOF-PLAN.md`, beginning with
+nonvacuous semantic soundness rather than remaining local feature coverage.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
 

@@ -373,3 +373,44 @@ snapshot/control-state validity, source elaboration coverage, sealed binding
 projection/combination and hidden context arguments remain unfinished, alongside
 the broader metatheory and normative-adequacy audit. No compiler or library
 acceptance gate was changed or run.
+
+## Soundness-first storage preservation
+
+`lake build` passes all 38 jobs. Work has been reordered around the hardest
+outstanding obligation: nonvacuous preservation/progress and ownership/lifetime
+safety, without assuming those conclusions through `ResourceAdmission`. See
+`PROOF-PLAN.md`. Independent binding-context feature work is paused.
+
+The first preservation obstruction was the reference invariant: it required a
+resident at the referent to supply its type, so a retained unique handle stopped
+being typed during a lawful move-and-restore sequence. Reference typing now
+uses the declared address type, independent of vacancy. The existing
+`FieldOffset`/`AddressOffset` producer moved from Memory to Storage and supplies
+both that type view and the unchanged physical-addressing consumers; there is
+no new independent field-shape walker.
+
+Transfers now receive the program and check their destination's declared type.
+Copies, construction and borrowing check their destination types through the
+same address product. All real transfer consumers migrated, including argument
+binding, protection, returns, control witnesses, raw writes and foreign results.
+A source resident can no longer be installed into an incompatible vacant slot.
+
+`Preservation` proves that arbitrary successful writes change only a root's
+resident tree, not its declared location metadata or loan table. Transfers
+compose those laws. Whole-root address typing is invariant under transfer, and
+a retained reference to such a root remains typed even if the transfer leaves
+that root vacant. These theorems do not assume `ResourceAdmission` or a typed
+post-state.
+
+`PreservationChecks` proves a concrete initial `WorldTyped` world, moves through
+an actual unique loan while preserving its resident handle, proves that the
+hole is unreadable and cannot end its loan, and restores the same owner through
+the real two-step execution relation. Negative checks reject transfer, Copy and
+construction into the wrong declared type. Earlier ownership, binding and
+borrow regressions pass with the strengthened destination contract.
+
+This checkpoint does not prove whole-world preservation, nested-path reference
+preservation, control-state validity, progress, source-admitted nonvacuity or
+normative adequacy. Those remain the active proof obligations; the new root
+lemmas are not a substitute for them. No compiler or library acceptance gate
+was changed or run.

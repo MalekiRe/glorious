@@ -304,7 +304,7 @@ inductive BindsInput (program : Language.Program) (activation scope region : Ide
   | owned {before input address allocated after layout value} : input.access = .owned →
       before.Stores input.storage value → value.type = input.formal.type →
       Allocates program before (.localSlot activation scope) region input.formal.type layout input.formal.mutable address allocated →
-      Transfers allocated input.authority input.storage address after →
+      Transfers program allocated input.authority input.storage address after →
       BindsInput program activation scope region before input ⟨input.formal.id,address,.owner⟩ after
 
 /-- Pattern borrowing constructs a reference value, unlike a lent invocation
