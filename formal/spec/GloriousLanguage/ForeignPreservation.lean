@@ -31,31 +31,31 @@ theorem Registration.Valid.transfer {program : Kernel.Program} {before after : W
     have sameHome : changed.home = root.home := by simpa [Root.location] using congrArg Root.home location
     exact ⟨changed,domain,found,by simpa only [sameHome] using home⟩
 
-theorem Mutation.worldTyped {program : Kernel.Program} {before after : World}
+theorem Mutation.worldTyped {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before) (changed : Mutation program before after) :
+    (typed : Typing.WorldTyped program before) (changed : Mutation program policy before after) :
     Typing.WorldTyped program after := by
   cases changed with
-  | allocate allocated => exact allocated.worldTyped typed
-  | scalar stored => exact stored.worldTyped valid inventory typed
-  | unit stored => exact stored.worldTyped valid inventory typed
-  | pointer bound origin stored => exact stored.worldTyped valid inventory typed bound origin
-  | aggregate inputs head constructed => exact constructed.aggregate_worldTyped valid inventory typed inputs head
-  | acquire acquired => exact acquired.worldTyped valid inventory typed
-  | borrow borrowed => exact borrowed.worldTyped valid inventory typed
-  | allocateBuffer allocated => exact allocated.worldTyped valid inventory typed
-  | reallocateBuffer reallocated => exact reallocated.worldTyped valid inventory typed
-  | releaseBuffer released => exact released.worldTyped typed
-  | rawRead read => exact read.worldTyped valid inventory typed
-  | rawWrite written => exact written.worldTyped valid inventory typed
-  | rawBorrow borrowed => exact borrowed.worldTyped valid inventory typed
-  | bulkMove moved => exact moved.worldTyped valid inventory typed
-  | retire retired => exact retired.worldTyped typed
+  | allocate _ allocated => exact allocated.worldTyped typed
+  | scalar _ stored => exact stored.worldTyped valid inventory typed
+  | unit _ stored => exact stored.worldTyped valid inventory typed
+  | pointer _ _ bound origin stored => exact stored.worldTyped valid inventory typed bound origin
+  | aggregate _ _ inputs head constructed => exact constructed.aggregate_worldTyped valid inventory typed inputs head
+  | acquire _ _ acquired => exact acquired.worldTyped valid inventory typed
+  | borrow _ _ borrowed => exact borrowed.worldTyped valid inventory typed
+  | allocateBuffer _ allocated => exact allocated.worldTyped valid inventory typed
+  | reallocateBuffer _ _ reallocated => exact reallocated.worldTyped valid inventory typed
+  | releaseBuffer _ _ released => exact released.worldTyped typed
+  | rawRead _ _ read => exact read.worldTyped valid inventory typed
+  | rawWrite _ _ written => exact written.worldTyped valid inventory typed
+  | rawBorrow _ _ borrowed => exact borrowed.worldTyped valid inventory typed
+  | bulkMove _ _ moved => exact moved.worldTyped valid inventory typed
+  | retire _ _ retired => exact retired.worldTyped typed
   | endLoan ended => exact ended.worldTyped typed
 
-theorem Mutations.worldTyped {program : Kernel.Program} {before after : World}
+theorem Mutations.worldTyped {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before) (changed : Mutations program before after) :
+    (typed : Typing.WorldTyped program before) (changed : Mutations program policy before after) :
     Typing.WorldTyped program after := by
   induction changed with
   | refl => exact typed
@@ -84,7 +84,7 @@ theorem Step.worldTyped {program : Kernel.Program} {model : Model} {before after
   | host _ _ selected active step => exact lawful.host_worldTyped valid inventory typed selected active step
   | result _ _ selected active step _ transferred =>
     exact transferred.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step)
-  | callback _ _ selected active step _ _ _ _ _ _ _ _ lent _ _ consumed =>
+  | callback _ _ selected active step _ _ _ _ _ _ _ _ _ lent _ _ consumed =>
     exact consumed.worldTyped (lent.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step))
   | callbackResult _ _ _ _ protectedWorld retired =>
     exact retired.worldTyped (protectedWorld.worldTyped valid inventory typed)
@@ -107,7 +107,7 @@ theorem Step.ready {program : Kernel.Program} {model : Model} {before after : St
   cases step with
   | enter _ selected protectedWorld callTyped precondition start =>
     cases task
-    have law := lawful.start _ _ _ _ _ _ selected
+    have law := lawful.start _ _ _ _ _ selected
       (protectedWorld.worldTyped valid inventory typed).1 callTyped precondition start
     exact ⟨rfl,_,_,selected,law.1,law.2.1⟩
   | host _ _ selected active step =>

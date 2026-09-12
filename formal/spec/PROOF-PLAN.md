@@ -439,6 +439,26 @@ The actual equality rule and its runtime-equivariance consumer are migrated.
 General normalized implementation-head selection, row-equivalent solutions
 and associated-result determinacy remain on the same open static boundary.
 
+The foreign protocol now bounds host authority by actual input handoffs,
+retained external callbacks, explicit imported external-storage grants and
+fresh allocations within each uninterrupted host step. Projection, dereference
+and raw-pointer access use the existing storage authority and provenance rules.
+The actual host mutation constructors consume that authority; an arbitrary
+`writable` predicate no longer permits access to unrelated source-frame roots.
+Nested callbacks expose enclosing host handoffs and their protected returned
+value, not their hidden invocation leases or arbitrary source allocations.
+
+`ForeignEvolution` proves home preservation and the exact origins of newly
+created loans from those mutation producers. `ForeignAuthority` derives privacy
+of fresh lending handles and preserves every unexposed internal resident, with
+world typing, through arbitrarily many actual consecutive host continuations.
+Its post-world privacy is a theorem, not a foreign-contract admission premise.
+The targeted foreign/execution/public-result gate passed (62 jobs). This closes
+the host-only authority boundary, not arbitrary callback execution: source
+control must still preserve private placement across callbacks and prove that
+returned values cannot name hidden leases. Persistent external registration
+invariants and initialized return/cleanup preservation also remain open.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

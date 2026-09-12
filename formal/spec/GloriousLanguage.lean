@@ -32,3 +32,4 @@ import GloriousLanguage.RuntimeWorldEquivariance
 import GloriousLanguage.RuntimeCoverageEquivariance
 import GloriousLanguage.RuntimeBodyTyping
 import GloriousLanguage.DropDispatch
+import GloriousLanguage.ForeignAuthority

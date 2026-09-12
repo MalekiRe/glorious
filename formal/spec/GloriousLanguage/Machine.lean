@@ -68,6 +68,10 @@ structure ForeignCall where
 structure ForeignSession where
   call : ForeignCall
   state : List Nat
+  /-- Actual additional storage handed to this protocol: host allocations,
+  enclosing synchronous sessions and completed callback results. Hidden
+  invocation leases and arbitrary source callback allocations are not exposed. -/
+  exposed : List ResolvedPlace := []
   deriving Repr, Inhabited
 
 /-- Receiver and per-input lending use the same ordinary reference owner. -/
