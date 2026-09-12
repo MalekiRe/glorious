@@ -1293,3 +1293,20 @@ theorem World.Destroys.ancestry_set_dead {world : World} {id : Identity} {loan :
     · exact (ancestry key row beforeFound).2 guard member |>.imp (beforeLookup guard)
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- The ownership permission survives the destructor's endings: they only remove
+liveness from rows, so every live row of the produced world is a live row of the
+admitted one, and the permission's root existence is re-read at the produced
+world. -/
+theorem Permitted.of_loanReleaseFrame {world after : World} {requested : Access} {address : Address}
+    (permission : Permitted world .owner requested address)
+    (frame : world.LoanReleaseFrame after) (existence : ∃ root, after.root address = some root) :
+    Permitted after .owner requested address :=
+  ⟨existence,fun id loan found live overlap conflict =>
+    permission.2 id loan (frame.2 id loan found live) live overlap conflict⟩
+
+end Glorious.Language.Execution
