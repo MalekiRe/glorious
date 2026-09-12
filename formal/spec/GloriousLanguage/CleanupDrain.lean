@@ -783,3 +783,30 @@ theorem Address.child_prefix_grandchild {address : Address} {first second index 
   exact equal.1.symm
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Two prefixes of one address are comparable, because both extend the same
+field list. -/
+theorem Address.Prefix.comparable {first second probe : Address}
+    (firstIn : first.Prefix probe) (secondIn : second.Prefix probe) :
+    first.Prefix second ∨ second.Prefix first := by
+  obtain ⟨firstSuffix,firstShape⟩ := firstIn.2.2
+  obtain ⟨secondSuffix,secondShape⟩ := secondIn.2.2
+  have same : first.fields ++ firstSuffix = second.fields ++ secondSuffix := by
+    rw [← firstShape,← secondShape]
+  rcases List.append_eq_append_iff.mp same with ⟨shared,firstEq,_⟩ | ⟨shared,secondEq,_⟩
+  · left
+    exact ⟨firstIn.1.trans secondIn.1.symm,firstIn.2.1.trans secondIn.2.1.symm,⟨shared,firstEq⟩⟩
+  · right
+    exact ⟨secondIn.1.trans firstIn.1.symm,secondIn.2.1.trans firstIn.2.1.symm,⟨shared,secondEq⟩⟩
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+end Glorious.Language
