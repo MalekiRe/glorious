@@ -210,8 +210,8 @@ static type derivation and now also authenticate instantiated constructor
 identity and field shape through the same `ConstructorHead` product used by
 runtime construction. `EffectPreservation` proves home reassignment, handler
 installation, clause entry and continuation creation preserve world typing.
-`EffectStep.direct_worldTyped` covers all effect steps except copying replay;
-the remaining replay case depends on full relocated-value typing.
+`EffectStep.worldTyped` now covers every effect step, including copying replay
+through the complete relocated-value typing theorem below.
 
 `FloatRounding` proves finite rounding existence over an exact finite format
 grid, with nearest-even selection and explicit overflow/nonfinite outcomes.
@@ -236,6 +236,18 @@ now explicitly checks that captured references to unchanged external storage
 cannot rename a local identity in that storage's referent type. This is an
 input scope-closure obligation, not a typed-output premise. Its derivation
 from the eventual control-state invariant and full replay progress remain open.
+
+`RuntimeEquivariance` proves capability equations and their greatest models,
+kinded substitution, quantified entailment, equality, lifetime and row
+relations, declaration instances and all layouts invariant under a supported
+runtime-region permutation. `SnapshotWorldTyping` consumes these results in
+`CopiesSnapshot.worldTyped`: every copied and retained resident, including
+nominal/callable fields, references to internal or unchanged external storage,
+operation values, pointers and binding packs, preserves the full world typing
+contract. The proof uses the actual snapshot map and its input scope closure;
+it assumes neither declaration commutation nor a typed copied world. Full
+continuation task/frame typing, code relocation and replay/cancellation
+progress remain separate unfinished consumers.
 
 ## 3. Remaining boundary completeness and final audit
 

@@ -1,11 +1,12 @@
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.LocalPreservation
+import GloriousLanguage.SnapshotWorldTyping
 
-/-! Handler installation, continuation creation and direct effect transitions
+/-! Handler installation, continuation creation and effect transitions
 preserve storage typing through their actual input-world producers. Changing
 a suspended root's home changes control ownership, not its stored value or
-physical storage identity. Snapshot replay additionally requires the separate
-relocation/no-escape preservation boundary. -/
+physical storage identity. Multi-shot replay consumes the proved snapshot
+relocation and external-referent scope boundary. -/
 namespace Glorious.Language
 
 theorem Table.get_map_keyed {α β : Type} (table : Table α) (f : Identity → α → β) (id : Identity) :
@@ -179,13 +180,12 @@ theorem CreatesContinuation.worldTyped {program : Kernel.Program} {context : Con
   apply constructed.empty_worldTyped valid inventory (allocation.worldTyped typed) (by simp) (by simp)
   exact .continuation ⟨_,_,_,_,type⟩
 
-/-- All direct effect steps preserve the whole storage invariant. The one
-excluded event is copy replay, whose correctness additionally consumes the
-snapshot relocation/no-escape theorem rather than an assumed copied world. -/
-theorem EffectStep.direct_worldTyped {program : Kernel.Program} {before after : State} {event : Option Event}
+/-- Every effect transition, including independently relocated multi-shot
+replay, preserves the full storage invariant. -/
+theorem EffectStep.worldTyped {program : Kernel.Program} {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before.world) (step : EffectStep program before event after)
-    (direct : ∀ id, event ≠ some (.replay id false)) : Typing.WorldTyped program after.world := by
+    (typed : Typing.WorldTyped program before.world) (step : EffectStep program before event after) :
+    Typing.WorldTyped program after.world := by
   cases step with
   | install task installed => exact installed.worldTyped valid inventory typed
   | operationCall => exact typed
@@ -201,7 +201,8 @@ theorem EffectStep.direct_worldTyped {program : Kernel.Program} {before after : 
   | resumeLast task found obligation remaining restored keptTransfer =>
     subst restored
     exact keptTransfer.worldTyped valid inventory (restoreRoots.worldTyped typed)
-  | resumeCopy => exact False.elim (direct _ rfl)
+  | resumeCopy task found obligation remaining copied keptTransfer =>
+    exact keptTransfer.worldTyped valid inventory (copied.worldTyped valid inventory typed)
   | resumeReturns task frames keptTransfer => exact keptTransfer.worldTyped valid inventory typed
   | completionIdentity task frames completion started keptTransfer roots permission =>
     exact keptTransfer.worldTyped valid inventory (started.worldTyped typed)

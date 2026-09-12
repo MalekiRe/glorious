@@ -7,6 +7,7 @@ import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
+import GloriousLanguage.SnapshotWorldTyping
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
