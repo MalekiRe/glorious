@@ -58,15 +58,20 @@ theorem SuspendPermission.compose {program : Kernel.Program} {world : World} {qu
     (first : SuspendPermission program world left quantity firstFrames)
     (last : SuspendPermission program world right quantity lastFrames) :
     SuspendPermission program world all quantity (firstFrames ++ lastFrames) := by
-  refine ⟨first.1,Suspensible.covered cover first.2.1 last.2.1,?_,?_⟩
+  refine ⟨first.1,Suspensible.covered cover first.2.1 last.2.1,?_,?_,?_⟩
   · intro optional
     exact Cancelable.covered cover (first.2.2.1 optional) (last.2.2.1 optional)
   · intro n bound multiple
-    obtain ⟨firstRoots,firstFrames⟩ := first.2.2.2 n bound multiple
-    obtain ⟨lastRoots,lastFrames⟩ := last.2.2.2 n bound multiple
+    obtain ⟨firstRoots,firstFrames⟩ := first.2.2.2.1 n bound multiple
+    obtain ⟨lastRoots,lastFrames⟩ := last.2.2.2.1 n bound multiple
     refine ⟨Replayable.covered cover firstRoots lastRoots,?_⟩
     intro frame member
     exact (List.mem_append.mp member).elim (firstFrames frame) (lastFrames frame)
+  · intro authority member
+    rw [List.flatMap_append] at member
+    exact (List.mem_append.mp member).elim
+      (fun inside => first.2.2.2.2 authority inside)
+      (fun inside => last.2.2.2.2 authority inside)
 
 theorem OperationDisposition.Permits.compose {program : Kernel.Program} {world : World}
     {disposition : OperationDisposition} {all left right : List Identity} {firstFrames lastFrames : List Frame}
@@ -87,13 +92,17 @@ theorem OperationDisposition.Permits.restrict {program : Kernel.Program} {world 
   cases disposition with
   | terminal => exact Cancelable.covered cover permission permission
   | resumptive quantity =>
-      refine ⟨permission.1,Suspensible.covered cover permission.2.1 permission.2.1,?_,?_⟩
+      refine ⟨permission.1,Suspensible.covered cover permission.2.1 permission.2.1,?_,?_,?_⟩
       · intro optional
         exact Cancelable.covered cover (permission.2.2.1 optional) (permission.2.2.1 optional)
       · intro n bound multiple
-        obtain ⟨replayable,framePermission⟩ := permission.2.2.2 n bound multiple
+        obtain ⟨replayable,framePermission⟩ := permission.2.2.2.1 n bound multiple
         exact ⟨Replayable.covered cover replayable replayable,
           fun frame member => framePermission frame (framesWithin frame member)⟩
+      · intro authority member
+        obtain ⟨frame,present,inside⟩ := List.mem_flatMap.mp member
+        exact permission.2.2.2.2 authority
+          (List.mem_flatMap.mpr ⟨frame,framesWithin frame present,inside⟩)
 
 /-- The actual delimiter's ownership splits at a retained invocation boundary.
 The handler's computation belongs to the caller share, not the callee share.

@@ -142,11 +142,22 @@ def ActiveObligation (suspension : Suspension) : Prop :=
   suspension.quantity.SurfaceResumption ∧
   suspension.quantity.upper = some (suspension.remaining + suspension.used)
 
+/-- The disposition admission of a resumptive operation: surface resumption,
+the suspended content, the optional cancellation share, the multi-shot replay
+share with its snapshot frames, and the copy-replayability of the control this
+share captures. -/
 def SuspendPermission (program : Kernel.Program) (world : World) (roots : List Identity)
     (quantity : Quantity) (frames : List Frame) : Prop :=
   quantity.SurfaceResumption ∧ Suspensible program world roots ∧
   (quantity.lower = 0 → Cancelable program world roots) ∧
-  (∀ n, quantity.upper = some n → 1 < n → Replayable program world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame)
+  (∀ n, quantity.upper = some n → 1 < n → Replayable program world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame) ∧
+  -- The control this share of the disposition captures is copy-replayable:
+  -- every authority its frames name is a replayed authority, so a live one is a
+  -- shared view. This is the source control contract the actual replay consumers
+  -- need; it is a premise of the disposition admission, not a property of any
+  -- post-state, and it is what a delimiter that captures a live unique borrow
+  -- legitimately fails.
+  ∀ authority ∈ frames.flatMap Frame.authoritySupport, authority.Replayable world
 
 /-- The selected operation determines disposition, independently of whether
 the accepting delimiter is internal to an invocation or belongs to its caller. -/

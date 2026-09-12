@@ -153,4 +153,139 @@ theorem suspendRoots.controlReplayable {world : World} {roots : List Identity} {
     Authority.Replayable.congr_loans (before := world) (after := suspendRoots world roots id) rfl
       (control authority member)
 
+
+/-- The disposition admission of the real suspend steps carries the
+control-replayability of the captured frames: the selected operation's
+`SuspendPermission` requires every authority those frames name to be a replayed
+authority, and the actual capture sequence - the ordered payload handoff, the
+real capture relocation and the real continuation-handle allocation - moves no
+loan row, so the admission still holds in the world the suspension is published
+in. The handler and resumption-context authorities of the suspension are the
+surrounding live control's and are not covered by this share (see the lane
+manifest). -/
+theorem EffectStep.capture_controlReplayable {program : Kernel.Program} {before after : State}
+    {id : Identity}
+    (step : EffectStep program before (some (.suspend id)) after) :
+    ∃ suspension, after.resumptions.get id = some suspension ∧
+      ∀ authority ∈ suspension.frames.flatMap Frame.authoritySupport, authority.Replayable after.world := by
+  cases step with
+  | suspend task selected terminal quantity bound continuation routes started keptTransfer selectedRoots
+      permission homes created plan suspension =>
+    subst suspension
+    refine ⟨_,Table.get_set _ _ _,?_⟩
+    intro authority member
+    exact created.controlReplayable (suspendRoots.controlReplayable (control := permission.2.2.2.2)) authority member
+  | suspendTailArm task selected terminal quantity bound contains continuation routes started keptTransfer
+      selectedRoots permission homes plan suspension =>
+    subst suspension
+    refine ⟨_,Table.get_set _ _ _,?_⟩
+    intro authority member
+    exact suspendRoots.controlReplayable (control := permission.2.2.2.2) authority member
+
+/-- Region liveness is untouched by the actual storage producers the capture
+uses: writes, allocations, transfers, retirements and the resident construction
+change no `liveRegions` entry. Regions begin at `FreshRegion` and end only at
+`RegionEnds`, so these framings are what a control-region liveness invariant
+composes with. -/
+theorem World.write_liveRegions {before after : World} {address : Address} {value : Option Value}
+    (written : before.write address value = some after) : after.liveRegions = before.liveRegions := by
+  rw [World.write_rest written]
+
+theorem Allocates.liveRegions {program : Program} {before after : World}
+    {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) :
+    after.liveRegions = before.liveRegions := by
+  cases allocated
+  rfl
+
+theorem Clears.liveRegions {before after : World} {addresses : List Address}
+    (cleared : Clears before addresses after) : after.liveRegions = before.liveRegions := by
+  induction cleared with
+  | nil => rfl
+  | cons written rest ih => exact ih.trans (World.write_liveRegions written)
+
+theorem NewValue.liveRegions {program : RuntimeProgram} {before after : World}
+    {destination type head sources}
+    (constructed : NewValue program before destination type head sources after) :
+    after.liveRegions = before.liveRegions := by
+  cases constructed with
+  | construct vacant typed ready separate cleared written =>
+      exact (World.write_liveRegions written).trans (Clears.liveRegions cleared)
+
+theorem Transfers.liveRegions {program : RuntimeProgram} {before after : World}
+    {authority source destination} (transferred : Transfers program before authority source destination after) :
+    after.liveRegions = before.liveRegions := by
+  cases transferred with
+  | move _ _ _ _ _ _ _ clear install =>
+      exact (World.write_liveRegions install).trans (World.write_liveRegions clear)
+
+theorem Retires.liveRegions {before after : World} {id : Identity} (retired : Retires before id after) :
+    after.liveRegions = before.liveRegions := by
+  cases retired
+  rfl
+
+theorem RetiresEmpty.liveRegions {before after : World} {addresses : List Address}
+    (retired : RetiresEmpty before addresses after) : after.liveRegions = before.liveRegions := by
+  induction retired with
+  | nil => rfl
+  | cons _ first _ ih => exact ih.trans (Retires.liveRegions first)
+
+theorem Protect.liveRegions {program : Kernel.Program} {context : Context}
+    {before after : World} {source destination : Address} {authority : Authority}
+    (kept : Protect program context before source authority destination after) :
+    after.liveRegions = before.liveRegions := by
+  obtain ⟨value,allocated,stored,temporary,transfer⟩ := kept
+  exact (Transfers.liveRegions transfer).trans (Allocates.liveRegions temporary.choose_spec)
+
+/-- The ordered by-value handoff touches no region: every transfer is an
+ordinary allocation/write pair and a failed prefix retains the world it stopped
+in. -/
+theorem ProtectsFor.liveRegions {program : Kernel.Program} {context : Context}
+    {footprint : List Address} {before : World} {sources : List ResolvedPlace}
+    {destinations : List Address} {after : World}
+    (kept : ProtectsFor program context footprint before sources destinations after) :
+    after.liveRegions = before.liveRegions := by
+  induction kept using ProtectsFor.inductionOn with
+  | nil world => rfl
+  | cons ready head tail ih => exact ih.trans (Protect.liveRegions head)
+
+theorem suspendRoots.liveRegions (world : World) (roots : List Identity) (id : Identity) :
+    (suspendRoots world roots id).liveRegions = world.liveRegions := rfl
+
+theorem restoreRoots.liveRegions (world : World) (homes : Table Home) :
+    (restoreRoots world homes).liveRegions = world.liveRegions := rfl
+
+/-- The real continuation-handle allocation publishes the world it started from
+with one further root; it touches no region. -/
+theorem CreatesContinuation.liveRegions {program : Kernel.Program} {context : Context}
+    {before after : World} {id : Identity} {signature : Signature} {answer effects : Term}
+    {quantity : Quantity} {localSlot : Local} {address : Address}
+    (created : CreatesContinuation program context before id signature answer effects quantity localSlot address after) :
+    after.liveRegions = before.liveRegions := by
+  obtain ⟨allocated,layout,type,allocation,constructed⟩ := created
+  exact (NewValue.liveRegions constructed).trans (Allocates.liveRegions allocation)
+
+/-- The clause's own region is live in the world clause entry publishes: entry
+allocates exactly that region through `FreshRegion`. -/
+theorem StartsClause.region_live {before : State} {handler : InstalledHandler} {context : Context}
+    {after : World} (started : StartsClause before handler context after) :
+    context.region ∈ after.liveRegions := by
+  obtain ⟨fresh,same⟩ := started
+  have region : context.region = before.world.nextRegion := by rw [same]
+  rw [fresh.2, region]
+  exact List.mem_cons_self ..
+
+/-- The resumption brand is instantiation metadata, so the resumption clause
+keeps the same live region as the clause entry it refines. -/
+theorem StartsResumptionClause.region_live {before : State} {handler : InstalledHandler}
+    {lexical : Local} {context : Context} {localSlot : Local} {after : World}
+    (started : StartsResumptionClause before handler lexical context localSlot after) :
+    context.region ∈ after.liveRegions := by
+  obtain ⟨outer,brand,started,brandAt,contextAt,localAt⟩ := started
+  have region : context.region = outer.region := by
+    rw [contextAt]
+    rfl
+  rw [region]
+  exact started.region_live
+
 end Glorious.Language.Execution
