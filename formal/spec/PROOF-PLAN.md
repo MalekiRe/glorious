@@ -847,7 +847,20 @@ which is exactly the shape `CleanupRun.destroy_child` already has for a child wi
 no live children of its own. The drain obligations are bridged across both changes
 the shell phase makes (the write by `World.write_value_update`'s shape, the restamp
 by the restamp lemmas), which is why a single loans equality was not enough.
-The details, for reference: reconcile a node's own shell witness with the supplied
+The recursion's step provider is the last piece, and its
+shape is now settled: the child's own run comes from `destroy_node`, and the
+caller's-shell facts cannot be read off at the end because a node's runs change the
+value stored at the caller's path (the grandchildren live inside that value). Two
+routes exist and both are pure composition. The direct one adds a value-level fact
+that this core does not have — that a replacement below a child slot leaves the
+ancestor's other slots alone (the single-slot half is landed as
+`Value.replace_cons_siblings`, so what is missing is its read-after-replace
+forward form, which `replace_atPath_shell` does not give) — and then reads the
+caller's shell with `World.Stores.write_child_none` on the node's own clear. The
+other route carries the caller's shell as a second invariant conjunct through the
+child's field loop, which is the pattern `destroy_fields_tree` already uses for the
+node's own shell; it needs no new value-level fact but one more statement
+extension of that loop. The details, for reference: reconcile the child's own shell witness with the supplied
 one by `simpa only [valueEq] using treeX`; state the drain's obligations at the
 world they are used in and bridge them twice, once for the shell write and once for
 the restamp; make run traces existential; and pin every implicit parameter
