@@ -3777,4 +3777,34 @@ theorem Kernel.ReceiverFramed.step {program : RuntimeProgram} {recipient : Claim
   | loan ready formal owning locatedType transferred =>
       exact Kernel.ReceiverFramed.loan_step valid transferred framed
 
+
+/-- Every actual binding rule advances the storage frontier by at most the fresh
+root a resident allocation consumes. -/
+theorem Kernel.BindsInputAt.nextRoot_le {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding}
+    (bound : BindsInputAt program recipient activation scope region before input binding after) :
+    before.nextRoot ≤ after.nextRoot := by
+  cases input with
+  | mk origin inputFormal inputStorage inputAuthority inputAccess =>
+  cases bound with
+  | lent ready borrowed resident stored initialized type permission lent =>
+      cases lent with
+      | owned => exact Nat.le_refl _
+      | lent modes sourceStored borrowRegion allocProof formed =>
+          rw [Glorious.Language.FormsLoan.nextRoot formed, (Allocates.fresh_root allocProof).2]
+          exact Nat.le_succ _
+  | owned ready owning resident stored type allocation transferred =>
+      rw [Glorious.Language.Transfers.nextRoot transferred, (Allocates.fresh_root allocation).2]
+      exact Nat.le_succ _
+  | storage ready formal locatedType claimed =>
+      exact Nat.le_of_eq (ClaimsStorage.nextRoot claimed).symm
+  | allocation ready formal owning locatedType transferred =>
+      exact Nat.le_of_eq (TransfersAllocation.nextRoot transferred).symm
+  | guardedAllocation ready formal owning authorityEq locatedType claimed =>
+      exact Nat.le_of_eq (ClaimsAllocation.nextRoot claimed).symm
+  | loan ready formal owning locatedType transferred =>
+      exact Nat.le_of_eq (TransfersStorageLoan.nextRoot transferred).symm
+
+
 end Kernel
