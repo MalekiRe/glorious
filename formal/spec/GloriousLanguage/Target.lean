@@ -118,10 +118,14 @@ def EnumLayout (variants : List Layout) (layout : Layout) : Prop :=
     layout.alignment ∧
   layout.offsets = [] ∧ layout.variants = variants.map (fun variant => variant.offsets.map (· + layout.payloadOffset))
 
+def integerMinimum (target : TargetProfile) (signed : Bool) (width : Width) : Int :=
+  if signed then -(2^(width.bits target-1)) else 0
+
+def integerLimit (target : TargetProfile) (signed : Bool) (width : Width) : Int :=
+  if signed then 2^(width.bits target-1) else 2^width.bits target
+
 def IntegerRange (target : TargetProfile) (signed : Bool) (width : Width) (n : Int) : Prop :=
-  let bits := width.bits target
-  if signed then -(2^(bits-1) : Int) ≤ n ∧ n < 2^(bits-1)
-  else 0 ≤ n ∧ n < (2^bits : Int)
+  integerMinimum target signed width ≤ n ∧ n < integerLimit target signed width
 
 inductive Overflow where
   | checked | wrapping | saturating
@@ -138,10 +142,7 @@ def integerWrap (target : TargetProfile) (signed : Bool) (width : Width) (n : In
   if signed && residue ≥ modulus / 2 then residue - modulus else residue
 
 def integerClamp (target : TargetProfile) (signed : Bool) (width : Width) (n : Int) : Int :=
-  let bits := width.bits target
-  let lower : Int := if signed then -(2^(bits-1)) else 0
-  let upper : Int := if signed then 2^(bits-1)-1 else 2^bits-1
-  max lower (min upper n)
+  max (integerMinimum target signed width) (min (integerLimit target signed width - 1) n)
 
 inductive IntegerResult (target : TargetProfile) (signed : Bool) (width : Width) :
     Overflow → Int → Except Fatal Int → Prop where
@@ -206,6 +207,40 @@ def Fraction.divide (a b : Fraction) : Fraction :=
   ⟨a.numerator * b.denominator * (if b.numerator < 0 then -1 else 1),
     a.denominator * b.numerator.natAbs⟩
 def Fraction.absolute (a : Fraction) : Fraction := ⟨a.numerator.natAbs,a.denominator⟩
+
+/-- Checked floating-to-integer conversion tests the exact input before
+truncation. In particular, a negative fraction is not an unsigned zero. -/
+def Fraction.IntegerInterval (target : TargetProfile) (signed : Bool) (width : Width) (a : Fraction) : Prop :=
+  a.Valid ∧ integerMinimum target signed width * a.denominator ≤ a.numerator ∧
+    a.numerator < integerLimit target signed width * a.denominator
+
+inductive ConversionPolicy where
+  | lossy | checked | exact
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+def ConversionPolicy.integerOverflow : ConversionPolicy → Overflow
+  | .lossy => .wrapping
+  | .checked | .exact => .checked
+
+/-- The numeric conversion policy is a machine contract selected by primitive
+identity. A checked/exact leaf's fault is not a library Result value; source
+checked APIs must establish their failure branch without catching such a fault. -/
+inductive FractionIntegerConversion (target : TargetProfile) (signed : Bool) (width : Width) :
+    ConversionPolicy → Fraction → Except Fatal Int → Prop where
+  | lossy {value} : value.Valid →
+      FractionIntegerConversion target signed width .lossy value
+        (.ok (integerClamp target signed width (value.numerator.tdiv value.denominator)))
+  | checked {value} : value.IntegerInterval target signed width →
+      FractionIntegerConversion target signed width .checked value (.ok (value.numerator.tdiv value.denominator))
+  | exact {value} : value.IntegerInterval target signed width →
+      value.numerator = value.numerator.tdiv value.denominator * (value.denominator : Int) →
+      FractionIntegerConversion target signed width .exact value (.ok (value.numerator.tdiv value.denominator))
+  | outOfRange {policy value} : policy ≠ .lossy → value.Valid →
+      ¬ value.IntegerInterval target signed width →
+      FractionIntegerConversion target signed width policy value (.error .arithmetic)
+  | fractional {value} : value.IntegerInterval target signed width →
+      value.numerator ≠ value.numerator.tdiv value.denominator * (value.denominator : Int) →
+      FractionIntegerConversion target signed width .exact value (.error .arithmetic)
 
 def binaryFraction (negative : Bool) (significand : Nat) (exponent : Int) : Fraction :=
   let sign : Int := if negative then -1 else 1
@@ -282,6 +317,26 @@ inductive Rounded (width : FloatWidth) : Fraction → Bool → Nat → Prop wher
   | finite {exact sign bits} : RoundsFinite width exact sign bits → Rounded width exact sign bits
   | overflow {exact sign bits} : exact.Valid → (overflowThreshold width).Le exact.absolute →
       decodeFloat width bits = some (.infinity (decide (exact.numerator < 0))) → Rounded width exact sign bits
+
+/-- All finite-input floating conversions consume the same one-rounding
+relation. Checked conversion rejects overflow; exact conversion additionally
+requires mathematical equality, not merely a finite rounded representation. -/
+inductive RoundedConversion (width : FloatWidth) : ConversionPolicy → Fraction → Bool → Except Fatal Nat → Prop where
+  | lossy {value sign bits} : Rounded width value sign bits → RoundedConversion width .lossy value sign (.ok bits)
+  | checked {value sign bits negative significand exponent} : Rounded width value sign bits →
+      decodeFloat width bits = some (.finite negative significand exponent) →
+      RoundedConversion width .checked value sign (.ok bits)
+  | exact {value sign bits negative significand exponent} : Rounded width value sign bits →
+      decodeFloat width bits = some (.finite negative significand exponent) →
+      value.Equal (binaryFraction negative significand exponent) →
+      RoundedConversion width .exact value sign (.ok bits)
+  | overflow {policy value sign bits negative} : policy ≠ .lossy → Rounded width value sign bits →
+      decodeFloat width bits = some (.infinity negative) →
+      RoundedConversion width policy value sign (.error .arithmetic)
+  | precisionLoss {value sign bits negative significand exponent} : Rounded width value sign bits →
+      decodeFloat width bits = some (.finite negative significand exponent) →
+      ¬ value.Equal (binaryFraction negative significand exponent) →
+      RoundedConversion width .exact value sign (.error .arithmetic)
 
 inductive FloatOperation where
   | add | subtract | multiply | divide | negate | absolute | squareRoot | fusedMultiplyAdd
@@ -389,7 +444,7 @@ def ScalarValue.Valid (target : TargetProfile) : ScalarValue → Prop
 inductive Primitive where
   | integer (operation : IntegerOperation) (signed : Bool) (width : Width) (overflow : Overflow)
   | floating (operation : FloatOperation) (width : FloatWidth)
-  | scalarEqual | scalarLess | scalarConvert
+  | scalarEqual | scalarLess | scalarConvert (policy : ConversionPolicy)
   | allocate | reallocate | release | rawMove | rawCopy | rawRead | rawWrite | rawBorrow
   | pointerOffset | pointerAddress | pointerWithAddress | layout | literalText | literalBytes
   | availableClose | bindingProject | bindingCombine | abort

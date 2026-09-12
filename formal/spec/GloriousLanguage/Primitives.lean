@@ -67,43 +67,70 @@ def ScalarLess : ScalarValue → ScalarValue → Prop
   | .floating wa a, .floating wb b => wa = wb ∧ FloatLess wa a b
   | _, _ => False
 
-inductive ScalarConversion (target : TargetProfile) : ScalarValue → Scalar → Except Fatal ScalarValue → Prop where
-  | integer {sourceSign sourceWidth value sign width} : IntegerRange target sourceSign sourceWidth value →
-      IntegerRange target sign width value →
-      ScalarConversion target (.integer sourceSign sourceWidth value) (.integer sign width) (.ok (.integer sign width value))
-  | integerOverflow {sourceSign sourceWidth value sign width} : IntegerRange target sourceSign sourceWidth value →
-      ¬ IntegerRange target sign width value →
-      ScalarConversion target (.integer sourceSign sourceWidth value) (.integer sign width) (.error .arithmetic)
-  | integerFloat {sign width value float result} : IntegerRange target sign width value → Rounded float ⟨value,1⟩ false result →
-      ScalarConversion target (.integer sign width value) (.floating float) (.ok (.floating float result))
-  | floatInteger {width bits sign significand exponent destinationSign destinationWidth fraction value} :
-      decodeFloat width bits = some (.finite sign significand exponent) → fraction = binaryFraction sign significand exponent →
-      value = fraction.numerator.tdiv fraction.denominator → IntegerRange target destinationSign destinationWidth value →
-      ScalarConversion target (.floating width bits) (.integer destinationSign destinationWidth)
+inductive ScalarConversion (target : TargetProfile) (policy : ConversionPolicy) :
+    ScalarValue → Scalar → Except Fatal ScalarValue → Prop where
+  | integer {sourceSign sourceWidth value sign width result} : IntegerRange target sourceSign sourceWidth value →
+      IntegerResult target sign width policy.integerOverflow value (.ok result) →
+      ScalarConversion target policy (.integer sourceSign sourceWidth value) (.integer sign width)
+        (.ok (.integer sign width result))
+  | integerFault {sourceSign sourceWidth value sign width reason} : IntegerRange target sourceSign sourceWidth value →
+      IntegerResult target sign width policy.integerOverflow value (.error reason) →
+      ScalarConversion target policy (.integer sourceSign sourceWidth value) (.integer sign width) (.error reason)
+  | integerFloat {sign width value float result} : IntegerRange target sign width value →
+      RoundedConversion float policy ⟨value,1⟩ false (.ok result) →
+      ScalarConversion target policy (.integer sign width value) (.floating float) (.ok (.floating float result))
+  | integerFloatFault {sign width value float reason} : IntegerRange target sign width value →
+      RoundedConversion float policy ⟨value,1⟩ false (.error reason) →
+      ScalarConversion target policy (.integer sign width value) (.floating float) (.error reason)
+  | floatInteger {width bits sign significand exponent destinationSign destinationWidth value} :
+      decodeFloat width bits = some (.finite sign significand exponent) →
+      FractionIntegerConversion target destinationSign destinationWidth policy
+        (binaryFraction sign significand exponent) (.ok value) →
+      ScalarConversion target policy (.floating width bits) (.integer destinationSign destinationWidth)
         (.ok (.integer destinationSign destinationWidth value))
-  | floatIntegerInvalid {width bits sign destinationWidth} :
-      ((∃ negative, decodeFloat width bits = some (.infinity negative)) ∨ decodeFloat width bits = some .nan ∨
-        ∃ negative m e fraction, decodeFloat width bits = some (.finite negative m e) ∧
-          fraction = binaryFraction negative m e ∧ ¬ IntegerRange target sign destinationWidth (fraction.numerator.tdiv fraction.denominator)) →
-      ScalarConversion target (.floating width bits) (.integer sign destinationWidth) (.error .arithmetic)
+  | floatIntegerFault {width bits sign significand exponent destinationSign destinationWidth reason} :
+      decodeFloat width bits = some (.finite sign significand exponent) →
+      FractionIntegerConversion target destinationSign destinationWidth policy
+        (binaryFraction sign significand exponent) (.error reason) →
+      ScalarConversion target policy (.floating width bits) (.integer destinationSign destinationWidth) (.error reason)
+  | floatIntegerNonfinite {width bits sign destinationWidth} : policy ≠ .lossy →
+      ((∃ negative, decodeFloat width bits = some (.infinity negative)) ∨ decodeFloat width bits = some .nan) →
+      ScalarConversion target policy (.floating width bits) (.integer sign destinationWidth) (.error .arithmetic)
+  | floatIntegerNaN {width bits sign destinationWidth} : policy = .lossy → decodeFloat width bits = some .nan →
+      ScalarConversion target policy (.floating width bits) (.integer sign destinationWidth)
+        (.ok (.integer sign destinationWidth 0))
+  | floatIntegerInfinity {width bits sign destinationWidth negative} : policy = .lossy →
+      decodeFloat width bits = some (.infinity negative) →
+      ScalarConversion target policy (.floating width bits) (.integer sign destinationWidth)
+        (.ok (.integer sign destinationWidth (if negative then integerMinimum target sign destinationWidth
+          else integerLimit target sign destinationWidth - 1)))
   | float {sourceWidth bits sign m e destinationWidth result} : decodeFloat sourceWidth bits = some (.finite sign m e) →
-      Rounded destinationWidth (binaryFraction sign m e) sign result →
-      ScalarConversion target (.floating sourceWidth bits) (.floating destinationWidth) (.ok (.floating destinationWidth result))
+      RoundedConversion destinationWidth policy (binaryFraction sign m e) sign (.ok result) →
+      ScalarConversion target policy (.floating sourceWidth bits) (.floating destinationWidth)
+        (.ok (.floating destinationWidth result))
+  | floatFault {sourceWidth bits sign m e destinationWidth reason} : decodeFloat sourceWidth bits = some (.finite sign m e) →
+      RoundedConversion destinationWidth policy (binaryFraction sign m e) sign (.error reason) →
+      ScalarConversion target policy (.floating sourceWidth bits) (.floating destinationWidth) (.error reason)
   | floatInfinity {sourceWidth bits sign destinationWidth result} : decodeFloat sourceWidth bits = some (.infinity sign) →
       decodeFloat destinationWidth result = some (.infinity sign) →
-      ScalarConversion target (.floating sourceWidth bits) (.floating destinationWidth) (.ok (.floating destinationWidth result))
+      ScalarConversion target policy (.floating sourceWidth bits) (.floating destinationWidth)
+        (.ok (.floating destinationWidth result))
   | floatNaN {sourceWidth bits destinationWidth} : decodeFloat sourceWidth bits = some .nan →
-      ScalarConversion target (.floating sourceWidth bits) (.floating destinationWidth) (.ok (.floating destinationWidth (canonicalNaN destinationWidth)))
+      ScalarConversion target policy (.floating sourceWidth bits) (.floating destinationWidth)
+        (.ok (.floating destinationWidth (canonicalNaN destinationWidth)))
+  /-- Character construction validates Unicode independently of numeric
+  conversion policy. Machine availability does not introduce a source As
+  instance beyond the library's explicitly supported character conversions. -/
   | character {sign width value} : 0 ≤ value → Source.UnicodeScalar value.toNat → IntegerRange target sign width value →
-      ScalarConversion target (.integer sign width value) .character (.ok (.character value.toNat))
+      ScalarConversion target policy (.integer sign width value) .character (.ok (.character value.toNat))
   | characterInvalid {sign width value} : IntegerRange target sign width value →
       (value < 0 ∨ ¬ Source.UnicodeScalar value.toNat) →
-      ScalarConversion target (.integer sign width value) .character (.error .invalidValue)
+      ScalarConversion target policy (.integer sign width value) .character (.error .invalidValue)
   | characterInteger {value sign width} : Source.UnicodeScalar value → IntegerRange target sign width value →
-      ScalarConversion target (.character value) (.integer sign width) (.ok (.integer sign width value))
+      ScalarConversion target policy (.character value) (.integer sign width) (.ok (.integer sign width value))
   | characterIntegerOverflow {value sign width} : Source.UnicodeScalar value →
       ¬ IntegerRange target sign width value →
-      ScalarConversion target (.character value) (.integer sign width) (.error .arithmetic)
+      ScalarConversion target policy (.character value) (.integer sign width) (.error .arithmetic)
 
 inductive PrimitiveCalculation (target : TargetProfile) : Primitive → List Term → List ScalarValue → Except Fatal ScalarValue → Prop where
   | integer {op sign width overflow integers result} :
@@ -120,8 +147,8 @@ inductive PrimitiveCalculation (target : TargetProfile) : Primitive → List Ter
   | less {a b flag} : a.type = b.type → a.Valid target → b.Valid target →
       ((flag = 1 ∧ ScalarLess a b) ∨ (flag = 0 ∧ ¬ ScalarLess a b)) →
       PrimitiveCalculation target .scalarLess [] [a,b] (.ok (.integer false (.fixed 8) flag))
-  | convert {source destination result} : ScalarConversion target source destination result →
-      PrimitiveCalculation target .scalarConvert [.scalar destination] [source] result
+  | convert {policy source destination result} : ScalarConversion target policy source destination result →
+      PrimitiveCalculation target (.scalarConvert policy) [.scalar destination] [source] result
 
 def StoresScalar (program : Kernel.Program) (before : World) (destination : Address) (scalar : ScalarValue) (after : World) : Prop :=
   scalar.Valid program.declarations.input.target ∧ DestinationType before destination (.scalar scalar.type) ∧

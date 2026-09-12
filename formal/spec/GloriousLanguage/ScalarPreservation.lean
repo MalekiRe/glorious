@@ -5,6 +5,48 @@ relations. These do not identify a trapping machine leaf with a source-library
 checked conversion or assume that a prospective result is well typed. -/
 namespace Glorious.Language
 
+theorem integerMinimum.nonpositive (target : TargetProfile) (sign : Bool) (width : Width) :
+    integerMinimum target sign width ≤ 0 := by
+  have positive : (0 : Int) < 2 ^ (width.bits target - 1) := Int.pow_pos (by decide)
+  cases sign <;> simp only [integerMinimum,↓reduceIte] <;> omega
+
+theorem integerLimit.positive (target : TargetProfile) (sign : Bool) (width : Width) :
+    0 < integerLimit target sign width := by
+  cases sign <;> exact Int.pow_pos (by decide)
+
+theorem IntegerRange.zero (target : TargetProfile) (sign : Bool) (width : Width) :
+    IntegerRange target sign width 0 :=
+  ⟨integerMinimum.nonpositive target sign width,integerLimit.positive target sign width⟩
+
+theorem IntegerRange.minimum (target : TargetProfile) (sign : Bool) (width : Width) :
+    IntegerRange target sign width (integerMinimum target sign width) := by
+  have lower := integerMinimum.nonpositive target sign width
+  have upper := integerLimit.positive target sign width
+  constructor <;> omega
+
+theorem IntegerRange.maximum (target : TargetProfile) (sign : Bool) (width : Width) :
+    IntegerRange target sign width (integerLimit target sign width - 1) := by
+  have lower := integerMinimum.nonpositive target sign width
+  have upper := integerLimit.positive target sign width
+  constructor <;> omega
+
+theorem Fraction.IntegerInterval.truncate_range {target : TargetProfile} {sign : Bool} {width : Width}
+    {value : Fraction} (interval : value.IntegerInterval target sign width) :
+    IntegerRange target sign width (value.numerator.tdiv value.denominator) := by
+  have denominatorPositive : (0 : Int) < value.denominator := by
+    have := interval.1
+    change 0 < value.denominator at this
+    omega
+  constructor
+  · exact Int.le_tdiv_of_mul_le denominatorPositive interval.2.1
+  · by_cases nonnegative : 0 ≤ value.numerator
+    · rw [Int.tdiv_eq_ediv_of_nonneg nonnegative]
+      exact Int.ediv_lt_of_lt_mul denominatorPositive interval.2.2
+    · have belowZero := Int.tdiv_le_tdiv denominatorPositive (show value.numerator ≤ 0 by omega)
+      have limitPositive := integerLimit.positive target sign width
+      simp only [Int.zero_tdiv] at belowZero
+      exact Int.lt_of_le_of_lt belowZero limitPositive
+
 theorem Scalar.integer_bits_positive {target : TargetProfile} {sign : Bool} {width : Width}
     (valid : (Scalar.integer sign width).Valid target) : 0 < width.bits target := by
   cases width with
@@ -32,16 +74,17 @@ theorem integerWrap.range {target : TargetProfile} {sign : Bool} {width : Width}
   have lower := Int.emod_nonneg value (Int.ne_of_gt modulusPositive)
   have upper := Int.emod_lt_of_pos value modulusPositive
   cases sign with
-  | false => simpa [IntegerRange,integerWrap] using And.intro lower upper
+  | false => simpa [IntegerRange,integerMinimum,integerLimit,integerWrap] using And.intro lower upper
   | true =>
-      simp only [IntegerRange,integerWrap,Bool.true_and,↓reduceIte,decide_eq_true_eq]
+      simp only [IntegerRange,integerMinimum,integerLimit,integerWrap,Bool.true_and,↓reduceIte,decide_eq_true_eq]
       split <;> omega
 
 theorem integerClamp.range {target : TargetProfile} {sign : Bool} {width : Width} (value : Int) :
     IntegerRange target sign width (integerClamp target sign width value) := by
-  have modulusPositive : (0 : Int) < 2 ^ width.bits target := Int.pow_pos (by decide)
-  have halfPositive : (0 : Int) < 2 ^ (width.bits target - 1) := Int.pow_pos (by decide)
-  cases sign <;> simp only [IntegerRange,integerClamp,Bool.false_eq_true,↓reduceIte] <;> omega
+  have lower := integerMinimum.nonpositive target sign width
+  have upper := integerLimit.positive target sign width
+  simp only [IntegerRange,integerClamp]
+  omega
 
 theorem IntegerResult.total (target : TargetProfile) (sign : Bool) (width : Width)
     (overflow : Overflow) (value : Int) :
@@ -75,6 +118,21 @@ theorem Rounded.valid {width : FloatWidth} {exact : Fraction} {zeroSign : Bool} 
       rcases rounded.2.2 with ⟨_,_,_,_,decoded,_⟩
       simp [decoded]
   | overflow _ _ decoded => simp [decoded]
+
+theorem RoundedConversion.valid {width : FloatWidth} {policy : ConversionPolicy}
+    {exact : Fraction} {zeroSign : Bool} {bits : Nat}
+    (converted : RoundedConversion width policy exact zeroSign (.ok bits)) :
+    (decodeFloat width bits).isSome = true := by
+  cases converted <;> apply Rounded.valid <;> assumption
+
+theorem FractionIntegerConversion.range {target : TargetProfile} {sign : Bool} {width : Width}
+    {policy : ConversionPolicy} {value : Fraction} {result : Int}
+    (converted : FractionIntegerConversion target sign width policy value (.ok result)) :
+    IntegerRange target sign width result := by
+  cases converted with
+  | lossy _ => exact integerClamp.range _
+  | checked interval => exact interval.truncate_range
+  | exact interval _ => exact interval.truncate_range
 
 theorem FloatCalculation.valid {width : FloatWidth} {operation : FloatOperation}
     {inputs : List Nat} {result : Nat} (calculated : FloatCalculation width operation inputs result) :
@@ -255,17 +313,26 @@ theorem IntegerCalculation.nonempty {target : TargetProfile} {sign : Bool} {widt
     (calculated : IntegerCalculation target sign width operation overflow inputs result) : inputs ≠ [] := by
   cases calculated <;> simp
 
-theorem ScalarConversion.type {target : TargetProfile} {source result : ScalarValue} {destination : Scalar}
-    (calculated : ScalarConversion target source destination (.ok result)) : result.type = destination := by
+theorem ScalarConversion.type {target : TargetProfile} {policy : ConversionPolicy}
+    {source result : ScalarValue} {destination : Scalar}
+    (calculated : ScalarConversion target policy source destination (.ok result)) : result.type = destination := by
   cases calculated <;> rfl
 
-theorem ScalarConversion.valid {target : TargetProfile} {source result : ScalarValue} {destination : Scalar}
+theorem ScalarConversion.valid {target : TargetProfile} {policy : ConversionPolicy}
+    {source result : ScalarValue} {destination : Scalar}
     (destinationValid : destination.Valid target)
-    (calculated : ScalarConversion target source destination (.ok result)) : result.Valid target := by
+    (calculated : ScalarConversion target policy source destination (.ok result)) : result.Valid target := by
   cases calculated with
-  | integer _ range => exact ⟨destinationValid,range⟩
+  | integer _ converted => exact ⟨destinationValid,converted.range destinationValid⟩
   | integerFloat _ rounded => exact rounded.valid
-  | floatInteger _ _ _ range => exact ⟨destinationValid,range⟩
+  | floatInteger _ converted => exact ⟨destinationValid,converted.range⟩
+  | floatIntegerNaN _ _ => exact ⟨destinationValid,IntegerRange.zero _ _ _⟩
+  | floatIntegerInfinity _ _ =>
+      constructor
+      · exact destinationValid
+      · split
+        · exact IntegerRange.minimum _ _ _
+        · exact IntegerRange.maximum _ _ _
   | float _ rounded => exact rounded.valid
   | floatInfinity _ decoded => simp [ScalarValue.Valid,decoded]
   | floatNaN _ => simp [ScalarValue.Valid,decodeFloat.canonicalNaN]
@@ -276,8 +343,8 @@ theorem ScalarConversion.valid {target : TargetProfile} {source result : ScalarV
 arithmetic fault, not absence of a transition. This does not add an unchecked
 source `As<char>` instance or identify that fault with a library Result. -/
 theorem ScalarConversion.character_integer_total {target : TargetProfile} {value : Nat}
-    (valid : Source.UnicodeScalar value) (sign : Bool) (width : Width) :
-    ∃ result, ScalarConversion target (.character value) (.integer sign width) result := by
+    (valid : Source.UnicodeScalar value) (policy : ConversionPolicy) (sign : Bool) (width : Width) :
+    ∃ result, ScalarConversion target policy (.character value) (.integer sign width) result := by
   classical
   by_cases range : IntegerRange target sign width value
   · exact ⟨_,.characterInteger valid range⟩
@@ -319,7 +386,7 @@ theorem PrimitiveCalculation.valid {target : TargetProfile} {primitive : Primiti
   | floating _ calculated => exact calculated.valid
   | equal _ _ _ flag | less _ _ _ flag =>
       rcases flag with ⟨rfl,_⟩ | ⟨rfl,_⟩ <;>
-        simp [ScalarValue.Valid,Scalar.Valid,IntegerRange,Width.bits]
+        simp [ScalarValue.Valid,Scalar.Valid,IntegerRange,integerMinimum,integerLimit,Width.bits]
   | convert calculated => exact calculated.valid (destinationsValid _ (by simp))
 
 end Execution

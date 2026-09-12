@@ -133,6 +133,18 @@ rounding/square-root existence and the distinction between trapping machine
 conversion and the library's conversion policies remain open; this is not a
 claim of complete scalar or source-library conversion semantics.
 
+The conversion primitive now carries an explicit lossy, checked or exact
+policy, replacing the earlier mixed behavior. All consumers use shared integer
+bounds and the same rounding relation. `ConversionPreservation` proves total
+valid integer-destination outcomes for every policy, deterministic integer and
+fraction policy decisions, exact-value preservation and the checked half-open
+input interval. Thus negative fractions cannot become successful checked
+unsigned zero by truncation. Floating-destination policy decisions consume an
+actual rounding witness; general rounding existence and the checked library
+Result construction remain separate obligations. Fatal machine outcomes are
+not treated as catchable source conversion errors. Static primitive signature
+admission still needs to be tied to these operational argument/result shapes.
+
 After the soundness foundation, prove that elaboration and observations give
 the normative language meaning. This includes complete source coverage,
 contextual/implicit captures and arguments, sealed binding provenance, generic
