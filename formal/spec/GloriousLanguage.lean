@@ -65,6 +65,7 @@ import GloriousLanguage.RootSelection
 import GloriousLanguage.LabelBoundary
 import GloriousLanguage.LabelExecution
 import GloriousLanguage.RealizationLayout
+import GloriousLanguage.ScopedInterpretation
 import GloriousLanguage.InvocationLifecycle
 import GloriousLanguage.InvocationLifecyclePreservation
 import GloriousLanguage.PrimitiveDispatch

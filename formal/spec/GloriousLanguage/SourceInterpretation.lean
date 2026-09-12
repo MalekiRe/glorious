@@ -143,19 +143,6 @@ structure Interpretation (program : Kernel.Program) (world : World)
   locals : ∀ localSlot ∈ source.locals, ∀ binding,
     runtime.environment.Selects localSlot.id binding → InvocationAddress world binding.address
 
-/-- The recorded open obligation in its exact form: transporting the two
-projection steps of `DefinitionalStep` at the runtime image. It is stated as a
-proposition-valued target, not assumed anywhere below. -/
-def ProjectionStepConversion (program : Program) (source : Language.Context)
-    (runtime : Execution.Context) : Prop :=
-  ∀ left right, DefinitionalStep program source left right →
-    (∃ (associated : AssociatedDefinition), ∃ trait member owners items,
-        left = .projection trait member owners items associated.kind ∧
-        (DefinitionalStep program runtime.static (runtime.term left) (runtime.term right) ∨
-          DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right)))
-    ∨ ¬ ∃ (associated : AssociatedDefinition), ∃ trait member owners items, left = .projection trait member owners items associated.kind
-
-
 /-- The runtime image of the definitional steps of a source interpretation: the
 definitional-step reading of the source context at one image context and one
 scope. The alias expansions are derived below from actual declaration closure;
@@ -346,21 +333,6 @@ theorem ScopeInstantiation.stepImage_alias {program : Language.Program} (valid :
           (ScopeInstantiation.aliasValue_fixed valid found))))
 
 
-/-- The recorded projection obligation is exactly the projection-shaped
-instance of the step image: a projection-headed definitional step is either an
-actual runtime step or already a runtime conversion, and either way its two
-images convert. -/
-theorem ProjectionStepConversion.step {program : Language.Program} {source : Language.Context}
-    {runtime : Execution.Context} (obligation : Typing.ProjectionStepConversion program source runtime)
-    {left right : Term} (derived : DefinitionalStep program source left right)
-    (shape : ∃ (associated : AssociatedDefinition), ∃ trait member owners items,
-      left = .projection trait member owners items associated.kind) :
-    DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right) := by
-  rcases obligation left right derived with ⟨associated,trait,member,owners,items,_same,converted⟩ | absent
-  · rcases converted with stepped | equal
-    · exact DefinitionallyEqual.step stepped
-    · exact equal
-  · exact False.elim (absent shape)
 
 end ScopeInstantiation
 end Glorious.Language

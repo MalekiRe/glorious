@@ -2,6 +2,7 @@ import GloriousLanguage.Contracts
 import GloriousLanguage.ControlContextTyping
 import GloriousLanguage.PatternContextTyping
 import GloriousLanguage.SourceAddress
+import GloriousLanguage.ScopedInterpretation
 
 /-! A label request is consumed by actual leave or actual resource exhaustion.
 The selected delimiter retains its source result derivation. Payload storage
@@ -98,7 +99,7 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     (label : Typing.InstalledLabelTyped program before.world target brand region type)
     {placeSource : Typing.Context} {place : Kernel.Place} {writable : Bool}
     (bindings : Typing.ContextBindingsTyped program before.world placeSource caller)
-    (interpreted : Typing.SourceInterpreted program.declarations caller placeSource.static)
+    (reading : Typing.ScopeReading program.declarations placeSource.static caller)
     {module : ModuleId} {unsafeAllowed : Bool}
     (realized : World.LayoutRealized program.declarations before.world module unsafeAllowed)
     (argumentTyped : Typing.PlaceType program.declarations placeSource place actual writable)
@@ -116,14 +117,12 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
       Cancelable program after.world roots := by
   cases step <;> try { simp_all only [reduceCtorEq] }
   case leave actualPending actualRoute handoff selected allowed =>
-    have conversion : Typing.SourceConversionClosed program.declarations placeSource.static caller :=
-      interpreted.sourceConversionClosed
     obtain ⟨rfl,rfl,rfl⟩ := Task.leave.inj (actualPending.symm.trans pending)
     obtain ⟨rfl,rfl,rfl,rfl,rfl⟩ := actualRoute.functional route
     have original := handoff
     obtain ⟨value,_,stored,_,_⟩ := original
     obtain ⟨source,lexical,sourceRegion,result,body,contextTyped,sourceTyped,closedLabel,_⟩ := label
-    have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed conversion
+    have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed reading
       realized bindings argumentTyped resolved stored
     have valueAgrees := Typing.AddressTyped.resident_type valid inventory typed derived stored
     have movedTyped := handoff.worldTyped valid inventory typed
@@ -174,7 +173,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     (route : LabelRoute state.frames brand inner target region type outer)
     (label : Typing.InstalledLabelTyped program state.world target brand region type)
     (sourceTyped : Typing.ContextBindingsTyped program state.world source caller)
-    (interpreted : Typing.SourceInterpreted program.declarations caller source.static)
+    (reading : Typing.ScopeReading program.declarations source.static caller)
     {module : ModuleId} {unsafeAllowed : Bool}
     (realized : World.LayoutRealized program.declarations state.world module unsafeAllowed)
     (argumentTyped : Typing.PlaceType program.declarations source place actual writable)
@@ -214,7 +213,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
   · right
     obtain ⟨kept,value,roots,targetSource,result,frames,task,original,stored,initialized,valueTyped,valueType,
       resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩ :=
-      step.leave_source_result valid inventory typed pending route label sourceTyped interpreted
+      step.leave_source_result valid inventory typed pending route label sourceTyped reading
         realized argumentTyped resolved
     exact ⟨kept,value,roots,targetSource,result,rfl,frames,task,resolved,original,stored,initialized,valueTyped,valueType,
       subtype,selectedType.trans closed.symm,resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩

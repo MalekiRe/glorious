@@ -4,6 +4,7 @@ import GloriousLanguage.Preservation
 import GloriousLanguage.ProjectionStorage
 import GloriousLanguage.SourceInterpretation
 import GloriousLanguage.RealizationLayout
+import GloriousLanguage.ScopedInterpretation
 
 /-! The source place/projection bridge to actual physical storage typing.
 
@@ -400,7 +401,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program world)
     (moduleEq : runtime.module = source.static.module)
-    (closed : Typing.SourceConversionClosed program.declarations source.static runtime)
+    (reading : Typing.ScopeReading program.declarations source.static runtime)
     {module : ModuleId} {unsafeAllowed : Bool}
     (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     {type : Term} {mutable : Bool} {projections : List Kernel.Projection} {result : Term} {writable : Bool}
@@ -411,6 +412,8 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
     Typing.AddressTyped program world runtime address result := by
   have representation : Typing.TargetRepresentation program world runtime :=
     World.representation valid inventory worldTyped realized
+  have closed : Typing.SourceConversionClosed program.declarations source.static runtime :=
+    reading.conversionClosed valid
   induction projected generalizing base authority address permission with
   | nil => cases resolved with | nil => exact baseTyped
   | @field type mutable index rest field result writable located tail ih =>
@@ -562,7 +565,7 @@ theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {worl
     {source : Typing.Context} {runtime : Execution.Context}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program world)
-    (closed : Typing.SourceConversionClosed program.declarations source.static runtime)
+    (reading : Typing.ScopeReading program.declarations source.static runtime)
     {module : ModuleId} {unsafeAllowed : Bool}
     (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     (typed : Typing.ContextBindingsTyped program world source runtime)
@@ -580,7 +583,7 @@ theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {worl
       exact selected
     have located := Typing.ContextBindingsTyped.place_location valid inventory worldTyped typed
       member selected' projections stored
-    exact Typing.ResolvesProjections.addressTyped valid inventory worldTyped typed.moduleEq closed
+    exact Typing.ResolvesProjections.addressTyped valid inventory worldTyped typed.moduleEq reading
       realized projected located projections
 
 end Typing
