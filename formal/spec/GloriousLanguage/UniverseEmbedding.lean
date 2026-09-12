@@ -1,4 +1,5 @@
 import GloriousLanguage.StaticAtomTransport
+import GloriousLanguage.AtomInstantiation
 
 /-! A larger universe has genuinely more admitted atoms. A finite-support
 bijection absorbs that new level into the infinitely many atoms of the old
@@ -29,25 +30,16 @@ theorem AtomRenaming.fixed_term (rename : AtomRenaming) (term : Term)
     (rigids : ∀ id kind level, Occurs (.rigid id kind level) term → rename.rigid id kind level = (id,level))
     (variables : ∀ id kind level, Occurs (.variable id kind level) term → rename.inference id kind level = (id,level)) :
     rename.term term = term := by
-  have children : ∀ child ∈ term.children, rename.term child = child := by
-    intro child member
-    exact rename.fixed_term child (fun id nested => regions id (.child member nested))
-      (fun id kind level nested => rigids id kind level (.child member nested))
-      (fun id kind level nested => variables id kind level (.child member nested))
-  cases term <;> simp only [AtomRenaming.term]
-  all_goals try rfl
-  case runtimeRegion id => rw [regions id .here]
-  case rigid id kind level => rw [rigids id kind level .here]
-  case «variable» id kind level => rw [variables id kind level .here]
-  all_goals simp only [Term.children,List.mem_cons,List.mem_append,List.not_mem_nil] at children
-  all_goals congr 1
-  all_goals first
-  | exact children _ (by simp)
-  | apply List.map_eq_self_of
-    intro child member
-    exact children child (by simp [member])
-termination_by sizeOf term
-decreasing_by exact Term.child_sizeOf ‹_ ∈ term.children›
+  apply AtomHomomorphism.fixed_term (map := rename.term) (by
+    intro source
+    cases source <;> simp only [AtomRenaming.term,Term.mapChildren]) term
+  · intro _ _ _
+    simp only [AtomRenaming.term]
+  · intro atom occurs
+    cases atom <;> try exact True.intro
+    case runtimeRegion id => simp only [AtomRenaming.term,regions id occurs]
+    case rigid id kind level => simp only [AtomRenaming.term,rigids id kind level occurs]
+    case «variable» id kind level => simp only [AtomRenaming.term,variables id kind level occurs]
 
 namespace UniverseEmbedding
 

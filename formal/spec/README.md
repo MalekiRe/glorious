@@ -67,6 +67,12 @@ or a dependency of this project.
   atom transport, assumption cut and larger-universe universal evidence.
 - `LogicalPredicateInterpretation`, `PredicateComposition`: admitted predicate
   interpretation equivalent to entailment and exact generic-table composition.
+- `AtomInstantiation`, `CapabilityAtomTransport`, `FreshAtomTransport`:
+  shared noninjective atom substitution through actual structural capabilities
+  and all sixteen mutual static judgments.
+- `FreshInstantiation`, `FreshParametricity`: concrete fresh-universe inspection
+  specializes to the caller's actual generic substitution, including nested
+  universal requirements; the general parameter-cut bridge remains open.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

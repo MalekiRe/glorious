@@ -58,6 +58,7 @@ import GloriousLanguage.CapabilitySubstitution
 import GloriousLanguage.LogicalSubstitution
 import GloriousLanguage.LogicalUniverse
 import GloriousLanguage.LogicalPredicateInterpretation
+import GloriousLanguage.FreshParametricity
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence
 import GloriousLanguage.EffectContextTyping

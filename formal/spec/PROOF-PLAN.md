@@ -1003,13 +1003,41 @@ domain. The shared static transport and actual assumption cut then establish
 `Entails.raiseUniverse` for arbitrary larger universes under kinded assumptions
 and a kinded goal. Universal introduction still covers every newly admitted
 value; no quantifier rule, semantic domain or source meaning is weakened.
-General fresh-rigid specialization, source-reduction confluence and the dependent
+The general parameter cut, source-reduction confluence and the dependent
 conversion-safe Drop inversion remain open. These results do not establish full
 language soundness or close the ambient caller-storage obligations above.
 The frozen combined gate passes 163 targets with warnings as errors, including
 the actual head-inference/coherence admission consumers, source and match entry,
 whole-machine control, exterior cleanup separation, callback runtime lifetime
 and runtime world/coverage/body transport. Existing examples were not run.
+
+`AtomInstantiation` now supplies a single globally kind-preserving atom map,
+including proof-only nodes, and `CapabilityAtomTransport` transports the actual
+recursive capability equation through noninjective maps. The ordinary parameter
+substitution consumer derives a total proof-node extension that agrees exactly
+with `Term.substitute` on its admitted terms; its superseded equation walker is
+removed. `UniverseEmbedding` also consumes the shared fixed-atom theorem.
+
+`FreshAtomTransport` carries all sixteen actual static judgments into the
+existing hygienic predicate interpretation. `FreshInstantiation` derives the
+canonical fresh rigid generic table and proves that specializing it recovers
+the caller's exact table. `Entails.specialize_fresh_instance` then derives
+actual `EntailsSubstitution` from one fresh-universe inspection proof and caller
+evidence for the source requirements. Duplicate and compound arguments and
+nested universal requirements are covered by the general proof; no syntactic
+constraint replacement or postulated semantic transport is used.
+
+This closes specialization of a genuinely fresh inspection proof, not the
+remaining bridge from an arbitrary parameter-context derivation to that proof.
+That bridge must handle caller-only parameters, scoped regions and scoped
+brands in universally chosen arguments, using distinct caller and current
+valuations and actual source preimages. Source-reduction confluence,
+conversion-safe Drop inversion, ambient caller-slot privacy and full-language
+soundness are still open.
+The frozen fresh-specialization batch passes its strict 166-job combined gate,
+including actual head-inference and coherence admission, source match entry,
+whole-machine control, exterior storage separation and runtime transport.
+Existing example targets and the unresolved Drop aggregate were not run.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
