@@ -105,10 +105,10 @@ example (id : Identity) : Closed (.runtimeRegion id) := by
 
 example (map : Relocation) (id level : Identity) :
     map.term (.rigid id .region level) = .rigid id .region level := by
-  simp [Relocation.term]
+  simp [Relocation.term,Term.renameRuntimeRegions]
 
 example (map : Relocation) (id : Identity) :
-    map.term (.runtimeRegion id) = .runtimeRegion (map.region id) := by simp [Relocation.term]
+    map.term (.runtimeRegion id) = .runtimeRegion (map.region id) := by simp [Relocation.term,Term.renameRuntimeRegions]
 
 example (context : Execution.Context) (map : Relocation) :
     (map.context context).instantiation.regions =

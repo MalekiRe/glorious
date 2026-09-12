@@ -83,9 +83,16 @@ theorem World.clear_resident_origin {before after : World} {address observed : A
   obtain ⟨original,found,same⟩ := Option.map_eq_some_iff.mp framed.symm
   exact ⟨original,World.resident_iff_stores.mpr found,same.symm⟩
 
-theorem World.clear_wellFormed {before after : World} {address : Address} {authority : Authority}
+/-- Framing a write that retains old resident identities, heads and arities.
+The operation-specific origin proof supplies these facts from the actual
+write, rather than assuming a well-formed result. -/
+theorem World.write_wellFormed_of_origin {before after : World} {address : Address} {authority : Authority}
+    {replacement : Option Value}
     (valid : before.WellFormed) (permission : Permitted before authority .owned address)
-    (written : before.write address none = some after) : after.WellFormed := by
+    (written : before.write address replacement = some after)
+    (origin : ∀ observed value, after.Resident observed value → ∃ original,
+      before.Resident observed original ∧ value.owner = original.owner ∧ value.head = original.head ∧
+        value.fields.length = original.fields.length) : after.WellFormed := by
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
@@ -120,20 +127,14 @@ theorem World.clear_wellFormed {before after : World} {address : Address} {autho
       obtain ⟨_,selected,_⟩ := World.root_transport locations found
       simp [selected]
   · intro observed value pack resident head
-    obtain ⟨original,found,shell⟩ := World.clear_resident_origin written resident
-    have headEq : value.head = original.head := by simpa [Value.shell,Value.withFields,Value.head] using congrArg Value.head shell
-    have arity : value.fields.length = original.fields.length := by
-      simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) shell
+    obtain ⟨original,found,_,headEq,arity⟩ := origin observed value resident
     simpa only [proofBound,regionsEq,ownerBound,arity] using packs observed original pack found (headEq.symm.trans head)
   · intro observed value resident
-    obtain ⟨original,found,shell⟩ := World.clear_resident_origin written resident
-    have owner : value.owner = original.owner := by simpa [Value.shell,Value.withFields,Value.owner] using congrArg Value.owner shell
+    obtain ⟨original,found,owner,_,_⟩ := origin observed value resident
     simpa only [ownerBound,owner] using owners observed original found
   · intro a b x y first second same
-    obtain ⟨left,leftFound,leftShell⟩ := World.clear_resident_origin written first
-    obtain ⟨right,rightFound,rightShell⟩ := World.clear_resident_origin written second
-    have leftOwner : x.owner = left.owner := by simpa [Value.shell,Value.withFields,Value.owner] using congrArg Value.owner leftShell
-    have rightOwner : y.owner = right.owner := by simpa [Value.shell,Value.withFields,Value.owner] using congrArg Value.owner rightShell
+    obtain ⟨left,leftFound,leftOwner,_,_⟩ := origin a x first
+    obtain ⟨right,rightFound,rightOwner,_,_⟩ := origin b y second
     exact unique a b left right leftFound rightFound (leftOwner.symm.trans (same.trans rightOwner))
   · intro id root found
     obtain ⟨original,selected,same⟩ := World.root_origin locations found
@@ -161,8 +162,7 @@ theorem World.clear_wellFormed {before after : World} {address : Address} {autho
       obtain ⟨_,selected,_⟩ := World.root_transport locations found
       simp [selected]
   · intro observed value id resident head
-    obtain ⟨original,found,shell⟩ := World.clear_resident_origin written resident
-    have headEq : value.head = original.head := by simpa [Value.shell,Value.withFields,Value.head] using congrArg Value.head shell
+    obtain ⟨original,found,_,headEq,_⟩ := origin observed value resident
     obtain ⟨loan,selected,live⟩ := references observed original id found (headEq.symm.trans head)
     exact ⟨loan,by simpa only [loansEq] using selected,live⟩
   · intro a b left right first second leftLive rightLive overlap unique
@@ -170,6 +170,17 @@ theorem World.clear_wellFormed {before after : World} {address : Address} {autho
     have rightFound : before.loans.get b = some right := by simpa only [loansEq] using second
     exact (overlaps a b left right leftFound rightFound leftLive rightLive overlap unique).imp
       (AncestorLoan.transport (before := before) loansEq) (AncestorLoan.transport (before := before) loansEq)
+
+theorem World.clear_wellFormed {before after : World} {address : Address} {authority : Authority}
+    (valid : before.WellFormed) (permission : Permitted before authority .owned address)
+    (written : before.write address none = some after) : after.WellFormed := by
+  apply World.write_wellFormed_of_origin valid permission written
+  intro observed value resident
+  obtain ⟨original,found,shell⟩ := World.clear_resident_origin written resident
+  refine ⟨original,found,?_,?_,?_⟩
+  · simpa [Value.shell,Value.withFields,Value.owner] using congrArg Value.owner shell
+  · simpa [Value.shell,Value.withFields,Value.head] using congrArg Value.head shell
+  · simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) shell
 
 theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
     {address : Address} {authority : Authority} (typed : Typing.WorldTyped program before)
@@ -179,7 +190,7 @@ theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
-  refine ⟨World.clear_wellFormed typed.1 permission written,?_,?_⟩
+  refine ⟨World.clear_wellFormed typed.1 permission written,?_,?_,?_⟩
   · intro observed value resident
     have checked := World.stores_typed roots (World.resident_iff_stores.mp resident)
     apply checked.transport ?_ proofEq (fun _ origin => origin.write written)
@@ -189,7 +200,10 @@ theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
   · intro id root value found contents
     by_cases live : root.live = true
     · exact (roots id root value found live contents).2
-    · exact typed.2.2 id root value (World.write_dead_root written found live) contents
+    · exact typed.2.2.1 id root value (World.write_dead_root written found live) contents
+  · apply World.root_regions_transport typed.2.2.2 (World.write_locations written)
+    have same := congrArg World.nextRegion rest
+    exact Nat.le_of_eq same.symm
 
 theorem Retires.roots_other {before after : World} {id : Identity}
     (retired : Retires before id after) {other : Identity} (different : other ≠ id) :
@@ -275,7 +289,7 @@ theorem Retires.wellFormed {before after : World} {id : Identity}
 
 theorem Retires.worldTyped {program : Kernel.Program} {before after : World} {id : Identity}
     (typed : Typing.WorldTyped program before) (retired : Retires before id after) : Typing.WorldTyped program after := by
-  refine ⟨retired.wellFormed typed.1,?_,?_⟩
+  refine ⟨retired.wellFormed typed.1,?_,?_,?_⟩
   · intro address value resident
     have original := retired.resident.mp resident
     apply (typed.2.1 address value original).resident_transport ?_ ?_ (fun _ origin => origin.retire retired) ⟨address,original⟩
@@ -297,7 +311,17 @@ theorem Retires.worldTyped {program : Kernel.Program} {before after : World} {id
           simp only [Table.get_set] at found
           cases found
           simp [empty] at contents
-        · exact typed.2.2 key root value (by simpa only [Table.get_set_other _ _ _ _ same] using found) contents
+        · exact typed.2.2.1 key root value (by simpa only [Table.get_set_other _ _ _ _ same] using found) contents
+  · intro key root found
+    cases retired with
+    | vacant selected _ _ _ =>
+        by_cases same : key = id
+        · subst key
+          simp only [Table.get_set] at found
+          cases found
+          have supported := typed.2.2.2 id _ selected
+          exact supported
+        · exact typed.2.2.2 key root (by simpa only [Table.get_set_other _ _ _ _ same] using found)
 
 theorem EndsLoan.live_origin {before after : World} {id key : Identity} {loan : Loan}
     (ended : EndsLoan before id after) (found : after.loans.get key = some loan) (live : loan.live = true) :

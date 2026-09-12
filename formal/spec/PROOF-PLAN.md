@@ -113,6 +113,18 @@ the full invocation/frame/control-state invariant, including generic drop-hook
 admission. Neither an admissible post-state nor resource admission supplies
 these storage-preservation conclusions.
 
+`LocalPreservation` now proves `LocalStep.worldTyped` for every ordinary local
+transition, not only cleanup tasks. Fresh-region creation, call entry and
+input binding, result protection, owned receiver consumption and pattern
+deconstruction all preserve the same world invariant. Shell consumption is
+proved from the actual same-type structural write and retained resident
+identities, without inventing a new physical-path admission condition.
+`CopyPreservation` proves the complete world and typing invariants for source
+Copy, including fresh owner separation and binding-fact origin renaming, and
+composes them through actual acquisition, capture and observation-copy rules.
+Atomic construction, non-cleanup effect/control/primitive steps and full task
+and frame preservation/progress remain open.
+
 The immutable declaration admission now excludes literal execution identities
 through its complete semantic term projection, including captures, defaults
 and invocation contracts. `InstantiationEquivariance` consumes that correction
@@ -121,6 +133,23 @@ fields commute with runtime-region relocation. Full snapshot value typing is
 still open: quantified entailment requires a supported permutation action,
 and the sealed environment ledger and external-referent lifetime contracts
 need coherent runtime instantiation and control support.
+
+Runtime-region generativity is now part of the authoritative root typing
+contract, including vacant and retired roots. Allocation requires that a type
+refer only to identities already allocated; existing transfer, borrowing and
+lifecycle consumers preserve that contract. This does not require old regions
+to remain live. `RuntimeSupport` proves a total fresh-name permutation that
+agrees with executable relocation on supported terms, using one shared term
+action in both the actual relocation and its proof. `SnapshotTyping` derives
+support for nested residents and vacant locations from nominal/callable
+instantiation and the actual root contract, proves permutation agreement at
+those locations, and preserves all original values under snapshot copying.
+Full copied value typing still requires static entailment/layout equivariance
+and external-referent lifetime support; no such conclusion is assumed.
+
+Operation-value construction now consumes the same `OperationInstance` as
+performance. The former declaration-only lookup did not authenticate generic
+arguments or constraints. Complete atomic storage preservation is still open.
 
 The scalar producer boundary now has general integer-operation totality and
 result-range proofs in `ScalarPreservation`: every supported integer arity
@@ -142,8 +171,18 @@ input interval. Thus negative fractions cannot become successful checked
 unsigned zero by truncation. Floating-destination policy decisions consume an
 actual rounding witness; general rounding existence and the checked library
 Result construction remain separate obligations. Fatal machine outcomes are
-not treated as catchable source conversion errors. Static primitive signature
-admission still needs to be tied to these operational argument/result shapes.
+not treated as catchable source conversion errors.
+
+`ScalarSignatures` now supplies the primitive-identity-specific scalar arity,
+argument and result contract to the actual `Typing.AtomType.primitive` rule;
+an arbitrary manifest signature cannot admit a mismatched scalar operation.
+`ScalarProgress` derives a valid normal result or explicit fault for every
+admitted nonfloating-result scalar calculation from actual typed scalar reads,
+including floating comparisons and finite/nonfinite inputs to integer
+conversion. Its result-type theorem covers all successful scalar families.
+`IntegerDeterminism` proves arithmetic's normal/fault outcomes are disjoint and
+deterministic. Finite floating rounding/square-root existence, result storage
+creation and full primitive-step progress remain open.
 
 After the soundness foundation, prove that elaboration and observations give
 the normative language meaning. This includes complete source coverage,

@@ -1027,7 +1027,7 @@ theorem Typing.WorldTyped.roots {program : Kernel.Program} {world : World} (type
       Typing.ValueTyped program world resident ∧ resident.type = root.type := by
   intro id root resident found live contents
   exact ⟨typed.2.1 ⟨id,root.generation,[]⟩ resident ⟨root,resident,found,live,rfl,contents,.root⟩,
-    typed.2.2 id root resident found contents⟩
+    typed.2.2.1 id root resident found contents⟩
 
 /-- Both writes preserve all resulting resident trees, including ancestors
 whose field lists changed. References are transported only after composing

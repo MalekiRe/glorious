@@ -130,7 +130,7 @@ example (map : Relocation) (outside : 10 ∉ map.owners) :
 
 example (program : Kernel.Program) (world : World) (map : Relocation) :
     Typing.ValueTyped program world (map.value packValue) := by
-  simp only [packValue, fieldValue, packType, Relocation.value, Relocation.values, Relocation.term,
+  simp only [packValue, fieldValue, packType, Relocation.value, Relocation.values, Relocation.term, Term.renameRuntimeRegions,
     List.map_cons, List.map_nil]
   change Typing.ValueTyped program world
     (.resident (map.ownerBase+11) (.bindings (.runtimeBrand (.proof 3)) (.runtimeRegion (map.region 2)) [.unit])

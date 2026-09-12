@@ -268,13 +268,18 @@ theorem Borrows.worldTyped {program : Kernel.Program} {before after : World} {au
         exact ⟨.reference (Table.get_set _ _ _) rfl rfl rfl
           (((World.write_address_types written (vacant.no_located_descendant (Or.inl ⟨_,stored⟩))).mp referentType).retained
             (fun _ selected => selected) (fun _ => rfl)),rfl⟩)
-    refine ⟨well,?_,?_⟩
+    refine ⟨well,?_,?_,?_⟩
     · intro address value resident
       exact World.stores_typed roots (World.resident_iff_stores.mp resident)
     · intro id root value found contents
       by_cases live : root.live = true
       · exact (roots id root value found live contents).2
-      · exact typed.2.2 id root value (World.write_dead_root written found live) contents
+      · exact typed.2.2.1 id root value (World.write_dead_root written found live) contents
+    · intro id root found
+      obtain ⟨original,oldFound,same⟩ := World.root_origin (World.write_locations written) found
+      have bound := congrArg World.nextRegion (World.write_rest written)
+      rw [same]
+      simpa only [bound] using typed.2.2.2 id original oldFound
 
 namespace Execution
 

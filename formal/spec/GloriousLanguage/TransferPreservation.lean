@@ -291,15 +291,30 @@ theorem Transfers.wellFormed {program : Program} {before after : World} {authori
     · exact Or.inl (ancestor.transport transfer.loans)
     · exact Or.inr (ancestor.transport transfer.loans)
 
+/-- Region generativity is a property of stored types, including vacant and
+retired roots. A storage write changes values, never this root type contract. -/
+theorem World.root_regions_transport {before after : World}
+    (supported : ∀ id root, before.roots.get id = some root → root.type.RuntimeRegionsBelow before.nextRegion)
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
+    (bound : before.nextRegion ≤ after.nextRegion) :
+    ∀ id root, after.roots.get id = some root → root.type.RuntimeRegionsBelow after.nextRegion := by
+  intro id root found
+  obtain ⟨original,selected,same⟩ := World.root_origin locations found
+  rw [same]
+  exact (supported id original selected).mono bound
+
 theorem Transfers.worldTyped {program : Kernel.Program} {before after : World} {authority source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
     (transfer : Transfers program.declarations before authority source destination after) : Typing.WorldTyped program after := by
   obtain ⟨residents,roots⟩ := transfer.typed_residents valid inventory typed
-  refine ⟨transfer.wellFormed typed.1,residents,?_⟩
-  intro id root value found contents
-  by_cases live : root.live = true
-  · exact roots id root value found live contents
-  · exact typed.2.2 id root value (transfer.dead_root found live) contents
+  refine ⟨transfer.wellFormed typed.1,residents,?_,?_⟩
+  · intro id root value found contents
+    by_cases live : root.live = true
+    · exact roots id root value found live contents
+    · exact typed.2.2.1 id root value (transfer.dead_root found live) contents
+  · apply World.root_regions_transport typed.2.2.2 transfer.locations
+    have same := congrArg World.nextRegion transfer.rest
+    exact Nat.le_of_eq same.symm
 
 end Glorious.Language

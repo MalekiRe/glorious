@@ -49,26 +49,7 @@ def Relocation.pointer (map : Relocation) (pointer : RawPointer) : RawPointer :=
       | some base => { pointer with address := base+pointer.offset, allocation := some (map.root root) }
     else pointer
 
-def Relocation.term (map : Relocation) : Term → Term
-  | .runtimeRegion id => .runtimeRegion (map.region id)
-  | .tuple fields => .tuple (fields.map map.term)
-  | .array a b => .array (map.term a) (map.term b)
-  | .reference mode a b => .reference mode (map.term a) (map.term b)
-  | .rawPointer mode a => .rawPointer mode (map.term a)
-  | .nominal id arguments => .nominal id (arguments.map map.term)
-  | .alias id arguments => .alias id (arguments.map map.term)
-  | .callable id arguments => .callable id (arguments.map map.term)
-  | .continuation a b c d q => .continuation (map.term a) (map.term b) (map.term c) (map.term d) q
-  | .label a b c => .label (map.term a) (map.term b) (map.term c)
-  | .environment a b => .environment (map.term a) (map.term b)
-  | .available a b => .available (map.term a) (map.term b)
-  | .bindings a b arguments => .bindings (map.term a) (map.term b) (arguments.map map.term)
-  | .effect id arguments => .effect id (arguments.map map.term)
-  | .row instances tails => .row (instances.map map.term) (tails.map map.term)
-  | .projection trait member owners items kind => .projection trait member (owners.map map.term) (items.map map.term) kind
-  | .constantTuple fields => .constantTuple (fields.map map.term)
-  | .constantConstructor id arguments fields => .constantConstructor id (arguments.map map.term) (fields.map map.term)
-  | term => term
+def Relocation.term (map : Relocation) : Term → Term := Term.renameRuntimeRegions map.region
 
 def Relocation.constraint (map : Relocation) : Constraint → Constraint
   | .equal a b => .equal (map.term a) (map.term b)

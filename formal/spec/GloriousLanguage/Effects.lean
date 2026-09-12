@@ -100,13 +100,6 @@ inductive PayloadPlan (program : Language.Program) (world : World) :
       PayloadPlan program world (address :: addresses) (pattern :: patterns)
         ⟨actions.shells ++ rest.shells,actions.bindings ++ rest.bindings,rest.cleanup ++ actions.cleanup⟩
 
-def OperationInstance (program : Kernel.Program) (id : DeclId) (arguments : List Term)
-    (operation : OperationDefinition) (signature : Signature) : Prop :=
-  ∃ substitution,
-    program.declarations.operation id = some operation ∧ Instantiates operation.signature.generics arguments substitution ∧
-    ConstraintsHold program.declarations ⟨[],[],0,operation.header.module,false⟩ substitution operation.signature.constraints ∧
-    signature = operation.signature.instantiate substitution
-
 def CreatesContinuation (program : Kernel.Program) (context : Context) (before : World)
     (id : Identity) (signature : Signature) (answer effects : Term) (quantity : Quantity)
     (localSlot : Local) (address : Address) (after : World) : Prop :=

@@ -104,8 +104,19 @@ private theorem allocateHandle {program : Language.Program}
     (pointer : program.input.target.pointerBits = 64)
     (capacity : 8 ≤ program.input.target.maximumObjectBytes) :
     Allocates program world (.localSlot 2 1) 1 localSlot.type referenceLayout false handle allocated := by
-  refine .fresh (base := 8) (by decide) ⟨⟨3,rfl⟩,by decide,by simp [referenceLayout]⟩ capacity
+  refine .fresh (base := 8) (by decide) ?_ ⟨⟨3,rfl⟩,by decide,by simp [referenceLayout]⟩ capacity
     ⟨⟨[],[],0,default,false⟩,?_⟩ (by decide) (by decide) ?_ ?_
+  · intro id occurs
+    change Occurs (.runtimeRegion id) (.reference .shared (.runtimeRegion 0) .unit) at occurs
+    cases occurs with
+    | child member occurs =>
+      simp only [Term.children,List.mem_cons,List.mem_singleton] at member
+      rcases member with rfl | rfl
+      · cases occurs with
+        | here => decide
+        | child member _ => simp [Term.children] at member
+      · cases occurs with
+        | child member _ => simp [Term.children] at member
   · simpa [localSlot, referenceLayout, pointer] using
       (@LayoutOf.reference program ⟨[],[],0,default,false⟩ .shared (.runtimeRegion 0) .unit)
   · simp [referenceLayout, pointer]

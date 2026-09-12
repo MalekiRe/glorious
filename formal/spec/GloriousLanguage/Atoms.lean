@@ -102,9 +102,9 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       function.captures = [] → DestinationType before.world destination (.callable id arguments) →
       NewValue program.declarations before.world destination (.callable id arguments) (.callable id arguments) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
-  | operation {before context destination id family item next operation after} :
+  | operation {before context destination id family item next operation signature after} :
       before.task = .atom context destination (.operation id family item) next →
-      program.declarations.operation id = some operation →
+      OperationInstance program id (family ++ item) operation signature →
       NewValue program.declarations before.world destination (.callable id (family ++ item)) (.operation id (family ++ item)) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
   | label {before context destination next brand root after} :

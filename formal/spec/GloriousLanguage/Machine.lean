@@ -7,6 +7,16 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
+/-- One selected operation application contract for both first-class value
+construction and performance. Merely finding its declaration cannot supply
+generic arguments or prove the declaration's prerequisites. -/
+def OperationInstance (program : Kernel.Program) (id : DeclId) (arguments : List Term)
+    (operation : OperationDefinition) (signature : Signature) : Prop :=
+  ∃ substitution,
+    program.declarations.operation id = some operation ∧ Instantiates operation.signature.generics arguments substitution ∧
+    ConstraintsHold program.declarations ⟨[],[],0,operation.header.module,false⟩ substitution operation.signature.constraints ∧
+    signature = operation.signature.instantiate substitution
+
 structure Context where
   environment : Environment
   module : ModuleId

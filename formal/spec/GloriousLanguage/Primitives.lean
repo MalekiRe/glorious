@@ -1,4 +1,5 @@
 import GloriousLanguage.Memory
+import GloriousLanguage.ScalarSignatures
 
 /-! Finite machine leaves. Boolean flags here are u8 machine results; source
 truth/result carriers remain ordinary nominal library data. A manifest binds
@@ -19,12 +20,6 @@ inductive ScalarValues (world : World) : List ResolvedPlace → List ScalarValue
   | nil : ScalarValues world [] []
   | cons {address addresses scalar scalars} : ScalarAt world address scalar → ScalarValues world addresses scalars →
       ScalarValues world (address :: addresses) (scalar :: scalars)
-
-def IntegerArity (operation : IntegerOperation) : Nat := if operation = .negate then 1 else 2
-def FloatArity : FloatOperation → Nat
-  | .negate | .absolute | .squareRoot => 1
-  | .fusedMultiplyAdd => 3
-  | _ => 2
 
 inductive IntegerCalculation (target : TargetProfile) (signed : Bool) (width : Width) :
     IntegerOperation → Overflow → List Int → Except Fatal Int → Prop where

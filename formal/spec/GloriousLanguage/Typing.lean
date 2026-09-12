@@ -151,7 +151,9 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       AtomType program context (.label (.rigid id .brand 0)) (.label (.rigid id .brand 0) region type)
   | primitive {id arguments operands binding substitution signature} : binding ∈ program.declarations.input.manifest.bindings →
       binding.declaration = id → Instantiates binding.signature.generics arguments substitution →
-      signature = binding.signature.instantiate substitution → PlacesType program.declarations context operands signature.parameters →
+      signature = binding.signature.instantiate substitution →
+      binding.ScalarSignature program.declarations.input.target arguments signature →
+      PlacesType program.declarations context operands signature.parameters →
       (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) →
       RowSubset program.declarations context.static signature.effects context.effects →
       AtomType program context (.primitive id arguments operands) signature.result
@@ -202,7 +204,8 @@ end
 
 def WorldTyped (program : Kernel.Program) (world : World) : Prop :=
   world.WellFormed ∧ (∀ address value, world.Resident address value → ValueTyped program world value) ∧
-  (∀ id root value, world.roots.get id = some root → root.value = some value → value.type = root.type)
+  (∀ id root value, world.roots.get id = some root → root.value = some value → value.type = root.type) ∧
+  (∀ id root, world.roots.get id = some root → root.type.RuntimeRegionsBelow world.nextRegion)
 
 def PatternCoverage (program : Kernel.Program) (type : Term) (arms : List Arm) : Prop :=
   (∀ world address value, WorldTyped program world → world.Stores address value → value.type = type → value.Initialized →

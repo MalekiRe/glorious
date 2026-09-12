@@ -4,3 +4,8 @@ import GloriousLanguage.ScalarPreservation
 import GloriousLanguage.ConversionPreservation
 import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.InstantiationEquivariance
+import GloriousLanguage.CopyPreservation
+import GloriousLanguage.LocalPreservation
+import GloriousLanguage.SnapshotTyping
+import GloriousLanguage.ScalarProgress
+import GloriousLanguage.IntegerDeterminism

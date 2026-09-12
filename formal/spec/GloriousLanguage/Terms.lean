@@ -133,6 +133,49 @@ theorem Term.Lexical.child {parent child : Term} (lexical : parent.Lexical)
   ⟨fun id occurs => lexical.1 id (.child member occurs),
     fun brand occurs => lexical.2 brand (.child member occurs)⟩
 
+/-- Runtime region renaming preserves every other semantic identity. Snapshot
+relocation and its finite-permutation proof use this one structural action. -/
+def Term.renameRuntimeRegions (rename : Identity → Identity) : Term → Term
+  | .runtimeRegion id => .runtimeRegion (rename id)
+  | .tuple fields => .tuple (fields.map (Term.renameRuntimeRegions rename))
+  | .array a b => .array (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+  | .reference mode a b => .reference mode (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+  | .rawPointer mode a => .rawPointer mode (a.renameRuntimeRegions rename)
+  | .nominal id arguments => .nominal id (arguments.map (Term.renameRuntimeRegions rename))
+  | .alias id arguments => .alias id (arguments.map (Term.renameRuntimeRegions rename))
+  | .callable id arguments => .callable id (arguments.map (Term.renameRuntimeRegions rename))
+  | .continuation a b c d q => .continuation (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+      (c.renameRuntimeRegions rename) (d.renameRuntimeRegions rename) q
+  | .label a b c => .label (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename) (c.renameRuntimeRegions rename)
+  | .environment a b => .environment (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+  | .available a b => .available (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+  | .bindings a b arguments => .bindings (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+      (arguments.map (Term.renameRuntimeRegions rename))
+  | .effect id arguments => .effect id (arguments.map (Term.renameRuntimeRegions rename))
+  | .row instances tails => .row (instances.map (Term.renameRuntimeRegions rename)) (tails.map (Term.renameRuntimeRegions rename))
+  | .projection trait member owners items kind => .projection trait member
+      (owners.map (Term.renameRuntimeRegions rename)) (items.map (Term.renameRuntimeRegions rename)) kind
+  | .constantTuple fields => .constantTuple (fields.map (Term.renameRuntimeRegions rename))
+  | .constantConstructor id arguments fields => .constantConstructor id
+      (arguments.map (Term.renameRuntimeRegions rename)) (fields.map (Term.renameRuntimeRegions rename))
+  | term => term
+
+/-- Generativity, not liveness: a type may retain an expired region, but cannot
+refer to a concrete identity that has never been allocated. -/
+def Term.RuntimeRegionsBelow (bound : Identity) (term : Term) : Prop :=
+  ∀ id, Occurs (.runtimeRegion id) term → id < bound
+
+theorem Term.RuntimeRegionsBelow.child {bound : Identity} {parent child : Term}
+    (supported : parent.RuntimeRegionsBelow bound) (member : child ∈ parent.children) :
+    child.RuntimeRegionsBelow bound := fun id occurs => supported id (.child member occurs)
+
+theorem Term.RuntimeRegionsBelow.mono {lower upper : Identity} {term : Term}
+    (supported : term.RuntimeRegionsBelow lower) (bound : lower ≤ upper) : term.RuntimeRegionsBelow upper :=
+  fun id occurs => Nat.lt_of_lt_of_le (supported id occurs) bound
+
+theorem Term.Lexical.runtimeRegionsBelow {term : Term} (lexical : term.Lexical) (bound : Identity) :
+    term.RuntimeRegionsBelow bound := fun id occurs => False.elim (lexical.1 id occurs)
+
 abbrev Substitution := Table Term
 
 def Term.substitute (substitution : Substitution) : Term → Term

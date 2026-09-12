@@ -52,7 +52,7 @@ theorem Allocates.wellFormed {program : Program} {before after : World} {home re
     allocated.root valid
   have located : ∀ {observed}, before.Located observed → after.Located observed := allocated.located valid
   cases allocated with
-  | @fresh base regionLive layoutValid maximum layoutOf positive aligned within disjoint =>
+  | @fresh base regionLive _ layoutValid maximum layoutOf positive aligned within disjoint =>
     rcases valid with ⟨rootsUnique,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,ownersUnique,
       roots,regions,bases,ranges,loans,references,overlaps,parents,locations⟩
     refine ⟨rootsUnique.set _ _,loansUnique,proofsUnique,regionsUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,?_,?_⟩
@@ -134,7 +134,7 @@ theorem Allocates.worldTyped {program : Kernel.Program} {before after : World} {
     (typed : Typing.WorldTyped program before)
     (allocated : Allocates program.declarations before home region type layout mutable address after) :
     Typing.WorldTyped program after := by
-  refine ⟨allocated.wellFormed typed.1,?_,?_⟩
+  refine ⟨allocated.wellFormed typed.1,?_,?_,?_⟩
   · intro observed value resident
     have old := (allocated.resident typed.1).mp resident
     apply (typed.2.1 observed value old).resident_transport
@@ -153,7 +153,16 @@ theorem Allocates.worldTyped {program : Kernel.Program} {before after : World} {
       simp only [Table.get_set] at found
       cases found
       cases contents
-    · exact typed.2.2 id root value
+    · exact typed.2.2.1 id root value
         (by simpa only [Table.get_set_other _ _ _ _ fresh] using found) contents
+  · intro id root found
+    cases allocated with
+    | fresh _ supported _ _ _ _ _ _ _ =>
+      by_cases fresh : id = before.nextRoot
+      · subst id
+        simp only [Table.get_set] at found
+        cases found
+        exact supported
+      · exact typed.2.2.2 id root (by simpa only [Table.get_set_other _ _ _ _ fresh] using found)
 
 end Glorious.Language

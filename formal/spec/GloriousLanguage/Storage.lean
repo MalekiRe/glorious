@@ -429,7 +429,8 @@ def DisjointStorage (world : World) (base size : Nat) : Prop :=
 /-- Allocation introduces a storage home at a fresh, aligned physical extent,
 never an initialized owner. Zero-sized homes retain separate logical identity. -/
 inductive Allocates (program : Program) : World → Home → Identity → Term → Layout → Bool → Address → World → Prop where
-  | fresh {before home region type layout mutable base} : region ∈ before.liveRegions → layout.Valid →
+  | fresh {before home region type layout mutable base} : region ∈ before.liveRegions →
+      type.RuntimeRegionsBelow before.nextRegion → layout.Valid →
       layout.size ≤ program.input.target.maximumObjectBytes →
       (∃ context, LayoutOf program context type layout) →
       0 < base → base % layout.alignment = 0 → base + layout.size < 2^program.input.target.pointerBits →

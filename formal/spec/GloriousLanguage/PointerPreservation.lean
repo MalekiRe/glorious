@@ -259,7 +259,7 @@ theorem CopiesSnapshot.pointer_typed {program : Kernel.Program} {before after : 
       rcases head with ⟨impossible,_⟩ | ⟨_,_,_,_,impossible,_⟩ | ⟨_,_,_,_,_,impossible,_⟩ <;> cases impossible
   | pointer bound origin =>
       rw [copied.result]
-      simp only [Relocation.value,Relocation.term,Relocation.values]
+      simp only [Relocation.value,Relocation.term,Term.renameRuntimeRegions,Relocation.values]
       exact .pointer (copied.relocation.pointer_bound valid origin bound)
         (copied.relocation.pointer_origin valid origin)
 

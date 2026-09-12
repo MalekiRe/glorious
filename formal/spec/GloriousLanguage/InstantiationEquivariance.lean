@@ -1,4 +1,4 @@
-import GloriousLanguage.RelocationPreservation
+import GloriousLanguage.StorageTyping
 
 /-! Runtime relocation acts on generic arguments, not on immutable lexical
 declarations. These laws connect the existing kinded substitution operation
@@ -43,15 +43,15 @@ def Relocation.substitution (map : Relocation) (substitution : Substitution) : S
 
 theorem Relocation.term_kind (map : Relocation) (term : Term) :
     (map.term term).kind = term.kind := by
-  cases term <;> simp only [Relocation.term,Term.kind]
+  cases term <;> simp only [Relocation.term,Term.renameRuntimeRegions,Term.kind]
 
 theorem Relocation.term_children (map : Relocation) (term : Term) :
     (map.term term).children = term.children.map map.term := by
-  cases term <;> simp only [Relocation.term,Term.children,List.map_cons,List.map_nil,List.map_append]
+  cases term <;> simp only [Relocation.term,Term.renameRuntimeRegions,Term.children,List.map_cons,List.map_nil,List.map_append]
 
 theorem Relocation.lexical_term (map : Relocation) (term : Term) (lexical : term.Lexical) :
     map.term term = term := by
-  cases term <;> simp only [Relocation.term]
+  cases term <;> simp only [Relocation.term,Term.renameRuntimeRegions]
   case runtimeRegion id => exact False.elim (lexical.1 id .here)
   all_goals try rfl
   all_goals
@@ -77,15 +77,15 @@ theorem Relocation.occurs_preimage (map : Relocation) {needle term : Term}
 
 theorem Relocation.term_eq_parameter (map : Relocation) {term : Term} {id : Identity} {kind : Kind}
     (same : map.term term = .parameter id kind) : term = .parameter id kind := by
-  cases term <;> simp only [Relocation.term] at same <;> cases same <;> rfl
+  cases term <;> simp only [Relocation.term,Term.renameRuntimeRegions] at same <;> cases same <;> rfl
 
 theorem Relocation.term_substitute (map : Relocation) (substitution : Substitution) (term : Term) :
     map.term (term.substitute substitution) =
       (map.term term).substitute (map.substitution substitution) := by
-  cases term <;> simp only [Term.substitute,Relocation.term]
+  cases term <;> simp only [Term.substitute,Relocation.term,Term.renameRuntimeRegions]
   case parameter id kind =>
     rw [Relocation.substitution,Table.get_map_values]
-    cases substitution.get id <;> simp only [Option.getD,Option.map,Relocation.term]
+    cases substitution.get id <;> simp only [Option.getD,Option.map,Relocation.term,Term.renameRuntimeRegions]
   all_goals try rfl
   all_goals try simp only [List.map_map,Function.comp_def]
   all_goals
@@ -159,14 +159,14 @@ theorem ConstructorHead.relocate {program : Program} (valid : ProgramWellFormed 
     ConstructorHead program (map.term type) variant (fields.map map.term) head := by
   rcases constructed with ⟨rfl,rfl,rfl⟩ | ⟨element,sign,width,length,rfl,rfl,rfl,count,homogeneous⟩ |
     ⟨id,arguments,data,constructor,substitution,rfl,rfl,rfl,selected,instantiated,substituted⟩
-  · exact Or.inl ⟨by simp only [Relocation.term],rfl,rfl⟩
-  · refine Or.inr (Or.inl ⟨map.term element,sign,width,length,by simp only [Relocation.term],rfl,rfl,
+  · exact Or.inl ⟨by simp only [Relocation.term,Term.renameRuntimeRegions],rfl,rfl⟩
+  · refine Or.inr (Or.inl ⟨map.term element,sign,width,length,by simp only [Relocation.term,Term.renameRuntimeRegions],rfl,rfl,
       by simpa only [List.length_map] using count,?_⟩)
     intro field member
     obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
     exact congrArg map.term (homogeneous original inOriginal)
   · refine Or.inr (Or.inr ⟨id,arguments.map map.term,data,constructor,map.substitution substitution,
-      by simp only [Relocation.term],rfl,rfl,selected,Instantiates.relocate instantiated map,?_⟩)
+      by simp only [Relocation.term,Term.renameRuntimeRegions],rfl,rfl,selected,Instantiates.relocate instantiated map,?_⟩)
     apply map.substitutes_list _ substituted
     intro term member
     obtain ⟨field,inFields,rfl⟩ := List.mem_map.mp member
