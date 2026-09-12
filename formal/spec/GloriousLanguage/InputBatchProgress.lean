@@ -3472,4 +3472,16 @@ theorem Value.replace_fields_none {before after : Value} {index : Nat} {path : L
   · exact absurd (noneBefore slot (List.mem_of_getElem? found))
       (by rw [atSlot]; simp)
 
+
+/-- The receiver shell the entry must preserve: a stored value with the callable
+head, the consumed liveness flag, every field a hole and no resources, plus the
+owner permission at the receiver address. -/
+def Kernel.ReceiverFramed (world : World) (receiver : Address) (authority : Authority)
+    (head : ValueHead) : Prop :=
+  (∃ value, world.Stores receiver value ∧ value.head = head ∧ value.shellLive = false ∧
+    (∀ field ∈ value.fields, field = none) ∧ value.resources = []) ∧
+  Permitted world authority .owned receiver
+
 end Kernel
+
+end Glorious.Language
