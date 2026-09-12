@@ -77,16 +77,16 @@ structure Invocation where
 /-- The same selected Fn/RunsIn obligation is consumed by structural typing
 and contextual execution. A witness's presence is not an invocation proof. -/
 def RunsInEnvironment (program : Language.Program) (context : Language.Context)
-    (call : Invocation) (receiver brand region : Term) : Prop :=
+    (call : Invocation) (receiver brand region : Term) (residents : List Term) : Prop :=
   ∃ selected, call.environment = some selected ∧
     WellKinded program context selected.region .region ∧
     RegionIncludes context.assumptions region selected.region ∧
     Entails program context (.callable (call.receiver.type selected.region receiver)
       call.signature.parameters call.signature.result call.signature.effects call.signature.unsafeAllowed) ∧
     Entails program context (.runsIn (call.receiver.type selected.region receiver)
-      (selected.access.type selected.region (.environment brand region)) call.signature.parameters
+      (selected.access.type selected.region (.environment brand region residents)) call.signature.parameters
       selected.after call.signature.unsafeAllowed) ∧
-    (selected.access ≠ .owned → selected.after = .environment brand region)
+    (selected.access ≠ .owned → selected.after = .environment brand region residents)
 
 mutual
   inductive Code where

@@ -9,3 +9,8 @@ import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
+import GloriousLanguage.ConstructionPreservation
+import GloriousLanguage.ControlPreservation
+import GloriousLanguage.EffectPreservation
+import GloriousLanguage.MemoryPreservation
+import GloriousLanguage.FloatProgress

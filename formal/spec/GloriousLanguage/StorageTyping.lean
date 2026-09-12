@@ -272,8 +272,8 @@ theorem Typing.ValueTyped.fields_model {program : Kernel.Program} {world : World
   | operation selected => exact ⟨[],.nil,fun _ fields => by cases fields; exact .operation selected⟩
   | label => exact ⟨[],.nil,fun _ fields => by cases fields; exact .label⟩
   | continuation form => exact ⟨[],.nil,fun _ fields => by cases fields; exact .continuation form⟩
-  | available found brand identity region =>
-      exact ⟨[],.nil,fun _ fields => by cases fields; exact .available found brand identity region⟩
+  | available found brand identity region residents =>
+      exact ⟨[],.nil,fun _ fields => by cases fields; exact .available found brand identity region residents⟩
   | bindings checked brand region length distinct =>
       exact ⟨_,checked,fun _ fields => .bindings fields brand region
         (fields.length.trans (checked.length.symm.trans length)) distinct⟩

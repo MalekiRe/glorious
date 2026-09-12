@@ -41,7 +41,7 @@ theorem Typing.ValueTyped.owner_change {program : Kernel.Program} {world : World
   | operation selected => exact .operation selected
   | label => exact .label
   | continuation form => exact .continuation form
-  | available found brand id region => exact .available found brand id region
+  | available found brand id region residents => exact .available found brand id region residents
   | bindings fields brand region length distinct => exact .bindings fields brand region length distinct
 
 theorem Typing.ValueTyped.mapBindingOrigins {program : Kernel.Program} {world : World} {value : Value}
@@ -64,7 +64,7 @@ theorem Typing.ValueTyped.mapBindingOrigins {program : Kernel.Program} {world : 
   · exact fun {_ _ _ _ _ _} selected => .operation selected
   · exact fun {_ _ _ _ _} => .label
   · exact fun {_ _ _ _} form => .continuation form
-  · exact fun {_ _ _ _ _ _} found brand id region => .available found brand id region
+  · exact fun {_ _ _ _ _ _ _} found brand id region residents => .available found brand id region residents
   · intro owner brand region live fields types pack _ brandEq regionEq length distinct checked
     exact .bindings checked brandEq regionEq
       (by simpa [Value.mapFieldOrigins_eq_map,BindingPack.mapOrigins] using length) distinct

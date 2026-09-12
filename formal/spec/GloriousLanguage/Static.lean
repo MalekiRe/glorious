@@ -53,10 +53,12 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
       Kinding program context (.continuation brand argument answer effects quantity) .type
   | label {brand region result} : Kinding program context brand .brand → Kinding program context region .region →
       Kinding program context result .type → Kinding program context (.label brand region result) .type
-  | environment {brand region} : Kinding program context brand .brand → Kinding program context region .region →
-      Kinding program context (.environment brand region) .type
-  | available {brand region} : Kinding program context brand .brand → Kinding program context region .region →
-      Kinding program context (.available brand region) .type
+  | environment {brand region residents} : Kinding program context brand .brand → Kinding program context region .region →
+      (∀ resident ∈ residents, Kinding program context resident .type) →
+      Kinding program context (.environment brand region residents) .type
+  | available {brand region residents} : Kinding program context brand .brand → Kinding program context region .region →
+      (∀ resident ∈ residents, Kinding program context resident .type) →
+      Kinding program context (.available brand region residents) .type
   | bindings {brand region arguments} : Kinding program context brand .brand → Kinding program context region .region →
       (∀ argument ∈ arguments, Kinding program context argument .type) →
       Kinding program context (.bindings brand region arguments) .type
@@ -115,12 +117,11 @@ inductive CapabilityEquation (program : Program) (assignment : Term → Option P
   | callable {id arguments captures principals} : CallableFields program id arguments captures →
       ListRel (fun field capability => assignment field = some capability) captures principals →
       CapabilityEquation program assignment (.callable id arguments) (Principal.fields principals)
-  | environment {definition brand region principals} : Definition.environment definition ∈ program.declarations →
-      definition.brand = brand → definition.region = region →
-      ListRel (fun field capability => assignment field = some capability) definition.residents principals →
-      CapabilityEquation program assignment (.environment brand region) (Principal.fields principals)
-  | available {brand region principal} : assignment (.environment brand region) = some principal →
-      CapabilityEquation program assignment (.available brand region) principal
+  | environment {brand region residents principals} :
+      ListRel (fun field capability => assignment field = some capability) residents principals →
+      CapabilityEquation program assignment (.environment brand region residents) (Principal.fields principals)
+  | available {brand region residents principal} : assignment (.environment brand region residents) = some principal →
+      CapabilityEquation program assignment (.available brand region residents) principal
   | bindings {brand region fields principals} :
       ListRel (fun field capability => assignment field = some capability) fields principals →
       CapabilityEquation program assignment (.bindings brand region fields) (Principal.fields principals)
@@ -226,12 +227,11 @@ mutual
         TypeOutlives program context (.callable id arguments) region
     | label {brand long result short} : RegionIncludes context.assumptions long short →
         TypeOutlives program context (.label brand long result) short
-    | environment {definition short} : Definition.environment definition ∈ program.declarations →
-        RegionIncludes context.assumptions definition.region short →
-        (∀ field ∈ definition.residents, TypeOutlives program context field short) →
-        TypeOutlives program context (.environment definition.brand definition.region) short
-    | available {brand long short} : TypeOutlives program context (.environment brand long) short →
-        TypeOutlives program context (.available brand long) short
+    | environment {brand long residents short} : RegionIncludes context.assumptions long short →
+        (∀ field ∈ residents, TypeOutlives program context field short) →
+        TypeOutlives program context (.environment brand long residents) short
+    | available {brand long residents short} : TypeOutlives program context (.environment brand long residents) short →
+        TypeOutlives program context (.available brand long residents) short
     | bindings {brand long fields short} : RegionIncludes context.assumptions long short →
         (∀ field ∈ fields, TypeOutlives program context field short) →
         TypeOutlives program context (.bindings brand long fields) short
@@ -383,12 +383,12 @@ mutual
     | continuation {brand argument answer effects quantity} :
         LayoutOf program context (.continuation brand argument answer effects quantity) program.input.target.continuationLayout
     | label {brand region result} : LayoutOf program context (.label brand region result) ⟨0,1,[],0,0,[]⟩
-    | available {brand region} : LayoutOf program context (.available brand region) ⟨0,1,[],0,0,[]⟩
+    | available {brand region residents} : LayoutOf program context (.available brand region residents) ⟨0,1,[],0,0,[]⟩
     | bindings {brand region fields layouts layout} : ListRel (LayoutOf program context) fields layouts →
         AggregateLayout layouts layout → LayoutOf program context (.bindings brand region fields) layout
-    | environment {definition layouts layout} : Definition.environment definition ∈ program.declarations →
-        ListRel (LayoutOf program context) definition.residents layouts → AggregateLayout layouts layout →
-        LayoutOf program context (.environment definition.brand definition.region) layout
+    | environment {brand region residents layouts layout} :
+        ListRel (LayoutOf program context) residents layouts → AggregateLayout layouts layout →
+        LayoutOf program context (.environment brand region residents) layout
     | array {element sign width length elementLayout layout} : 0 ≤ length →
         IntegerRange program.input.target false .pointer length → LayoutOf program context element elementLayout →
         ArrayLayout elementLayout length.toNat layout →
@@ -532,7 +532,6 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
   | .import _ => True
   | .fixity fixity => fixity.precedence ≤ 255 ∧
     ∃ function, program.function fixity.target = some function ∧ Visible function.header fixity.header.module
-  | .environment environment => environment.brand.kind = .brand ∧ environment.region.kind = .region
 
 /-- Source templates are checked before runtime instantiation. Runtime atoms
 remain well-kinded in execution judgments, but cannot occur literally in the

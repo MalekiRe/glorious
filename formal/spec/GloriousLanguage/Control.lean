@@ -24,10 +24,13 @@ def AbandonedRoots (world : World) (frames : List Frame) (kept roots : List Iden
 def DisposesReservations (context : Context) (places : List ResolvedPlace) (next : Task) : Task :=
   places.foldr (fun place task => .destroy context place.address place.authority task) next
 
-def ReservationInputs (world : World) (reserved : List ResolvedPlace) (access : Access)
+/-- The frozen reservation ledger supplies both storage and its exact resident
+type product. Invocation cannot recover a different capture shape from an
+independent environment declaration or an unrelated subtype view. -/
+def ReservationInputs (world : World) (available : Availability) (access : Access)
     (formals : List Local) (inputs : List InvocationInput) : Prop :=
-  reserved.length = formals.length ∧
-  inputs = (formals.zip reserved).zipIdx.map
+  available.reserved.length = formals.length ∧ formals.map (·.type) = available.residents ∧
+  inputs = (formals.zip available.reserved).zipIdx.map
     (fun (entry,index) => ⟨.capture index,entry.1,entry.2.address,entry.2.authority,access⟩) ∧
   ∀ input ∈ inputs, Permitted world input.authority access input.storage ∧
     ∃ value, world.Stores input.storage value ∧ value.Initialized ∧ value.type = input.formal.type
@@ -149,19 +152,20 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       Protect program outerContext before.world argument.address argument.authority kept after →
       AbandonedRoots after inner [kept.root] roots → Cancelable program.declarations after roots →
       ControlStep program before none { before with world := after, frames := outer, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions) (.yield outerContext kept)) }
-  | reserve {before context lexical bound localSlot brand places next reserved allocated destination after layout} :
+  | reserve {before context lexical bound localSlot brand places next reserved types allocated destination after layout} :
       before.task = .run context (.reserve lexical brand places next) →
       bound = context.bindBrand brand (.proof before.world.nextProof) → localSlot = bound.local lexical →
       ResolvedOperands before.world context.environment places reserved →
+      ListRel (fun place type => AddressType program.declarations before.world place.address type) reserved types →
       (reserved.map ResolvedPlace.address).Nodup →
       (∀ a ∈ reserved, ∀ b ∈ reserved, a.address ≠ b.address → ¬ a.address.Overlaps b.address) →
       (∀ id available, before.world.availability.get id = some available → available.active = true →
         ∀ a ∈ available.reserved, ∀ b ∈ reserved, ¬ a.address.Overlaps b.address) →
-      localSlot.type = .available (.runtimeBrand (.proof before.world.nextProof)) (.runtimeRegion context.region) →
+      localSlot.type = .available (.runtimeBrand (.proof before.world.nextProof)) (.runtimeRegion context.region) types →
       Allocates program.declarations before.world (.localSlot context.activation context.scope) context.region localSlot.type layout
         localSlot.mutable destination allocated →
       NewValue program.declarations allocated destination localSlot.type (.available before.world.nextProof) [] after →
-      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1, availability := after.availability.set before.world.nextProof ⟨before.world.nextProof,.runtimeBrand (.proof before.world.nextProof),context.region,reserved,true⟩ }, task := .run (bound.bind localSlot destination) next }
+      ControlStep program before none { before with world := { after with nextProof := before.world.nextProof+1, availability := after.availability.set before.world.nextProof ⟨before.world.nextProof,.runtimeBrand (.proof before.world.nextProof),context.region,reserved,types,true⟩ }, task := .run (bound.bind localSlot destination) next }
   | available {before context destination place id next source authority value after} :
       before.task = .atom context destination (.available place) next →
       ResolvesPlace before.world context.environment place source authority →
@@ -197,9 +201,10 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       before.world.Stores witness witnessValue → witnessValue.Initialized → witnessValue.head = .available token →
       Permitted before.world permission selected.access witness →
       before.world.availability.get token = some available → available.active = true → available.region ∈ before.world.liveRegions →
-      witnessValue.type = .available available.brand (.runtimeRegion available.region) →
-      RunsInEnvironment program.declarations context.static call (.callable id arguments) available.brand (.runtimeRegion available.region) →
-      ReservationInputs before.world available.reserved selected.access function.captures captures →
+      witnessValue.type = .available available.brand (.runtimeRegion available.region) available.residents →
+      RunsInEnvironment program.declarations context.static call (.callable id arguments)
+        available.brand (.runtimeRegion available.region) available.residents →
+      ReservationInputs before.world available selected.access function.captures captures →
       ArgumentInputs before.world context 0 function.parameters call.arguments inputs →
       ConsumesReceiver before.world receiver authority call.receiver consumed →
       ConsumesAvailability consumed witness token selected.access after →

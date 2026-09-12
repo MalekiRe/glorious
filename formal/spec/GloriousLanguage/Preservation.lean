@@ -782,8 +782,8 @@ theorem Typing.ValueTyped.transport {program : Kernel.Program} {before after : W
   · exact fun {_ _ _ _ _ _} selected => .operation selected
   · exact fun {_ _ _ _ _} => .label
   · exact fun {_ _ _ _} type => .continuation type
-  · intro owner brand region id live available found brandEq idEq regionEq
-    exact .available (by simpa [proofs] using found) brandEq idEq regionEq
+  · intro owner brand region residents id live available found brandEq idEq regionEq residentsEq
+    exact .available (by simpa [proofs] using found) brandEq idEq regionEq residentsEq
   · exact fun {_ _ _ _ _ _ _} _ brand region length distinct fields => .bindings fields brand region length distinct
   · exact .nil
   · exact fun {_ _ _} _ fields => .hole fields

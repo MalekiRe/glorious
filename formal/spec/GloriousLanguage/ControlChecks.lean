@@ -4,7 +4,7 @@ namespace Glorious.Language.ControlChecks
 
 open Kernel Execution
 
-private def witnessType : Term := .available (.runtimeBrand (.proof 3)) (.runtimeRegion 4)
+private def witnessType : Term := .available (.runtimeBrand (.proof 3)) (.runtimeRegion 4) []
 private def witness : Value := .resident 8 witnessType (.available 3) true []
 private def source : Address := ⟨10,0,[]⟩
 private def destination : Address := ⟨11,0,[]⟩
@@ -13,7 +13,7 @@ private def home : Root :=
 private def vacant : Root := { home with value := none }
 private def world : World :=
   { roots := [(10,home),(11,vacant)]
-    availability := [(3,⟨3,.runtimeBrand (.proof 3),4,[],true⟩)]
+    availability := [(3,⟨3,.runtimeBrand (.proof 3),4,[],[],true⟩)]
     nextRoot := 12
     nextOwner := 9
     nextRegion := 5
@@ -127,7 +127,7 @@ example (context : Execution.Context) (address : Address) (next : Task) :
 example {world reserved access formals inputs input}
     (planned : ReservationInputs world reserved access formals inputs) (member : input ∈ inputs) :
     input.access = access := by
-  rcases planned with ⟨_,rfl,_⟩
+  rcases planned with ⟨_,_,rfl,_⟩
   rcases List.mem_map.mp member with ⟨⟨entry,index⟩,_,rfl⟩
   rfl
 

@@ -7,6 +7,16 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
+def ConstructorHead (program : Language.Program) (type : Term) (variant : Option DeclId)
+    (fieldTypes : List Term) (head : ValueHead) : Prop :=
+  (type = .tuple fieldTypes ∧ variant = none ∧ head = .tuple) ∨
+  (∃ element sign width length, type = .array element (.constant (.integer sign width length)) ∧
+    variant = none ∧ head = .array ∧ length = fieldTypes.length ∧ ∀ field ∈ fieldTypes, field = element) ∨
+  (∃ id arguments data constructor substitution,
+    type = .nominal data.header.id arguments ∧ variant = some id ∧ head = .constructor id ∧
+    program.Constructor id data constructor ∧ Instantiates data.generics arguments substitution ∧
+    ListRel (Substitutes substitution) (constructor.fields.map (·.type)) fieldTypes)
+
 mutual
   inductive ConstantValue (program : Language.Program) (context : Language.Context) :
       Nat → Term → Nat → Value → Prop where
@@ -21,6 +31,7 @@ mutual
     | constructor {next id arguments fields finish residents type} :
         ConstantType program context (.constantConstructor id arguments fields) type →
         ConstantValues program context (next+1) fields finish residents →
+        ConstructorHead program type (some id) (residents.map Value.type) (.constructor id) →
         ConstantValue program context next (.constantConstructor id arguments fields) finish
           (.resident next type (.constructor id) true (residents.map some))
 
@@ -49,16 +60,6 @@ inductive Captures (program : Kernel.Program) (context : Context) :
       Borrows program.declarations allocated authority mode region source destination middle →
       Captures program context middle rest addresses after →
       Captures program context before (capture :: rest) (destination :: addresses) after
-
-def ConstructorHead (program : Language.Program) (type : Term) (variant : Option DeclId)
-    (fieldTypes : List Term) (head : ValueHead) : Prop :=
-  (type = .tuple fieldTypes ∧ variant = none ∧ head = .tuple) ∨
-  (∃ element sign width length, type = .array element (.constant (.integer sign width length)) ∧
-    variant = none ∧ head = .array ∧ length = fieldTypes.length ∧ ∀ field ∈ fieldTypes, field = element) ∨
-  (∃ id arguments data constructor substitution,
-    type = .nominal data.header.id arguments ∧ variant = some id ∧ head = .constructor id ∧
-    program.Constructor id data constructor ∧ Instantiates data.generics arguments substitution ∧
-    ListRel (Substitutes substitution) (constructor.fields.map (·.type)) fieldTypes)
 
 def DestinationType (world : World) (address : Address) (type : Term) : Prop :=
   address.fields = [] ∧ ∃ root, world.root address = some root ∧ root.type = type ∧ root.value = none

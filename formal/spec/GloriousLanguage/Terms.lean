@@ -55,8 +55,8 @@ inductive Term where
   | callable (declaration : DeclId) (arguments : List Term)
   | continuation (brand argument answer effects : Term) (quantity : Quantity)
   | label (brand region result : Term)
-  | environment (brand region : Term)
-  | available (brand region : Term)
+  | environment (brand region : Term) (residents : List Term)
+  | available (brand region : Term) (residents : List Term)
   | bindings (brand region : Term) (arguments : List Term)
   | effect (declaration : DeclId) (arguments : List Term)
   | row (instances tails : List Term)
@@ -81,12 +81,12 @@ def Term.kind : Term → Kind
 
 def Term.children : Term → List Term
   | .tuple fields | .constantTuple fields => fields
-  | .array a b | .reference _ a b | .environment a b | .available a b => [a, b]
+  | .array a b | .reference _ a b => [a, b]
   | .rawPointer _ a => [a]
   | .nominal _ xs | .alias _ xs | .callable _ xs | .effect _ xs => xs
   | .continuation a b c d _ => [a, b, c, d]
   | .label a b c => [a, b, c]
-  | .bindings a b xs => a :: b :: xs
+  | .environment a b xs | .available a b xs | .bindings a b xs => a :: b :: xs
   | .row xs ys | .projection _ _ xs ys _ | .constantConstructor _ xs ys => xs ++ ys
   | _ => []
 
@@ -100,8 +100,8 @@ def Term.mapChildren (f : Term → Term) : Term → Term
   | .callable d xs => .callable d (xs.map f)
   | .continuation a b c d q => .continuation (f a) (f b) (f c) (f d) q
   | .label a b c => .label (f a) (f b) (f c)
-  | .environment a b => .environment (f a) (f b)
-  | .available a b => .available (f a) (f b)
+  | .environment a b xs => .environment (f a) (f b) (xs.map f)
+  | .available a b xs => .available (f a) (f b) (xs.map f)
   | .bindings a b xs => .bindings (f a) (f b) (xs.map f)
   | .effect d xs => .effect d (xs.map f)
   | .row xs ys => .row (xs.map f) (ys.map f)
@@ -147,8 +147,10 @@ def Term.renameRuntimeRegions (rename : Identity → Identity) : Term → Term
   | .continuation a b c d q => .continuation (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
       (c.renameRuntimeRegions rename) (d.renameRuntimeRegions rename) q
   | .label a b c => .label (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename) (c.renameRuntimeRegions rename)
-  | .environment a b => .environment (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
-  | .available a b => .available (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+  | .environment a b residents => .environment (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+      (residents.map (Term.renameRuntimeRegions rename))
+  | .available a b residents => .available (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
+      (residents.map (Term.renameRuntimeRegions rename))
   | .bindings a b arguments => .bindings (a.renameRuntimeRegions rename) (b.renameRuntimeRegions rename)
       (arguments.map (Term.renameRuntimeRegions rename))
   | .effect id arguments => .effect id (arguments.map (Term.renameRuntimeRegions rename))
@@ -190,8 +192,10 @@ def Term.substitute (substitution : Substitution) : Term → Term
   | .continuation a b c d uses => .continuation (a.substitute substitution) (b.substitute substitution)
       (c.substitute substitution) (d.substitute substitution) uses
   | .label a b c => .label (a.substitute substitution) (b.substitute substitution) (c.substitute substitution)
-  | .environment a b => .environment (a.substitute substitution) (b.substitute substitution)
-  | .available a b => .available (a.substitute substitution) (b.substitute substitution)
+  | .environment a b residents => .environment (a.substitute substitution) (b.substitute substitution)
+      (residents.map (Term.substitute substitution))
+  | .available a b residents => .available (a.substitute substitution) (b.substitute substitution)
+      (residents.map (Term.substitute substitution))
   | .bindings a b arguments => .bindings (a.substitute substitution) (b.substitute substitution)
       (arguments.map (Term.substitute substitution))
   | .effect id arguments => .effect id (arguments.map (Term.substitute substitution))
@@ -223,8 +227,8 @@ def ScopeInstantiation.term (scope : ScopeInstantiation) : Term → Term
   | .callable id arguments => .callable id (arguments.map scope.term)
   | .continuation a b c d quantity => .continuation (scope.term a) (scope.term b) (scope.term c) (scope.term d) quantity
   | .label a b c => .label (scope.term a) (scope.term b) (scope.term c)
-  | .environment a b => .environment (scope.term a) (scope.term b)
-  | .available a b => .available (scope.term a) (scope.term b)
+  | .environment a b residents => .environment (scope.term a) (scope.term b) (residents.map scope.term)
+  | .available a b residents => .available (scope.term a) (scope.term b) (residents.map scope.term)
   | .bindings a b arguments => .bindings (scope.term a) (scope.term b) (arguments.map scope.term)
   | .effect id arguments => .effect id (arguments.map scope.term)
   | .row instances tails => .row (instances.map scope.term) (tails.map scope.term)

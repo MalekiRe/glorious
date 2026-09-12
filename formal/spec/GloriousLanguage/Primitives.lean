@@ -227,7 +227,8 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       LayoutOf program.declarations context.static type layout →
       ConstantValue program.declarations context.static before.world.nextOwner
         (.constantTuple [.constant (.integer false .pointer layout.size),.constant (.integer false .pointer layout.alignment)])
-        allocated size → before.world.write destination (some size) = some after → alignment = allocated →
+        allocated size → DestinationType before.world destination size.type →
+      before.world.write destination (some size) = some after → alignment = allocated →
       PrimitiveStep program before none { before with world := { after with nextOwner := alignment }, task := .run context next }
   | abort {before context destination binding arguments operands next} :
       before.task = .primitive context destination binding arguments operands next → binding.primitive = some .abort →

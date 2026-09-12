@@ -89,7 +89,6 @@ def SourceEntity (node : Node) (definition : Definition) : Prop :=
   | .declaration source, .module module => ∃ members, source.undecorated = .module module.header.name members
   | .declaration source, .import imported => source.undecorated = .import imported.tree
   | .declaration source, .fixity fixity => ∃ target, source.undecorated = .fixity fixity.kind fixity.precedence fixity.operator target
-  | .expression _, .environment environment => environment.header.sourceVisible = false
   | _, _ => False
 
 end Glorious.Language.Source

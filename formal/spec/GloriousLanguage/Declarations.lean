@@ -100,13 +100,6 @@ structure FunctionDefinition where
   invocations : List InvocationRelation := []
   deriving Repr, Inhabited
 
-structure EnvironmentDefinition where
-  header : Header
-  brand : Term
-  region : Term
-  residents : List Term
-  deriving Repr, Inhabited
-
 structure OperationDefinition where
   header : Header
   family : DeclId
@@ -172,7 +165,6 @@ inductive Definition where
   | module (value : ModuleDefinition)
   | import (value : ImportDefinition)
   | fixity (value : FixityDefinition)
-  | environment (value : EnvironmentDefinition)
   deriving Repr, Inhabited
 
 def Definition.header : Definition → Header
@@ -180,7 +172,6 @@ def Definition.header : Definition → Header
   | .associated d => d.header | .implementation d => d.header | .function d => d.header
   | .operation d => d.header | .effect d => d.header | .constant d => d.header
   | .global d => d.header | .module d => d.header | .import d => d.header | .fixity d => d.header
-  | .environment d => d.header
 
 def Signature.terms (signature : Signature) : List Term :=
   signature.result :: signature.effects :: signature.parameters ++
@@ -208,7 +199,6 @@ def Definition.terms : Definition → List Term
   | .operation entry => entry.signature.terms
   | .constant entry => entry.type :: entry.value :: entry.generics.flatMap (fun binder => binder.defaultValue.toList)
   | .global entry => [entry.type]
-  | .environment entry => entry.brand :: entry.region :: entry.residents
   | .module _ | .import _ | .fixity _ => []
 
 def Definition.Lexical (definition : Definition) : Prop :=

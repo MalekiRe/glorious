@@ -58,7 +58,7 @@ theorem AllocatesBuffer.bound {program : Program} {before after : World}
     (allocated : AllocatesBuffer program before domain element count base pointer after) :
     pointer.address < 2^program.input.target.pointerBits := by
   cases allocated with
-  | fresh _ _ _ _ _ _ extent _ => exact Nat.lt_of_le_of_lt (Nat.le_add_right _ _) extent
+  | fresh _ _ _ _ _ _ _ _ extent _ => exact Nat.lt_of_le_of_lt (Nat.le_add_right _ _) extent
 
 theorem PointerOffset.origin {program : Program} {world : World} {pointer result : RawPointer} {bytes : Int}
     (offset : PointerOffset program world pointer bytes result) : result.Origin world := by
@@ -86,16 +86,16 @@ theorem WithAddress.bound {program : Program} {world : World} {pointer result : 
   obtain ⟨_,_,_,_,_,_,_,_,bound,rfl⟩ := changed
   exact bound
 
-theorem InstallsResidents.pointer_origin {pointer : RawPointer} {before after : World}
+theorem InstallsResidents.pointer_origin {program : Program} {pointer : RawPointer} {before after : World}
     {addresses : List Address} {values : List (Option Value)}
-    (origin : pointer.Origin before) (installed : InstallsResidents before addresses values after) : pointer.Origin after := by
+    (origin : pointer.Origin before) (installed : InstallsResidents program before addresses values after) : pointer.Origin after := by
   induction installed with
   | nil => exact origin
   | hole _ _ ih => exact ih origin
-  | resident _ written _ ih => exact ih (origin.write written)
+  | resident _ _ written _ ih => exact ih (origin.write written)
 
-theorem BulkMove.pointer_origin {pointer : RawPointer} {before after : World} {sources destinations : List Address}
-    (origin : pointer.Origin before) (moved : BulkMove before sources destinations after) : pointer.Origin after := by
+theorem BulkMove.pointer_origin {program : Program} {pointer : RawPointer} {before after : World} {sources destinations : List Address}
+    (origin : pointer.Origin before) (moved : BulkMove program before sources destinations after) : pointer.Origin after := by
   obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
   exact installed.pointer_origin (origin.clear cleared)
 
@@ -110,14 +110,14 @@ theorem ReleasesBuffer.pointer_origin {pointer released : RawPointer} {program :
 theorem ReallocatesBuffer.origin {program : Program} {before after : World} {old result : RawPointer}
     {domain : Identity} {element : Term} {count base : Nat}
     (reallocated : ReallocatesBuffer program before old domain element count base result after) : result.Origin after := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_,moved,released⟩ := reallocated
+  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_,moved,released⟩ := reallocated
   exact released.pointer_origin (moved.pointer_origin allocated.origin)
 
 theorem ReallocatesBuffer.bound {program : Program} {before after : World} {old result : RawPointer}
     {domain : Identity} {element : Term} {count base : Nat}
     (reallocated : ReallocatesBuffer program before old domain element count base result after) :
     result.address < 2^program.input.target.pointerBits := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_⟩ := reallocated
+  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_⟩ := reallocated
   exact allocated.bound
 
 end Memory

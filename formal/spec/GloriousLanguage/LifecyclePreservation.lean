@@ -60,7 +60,8 @@ theorem Typing.ValueTyped.resident_transport {program : Kernel.Program} {before 
   · exact fun {_ _ _ _ _ _} selected _ => .operation selected
   · exact fun {_ _ _ _ _} _ => .label
   · exact fun {_ _ _ _} type _ => .continuation type
-  · exact fun {_ _ _ _ _ _} found brand id region _ => .available (by simpa [proofs] using found) brand id region
+  · exact fun {_ _ _ _ _ _ _} found brand id region residents _ =>
+      .available (by simpa [proofs] using found) brand id region residents
   · intro owner brand region live fields types pack _ brandEq regionEq length distinct ih ⟨address,resident⟩
     exact .bindings (ih (fun _ member => resident.field member)) brandEq regionEq length distinct
   · exact fun _ => .nil
@@ -489,13 +490,13 @@ theorem Typing.ValueTyped.deactivateAvailability {program : Kernel.Program} {wor
   · exact fun {_ _ _ _ _ _} operation => .operation operation
   · exact fun {_ _ _ _ _} => .label
   · exact fun {_ _ _ _} type => .continuation type
-  · intro owner brand region key live proof found brandEq idEq regionEq
+  · intro owner brand region residents key live proof found brandEq idEq regionEq residentsEq
     by_cases same : key = id
     · subst key
       have equal := Option.some.inj (selected.symm.trans found)
       subst proof
-      exact .available (Table.get_set _ _ _) brandEq idEq regionEq
-    · exact .available (by simpa only [Table.get_set_other _ _ _ _ same] using found) brandEq idEq regionEq
+      exact .available (Table.get_set _ _ _) brandEq idEq regionEq residentsEq
+    · exact .available (by simpa only [Table.get_set_other _ _ _ _ same] using found) brandEq idEq regionEq residentsEq
   · exact fun {_ _ _ _ _ _ _} _ brand region length distinct fields => .bindings fields brand region length distinct
   · exact .nil
   · exact fun {_ _ _} _ fields => .hole fields

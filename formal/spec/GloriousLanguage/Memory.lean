@@ -85,7 +85,7 @@ mutual
         Encodes program world runtime address (.resident owner (.bindings brand region types) (.bindings id) true fields) layout bytes
     | proof {address value} : value.fields = [] → value.shellLive = true →
         ((∃ brand region result, value.head = .label brand ∧ value.type = .label (.runtimeBrand (.label brand)) region result) ∨
-         (∃ id brand region, value.head = .available id ∧ value.type = .available brand region)) →
+         (∃ id brand region residents, value.head = .available id ∧ value.type = .available brand region residents)) →
         Encodes program world runtime address value ⟨0,1,[],0,0,[]⟩ []
 
   inductive EncodesFields (program : Language.Program) (world : World) (runtime : RuntimeAddresses) :
@@ -125,7 +125,9 @@ def ObjectBytes (program : Language.Program) (world : World) (runtime : RuntimeA
 inductive AllocatesBuffer (program : Language.Program) :
     World → Identity → Term → Nat → Nat → RawPointer → World → Prop where
   | fresh {before domain element count base elementLayout layout} :
-      domain ∈ program.input.manifest.allocationDomains → LayoutOf program ⟨[],[],0,default,true⟩ element elementLayout →
+      domain ∈ program.input.manifest.allocationDomains → element.RuntimeRegionsBelow before.nextRegion →
+      IntegerRange program.input.target false .pointer (Int.ofNat count) →
+      LayoutOf program ⟨[],[],0,default,true⟩ element elementLayout →
       ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
       0 < base → base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
       DisjointStorage before base layout.size →
@@ -169,24 +171,28 @@ inductive RawBorrow (program : Language.Program) :
 def Slots (base : Address) (start count : Nat) : List Address :=
   (List.range count).map (fun index => base.child (start+index))
 
-inductive InstallsResidents : World → List Address → List (Option Value) → World → Prop where
-  | nil {world} : InstallsResidents world [] [] world
+inductive InstallsResidents (program : Language.Program) : World → List Address → List (Option Value) → World → Prop where
+  | nil {world} : InstallsResidents program world [] [] world
   | hole {before address addresses residents after} : before.Vacant address →
-      InstallsResidents before addresses residents after → InstallsResidents before (address :: addresses) (none :: residents) after
+      InstallsResidents program before addresses residents after →
+      InstallsResidents program before (address :: addresses) (none :: residents) after
   | resident {before address addresses value residents middle after} : before.Vacant address →
-      before.write address (some value) = some middle → InstallsResidents middle addresses residents after →
-      InstallsResidents before (address :: addresses) (some value :: residents) after
+      AddressType program before address value.type →
+      before.write address (some value) = some middle → InstallsResidents program middle addresses residents after →
+      InstallsResidents program before (address :: addresses) (some value :: residents) after
 
 /-- Reads all sources before clearing, then writes the preserved snapshot.
 Destination overlap is legal only with the source range; unrelated initialized
 owners cannot be overwritten. This is relocation, never implicit Copy. -/
-def BulkMove (before : World) (sources destinations : List Address) (after : World) : Prop :=
+def BulkMove (program : Language.Program) (before : World) (sources destinations : List Address) (after : World) : Prop :=
   ∃ residents cleared,
-    sources.length = destinations.length ∧ sources.Nodup ∧ destinations.Nodup ∧
+    sources.length = destinations.length ∧
+    sources.Pairwise (fun left right => ¬ left.Overlaps right) ∧
+    destinations.Pairwise (fun left right => ¬ left.Overlaps right) ∧
     ListRel (fun address value => before.read address = value) sources residents ∧
     (∀ address ∈ sources, Permitted before .owner .owned address) ∧
     (∀ address ∈ destinations, address ∈ sources ∨ before.Vacant address) ∧
-    Clears before sources cleared ∧ InstallsResidents cleared destinations residents after
+    Clears before sources cleared ∧ InstallsResidents program cleared destinations residents after
 
 inductive ReleasesBuffer (program : Language.Program) : World → RawPointer → Identity → World → Prop where
   | release {before pointer domain id root value cleared retired after} : pointer.allocation = some id → pointer.offset = 0 →
@@ -200,10 +206,12 @@ def ReallocatesBuffer (program : Language.Program) (before : World) (old : RawPo
     (domain : Identity) (element : Term) (newCount base : Nat) (result : RawPointer) (after : World) : Prop :=
   ∃ oldId root value allocated newId moved oldCount,
     old.allocation = some oldId ∧ before.roots.get oldId = some root ∧ root.value = some value ∧
-    oldCount = value.fields.length ∧ value.shellLive = false ∧ oldCount ≤ newCount ∧
+    oldCount = value.fields.length ∧
+    value.type = .array element (.constant (.integer false .pointer oldCount)) ∧
+    value.shellLive = false ∧ oldCount ≤ newCount ∧
     CanEndStorage before oldId ∧ AllocatesBuffer program before domain element newCount base result allocated ∧
     result.allocation = some newId ∧
-    BulkMove allocated (Slots ⟨oldId,root.generation,[]⟩ 0 oldCount) (Slots ⟨newId,0,[]⟩ 0 oldCount) moved ∧
+    BulkMove program allocated (Slots ⟨oldId,root.generation,[]⟩ 0 oldCount) (Slots ⟨newId,0,[]⟩ 0 oldCount) moved ∧
     ReleasesBuffer program moved old domain after
 
 structure AllocationContract where

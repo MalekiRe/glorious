@@ -1,9 +1,10 @@
 import GloriousLanguage.ScalarPreservation
 
 /-! Policy-correct scalar conversion. Integer destinations are total on valid
-scalar inputs. Floating destinations consume the actual rounding witness, whose
-general existence remains a separate mathematical obligation. These are machine
-leaf contracts, not a way to turn a fatal event into a source checked Result. -/
+scalar inputs. Floating policy lifting consumes the actual rounding witness;
+`FloatRounding` proves its existence and `FloatProgress` derives full conversion
+progress. These machine leaf contracts do not turn a fatal event into a source
+checked Result. -/
 namespace Glorious.Language
 
 theorem binaryFraction.valid (negative : Bool) (significand : Nat) (exponent : Int) :

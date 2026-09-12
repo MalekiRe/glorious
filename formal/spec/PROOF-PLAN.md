@@ -191,6 +191,52 @@ and associated inference, effect/label behavior, and observable equivalence.
 Required producer repairs discovered while proving item 1 are dependencies of
 that proof, not a reason to return to feature-by-feature scheduling.
 
+The sealed environment contract now carries its frozen resident-type product
+through `Term.environment`, `Term.available` and the runtime reservation ledger.
+The uninstantiable declaration-side environment lookup has been removed.
+Reservation formation authenticates the actual locations and exact types;
+capability, lifetime, layout and contextual invocation consume that same product.
+`ControlPreservation` proves atomic witness publication from the actual storage
+constructor, then storage preservation for the complete reserve/call/consume/
+close cycle. `ControlStep.nonTest_worldTyped` covers every control transition
+except pattern-test result construction. That remaining boundary needs the
+atomic binding-pack/carrier proof; full task/frame typing and progress are not
+claimed by this storage theorem.
+
+`ConstructionPreservation` now proves full world preservation for `NewValue`
+from actual head/field typing and fresh-owner facts, and consumes it in
+`AtomStep.worldTyped` for every atomic constructor. Constants retain their
+static type derivation and now also authenticate instantiated constructor
+identity and field shape through the same `ConstructorHead` product used by
+runtime construction. `EffectPreservation` proves home reassignment, handler
+installation, clause entry and continuation creation preserve world typing.
+`EffectStep.direct_worldTyped` covers all effect steps except copying replay;
+the remaining replay case depends on full relocated-value typing.
+
+`FloatRounding` proves finite rounding existence over an exact finite format
+grid, with nearest-even selection and explicit overflow/nonfinite outcomes.
+`FloatProgress` consumes it for every floating calculation except square root
+and for all floating-destination conversion policies. `ScalarProgress` now
+derives valid results or explicit faults for every admitted nonsquare-root
+scalar calculation; its earlier nonfloating theorem is a corollary. Square-root
+existence, full floating determinism, result-storage progress and checked
+source-library result construction remain open.
+
+The actual memory producers now require supported element regions, a
+representable pointer-width element count, and old/new array element agreement
+on reallocation. Bulk relocation requires pairwise disjoint sources and
+pairwise disjoint destinations, while retaining legal cross-range overlap;
+each insertion consumes its actual post-clear address type. `MemoryPreservation`
+derives typed allocation, reallocation, overlapping bulk relocation and raw
+read/write/borrow preservation from those actual producers, then proves
+`PrimitiveStep.worldTyped` for every primitive transition. This is full storage
+preservation, not allocation existence, resource admission or primitive progress.
+Snapshot copying
+now explicitly checks that captured references to unchanged external storage
+cannot rename a local identity in that storage's referent type. This is an
+input scope-closure obligation, not a typed-output premise. Its derivation
+from the eventual control-state invariant and full replay progress remain open.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

@@ -62,10 +62,10 @@ def CallSignature (program : Language.Program) (context : Language.Context) (id 
 
 def InvocationEnvironment (program : Language.Program) (context : Context)
     (call : Invocation) (receiver : Term) : Prop :=
-  call.environment = none ∨ ∃ selected brand region writable,
+  call.environment = none ∨ ∃ selected brand region residents writable,
     call.environment = some selected ∧
-    PlaceType program context selected.witness (.available brand region) writable ∧
-    RunsInEnvironment program context.static call receiver brand region
+    PlaceType program context selected.witness (.available brand region residents) writable ∧
+    RunsInEnvironment program context.static call receiver brand region residents
 
 inductive InvocationType (program : Language.Program) (context : Context) : Invocation → Prop where
   | function {call id arguments writable signature} : PlaceType program context call.callee (.callable id arguments) writable →
@@ -157,8 +157,9 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       (signature.unsafeAllowed = true → context.static.unsafeAllowed = true) →
       RowSubset program.declarations context.static signature.effects context.effects →
       AtomType program context (.primitive id arguments operands) signature.result
-  | available {place brand region writable} : PlaceType program.declarations context place (.available brand region) writable →
-      AtomType program context (.available place) (.available brand region)
+  | available {place brand region residents writable} :
+      PlaceType program.declarations context place (.available brand region residents) writable →
+      AtomType program context (.available place) (.available brand region residents)
   | bindings {place brand region arguments writable} : PlaceType program.declarations context place (.bindings brand region arguments) writable →
       AtomType program context (.bindings place) (.bindings brand region arguments)
 
@@ -187,9 +188,10 @@ mutual
     | continuation {owner type id live} : (∃ argument answer effects quantity,
         type = .continuation (.runtimeBrand (.resumption id)) argument answer effects quantity) →
         ValueTyped program world (.resident owner type (.continuation id) live [])
-    | available {owner brand region id live available} : world.availability.get id = some available → available.brand = brand →
+    | available {owner brand region residents id live available} : world.availability.get id = some available → available.brand = brand →
         brand = .runtimeBrand (.proof id) → region = .runtimeRegion available.region →
-        ValueTyped program world (.resident owner (.available brand region) (.available id) live [])
+        residents = available.residents →
+        ValueTyped program world (.resident owner (.available brand region residents) (.available id) live [])
     | bindings {owner brand region live fields types pack} : FieldsTyped program world fields types →
         brand = .runtimeBrand (.proof pack.brand) → region = .runtimeRegion pack.region →
         fields.length = pack.fields.length → pack.fields.Nodup →
@@ -272,11 +274,12 @@ mutual
         CodeType program context next result → CodeType program context (.endLoan handle next) result
     | unsafeAllowed {context body result} : CodeType program { context with static := { context.static with unsafeAllowed := true } } body result →
         CodeType program context (.unsafeScope body) result
-    | closeAvailable {context place next brand region writable result} :
-        PlaceType program.declarations context place (.available brand region) writable → CodeType program context next result →
+    | closeAvailable {context place next brand region residents writable result} :
+        PlaceType program.declarations context place (.available brand region residents) writable → CodeType program context next result →
         CodeType program context (.closeAvailable place next) result
-    | reserve {context localSlot brand places next types result region} : PlacesType program.declarations context places types →
-        localSlot.type = .available (.rigid brand .brand 0) region → CodeType program (context.bind localSlot) next result →
+    | reserve {context localSlot brand places next types result region} :
+        ListRel (fun place type => ∃ writable, PlaceType program.declarations context place type writable) places types →
+        localSlot.type = .available (.rigid brand .brand 0) region types → CodeType program (context.bind localSlot) next result →
         CodeType program context (.reserve localSlot brand places next) result
     | abort {context result} : CodeType program context .abort result
     | bottom {context code result} : CodeType program context code .bottom → CodeType program context code result

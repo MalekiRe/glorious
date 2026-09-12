@@ -1,10 +1,10 @@
-import GloriousLanguage.ConversionPreservation
+import GloriousLanguage.FloatProgress
 import GloriousLanguage.Preservation
 
 /-! The scalar manifest contract is consumed by actual call admission and
-calculation. Nonfloating result families have a general normal-or-fatal outcome;
-floating-result progress still requires the separate rounding/sqrt existence
-theorems. Storage allocation/initialization progress is not assumed here. -/
+calculation. Every admitted scalar family except square root has a general
+normal-or-fatal outcome. Storage allocation/initialization progress and the
+remaining square-root isolation theorem are not assumed here. -/
 namespace Glorious.Language
 
 def ScalarOperandsTyped (target : TargetProfile) (values : List ScalarValue) (types : List Term) : Prop :=
@@ -47,6 +47,31 @@ theorem ScalarOperandsTyped.integers {target : TargetProfile} {sign : Bool} {wid
               rcases member with rfl | member
               · exact current.1.2
               · exact ranges value member
+
+theorem ScalarOperandsTyped.floats {target : TargetProfile} {width : FloatWidth}
+    {values : List ScalarValue} {count : Nat}
+    (typed : ScalarOperandsTyped target values (List.replicate count (.scalar (.floating width)))) :
+    ∃ bits : List Nat, values = bits.map (.floating width) ∧ bits.length = count ∧
+      ∀ input ∈ bits, (decodeFloat width input).isSome = true := by
+  induction count generalizing values with
+  | zero => cases typed; exact ⟨[],rfl,rfl,by simp⟩
+  | succ count ih =>
+      cases typed with
+      | @cons first _ rest _ current remainder =>
+          cases first with
+          | character _ => cases current.2
+          | integer _ _ _ => cases current.2
+          | floating inputWidth input =>
+              have shape := current.2
+              simp only [ScalarValue.type,Term.scalar.injEq,Scalar.floating.injEq] at shape
+              subst inputWidth
+              rcases ih remainder with ⟨bits,rfl,length,valid⟩
+              refine ⟨input :: bits,rfl,by simp [length],?_⟩
+              intro value member
+              simp only [List.mem_cons] at member
+              rcases member with rfl | member
+              · exact current.1
+              · exact valid value member
 
 theorem ScalarPrimitiveSignature.arguments_valid {target : TargetProfile} {primitive : Primitive}
     {arguments parameters : List Term} {result : Term}
@@ -95,14 +120,14 @@ theorem PrimitiveCalculation.less_total {target : TargetProfile} {left right : S
 
 end Execution
 
-/-- Every admitted nonfloating-result scalar call has a specified calculation
-outcome. This includes floating comparisons and all finite/nonfinite numeric
-inputs to integer conversion, not only operations on integer input values. -/
-theorem ScalarPrimitiveSignature.nonfloating_progress {target : TargetProfile} {primitive : Primitive}
+/-- Every admitted scalar call other than square root has a specified
+calculation outcome, including all floating-result conversion policies and
+arithmetic. Finite rounding existence is proved, not a caller premise. -/
+theorem ScalarPrimitiveSignature.nonsqrt_progress {target : TargetProfile} {primitive : Primitive}
     {arguments parameters : List Term} {output : Term} {values : List ScalarValue}
     (signature : ScalarPrimitiveSignature target primitive arguments parameters output)
     (inputs : ScalarOperandsTyped target values parameters)
-    (nonfloating : ∀ width, output ≠ .scalar (.floating width)) :
+    (nonsqrt : ∀ width, primitive ≠ .floating .squareRoot width) :
     ∃ outcome, Execution.PrimitiveCalculation target primitive arguments values outcome ∧
       ∀ result, outcome = .ok result → result.Valid target ∧ .scalar result.type = output := by
   have safe := fun result calculated => Execution.PrimitiveCalculation.typed_result signature inputs
@@ -119,7 +144,15 @@ theorem ScalarPrimitiveSignature.nonfloating_progress {target : TargetProfile} {
       rcases Execution.PrimitiveCalculation.integer_total valid operation overflow integers arity ranges with
         ⟨outcome,calculated,_⟩
       exact ⟨outcome,calculated⟩
-  | floating => exact False.elim (nonfloating _ rfl)
+  | @floating operation width =>
+      rcases ScalarOperandsTyped.floats inputs with ⟨bits,rfl,arity,valid⟩
+      have operationValid : operation ≠ .squareRoot := by
+        intro same
+        subst operation
+        exact nonsqrt width rfl
+      rcases Execution.PrimitiveCalculation.floating_nonsqrt_total target width operation bits arity valid operationValid with
+        ⟨result,calculated,_⟩
+      exact ⟨_,calculated⟩
   | equal valid =>
       cases inputs with
       | cons left rest =>
@@ -142,19 +175,25 @@ theorem ScalarPrimitiveSignature.nonfloating_progress {target : TargetProfile} {
       cases inputs with
       | @cons value _ _ _ typed done =>
           cases done
-          cases destination with
-          | floating width => exact False.elim (nonfloating width rfl)
-          | integer sign width =>
-              rcases Execution.ScalarConversion.to_integer_total typed.1 policy sign width with ⟨outcome,converted⟩
-              exact ⟨outcome,.convert converted⟩
-          | character =>
-              have sourceType := Term.scalar.inj typed.2
-              cases value with
-              | integer sign width integer =>
-                  rcases Execution.ScalarConversion.to_character_total typed.1.2 policy with ⟨outcome,converted⟩
-                  exact ⟨outcome,.convert converted⟩
-              | floating _ _ => cases sourceType; cases supported
-              | character _ => cases sourceType; cases supported
+          have sourceType := Term.scalar.inj typed.2
+          rw [← sourceType] at supported
+          rcases Execution.ScalarConversion.total typed.1 supported policy with ⟨outcome,converted⟩
+          exact ⟨outcome,.convert converted⟩
+
+/-- Compatibility specialization of scalar progress; there is no separate
+nonfloating implementation or weaker operand-validity path. -/
+theorem ScalarPrimitiveSignature.nonfloating_progress {target : TargetProfile} {primitive : Primitive}
+    {arguments parameters : List Term} {output : Term} {values : List ScalarValue}
+    (signature : ScalarPrimitiveSignature target primitive arguments parameters output)
+    (inputs : ScalarOperandsTyped target values parameters)
+    (nonfloating : ∀ width, output ≠ .scalar (.floating width)) :
+    ∃ outcome, Execution.PrimitiveCalculation target primitive arguments values outcome ∧
+      ∀ result, outcome = .ok result → result.Valid target ∧ .scalar result.type = output := by
+  apply signature.nonsqrt_progress inputs
+  intro width same
+  subst primitive
+  cases signature
+  exact nonfloating width rfl
 
 theorem Typing.ValueTyped.scalar_head {program : Kernel.Program} {world : World} {value : Value}
     {scalar : ScalarValue} (typed : Typing.ValueTyped program world value) (head : value.head = .scalar scalar) :
@@ -191,6 +230,19 @@ theorem ScalarValues.typed {program : Kernel.Program} {world : World} {sources :
 /-- The manifest-selected signature and the actual scalar reads jointly
 establish calculation progress. Creating the destination is the independent
 storage-progress obligation, not a prospective typed-result assumption. -/
+theorem ScalarValues.nonsqrt_progress {program : Kernel.Program} {world : World} {sources : List ResolvedPlace}
+    {values : List ScalarValue} {binding : RuntimeBinding} {arguments : List Term} {signature : Signature}
+    {primitive : Primitive} (worldTyped : Typing.WorldTyped program world)
+    (bound : binding.ScalarSignature program.declarations.input.target arguments signature)
+    (identity : binding.primitive = some primitive) (scalar : primitive.IsScalar)
+    (observed : ScalarValues world sources values)
+    (sourceTypes : ListRel (fun source type => ∃ value, world.Stores source.address value ∧ value.type = type)
+      sources signature.parameters)
+    (nonsqrt : ∀ width, primitive ≠ .floating .squareRoot width) :
+    ∃ outcome, PrimitiveCalculation program.declarations.input.target primitive arguments values outcome ∧
+      ∀ result, outcome = .ok result → result.Valid program.declarations.input.target ∧ .scalar result.type = signature.result :=
+  (bound primitive identity scalar).nonsqrt_progress (observed.typed worldTyped sourceTypes) nonsqrt
+
 theorem ScalarValues.nonfloating_progress {program : Kernel.Program} {world : World} {sources : List ResolvedPlace}
     {values : List ScalarValue} {binding : RuntimeBinding} {arguments : List Term} {signature : Signature}
     {primitive : Primitive} (worldTyped : Typing.WorldTyped program world)

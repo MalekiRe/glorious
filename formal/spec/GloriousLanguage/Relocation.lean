@@ -207,6 +207,14 @@ structure SnapshotMap (program : Kernel.Program) (before : State) (suspension : 
     id ∈ suspension.frames.flatMap Frame.ownedRegions ++ [suspension.context.region,suspension.handler.computation.region] ∨
     ∃ rootId root, rootId ∈ map.roots ∧ before.world.roots.get rootId = some root ∧ root.region = id
   liveRegions : ∀ id ∈ map.regions, id ∈ before.world.liveRegions
+  /-- A captured handle may continue to alias external storage, but that
+  unchanged storage cannot acquire a renamed local type identity. This is a
+  scope-closure check on the copy's inputs, not a post-copy typing premise. -/
+  externalReferentsScoped : ∀ address value id loan,
+    address.root ∈ map.roots → before.world.Resident address value → value.head = .reference id →
+    before.world.loans.get id = some loan → loan.referent.root ∉ map.roots →
+    ∀ type, AddressType program.declarations before.world loan.referent type →
+    ∀ region ∈ map.regions, ¬ Occurs (.runtimeRegion region) type
   activations : ∀ id, id ∈ map.activations ↔
     (∃ caller region, Frame.activation caller id region ∈ suspension.frames) ∨
     ∃ rootId home scope, rootId ∈ map.roots ∧ suspension.homes.get rootId = some home ∧

@@ -199,8 +199,8 @@ theorem FloatCalculation.multiply_infinite_total {width : FloatWidth} {a b : Nat
           exact ⟨result,.multiplyInfinity left right (Or.inl ⟨rfl,Or.inr ⟨mb,eb,zero,rfl⟩⟩) decoded,
             Or.inr ⟨_,decoded⟩⟩
 
-/-- Every nonfinite FMA input triple has a specified valid result. The only
-remaining FMA totality obligation is existence of the single finite rounding. -/
+/-- Every nonfinite FMA input triple has a specified valid result. The finite
+case consumes the separate mathematical single-rounding existence theorem. -/
 theorem FloatCalculation.fused_nonfinite_total {width : FloatWidth} {a b c : Nat}
     {meaningA meaningB meaningC : FloatMeaning}
     (left : decodeFloat width a = some meaningA) (right : decodeFloat width b = some meaningB)

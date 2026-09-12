@@ -178,6 +178,7 @@ structure Availability where
   brand : Term
   region : Identity
   reserved : List ResolvedPlace
+  residents : List Term
   active : Bool
   deriving Repr, Inhabited
 
