@@ -53,6 +53,8 @@ import GloriousLanguage.ControlOriginPreservation
 import GloriousLanguage.DropSuspension
 import GloriousLanguage.DefinitionalNormalForms
 import GloriousLanguage.ClosedDefinitionalEquality
+import GloriousLanguage.CapabilitySubstitution
+import GloriousLanguage.LogicalSubstitution
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence
 import GloriousLanguage.EffectContextTyping

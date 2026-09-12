@@ -763,7 +763,9 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
     (∀ variant ∈ data.variants, (variant.fields.map (·.header.name)).Nodup ∧
       ∀ field ∈ variant.fields, WellKinded program context field.type .type ∧ field.header.module = data.header.module) ∧
     (data.quantitySource.isSome = true → data.invariant.isSome = true) ∧
-    (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function)
+    (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function) ∧
+    (∀ source, data.quantitySource = some source → WellKinded program context source source.kind ∧
+      (source.kind = .quantity ∨ source.kind = .type))
   | .alias alias => (alias.generics.map (·.id)).Nodup ∧
     WellKinded program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type
   | .function function => SignatureWellFormed program function.header.module function.signature ∧
@@ -774,7 +776,10 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
       (function.signature.result = .unit ∨ ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false,{}⟩ function.signature.result layout)) ∧
     (function.origin = .foreign → function.cABI = true) ∧
     (∀ manifest, function.origin = .runtime manifest → manifest = program.input.manifest.identity ∧
-      ∃ binding ∈ program.input.manifest.bindings, binding.declaration = function.header.id ∧ binding.signature = function.signature)
+      ∃ binding ∈ program.input.manifest.bindings, binding.declaration = function.header.id ∧ binding.signature = function.signature) ∧
+    (∀ capture ∈ function.captures,
+      WellKinded program ⟨function.signature.generics,function.signature.constraints,0,function.header.module,false,{}⟩
+        capture .type)
   | .trait trait => (trait.generics.map (·.id)).Nodup ∧ trait.members.Nodup ∧
     (trait.relation ≠ .ordinary → (trait.header.id,trait.relation) ∈ program.input.manifest.sealedRelations)
   | .associated associated => ∃ trait, program.trait associated.owner = some trait ∧ associated.header.id ∈ trait.members ∧

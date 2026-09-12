@@ -56,6 +56,9 @@ or a dependency of this project.
   predicate semantics and source-derived scope through actual selected-arm entry.
 - `ClosedDefinitionalEquality`, `HeadOriginDecomposition`: assumption-free equality
   conservativity and positive source origins of actual selected generic bindings.
+- `DeclarationDependencyKinding`, `CapabilitySubstitution`, `LogicalSubstitution`:
+  kinded declaration dependencies, recursive structural capability substitution
+  and hygienic substitution-domain transport through actual logical equality.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

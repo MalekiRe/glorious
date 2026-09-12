@@ -914,6 +914,35 @@ runtime world/coverage/body renaming and invocation cleanup consumers. Existing
 example files were mechanically migrated but not executed as routine evidence.
 The known Drop inversion failure and full aggregate soundness remain open.
 
+The structural capability substitution boundary now consumes kinded declaration
+dependencies. Actual declaration admission previously omitted function captures
+and data quantity sources; it now checks captures under the full signature
+context and quantity sources under the data's real generics and requirements.
+Quantity sources retain both permitted forms: a quantity term or a type whose
+structural capability supplies the marker. The existing equation is unchanged.
+`DeclarationDependencyKinding` derives the exact instantiated dependency kinds;
+`InstantiationComposition` composes the real ordered generic table and captured
+field substitution. `CapabilitySubstitution` handles every equation constructor
+and arbitrary recursive, noninjective type substitution through the shared
+coinductive image construction. Finite logical leaves remain the responsibility
+of the open mutual cut, not a supplied structural-capability conclusion.
+
+The logical equality boundary now preserves full source `Kinding` under kinded
+assumptions, including every actual nested quantified rule. Its interpretation
+uses the same generic quotient node/rebuild producer as closed definitional
+equality; the earlier closed-equality theorem retains its unchanged contract.
+`LogicalSubstitution` consumes this result to derive converted substitution
+admissibility, including occurrence kinds, binder masks and ordered default
+prefixes. The actual instantiated-requirement converter no longer asks for the
+prospective target table's admissibility as an independent premise.
+
+The frozen declaration/kinding/capability batch passes its combined 149-job
+dependency gate, including actual source and match entry, whole-machine control,
+callback lifetime and runtime-renaming consumers; the logical substitution
+consumer passes its 29-job gate. These are strict general proofs, not examples
+or a completed logical/source-reduction cut. Confluence, conversion-safe Drop
+inversion and full-language soundness remain unproved.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

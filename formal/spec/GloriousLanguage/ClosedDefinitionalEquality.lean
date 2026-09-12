@@ -1,5 +1,4 @@
-import GloriousLanguage.JoinabilityCongruence
-import GloriousLanguage.PredicateInterpretation
+import GloriousLanguage.QuotientInterpretation
 
 /-! An assumption-free logical equality has no authority beyond actual
 definitional conversion. The shared predicate interpretation handles hygienic
@@ -21,87 +20,16 @@ theorem ofTerm_eq {program : Program} {context : Context} {left right : Term} :
     (ofTerm left : Class program context) = ofTerm right ↔ DefinitionallyEqual program context left right :=
   ⟨Quotient.exact,fun equal => Quotient.sound equal⟩
 
-private theorem represented {program : Program} {context : Context} (value : Class program context) :
-    ∃ term, ofTerm term = value := by
-  induction value using Quotient.ind with
-  | _ term => exact ⟨term,rfl⟩
-
-noncomputable def representative {program : Program} {context : Context} (value : Class program context) : Term :=
-  Classical.choose (represented value)
-
-theorem representative_eq {program : Program} {context : Context} (value : Class program context) :
-    ofTerm (representative value) = value := Classical.choose_spec (represented value)
-
-noncomputable def rebuild (head : Term) (children : List Term) (lengths : children.length = head.children.length) : Term :=
-  Classical.choose (head.children_realizable children lengths)
-
-theorem rebuild_spec (head : Term) (children : List Term) (lengths : children.length = head.children.length) :
-    SameHead head (rebuild head children lengths) ∧ (rebuild head children lengths).children = children :=
-  Classical.choose_spec (head.children_realizable children lengths)
-
-noncomputable def node {program : Program} {context : Context} (head : Term) (children : List (Class program context)) :
-    Class program context :=
-  if lengths : children.length = head.children.length then
-    ofTerm (rebuild head (children.map representative) (by simpa only [List.length_map] using lengths))
-  else ofTerm .unit
-
-theorem node_spec {program : Program} {context : Context} (head : Term) (children : List (Class program context))
-    (lengths : children.length = head.children.length) :
-    ∃ rebuilt, SameHead head rebuilt ∧ rebuilt.children = children.map representative ∧ node head children = ofTerm rebuilt := by
-  unfold node
-  rw [dif_pos lengths]
-  exact ⟨_,(rebuild_spec _ _ _).1,(rebuild_spec _ _ _).2,rfl⟩
-
-theorem node_sameHead {program : Program} {context : Context} {left right : Term} (same : SameHead left right)
-    (children : List (Class program context)) : node left children = node right children := by
-  by_cases lengths : children.length = left.children.length
-  · obtain ⟨first,firstHead,firstChildren,firstNode⟩ := node_spec left children lengths
-    obtain ⟨second,secondHead,secondChildren,secondNode⟩ := node_spec right children (lengths.trans same.children_length)
-    rw [firstNode,secondNode]
-    apply ofTerm_eq.mpr
-    apply DefinitionallyEqual.congr (firstHead.symm.trans (same.trans secondHead))
-    rw [firstChildren,secondChildren]
-    exact .reflexive (fun _ => .refl) _
-  · have otherLengths : children.length ≠ right.children.length := by rw [← same.children_length]; exact lengths
-    simp only [node,dif_neg lengths,dif_neg otherLengths]
-
-noncomputable def algebra (program : Program) (context : Context) : PredicateSemantics.PredicateAlgebra (Class program context) where
-  node := node
-  sameHead := node_sameHead
-  outlives := fun _ _ => True
-  typeOutlives := fun _ _ => True
-  rows := fun _ _ => True
-  implements := fun _ _ _ => True
-  use := fun _ _ => True
-  callable := fun _ _ _ _ _ => True
-  runsIn := fun _ _ _ _ _ => True
+noncomputable def algebra (program : Program) (context : Context) : PredicateSemantics.PredicateAlgebra (Class program context) :=
+  PredicateSemantics.TermQuotient.algebra (setoid program context) (fun same children => .congr same children)
 
 def canonical {program : Program} {context : Context} : PredicateSemantics.Valuation (Class program context) :=
   fun id kind => ofTerm (.parameter id kind)
 
 theorem eval_canonical {program : Program} {context : Context} (term : Term) :
-    (algebra program context).eval canonical term = ofTerm term := by
-  by_cases parameter : ∃ id kind, term = .parameter id kind
-  · obtain ⟨id,kind,rfl⟩ := parameter
-    exact PredicateSemantics.TermAlgebra.eval_parameter _ _ _ _
-  · have notParameter : ∀ id kind, term ≠ .parameter id kind := fun id kind equal => parameter ⟨id,kind,equal⟩
-    rw [PredicateSemantics.TermAlgebra.eval_node _ _ notParameter]
-    have children : term.children.map ((algebra program context).eval canonical) = term.children.map ofTerm := by
-      apply List.map_congr_left
-      intro child _
-      exact eval_canonical child
-    rw [children]
-    obtain ⟨rebuilt,same,reconstructed,node⟩ := node_spec term (term.children.map (ofTerm (program := program) (context := context))) (by simp)
-    change DefinitionalQuotient.node term (term.children.map ofTerm) = ofTerm term
-    rw [node]
-    apply ofTerm_eq.mpr
-    apply DefinitionallyEqual.congr same.symm
-    rw [reconstructed,List.map_map]
-    simpa only [List.map_id,Function.comp_def] using ListRel.maps term.children (fun term => representative (ofTerm term)) id (by
-      intro child _
-      exact ofTerm_eq.mp (representative_eq (ofTerm child)))
-termination_by term
-decreasing_by exact Term.child_sizeOf ‹_ ∈ term.children›
+    (algebra program context).eval canonical term = ofTerm term :=
+  PredicateSemantics.TermQuotient.eval_canonical (setoid := setoid program context)
+    (fun same children => DefinitionallyEqual.congr same children) term
 
 def Holds (program : Program) (context : Context) (constraint : Constraint) : Prop :=
   (algebra program context).Holds program context canonical canonical constraint
@@ -174,8 +102,8 @@ theorem Equal.closed_definitional {program : Program} {context : Context} {left 
   case entailed _ _ _ _ ih closed => exact DefinitionalQuotient.holds_equal.mp (ih closed)
   case rowDuplicate _ _ _ _ _ _ ih closed => exact (ih closed).rowDuplicate
   case tailDuplicate _ _ _ _ _ _ ih closed => exact (ih closed).tailDuplicate
-  case checkedCallable => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case checkedRunsIn => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
+  case checkedCallable => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case checkedRunsIn => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
   case congrSubstitution context _ _ _ _ _ _ before after _ equal held closed =>
     exact ((DefinitionalQuotient.algebra program context).holds_substitution_congr program context
       DefinitionalQuotient.canonical DefinitionalQuotient.canonical
@@ -183,13 +111,13 @@ theorem Equal.closed_definitional {program : Program} {context : Context} {left 
         rw [DefinitionalQuotient.eval_canonical,DefinitionalQuotient.eval_canonical]
         exact DefinitionalQuotient.ofTerm_eq.mpr (equal id kind closed)) before after).mp (held closed)
   case equality _ _ _ _ ih closed => exact DefinitionalQuotient.holds_equal.mpr (ih closed)
-  case outlivesRefl => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case outlivesStatic => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case outlivesTrans => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case typeOutlives => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case rows => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case implementation => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
-  case use => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra]
+  case outlivesRefl => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case outlivesStatic => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case outlivesTrans => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case typeOutlives => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case rows => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case implementation => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
+  case use => simp only [DefinitionalQuotient.Holds,PredicateSemantics.PredicateAlgebra.Holds,DefinitionalQuotient.algebra,PredicateSemantics.TermQuotient.algebra]
   case quantified context _ _ _ instances closed =>
     exact (DefinitionalQuotient.algebra program context).holds_quantified program context DefinitionalQuotient.canonical
       (fun values substitution instantiated kinded requirement member =>
