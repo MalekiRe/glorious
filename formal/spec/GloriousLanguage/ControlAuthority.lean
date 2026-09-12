@@ -5,15 +5,6 @@ Recording means that a loan identity has an actual table entry, including
 after it ends. It is not liveness, permission, or a second loan inventory. -/
 namespace Glorious.Language
 
-theorem Authority.Recorded.parentLoan {authority : Authority} {loans : Table Loan} {id : Identity}
-    (recorded : authority.Recorded loans) (parent : authority.parentLoan = some id) :
-    ∃ loan, loans.get id = some loan := by
-  induction authority with
-  | owner => cases parent
-  | loan identity => cases parent; exact recorded
-  | shared backing ih => exact ih recorded parent
-  | guarded backing carrier ih => exact ih recorded.1 parent
-
 theorem Authority.Recorded.loan_bound {world : World} {authority : Authority} {id : Identity}
     (well : world.WellFormed) (recorded : authority.Recorded world.loans)
     (parent : authority.parentLoan = some id) : id < world.nextLoan := by

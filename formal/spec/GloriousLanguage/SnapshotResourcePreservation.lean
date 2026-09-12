@@ -7,26 +7,6 @@ The declared invariant relocation law is consumed at copied nominal nodes;
 ordinary support framing handles the unchanged external nodes. -/
 namespace Glorious.Language
 
-theorem Value.ResourcesClosed.reachable {program : RuntimeProgram} {world : World}
-    {value resident : Value} {authority current : Authority} {incoming access : Access}
-    (closed : value.ResourcesClosed program world)
-    (reached : value.ReachableResident world authority incoming resident current access) :
-    resident.ResourcesClosed program world := by
-  intro child next requested nested
-  obtain ⟨base,access,prior⟩ := reached.rebase .owner .shared
-  obtain ⟨final,finalAccess,nested⟩ := nested.rebase base access
-  exact closed child final finalAccess (prior.trans nested)
-
-theorem Value.LoansRestored.reachable {program : RuntimeProgram} {world : World}
-    {value resident : Value} {authority current : Authority} {incoming access : Access}
-    (restored : value.LoansRestored program world)
-    (reached : value.ReachableResident world authority incoming resident current access) :
-    resident.LoansRestored program world := by
-  rintro identity next requested ⟨child,nested,head⟩
-  obtain ⟨base,access,prior⟩ := reached.rebase .owner .shared
-  obtain ⟨final,finalAccess,nested⟩ := nested.rebase base access
-  exact restored identity final finalAccess ⟨child,prior.trans nested,head⟩
-
 theorem World.Resident.nested {world : World} {address : Address} {value child : Value}
     {path : List Nat} (resident : world.Resident address value) (located : ResidentAt value path child) :
     world.Resident { address with fields := address.fields ++ path } child := by
@@ -52,23 +32,6 @@ theorem Value.ResourcesClosed.support_root {program : RuntimeProgram} {world : W
     subst current
     exact Option.isSome_iff_exists.mp (((valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.2 live).2)
   · exact ((closed resident authority access reached).1 binding member).root valid
-
-theorem Value.InvariantClosed.framed {program : RuntimeProgram} {before after : World} {value : Value}
-    (framed : value.SupportFramed before after) (closed : value.InvariantClosed program before) :
-    value.InvariantClosed program after := by
-  unfold Value.InvariantClosed at closed ⊢
-  cases type : value.type with
-  | nominal identity arguments =>
-      simp only [type] at closed ⊢
-      obtain ⟨data,found,declared⟩ := closed
-      refine ⟨data,found,?_⟩
-      cases invariant : data.invariant with
-      | none => simpa only [invariant] using declared
-      | some invariant =>
-          simp only [invariant] at declared ⊢
-          obtain ⟨contract,found,owner,holds⟩ := declared
-          exact ⟨contract,found,owner,contract.framed before after value framed holds⟩
-  | _ => simpa only [type] using closed
 
 namespace Execution
 

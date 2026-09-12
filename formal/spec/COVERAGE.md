@@ -192,11 +192,13 @@ rather than adding a condition; whether a returned resident's erased
 obligations are closed stays a separate unsafe-invariant duty and is not
 assumed here.
 
-The recovered strict 211-job gate is the 208-job gate above plus the two
-repaired consumers `PublicValues` and `RuntimeWorldEquivariance`: the same
-target list without the two compatibility modules passes 208 jobs. The 208-job
-gate adds `InputBindingProgress` and
-`LoanCompatibility` to the recovered targets above. It closes two narrow
+The recovered checkpoint gate over the targets listed above passes 205 jobs;
+adding `InputBindingProgress` and `LoanCompatibility` passes 208. The current
+gate adds the repaired consumers `PublicValues` and `RuntimeWorldEquivariance`,
+the promoted `LoanResourceRows`, `ReferenceTransferPreservation`,
+`SnapshotResourcePreservation`, `AllocationFraming` and
+`CopyResourcePreservation`, and passes 212 jobs, or 210 without the two
+compatibility modules. It closes narrow
 boundaries, not a batch or pre-entry theorem. `Authority.LoanCompatible` is the
 pre-state compatibility relation for one newly formed live loan: owning, loan,
 shared and guarded authorities observe the actual pre-world loan rows and the
@@ -215,11 +217,35 @@ Open at this boundary: compatibility with already bound outputs, pending
 custody and owning-claim invalidation, the ordered whole-input/pre-entry
 theorem, and the source pre-entry derivation. This is a single-input producer
 plus a permission-only compatibility foundation; it is not general batch
-progress and must not be reported as such. The scoped framing promotions
-(`ReferenceTransferPreservation`, the `Storage` permission-state block and the
-paired `ControlAuthority`/`LoanPreservation`/`SnapshotResourcePreservation`
-relocations) remain in their own workspace until their final manifest is
-checked, and are not part of this gate.
+progress and must not be reported as such.
+
+The scoped framing promotions are now integrated and checked, not resident in a
+lane workspace. They are level moves plus one disclosed redesign: the
+`Storage` permission-state block gains `Loan.permissionState_eq_iff` and
+`Authority.Recorded.parentLoan` (removed from `LoanPreservation` and
+`ControlAuthority` respectively, so every dependent reads them at their lower
+level), the three `Value.{ResourcesClosed,LoansRestored}.reachable` /
+`Value.InvariantClosed.framed` lemmas move from `SnapshotResourcePreservation`
+into `ReferenceTransferPreservation` with byte-identical statements, and
+`BufferAllocationFraming` supplies the projected row fact its consumer now
+expects. The new `LoanResourceRows` module carries producer row laws, and
+`LoanCompatibility` grows additively from its checked permission-only
+foundation. The redesign changes exactly one predicate: `Value.ReferenceRowsFramed`
+compares the canonical `Loan.permissionState` projection of the observed row
+rather than the whole row. That is the projection `Storage` already designates
+for retention consumers ("custody and a requested return change administration,
+not the loan's exclusion geometry"), and the permission, support and observation
+predicates never inspect custody or return-request state, so the framing
+conclusions are unchanged while custody is carried by the separate scoped
+obligations. Verified before integration: no declaration of the previous tree is
+dropped, the only changed statements are `Value.ReferenceRowsFramed` and its
+`.lookup`, and the moved lemmas are text-identical. The composed strict gate over
+the recovered targets plus the two repaired public-safety consumers and
+`ReferenceTransferPreservation`, `SnapshotResourcePreservation`,
+`AllocationFraming` and `CopyResourcePreservation` passes 212 jobs from a fresh
+source-only tree; the same base without this chunk passes the recovered targets
+with the identical whole-library failure set (thirteen modules, unchanged error
+text).
 
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.

@@ -228,6 +228,14 @@ record, never claim that a handed-off loan retains its old custodian. -/
 def Loan.permissionState (loan : Loan) : Loan :=
   { loan with returnRequested := false, custody := none }
 
+theorem Loan.permissionState_eq_iff {current original : Loan} :
+    current.permissionState = original.permissionState ↔
+      current.identity = original.identity ∧ current.parent = original.parent ∧
+      current.referent = original.referent ∧ current.mode = original.mode ∧
+      current.region = original.region ∧ current.live = original.live ∧
+      current.kind = original.kind ∧ current.guards = original.guards := by
+  simp only [Loan.permissionState,Loan.mk.injEq,and_true]
+
 /-- Raw ownership is exclusive, and raw owning/borrowed obligations always
 have an actual custodian. Ordinary source loans use their resident handles. -/
 def LoanKind.Allows (kind : LoanKind) (mode : Mutability) (custody : Option ClaimCustody) : Prop :=
@@ -262,7 +270,16 @@ theorem Authority.Recorded.transport {authority : Authority} {before after : Tab
   | loan id => obtain ⟨loan,found⟩ := recorded; exact retained id loan found
   | shared backing ih => exact ih recorded
   | guarded backing carrier ih =>
-    exact ⟨ih recorded.1,by obtain ⟨loan,found⟩ := recorded.2; exact retained carrier loan found⟩
+      exact ⟨ih recorded.1,by obtain ⟨loan,found⟩ := recorded.2; exact retained carrier loan found⟩
+
+theorem Authority.Recorded.parentLoan {authority : Authority} {loans : Table Loan} {id : Identity}
+    (recorded : authority.Recorded loans) (parent : authority.parentLoan = some id) :
+    ∃ loan, loans.get id = some loan := by
+  induction authority with
+  | owner => cases parent
+  | loan identity => cases parent; exact recorded
+  | shared backing ih => exact ih recorded parent
+  | guarded backing carrier ih => exact ih recorded.1 parent
 
 theorem Authority.Recorded.set {authority : Authority} {loans : Table Loan}
     (recorded : authority.Recorded loans) (id : Identity) (loan : Loan) :

@@ -213,7 +213,7 @@ theorem AllocatesBuffer.handoffReady {program : RuntimeProgram} {before after : 
   have rows : value.ReferenceRowsFramed before after := by
     intro identity current access reached
     obtain ⟨loan,found,_⟩ := ready.1.2.1 identity current access reached
-    exact (allocated.old_loan valid found).trans found.symm
+    exact congrArg (Option.map Loan.permissionState) ((allocated.old_loan valid found).trans found.symm)
   exact ready.frame_observed rows (allocated.guardsFramed valid) (allocated.supportFramed valid ready.1)
     (fun _ _ held => allocated.heldBy valid held) (fun _ _ _ permission => allocated.permitted valid permission)
 

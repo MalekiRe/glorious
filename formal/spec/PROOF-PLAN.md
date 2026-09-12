@@ -224,8 +224,32 @@ This is not general batch or pre-entry progress. Compatibility with previously
 bound outputs, pending custody and owning-claim invalidation, the ordered
 whole-input/pre-entry theorem and the source pre-entry derivation remain the
 next milestone, and no accumulation of small permission lemmas substitutes for
-it. The scoped framing promotions stay in their own workspace until their final
-manifest is checked.
+it.
+
+The scoped framing promotions are integrated and checked. They place each
+declaration at the level its consumers need: `Storage` gains
+`Loan.permissionState_eq_iff` and `Authority.Recorded.parentLoan` (removed from
+`LoanPreservation` and `ControlAuthority`), the three
+`Value.{ResourcesClosed,LoansRestored}.reachable` / `Value.InvariantClosed.framed`
+lemmas move from `SnapshotResourcePreservation` into
+`ReferenceTransferPreservation` with identical statements, and
+`BufferAllocationFraming` supplies the projected row fact its consumer expects.
+A new `LoanResourceRows` module carries producer row laws, `LoanCompatibility`
+grows additively, and `ReferenceTransferPreservation` gains the scoped framing
+layer (`World.LocationExtension`, `Value.ResourcesRecorded`,
+`Value.HeldResourcesFramed`, `Value.BatchCompatible`,
+`World.ResourceRowsRetained`, `Transfers.*` and the `frame_scoped` family) as a
+strict superset of the previous file. Exactly one predicate is redesigned:
+`Value.ReferenceRowsFramed` compares the canonical `Loan.permissionState`
+projection of the observed row instead of whole-row identity, so administration
+(`custody`, `returnRequested`) is no longer implied by row framing and is
+carried by the separate scoped custody obligations; nothing else in the
+permission, support, reachability or observation vocabulary reads those two
+fields. No declaration of the previous tree is dropped, the only changed
+statements are that predicate and its `.lookup`, and the moved lemmas are
+text-identical. The composed strict gate over the recovered targets, the two
+repaired public-safety consumers and the promoted framing modules passes 212
+jobs from a fresh source-only tree.
 
 ## 2. Source and normative adequacy
 

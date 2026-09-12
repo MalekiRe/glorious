@@ -67,14 +67,6 @@ theorem Permitted.guardLoans {world : World} {authority : Authority} {access : A
       · exact live.2 guard member
       · exact ih permission.2.1 guard member
 
-theorem Loan.permissionState_eq_iff {current original : Loan} :
-    current.permissionState = original.permissionState ↔
-      current.identity = original.identity ∧ current.parent = original.parent ∧
-      current.referent = original.referent ∧ current.mode = original.mode ∧
-      current.region = original.region ∧ current.live = original.live ∧
-      current.kind = original.kind ∧ current.guards = original.guards := by
-  simp only [Loan.permissionState,Loan.mk.injEq,and_true]
-
 theorem AncestorLoan.transport_parents {before after : World} {ancestor descendant : Identity}
     (related : AncestorLoan before ancestor descendant)
     (retained : ∀ identity original, before.loans.get identity = some original →

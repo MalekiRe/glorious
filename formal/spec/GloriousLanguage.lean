@@ -7,6 +7,7 @@ import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.CopyResourcePreservation
 import GloriousLanguage.LoanCompatibility
+import GloriousLanguage.LoanResourceRows
 import GloriousLanguage.CopyProgress
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
