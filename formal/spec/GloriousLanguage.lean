@@ -52,6 +52,7 @@ import GloriousLanguage.PatternContextTyping
 import GloriousLanguage.SuspensionPreservation
 import GloriousLanguage.ControlOriginPreservation
 import GloriousLanguage.DropSuspension
+import GloriousLanguage.DropPrivate
 import GloriousLanguage.DefinitionalNormalForms
 import GloriousLanguage.ClosedDefinitionalEquality
 import GloriousLanguage.CapabilitySubstitution

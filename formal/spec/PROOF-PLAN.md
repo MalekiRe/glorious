@@ -666,9 +666,10 @@ root lists. This is historical address provenance, not unconditional storage
 liveness. Retained activation/scope ownership, arbitrary-body preservation of
 hidden handles and initialized normal-return lifetimes remain on the same
 unfinished dependency chain; transfer and cancellation may legitimately
-dispose abandoned frames. The current-source `DropSuspension` gate remains
-blocked by the capability-extraction failure recorded above; its integration
-is not included in the successful control/source-entry gate.
+dispose abandoned frames. At that checkpoint, `DropSuspension` remained
+blocked by the capability-extraction failure recorded above. The later lower
+private-storage integration below checks this consumer without the unused
+`DropReturn` dependency; it does not claim to repair Drop capability inversion.
 
 Saved-home provenance now authenticates the actual cleanup roles as well.
 `FrameOwnsHome` is the authoritative home-based ownership judgment used by
@@ -940,6 +941,42 @@ gate passes (143 jobs, warnings as errors), including source/match entry,
 runtime world/coverage/body renaming and invocation cleanup consumers. Existing
 example files were mechanically migrated but not executed as routine evidence.
 The known Drop inversion failure and full aggregate soundness remain open.
+
+The lower `PrivateStorage` producer now owns exact vacant internal-slot framing
+through actual allocation, writes, copies, moves, loans and common input binding.
+`DropHandle` consumes it, rather than owning a second copy of those generic
+proofs. Its actual two-step entry product also retains the source destruction
+task, body stack and fresh callee activation, including the real unsafe-context
+reset on the activation frame. `DropSuspension` carries the newly allocated
+loan's freshness through historical saved authority and actual cancellation.
+
+`PrivateLocalControl`, `PrivateEffectPreservation`, `PrivateBranchPreservation`
+and `PrivateForeignPreservation` derive executable operand and cleanup-owner
+exclusion through the real producers. Pattern tests construct their actual
+binding carriers; active suspension restoration cannot select a private root;
+foreign mutation follows actual exposure, callback inputs and retained lease
+cleanup. The guard itself may retain the private handle, but it is not a host
+exposure seed. No future-frame or post-world privacy premise is assumed.
+
+`PrivatePreservation` covers every branch of the complete six-family `Step`
+relation. Its general finite-run theorem either retains the protected stack
+prefix and exact slot or factors the run at the actual first silent guard pop,
+with the private slot intact on both sides. It places no slot-preservation
+obligation on the caller's later suffix. `DropPrivate` derives the initial
+invariant from actual hook dispatch and ordinary owned-input entry and feeds
+that complete-machine theorem. This closes the conditional caller-handle
+preservation argument, including nested callbacks and cancellation, rather
+than just checking isolated transitions or examples.
+
+The ambient run's no-label-transfer/no-operation-dispatch/no-replay restrictions
+are still explicit inputs to that result. The current `DropContract` quantifies
+isolated initial invocations; erasing real caller frames changes host exposure
+and cannot justify those inputs. Correct ambient invocation admission, initialized
+normal-return integration and dependent conversion-safe Drop inversion remain
+open. This checkpoint does not claim a complete destructor or language proof.
+The frozen combined caller-private, suspension, exterior-home and callback-runtime
+gate passes 129 jobs with warnings as errors. Existing examples and the known
+failing higher Drop aggregate were not run.
 
 The structural capability substitution boundary now consumes kinded declaration
 dependencies. Actual declaration admission previously omitted function captures

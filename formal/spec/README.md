@@ -54,6 +54,9 @@ or a dependency of this project.
   retained cleanup barriers, runtime handoff coverage and whole-run runtime liveness.
 - `ExternalHomePreservation`: whole-run external/allocation-home preservation,
   actual registration-owner origin and source cleanup/cancellation separation.
+- `PrivateStorage`, the private-preservation producer modules, `DropPrivate`:
+  actual hook allocation/input entry and complete-machine caller-slot preservation
+  up to the first real guard pop, under the ambient trace's control restrictions.
 - `PredicateInterpretation`, `PredicateScope`, `MatchEntryContextTyping`: hygienic
   predicate semantics and source-derived scope through actual selected-arm entry.
 - `ClosedDefinitionalEquality`, `HeadOriginDecomposition`: assumption-free equality

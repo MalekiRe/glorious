@@ -20,24 +20,26 @@ theorem LocalStep.hook_entry_old_suspensions {program : Kernel.Program} {host : 
       body.task = .run callee function.body ∧
       body.world.roots.get handle.root = some root ∧ root.live = true ∧ root.value = none ∧
       root.home = .temporary caller.activation caller.scope ∧ handle.fields = [] ∧
-      handle.root = before.world.nextRoot ∧ CanEndStorage body.world handle.root ∧
+      handle.root = before.world.nextRoot ∧ loan = before.world.nextLoan ∧ CanEndStorage body.world handle.root ∧
       (∀ binding ∈ callee.environment, binding.address.root ≠ handle.root) ∧
       after.ControlWellFormed ∧
       (∀ id original, before.resumptions.get id = some original →
         ∀ current, after.resumptions.get id = some current →
-          handle.root ∉ current.roots ∧ handle.root ∉ current.controlRootSupport) ∧
+          handle.root ∉ current.roots ∧ handle.root ∉ current.controlRootSupport ∧
+          ∀ authority ∈ current.controlAuthoritySupport, authority.parentLoan ≠ some loan) ∧
       (∀ id original, before.resumptions.get id = some original →
         ∀ canceled, EffectStep program after (some (.cancel id)) canceled →
         ∀ context roots next, canceled.task = .cleanup context roots next → handle.root ∉ roots) := by
-  obtain ⟨caller,callee,function,authority,handle,loan,next,root,frame,task,found,live,vacant,home,whole,fresh,safe,excluded⟩ :=
+  obtain ⟨caller,callee,function,authority,handle,loan,next,root,_,frame,task,_,_,found,live,vacant,home,whole,fresh,freshLoan,safe,excluded⟩ :=
     dispatch.hook_entry_private valid inventory typed entry
   have execution : Run program host before (.hookEnter address hook :: trace) after :=
     .visible (Or.inl dispatch) (.silent (Or.inl entry) run)
-  refine ⟨caller,callee,function,authority,handle,loan,next,root,frame,task,found,live,vacant,home,whole,fresh,safe,excluded,
+  refine ⟨caller,callee,function,authority,handle,loan,next,root,frame,task,found,live,vacant,home,whole,fresh,freshLoan,safe,excluded,
     execution.controlWellFormed valid inventory lawful typed control,?_,?_⟩
   · intro id original beforeAt current afterAt
     exact ⟨execution.old_inventory_excludes_future_root control.suspensions beforeAt afterAt (Nat.le_of_eq fresh.symm),
-      execution.old_saved_control_excludes_future_root valid inventory lawful typed control beforeAt afterAt (Nat.le_of_eq fresh.symm)⟩
+      execution.old_saved_control_excludes_future_root valid inventory lawful typed control beforeAt afterAt (Nat.le_of_eq fresh.symm),
+      execution.old_saved_authority_excludes_future_loan typed.1 control beforeAt afterAt (Nat.le_of_eq freshLoan.symm)⟩
   · intro id original beforeAt canceled cancellation
     exact execution.cancel_old_excludes_future_root control.suspensions beforeAt (Nat.le_of_eq fresh.symm) cancellation
 
