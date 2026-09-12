@@ -1,4 +1,3 @@
-import GloriousLanguage.ReceiverPreservation
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.LocalPreservation
 
@@ -38,24 +37,37 @@ theorem Clears.withProofs {before after : World} {addresses : List Address}
   | cons written _ ih =>
       exact .cons (by rw [World.write_withProofs,written]; rfl) ih
 
-theorem NewValue.withProofs {program : Program} {before after : World} {destination type head sources}
+/-- Proof metadata changes neither observed support nor storage permission.
+The common handoff frame rule consumes each nominal invariant's declared
+framing law; no new resource-closure premise is supplied by the consumer. -/
+theorem ResidentHandoffReady.withProofs {program : RuntimeProgram} {world : World}
+    {sources : List ResolvedPlace} {values : List Value} {footprint : List Address}
+    (ready : ResidentHandoffReady program world sources values footprint)
+    (proofs : Table Availability) (next : Identity) :
+    ResidentHandoffReady program (world.withProofs proofs next) sources values footprint := by
+  have locations : world.LocationExtension (world.withProofs proofs next) := .of_locations (fun _ => rfl)
+  refine ⟨ready.1,?_,ready.2.2.1,?_⟩
+  · intro value member
+    have admitted := ready.2.1 value member
+    exact ⟨admitted.1,admitted.2.frame locations rfl (fun _ _ => ⟨rfl,rfl⟩)⟩
+  · intro source member
+    exact (ready.2.2.2 source member).locationExtension locations rfl
+
+theorem NewValue.withProofs {program : RuntimeProgram} {before after : World} {destination type head sources}
     (constructed : NewValue program before destination type head sources after)
     (proofs : Table Availability) (next : Identity) :
     NewValue program (before.withProofs proofs next) destination type head sources (after.withProofs proofs next) := by
   cases constructed with
-  | construct vacant located inputs initialized separate permissions cleared written =>
-      rename_i residents taken middle
-      refine .construct (before := before.withProofs proofs next) (head := head)
-        (after := middle.withProofs proofs next)
-        vacant (located.retained (fun _ selected => selected) (fun _ => rfl))
-        inputs initialized separate ?_ (cleared.withProofs proofs next) ?_
-      · intro source member
-        exact ⟨(permissions source member).1.transport (before := before)
-          (after := before.withProofs proofs next) (fun _ => rfl) rfl,(permissions source member).2⟩
-      · rw [World.write_withProofs]
-        dsimp only [World.withProofs]
-        rw [written]
-        rfl
+  | @construct residents taken finished vacant located ready separated cleared written =>
+    refine .construct (before := before.withProofs proofs next)
+      (head := head) (residents := residents) (taken := taken.withProofs proofs next)
+      (after := finished.withProofs proofs next)
+      vacant (located.retained (fun _ selected => selected) (fun _ => rfl))
+      (ready.withProofs proofs next) separated (cleared.withProofs proofs next) ?_
+    rw [World.write_withProofs]
+    dsimp only [World.withProofs]
+    rw [written]
+    rfl
 
 theorem Typing.ValueTyped.extendProofs {program : Kernel.Program} {world : World} {value : Value}
     {proofs : Table Availability} {next : Identity}
@@ -68,7 +80,7 @@ theorem Typing.ValueTyped.extendProofs {program : Kernel.Program} {world : World
     ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ typed
   · exact fun {_ _} => .unit
   · exact fun {_ _ _} valid => .scalar valid
-  · exact fun {_ _ _ _ _ _} shape _ fields => .aggregate shape fields
+  · exact fun {_ _ _ _ _ _ _} shape _ fields => .aggregate shape fields
   · exact fun {_ _ _ _ _ _ _} found active mode region located =>
       .reference found active mode region (located.retained (fun _ found => found) (fun _ => rfl))
   · exact fun {_ _ _ _ _} bound origin => .pointer bound origin
@@ -91,9 +103,9 @@ theorem World.registerAvailability_wellFormed {world : World} {available : Avail
     (recorded : ∀ place ∈ available.reserved, place.authority.Recorded world.loans) :
     (world.withProofs (world.availability.set world.nextProof available) (world.nextProof+1)).WellFormed := by
   rcases valid with ⟨rootsUnique,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,unique,
-    roots,regions,bases,ranges,loans,references,overlaps,parents,locations⟩
+    roots,regions,bases,ranges,loans,references,overlaps,parents,locations,guards⟩
   refine ⟨rootsUnique,loansUnique,proofsUnique.set _ _,regionsUnique,?_,?_,owners,unique,
-    roots,regions,bases,ranges,loans,references,?_,parents,locations⟩
+    roots,regions,bases,ranges,loans,references,?_,parents,locations,guards⟩
   · intro id proof found
     by_cases same : id = world.nextProof
     · subst id
@@ -155,7 +167,7 @@ theorem reserve_worldTyped {program : Kernel.Program} {before allocated after : 
       (.available (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion region) types)
       layout mutable destination allocated)
     (permitted : ∀ place ∈ reserved, Permitted before place.authority .shared place.address)
-    (created : NewValue program.declarations allocated destination
+    (created : NewValue program allocated destination
       (.available (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion region) types)
       (.available before.nextProof) [] after) :
     Typing.WorldTyped program { after with
@@ -167,7 +179,7 @@ theorem reserve_worldTyped {program : Kernel.Program} {before allocated after : 
   have proofBase : allocated.nextProof = before.nextProof := by cases allocation; rfl
   have regionLive : region ∈ allocated.liveRegions := by
     cases allocation with
-    | fresh live _ _ _ _ _ _ _ _ => exact live
+    | fresh request _ => exact request.region_live
   have allocatedRoots : ∀ place ∈ reserved, (allocated.root place.address).isSome = true := by
     intro place member
     obtain ⟨root,found⟩ := (permitted place member).root

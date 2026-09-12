@@ -84,13 +84,35 @@ resource-input bindings and stopped contexts remain in actual control support.
 Ordinary copy preserves shared resource closure. Copied stored-value typing
 does not by itself establish mixed copied/external snapshot resource closure.
 
-This is not whole-language soundness. Private, control, foreign and
-whole-execution consumers still need the changed raw/failure constructors.
+The following fresh strict 135-job gate, also replayed in main, checks
+`SemanticPreservation`, `ControlContextTyping`, `SnapshotReplayPreservation`
+and `OperationExecution`. General actual `Step.worldTyped`, `Run.worldTyped`
+and the public storage-safety consumers compose without changing their
+statements or adding a typed-output premise. This includes indexed foreign
+mutation/custody, actual host-produced callback worlds, all actual primitive
+and control resource faults, and nonempty proof-binding construction via the
+ordinary declared invariant framing law. Superseded higher bulk-move proofs
+were removed in favor of the common lower producer. `MemoryPreservation` and
+`ControlContextTyping` are now checked for the changed graph.
+
+The same gate closes the mixed copied/external snapshot resource graph.
+`CopiesSnapshot` derives closed nominal resources and restored reference
+targets, then actual copied-root suspension/replay admission and conditional
+cancellation admission. The nominal invariant relocation law has its real
+consumer; old external allocation ownership is retained because actual fresh
+shared loans cannot be owning rows. This is not an assumed post-world
+resource invariant. Cancellation still needs its source admission.
+
+Raw buffer release now requires `value.resources = []`; hole fields and
+structural array typing cannot justify silently discarding raw bindings.
+Reallocation's common success/fault source admission also records the positive
+old-region root/loan/availability/binding-pack facts needed by actual teardown.
+
+This is not whole-language soundness. Private, complete control-lifetime and
+foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody
 interference contract; independent initial input permissions are insufficient.
-Reallocation construction, label and other allocation sites, snapshot resource
-closure/custody, and task/frame preservation remain open. Superseded allocation,
-pointer and shell-binding proofs were removed from their higher consumers;
-the remaining `MemoryPreservation` and `ControlContextTyping` modules are not
-claimed checked here. Earlier whole-execution checkpoints are historical
-evidence, not a passing acceptance gate for this changed graph.
+Reallocation construction, label and other allocation sites, physical replay,
+cancellation execution and task/frame preservation/progress remain open.
+Storage preservation and source-conditional replay admission do not prove
+those obligations or replace the unfinished source resource-soundness theorem.

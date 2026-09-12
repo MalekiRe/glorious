@@ -94,7 +94,7 @@ theorem ReleasesBuffer.pointer_origin {pointer released : RawPointer} {program :
     {allocation : ResolvedPlace}
     (origin : pointer.Origin before) (release : ReleasesBuffer program before allocation released domain after) : pointer.Origin after := by
   cases release with
-  | release _ _ _ _ claims _ written retired closed =>
+  | release _ _ _ _ _ claims _ written retired closed =>
       have unclaimed := ReleasesStorageClaims.pointer_origin claims origin
       have coherent := (unclaimed.write written).retire retired
       obtain ⟨_,rfl⟩ := closed

@@ -244,7 +244,7 @@ def BufferAt (world : World) (allocation : ResolvedPlace) (pointer : RawPointer)
 inductive ReleasesBuffer (program : Language.Program) : World → ResolvedPlace → RawPointer → Identity → World → Prop where
   | release {before allocation pointer domain value root unclaimed cleared retired after} :
       BufferAt before allocation pointer domain value → before.root allocation.address = some root →
-      value.shellLive = false → (∀ field ∈ value.fields, field = none) →
+      value.shellLive = false → value.resources = [] → (∀ field ∈ value.fields, field = none) →
       ReleasesStorageClaims before allocation unclaimed → CanEndStorage unclaimed allocation.address.root →
       unclaimed.write allocation.address none = some cleared → Retires cleared allocation.address.root retired →
       Execution.RegionEnds retired root.region after → ReleasesBuffer program before allocation pointer domain after
@@ -252,17 +252,27 @@ inductive ReleasesBuffer (program : Language.Program) : World → ResolvedPlace 
 /-- Reallocation is admitted at the old allocation before allocating or
 moving anything. The snapshot carries its real resident/resource readiness;
 the same source admission is required for physical success and exhaustion. -/
+structure BufferRegionReady (before : World) (allocation : ResolvedPlace) (region : Identity) : Prop where
+  roots : ∀ id root, before.roots.get id = some root → root.live = true → root.region = region →
+    id = allocation.address.root
+  loans : ∀ id loan, before.loans.get id = some loan → loan.live = true → loan.region = region →
+    loan.referent.root = allocation.address.root
+  availability : ∀ id available, before.availability.get id = some available → available.active = true →
+    available.region ≠ region
+  packs : ∀ address value pack, before.Resident address value → value.head = .bindings pack → pack.region ≠ region
+
 structure ReallocationSourceReady (program : Language.RuntimeProgram) (before : World)
     (allocation : ResolvedPlace) (pointer : RawPointer) (domain : Identity)
     (element : Term) (oldCount newCount : Nat) : Prop where
   source : ∃ value, BufferAt before allocation pointer domain value ∧ value.fields.length = oldCount ∧
     value.type = .array element (.constant (.integer false .pointer oldCount)) ∧
-    value.shellLive = false ∧
+    value.shellLive = false ∧ value.resources = [] ∧
     ∀ child, some child ∈ value.fields → child.MoveReady program before [allocation.address]
   growing : oldCount ≤ newCount
   release_ready : ReleasesStorageClaimsReady before allocation
   unreserved : ∀ id available, before.availability.get id = some available → available.active = true →
     ∀ place ∈ available.reserved, place.address.root ≠ allocation.address.root
+  region_ready : ∀ root, before.root allocation.address = some root → BufferRegionReady before allocation root.region
 
 def BufferReallocationRequest (program : Language.RuntimeProgram) (before : World)
     (allocation : ResolvedPlace) (pointer : RawPointer) (domain : Identity)
@@ -310,7 +320,7 @@ theorem vacant_release_has_no_live_borrow {program : Language.Program} {before a
     (selectedRoot : pointer.allocation = some id) (found : before.loans.get loan.identity = some loan)
     (live : loan.live = true) (borrowed : loan.kind ≠ .owning) : loan.referent.root ≠ id := by
   cases released with
-  | release located _ _ _ claims _ _ _ _ =>
+  | release located _ _ _ _ claims _ _ _ _ =>
     obtain ⟨_,_,selected,_,address,_⟩ := located
     have same := Option.some.inj (selectedRoot.symm.trans selected)
     subst same

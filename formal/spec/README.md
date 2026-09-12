@@ -27,9 +27,11 @@ executable contracts. Its checked boundary covers common resident/raw input
 binding, actual local execution, source-local context entry, payload-pattern
 transport, ordered preparation success/exhaustion and actual source-selected
 operation success/resource failure. Common loan-kind/custody preservation and
-buffer-allocation progress compose with that boundary. Higher whole-execution,
-private, control and foreign proofs are being migrated; their older
-checkpoints do not establish conformance of this changed graph.
+buffer-allocation progress compose with that boundary. Whole actual execution
+and public storage preservation now consume those changed contracts, as do
+copied-snapshot resource closure/restoration and replay/cancellation admission.
+Other private, control-lifetime and foreign-runtime proofs are being migrated;
+their older checkpoints do not establish conformance of this changed graph.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
 
@@ -166,7 +168,18 @@ or a dependency of this project.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure;
-  mixed copied/external snapshot resource closure remains open.
+  source-admitted copy construction remains a separate progress obligation.
+- `SnapshotResourcePreservation`, `SnapshotReplayPreservation`: one mixed
+  copied/external graph proof derives nominal closure and transitive reference
+  restoration, retaining old external allocation ownership. Actual copied
+  roots inherit suspension/replay admission and source-admitted cancellation.
+  Construction of a physical replay and cancellation execution remain open.
+- `BulkMovePreservation`, `MemoryPreservation`, `ForeignPreservation`,
+  `SemanticPreservation`: real resident snapshots, raw custody and indexed host
+  transactions compose into storage preservation for every actual step/run and
+  public reachable, observed, lifecycle and divergent execution. Proof metadata
+  uses the ordinary invariant framing law. Raw buffer release must discharge
+  retained shell resources and its actual region lifetime obligations.
 - `TargetLayoutValidity`, `LayoutValidity`, `LayoutCoherence`: actual ordered
   ordinary/C layouts are valid and unique modulo closed conversion. C enums
   and scalars consume the same exact target mapping. Callable field conversion

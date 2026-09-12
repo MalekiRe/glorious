@@ -113,7 +113,7 @@ inductive Result where
   deriving Repr, Inhabited
 
 def Finished (program : Kernel.Program) (function : Function) (state : State) (result : Result) : Prop :=
-  (∃ address value publicScope, state.task = .stopped address ∧ state.world.Stores address value ∧ Reveals state.world value publicScope ∧ result = .returned publicScope) ∨
+  (∃ context address value publicScope, state.task = .stopped context address ∧ state.world.Stores address value ∧ Reveals state.world value publicScope ∧ result = .returned publicScope) ∨
   (∃ reason, state.task = .fatal reason ∧ result = .fatal reason) ∨
   (∃ context id arguments payload residents publicScope,
     state.task = .perform context id arguments payload ∧ Contracts.MayAwait program function state ∧

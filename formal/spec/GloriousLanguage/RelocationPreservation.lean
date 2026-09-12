@@ -112,6 +112,10 @@ theorem Relocation.values_length (map : Relocation) (fields : List (Option Value
 theorem Relocation.value_owner (map : Relocation) (value : Value) :
     (map.value value).owner = map.ownerBase + value.owner := by cases value; rfl
 
+theorem Relocation.value_type (map : Relocation) (value : Value) : (map.value value).type = map.term value.type := by
+  cases value
+  simp only [Relocation.value,Value.type]
+
 theorem Relocation.value_fields_length (map : Relocation) (value : Value) :
     (map.value value).fields.length = value.fields.length := by
   cases value

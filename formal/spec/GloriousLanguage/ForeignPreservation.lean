@@ -1,6 +1,7 @@
 import GloriousLanguage.MemoryPreservation
 import GloriousLanguage.ReceiverPreservation
 import GloriousLanguage.StorageFraming
+import GloriousLanguage.HandoffPreservation
 
 /-! Typed host interaction, including source callback re-entry. The external
 model supplies mutation and protocol evidence, never the preservation result. -/
@@ -12,14 +13,14 @@ open Kernel Execution Memory
 theorem Registration.Valid.transfer {program : Kernel.Program} {before after : World}
     {runtimes : List Identity} {registration : Registration} {authority : Authority} {source destination : Address}
     (valid : registration.Valid program before runtimes)
-    (transferred : Transfers program.declarations before authority source destination after)
+    (transferred : Transfers program before authority source destination after)
     (sourceSeparate : ¬ source.Overlaps registration.owner) (destinationSeparate : ¬ destination.Overlaps registration.owner) :
     registration.Valid program after runtimes := by
   intro active
   obtain ⟨⟨value,stored,initialized,head⟩,function,runtime,bound,synchronous,retained⟩ := valid active
   have read : after.read registration.owner = before.read registration.owner := by
     cases transferred with
-    | move _ _ _ _ _ _ clear install =>
+    | move _ _ _ _ _ _ _ clear install =>
       exact (World.write_disjoint install destinationSeparate).trans (World.write_disjoint clear sourceSeparate)
   refine ⟨⟨value,read.trans stored,initialized,head⟩,function,runtime,bound,?_,?_⟩
   · intro sync
@@ -32,11 +33,20 @@ theorem Registration.Valid.transfer {program : Kernel.Program} {before after : W
     exact ⟨changed,domain,found,by simpa only [sameHome] using home⟩
 
 theorem Mutation.worldTyped {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
+    {action : MutationAction}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before) (changed : Mutation program policy before after) :
+    (typed : Typing.WorldTyped program before) (changed : Mutation program policy before action after) :
     Typing.WorldTyped program after := by
   cases changed with
-  | allocate _ allocated => exact allocated.worldTyped typed
+  | allocate _ _ allocated => exact allocated.worldTyped typed
+  | allocateExterior _ _ allocated =>
+      have prepared := allocated.worldTyped typed
+      have permission := allocated.owner_permitted typed.1
+      have located : World.Located _ _ := Or.inr allocated.created_vacant
+      cases allocated with
+      | fresh request _ =>
+          exact World.fresh_loan_worldTyped prepared permission located request.region_live
+            .owning (some policy.custody) (by simp [LoanKind.Allows])
   | scalar _ stored => exact stored.worldTyped valid inventory typed
   | unit _ stored => exact stored.worldTyped valid inventory typed
   | pointer _ _ bound origin stored => exact stored.worldTyped valid inventory typed bound origin
@@ -44,18 +54,20 @@ theorem Mutation.worldTyped {program : Kernel.Program} {policy : AuthorityPolicy
   | acquire _ _ acquired => exact acquired.worldTyped valid inventory typed
   | borrow _ _ borrowed => exact borrowed.worldTyped valid inventory typed
   | allocateBuffer _ allocated => exact allocated.worldTyped valid inventory typed
-  | reallocateBuffer _ _ reallocated => exact reallocated.worldTyped valid inventory typed
-  | releaseBuffer _ _ released => exact released.worldTyped typed
-  | rawRead _ _ read => exact read.worldTyped valid inventory typed
-  | rawWrite _ _ written => exact written.worldTyped valid inventory typed
-  | rawBorrow _ _ borrowed => exact borrowed.worldTyped valid inventory typed
+  | reallocateBuffer _ _ _ reallocated => exact reallocated.worldTyped valid inventory typed
+  | releaseBuffer _ _ _ released => exact released.worldTyped typed
+  | rawRead _ _ _ read => exact read.worldTyped valid inventory typed
+  | rawWrite _ _ _ written => exact written.worldTyped valid inventory typed
+  | rawBorrow _ _ _ borrowed => exact borrowed.worldTyped valid inventory typed
   | bulkMove _ _ moved => exact moved.worldTyped valid inventory typed
   | retire _ _ retired => exact retired.worldTyped typed
   | endLoan ended => exact ended.worldTyped typed
 
-theorem Mutations.worldTyped {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
+theorem Mutations.worldTyped {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World}
+    {produced : List ProducedResource} {actions : List MutationAction}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before) (changed : Mutations program policy before after) :
+    (typed : Typing.WorldTyped program before) (changed : Mutations program custody policy before produced actions after) :
     Typing.WorldTyped program after := by
   induction changed with
   | refl => exact typed
@@ -63,13 +75,13 @@ theorem Mutations.worldTyped {program : Kernel.Program} {policy : AuthorityPolic
 
 theorem Model.Lawful.host_worldTyped {program : Kernel.Program} {model : Model}
     {session : ForeignSession} {imported : Import} {contract : Contract} {before after : World}
-    {observation next : List Nat} {action : HostAction}
+    {observation next : List Nat} {actions : List MutationAction} {action : HostAction}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : model.Lawful program) (typed : Typing.WorldTyped program before)
     (selected : Selected program model session.call imported contract) (active : contract.session before session)
-    (step : model.step session.call.binding.declaration before session observation after action next) :
+    (step : model.step session.call.binding.declaration before session observation actions after action next) :
     Typing.WorldTyped program after :=
-  (lawful.step session imported contract before observation after action next selected typed.1 active step).1.worldTyped
+  (lawful.step session imported contract before observation actions after action next selected typed.1 active step).1.worldTyped
     valid inventory typed
 
 /-- All foreign transitions preserve full resident typing and storage
@@ -84,8 +96,8 @@ theorem Step.worldTyped {program : Kernel.Program} {model : Model} {before after
   | host _ _ selected active step => exact lawful.host_worldTyped valid inventory typed selected active step
   | result _ _ selected active step _ transferred =>
     exact transferred.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step)
-  | callback _ _ selected active step _ lent _ _ consumed =>
-    exact consumed.worldTyped (lent.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step))
+  | callback _ _ selected active step _ _ =>
+    exact lawful.host_worldTyped valid inventory typed selected active step
   | callbackResult _ _ _ _ protectedWorld retired =>
     exact retired.worldTyped (protectedWorld.worldTyped valid inventory typed)
   | callbackReturned => exact typed
@@ -112,7 +124,7 @@ theorem Step.ready {program : Kernel.Program} {model : Model} {before after : St
     exact ⟨rfl,_,_,selected,law.1,law.2.1⟩
   | host _ _ selected active step =>
     cases task
-    have law := lawful.step _ _ _ _ _ _ _ _ selected typed.1 active step
+    have law := lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active step
     exact ⟨rfl,_,_,selected,law.2.2.2.2.1 rfl,law.2.2.2.1⟩
   | callbackReturned _ _ selected postcondition returned =>
     cases task
@@ -136,7 +148,7 @@ theorem Step.result_registrations {program : Kernel.Program} {model : Model}
     RegistrationsValid program model after.world after.hostState := by
   cases step with
   | result _ _ selected active host separated transferred =>
-    have registry := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 active host).2.2.2.1
+    have registry := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active host).2.2.2.1
     refine ⟨registry.1,?_⟩
     intro registration member active
     have separate := separated registration member active

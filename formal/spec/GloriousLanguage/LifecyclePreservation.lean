@@ -213,7 +213,7 @@ theorem Memory.ReleasesBuffer.wellFormed {program : Program} {before after : Wor
     {allocation : ResolvedPlace}
     (valid : before.WellFormed) (released : Memory.ReleasesBuffer program before allocation pointer domain after) : after.WellFormed := by
   cases released with
-  | release _ selected _ _ claims safe written retired closed =>
+  | release _ selected _ _ _ claims safe written retired closed =>
       exact closed.wellFormed (retired.wellFormed
         (World.clear_wellFormed (claims.wellFormed valid)
           (safe.place_permission claims.ready.whole (by cases claims; exact selected)) written))
@@ -223,7 +223,7 @@ theorem Memory.ReleasesBuffer.worldTyped {program : Kernel.Program} {before afte
     (typed : Typing.WorldTyped program before) (released : Memory.ReleasesBuffer program.declarations before allocation pointer domain after) :
     Typing.WorldTyped program after := by
   cases released with
-  | release _ selected _ _ claims safe written retired closed =>
+  | release _ selected _ _ _ claims safe written retired closed =>
       exact closed.worldTyped (retired.worldTyped
         (World.clear_worldTyped (claims.worldTyped typed)
           (safe.place_permission claims.ready.whole (by cases claims; exact selected)) written))

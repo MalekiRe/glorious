@@ -152,10 +152,6 @@ theorem SnapshotMap.operation_instance {program : Kernel.Program} {before : Stat
   rw [← selected.terms_permutation world supported] at instanced
   exact ⟨_,instanced⟩
 
-theorem Relocation.value_type (map : Relocation) (value : Value) : (map.value value).type = map.term value.type := by
-  cases value
-  simp only [Relocation.value,Value.type]
-
 theorem Relocation.constructor_value (map : Relocation) {program : Program} {owner : Identity} {type : Term}
     {head : ValueHead} {live : Bool} {fields : List (Option Value)} {resources : List StorageBinding}
     {variant : Option DeclId} {types : List Term}

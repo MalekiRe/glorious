@@ -33,14 +33,24 @@ assumes successful payload allocation; the real failed prefix is retained.
 The strict 173-job operation/lifecycle/buffer/copy-resource dependency gate
 checks this boundary, not the unmigrated whole-machine theorem.
 
+The subsequent strict 135-job checkpoint composes actual whole-step/run and
+public storage preservation with the changed operation/control/primitive/host
+contracts. One mixed copied/external graph proof now derives closed resources,
+reference restoration and actual copied-root suspension/replay/conditional
+cancellation admission. It consumes the nominal invariant relocation law;
+source cancellation permission is not manufactured by copying. The actual raw
+release/source boundary now discharges retained shell resources and old-region
+lifetime facts before its eventual teardown.
+
 The immediate dependency chain remains general ordinary input/pre-entry
-progress, mixed copied/external snapshot resource closure, and constructive
+progress, source-admitted copy construction, physical replay and constructive
 raw reallocation/release. Input batch readiness must retain permissions and
 custody under each earlier real loan creation or transfer, allowing compatible
 shared views while excluding genuine mode/guard/custody interference. It must
 not assume every pending post-state is ready or that allocation succeeds.
-All higher control/private/foreign consumers must then use those same actual
-outcomes. No helpers or checked smaller projection settle full soundness.
+The remaining complete control-lifetime/private/foreign-runtime consumers must
+then use those same actual outcomes. No helpers or checked storage projection
+settle full soundness.
 
 1. Prove the storage algebra, typed destination obligations, partial-hole
    invariants and reference preservation for arbitrary storage paths. Keep one

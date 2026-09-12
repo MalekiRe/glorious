@@ -257,7 +257,7 @@ theorem PacksBindings.worldTypedWithOrigins {program : Kernel.Program} {context 
   have regionLive : context.region ∈ allocated.liveRegions := by
     obtain ⟨_,allocation⟩ := temporary
     cases allocation with
-    | fresh live _ _ _ _ _ _ _ _ => exact live
+    | fresh request _ => exact request.region_live
   have registered : Typing.WorldTypedWithOrigins program
       (allocated.withProofs allocated.availability (before.nextProof+1)) originBound :=
     World.advanceProof_worldTypedWithOrigins allocatedTyped (by rw [proofBase]; exact Nat.le_succ _)
@@ -325,12 +325,6 @@ theorem ControlStep.worldTyped {program : Kernel.Program} {before after : State}
       have proofs := congrArg World.availability (World.write_rest written)
       simpa only [proofs] using (by assumption)
   case destroySpentAvailable => apply World.clear_worldTyped typed <;> assumption
-  case contextualCall consumed used =>
-    apply used.worldTyped (consumed.worldTyped typed)
-    intro access
-    apply Permitted.transport consumed.locations consumed.loans
-    rw [← access]
-    assumption
   case positiveTest allocation tested => exact tested.worldTyped valid inventory (allocation.worldTyped typed)
   case negativeTest allocation tested => exact tested.worldTyped valid inventory (allocation.worldTyped typed)
   case bindings moved => exact moved.worldTyped valid inventory typed

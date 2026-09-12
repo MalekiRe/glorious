@@ -110,14 +110,6 @@ theorem ControlStep.contextBindingsTyped {program : Kernel.Program} {before afte
     have valueTyped := World.stores_typed worldTyped.roots stored
     exact typed.world (fun _ _ binding => World.clear_nonreference_leaf_bindingStorageTyped worldTyped.1 stored
       (valueTyped.available_fields head) (by intro id; rw [head]; exact ValueHead.noConfusion) permission written binding)
-  case contextualCall _ _ _ _ _ _ _ _ _ _ witnessStored _ witnessHead witnessPermission _ _ _ _ _ _ _ consumed used =>
-    have consumedWorld := consumed.worldTyped worldTyped
-    have consumedContext := typed.world (fun _ _ binding => consumed.bindingStorageTyped worldTyped.1 binding)
-    obtain ⟨witness,present,head⟩ := consumed.stores_head witnessStored
-    apply consumedContext.world
-    intro address type binding
-    exact used.bindingStorageTyped consumedWorld present (head.trans witnessHead)
-      (fun access => by simpa only [access] using witnessPermission.transport consumed.locations consumed.loans) binding
   case positiveTest allocated tested | negativeTest allocated tested =>
     exact typed.world (fun _ _ binding => tested.bindingStorageTyped valid inventory (allocated.worldTyped worldTyped)
       (allocated.bindingStorageTyped worldTyped.1 binding))
