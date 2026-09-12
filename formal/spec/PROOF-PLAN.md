@@ -1223,6 +1223,16 @@ caller permission is equivalent to full-handler permission. Isolated invocations
 use this same frame-owned boundary with an empty ambient suffix. Neither absent
 routing nor impossible payload preparation makes the predicate vacuously true.
 `PublicValues` retains the complete admission when observing outward payloads.
+`OperationExecution` consumes the split to construct all three actual handler
+transitions: terminal dispatch, tail-arm capture and bound-resumption capture.
+The real fresh clause context, ordered full cleanup/capture roots, saved-home
+table and quantitative bound are constructed from the same preparation and
+admitted disposition. Both capture branches produce the same outward request's
+`LifecycleObserves` witness, and actual preservation supplies their post-world
+typing. Real clause-pattern planning and continuation-storage creation remain
+explicit dependent producer inputs; they are not complete transition premises.
+The strict 138-job handler/private/lifecycle dependency gate checks these
+constructed transitions and their actual public-observation consumers.
 This strengthens semantic admission; it does not prove source resource progress.
 General ordered layout/allocation and loan readiness must still produce the
 payload preparation and residual permissions. Matching, clause binding and

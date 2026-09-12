@@ -8,6 +8,19 @@ namespace Glorious.Language.Contracts
 
 open Kernel Execution
 
+/-- The real capture of this exact request constructs its suspended lifecycle.
+This constructor is used by handler progress; it cannot be supplied by an
+unrelated same-key suspension table entry. -/
+theorem ObservationAt.capture_lifecycle {program : Kernel.Program} {host : Foreign.Model}
+    {function : Function} {boundary : InvocationBoundary} {start pending captured : State}
+    {request : Observation} {id : DeclId} {arguments : List Term} {payload : List ResolvedPlace}
+    {continuation : Identity}
+    (observed : ObservationAt program host function boundary start pending request)
+    (outcome : request.outcome = .operation id arguments payload)
+    (capture : EffectStep program pending (some (.suspend continuation)) captured) :
+    LifecycleObserves program host function ⟨request,continuation,[.suspend continuation],captured.world,.suspended⟩ :=
+  ⟨captured,⟨boundary,start,pending,id,arguments,payload,observed,outcome,capture⟩,rfl,rfl⟩
+
 theorem EscapedCapture.request_observed {program : Kernel.Program} {host : Foreign.Model}
     {function : Function} {request : Observation} {continuation : Identity} {captured : State}
     (escaped : EscapedCapture program host function request continuation captured) :

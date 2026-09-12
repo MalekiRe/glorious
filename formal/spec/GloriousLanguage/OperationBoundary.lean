@@ -1,4 +1,6 @@
 import GloriousLanguage.InvocationBoundary
+import GloriousLanguage.RootSelection
+import GloriousLanguage.LocalPreservation
 
 /-! An outward operation contributes its callee-owned share of the same
 post-payload disposition obligation used by the actual accepting handler.
@@ -294,6 +296,19 @@ structure InvocationBoundary.OperationReady (boundary : InvocationBoundary) (pro
       AbandonedRoots moved inner (kept.map Address.root) roots ∧
       OperationDisposition.Permits program moved roots inner disposition
 
+/-- The actual accepting caller checks only its retained share, after the
+same ordered payload preparation. Destination selection, payload addresses and
+the terminal/resumptive mode are not reconstructed independently. -/
+def InvocationBoundary.OperationCallerPermission (boundary : InvocationBoundary) (program : Kernel.Program)
+    (before : State) (id : DeclId) (arguments : List Term) (payload : List ResolvedPlace)
+    (disposition : OperationDisposition) : Prop :=
+  ∀ abandoned handler owns arm outer clause kept moved,
+    Routes program before id arguments payload abandoned handler owns arm outer →
+    PreparedOperationPayload program before payload clause kept moved →
+    ∀ caller, boundary.ambient = caller ++ .handler handler owns :: outer →
+    ∀ roots, DelimitedRoots moved handler caller (kept.map Address.root) roots →
+      OperationDisposition.Permits program moved roots caller disposition
+
 /-- The routing condition cannot hold vacuously through unavailable payload
 preparation: admission contains an actual preparation witness. -/
 theorem InvocationBoundary.OperationReady.foreign_free {boundary : InvocationBoundary} {program : Kernel.Program}
@@ -367,5 +382,34 @@ theorem InvocationBoundary.OperationReady.caller_permission {boundary : Invocati
   rw [frames] at selected ⊢
   exact ⟨fun ambientPermission => selected.permits_compose localRoots ambientRoots localPermission ambientPermission,
     fun permission => ((selected.permits_iff localRoots ambientRoots).mp permission).2⟩
+
+/-- Preparation and the exact ordered handler cleanup selection are produced
+from the admitted callee and caller shares. Only the real clause home is an
+input; no post-world, selected root list or complete effect step is presumed. -/
+theorem InvocationBoundary.OperationReady.handler_permission {boundary : InvocationBoundary} {program : Kernel.Program}
+    {before : State} {id : DeclId} {arguments : List Term} {payload : List ResolvedPlace}
+    {disposition : OperationDisposition} {abandoned outer : List Frame}
+    {handler : InstalledHandler} {owns : Bool} {arm : OperationArm}
+    {clause : Execution.Context} {withRegion : World}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (ready : boundary.OperationReady program before payload disposition)
+    (outward : ¬ boundary.InternalOperation program before id arguments payload)
+    (route : Routes program before id arguments payload abandoned handler owns arm outer)
+    (home : OperationPayloadContext before clause withRegion)
+    (ambientPermission : boundary.OperationCallerPermission program before id arguments payload disposition) :
+    ∃ kept moved roots,
+      Protects program clause withRegion payload kept moved ∧
+      DelimitedRoots moved handler abandoned (kept.map Address.root) roots ∧
+      OperationDisposition.Permits program moved roots abandoned disposition ∧ Typing.WorldTyped program moved := by
+  obtain ⟨kept,moved,handoff,_⟩ := ready.prepare home
+  have movedTyped := handoff.worldTyped valid inventory (home.fresh.worldTyped typed)
+  have prepared : PreparedOperationPayload program before payload clause kept moved := ⟨withRegion,home,handoff⟩
+  obtain ⟨roots,selected⟩ := DelimitedRoots.exists movedTyped.1.1 handler abandoned (kept.map Address.root)
+  obtain ⟨caller,ambient,permission⟩ := ready.caller_permission outward route prepared selected
+  obtain ⟨callerRoots,callerSelected⟩ := DelimitedRoots.exists movedTyped.1.1 handler caller (kept.map Address.root)
+  have allowed := (permission callerRoots callerSelected).mp
+    (ambientPermission abandoned handler owns arm outer clause kept moved route prepared caller ambient callerRoots callerSelected)
+  exact ⟨kept,moved,roots,handoff,selected,allowed,movedTyped⟩
 
 end Glorious.Language.Contracts

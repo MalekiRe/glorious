@@ -25,6 +25,7 @@ import GloriousLanguage.InvocationLending
 import GloriousLanguage.InvocationInputs
 import GloriousLanguage.InvocationBoundary
 import GloriousLanguage.OperationBoundary
+import GloriousLanguage.OperationExecution
 import GloriousLanguage.RootSelection
 import GloriousLanguage.LabelBoundary
 import GloriousLanguage.InvocationLifecycle

@@ -255,6 +255,16 @@ theorem MayAwait.operation_ready {program : Kernel.Program} {function : Function
   subst actual
   exact permission
 
+theorem MayAwait.outward {program : Kernel.Program} {function : Function} {state : State}
+    {boundary : InvocationBoundary} {context : Execution.Context} {id : DeclId}
+    {arguments : List Term} {payload : List ResolvedPlace}
+    (awaiting : MayAwait program function state boundary)
+    (pending : state.task = .perform context id arguments payload) :
+    ¬ boundary.InternalOperation program state id arguments payload := by
+  obtain ⟨_,_,_,_,_,_,task,_,_,_,outside,_⟩ := awaiting
+  obtain ⟨rfl,rfl,rfl,rfl⟩ := Task.perform.inj (task.symm.trans pending)
+  exact outside
+
 theorem MayAwait.foreign_free {program : Kernel.Program} {function : Function} {state : State}
     {boundary : InvocationBoundary} (awaiting : MayAwait program function state boundary) :
     ∃ inner, state.frames = inner ++ boundary.ambient ∧ ∀ frame ∈ inner, frame.ForeignFree := by
@@ -305,11 +315,7 @@ theorem MayAwait.caller_permission {program : Kernel.Program} {function : Functi
   obtain ⟨actual,actualMode,ready⟩ := awaiting.operation_ready pending selectedOperation
   have same := actualMode.functional matched
   subst actual
-  have outward : ¬ boundary.InternalOperation program state id arguments payload := by
-    obtain ⟨_,_,_,_,_,_,task,_,_,_,outside,_⟩ := awaiting
-    obtain ⟨rfl,rfl,rfl,rfl⟩ := Task.perform.inj (task.symm.trans pending)
-    exact outside
-  exact ready.caller_permission outward route prepared selectedRoots
+  exact ready.caller_permission (awaiting.outward pending) route prepared selectedRoots
 
 /-- An outward label retains an actual destination and payload preparation,
 with permission on its callee-owned post-payload remainder. The caller supplies
