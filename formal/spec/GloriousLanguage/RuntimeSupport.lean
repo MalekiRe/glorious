@@ -5,25 +5,6 @@ Allocated identities may be expired; these bounds never establish storage
 liveness or permission to dereference a raw pointer. -/
 namespace Glorious.Language
 
-theorem Term.child_sizeOf {term child : Term} (member : child ∈ term.children) :
-    sizeOf child < sizeOf term := by
-  cases term <;> simp only [Term.children,List.mem_cons,List.mem_append,List.not_mem_nil] at member
-  all_goals simp_wf
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals try (change _ ∨ _ at member; rcases member with member | member)
-  all_goals first
-  | contradiction
-  | subst child
-    omega
-  | have smaller := List.sizeOf_lt_of_mem member
-    omega
-
-theorem Term.mapChildren_children (f : Term → Term) (term : Term) :
-    (term.mapChildren f).children = term.children.map f := by
-  cases term <;> simp only [Term.mapChildren,Term.children,List.map_cons,List.map_nil,List.map_append]
-
 theorem Term.mapChildren_eq_runtimeRegion (f : Term → Term) {term : Term} {id : Identity}
     (same : term.mapChildren f = .runtimeRegion id) : term = .runtimeRegion id := by
   cases term <;> simp only [Term.mapChildren] at same <;> cases same <;> rfl
@@ -44,12 +25,6 @@ theorem Term.RuntimeRegionsBelow.mapChildren {bound : Identity} {term : Term}
       obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
       exact children original inOriginal id nested
 
-theorem Term.substitute_eq_mapChildren (substitution : Substitution) {term : Term}
-    (notParameter : ∀ id kind, term ≠ .parameter id kind) :
-    term.substitute substitution = term.mapChildren (Term.substitute substitution) := by
-  cases term <;> simp only [Term.substitute,Term.mapChildren]
-  exact False.elim (notParameter _ _ rfl)
-
 theorem Term.substitute_runtimeRegionsBelow (substitution : Substitution) (term : Term) (bound : Identity)
     (supported : term.RuntimeRegionsBelow bound)
     (arguments : ∀ id value, substitution.get id = some value → value.RuntimeRegionsBelow bound) :
@@ -67,15 +42,6 @@ theorem Term.substitute_runtimeRegionsBelow (substitution : Substitution) (term 
     exact child.substitute_runtimeRegionsBelow substitution bound (supported.child member) arguments
 termination_by term
 decreasing_by exact Term.child_sizeOf member
-
-theorem Instantiates.argument_of_get {binders : List Binder} {arguments : List Term} {substitution : Substitution}
-    (instantiated : Instantiates binders arguments substitution) {id : Identity} {value : Term}
-    (found : substitution.get id = some value) : value ∈ arguments := by
-  obtain ⟨entry,located,atValue⟩ := Option.map_eq_some_iff.mp found
-  have member := List.mem_of_find?_eq_some located
-  rw [instantiated.2.2] at member
-  rw [← atValue]
-  exact (List.of_mem_zip member).2
 
 theorem Instantiates.runtimeRegionsBelow {binders : List Binder} {arguments : List Term} {substitution : Substitution}
     (instantiated : Instantiates binders arguments substitution) {bound : Identity}

@@ -1,21 +1,14 @@
 import GloriousLanguage.StorageTyping
+import GloriousLanguage.TermScope
 
 /-! Runtime relocation acts on generic arguments, not on immutable lexical
 declarations. These laws connect the existing kinded substitution operation
 to that action; no second instantiation relation is introduced. -/
 namespace Glorious.Language
 
-theorem List.map_eq_self_of {α : Type} (f : α → α) (values : List α)
-    (fixed : ∀ value ∈ values, f value = value) : values.map f = values := by
-  induction values with
-  | nil => rfl
-  | cons first rest ih =>
-      simp only [List.map_cons,fixed first List.mem_cons_self,
-        ih (fun value member => fixed value (List.mem_cons_of_mem _ member))]
-
 theorem ProgramWellFormed.lexical {program : Program} (valid : ProgramWellFormed program)
     {definition : Definition} (member : definition ∈ program.declarations) : definition.Lexical :=
-  (valid.2.2.2.2.1 definition member).1
+  (valid.2.2.2.2.1 definition member).1.1
 
 theorem ProgramWellFormed.field_lexical {program : Program} (valid : ProgramWellFormed program)
     {data : DataDefinition} {variant : VariantDefinition} {field : FieldDefinition}
@@ -24,17 +17,6 @@ theorem ProgramWellFormed.field_lexical {program : Program} (valid : ProgramWell
   apply valid.lexical (List.mem_of_find?_eq_some (Program.data_lookup found))
   simp only [Definition.terms,List.mem_append,List.mem_map,List.mem_flatMap]
   exact Or.inl (Or.inl (Or.inl ⟨field,⟨variant,constructor,member⟩,rfl⟩))
-
-theorem Table.get_map_values {α β : Type} (table : Table α) (f : α → β) (id : Identity) :
-    Table.get (table.map (fun (key,value) => (key,f value))) id = (table.get id).map f := by
-  induction table with
-  | nil => rfl
-  | cons entry rest ih =>
-      rcases entry with ⟨key,value⟩
-      by_cases same : key = id
-      · simp [Table.get,same]
-      · simpa only [List.map_cons,Table.get,List.find?_cons,beq_eq_false_iff_ne.mpr same,
-          Bool.false_eq_true,↓reduceIte,Option.map_map] using ih
 
 namespace Execution
 

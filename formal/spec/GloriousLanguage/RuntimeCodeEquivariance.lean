@@ -6,6 +6,28 @@ the source inventory, rather than an assumed instance-equivalence fact,
 establishes that immutable templates contain no runtime identities. -/
 namespace Glorious.Language
 
+theorem Kernel.Pattern.terms_mapTerms (f : Term → Term) (pattern : Kernel.Pattern) :
+    (pattern.mapTerms f).terms = pattern.terms.map f := by
+  cases pattern <;> simp only [Kernel.Pattern.mapTerms,Kernel.Pattern.terms,Kernel.Local.mapTerms,
+    List.map_cons,List.map_nil,List.flatMap_map,List.map_flatMap]
+  all_goals first
+  | exact Kernel.Pattern.terms_mapTerms f _
+  | apply List.flatMap_congr_left
+    intro child _
+    exact child.terms_mapTerms f
+termination_by pattern
+
+theorem Kernel.Atom.terms_mapTerms (f : Term → Term) (atom : Kernel.Atom) :
+    (atom.mapTerms f).terms = atom.terms.map f := by
+  cases atom <;> simp only [Kernel.Atom.mapTerms,Kernel.Atom.terms,Kernel.Capture.mapTerms,
+    List.map_cons,List.map_nil,List.map_append,List.map_map,Function.comp_def]
+
+theorem Kernel.Invocation.terms_mapTerms (f : Term → Term) (call : Kernel.Invocation) :
+    (call.mapTerms f).terms = call.terms.map f := by
+  simp only [Kernel.Invocation.mapTerms,Kernel.Invocation.transformTerms,Kernel.Invocation.terms,
+    Signature.terms_mapTerms,List.map_append,List.flatMap_map,List.map_flatMap,Option.toList_map,
+    Kernel.EnvironmentAccess.mapTerms,List.map_cons,List.map_nil]
+
 theorem Signature.mapTerms_id (signature : Signature) : signature.mapTerms id = signature := by
   simp only [Signature.mapTerms,List.map_id_fun,id_eq,Option.map_id_fun]
   congr 1
@@ -335,7 +357,7 @@ theorem Kernel.Instance.permute {program : Kernel.Program} (valid : ProgramWellF
     (inventory : Kernel.BodyInventory program) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
     (selected : Kernel.Instance program id arguments function) (permutation : RegionPermutation) :
     Kernel.Instance program id (arguments.map permutation.term) (permutation.function function) := by
-  rcases selected with ⟨template,declaration,substitution,body,signature,agrees,instantiated,requirements,rfl⟩
+  rcases selected with ⟨template,declaration,substitution,body,signature,agrees,instantiated,requirements,closed,rfl⟩
   have templateLexical := inventory.lexical (List.mem_of_find?_eq_some body)
   have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup signature))
   have constraints : ∀ constraint ∈ template.signature.constraints, ∀ term ∈ constraint.terms, term.Lexical := by
@@ -347,8 +369,11 @@ theorem Kernel.Instance.permute {program : Kernel.Program} (valid : ProgramWellF
     simp only [Signature.terms,List.mem_append,List.mem_cons]
     exact Or.inl (Or.inr (List.mem_flatMap.mpr ⟨constraint,member,present⟩))
   refine ⟨template,declaration,permutation.substitution substitution,body,signature,agrees,
-    instantiated.permute permutation,?_,?_⟩
+    instantiated.permute permutation,?_,?_,?_⟩
   · simpa only [RegionPermutation.context,List.map_nil] using requirements.permute valid constraints permutation
+  · intro argument member
+    obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    exact (closed original present).permute permutation
   · rw [permutation.function_instantiate,permutation.lexical_function templateLexical]
 
 theorem Execution.Relocation.substitution_filter (map : Execution.Relocation) (substitution : Substitution)
@@ -363,7 +388,7 @@ theorem Kernel.Instance.relocation_permutation {program : Kernel.Program} (inven
     (selected : Kernel.Instance program id arguments function) (map : Execution.Relocation) (permutation : RegionPermutation)
     (argumentsAgree : ∀ argument ∈ arguments, map.term argument = permutation.term argument) :
     function.mapTerms map.term = permutation.function function := by
-  obtain ⟨template,declaration,substitution,found,_,_,instantiated,_,rfl⟩ := selected
+  obtain ⟨template,declaration,substitution,found,_,_,instantiated,_,_,rfl⟩ := selected
   have lexical := inventory.lexical (List.mem_of_find?_eq_some found)
   have fixed : template.mapTerms map.term = template :=
     template.mapTerms_eq_self map.term (fun term member => map.lexical_term term (lexical term member))

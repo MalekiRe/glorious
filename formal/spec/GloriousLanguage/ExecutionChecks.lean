@@ -70,7 +70,7 @@ example (next : Task) : CloseRegions [30,20,30,10] next =
 
 private def scopes : ScopeInstantiation := ⟨[(7,70)],[(7,.label 80)]⟩
 
-example : scopes.term (.label (.rigid 7 .brand 0) (.rigid 7 .region 0) .unit) =
+example : scopes.term (.label (.scopedBrand 7) (.scopedRegion 7) .unit) =
     .label (.runtimeBrand (.label 80)) (.runtimeRegion 70) .unit := by
   simp [scopes, ScopeInstantiation.term, Table.get]
 
@@ -128,14 +128,14 @@ example {program : Kernel.Program} {world after : World} {context : Execution.Co
 example {program : Kernel.Program} {world : World} {context : Execution.Context}
     {place : Place} {mode : Mutability} {lexical : Identity} {destination : Address}
     {next : Code} {event : Option Event} {after : State} :
-    ¬ AtomStep program { world := world, task := .atom context destination (.borrow place mode (.rigid lexical .region 0)) next }
+    ¬ AtomStep program { world := world, task := .atom context destination (.borrow place mode (.scopedRegion lexical)) next }
       event after := by
   intro impossible
   cases impossible <;> simp_all
 
 example {program : Kernel.Program} {world : World} {context : Execution.Context}
     {lexical : Identity} {destination : Address} {next : Code} {event : Option Event} {after : State} :
-    ¬ AtomStep program { world := world, task := .atom context destination (.label (.rigid lexical .brand 0)) next }
+    ¬ AtomStep program { world := world, task := .atom context destination (.label (.scopedBrand lexical)) next }
       event after := by
   intro impossible
   cases impossible <;> simp_all

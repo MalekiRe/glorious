@@ -169,7 +169,7 @@ theorem AllocatesBuffer.worldTyped {program : Kernel.Program} {before after : Wo
       · exact supported.array_count.mono (Nat.le_succ _)
       · exact array.valid
       · exact maximum
-      · exact ⟨⟨[],[],0,default,true⟩,.array (by omega) countRange elementLayoutOf array⟩
+      · exact ⟨⟨[],[],0,default,true,{}⟩,.array (by omega) countRange elementLayoutOf array⟩
       · exact positive
       · exact aligned
       · exact extent

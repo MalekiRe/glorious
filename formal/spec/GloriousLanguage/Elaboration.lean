@@ -27,7 +27,6 @@ structure Context where
   visibility : Visibility := .privateScope
   attributes : List Source.Attribute := []
   selfType : Option Term := none
-  currentRegion : Option Identity := none
   itemIndex : Nat := 0
   deriving Repr, Inhabited
 
@@ -254,16 +253,18 @@ def parameterPrologue (plans : List (Local × Pattern)) (body : Code) : Code :=
   plans.foldr (fun (formal,pattern) rest => .choose ⟨formal.id,[]⟩ [.clause pattern rest]) body
 
 def FunctionContext (context : Context) (function : Function) : Context :=
-  { context with currentRegion := some function.activationRegion, typed := { context.typed with
+  { context with typed := { context.typed with
       static := { context.typed.static with
         binders := context.typed.static.binders ++ function.signature.generics,
         assumptions := function.signature.constraints ++ context.typed.static.assumptions,
-        unsafeAllowed := false },
+        unsafeAllowed := false,
+        scope := ⟨[function.activationRegion],[],some function.activationRegion⟩ },
       locals := function.captures ++ function.parameters, effects := function.signature.effects } }
 
 def NamedFunctionContext (context : Context) (function : Function) (name : String) (exitLabel : Identity) : Context :=
   let inner := FunctionContext { context with names := [], capturePlaces := [] } function
-  { inner with namedLabels := [(name,exitLabel)], typed := { inner.typed with labels := [(exitLabel,.rigid function.activationRegion .region 0,function.signature.result)] } }
+  { inner with namedLabels := [(name,exitLabel)], typed := { inner.typed.bindBrand exitLabel with
+      labels := [(exitLabel,.scopedRegion function.activationRegion,function.signature.result)] } }
 
 def AtomCode (localSlot : Local) (atom : Atom) : Code := .bind localSlot atom (.result ⟨localSlot.id,[]⟩)
 
@@ -377,9 +378,9 @@ mutual
     | forcedMove {context source place type mutable localSlot} : PlaceExpression program context source place type mutable →
         Fresh context localSlot → localSlot.type = type → Expression program context (.move source) type (AtomCode localSlot (.acquire place true))
     | borrow {context source place type mutable localSlot mode region} : PlaceExpression program context source place type mutable →
-        context.currentRegion = some region →
-        Fresh context localSlot → (mode = .unique → mutable = true) → localSlot.type = .reference mode (.rigid region .region 0) type →
-        Expression program context (.borrow mode source) localSlot.type (AtomCode localSlot (.borrow place mode (.rigid region .region 0)))
+        context.typed.static.scope.currentRegion = some region →
+        Fresh context localSlot → (mode = .unique → mutable = true) → localSlot.type = .reference mode (.scopedRegion region) type →
+        Expression program context (.borrow mode source) localSlot.type (AtomCode localSlot (.borrow place mode (.scopedRegion region)))
     | constant {context path sourceArguments value type localSlot} : ConstantAlias program context path sourceArguments value type →
         Fresh context localSlot → localSlot.type = type → Expression program context (.name path sourceArguments []) type (AtomCode localSlot (.constant value))
     | function {context path sourceOwners sourceItems header declaration arguments signature localSlot} :
@@ -395,8 +396,8 @@ mutual
         Fresh context localSlot → localSlot.type = .callable header.id arguments →
         Expression program context (.name path sourceOwners sourceItems) localSlot.type (AtomCode localSlot (.operation header.id arguments []))
     | labelName {context name id region type localSlot} : (name,id) ∈ context.namedLabels → (id,region,type) ∈ context.typed.labels →
-        Fresh context localSlot → localSlot.type = .label (.rigid id .brand 0) region type →
-        Expression program context (.labelName name) localSlot.type (AtomCode localSlot (.label (.rigid id .brand 0)))
+        Fresh context localSlot → localSlot.type = .label (.scopedBrand id) region type →
+        Expression program context (.labelName name) localSlot.type (AtomCode localSlot (.label (.scopedBrand id)))
     | tuple {context expressions types bindings places result} : Arguments program { context with itemIndex := 0 } expressions types bindings places →
         Fresh context result → result.type = .tuple types →
         Expression program context (.tuple expressions) result.type (sequence bindings (AtomCode result (.construct result.type none places)))
@@ -429,7 +430,8 @@ mutual
           ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩ →
         Expression program context (.tail source arguments) result
           (.evaluate callee calleeCode (sequence bindings (.tail ⟨⟨callee.id,[]⟩,places,access,environment,signature⟩)))
-    | block {context statements result type code scope} : Block program { context with itemIndex := 0, currentRegion := some scope } statements result type code →
+    | block {context statements result type code scope} : scope ∉ context.typed.static.scope.regions →
+        Block program { context with itemIndex := 0, typed := context.typed.bindRegion scope } statements result type code →
         Expression program context (.block statements result) type (.scope scope code)
     | contextualBlock {context statements result expected signature function arguments captures localSlot} :
         IsContextual program context expected signature →
@@ -451,7 +453,12 @@ mutual
         Expression program context (.capture places source) localSlot.type (AtomCode localSlot (.closure function.declaration arguments captures))
     | label {context name annotation body type brand region code} :
         (annotation = none ∨ ∃ source, annotation = some source ∧ TypeExpression program context source .type type) →
-        Expression program { (context.child 0) with currentRegion := some region, namedLabels := (name,brand) :: context.namedLabels, typed := { context.typed with labels := (brand,.rigid region .region 0,type) :: context.typed.labels } } body type code →
+        region ∉ context.typed.static.scope.regions → brand ∉ context.typed.static.scope.brands →
+        Expression program
+          { (context.child 0) with
+            namedLabels := (name,brand) :: context.namedLabels
+            typed := { (context.typed.bindRegion region).bindBrand brand with
+              labels := (brand,.scopedRegion region,type) :: context.typed.labels } } body type code →
         Expression program context (.label name annotation body) type (.scope region (.label brand region type code))
     | test {context subject sourcePattern subjectLocal subjectCode type pattern names patternId result nextType} :
         Fresh context subjectLocal → subjectLocal.type = type → Expression program (context.child 0) subject type subjectCode →

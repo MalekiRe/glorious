@@ -31,7 +31,7 @@ example (context : Elaboration.Context) (function : Function) :
     (FunctionContext context function).typed.static.unsafeAllowed = false := rfl
 
 example (context : Elaboration.Context) (function : Function) :
-    (FunctionContext context function).currentRegion = some function.activationRegion := rfl
+    (FunctionContext context function).typed.static.scope.currentRegion = some function.activationRegion := rfl
 
 example {program : Kernel.Program} {context source signature function arguments captures}
     (checked : Closure program context source signature function arguments captures) :
@@ -67,7 +67,7 @@ example :
     Code.instantiate, Code.transformTerms, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
 
 example (function : Function) (region brand : Identity) :
-    (function.entryScope region brand).term (.rigid function.activationRegion .region 0) =
+    (function.entryScope region brand).term (.scopedRegion function.activationRegion) =
       .runtimeRegion region := by
   simp [Function.entryScope, ScopeInstantiation.term, Table.get]
 

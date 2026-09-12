@@ -1,5 +1,5 @@
 import GloriousLanguage.Specification
-import GloriousLanguage.CapabilityModels
+import GloriousLanguage.DropCapabilities
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.ResumptionPreservation
 
@@ -51,30 +51,33 @@ theorem DropsAdmitted.dispatch {program : Kernel.Program}
     {arguments : List Term} {substitution : Substitution} {region : Term}
     (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
     (instantiated : Instantiates data.generics arguments substitution)
-    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
-    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
-    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ region .region) :
-    ∃ function, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
-      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function := by
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
+    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ region .region) :
+    ∃ function principal, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
+      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function ∧
+      PrincipalOf program.declarations (.nominal id arguments) principal ∧ principal.MayDiscard := by
   obtain ⟨hookArguments,declaration,hookSubstitution,application⟩ :=
     admitted.applications id data hook arguments substitution region selected drops instantiated kinded requirements regionKinded
   obtain ⟨function,bodyInstance,signature,captures⟩ := Kernel.DropApplication.body inventory application
+  obtain ⟨principal,capability,discard⟩ := application.capability
   have typed := (functions hook hookArguments function bodyInstance).1
   have parameterTypes := typed.choose_spec.2.1
   have dispatch : Kernel.DropInstance program (.nominal id arguments) region hook function :=
     ⟨Or.inl ⟨id,arguments,data,rfl,selected,drops⟩,⟨hookArguments,bodyInstance⟩,signature,captures,parameterTypes⟩
-  exact ⟨function,dispatch,typed,admitted.contracts _ _ _ _ dispatch⟩
+  exact ⟨function,principal,dispatch,typed,admitted.contracts _ _ _ _ dispatch,capability,discard⟩
 
 theorem WellFormed.drop_dispatch {program : Kernel.Program} (valid : WellFormed program)
     {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
     {substitution : Substitution} {region : Term}
     (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
     (instantiated : Instantiates data.generics arguments substitution)
-    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
-    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
-    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ region .region) :
-    ∃ function, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
-      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function :=
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
+    (regionKinded : Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ region .region) :
+    ∃ function principal, Kernel.DropInstance program (.nominal id arguments) region hook function ∧
+      Typing.FunctionType program function ∧ Contracts.DropContract program (.nominal id arguments) region function ∧
+      PrincipalOf program.declarations (.nominal id arguments) principal ∧ principal.MayDiscard :=
   valid.drops.dispatch valid.inventory valid.functions selected drops instantiated kinded requirements regionKinded
 
 end Specification
@@ -140,12 +143,12 @@ theorem destroyHook_progress {program : Kernel.Program} {before : State} {contex
     {substitution : Substitution} {handle : Address} {withHandle after : World}
     (valid : Specification.WellFormed program) (typed : Typing.WorldTyped program before.world)
     (task : before.task = .destroy context address authority next)
-    (stored : before.world.Stores address value) (live : value.shellLive = true)
-    (nominal : value.type = .nominal id arguments) (disposable : MayDispose program.declarations value)
+    (stored : before.world.Stores address value) (initialized : value.Initialized)
+    (nominal : value.type = .nominal id arguments)
     (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
     (instantiated : Instantiates data.generics arguments substitution)
-    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false⟩ argument argument.kind)
-    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false⟩ substitution data.requirements)
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
     (allocated : Temporary program context (.reference .unique (.runtimeRegion context.region) value.type)
       before.world handle withHandle)
     (borrowed : Borrows program.declarations withHandle authority .unique context.region address handle after) :
@@ -157,9 +160,12 @@ theorem destroyHook_progress {program : Kernel.Program} {before : State} {contex
       LocalStep program before (some (.hookEnter address hook))
         { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,formal,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle withHandle.nextLoan next :: before.frames } ∧
       Typing.WorldTyped program after := by
-  obtain ⟨function,dispatch,_,contract⟩ := valid.drop_dispatch selected drops instantiated kinded requirements
+  obtain ⟨function,principal,dispatch,_,contract,capability,discard⟩ := valid.drop_dispatch selected drops instantiated kinded requirements
     (Kinding.runtimeRegion (id := context.region))
-  rw [← nominal] at dispatch contract
+  rw [← nominal] at dispatch contract capability
+  have valueTyped := typed.2.1 address value (World.resident_iff_stores.mpr stored)
+  have disposable := valueTyped.mayDispose valid.inventory initialized capability discard
+  have live := (initialized [] value .root).1
   obtain ⟨formal,parameters,formalType⟩ := dispatch.2.2.parameter
   have step := LocalStep.destroyHook task stored live disposable dispatch allocated borrowed rfl
   simp only [parameters,List.head!] at step

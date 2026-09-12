@@ -77,7 +77,7 @@ def Installs (program : Kernel.Program) (before : State) (outer : Context) (synt
       ((CaptureLocals captures).zip sources |>.map (fun (localSlot,address) => ⟨.capture 0,localSlot,address,.owner,.owned⟩)) bindings bound ∧
     RetiresEmpty bound sources disposed ∧ after = disposed ∧
     handler = ⟨before.nextHandler,syntaxNode,
-      ⟨bindings,outer.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,outer.instantiation,false⟩,
+      ⟨bindings,outer.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,outer.instantiation,outer.unsafeAllowed⟩,
       { outer with scope := first.nextRegion, region := first.nextRegion },outer⟩
 
 def StartsClause (before : State) (handler : InstalledHandler) (context : Context) (after : World) : Prop :=
@@ -86,9 +86,9 @@ def StartsClause (before : State) (handler : InstalledHandler) (context : Contex
 
 def StartsResumptionClause (before : State) (handler : InstalledHandler) (lexical : Local)
     (context : Context) (localSlot : Local) (after : World) : Prop :=
-  ∃ outer brand argument answer effects quantity,
+  ∃ outer brand,
     StartsClause before handler outer after ∧
-    lexical.type = .continuation (.rigid brand .brand 0) argument answer effects quantity ∧
+    lexical.resumptionBrand = some brand ∧
     context = outer.bindBrand brand (.resumption before.nextContinuation) ∧
     localSlot = context.local lexical
 
@@ -160,7 +160,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       CreatesContinuation program clause (suspendRoots moved roots before.nextContinuation) before.nextContinuation
         signature (clause.term handler.syntaxNode.result) signature.effects quantity localSlot address created →
       PayloadPlan program.declarations created kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
-      suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,quantity,bound,0,true,true⟩ →
+      suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,moved.nextRoot,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with world := created, task := .pattern (clause.bind localSlot address) (ScheduledPattern actions) arm.body, frames := .serviced handler owns clause (some before.nextContinuation) :: outer, resumptions := before.resumptions.set before.nextContinuation suspension, nextContinuation := before.nextContinuation+1, nextActivation := before.nextActivation+1 }
   | suspendTailArm {before context id arguments payload inner handler owns arm outer operation signature quantity bound
       clause withRegion kept moved roots homes actions suspension} :
@@ -171,7 +171,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       DelimitedRoots moved handler inner (kept.map Address.root) roots →
       SuspendPermission program moved roots quantity inner → SaveHomes moved roots homes →
       PayloadPlan program.declarations moved kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
-      suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,quantity,bound,0,true,true⟩ →
+      suspension = ⟨before.nextContinuation,handler,inner,context,roots,homes,moved.nextRoot,quantity,bound,0,true,true⟩ →
       EffectStep program before (some (.suspend before.nextContinuation)) { before with world := suspendRoots moved roots before.nextContinuation, task := .pattern clause (ScheduledPattern actions) arm.body, frames := .tailResume clause before.nextContinuation :: .serviced handler owns clause (some before.nextContinuation) :: outer, resumptions := before.resumptions.set before.nextContinuation suspension, nextContinuation := before.nextContinuation+1, nextActivation := before.nextActivation+1 }
   | continuationCall {before context call tail receiver authority value id argument permission} :
       before.task = .apply context call tail → call.environment = none →
@@ -236,7 +236,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
   | cancel {before context id next suspension} : before.task = .cancel context id next →
       before.resumptions.get id = some suspension → ActiveObligation suspension → suspension.quantity.lower = 0 →
       Cancelable program.declarations before.world suspension.roots →
-      EffectStep program before (some (.cancel id)) { before with task := .cleanup context suspension.roots (CloseRegions (SuspensionRegions suspension) next), resumptions := before.resumptions.set id { suspension with active := false, remaining := 0 } }
+      EffectStep program before (some (.cancel id)) { before with world := restoreRoots before.world suspension.homes, task := .cleanup context suspension.roots (CloseRegions (SuspensionRegions suspension) next), resumptions := before.resumptions.set id { suspension with active := false, remaining := 0 } }
 
 theorem exact_resumption_not_cancelable {program : Kernel.Program} {before after : State}
     {id suspension}

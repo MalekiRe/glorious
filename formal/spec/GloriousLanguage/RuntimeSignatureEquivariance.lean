@@ -5,6 +5,31 @@ operations. Generic defaults and quantified constraints use the same semantic
 term action as parameters, results and environment access. -/
 namespace Glorious.Language
 
+theorem List.flatMap_congr_left {α β : Type} {values : List α} {first second : α → List β}
+    (agree : ∀ value ∈ values, first value = second value) : values.flatMap first = values.flatMap second := by
+  induction values with
+  | nil => rfl
+  | cons value values ih =>
+    simp only [List.flatMap_cons,agree value List.mem_cons_self,
+      ih (fun value member => agree value (List.mem_cons_of_mem _ member))]
+
+theorem Constraint.terms_mapTerms (f : Term → Term) (constraint : Constraint) :
+    (constraint.mapTerms f).terms = constraint.terms.map f := by
+  cases constraint <;>
+    simp only [Constraint.mapTerms,Constraint.terms,List.map_cons,List.map_nil,List.map_append,
+      List.flatMap_map,List.map_flatMap,Option.toList_map]
+  case quantified binders requirements =>
+    congr 1
+    apply List.flatMap_congr_left
+    intro requirement _
+    exact requirement.terms_mapTerms f
+termination_by constraint
+
+theorem Signature.terms_mapTerms (f : Term → Term) (signature : Signature) :
+    (signature.mapTerms f).terms = signature.terms.map f := by
+  simp only [Signature.mapTerms,Signature.terms,List.map_cons,List.map_append,
+    List.flatMap_map,List.map_flatMap,Constraint.terms_mapTerms,Option.toList_map]
+
 theorem Constraint.mapTerms_id (constraint : Constraint) : constraint.mapTerms id = constraint := by
   cases constraint <;> simp only [Constraint.mapTerms,id_eq,List.map_id_fun,Option.map_id_fun]
   all_goals try rfl
@@ -119,6 +144,11 @@ theorem Typing.CallSignature.permute {program : Program} (valid : ProgramWellFor
     (selected : Typing.CallSignature program context id arguments signature) (permutation : RegionPermutation) :
     Typing.CallSignature program (permutation.context context) id (arguments.map permutation.term)
       (permutation.signature signature) := by
+  obtain ⟨kinded,selected⟩ := selected
+  refine ⟨?_,?_⟩
+  · intro argument member
+    obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    simpa only [permutation.term_kind] using (kinded original present).permute permutation
   rcases selected with selected | selected
   all_goals rcases selected with ⟨declaration,substitution,found,instantiated,requirements,rfl⟩
   · have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup found))
@@ -157,12 +187,11 @@ theorem ScopeInstantiation.term_renameRuntimeRegions (scope : ScopeInstantiation
       ({ scope with regions := scope.regions.map (fun (lexical,runtime) => (lexical,rename runtime)) } : ScopeInstantiation).term
         (term.renameRuntimeRegions rename) := by
   cases term <;> simp only [ScopeInstantiation.term,Term.renameRuntimeRegions]
-  case rigid id kind level =>
-    cases kind <;> cases level <;> simp only [ScopeInstantiation.term,Term.renameRuntimeRegions]
-    all_goals try rfl
-    · rw [Table.get_map_values]
-      cases scope.regions.get id <;> simp only [Option.map,Option.getD,Term.renameRuntimeRegions]
-    · cases scope.brands.get id <;> simp only [Option.map,Option.getD,Term.renameRuntimeRegions]
+  case scopedRegion id =>
+    rw [Table.get_map_values]
+    cases scope.regions.get id <;> simp only [Option.map,Option.getD,Term.renameRuntimeRegions]
+  case scopedBrand id =>
+    cases scope.brands.get id <;> simp only [Option.map,Option.getD,Term.renameRuntimeRegions]
   all_goals try rfl
   all_goals try simp only [List.map_map,Function.comp_def]
   all_goals

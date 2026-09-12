@@ -1,4 +1,5 @@
 import GloriousLanguage.BorrowPreservation
+import GloriousLanguage.RehomePreservation
 
 /-! Preservation for the actual machine cleanup tasks, including cancellation,
 reservation disposal and destructor entry. Executing a destructor's arbitrary
@@ -26,6 +27,7 @@ inductive CleanupWorldChange (program : Kernel.Program) : World → World → Pr
   | retire {before after id} : Retires before id after → CleanupWorldChange program before after
   | region {before after id} : RegionEnds before id after → CleanupWorldChange program before after
   | loan {before after id} : EndsLoan before id after → CleanupWorldChange program before after
+  | restore {before homes} : CleanupWorldChange program before (restoreRoots before homes)
   | reservation {before cleared address authority id available} : before.availability.get id = some available →
       Permitted before authority .owned address → before.write address none = some cleared →
       CleanupWorldChange program before
@@ -63,7 +65,7 @@ theorem Step.cleanup_change {program : Kernel.Program} {host : Foreign.Model}
   · cases atom <;> simp_all only [Task.Cleanup]
   · cases effect <;> simp_all only [Task.Cleanup]
     case disposeContinuation => apply CleanupWorldChange.clear <;> assumption
-    case cancel => exact .unchanged
+    case cancel => exact .restore
   · cases control <;> simp_all only [Task.Cleanup]
     case destroyAvailable => apply CleanupWorldChange.reservation <;> assumption
     case destroySpentAvailable => apply CleanupWorldChange.clear <;> assumption
@@ -82,6 +84,7 @@ theorem CleanupWorldChange.worldTyped {program : Kernel.Program} {before after :
   | retire retired => exact retired.worldTyped typed
   | region closed => exact closed.worldTyped typed
   | loan closed => exact closed.worldTyped typed
+  | restore => exact restoreRoots.worldTyped typed
   | reservation found permission written =>
       have cleared := World.clear_worldTyped typed permission written
       have same := congrArg World.availability (World.write_rest written)

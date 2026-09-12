@@ -111,7 +111,7 @@ theorem Kernel.Instance.capture_runtimeRegionsBelow {program : Kernel.Program}
     (selected : Kernel.Instance program id arguments function)
     (supported : ∀ argument ∈ arguments, argument.RuntimeRegionsBelow bound) :
     ∀ type ∈ function.captures.map (·.type), type.RuntimeRegionsBelow bound := by
-  rcases selected with ⟨template,declaration,substitution,body,signature,_,instantiated,_,rfl⟩
+  rcases selected with ⟨template,declaration,substitution,body,signature,_,instantiated,_,_,rfl⟩
   have member : template ∈ program.functions := List.mem_of_find?_eq_some body
   have identity : template.declaration = id := by
     have matching := List.find?_some body

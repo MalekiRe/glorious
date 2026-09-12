@@ -21,6 +21,13 @@ structure Local where
   mutable : Bool
   deriving Repr, Inhabited
 
+/-- The explicit continuation binder shared by source admission and clause
+entry. Ordinary locals do not introduce a generative brand. -/
+def Local.resumptionBrand (localSlot : Local) : Option Identity :=
+  match localSlot.type with
+  | .continuation (.scopedBrand brand) _ _ _ _ => some brand
+  | _ => none
+
 inductive CaptureMode where
   | shared | unique | own
   deriving DecidableEq, BEq, Repr, Inhabited

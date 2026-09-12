@@ -287,7 +287,7 @@ theorem Retires.wellFormed {before after : World} {id : Identity}
         obtain ⟨identity,bound,brand,active⟩ := proofs key available found
         refine ⟨identity,bound,brand,fun live => ⟨(active live).1,?_⟩⟩
         intro place member
-        simpa only [rootFrame (safe.2 key available found live place member)] using (active live).2 place member
+        simpa only [rootFrame (safe.2.1 key available found live place member)] using (active live).2 place member
       · exact fun address value pack resident head => packs address value pack (residents resident) head
       · exact fun address value resident => owners address value (residents resident)
       · exact fun a b x y first second same => ownerUnique a b x y (residents first) (residents second) same

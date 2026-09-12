@@ -16,9 +16,10 @@ default deliverable. Do not substitute example coverage for general proofs.
 ## 1. Nonvacuous semantic soundness — active
 
 Establish preservation, progress, ownership/lifetime safety and lawful resource
-completion for the actual execution relation. The current `ResourceAdmission`
-quantifies over runs and requires typed post-states and progress. Projecting
-those requirements out of an admission assumption is not the missing soundness
+completion for the actual execution relation. `ResourceAdmission` still
+quantifies over runs and requires progress and resource completion. Storage
+typing has been removed from that admission and proved separately. Projecting
+the remaining requirements out of admission is not the missing soundness
 proof. Moving the same assumption into a certificate is not a repair either.
 
 Work outward from the required invariant and its proof failures:
@@ -432,12 +433,12 @@ Capability-domain admission, receiver restoration and complete destructor
 execution/cleanup progress remain open. The frozen destructor batch and its
 execution/public-safety consumers passed the targeted Lean gate (59 jobs).
 
-Associated defaults now specialize under the owning trait's checked binder
-substitution, followed by the associated item's own substitution. The selected
-implementation's substitution no longer interprets a trait-owned default body.
-The actual equality rule and its runtime-equivariance consumer are migrated.
-General normalized implementation-head selection, row-equivalent solutions
-and associated-result determinacy remain on the same open static boundary.
+Associated defaults specialize under the owning trait's checked binders and
+the associated item's own binders. These substitutions are simultaneous:
+sequential rewriting incorrectly captures caller parameters that share an
+item-binder identity. The selected implementation's substitution does not
+interpret a trait-owned default body. The actual equality rule and its
+runtime-equivariance consumer use the corrected substitution product.
 
 The foreign protocol now bounds host authority by actual input handoffs,
 retained external callbacks, explicit imported external-storage grants and
@@ -478,6 +479,58 @@ a projection of this stronger invariant. The former privacy proof's dependency
 on the host's frame-postcondition law is removed. Source callbacks still need
 the shared control-origin invariant: hidden roots must not appear in incoming
 suspension inventories or be exported by source control transitions.
+
+Executable lexical regions and brands now have constructors distinct from
+universal eigenvariables. One explicit lexical scope admits them and one runtime
+scope map closes them. Declaration signatures and capture interfaces exclude
+body-local names; actual runtime instances inherit closed generic arguments.
+Source closure checking uses declaration invocation signatures, not the runtime
+instance relation. `ScopeClosing` proves closure of scoped terms under a
+covering runtime map; `ContextTyping` derives it for typed body results.
+`InputTyping` and `ContextTyping` derive real entry bindings from the
+shared ordinary/capture/callback recipes and sequential input transfers.
+Fresh scope, brand, label and clause consumers use the same product. Labels
+look up their lexical lifetime instead of silently rebinding it to the cleanup
+region; attached handler arms preserve their lexical unsafe-site permission.
+Whole-body binding persistence, copied external bindings and complete frame
+typing remain open, especially for retired locals and loan-backed subobjects.
+
+Drop's actual generic application now discharges its affine prerequisite in
+an assumption-free context. `DropCapabilities` propagates the constructed
+canonical capability through all initialized nested residents, and dispatch
+derives disposal permission instead of taking it as a premise. Normal hook
+completion requires the original loan ended and the current Self initialized;
+it does not assert that reassignment preserves the original Self owner or that
+arbitrary parent loans survive. `DropReturn` consumes actual normal observations
+and constructs the ordinary unit-result/handle cleanup suffix to the current
+receiver's reverse field cleanup. `DropHandle` derives saved-handle vacancy
+and privacy at actual function entry. Preserving that private caller state
+through arbitrary hook bodies and completing nested field cleanup remain open.
+
+Implementation matching now consumes actual inferred substitutions and positive
+definitional convertibility, including reflexive opaque projections and unordered
+row equivalence. The superseded eager-normalization matcher is removed. Actual
+alias and associated bodies are kind-checked at their owner/item domains, and
+`ProjectionKinding` derives kind preservation for every real expansion.
+`DefinitionalCoherence` establishes selection coherence and joins competing
+root expansions. This is not global confluence: contextual reduction, domain
+transport and legitimate lexical-equality entailment remain explicit obligations.
+
+Suspension admission now retains the actual capture-time root frontier, exact
+saved-home domain and active ownership inventory. Incoming continuations cannot
+claim future storage IDs. Ordinary storage retirement rejects suspended homes;
+cancellation explicitly restores saved homes before running ordinary cleanup.
+The former rehome proof has moved to one lower shared preservation module.
+`ForeignSuspension` derives unchanged reservation metadata and preservation of
+suspended-root locations/liveness from actual host mutations. Budget preservation
+continues to use the existing component, but preservation of the full new
+suspension-origin invariant across all source control transitions remains open.
+
+This combined scope, destructor, positive-conversion and suspension-boundary
+checkpoint passed the targeted Lean dependency gate (85 jobs), including foreign
+registration/suspension, drop return/handle, context/scope typing, runtime body
+equivariance, definitional coherence/kinding and execution/public safety. The
+gate proof-checks this boundary; it does not establish the open general results.
 
 ## 3. Remaining boundary completeness and final audit
 

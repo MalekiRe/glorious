@@ -1,4 +1,5 @@
 import GloriousLanguage.Declarations
+import GloriousLanguage.RowSemantics
 
 /-! Declarative static semantics. Proof search, inference-cell mutation and
 normalization algorithms are deliberately not definitions of these relations. -/
@@ -10,6 +11,7 @@ structure Context where
   universeLevel : Nat := 0
   module : ModuleId
   unsafeAllowed : Bool := false
+  scope : LexicalScope := {}
   deriving Repr, Inhabited
 
 /-- The concrete resident fields of either a source callable or an operation
@@ -26,6 +28,8 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
       Kinding program context (.quantity quantity) .quantity
   | parameter {binder} : binder ∈ context.binders → Kinding program context (.parameter binder.id binder.kind) binder.kind
   | rigid {id kind level} : level ≤ context.universeLevel → Kinding program context (.rigid id kind level) kind
+  | scopedRegion {id} : id ∈ context.scope.regions → Kinding program context (.scopedRegion id) .region
+  | scopedBrand {id} : id ∈ context.scope.brands → Kinding program context (.scopedBrand id) .brand
   | runtimeRegion {id} : Kinding program context (.runtimeRegion id) .region
   | runtimeBrand {id} : Kinding program context (.runtimeBrand id) .brand
   | variable {id kind level} : level ≤ context.universeLevel → Kinding program context (.variable id kind level) kind
@@ -78,6 +82,7 @@ inductive Kinding (program : Program) (context : Context) : Term → Kind → Pr
       Kinding program context (.constantTuple fields) .constant
   | constructorConstant {constructor data variant arguments fields substitution} :
       program.Constructor constructor data variant → Instantiates data.generics arguments substitution →
+      (∀ argument ∈ arguments, Kinding program context argument argument.kind) →
       fields.length = variant.fields.length → (∀ field ∈ fields, Kinding program context field .constant) →
       Kinding program context (.constantConstructor constructor arguments fields) .constant
   | principal {principal} : Kinding program context (.principal principal) .quantity
@@ -152,26 +157,7 @@ mutual
     | trans {a b c} : Equal program context a b → Equal program context b c → Equal program context a c
     | congr {a b} : SameHead a b → ListRel (Equal program context) a.children b.children → Equal program context a b
     | assumed {a b} : Constraint.equal a b ∈ context.assumptions → Equal program context a b
-    | alias {id declaration arguments substitution value} : program.alias id = some declaration →
-        Instantiates declaration.generics arguments substitution → Substitutes substitution declaration.value value →
-        Equal program context (.alias id arguments) value
-    | projection {trait member owners items implementation implSub associated body specialized itemSub value} :
-        SelectsImpl program context trait owners false implementation implSub →
-        program.associated member = some associated → associated.owner = trait →
-        (member,body) ∈ implementation.associated → Substitutes implSub body specialized →
-        Instantiates associated.generics items itemSub → Substitutes itemSub specialized value →
-        Equal program context (.projection trait member owners items associated.kind) value
-    | defaultProjection {trait member owners items implementation implSub declaration ownerSub associated body specialized itemSub value} :
-        SelectsImpl program context trait owners false implementation implSub →
-        program.trait trait = some declaration → Instantiates declaration.generics owners ownerSub →
-        program.associated member = some associated → associated.owner = trait →
-        (∀ body, (member,body) ∉ implementation.associated) → associated.defaultValue = some body →
-        Substitutes ownerSub body specialized → Instantiates associated.generics items itemSub →
-        Substitutes itemSub specialized value → Equal program context (.projection trait member owners items associated.kind) value
-    | rowPermutation {instances tails instances' tails'} : instances.Perm instances' → tails.Perm tails' →
-        Equal program context (.row instances tails) (.row instances' tails')
-    | rowFlatten {instances tails nested nestedTails} :
-        Equal program context (.row instances (.row nested nestedTails :: tails)) (.row (instances ++ nested) (nestedTails ++ tails))
+    | definitional {a b} : DefinitionallyEqual program context a b → Equal program context a b
     | rowDuplicate {a b rest tails} : Equal program context a b →
         Equal program context (.row (a :: b :: rest) tails) (.row (a :: rest) tails)
     | tailDuplicate {instances a b tails} : Equal program context a b →
@@ -179,15 +165,10 @@ mutual
 
   inductive SelectsImpl (program : Program) (context : Context) :
       DeclId → List Term → Bool → ImplDefinition → Substitution → Prop where
-    | selected {trait arguments negative implementation substitution head requirements} :
+    | selected {trait arguments negative implementation substitution} :
         Definition.implementation implementation ∈ program.declarations → implementation.trait = trait →
-        implementation.negative = negative →
-        (∃ values, Instantiates implementation.generics values substitution ∧
-          ∀ value ∈ values, Kinding program context value value.kind) →
-        ListRel (Substitutes substitution) implementation.arguments head →
-        ListRel (Equal program context) head arguments →
-        ListRel (SubstituteConstraint substitution) implementation.requirements requirements →
-        (∀ requirement ∈ requirements, Entails program context requirement) →
+        implementation.negative = negative → MatchesImplHead program context implementation arguments substitution →
+        (∀ requirement ∈ implementation.requirements, EntailsSubstitution program context substitution requirement) →
         SelectsImpl program context trait arguments negative implementation substitution
 
   inductive RowMember (program : Program) (context : Context) : Term → Term → Prop where
@@ -268,7 +249,94 @@ mutual
   inductive EntailsSubstitution (program : Program) (context : Context) : Substitution → Constraint → Prop where
     | instantiated {substitution requirement result} : SubstituteConstraint substitution requirement result →
         Entails program context result → EntailsSubstitution program context substitution requirement
+
+  /-- Positive, demand-driven declaration expansion. Opaque arguments need
+  only be kinded; unused alias and GAT arguments are not eagerly normalized.
+  One simultaneous substitution preserves the identity of caller parameters. -/
+  inductive DefinitionalStep (program : Program) (context : Context) : Term → Term → Prop where
+    | alias {id declaration arguments substitution value} :
+        program.alias id = some declaration → Instantiates declaration.generics arguments substitution →
+        (∀ argument ∈ arguments, Kinding program context argument argument.kind) →
+        Substitutes substitution declaration.value value → DefinitionalStep program context (.alias id arguments) value
+    | projection {trait member owners items associated ownerSub itemSub implementation implSub body value} :
+        ProjectionDomain program context trait member owners items associated ownerSub itemSub →
+        SelectsImpl program context trait owners false implementation implSub →
+        (member,body) ∈ implementation.associated → Substitutes (implSub ++ itemSub) body value →
+        DefinitionalStep program context (.projection trait member owners items associated.kind) value
+    | defaultProjection {trait member owners items associated ownerSub itemSub implementation implSub body value} :
+        ProjectionDomain program context trait member owners items associated ownerSub itemSub →
+        SelectsImpl program context trait owners false implementation implSub →
+        (∀ body, (member,body) ∉ implementation.associated) → associated.defaultValue = some body →
+        Substitutes (ownerSub ++ itemSub) body value →
+        DefinitionalStep program context (.projection trait member owners items associated.kind) value
+
+  /-- Definitional convertibility contains no arbitrary context equality.
+  In particular, an opaque projection compares reflexively without an assumed
+  absence of reduction or a fabricated normal form. -/
+  inductive DefinitionallyEqual (program : Program) (context : Context) : Term → Term → Prop where
+    | refl {term} : DefinitionallyEqual program context term term
+    | symm {left right} : DefinitionallyEqual program context left right → DefinitionallyEqual program context right left
+    | trans {left middle right} : DefinitionallyEqual program context left middle →
+        DefinitionallyEqual program context middle right → DefinitionallyEqual program context left right
+    | congr {left right} : SameHead left right →
+        ListRel (DefinitionallyEqual program context) left.children right.children → DefinitionallyEqual program context left right
+    | step {left right} : DefinitionalStep program context left right → DefinitionallyEqual program context left right
+    | row {left right} : RowEquivalent left right → DefinitionallyEqual program context left right
+
+  /-- The positive reduction closure is kept distinct from symmetric
+  convertibility. Its joinability and confluence are proof obligations, not
+  constructor premises or assertions that an eager evaluator terminates. -/
+  inductive DefinitionalReduction (program : Program) (context : Context) : Term → Term → Prop where
+    | refl {term} : DefinitionalReduction program context term term
+    | step {left right} : DefinitionalStep program context left right → DefinitionalReduction program context left right
+    | trans {left middle right} : DefinitionalReduction program context left middle →
+        DefinitionalReduction program context middle right → DefinitionalReduction program context left right
+    | congr {left right} : SameHead left right →
+        ListRel (DefinitionalReduction program context) left.children right.children → DefinitionalReduction program context left right
+    | row {left right} : RowEquivalent left right → DefinitionalReduction program context left right
+
+  /-- Actual inferred arguments and the single source substitution graph are
+  authoritative. Matching compares instantiated heads by positive conversion,
+  including opaque and row-equivalent arguments. -/
+  inductive MatchesImplHead (program : Program) (context : Context) :
+      ImplDefinition → List Term → Substitution → Prop where
+    | matched {implementation arguments values substitution specialized} :
+        Instantiates implementation.generics values substitution →
+        (∀ value ∈ values, Kinding program context value value.kind) →
+        ListRel (Substitutes substitution) implementation.arguments specialized →
+        ListRel (DefinitionallyEqual program context) specialized arguments →
+        MatchesImplHead program context implementation arguments substitution
+
+  /-- Actual lexical trait and GAT domains. Ordered arguments are instantiated
+  once against disjoint template binders, without normalizing unused items. -/
+  inductive ProjectionDomain (program : Program) (context : Context) :
+      DeclId → DeclId → List Term → List Term → AssociatedDefinition → Substitution → Substitution → Prop where
+    | valid {trait member owners items declaration associated ownerSub itemSub} :
+        program.trait trait = some declaration → member ∈ declaration.members →
+        program.associated member = some associated → associated.owner = trait →
+        Instantiates declaration.generics owners ownerSub → Instantiates associated.generics items itemSub →
+        (∀ argument ∈ owners ++ items, Kinding program context argument argument.kind) →
+        (∀ requirement ∈ declaration.requirements, EntailsSubstitution program context ownerSub requirement) →
+        (∀ requirement ∈ associated.requirements, EntailsSubstitution program context (ownerSub ++ itemSub) requirement) →
+        ProjectionDomain program context trait member owners items associated ownerSub itemSub
 end
+
+/-- Joining is positive evidence from the declared reductions. -/
+def DefinitionallyJoinable (program : Program) (context : Context) (left right : Term) : Prop :=
+  ∃ common, DefinitionalReduction program context left common ∧ DefinitionalReduction program context right common
+
+def SubstitutionsJoinable (program : Program) (context : Context) (left right : Substitution) : Prop :=
+  ListRel (fun first second => first.1 = second.1 ∧ DefinitionallyJoinable program context first.2 second.2) left right
+
+/-- This admission check constrains common head solutions and inferred generic
+arguments, not the associated-type result whose determinism is proved from it. -/
+def HeadSolutionsCoherent (program : Program) (context : Context) : Prop :=
+  ∀ left right, Definition.implementation left ∈ program.declarations →
+    Definition.implementation right ∈ program.declarations → left.trait = right.trait →
+    ∀ arguments leftSub rightSub,
+      MatchesImplHead program context left arguments leftSub →
+      MatchesImplHead program context right arguments rightSub →
+      left.header.id = right.header.id ∧ SubstitutionsJoinable program context leftSub rightSub
 
 def ConstraintsHold (program : Program) (context : Context) (substitution : Substitution)
     (requirements : List Constraint) : Prop :=
@@ -285,7 +353,7 @@ def DomainValid (program : Program) (context : Context) (term : Term) : Prop :=
     program.trait trait = some declaration → program.associated member = some associated →
     Instantiates declaration.generics owners ownerSub → Instantiates associated.generics items itemSub →
     ConstraintsHold program context ownerSub declaration.requirements ∧
-    ConstraintsHold program context (itemSub ++ ownerSub) associated.requirements)
+    ConstraintsHold program context (ownerSub ++ itemSub) associated.requirements)
 
 def WellKinded (program : Program) (context : Context) (term : Term) (kind : Kind) : Prop :=
   Kinding program context term kind ∧ DomainValid program context term
@@ -469,64 +537,80 @@ def ImplLocal (program : Program) (implementation : ImplDefinition) : Prop :=
   implementation.trait.package = implementation.header.id.package ∨
   ∃ (self : Term) (id : DeclId) (arguments : List Term) (normalized : Term),
     implementation.arguments.head? = some self ∧
-    Equal program ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false⟩ self normalized ∧
+    Equal program ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false,{}⟩ self normalized ∧
     normalized = .nominal id arguments ∧ id.package = implementation.header.id.package
 
 def Coherent (program : Program) : Prop :=
-  ∀ left right, Definition.implementation left ∈ program.declarations →
-    Definition.implementation right ∈ program.declarations → left.trait = right.trait →
-    (∃ context leftValues rightValues leftSub rightSub leftHead rightHead,
-      Instantiates left.generics leftValues leftSub ∧ Instantiates right.generics rightValues rightSub ∧
-      ListRel (Substitutes leftSub) left.arguments leftHead ∧ ListRel (Substitutes rightSub) right.arguments rightHead ∧
-      (∀ value ∈ leftValues ++ rightValues, WellKinded program context value value.kind) ∧
-      ListRel (Equal program context) leftHead rightHead) → left.header.id = right.header.id
+  ∀ context, HeadSolutionsCoherent program context
 
 def SignatureWellFormed (program : Program) (module : ModuleId) (signature : Signature) : Prop :=
-  let context : Context := ⟨signature.generics,signature.constraints,0,module,false⟩
+  let context : Context := ⟨signature.generics,signature.constraints,0,module,false,{}⟩
   (signature.generics.map (·.id)).Nodup ∧
   (∀ parameter ∈ signature.parameters, WellKinded program context parameter .type) ∧
   WellKinded program context signature.result .type ∧ WellKinded program context signature.effects .row ∧
   (∀ i binder defaultValue, signature.generics[i]? = some binder → binder.defaultValue = some defaultValue →
     WellKinded program { context with binders := signature.generics.take i } defaultValue binder.kind)
 
+/-- Implementation heads and associated overrides are checked at the actual
+trait and item domains. Distinct template binder identities permit one
+simultaneous substitution; caller arguments are never recursively rewritten
+by another template's parameter binding. -/
+def ImplementationSignatureWellFormed (program : Program) (implementation : ImplDefinition)
+    (trait : TraitDefinition) : Prop :=
+  let context : Context := ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false,{}⟩
+  (implementation.generics.map (·.id)).Nodup ∧
+  ∃ ownerSub, Instantiates trait.generics implementation.arguments ownerSub ∧
+    (∀ argument ∈ implementation.arguments, WellKinded program context argument argument.kind) ∧
+    ConstraintsHold program context ownerSub trait.requirements ∧
+    ∀ member body, (member,body) ∈ implementation.associated →
+      ∃ associated requirements, program.associated member = some associated ∧ member ∈ trait.members ∧
+        associated.owner = implementation.trait ∧
+        ((implementation.generics ++ associated.generics).map (·.id)).Nodup ∧
+        ListRel (SubstituteConstraint ownerSub) associated.requirements requirements ∧
+        WellKinded program ⟨implementation.generics ++ associated.generics,
+          implementation.requirements ++ requirements,0,implementation.header.module,false,{}⟩ body associated.kind
+
 def DeclarationShapeWellFormed (program : Program) : Definition → Prop
   | .data data =>
-    let context : Context := ⟨data.generics,data.requirements,0,data.header.module,false⟩
+    let context : Context := ⟨data.generics,data.requirements,0,data.header.module,false,{}⟩
     (data.generics.map (·.id)).Nodup ∧ (data.variants.map (·.header.name)).Nodup ∧
     (data.isEnum = false → data.variants.length = 1) ∧
     (∀ variant ∈ data.variants, (variant.fields.map (·.header.name)).Nodup ∧
       ∀ field ∈ variant.fields, WellKinded program context field.type .type ∧ field.header.module = data.header.module) ∧
     (data.quantitySource.isSome = true → data.invariant.isSome = true) ∧
     (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function)
-  | .alias alias => WellKinded program ⟨alias.generics,[],0,alias.header.module,false⟩ alias.value .type
+  | .alias alias => (alias.generics.map (·.id)).Nodup ∧
+    WellKinded program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type
   | .function function => SignatureWellFormed program function.header.module function.signature ∧
     function.parameters.length = function.signature.parameters.length ∧ function.parameters.Nodup ∧
     (function.cABI = true → function.signature.generics = [] ∧
       (∀ parameter ∈ function.signature.parameters,
-        ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false⟩ parameter layout) ∧
-      (function.signature.result = .unit ∨ ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false⟩ function.signature.result layout)) ∧
+        ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false,{}⟩ parameter layout) ∧
+      (function.signature.result = .unit ∨ ∃ layout, CCompatible program ⟨[],[],0,function.header.module,false,{}⟩ function.signature.result layout)) ∧
     (function.origin = .foreign → function.cABI = true) ∧
     (∀ manifest, function.origin = .runtime manifest → manifest = program.input.manifest.identity ∧
       ∃ binding ∈ program.input.manifest.bindings, binding.declaration = function.header.id ∧ binding.signature = function.signature)
   | .trait trait => (trait.generics.map (·.id)).Nodup ∧ trait.members.Nodup ∧
     (trait.relation ≠ .ordinary → (trait.header.id,trait.relation) ∈ program.input.manifest.sealedRelations)
   | .associated associated => ∃ trait, program.trait associated.owner = some trait ∧ associated.header.id ∈ trait.members ∧
+    ((trait.generics ++ associated.generics).map (·.id)).Nodup ∧
     (∀ value, associated.defaultValue = some value →
       WellKinded program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
-        0,associated.header.module,false⟩ value associated.kind)
+        0,associated.header.module,false,{}⟩ value associated.kind)
   | .implementation implementation => ImplLocal program implementation ∧
     ∃ trait, program.trait implementation.trait = some trait ∧
       (trait.relation = .ordinary ∨ trait.relation = .use ∨ trait.relation = .drop) ∧
       (trait.unsafeAllowed = true → implementation.unsafeAllowed = true) ∧
-      (implementation.associated.map Prod.fst).Nodup ∧ (implementation.functions.map Prod.fst).Nodup
+      (implementation.associated.map Prod.fst).Nodup ∧ (implementation.functions.map Prod.fst).Nodup ∧
+      ImplementationSignatureWellFormed program implementation trait
   | .effect effect => (effect.generics.map (·.id)).Nodup ∧ effect.operations.Nodup ∧
     ∀ operation ∈ effect.operations, ∃ declaration, program.operation operation = some declaration ∧ declaration.family = effect.header.id
   | .operation operation => SignatureWellFormed program operation.header.module operation.signature ∧
     (operation.terminal = true ∧ operation.signature.result = .bottom ∧ operation.quantity = none ∨
      operation.terminal = false ∧ operation.signature.result ≠ .bottom ∧
        ∃ quantity, operation.quantity = some quantity ∧ quantity.SurfaceResumption)
-  | .constant constant => ConstantType program ⟨constant.generics,[],0,constant.header.module,false⟩ constant.value constant.type
-  | .global global => WellKinded program ⟨[],[],0,global.header.module,false⟩ global.type .type ∧
+  | .constant constant => ConstantType program ⟨constant.generics,[],0,constant.header.module,false,{}⟩ constant.value constant.type
+  | .global global => WellKinded program ⟨[],[],0,global.header.module,false,{}⟩ global.type .type ∧
     PrincipalOf program global.type .duplicable
   | .module _ => True
   | .import _ => True
@@ -537,7 +621,7 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
 remain well-kinded in execution judgments, but cannot occur literally in the
 immutable declarations those judgments instantiate. -/
 def DeclarationWellFormed (program : Program) (definition : Definition) : Prop :=
-  definition.Lexical ∧ DeclarationShapeWellFormed program definition
+  (definition.Lexical ∧ definition.ScopeClosed) ∧ DeclarationShapeWellFormed program definition
 
 def ProgramWellFormed (program : Program) : Prop :=
   SourceClosure program ∧ (program.declarations.map (·.header.id)).Nodup ∧

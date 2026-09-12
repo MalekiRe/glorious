@@ -247,23 +247,23 @@ def World.References (world : World) (identity : Identity) : Prop :=
 inductive FieldOffset (program : Language.Program) (world : World) :
     Address → Term → Nat → Term → Nat → Prop where
   | tuple {address fields index type layouts layout offset} : fields[index]? = some type →
-      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
+      ListRel (LayoutOf program ⟨[],[],0,default,false,{}⟩) fields layouts → AggregateLayout layouts layout →
       layout.offsets[index]? = some offset → FieldOffset program world address (.tuple fields) index type offset
   | bindings {address brand region fields index type layouts layout offset} : fields[index]? = some type →
-      ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts → AggregateLayout layouts layout →
+      ListRel (LayoutOf program ⟨[],[],0,default,false,{}⟩) fields layouts → AggregateLayout layouts layout →
       layout.offsets[index]? = some offset → FieldOffset program world address (.bindings brand region fields) index type offset
   | callable {address id arguments fields index type layouts layout offset} : CallableFields program id arguments fields →
-      fields[index]? = some type → ListRel (LayoutOf program ⟨[],[],0,default,false⟩) fields layouts →
+      fields[index]? = some type → ListRel (LayoutOf program ⟨[],[],0,default,false,{}⟩) fields layouts →
       AggregateLayout (program.input.target.codeIdentityLayout :: layouts) layout →
       layout.offsets[index+1]? = some offset → FieldOffset program world address (.callable id arguments) index type offset
   | array {address element sign width count index layout} : 0 ≤ count → index < count.toNat →
-      LayoutOf program ⟨[],[],0,default,false⟩ element layout →
+      LayoutOf program ⟨[],[],0,default,false,{}⟩ element layout →
       FieldOffset program world address (.array element (.constant (.integer sign width count))) index element
         (index * alignUp layout.size layout.alignment)
   | nominal {address id arguments data variant substitution types index type layout offset value} :
       program.Constructor variant.header.id data variant → data.header.id = id →
       Instantiates data.generics arguments substitution → ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
-      types[index]? = some type → LayoutOf program ⟨[],[],0,data.header.module,false⟩ (.nominal id arguments) layout →
+      types[index]? = some type → LayoutOf program ⟨[],[],0,data.header.module,false,{}⟩ (.nominal id arguments) layout →
       world.Stores address value → value.head = .constructor variant.header.id →
       (data.isEnum = false ∧ layout.offsets[index]? = some offset ∨
         ∃ (tag : Nat) (offsets : List Nat), data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
@@ -520,7 +520,7 @@ inductive LoanPurpose where
 
 def LoanPurpose.Admitted (purpose : LoanPurpose) (program : Program) (type : Term) : Prop :=
   match purpose with
-  | .source => Addressable program ⟨[],[],0,default,false⟩ type
+  | .source => Addressable program ⟨[],[],0,default,false,{}⟩ type
   | .invocation => True
 
 inductive FormsLoan (program : Program) (purpose : LoanPurpose) :
@@ -573,7 +573,21 @@ def MayDispose (program : Program) (value : Value) : Prop :=
 def CanEndStorage (world : World) (rootId : Identity) : Prop :=
   (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ≠ rootId) ∧
   (∀ id available, world.availability.get id = some available → available.active = true →
-    ∀ place ∈ available.reserved, place.address.root ≠ rootId)
+    ∀ place ∈ available.reserved, place.address.root ≠ rootId) ∧
+  /- Captured storage remains owned by its active suspension. Final replay
+  and cancellation must restore that ownership before ordinary retirement. -/
+  (∀ root, world.roots.get rootId = some root → ∀ suspension, root.home ≠ .suspended suspension)
+
+theorem CanEndStorage.sameHomes {before after : World} {id : Identity}
+    (safe : CanEndStorage before id)
+    (homes : (after.roots.get id).map Root.home = (before.roots.get id).map Root.home)
+    (loans : after.loans = before.loans) (availability : after.availability = before.availability) :
+    CanEndStorage after id := by
+  refine ⟨by simpa only [loans] using safe.1,by simpa only [availability] using safe.2.1,?_⟩
+  intro root found suspension
+  rw [found] at homes
+  obtain ⟨original,selected,equal⟩ := Option.map_eq_some_iff.mp homes.symm
+  exact equal ▸ safe.2.2 original selected suspension
 
 inductive Retires : World → Identity → World → Prop where
   | vacant {before id root} : before.roots.get id = some root → root.live = true → root.value = none →

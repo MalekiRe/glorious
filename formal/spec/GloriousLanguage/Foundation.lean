@@ -107,12 +107,42 @@ theorem ListRel.length_eq {relation : α → β → Prop} {as : List α} {bs : L
   | nil => rfl
   | cons _ _ ih => simpa using congrArg Nat.succ ih
 
+theorem ListRel.member_left {α β : Type} {relation : α → β → Prop} {left : List α} {right : List β}
+    (related : ListRel relation left right) {value : α} (member : value ∈ left) :
+    ∃ result ∈ right, relation value result := by
+  induction related with
+  | nil => cases member
+  | @cons first last left right head _ ih =>
+    rcases List.mem_cons.mp member with rfl | member
+    · exact ⟨last,List.mem_cons_self,head⟩
+    · obtain ⟨result,present,paired⟩ := ih member
+      exact ⟨result,List.mem_cons_of_mem _ present,paired⟩
+
 theorem ListRel.append {relation : α → β → Prop} {as cs : List α} {bs ds : List β}
     (left : ListRel relation as bs) (right : ListRel relation cs ds) :
     ListRel relation (as ++ cs) (bs ++ ds) := by
   induction left with
   | nil => exact right
   | cons head _ ih => exact .cons head ih
+
+theorem ListRel.imp {α β : Type} {first second : α → β → Prop} {left : List α} {right : List β}
+    (related : ListRel first left right) (implies : ∀ a b, first a b → second a b) :
+    ListRel second left right := by
+  induction related with
+  | nil => exact .nil
+  | cons head _ ih => exact .cons (implies _ _ head) ih
+
+theorem ListRel.filter {α β : Type} {relation : α → β → Prop} {left : List α} {right : List β}
+    (related : ListRel relation left right) (p : α → Bool) (q : β → Bool)
+    (agrees : ∀ a b, relation a b → p a = q b) :
+    ListRel relation (left.filter p) (right.filter q) := by
+  induction related with
+  | nil => exact .nil
+  | cons head _ ih =>
+    simp only [List.filter_cons,← agrees _ _ head]
+    split
+    · exact .cons head ih
+    · exact ih
 
 theorem ListRel.functional {α β : Type} {relation : α → β → Prop} {left : List α} {first second : List β}
     (functional : ∀ a b c, relation a b → relation a c → b = c)

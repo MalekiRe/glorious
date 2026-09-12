@@ -25,9 +25,9 @@ example {program : Language.Program} {world : World} {address id arguments}
     (codeLayout : program.input.target.codeIdentityLayout = header)
     (alignment : program.input.target.scalarAlignment (.integer false (.fixed 8)) = 1) :
     FieldOffset program world address (.callable id arguments) 0 (.scalar (.integer false (.fixed 8))) 8 := by
-  have scalar : LayoutOf program ⟨[],[],0,default,false⟩ (.scalar (.integer false (.fixed 8))) byte := by
+  have scalar : LayoutOf program ⟨[],[],0,default,false,{}⟩ (.scalar (.integer false (.fixed 8))) byte := by
     simpa [byte, Scalar.bytes, Width.bits, alignment] using
-      (@LayoutOf.scalar program ⟨[],[],0,default,false⟩ (.integer false (.fixed 8)) (by simp [Scalar.Valid]))
+      (@LayoutOf.scalar program ⟨[],[],0,default,false,{}⟩ (.integer false (.fixed 8)) (by simp [Scalar.Valid]))
   exact .callable fields rfl (.cons scalar .nil) (codeLayout.symm ▸ captureLayout) rfl
 
 example (program : Language.Program) (context : Language.Context) (brand region result : Term) :
@@ -38,7 +38,7 @@ example (program : Language.Program) (context : Language.Context) (brand argumen
 
 example {program : Language.Program} {world : World} {address type physical}
     (physicalAddress : PhysicalAddress program world address type physical) :
-    Addressable program ⟨[],[],0,default,false⟩ type := physicalAddress.1
+    Addressable program ⟨[],[],0,default,false,{}⟩ type := physicalAddress.1
 
 example {program : Language.Program} {context : Language.Context} {id arguments fields region}
     (captures : CallableFields program id arguments fields)

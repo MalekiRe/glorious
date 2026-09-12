@@ -145,6 +145,15 @@ theorem World.write_rest {before after : World} {address : Address} {replacement
   obtain ⟨_,_,_,rfl⟩ := World.write_value_update written
   rfl
 
+theorem World.write_canEndStorage {before after : World} {address : Address} {replacement : Option Value} {id : Identity}
+    (written : before.write address replacement = some after) (safe : CanEndStorage before id) :
+    CanEndStorage after id := by
+  have loans := congrArg World.loans (World.write_rest written)
+  have availability := congrArg World.availability (World.write_rest written)
+  apply safe.sameHomes (after := after) ?_ loans availability
+  simpa [Option.map_map,Function.comp_def,Root.location] using
+    congrArg (Option.map Root.home) (World.write_locations written id)
+
 theorem Transfers.rest {program : Program} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) : after = { before with roots := after.roots } := by
   cases transfer with

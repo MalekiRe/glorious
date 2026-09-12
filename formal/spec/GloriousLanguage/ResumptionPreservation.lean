@@ -104,6 +104,12 @@ theorem State.ResumptionsAccounted.empty {state : State} (empty : state.resumpti
   · simp [empty,Table.Unique]
   all_goals intros; simp [empty,Table.get] at *
 
+theorem State.SuspensionsWellFormed.empty {state : State} (empty : state.resumptions = [])
+    (homes : ∀ rootId root id, state.world.roots.get rootId = some root →
+      root.home = .suspended id → id < state.nextContinuation) : state.SuspensionsWellFormed := by
+  refine ⟨State.ResumptionsAccounted.empty empty,?_,?_,?_,homes⟩
+  all_goals intros; simp [empty,Table.get] at *
+
 theorem State.ResumptionsAccounted.transport {before after : State} (valid : before.ResumptionsAccounted)
     (table : after.resumptions = before.resumptions) (counter : before.nextContinuation ≤ after.nextContinuation) :
     after.ResumptionsAccounted := by
@@ -466,19 +472,22 @@ open Execution
 
 theorem InitialInvocation.resumptions_accounted {program : Kernel.Program} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} (initial : InitialInvocation program function inputs state) :
-    state.ResumptionsAccounted := initial.2.2.1
+    state.ResumptionsAccounted := initial.2.2.1.budgets
 
 /-- The control invariant is constructible for arbitrary fresh invocations;
 it does not require an execution-safety certificate or a successful run. -/
 theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} {caller : Execution.Context}
     (inputsTyped : InputsTyped program inputs state.world) (functionInputs : FunctionInputs function inputs)
-    (empty : state.resumptions = []) (task : state.task = .enter caller function (.supplied inputs) false)
+    (empty : state.resumptions = [])
+    (homes : ∀ rootId root id, state.world.roots.get rootId = some root →
+      root.home = .suspended id → id < state.nextContinuation)
+    (task : state.task = .enter caller function (.supplied inputs) false)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (fresh : ∀ id root, state.world.roots.get id = some root → Kernel.OwnedByActivation root state.nextActivation → root.live = false) :
     InitialInvocation program function inputs state :=
-  ⟨inputsTyped,functionInputs,State.ResumptionsAccounted.empty empty,caller,task,frames,region,activation,fresh⟩
+  ⟨inputsTyped,functionInputs,State.SuspensionsWellFormed.empty empty homes,caller,task,frames,region,activation,fresh⟩
 
 /-- The actual invocation contract supplies the initial control invariant;
 all finite-run budget and settlement conclusions are derived by preservation,

@@ -16,9 +16,9 @@ structure Signature where
 def CSignature (program : Language.Program) (signature : Language.Signature) (foreign : Signature) : Prop :=
   program.input.target.supportsC = true ∧ signature.generics = [] ∧ foreign.variadic = false ∧
   signature.effects = .row [] [] ∧ foreign.parameters.map Prod.fst = signature.parameters ∧
-  (∀ parameter ∈ foreign.parameters, CCompatible program ⟨[],[],0,default,false⟩ parameter.1 parameter.2) ∧
+  (∀ parameter ∈ foreign.parameters, CCompatible program ⟨[],[],0,default,false,{}⟩ parameter.1 parameter.2) ∧
   ((signature.result = .unit ∧ foreign.result = none) ∨
-    ∃ layout, foreign.result = some (signature.result,layout) ∧ CCompatible program ⟨[],[],0,default,false⟩ signature.result layout)
+    ∃ layout, foreign.result = some (signature.result,layout) ∧ CCompatible program ⟨[],[],0,default,false,{}⟩ signature.result layout)
 
 structure Import where
   declaration : DeclId

@@ -1,4 +1,5 @@
 import GloriousLanguage.Instantiation
+import GloriousLanguage.TermScope
 
 /-! Destructor selection retains the nominal instance and its actual loan
 region. Declaration admissibility and runtime body instantiation are separate;
@@ -9,7 +10,9 @@ def DropSignature (self region : Term) (signature : Signature) : Prop :=
   signature.parameters = [.reference .unique region self] ∧ signature.result = .unit ∧
   signature.effects = .row [] [] ∧ signature.unsafeAllowed = false
 
-/-- A checked application of the real destructor declaration. Its generic
+/-- A checked application of the real destructor declaration. The intrinsic
+`Drop : Use<[0,1]>` prerequisite is checked in an assumption-free context;
+unsupported capabilities cannot pass by omission. Its generic
 argument order comes from its signature, not the nominal type's spelling or
 a convention that omits the independent reference region. -/
 inductive DropApplication (program : Program) (self region : Term) (hook : DeclId) :
@@ -17,22 +20,25 @@ inductive DropApplication (program : Program) (self region : Term) (hook : DeclI
   | selected {arguments declaration substitution anchor} :
       DropHook program self (some hook) → program.function hook = some declaration →
       declaration.origin = .source anchor → declaration.captures = [] →
-      Kinding program ⟨[],[],0,declaration.header.module,false⟩ region .region →
+      Kinding program ⟨[],[],0,declaration.header.module,false,{}⟩ region .region →
       Instantiates declaration.signature.generics arguments substitution →
-      ConstraintsHold program ⟨[],[],0,declaration.header.module,false⟩ substitution declaration.signature.constraints →
+      (∀ argument ∈ arguments, Kinding program ⟨[],[],0,declaration.header.module,false,{}⟩ argument argument.kind) →
+      ConstraintsHold program ⟨[],[],0,declaration.header.module,false,{}⟩ substitution declaration.signature.constraints →
+      Entails program ⟨[],[],0,declaration.header.module,false,{}⟩ (.use self ⟨0,some 1⟩) →
       DropSignature self region (declaration.signature.instantiate substitution) →
       DropApplication program self region hook arguments declaration substitution
 
 /-- Nonvacuous declaration admission: every actual nominal application in
-the declaration's domain and every admitted borrowing region must select an
-exact destructor signature. This supplies no executable body or runtime world. -/
+the declaration's domain and every admitted borrowing region must discharge
+the intrinsic affine bound and select an exact destructor signature. This
+supplies no executable body, assumed principal answer, or runtime world. -/
 def DropApplications (program : Program) : Prop :=
   ∀ id data hook arguments substitution region,
     program.data id = some data → data.dropHook = some hook →
     Instantiates data.generics arguments substitution →
-    (∀ argument ∈ arguments, Kinding program ⟨[],[],0,data.header.module,false⟩ argument argument.kind) →
-    ConstraintsHold program ⟨[],[],0,data.header.module,false⟩ substitution data.requirements →
-    Kinding program ⟨[],[],0,data.header.module,false⟩ region .region →
+    (∀ argument ∈ arguments, Kinding program ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind) →
+    ConstraintsHold program ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements →
+    Kinding program ⟨[],[],0,data.header.module,false,{}⟩ region .region →
     ∃ hookArguments declaration hookSubstitution,
       DropApplication program (.nominal id arguments) region hook hookArguments declaration hookSubstitution
 
@@ -68,7 +74,7 @@ theorem DropApplication.body {program : Kernel.Program} {self region : Term} {ho
     ∃ function, Instance program hook arguments function ∧
       DropSignature self region function.signature ∧ function.captures = [] := by
   cases selected with
-  | selected hookFound found origin noCaptures _ instantiated constraints signature =>
+  | selected hookFound found origin noCaptures _ instantiated kinded constraints _ signature =>
     have lookup : program.declarations.lookup hook = some (.function declaration) := by
       unfold Language.Program.function at found
       cases lookedUp : program.declarations.lookup hook with
@@ -108,9 +114,10 @@ theorem DropApplication.body {program : Kernel.Program} {self region : Term} {ho
     have captures : body.captures = [] := by
       apply List.map_eq_nil_iff.mp
       exact bodyCaptures.trans noCaptures
-    refine ⟨body.instantiate substitution,⟨body,declaration,substitution,bodyAt,found,bodySignature,?_,?_,rfl⟩,?_,?_⟩
+    refine ⟨body.instantiate substitution,⟨body,declaration,substitution,bodyAt,found,bodySignature,?_,?_,?_,rfl⟩,?_,?_⟩
     · simpa only [bodySignature] using instantiated
     · simpa only [bodySignature] using constraints
+    · exact fun argument member => (kinded argument member).scoped
     · simpa only [Function.instantiate,Function.transformTerms,bodySignature] using signature
     · simp [Function.instantiate,Function.transformTerms,captures]
 

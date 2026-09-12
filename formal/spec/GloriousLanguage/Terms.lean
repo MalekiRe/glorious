@@ -43,6 +43,10 @@ inductive Term where
   | parameter (binder : Identity) (kind : Kind)
   | variable (cell : Identity) (kind : Kind) (universeLevel : Nat)
   | rigid (binder : Identity) (kind : Kind) (universeLevel : Nat)
+  /-- Executable lexical names are not universal eigenvariables. Only these
+  two constructors are interpreted by a running scope environment. -/
+  | scopedRegion (binder : Identity)
+  | scopedBrand (binder : Identity)
   | runtimeRegion (identity : Identity)
   | runtimeBrand (identity : RuntimeBrand)
   | unit | bottom | scalar (type : Scalar)
@@ -71,8 +75,8 @@ inductive Term where
 
 def Term.kind : Term → Kind
   | .parameter _ k | .variable _ k _ | .rigid _ k _ | .projection _ _ _ _ k => k
-  | .staticRegion | .runtimeRegion _ => .region
-  | .runtimeBrand _ => .brand
+  | .staticRegion | .runtimeRegion _ | .scopedRegion _ => .region
+  | .runtimeBrand _ | .scopedBrand _ => .brand
   | .effect .. => .effect
   | .row .. => .row
   | .constant .. | .constantTuple .. | .constantConstructor .. => .constant
@@ -210,14 +214,39 @@ def Term.substitute (substitution : Substitution) : Term → Term
 /-- Lexical scope names and concrete generative identities inhabit distinct
 constructors. Closing a caller's scope can never rename an already concrete
 region or brand supplied through a generic argument or capture. -/
+structure LexicalScope where
+  regions : List Identity := []
+  brands : List Identity := []
+  currentRegion : Option Identity := none
+  deriving Repr, Inhabited
+
+def LexicalScope.bindRegion (scope : LexicalScope) (id : Identity) : LexicalScope :=
+  { scope with regions := id :: scope.regions, currentRegion := some id }
+
+def LexicalScope.bindBrand (scope : LexicalScope) (id : Identity) : LexicalScope :=
+  { scope with brands := id :: scope.brands }
+
+def Term.Scoped (scope : LexicalScope) (term : Term) : Prop :=
+  (∀ id, Occurs (.scopedRegion id) term → id ∈ scope.regions) ∧
+  (∀ id, Occurs (.scopedBrand id) term → id ∈ scope.brands)
+
+/-- Closed with respect to executable lexical names only. Abstract generic
+parameters and universal eigenvariables are deliberately not ruled out. -/
+def Term.ScopeClosed (term : Term) : Prop := term.Scoped {}
+
+theorem Term.Scoped.child {scope : LexicalScope} {term child : Term}
+    (admitted : term.Scoped scope) (member : child ∈ term.children) : child.Scoped scope :=
+  ⟨fun id occurs => admitted.1 id (.child member occurs),
+    fun id occurs => admitted.2 id (.child member occurs)⟩
+
 structure ScopeInstantiation where
   regions : Table Identity := []
   brands : Table RuntimeBrand := []
   deriving Repr, Inhabited
 
 def ScopeInstantiation.term (scope : ScopeInstantiation) : Term → Term
-  | .rigid id .region 0 => ((scope.regions.get id).map Term.runtimeRegion).getD (.rigid id .region 0)
-  | .rigid id .brand 0 => ((scope.brands.get id).map Term.runtimeBrand).getD (.rigid id .brand 0)
+  | .scopedRegion id => ((scope.regions.get id).map Term.runtimeRegion).getD (.scopedRegion id)
+  | .scopedBrand id => ((scope.brands.get id).map Term.runtimeBrand).getD (.scopedBrand id)
   | .tuple fields => .tuple (fields.map scope.term)
   | .array a b => .array (scope.term a) (scope.term b)
   | .reference mode a b => .reference mode (scope.term a) (scope.term b)
@@ -239,9 +268,9 @@ def ScopeInstantiation.term (scope : ScopeInstantiation) : Term → Term
 
 theorem ScopeInstantiation.kind (scope : ScopeInstantiation) (term : Term) : (scope.term term).kind = term.kind := by
   cases term <;> try simp only [ScopeInstantiation.term, Term.kind]
-  rename_i id kind level
-  cases kind <;> cases level <;> simp only [ScopeInstantiation.term]
-  all_goals cases h : scope.regions.get id <;> cases k : scope.brands.get id <;> simp_all only [Option.map, Option.getD]
+  all_goals rename_i id
+  all_goals cases h : scope.regions.get id <;> cases k : scope.brands.get id <;>
+    simp_all only [Option.map,Option.getD]
 
 /-- The checked graph of the single substitution operation. No substituted
 occurrence may change kind, even inside a type whose outer kind is unchanged. -/

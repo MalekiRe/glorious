@@ -121,7 +121,7 @@ def AuthenticatedOrigins (program : Kernel.Program) (files : List ParsedFile) : 
 def FileElaborates (program : Kernel.Program) (file : ParsedFile) : Prop :=
   ∃ module, Definition.module module ∈ program.declarations.declarations ∧ module.file = file.file.id ∧ module.inline = false ∧
     Declarations program
-      { typed := ⟨⟨[],[],0,module.module,false⟩,[],[],.row [] [],none⟩,
+      { typed := ⟨⟨[],[],0,module.module,false,{}⟩,[],[],.row [] [],none⟩,
         origin := ⟨file.file.id,[]⟩ }
       file.declarations
 

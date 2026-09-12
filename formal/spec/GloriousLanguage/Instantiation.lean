@@ -134,7 +134,8 @@ def Instance (program : Program) (id : DeclId) (arguments : List Term) (function
     program.function id = some template ∧ program.declarations.function id = some declaration ∧
     template.signature = declaration.signature ∧
     Instantiates template.signature.generics arguments substitution ∧
-    ConstraintsHold program.declarations ⟨[],[],0,declaration.header.module,false⟩ substitution template.signature.constraints ∧
+    ConstraintsHold program.declarations ⟨[],[],0,declaration.header.module,false,{}⟩ substitution template.signature.constraints ∧
+    (∀ argument ∈ arguments, argument.ScopeClosed) ∧
     function = template.instantiate substitution
 
 end Kernel

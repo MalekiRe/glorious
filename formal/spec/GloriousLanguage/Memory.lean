@@ -25,7 +25,7 @@ structure RuntimeAddresses where
 
 
 def PhysicalAddress (program : Language.Program) (world : World) (address : Address) (type : Term) (physical : Nat) : Prop :=
-  Addressable program ⟨[],[],0,default,false⟩ type ∧
+  Addressable program ⟨[],[],0,default,false,{}⟩ type ∧
   ∃ root offset, world.root address = some root ∧ AddressOffset program world address type offset ∧ physical = root.base + offset
 
 def PointsTo (program : Language.Program) (world : World) (pointer : RawPointer) (address : Address) (type : Term) : Prop :=
@@ -39,21 +39,21 @@ mutual
       Address → Value → Layout → List (Option Nat) → Prop where
     | unit {address owner} : Encodes program world runtime address (.resident owner .unit .unit true []) ⟨0,1,[],0,0,[]⟩ []
     | scalar {address owner scalar layout} : scalar.Valid program.input.target →
-        LayoutOf program ⟨[],[],0,default,false⟩ (.scalar scalar.type) layout →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ (.scalar scalar.type) layout →
         Encodes program world runtime address (.resident owner (.scalar scalar.type) (.scalar scalar) true []) layout
           ((ScalarValue.bytes program.input.target scalar).map some)
-    | pointer {address owner mode type pointer layout} : LayoutOf program ⟨[],[],0,default,false⟩ (.rawPointer mode type) layout →
+    | pointer {address owner mode type pointer layout} : LayoutOf program ⟨[],[],0,default,false,{}⟩ (.rawPointer mode type) layout →
         pointer.address < 2^program.input.target.pointerBits →
         Encodes program world runtime address (.resident owner (.rawPointer mode type) (.pointer pointer) true []) layout
           ((integerBytes program.input.target.endian layout.size pointer.address).map some)
     | reference {address owner mode region type id loan physical layout} : world.loans.get id = some loan → loan.live = true →
         loan.mode = mode → PhysicalAddress program world loan.referent type physical → world.Initialized loan.referent →
-        LayoutOf program ⟨[],[],0,default,false⟩ (.reference mode region type) layout →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ (.reference mode region type) layout →
         Encodes program world runtime address (.resident owner (.reference mode region type) (.reference id) true []) layout
           ((integerBytes program.input.target.endian layout.size physical).map some)
     | aggregate {address value layout bytes} :
         (value.head = .tuple ∨ value.head = .array ∨ ∃ variant, value.head = .constructor variant) →
-        LayoutOf program ⟨[],[],0,default,false⟩ value.type layout → bytes.length = layout.size →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ value.type layout → bytes.length = layout.size →
         EncodesFields program world runtime address value.type 0 value.fields bytes →
         (∀ id data variant arguments index, value.head = .constructor id → value.type = .nominal data.header.id arguments →
           program.Constructor id data variant → data.isEnum = true → data.variants[index]? = some variant →
@@ -61,14 +61,14 @@ mutual
         (∀ (index byte : Nat), bytes[index]? = some (some byte) → byte < 256) →
         Encodes program world runtime address value layout bytes
     | callable {address owner id arguments fields layout bytes} :
-        LayoutOf program ⟨[],[],0,default,false⟩ (.callable id arguments) layout → bytes.length = layout.size →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ (.callable id arguments) layout → bytes.length = layout.size →
         runtime.callable id arguments < 256^program.input.target.codeIdentityLayout.size →
         bytes.take program.input.target.codeIdentityLayout.size =
           (integerBytes program.input.target.endian program.input.target.codeIdentityLayout.size (runtime.callable id arguments)).map some →
         EncodesFields program world runtime address (.callable id arguments) 0 fields bytes →
         Encodes program world runtime address (.resident owner (.callable id arguments) (.callable id arguments) true fields) layout bytes
     | operation {address owner id arguments operation layout bytes} : program.operation id = some operation →
-        LayoutOf program ⟨[],[],0,default,false⟩ (.callable id arguments) layout → bytes.length = layout.size →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ (.callable id arguments) layout → bytes.length = layout.size →
         runtime.callable id arguments < 256^program.input.target.codeIdentityLayout.size →
         bytes.take program.input.target.codeIdentityLayout.size =
           (integerBytes program.input.target.endian program.input.target.codeIdentityLayout.size (runtime.callable id arguments)).map some →
@@ -80,7 +80,7 @@ mutual
           program.input.target.continuationLayout
           ((integerBytes program.input.target.endian program.input.target.continuationLayout.size (runtime.continuation id)).map some)
     | bindings {address owner brand region fields id types layout bytes} :
-        LayoutOf program ⟨[],[],0,default,false⟩ (.bindings brand region types) layout → bytes.length = layout.size →
+        LayoutOf program ⟨[],[],0,default,false,{}⟩ (.bindings brand region types) layout → bytes.length = layout.size →
         EncodesFields program world runtime address (.bindings brand region types) 0 fields bytes →
         Encodes program world runtime address (.resident owner (.bindings brand region types) (.bindings id) true fields) layout bytes
     | proof {address value} : value.fields = [] → value.shellLive = true →
@@ -92,7 +92,7 @@ mutual
       Address → Term → Nat → List (Option Value) → List (Option Nat) → Prop where
     | nil {address type index bytes} : EncodesFields program world runtime address type index [] bytes
     | hole {address type index fields bytes child offset layout} :
-        FieldOffset program world address type index child offset → LayoutOf program ⟨[],[],0,default,false⟩ child layout →
+        FieldOffset program world address type index child offset → LayoutOf program ⟨[],[],0,default,false,{}⟩ child layout →
         (bytes.drop offset).take layout.size = List.replicate layout.size none →
         EncodesFields program world runtime address type (index+1) fields bytes →
         EncodesFields program world runtime address type index (none :: fields) bytes
@@ -107,7 +107,7 @@ end
 def OccupiesByte (program : Language.Program) (world : World) (root : Identity) (offset : Nat) : Prop :=
   ∃ address value relative layout,
     address.root = root ∧ world.Resident address value ∧ AddressOffset program world address value.type relative ∧
-    LayoutOf program ⟨[],[],0,default,false⟩ value.type layout ∧
+    LayoutOf program ⟨[],[],0,default,false,{}⟩ value.type layout ∧
     relative ≤ offset ∧ offset < relative+layout.size ∧
     (value.head = .unit ∨ (∃ scalar, value.head = .scalar scalar) ∨ (∃ pointer, value.head = .pointer pointer) ∨
       (∃ loan, value.head = .reference loan) ∨
@@ -127,7 +127,7 @@ inductive AllocatesBuffer (program : Language.Program) :
   | fresh {before domain element count base elementLayout layout} :
       domain ∈ program.input.manifest.allocationDomains → element.RuntimeRegionsBelow before.nextRegion →
       IntegerRange program.input.target false .pointer (Int.ofNat count) →
-      LayoutOf program ⟨[],[],0,default,true⟩ element elementLayout →
+      LayoutOf program ⟨[],[],0,default,true,{}⟩ element elementLayout →
       ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
       0 < base → base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
       DisjointStorage before base layout.size →
@@ -150,21 +150,21 @@ def WithAddress (program : Language.Program) (world : World) (pointer : RawPoint
 
 inductive RawRead (program : Language.Program) : World → RawPointer → Term → Bool → Address → World → Prop where
   | read {before pointer type copy source destination after layout} : PointsTo program before pointer source type →
-      LayoutOf program ⟨[],[],0,default,true⟩ type layout → RawRange program before pointer layout.size layout.alignment →
+      LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout → RawRange program before pointer layout.size layout.alignment →
       (copy = true ∧ Copies program before .owner source destination after ∨
         copy = false ∧ Transfers program before .owner source destination after) →
       RawRead program before pointer type copy destination after
 
 inductive RawWrite (program : Language.Program) : World → Authority → Address → RawPointer → Term → World → Prop where
   | write {before authority source pointer type destination after layout value} : before.Stores source value → value.type = type →
-      PointsTo program before pointer destination type → LayoutOf program ⟨[],[],0,default,true⟩ type layout →
+      PointsTo program before pointer destination type → LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout →
       RawRange program before pointer layout.size layout.alignment → Transfers program before authority source destination after →
       RawWrite program before authority source pointer type after
 
 inductive RawBorrow (program : Language.Program) :
     World → RawPointer → Term → Mutability → Identity → Address → World → Prop where
   | borrow {before pointer type mode region source destination after layout} : PointsTo program before pointer source type →
-      LayoutOf program ⟨[],[],0,default,true⟩ type layout → RawRange program before pointer layout.size layout.alignment →
+      LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout → RawRange program before pointer layout.size layout.alignment →
       before.Initialized source → Borrows program before .owner mode region source destination after →
       RawBorrow program before pointer type mode region destination after
 

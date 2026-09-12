@@ -23,8 +23,8 @@ theorem SnapshotMap.layoutOf {program : Kernel.Program} {before : State} {suspen
     (valid : ProgramWellFormed program.declarations) (world : before.world.WellFormed)
     (selected : SnapshotMap program before suspension map) {term : Term} {layout : Layout} {module : ModuleId} {unsafeAllowed : Bool}
     (supported : term.RuntimeRegionsBelow before.world.nextRegion)
-    (located : LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed⟩ term layout) :
-    LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed⟩ (map.term term) layout := by
+    (located : LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed,{}⟩ term layout) :
+    LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed,{}⟩ (map.term term) layout := by
   rw [selected.term_permutation world supported]
   exact located.permute valid (selected.permutation world)
 
@@ -33,8 +33,8 @@ theorem SnapshotMap.fieldLayouts {program : Kernel.Program} {before : State} {su
     (selected : SnapshotMap program before suspension map) {fields : List Term} {layouts : List Layout}
     {module : ModuleId} {unsafeAllowed : Bool}
     (supported : ∀ term ∈ fields, term.RuntimeRegionsBelow before.world.nextRegion)
-    (located : ListRel (LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed⟩) fields layouts) :
-    ListRel (LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed⟩) (fields.map map.term) layouts := by
+    (located : ListRel (LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed,{}⟩) fields layouts) :
+    ListRel (LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed,{}⟩) (fields.map map.term) layouts := by
   induction located with
   | nil => exact .nil
   | cons first _ ih =>

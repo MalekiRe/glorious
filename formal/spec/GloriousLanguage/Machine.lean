@@ -14,7 +14,7 @@ def OperationInstance (program : Kernel.Program) (id : DeclId) (arguments : List
     (operation : OperationDefinition) (signature : Signature) : Prop :=
   ∃ substitution,
     program.declarations.operation id = some operation ∧ Instantiates operation.signature.generics arguments substitution ∧
-    ConstraintsHold program.declarations ⟨[],[],0,operation.header.module,false⟩ substitution operation.signature.constraints ∧
+    ConstraintsHold program.declarations ⟨[],[],0,operation.header.module,false,{}⟩ substitution operation.signature.constraints ∧
     signature = operation.signature.instantiate substitution
 
 structure Context where
@@ -28,7 +28,7 @@ structure Context where
   deriving Repr, Inhabited
 
 def Context.static (context : Context) : Language.Context :=
-  ⟨[],[],0,context.module,context.unsafeAllowed⟩
+  ⟨[],[],0,context.module,context.unsafeAllowed,{}⟩
 
 def Context.bind (context : Context) (localSlot : Local) (address : Address) (authority : Authority := .owner) : Context :=
   { context with environment := ⟨localSlot.id,address,authority⟩ :: context.environment.filter (fun entry => entry.localSlot != localSlot.id) }
@@ -162,6 +162,9 @@ structure Suspension where
   context : Context
   roots : List Identity
   homes : Table Home
+  /-- Immutable root-allocation frontier at actual capture, before creating
+  the continuation handle. Saved identities cannot name future storage. -/
+  captureRootLimit : Identity
   quantity : Quantity
   remaining : Nat
   used : Nat
@@ -199,6 +202,31 @@ structure State.ResumptionsAccounted (state : State) : Prop where
   identity : ∀ id suspension, state.resumptions.get id = some suspension → suspension.identity = id
   fresh : ∀ id suspension, state.resumptions.get id = some suspension → id < state.nextContinuation
   accounted : ∀ id suspension, state.resumptions.get id = some suspension → suspension.Accounted
+
+/-- One historical capture inventory, retained after replay or cancellation.
+Its roots and saved homes are the actual capture product, not independently
+reconstructed permission tables. -/
+structure Suspension.CaptureOrigin (suspension : Suspension) : Prop where
+  roots : suspension.roots.Nodup
+  bounded : ∀ root ∈ suspension.roots, root < suspension.captureRootLimit
+  homes : suspension.homes.Unique
+  domain : ∀ root, (∃ home, suspension.homes.get root = some home) ↔ root ∈ suspension.roots
+  activationHomes : ∀ root home, suspension.homes.get root = some home →
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope
+
+/-- The executable control invariant combines the existing budget component
+with capture provenance and active ownership of the current root inventory.
+Historical bounds survive settlement; liveness belongs only to active roots. -/
+structure State.SuspensionsWellFormed (state : State) : Prop where
+  budgets : state.ResumptionsAccounted
+  origin : ∀ id suspension, state.resumptions.get id = some suspension → suspension.CaptureOrigin
+  frontier : ∀ id suspension, state.resumptions.get id = some suspension →
+    suspension.captureRootLimit ≤ state.world.nextRoot
+  active : ∀ id suspension, state.resumptions.get id = some suspension → suspension.active = true →
+    ∀ rootId, rootId ∈ suspension.roots ↔ ∃ root, state.world.roots.get rootId = some root ∧
+      root.live = true ∧ root.home = .suspended id
+  homeFresh : ∀ rootId root id, state.world.roots.get rootId = some root →
+    root.home = .suspended id → id < state.nextContinuation
 
 inductive Event where
   | allocate (address : Address)
@@ -412,9 +440,10 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       before.frames = .scope outer scope region :: rest → Protect program outer before.world value .owner kept after →
       ScopeRoots after context.activation scope [] roots → Suspensible after roots →
       LocalStep program before none { before with world := after, task := .cleanup context roots (.closeRegion region (.yield outer kept)), frames := rest }
-  | label {before context lexical region result body inner} : before.task = .run context (.label lexical region result body) →
-      inner = (context.bindRegion region context.region).bindBrand lexical (.label before.nextBrand) →
-      LocalStep program before none { before with task := .run inner body, frames := .label context before.nextBrand context.region (inner.term result) :: before.frames, nextBrand := before.nextBrand+1 }
+  | label {before context lexical region result body inner selectedRegion} : before.task = .run context (.label lexical region result body) →
+      context.instantiation.regions.get region = some selectedRegion →
+      inner = context.bindBrand lexical (.label before.nextBrand) →
+      LocalStep program before none { before with task := .run inner body, frames := .label context before.nextBrand selectedRegion (inner.term result) :: before.frames, nextBrand := before.nextBrand+1 }
   | labelReturn {before context value outer brand region result rest} : before.task = .yield context value →
       before.frames = .label outer brand region result :: rest →
       LocalStep program before none { before with task := .yield outer value, frames := rest }
@@ -454,9 +483,10 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       Temporary program context (.reference .unique (.runtimeRegion context.region) value.type) before.world handle withHandle →
       Borrows program.declarations withHandle authority .unique context.region address handle after → loan = withHandle.nextLoan →
       LocalStep program before (some (.hookEnter address hook)) { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle loan next :: before.frames }
-  | hookReturned {before context result outer address authority handle loan next rest} : before.task = .yield context result →
+  | hookReturned {before context result outer address authority handle loan next rest receiver} : before.task = .yield context result →
       before.frames = .hook outer address authority handle loan next :: rest →
-      LocalStep program before none { before with frames := rest, task := .destroy outer result .owner (.retire result.root (.retire handle.root (.closeLoan loan (.destroyFields outer address authority (match before.world.read address with | none => [] | some value => (List.range value.fields.length).reverse) next)))) }
+      before.world.Stores address receiver →
+      LocalStep program before none { before with frames := rest, task := .destroy outer result .owner (.retire result.root (.retire handle.root (.closeLoan loan (.destroyFields outer address authority (List.range receiver.fields.length).reverse next)))) }
   | destroyStructural {before context address authority next value} : before.task = .destroy context address authority next →
       before.world.Stores address value → MayDispose program.declarations value → Permitted before.world authority .owned address →
       (value.shellLive = false ∨ DropHook program.declarations value.type none) →

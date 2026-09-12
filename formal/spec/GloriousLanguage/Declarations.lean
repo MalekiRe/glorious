@@ -199,6 +199,11 @@ def Definition.terms : Definition → List Term
 def Definition.Lexical (definition : Definition) : Prop :=
   ∀ term ∈ definition.terms, term.Lexical
 
+/-- Published templates may quantify abstract names but cannot refer to an
+activation, label or proof binder introduced by executing a body. -/
+def Definition.ScopeClosed (definition : Definition) : Prop :=
+  ∀ term ∈ definition.terms, term.ScopeClosed
+
 structure Package where
   id : Identity
   name : String

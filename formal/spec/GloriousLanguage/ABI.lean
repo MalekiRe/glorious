@@ -39,7 +39,7 @@ def Descriptor.Valid (program : Kernel.Program) (descriptor : Descriptor) : Prop
   descriptor.manifest = program.declarations.input.manifest.identity ∧
   (descriptor.concrete.map (·.identity)).Nodup ∧
   (∀ concrete ∈ descriptor.concrete,
-    Closed concrete.type ∧ LayoutOf program.declarations ⟨[],[],0,default,false⟩ concrete.type concrete.layout ∧
+    Closed concrete.type ∧ LayoutOf program.declarations ⟨[],[],0,default,false,{}⟩ concrete.type concrete.layout ∧
     PrincipalOf program.declarations concrete.type concrete.principal ∧ DropHook program.declarations concrete.type concrete.drop)
 
 def Compatible (left right : Descriptor) : Prop :=
@@ -109,7 +109,7 @@ def SharedABI (program : Kernel.Program) (runtime : RuntimeAddresses)
       Represents program runtime source.world (vm.backing vmState) injection ∧
       Represents program runtime source.world (native.backing nativeState) injection ∧
       ∀ address value, source.world.Resident address value →
-        Addressable program.declarations ⟨[],[],0,default,false⟩ value.type → SharedHome vm native vmState nativeState address
+        Addressable program.declarations ⟨[],[],0,default,false,{}⟩ value.type → SharedHome vm native vmState nativeState address
 
 /-- A crossing changes which engine executes, not the backing allocation or
 the concrete identity of an addressable argument. Ordinary source moves are

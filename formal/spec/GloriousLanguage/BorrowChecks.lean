@@ -105,7 +105,7 @@ private theorem allocateHandle {program : Language.Program}
     (capacity : 8 ≤ program.input.target.maximumObjectBytes) :
     Allocates program world (.localSlot 2 1) 1 localSlot.type referenceLayout false handle allocated := by
   refine .fresh (base := 8) (by decide) ?_ ⟨⟨3,rfl⟩,by decide,by simp [referenceLayout]⟩ capacity
-    ⟨⟨[],[],0,default,false⟩,?_⟩ (by decide) (by decide) ?_ ?_
+    ⟨⟨[],[],0,default,false,{}⟩,?_⟩ (by decide) (by decide) ?_ ?_
   · intro id occurs
     change Occurs (.runtimeRegion id) (.reference .shared (.runtimeRegion 0) .unit) at occurs
     cases occurs with
@@ -118,7 +118,7 @@ private theorem allocateHandle {program : Language.Program}
       · cases occurs with
         | child member _ => simp [Term.children] at member
   · simpa [localSlot, referenceLayout, pointer] using
-      (@LayoutOf.reference program ⟨[],[],0,default,false⟩ .shared (.runtimeRegion 0) .unit)
+      (@LayoutOf.reference program ⟨[],[],0,default,false,{}⟩ .shared (.runtimeRegion 0) .unit)
   · simp [referenceLayout, pointer]
   · intro id root found _
     simp [world, Table.get] at found
@@ -158,7 +158,7 @@ example (program : Kernel.Program) :
     ⟨0,.root (root := sourceRoot) (id := 0) rfl rfl⟩
 
 example (program : Kernel.Program) :
-    Typing.PatternType program.declarations ⟨[],[],0,default,false⟩
+    Typing.PatternType program.declarations ⟨[],[],0,default,false,{}⟩
       (.reference .unique (.bind localSlot)) (.reference .unique (.runtimeRegion 0) .unit) .shared [localSlot] := by
   apply Typing.PatternType.reference
   exact .borrowBind (mode := .shared) rfl .runtimeRegion

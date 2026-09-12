@@ -114,11 +114,12 @@ theorem World.write_initializedAncestors {before after : World} {address : Addre
 
 theorem World.LoanReleaseFrame.canEndStorage {before after : World} {id : Identity}
     (frame : before.LoanReleaseFrame after) (safe : CanEndStorage before id) : CanEndStorage after id := by
-  refine ⟨fun key loan found live => safe.1 key loan (frame.2 key loan found live) live,?_⟩
-  intro key available found active address member
-  have old : before.availability.get key = some available := by
-    simpa only [congrArg World.availability frame.1] using found
-  exact safe.2 key available old active address member
+  refine ⟨fun key loan found live => safe.1 key loan (frame.2 key loan found live) live,?_,?_⟩
+  · intro key available found active address member
+    have old : before.availability.get key = some available := by
+      simpa only [congrArg World.availability frame.1] using found
+    exact safe.2.1 key available old active address member
+  · simpa only [congrArg World.roots frame.1] using safe.2.2
 
 theorem AncestorLoan.live_first_child {world : World} {ancestor descendant : Identity} {last : Loan}
     (parents : world.LoanParents) (related : AncestorLoan world ancestor descendant)
@@ -354,7 +355,7 @@ theorem referenceRoot_cleanup {program : Kernel.Program} {host : Foreign.Model}
     { before with world := cleared } (.retire id next) clearedTyped.1 clearedInitialized ⟨loan,selected⟩
   have releasedRoot : released.roots.get id = some { root with value := none } := by
     simpa only [congrArg World.roots frame.1] using (Table.get_set before.world.roots id { root with value := none })
-  have releasedSafe : CanEndStorage released id := frame.canEndStorage safe
+  have releasedSafe : CanEndStorage released id := frame.canEndStorage (World.write_canEndStorage written safe)
   let retiredWorld := { released with roots := released.roots.set id { root with value := none, live := false, generation := root.generation+1 } }
   have retired : Retires released id retiredWorld := .vacant releasedRoot live rfl releasedSafe
   have retireRun : CleanupRun program host { before with world := released, task := .retire id next }

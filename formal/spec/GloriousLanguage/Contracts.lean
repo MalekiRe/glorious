@@ -58,7 +58,7 @@ def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop 
       (function.captures.length ≤ index ∧ input.origin = .argument (index-function.captures.length)))
 
 def InitialInvocation (program : Kernel.Program) (function : Function) (inputs : List InvocationInput) (state : State) : Prop :=
-  InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.ResumptionsAccounted ∧
+  InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.SuspensionsWellFormed ∧
   ∃ caller, state.task = .enter caller function (.supplied inputs) false ∧ state.frames = [] ∧
     caller.region ∈ state.world.liveRegions ∧ caller.activation < state.nextActivation ∧
     (∀ id root, state.world.roots.get id = some root → OwnedByActivation root state.nextActivation → root.live = false)
@@ -117,7 +117,7 @@ def ResourceAdmissionAt (program : Kernel.Program) (function : Function) (access
     (∀ input ∈ inputs, (∃ index, input.origin = .capture index) → input.access = access) → Run program host start trace finish →
     StateProgress program host function finish ∧
     (∀ result value, finish.task = .stopped result → finish.world.Stores result value →
-      Subtype program.declarations ⟨[],[],0,default,false⟩ value.type function.signature.result) ∧
+      Subtype program.declarations ⟨[],[],0,default,false,{}⟩ value.type function.signature.result) ∧
     (∀ result, finish.task = .stopped result →
       ∀ id root, finish.world.roots.get id = some root → root.live = true →
         (∃ old, start.world.roots.get id = some old) ∨ result.root = id ∨
@@ -173,6 +173,14 @@ def DropTraceSafe (before : World) (inputs : List InvocationInput) (events : Lis
       before.loans.get id = some loan →
       ∀ source destination, Event.move source destination ∈ events → ¬ source.Overlaps loan.referent)
 
+/-- Normal Drop completion ends the original loan and restores initialized
+borrowing storage. Source reassignment may install a new Self owner. This
+does not grant an arbitrary ancestor authority: ordinary release can also end
+an unreferenced parent, while retained caller authority is a frame obligation. -/
+def DropBorrowReturned (self : Term) (after : World) (id : Identity) (original : Loan) : Prop :=
+  after.loans.get id = some { original with live := false } ∧
+    ∃ current, after.Stores original.referent current ∧ current.type = self ∧ current.Initialized
+
 /-- Destructor restrictions are safety properties of every actual execution
 prefix, including a hook that subsequently diverges and has no final outcome. -/
 def DropContract (program : Kernel.Program) (self region : Term) (function : Function) : Prop :=
@@ -180,6 +188,11 @@ def DropContract (program : Kernel.Program) (self region : Term) (function : Fun
   (∀ host inputs start events finish, Foreign.Model.Lawful program host →
     InitialInvocation program function inputs start → Run program host start events finish →
     DropTraceSafe start.world inputs events) ∧
+  (∀ host observation, Foreign.Model.Lawful program host → Observes program host function observation →
+    ∀ result, observation.outcome = .normal result →
+    ∀ input ∈ observation.input, ∀ value id original, observation.before.Stores input.storage value →
+      value.head = .reference id → observation.before.loans.get id = some original →
+      DropBorrowReturned self observation.after id original) ∧
   ResourceAdmission program function
 
 theorem exact_interface_is_derived (program : Kernel.Program) (function : Function) :

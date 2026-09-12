@@ -19,6 +19,20 @@ structure Context where
 def Context.bind (context : Context) (localSlot : Local) : Context :=
   { context with locals := localSlot :: context.locals.filter (fun previous => previous.id != localSlot.id) }
 
+def Context.bindRegion (context : Context) (id : Identity) : Context :=
+  { context with static := { context.static with scope := context.static.scope.bindRegion id } }
+
+def Context.bindBrand (context : Context) (id : Identity) : Context :=
+  { context with static := { context.static with scope := context.static.scope.bindBrand id } }
+
+def Context.bindResumption (context : Context) (continuation : Option Local) : Context :=
+  match continuation.bind Local.resumptionBrand with
+  | none => context
+  | some brand => context.bindBrand brand
+
+def TermsScoped (context : Context) (terms : List Term) : Prop :=
+  ∀ term ∈ terms, term.Scoped context.static.scope
+
 def FieldType (program : Language.Program) (context : Language.Context)
     (type : Term) (index : Nat) (field : Term) (visible : Bool) : Prop :=
   (∃ fields, type = .tuple fields ∧ fields[index]? = some field) ∨
@@ -53,12 +67,13 @@ def PlacesType (program : Language.Program) (context : Context) (places : List P
 
 def CallSignature (program : Language.Program) (context : Language.Context) (id : DeclId)
     (arguments : List Term) (signature : Signature) : Prop :=
+  (∀ argument ∈ arguments, Kinding program context argument argument.kind) ∧ (
   (∃ declaration substitution,
     program.function id = some declaration ∧ Instantiates declaration.signature.generics arguments substitution ∧
     ConstraintsHold program context substitution declaration.signature.constraints ∧ signature = declaration.signature.instantiate substitution) ∨
   (∃ operation substitution,
     program.operation id = some operation ∧ Instantiates operation.signature.generics arguments substitution ∧
-    ConstraintsHold program context substitution operation.signature.constraints ∧ signature = operation.signature.instantiate substitution)
+    ConstraintsHold program context substitution operation.signature.constraints ∧ signature = operation.signature.instantiate substitution))
 
 def InvocationEnvironment (program : Language.Program) (context : Context)
     (call : Invocation) (receiver : Term) : Prop :=
@@ -88,7 +103,8 @@ inductive InvocationType (program : Language.Program) (context : Context) : Invo
 mutual
   inductive PatternType (program : Language.Program) (context : Language.Context) : Pattern → Term → Access → List Local → Prop where
     | wildcard {type access} : PatternType program context .wildcard type access []
-    | bind {localSlot type} : Equal program context localSlot.type type → PatternType program context (.bind localSlot) type .owned [localSlot]
+    | bind {localSlot type} : localSlot.type.Scoped context.scope → Equal program context localSlot.type type →
+        PatternType program context (.bind localSlot) type .owned [localSlot]
     | borrowBind {localSlot type mode region} : localSlot.type = .reference mode region type → Kinding program context region .region →
         PatternType program context (.bind localSlot) type (if mode = .shared then .shared else .unique) [localSlot]
     | scalar {scalar access} : scalar.Valid program.input.target → (∀ width bits, scalar ≠ .floating width bits) →
@@ -139,8 +155,10 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
   | construct {type variant fields fieldTypes head} : PlacesType program.declarations context fields fieldTypes →
       Execution.ConstructorHead program.declarations type variant fieldTypes head →
       WellKinded program.declarations context.static type .type → AtomType program context (.construct type variant fields) type
-  | closure {id arguments captures function} : Instance program id arguments function →
-      CapturesType program.declarations context captures (function.captures.map (·.type)) →
+  | closure {id arguments captures declaration signature fields} : program.declarations.function id = some declaration →
+      CallSignature program.declarations context.static id arguments signature →
+      CallableFields program.declarations id arguments fields →
+      CapturesType program.declarations context captures fields →
       AtomType program context (.closure id arguments captures) (.callable id arguments)
   | function {id arguments signature} : CallSignature program.declarations context.static id arguments signature →
       AtomType program context (.function id arguments) (.callable id arguments)
@@ -148,9 +166,10 @@ inductive AtomType (program : Kernel.Program) (context : Context) : Atom → Ter
       CallSignature program.declarations context.static id (family ++ item) signature →
       AtomType program context (.operation id family item) (.callable id (family ++ item))
   | label {id region type} : (id,region,type) ∈ context.labels →
-      AtomType program context (.label (.rigid id .brand 0)) (.label (.rigid id .brand 0) region type)
+      AtomType program context (.label (.scopedBrand id)) (.label (.scopedBrand id) region type)
   | primitive {id arguments operands binding substitution signature} : binding ∈ program.declarations.input.manifest.bindings →
       binding.declaration = id → Instantiates binding.signature.generics arguments substitution →
+      (∀ argument ∈ arguments, Kinding program.declarations context.static argument argument.kind) →
       signature = binding.signature.instantiate substitution →
       binding.ScalarSignature program.declarations.input.target arguments signature →
       PlacesType program.declarations context operands signature.parameters →
@@ -245,8 +264,10 @@ def HandledInstances (program : Kernel.Program) (context : Language.Context)
 mutual
   inductive CodeType (program : Kernel.Program) : Context → Code → Term → Prop where
     | result {context place actual result writable} : PlaceType program.declarations context place actual writable →
+        result.Scoped context.static.scope →
         Subtype program.declarations context.static actual result → CodeType program context (.result place) result
     | bind {context localSlot atom next result} : AtomType program context atom localSlot.type →
+        TermsScoped context (localSlot.type :: atom.terms) →
         CodeType program (context.bind localSlot) next result → CodeType program context (.bind localSlot atom next) result
     | evaluate {context localSlot code next result} : CodeType program context code localSlot.type →
         CodeType program (context.bind localSlot) next result → CodeType program context (.evaluate localSlot code next) result
@@ -256,26 +277,36 @@ mutual
     | discard {context place next type writable result} : PlaceType program.declarations context place type writable →
         CodeType program context next result → CodeType program context (.discard place next) result
     | invoke {context localSlot call next result} : InvocationType program.declarations context call →
+        TermsScoped context (localSlot.type :: call.terms) →
         Subtype program.declarations context.static call.signature.result localSlot.type → CodeType program (context.bind localSlot) next result →
         CodeType program context (.invoke localSlot call next) result
     | tail {context call result} : InvocationType program.declarations context call →
+        TermsScoped context (result :: call.terms) →
         Subtype program.declarations context.static call.signature.result result → CodeType program context (.tail call) result
-    | scope {context id body result} : CodeType program context body result → CodeType program context (.scope id body) result
+    | scope {context id body result} : id ∉ context.static.scope.regions → result.Scoped context.static.scope →
+        CodeType program (context.bindRegion id) body result → CodeType program context (.scope id body) result
     | label {context brand region type body} :
-        CodeType program { context with labels := (brand,.rigid region .region 0,type) :: context.labels } body type →
+        region ∈ context.static.scope.regions → context.static.scope.currentRegion = some region →
+        brand ∉ context.static.scope.brands → type.Scoped context.static.scope →
+        CodeType program { context.bindBrand brand with labels := (brand,.scopedRegion region,type) :: context.labels } body type →
         CodeType program context (.label brand region type body) type
     | choose {context subject arms type writable result} : PlaceType program.declarations context subject type writable →
+        result.Scoped context.static.scope →
         PatternCoverage program type arms → ArmsType program context arms type result →
         CodeType program context (.choose subject arms) result
     | handler {context id computation handler input result instances} : HandlerType program context handler input result →
+        TermsScoped context (input :: result :: instances) →
         HandledInstances program context.static handler instances →
         CodeType program { context with effects := .row instances [context.effects] } computation input →
         CodeType program context (.handle id computation handler) result
     | test {context localSlot subject pattern id next type writable bindings result carrier arguments} :
         PlaceType program.declarations context subject type writable →
-        PatternType program.declarations context.static pattern type .shared bindings →
+        id ∉ context.static.scope.brands →
+        TermsScoped (context.bindBrand id) (localSlot.type :: pattern.terms) →
+        PatternType program.declarations (context.bindBrand id).static pattern type .shared bindings →
         program.declarations.input.manifest.testCarrier = some carrier → localSlot.type = .nominal carrier.declaration arguments →
-        CodeType program (context.bind localSlot) next result → CodeType program context (.test localSlot subject pattern id next) result
+        result.Scoped context.static.scope →
+        CodeType program ((context.bindBrand id).bind localSlot) next result → CodeType program context (.test localSlot subject pattern id next) result
     | endLoan {context handle next mode region type writable result} :
         PlaceType program.declarations context handle (.reference mode region type) writable →
         CodeType program context next result → CodeType program context (.endLoan handle next) result
@@ -286,10 +317,13 @@ mutual
         CodeType program context (.closeAvailable place next) result
     | reserve {context localSlot brand places next types result region} :
         ListRel (fun place type => ∃ writable, PlaceType program.declarations context place type writable) places types →
-        localSlot.type = .available (.rigid brand .brand 0) region types → CodeType program (context.bind localSlot) next result →
+        brand ∉ context.static.scope.brands → TermsScoped context (region :: result :: types) →
+        localSlot.type = .available (.scopedBrand brand) region types →
+        CodeType program ((context.bindBrand brand).bind localSlot) next result →
         CodeType program context (.reserve localSlot brand places next) result
-    | abort {context result} : CodeType program context .abort result
-    | bottom {context code result} : CodeType program context code .bottom → CodeType program context code result
+    | abort {context result} : result.Scoped context.static.scope → CodeType program context .abort result
+    | bottom {context code result} : result.Scoped context.static.scope →
+        CodeType program context code .bottom → CodeType program context code result
 
   inductive ArmsType (program : Kernel.Program) : Context → List Arm → Term → Term → Prop where
     | nil {context input output} : ArmsType program context [] input output
@@ -300,6 +334,7 @@ mutual
 
   inductive HandlerType (program : Kernel.Program) : Context → Handler → Term → Term → Prop where
     | attached {context result completion operations captures input types} : CapturesType program.declarations context captures types →
+        TermsScoped context (input :: result :: captures.map (·.type)) →
         CompletionType program { context with locals := Execution.CaptureLocals captures } completion input result →
         OperationArmsType program { context with locals := Execution.CaptureLocals captures } operations result →
         HandlerType program context (.attached result completion operations captures) input result
@@ -313,17 +348,28 @@ mutual
   inductive OperationArmsType (program : Kernel.Program) : Context → List OperationArm → Term → Prop where
     | nil {context result} : OperationArmsType program context [] result
     | cons {context id family item patterns continuation body rest result operation signature bindings output} :
-        Execution.OperationInstance program id (family ++ item) operation signature →
+        program.declarations.operation id = some operation →
+        CallSignature program.declarations context.static id (family ++ item) signature →
         PatternsType program.declarations context.static patterns signature.parameters .owned bindings →
         ((operation.terminal = true ∧ continuation = none ∧ output = result) ∨
           (operation.terminal = false ∧ ∃ quantity, operation.quantity = some quantity ∧
             ((continuation = none ∧ quantity.Contains 1 ∧ output = signature.result) ∨
               (∃ localSlot brand, continuation = some localSlot ∧
-                localSlot.type = .continuation (.rigid brand .brand 0) signature.result result signature.effects quantity ∧ output = result)))) →
-        CodeType program { context with locals := bindings ++ continuation.toList ++ context.locals } body output →
+                localSlot.type = .continuation (.scopedBrand brand) signature.result result signature.effects quantity ∧ output = result)))) →
+        (∀ brand, continuation.bind Local.resumptionBrand = some brand → brand ∉ context.static.scope.brands) →
+        TermsScoped (context.bindResumption continuation) (output :: continuation.toList.map (·.type)) →
+        CodeType program { context.bindResumption continuation with locals := bindings ++ continuation.toList ++ context.locals } body output →
         OperationArmsType program context rest result →
         OperationArmsType program context (.clause id family item patterns continuation body :: rest) result
 end
+
+/-- The source body and runtime-entry typing theorem share this context. -/
+def FunctionContext (function : Function) (module : ModuleId) : Context :=
+  ⟨⟨function.signature.generics,function.signature.constraints,0,module,false,
+      ⟨[function.activationRegion],function.namedExit.toList,some function.activationRegion⟩⟩,
+    function.captures ++ function.parameters,
+    function.namedExit.toList.map (fun id => (id,.scopedRegion function.activationRegion,function.signature.result)),
+    function.signature.effects,none⟩
 
 def FunctionType (program : Kernel.Program) (function : Function) : Prop :=
   ∃ declaration,
@@ -331,9 +377,8 @@ def FunctionType (program : Kernel.Program) (function : Function) : Prop :=
     (function.parameters.map (·.type)) = function.signature.parameters ∧
     (function.parameters.map (·.id)).Nodup ∧ (function.captures.map (·.id)).Nodup ∧
     (∀ formal ∈ function.parameters, ∀ capture ∈ function.captures, formal.id ≠ capture.id) ∧
-    CodeType program ⟨⟨function.signature.generics,function.signature.constraints,0,declaration.header.module,false⟩,
-      function.captures ++ function.parameters,
-      function.namedExit.toList.map (fun id => (id,.rigid function.activationRegion .region 0,function.signature.result)),function.signature.effects,none⟩
+    (∀ term ∈ function.signature.terms ++ (function.captures ++ function.parameters).map (·.type), term.ScopeClosed) ∧
+    CodeType program (FunctionContext function declaration.header.module)
       function.body function.signature.result
 
 end Glorious.Language.Typing

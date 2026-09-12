@@ -15,13 +15,6 @@ theorem RegionPermutation.function_involutive (permutation : RegionPermutation) 
   simp only [RegionPermutation.function,Kernel.Function.mapTerms_comp]
   exact function.mapTerms_eq_self _ (fun term _ => permutation.term_involutive term)
 
-theorem RegionPermutation.occurs (permutation : RegionPermutation) {part term : Term} (occurs : Occurs part term) :
-    Occurs (permutation.term part) (permutation.term term) := by
-  induction occurs with
-  | here => exact .here
-  | child member _ ih =>
-    exact .child (by rw [permutation.term_children]; exact List.mem_map.mpr ⟨_,member,rfl⟩) ih
-
 theorem RegionPermutation.substitution_append (permutation : RegionPermutation) (first second : Substitution) :
     permutation.substitution (first ++ second) = permutation.substitution first ++ permutation.substitution second := by
   simp only [RegionPermutation.substitution,List.map_append]
@@ -29,11 +22,6 @@ theorem RegionPermutation.substitution_append (permutation : RegionPermutation) 
 theorem Program.effect_lookup {program : Program} {id : DeclId} {effect : EffectDefinition}
     (found : program.effect id = some effect) : program.lookup id = some (.effect effect) := by
   unfold Program.effect at found
-  split at found <;> simp_all
-
-theorem Program.trait_lookup {program : Program} {id : DeclId} {trait : TraitDefinition}
-    (found : program.trait id = some trait) : program.lookup id = some (.trait trait) := by
-  unfold Program.trait at found
   split at found <;> simp_all
 
 theorem DomainValid.permute {program : Program} (valid : ProgramWellFormed program) {context : Context} {term : Term}
@@ -319,8 +307,8 @@ theorem Typing.PatternType.permute {program : Program} (valid : ProgramWellForme
   all_goals simp only [Kernel.Pattern.mapTerms,RegionPermutation.term,Term.renameRuntimeRegions,List.map_nil,List.map_cons,List.map_append]
   · intro type access
     exact .wildcard
-  · intro localSlot type equal
-    exact .bind (equal.permute valid permutation)
+  · intro localSlot type admitted equal
+    exact .bind (admitted.permute permutation) (equal.permute valid permutation)
   · intro localSlot type mode region shape kinded
     refine .borrowBind ?_ (kinded.permute permutation)
     simpa only [Kernel.Local.mapTerms,RegionPermutation.term,Term.renameRuntimeRegions] using congrArg permutation.term shape
@@ -419,7 +407,7 @@ theorem ProgramWellFormed.binding_signature_lexical {program : Program} (valid :
   exact manifest.2.2.2.2 binding member
 
 theorem Typing.AtomType.permute {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
-    (inventory : Kernel.BodyInventory program) {context : Typing.Context} {atom : Kernel.Atom} {type : Term}
+    (_inventory : Kernel.BodyInventory program) {context : Typing.Context} {atom : Kernel.Atom} {type : Term}
     (typed : Typing.AtomType program context atom type) (permutation : RegionPermutation) :
     Typing.AtomType program (permutation.typingContext context) (atom.mapTerms permutation.term) (permutation.term type) := by
   cases typed <;> simp only [Kernel.Atom.mapTerms,RegionPermutation.term,Term.renameRuntimeRegions,List.map_append]
@@ -429,19 +417,21 @@ theorem Typing.AtomType.permute {program : Kernel.Program} (valid : ProgramWellF
     exact .borrow (located.permute valid permutation) (addressable.permute valid permutation) (kinded.permute valid permutation) writable
   case construct fields head kinded =>
     exact .construct (fields.permute valid permutation) (head.permute valid permutation) (kinded.permute valid permutation)
-  case closure selected captures =>
-    refine .closure (selected.permute valid inventory permutation) ?_
-    simpa only [RegionPermutation.function,Kernel.Function.mapTerms,Kernel.Function.transformTerms,
-      Kernel.Local.mapTerms,List.map_map,Function.comp_def,RegionPermutation.term] using captures.permute valid permutation
+  case closure found selected fields captures =>
+    exact .closure found (selected.permute valid permutation) (fields.permute valid permutation)
+      (captures.permute valid permutation)
   case function selected => exact .function (selected.permute valid permutation)
   case operation found selected =>
     exact .operation found (by simpa only [List.map_append,RegionPermutation.term,RegionPermutation.typingContext] using selected.permute valid permutation)
   case label member =>
     exact .label (List.mem_map.mpr ⟨_,member,rfl⟩)
-  case primitive member identity instantiated signature scalar operands safety effects =>
-    refine .primitive member identity (instantiated.permute permutation) ?_ (scalar.permute permutation)
+  case primitive member identity instantiated kinded signature scalar operands safety effects =>
+    refine .primitive member identity (instantiated.permute permutation) ?_ ?_ (scalar.permute permutation)
       (operands.permute valid permutation) safety (effects.permute valid permutation)
-    rw [signature,permutation.signature_instantiate,permutation.lexical_signature (valid.binding_signature_lexical member)]
+    · intro argument member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      simpa only [permutation.term_kind,RegionPermutation.typingContext] using (kinded original present).permute permutation
+    · rw [signature,permutation.signature_instantiate,permutation.lexical_signature (valid.binding_signature_lexical member)]
   case available located =>
     apply Typing.AtomType.available
     simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using located.permute valid permutation

@@ -34,3 +34,10 @@ import GloriousLanguage.RuntimeBodyTyping
 import GloriousLanguage.DropDispatch
 import GloriousLanguage.ForeignAuthority
 import GloriousLanguage.ForeignRegistration
+import GloriousLanguage.ForeignSuspension
+import GloriousLanguage.ScopeClosing
+import GloriousLanguage.ContextTyping
+import GloriousLanguage.DropReturn
+import GloriousLanguage.DropHandle
+import GloriousLanguage.ProjectionKinding
+import GloriousLanguage.DefinitionalCoherence
