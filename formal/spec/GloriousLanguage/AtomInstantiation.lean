@@ -16,6 +16,17 @@ def AtomHomomorphism (map : Term → Term) : Prop :=
     | .runtimeRegion id => map (.runtimeRegion id)
     | other => other.mapChildren map
 
+theorem AtomHomomorphism.comp {first second : Term → Term}
+    (outer : AtomHomomorphism first) (inner : AtomHomomorphism second) :
+    AtomHomomorphism (first ∘ second) := by
+  intro term
+  cases term <;> try rfl
+  all_goals simp only [Function.comp_def]
+  all_goals rw [inner]
+  all_goals simp only [Term.mapChildren]
+  all_goals rw [outer]
+  all_goals simp only [Term.mapChildren,List.map_map,Function.comp_def]
+
 theorem Term.mapChildren_congr (term : Term) {first second : Term → Term}
     (agree : ∀ child ∈ term.children, first child = second child) :
     term.mapChildren first = term.mapChildren second := by

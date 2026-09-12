@@ -80,32 +80,35 @@ private theorem atoms_child {program : Program} {context : Context} {term child 
     {f : Term → Term}
     (atoms : ∀ atom, Occurs atom term → match atom with
       | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program context (f atom) kind
-      | .runtimeRegion _ => Kinding program context (f atom) .region
+      | .runtimeRegion _ | .scopedRegion _ => Kinding program context (f atom) .region
+      | .scopedBrand _ => Kinding program context (f atom) .brand
       | _ => True)
     (member : child ∈ term.children) :
     ∀ atom, Occurs atom child → match atom with
       | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program context (f atom) kind
-      | .runtimeRegion _ => Kinding program context (f atom) .region
+      | .runtimeRegion _ | .scopedRegion _ => Kinding program context (f atom) .region
+      | .scopedBrand _ => Kinding program context (f atom) .brand
       | _ => True :=
   fun atom occurs => atoms atom (.child member occurs)
 
-/-- One structural producer transports lexical parameters, rigid universals
-and inference variables. Evidence is required only at actual occurrences;
-universe lowering does not require an unrelated whole-context inequality. -/
-theorem Kinding.map_atoms {program : Program} {source target : Context} {term : Term} {kind : Kind}
+/-- One structural producer transports parameter, generative, inference and
+scoped atoms. Evidence is required only at actual occurrences; neither
+universe lowering nor scoped-atom abstraction assumes a whole-context map. -/
+theorem Kinding.map_scoped_atoms {program : Program} {source target : Context} {term : Term} {kind : Kind}
     (kinded : Kinding program source term kind) (f : Term → Term)
     (shape : ∀ term, f term = match term with
       | .parameter id kind => f (.parameter id kind)
       | .rigid id kind level => f (.rigid id kind level)
       | .variable id kind level => f (.variable id kind level)
       | .runtimeRegion id => f (.runtimeRegion id)
+      | .scopedRegion id => f (.scopedRegion id)
+      | .scopedBrand id => f (.scopedBrand id)
       | other => other.mapChildren f)
     (atoms : ∀ atom, Occurs atom term → match atom with
       | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program target (f atom) kind
-      | .runtimeRegion _ => Kinding program target (f atom) .region
-      | _ => True)
-    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
-    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands) :
+      | .runtimeRegion _ | .scopedRegion _ => Kinding program target (f atom) .region
+      | .scopedBrand _ => Kinding program target (f atom) .brand
+      | _ => True) :
     Kinding program target (f term) kind := by
   revert atoms
   induction kinded <;> intro atoms
@@ -113,10 +116,10 @@ theorem Kinding.map_atoms {program : Program} {source target : Context} {term : 
   case rigid => exact atoms _ .here
   case «variable» => exact atoms _ .here
   case runtimeRegion => exact atoms _ .here
+  case scopedRegion => exact atoms _ .here
+  case scopedBrand => exact atoms _ .here
   all_goals rw [shape]; simp only [Term.mapChildren]
   case quantity bounds => exact .quantity bounds
-  case scopedRegion member => exact .scopedRegion (regions _ member)
-  case scopedBrand member => exact .scopedBrand (brands _ member)
   case runtimeBrand => exact .runtimeBrand
   case unit => exact .unit
   case bottom => exact .bottom
@@ -230,6 +233,37 @@ theorem Kinding.map_atoms {program : Program} {source target : Context} {term : 
         exact ih original present (atoms_child atoms (List.mem_append_right _ present)))
   case principal => exact .principal
   case static => exact .static
+
+/-- Existing atom actions retain their API. Since they leave scoped names
+unchanged, their scoped-leaf evidence follows from the actual source kinding
+and the declared scope inclusion, through the same structural producer. -/
+theorem Kinding.map_atoms {program : Program} {source target : Context} {term : Term} {kind : Kind}
+    (kinded : Kinding program source term kind) (f : Term → Term)
+    (shape : ∀ term, f term = match term with
+      | .parameter id kind => f (.parameter id kind)
+      | .rigid id kind level => f (.rigid id kind level)
+      | .variable id kind level => f (.variable id kind level)
+      | .runtimeRegion id => f (.runtimeRegion id)
+      | other => other.mapChildren f)
+    (atoms : ∀ atom, Occurs atom term → match atom with
+      | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program target (f atom) kind
+      | .runtimeRegion _ => Kinding program target (f atom) .region
+      | _ => True)
+    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
+    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands) :
+    Kinding program target (f term) kind := by
+  apply kinded.map_scoped_atoms f (by
+    intro term
+    cases term <;> try rfl
+    all_goals exact shape _)
+  intro atom occurs
+  cases atom <;> try exact atoms _ occurs
+  case scopedRegion id =>
+    rw [shape]
+    exact .scopedRegion (regions _ (kinded.scoped.1 id occurs))
+  case scopedBrand id =>
+    rw [shape]
+    exact .scopedBrand (brands _ (kinded.scoped.2 id occurs))
 
 /-- Ordinary simultaneous substitution and alpha-renaming retain their
 existing API, now as consumers of the same occurrence-indexed atom producer. -/

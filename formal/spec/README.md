@@ -75,7 +75,10 @@ or a dependency of this project.
   and all sixteen mutual static judgments.
 - `FreshInstantiation`, `FreshParametricity`: concrete fresh-universe inspection
   specializes to the caller's actual generic substitution, including nested
-  universal requirements; the general parameter-cut bridge remains open.
+  universal requirements.
+- `GeneralAtomTransport`, `LogicalParameterCut`, `LogicalInstantiation`: general
+  hygienic parameter cut, actual generic-table composition and closed equality,
+  with derived preimages for caller-only parameters, regions and brands.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

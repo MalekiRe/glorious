@@ -1040,8 +1040,8 @@ domain. The shared static transport and actual assumption cut then establish
 `Entails.raiseUniverse` for arbitrary larger universes under kinded assumptions
 and a kinded goal. Universal introduction still covers every newly admitted
 value; no quantifier rule, semantic domain or source meaning is weakened.
-The general parameter cut, source-reduction confluence and the dependent
-conversion-safe Drop inversion remain open. These results do not establish full
+At that checkpoint, the general parameter cut, source-reduction confluence and
+dependent conversion-safe Drop inversion remained open. These results do not establish full
 language soundness or close the ambient caller-storage obligations above.
 The frozen combined gate passes 163 targets with warnings as errors, including
 the actual head-inference/coherence admission consumers, source and match entry,
@@ -1064,17 +1064,47 @@ evidence for the source requirements. Duplicate and compound arguments and
 nested universal requirements are covered by the general proof; no syntactic
 constraint replacement or postulated semantic transport is used.
 
-This closes specialization of a genuinely fresh inspection proof, not the
-remaining bridge from an arbitrary parameter-context derivation to that proof.
-That bridge must handle caller-only parameters, scoped regions and scoped
-brands in universally chosen arguments, using distinct caller and current
-valuations and actual source preimages. Source-reduction confluence,
+This closes specialization of a genuinely fresh inspection proof. The bridge
+from arbitrary parameter-context derivations was still open at that checkpoint:
+caller-only parameters, scoped regions and scoped brands in universally chosen
+arguments require distinct caller/current valuations and actual source preimages.
+Source-reduction confluence,
 conversion-safe Drop inversion, ambient caller-slot privacy and full-language
 soundness are still open.
 The frozen fresh-specialization batch passes its strict 166-job combined gate,
 including actual head-inference and coherence admission, source match entry,
 whole-machine control, exterior storage separation and runtime transport.
 Existing example targets and the unresolved Drop aggregate were not run.
+
+`LogicalParameterCut` now closes that general hygienic parameter cut.
+`Entails.substitute` and `Entails.substitutes` derive actual target entailment
+and its authoritative substitution graph from the original source derivation,
+admitted source predicate and assumptions, caller-kinded replacements, forward
+universe/scope inclusions and actual caller evidence for the source requirements.
+Substitutions may be noninjective and compound; nested universal requirements
+do not require backward inclusion of caller binders, regions or brands.
+
+`FreshArgumentPreimage` and `FreshSubstitutionModel` construct the previously
+missing caller-only atom preimages. Kinding and term interpretation generalize
+their existing atom-map producers; old interfaces are wrappers, not duplicated
+structural proofs. `CurrentAtomInterpretation` keeps source-current and fixed
+caller valuations distinct. `AtomOpening` derives the actual raw-table treatment
+of absent declaration keys. `GeneralAtomTransport` consumes these in all sixteen
+mutual judgments, and the former fresh-only case proof is removed in favor of
+the shared theorem. The original `LogicalSubstitution` graph-congruence module
+is preserved as an upstream dependency, not overwritten by the new cut.
+
+`LogicalInstantiation` consumes the result for actual opened predicates and
+equality: nested generic value-table substitution composes through the existing
+hygienic relation, and opening an admitted source equality into an assumption-free
+caller yields genuine `DefinitionallyEqual` after its real requirements are
+discharged. This does not establish positive source-reduction preservation,
+global confluence or conversion-safe Drop inversion; those remain the next
+dependent obligations, alongside ambient invocation and complete return cleanup.
+The source-only combined gate passes 186 jobs with warnings as errors, including
+existing fresh specialization, source/head admission, runtime transport and the
+actual whole-machine caller-private consumer. No example or failing aggregate
+target was used as evidence.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving

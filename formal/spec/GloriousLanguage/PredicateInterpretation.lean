@@ -66,27 +66,42 @@ theorem Term.mapChildren_ne_parameter {term : Term} (notParameter : ∀ id kind,
   all_goals cases same
   exact notParameter _ _ rfl
 
+/-- Every simultaneous parameter map is interpreted by one initial
+valuation. Ordinary substitution, alpha-renaming and kind-totalized proof
+substitution consume this same constructor-level interpretation theorem. -/
+theorem TermAlgebra.eval_parameter_map {α : Type u} (algebra : TermAlgebra α)
+    (valuation : Valuation α) (map : Term → Term)
+    (nodes : ∀ term, (∀ id kind, term ≠ .parameter id kind) → map term = term.mapChildren map)
+    (term : Term) :
+    algebra.eval valuation (map term) =
+      algebra.eval (fun id kind => algebra.eval valuation (map (.parameter id kind))) term := by
+  by_cases parameter : ∃ id kind, term = .parameter id kind
+  · obtain ⟨id,kind,rfl⟩ := parameter
+    simp only [TermAlgebra.eval_parameter]
+  · have notParameter : ∀ id kind, term ≠ .parameter id kind := fun id kind same => parameter ⟨id,kind,same⟩
+    rw [nodes term notParameter]
+    rw [algebra.eval_node _ (Term.mapChildren_ne_parameter notParameter _),algebra.eval_node _ notParameter]
+    rw [← algebra.sameHead (Term.sameHead_mapChildren term _),Term.mapChildren_children,List.map_map]
+    congr 1
+    apply List.map_congr_left
+    intro child member
+    exact algebra.eval_parameter_map valuation map nodes child
+termination_by term
+decreasing_by exact Term.child_sizeOf member
+
 /-- The single source substitution operation is interpreted by replacing
 parameter valuations simultaneously, not by re-evaluating inserted terms. -/
 theorem TermAlgebra.eval_substitute {α : Type u} (algebra : TermAlgebra α)
     (valuation : Valuation α) (substitution : Substitution) (term : Term) :
     algebra.eval valuation (term.substitute substitution) =
       algebra.eval (algebra.substituteValuation valuation substitution) term := by
-  by_cases parameter : ∃ id kind, term = .parameter id kind
-  · obtain ⟨id,kind,rfl⟩ := parameter
-    cases found : substitution.get id <;>
-      simp only [Term.substitute,found,Option.getD,TermAlgebra.eval_parameter,
-        TermAlgebra.substituteValuation,Option.map]
-  · have notParameter : ∀ id kind, term ≠ .parameter id kind := fun id kind same => parameter ⟨id,kind,same⟩
-    rw [Term.substitute_eq_mapChildren substitution notParameter]
-    rw [algebra.eval_node _ (Term.mapChildren_ne_parameter notParameter _),algebra.eval_node _ notParameter]
-    rw [← algebra.sameHead (Term.sameHead_mapChildren term _),Term.mapChildren_children,List.map_map]
-    congr 1
-    apply List.map_congr_left
-    intro child member
-    exact algebra.eval_substitute valuation substitution child
-termination_by term
-decreasing_by exact Term.child_sizeOf member
+  rw [algebra.eval_parameter_map valuation (Term.substitute substitution)
+    (fun _ notParameter => Term.substitute_eq_mapChildren substitution notParameter)]
+  apply congrArg (fun current => algebra.eval current term)
+  funext id kind
+  cases found : substitution.get id <;>
+    simp only [Term.substitute,found,Option.getD,TermAlgebra.eval_parameter,
+      TermAlgebra.substituteValuation,Option.map]
 
 theorem Term.renameParameters_eq_mapChildren (rename : Identity → Identity) {term : Term}
     (notParameter : ∀ id kind, term ≠ .parameter id kind) :
@@ -98,19 +113,9 @@ theorem TermAlgebra.eval_renameParameters {α : Type u} (algebra : TermAlgebra �
     (valuation : Valuation α) (rename : Identity → Identity) (term : Term) :
     algebra.eval valuation (term.renameParameters rename) =
       algebra.eval (fun id kind => valuation (rename id) kind) term := by
-  by_cases parameter : ∃ id kind, term = .parameter id kind
-  · obtain ⟨id,kind,rfl⟩ := parameter
-    simp only [Term.renameParameters,TermAlgebra.eval_parameter]
-  · have notParameter : ∀ id kind, term ≠ .parameter id kind := fun id kind same => parameter ⟨id,kind,same⟩
-    rw [Term.renameParameters_eq_mapChildren rename notParameter]
-    rw [algebra.eval_node _ (Term.mapChildren_ne_parameter notParameter _),algebra.eval_node _ notParameter]
-    rw [← algebra.sameHead (Term.sameHead_mapChildren term _),Term.mapChildren_children,List.map_map]
-    congr 1
-    apply List.map_congr_left
-    intro child member
-    exact algebra.eval_renameParameters valuation rename child
-termination_by term
-decreasing_by exact Term.child_sizeOf member
+  rw [algebra.eval_parameter_map valuation (Term.renameParameters rename)
+    (fun _ notParameter => Term.renameParameters_eq_mapChildren rename notParameter)]
+  simp only [Term.renameParameters,TermAlgebra.eval_parameter]
 
 /-- Renaming a quantified binder list changes its keys, never its chosen
 caller values. Injection is required only on those actual binder identities. -/

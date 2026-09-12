@@ -60,6 +60,7 @@ import GloriousLanguage.LogicalSubstitution
 import GloriousLanguage.LogicalUniverse
 import GloriousLanguage.LogicalPredicateInterpretation
 import GloriousLanguage.FreshParametricity
+import GloriousLanguage.LogicalInstantiation
 import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence
 import GloriousLanguage.EffectContextTyping
