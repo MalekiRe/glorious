@@ -278,6 +278,15 @@ or a dependency of this project.
   recursion and the unused `referenceRoot_cleanup`/`lendsResident_cleanup` chain
   were removed rather than re-established, since `EndsLoan.restored` now carries
   `ResourcesClosed`, which that obligation did not supply.
+- `CleanupDrain` (continued): the destructor recursion's inventory and first
+  transport are checked — `World.Destroys` is the inductive tree predicate (a
+  stored disposable shell whose fields are holes or further destructible
+  residents, with the owning permission and the pending-return readiness of its
+  custody) and `World.Destroys.write_disjoint` shows a write apart from the whole
+  subtree preserves it (shell, permission, loan-table readiness and every child,
+  with the prefix law chaining the apartness). The recursion theorem
+  (`CleanupRun.destroy_tree`) that consumes them is NOT yet stated; the remaining
+  transports are an ending-row step, the `RequestReturns` map and `Retires`.
 - `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
   is discharged from each input's own readiness (permitted rows, the allocation
   claim's owning row, the erased port's handed chain), with the one shape

@@ -1,4 +1,5 @@
 import GloriousLanguage.CleanupDestruction
+import GloriousLanguage.ForeignRootFraming
 import GloriousLanguage.InvocationLeaseCleanup
 
 /-! Execution of the general destructor continuation: the pending-return list a
@@ -479,3 +480,75 @@ theorem CleanupRun.cleanup_root_shell_retired {program : Kernel.Program} {host :
       Table.get_set released.world.roots id { root with value := none, live := false, generation := root.generation + 1 }, rfl⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- The recursive destructor's tree inventory: a stored disposable shell (no
+pending drop hook, no continuation/reference/available head, owning permission at
+its own address, and the pending-return readiness the drain reads for the custody
+its relinquishment marks) whose fields are each either a hole or a further
+destructible resident. -/
+inductive World.Destroys (program : RuntimeProgram) (world : World) : Address → Prop where
+  | resident {address value} : world.Stores address value →
+      MayDispose program.declarations value → value.shellLive = false →
+      (∀ inner, value.head ≠ .continuation inner) → (∀ inner, value.head ≠ .reference inner) →
+      (∀ inner, value.head ≠ .available inner) →
+      Permitted world .owner .owned address →
+      (∀ id loan, (world.RequestReturns (.resident value.owner)).loans.get id = some loan →
+        loan.live = true → loan.kind = .owning ∨ loan.kind = .storageBorrow) →
+      (∀ id loan, (world.RequestReturns (.resident value.owner)).loans.get id = some loan →
+        (∀ parent, loan.parent = some parent →
+          (world.RequestReturns (.resident value.owner)).loans.get parent ≠ none) ∧
+        (∀ guard ∈ loan.guards, (world.RequestReturns (.resident value.owner)).loans.get guard ≠ none)) →
+      (∀ (index : Nat) (child : Value), value.fields[index]? = some (some child) →
+        World.Destroys program world (address.child index)) →
+      World.Destroys program world address
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- A write that is apart from a destructible resident leaves that resident
+destructible: its stored shell, its owning permission, its custody's
+pending-return readiness (the loan table is untouched by a write) and its
+children (each apart from the write by the prefix law) all survive. -/
+theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World} {address : Address}
+    (tree : World.Destroys program world address) {target : Address} {replacement : Option Value} {after : World}
+    (written : world.write target replacement = some after)
+    (deep : ∀ probe, address.Prefix probe → ¬ target.Overlaps probe) :
+    World.Destroys program after address := by
+  revert deep
+  induction tree with
+  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+    intro deep
+    have framed := World.write_disjoint written (deep address ⟨rfl,rfl,⟨[],by simp⟩⟩)
+    have storedAfter : after.Stores address value := by
+      simpa only [World.Stores,framed] using stored
+    have loansAfter : after.loans = world.loans := by rw [World.write_rest written]
+    have located : ∃ root, after.root address = some root :=
+      (Option.bind_eq_some_iff.mp storedAfter).imp fun _ found => found.1
+    have permissionAfter : Permitted after .owner .owned address :=
+      ⟨located,fun id loan found live overlap conflict =>
+        permission.2 id loan (by simpa only [loansAfter] using found) live overlap conflict⟩
+    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_
+    · intro id loan found live
+      have previous : (world.RequestReturns (.resident value.owner)).loans.get id = some loan := by
+        simpa only [World.RequestReturns,loansAfter] using found
+      exact kinds id loan previous live
+    · intro id loan found
+      have previous : (world.RequestReturns (.resident value.owner)).loans.get id = some loan := by
+        simpa only [World.RequestReturns,loansAfter] using found
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have held := (ancestry id loan previous).1 parent link
+        simpa only [World.RequestReturns,loansAfter] using held
+      · have held := (ancestry id loan previous).2 guard member
+        simpa only [World.RequestReturns,loansAfter] using held
+    · intro index child selected
+      exact ih index child selected
+        (fun probe included => deep probe (Address.Prefix.trans (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included))
+
+end Glorious.Language
