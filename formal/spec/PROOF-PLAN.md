@@ -825,20 +825,21 @@ loans, and it reports `LoanReleaseFrame`), so the parent-shell fact obtained by
 applying `World.Stores.write_child_none` to the clear must be transported across
 that drain before the loop can carry it. Four plumbing details of that step
 theorem are now known and are recorded so the next attempt does not rediscover
-them: the child's own shell witness must be reconciled with the supplied shell
-(`simpa only [← valueEq] using treeX` for the disposal permission, the shell flag
-and the three head exclusions); the drain's `kinds`/`ancestry` premises are stated
-about the state's `world` projection, so the restamped facts must be bridged
-through the clear (`clearedLoans` by `rw [World.write_rest written]`, then
-rewriting both the found fact and the goal); the drain call must pin `program` and
-`host` or they stay metavariables; and the run's trace must be existential,
-because the shell step emits exactly `[.destroy address owner]` while the drain
-emits its own `.loanEnd` events. What still resists is the append's middle state:
-`destroy_shell`'s conclusion names it as a record literal, and the drain's start
-does not unify with that literal even though it prints identically, so the clean
-fix is for `destroy_shell` (or `shell_done_exists`) to bind the middle state
-existentially and report its task and world as equalities, after which the append
-is over variables.
+them — and all four are applied in the landed `CleanupRun.destroy_child`, which
+executes one child's destruction, drain and parent re-read in a single run; what
+that theorem leaves is the loop restatement that uses it (carrying the parent
+shell it now returns and the vacancies), and the per-node custody threading. The
+details, for reference: reconcile the child's own shell witness with the supplied
+shell (`simpa only [← valueEq] using treeX` for the disposal permission, the shell
+flag and the three head exclusions); bridge the drain's `kinds`/`ancestry` from
+the restamped world to the cleared world (`clearedLoans` by
+`rw [World.write_rest written]`, rewriting both the found fact and the goal); pin
+`program` and `host` on the drain call or they stay metavariables; and make the
+run's trace existential, since the shell step emits exactly
+`[.destroy address owner]` while the drain emits its own `.loanEnd` events. The
+append itself only works because `destroy_shell` now binds its middle state as a
+variable and reports its world and task as equalities — a record literal that
+prints identically does not unify.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered
