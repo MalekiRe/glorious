@@ -1,5 +1,6 @@
 import GloriousLanguage.CleanupExecution
 import GloriousLanguage.CustodyDischarge
+import GloriousLanguage.ProjectionStorage
 
 /-! Actual outcomes of the machine's destructor and loan-ending paths.
 
@@ -336,6 +337,41 @@ theorem CleanupRun.destroy_fields_loop {program : Kernel.Program} {host : Foreig
         step field rest ({ before with task := .destroy context (address.child field) authority (.destroyFields context address authority rest next) }) rfl
       obtain ⟨after, restRun, finished⟩ := ih running
       exact ⟨after, (CleanupRun.field_next task).append run |>.append restRun, finished⟩
+
+/-- The nested node's shell destruction, with every write derived: the shell is
+structurally destroyed, its already-empty slots are disposed by the two real
+steps, and the clear that finishes it exists because the shell is still stored
+after its custody's pending returns were restamped. -/
+theorem CleanupRun.destroy_shell {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {address : Address} {authority : Authority} {next : Task}
+    {value : Value}
+    (task : before.task = .destroy context address authority next)
+    (stored : before.world.Stores address value)
+    (disposable : MayDispose program.declarations value)
+    (shell : value.shellLive = false ∨ DropHook program.declarations value.type none)
+    (noContinuation : ∀ id, value.head ≠ .continuation id)
+    (noReference : ∀ id, value.head ≠ .reference id)
+    (noAvailable : ∀ id, value.head ≠ .available id)
+    (holes : ∀ index, index < value.fields.length → value.fields[index]? = some none)
+    (permission : Permitted before.world authority .owned address)
+    (handed : before.world.CustodyHandedOff (.resident value.owner)) :
+    ∃ after, CleanupRun program host before [.destroy address value.owner]
+      ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
+  have structural : Step program host before none
+      { before with task := .destroyFields context address authority ((List.range value.fields.length).reverse) next } :=
+    Or.inl (LocalStep.destroyStructural task stored disposable permission shell noContinuation noReference noAvailable)
+  have vacant : ∀ field ∈ (List.range value.fields.length).reverse, before.world.Vacant (address.child field) := by
+    intro field member
+    have bound : field < value.fields.length := by
+      simpa only [List.mem_reverse,List.mem_range] using member
+    exact World.Stores.vacant_child stored (holes field bound)
+  have fields : CleanupRun program host
+      { before with task := .destroyFields context address authority ((List.range value.fields.length).reverse) next } []
+      { before with task := .finishShell address authority next } :=
+    CleanupRun.destroy_fields_holes rfl vacant
+  obtain ⟨after,finish⟩ := CleanupRun.shell_done_exists (before := { before with task := .finishShell address authority next })
+    rfl stored (List.eq_none_of_getElem? holes) permission handed
+  exact ⟨after,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish)⟩
 
 /-- The whole non-vacant structural destruction of one captured root, with the
 real machine steps: the captured shell is structurally destroyed field by
