@@ -1091,6 +1091,8 @@ theorem World.DestroyFrame.of_kill {before : World} {id : Identity} {loan : Loan
 
 end Glorious.Language
 
+end Glorious.Language
+
 namespace Glorious.Language
 
 open Kernel
@@ -1134,7 +1136,5 @@ theorem World.Vacant.write_child_other {before after : World} {address : Address
     (written : before.write (address.child index) value = some after) (different : index ≠ other) :
     after.Vacant (address.child other) :=
   World.Vacant.write_disjoint vacant written (Address.child_not_overlaps different)
-
-end Glorious.Language
 
 end Glorious.Language
