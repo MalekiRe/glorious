@@ -1065,6 +1065,15 @@ structure UnsafeInvariantContract (program : Program) where
     Execution.Relocation.StorageReady world map.roots authorities →
     address.root ∈ map.roots → world.Resident address value → holds world value →
       holds (map.copyWorld world homes) (map.value value)
+  /-- A declared invariant cannot depend on internal home bookkeeping. Suspension
+  capture, replay and cancellation legitimately relabel the homes of captured
+  storage while moving no value, creating no loan and leaving every read of the
+  resident unchanged; no source term observes a home. Requiring independence
+  here is the rehoming counterpart of `relocated`: both rewrite the ghost
+  home field, so an invariant of a duplicable type must survive both. -/
+  rehomed : ∀ world (select : Identity → Root → Home) value,
+    holds world value →
+      holds { world with roots := world.roots.map (fun (id,root) => (id,{ root with home := select id root })) } value
 
 structure RuntimeProgram where
   declarations : Program

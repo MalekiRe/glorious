@@ -300,6 +300,14 @@ is not derivable. No statement is weakened and no previously derivable fact is
 assumed. Verified exact: the four modules check as 80 jobs, and the composed
 gate including them passes 224 jobs from a fresh source-only tree.
 
+One additive shared-core hunk landed for the suspension boundary:
+`UnsafeInvariantContract` gains `rehomed`, the rehoming counterpart of
+`relocated` (a declared invariant cannot depend on internal home bookkeeping,
+since capture, replay and cancellation relabel the ghost home field while moving
+no value, creating no loan and leaving every read of the resident unchanged). The
+structure has no instance anywhere in the tree, so the field is additive and
+changes no existing definition.
+
 Post-cancellation cleanup is now executed rather than only classified:
 `CleanupExecution` proves that the machine's own `cleanupRoot`, `destroyVacant`
 and `retire` steps actually retire every captured root of a cancelled
