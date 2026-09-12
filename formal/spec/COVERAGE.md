@@ -157,15 +157,45 @@ of any runtime relation, rule or language meaning was changed by the recovery.
 The whole library is not green. At this revision the named targets
 `BasicChecks`, `BindingChecks`, `ExecutionChecks`, `ControlChecks`,
 `PreservationChecks`, `SourceChecks`, `CleanupPreservation`, `InvocationLending`,
-`ForeignEvolution`, `ResumptionPreservation`, `RuntimeWorldEquivariance`,
-`AllocationLayout`, `FunctionEntryContextTyping`, `ScalarMachine` and
-`PublicValues` fail as stale consumers outside the checked dependency graph;
-their error sets are identical to the pristine pre-recovery tree, and the
-recovery additionally repairs the duplicate `Value.Initialized.resident` that
-previously made `DropCapabilities` fail. Full-source checking therefore still
-fails; an older checkpoint result is not evidence for the current graph.
+`ForeignEvolution`, `ResumptionPreservation`, `AllocationLayout`,
+`FunctionEntryContextTyping` and `ScalarMachine` fail as stale consumers
+outside the checked dependency graph; their error sets are identical to the
+pristine pre-recovery tree, and the recovery additionally repairs the duplicate
+`Value.Initialized.resident` that previously made `DropCapabilities` fail.
+Full-source checking therefore still fails; an older checkpoint result is not
+evidence for the current graph.
 
-The recovered strict 208-job gate adds `InputBindingProgress` and
+Two consumers left that stale set by repair rather than by re-snapshot.
+`RuntimeWorldEquivariance` was migrated to the current `Value.resident`
+(region renaming retains the resident's erased `resources` verbatim, since a
+`StorageBinding` names root/generation identities and loan authorities and no
+runtime region), its loan-permission transport now covers the full conjunct list
+including the live-guard and shared-guard obligations and the added `guarded`
+authority, and its whole-world well-formedness proof now discharges all nineteen
+`WellFormedWithOrigins` obligations including `LoanGuards` and `LoanKinds`.
+`PublicValues` was migrated to the canonical `Execution.Task.stopped context
+address` and to `∀ context address, state.task = .stopped context address →
+state.world.Initialized address` in `resourceAdmission_safe_iff` /
+`WellFormed.safe_iff_initialized_returns`.
+
+That repair exposed one genuine definitional defect in the public observation
+relation, now fixed: `Specification.Reveals` was drafted before `Value.resident`
+gained its `resources` field, so its five-argument constructor patterns silently
+pinned `resources := []` through the field's default. That accident restricted
+the observer to resource-free residents, which would have made
+`resourceAdmission_safe_iff`'s documented equivalence to "preservation of
+initialized stopped result addresses" false. `Reveals` now carries each
+resident's actual `resources`; erased resource obligations remain internal
+ownership state and are not part of the public value, so the observation is
+unchanged by them. This restores the pre-`resources` extent of the relation
+rather than adding a condition; whether a returned resident's erased
+obligations are closed stays a separate unsafe-invariant duty and is not
+assumed here.
+
+The recovered strict 211-job gate is the 208-job gate above plus the two
+repaired consumers `PublicValues` and `RuntimeWorldEquivariance`: the same
+target list without the two compatibility modules passes 208 jobs. The 208-job
+gate adds `InputBindingProgress` and
 `LoanCompatibility` to the recovered targets above. It closes two narrow
 boundaries, not a batch or pre-entry theorem. `Authority.LoanCompatible` is the
 pre-state compatibility relation for one newly formed live loan: owning, loan,

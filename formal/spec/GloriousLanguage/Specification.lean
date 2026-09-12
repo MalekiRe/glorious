@@ -69,24 +69,27 @@ inductive PublicValue where
   deriving Repr, Inhabited
 
 mutual
+  /-- The public observation of a live resident. Erased resource obligations are
+  internal ownership state, never part of the public value, so every constructor
+  carries the actual `resources` of the resident instead of pinning them empty. -/
   inductive Reveals (world : World) : Value → PublicValue → Prop where
-    | unit {owner} : Reveals world (.resident owner .unit .unit true []) .unit
-    | scalar {owner scalar} : Reveals world (.resident owner (.scalar scalar.type) (.scalar scalar) true []) (.scalar scalar)
-    | aggregate {owner type head fields values variant} :
+    | unit {owner resources} : Reveals world (.resident owner .unit .unit true [] resources) .unit
+    | scalar {owner scalar resources} : Reveals world (.resident owner (.scalar scalar.type) (.scalar scalar) true [] resources) (.scalar scalar)
+    | aggregate {owner type head fields values variant resources} :
         (head = .tuple ∧ variant = none ∨ head = .array ∧ variant = none ∨ ∃ id, head = .constructor id ∧ variant = some id) →
-        RevealsFields world fields values → Reveals world (.resident owner type head true fields) (.aggregate type variant values)
-    | reference {owner type id loan} : world.loans.get id = some loan → loan.live = true →
-        Reveals world (.resident owner type (.reference id) true []) (.reference loan.mode loan.referent)
-    | pointer {owner type pointer} : Reveals world (.resident owner type (.pointer pointer) true []) (.pointer pointer.address)
-    | callable {owner type id arguments fields captures} : RevealsFields world fields captures →
-        Reveals world (.resident owner type (.callable id arguments) true fields) (.callable id arguments captures)
-    | operation {owner type id arguments} :
-        Reveals world (.resident owner type (.operation id arguments) true []) (.callable id arguments [])
-    | label {owner type brand} : Reveals world (.resident owner type (.label brand) true []) (.label brand)
-    | continuation {owner type id} : Reveals world (.resident owner type (.continuation id) true []) (.continuation id)
-    | available {owner type id} : Reveals world (.resident owner type (.available id) true []) (.available id)
-    | bindings {owner type pack fields values} : RevealsFields world fields values →
-        Reveals world (.resident owner type (.bindings pack) true fields) (.bindings pack values)
+        RevealsFields world fields values → Reveals world (.resident owner type head true fields resources) (.aggregate type variant values)
+    | reference {owner type id loan resources} : world.loans.get id = some loan → loan.live = true →
+        Reveals world (.resident owner type (.reference id) true [] resources) (.reference loan.mode loan.referent)
+    | pointer {owner type pointer resources} : Reveals world (.resident owner type (.pointer pointer) true [] resources) (.pointer pointer.address)
+    | callable {owner type id arguments fields captures resources} : RevealsFields world fields captures →
+        Reveals world (.resident owner type (.callable id arguments) true fields resources) (.callable id arguments captures)
+    | operation {owner type id arguments resources} :
+        Reveals world (.resident owner type (.operation id arguments) true [] resources) (.callable id arguments [])
+    | label {owner type brand resources} : Reveals world (.resident owner type (.label brand) true [] resources) (.label brand)
+    | continuation {owner type id resources} : Reveals world (.resident owner type (.continuation id) true [] resources) (.continuation id)
+    | available {owner type id resources} : Reveals world (.resident owner type (.available id) true [] resources) (.available id)
+    | bindings {owner type pack fields values resources} : RevealsFields world fields values →
+        Reveals world (.resident owner type (.bindings pack) true fields resources) (.bindings pack values)
 
   inductive RevealsFields (world : World) : List (Option Value) → List PublicValue → Prop where
     | nil : RevealsFields world [] []

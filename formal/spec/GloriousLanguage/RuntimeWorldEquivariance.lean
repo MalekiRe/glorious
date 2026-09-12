@@ -29,10 +29,12 @@ def RegionPermutation.head (permutation : RegionPermutation) : ValueHead → Val
   | .bindings pack => .bindings { pack with region := permutation.rename pack.region }
   | head => head
 
+/- Erased resource obligations carry root/generation identities and loan
+authorities, never runtime regions, so region renaming retains them verbatim. -/
 mutual
   def RegionPermutation.value (permutation : RegionPermutation) : Value → Value
-    | .resident owner type head live fields =>
-        .resident owner (permutation.term type) (permutation.head head) live (permutation.values fields)
+    | .resident owner type head live fields resources =>
+        .resident owner (permutation.term type) (permutation.head head) live (permutation.values fields) resources
 
   def RegionPermutation.values (permutation : RegionPermutation) : List (Option Value) → List (Option Value)
     | [] => []
@@ -69,7 +71,7 @@ mutual
   theorem RegionPermutation.value_involutive (permutation : RegionPermutation) (value : Value) :
       permutation.value (permutation.value value) = value := by
     cases value with
-    | resident owner type head live fields =>
+    | resident owner type head live fields resources =>
       simp only [RegionPermutation.value,permutation.term_involutive,permutation.head_involutive,
         permutation.values_involutive fields]
   termination_by sizeOf value
@@ -240,6 +242,42 @@ theorem RegionPermutation.ancestorLoan_origin (permutation : RegionPermutation) 
     obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
     exact .parent oldFound parent ih
 
+/-- A rentable region permutation retains every loan identity, referent,
+generation, mode and guard list, so the full permission product transports in
+both directions, including the live-guard and shared-guard obligations. -/
+theorem RegionPermutation.loanPermission_iff (permutation : RegionPermutation) {world : World}
+    {id : Identity} {requested : Access} {address : Address} :
+    LoanPermission (permutation.world world) id requested address ↔
+      LoanPermission world id requested address := by
+  constructor
+  · rintro ⟨active,selected,live,rootEq,generation,path,mode,allowed,guardLives,guardShared⟩
+    rw [permutation.world_loans] at selected
+    obtain ⟨original,oldSelected,rfl⟩ := Option.map_eq_some_iff.mp selected
+    refine ⟨original,oldSelected,live,rootEq,generation,path,mode,?_,?_,?_⟩
+    · intro other loan found live different overlaps conflict
+      exact permutation.ancestorLoan_origin (allowed other (permutation.loan loan)
+        (by rw [permutation.world_loans,found]; rfl) live different overlaps conflict)
+    · intro guard member
+      obtain ⟨carrier,found,live⟩ := guardLives guard member
+      rw [permutation.world_loans] at found
+      obtain ⟨oldCarrier,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+      exact ⟨oldCarrier,oldFound,live⟩
+    · intro other loan found live member
+      exact guardShared other (permutation.loan loan) (by rw [permutation.world_loans,found]; rfl) live member
+  · rintro ⟨active,selected,live,rootEq,generation,path,mode,allowed,guardLives,guardShared⟩
+    refine ⟨permutation.loan active,by rw [permutation.world_loans,selected]; rfl,live,rootEq,generation,path,mode,?_,?_,?_⟩
+    · intro other loan found live different overlaps conflict
+      rw [permutation.world_loans] at found
+      obtain ⟨oldLoan,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+      exact permutation.ancestorLoan (allowed other oldLoan oldFound live different overlaps conflict)
+    · intro guard member
+      obtain ⟨carrier,found,live⟩ := guardLives guard member
+      exact ⟨permutation.loan carrier,by rw [permutation.world_loans,found]; rfl,live⟩
+    · intro other loan found live member
+      rw [permutation.world_loans] at found
+      obtain ⟨oldLoan,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+      exact guardShared other oldLoan oldFound live member
+
 theorem RegionPermutation.permitted_iff (permutation : RegionPermutation) {world : World}
     {authority : Authority} {access : Access} {address : Address} :
     Permitted (permutation.world world) authority access address ↔ Permitted world authority access address := by
@@ -259,22 +297,13 @@ theorem RegionPermutation.permitted_iff (permutation : RegionPermutation) {world
       exact allowed id original oldSelected live overlaps
   | loan id =>
     constructor
-    · rintro ⟨⟨root,found⟩,active,selected,live,rootEq,generation,path,mode,allowed⟩
+    · rintro ⟨⟨root,found⟩,permitted⟩
       rw [permutation.world_root] at found
       obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
-      rw [permutation.world_loans] at selected
-      obtain ⟨oldActive,oldSelected,rfl⟩ := Option.map_eq_some_iff.mp selected
-      refine ⟨⟨original,oldFound⟩,oldActive,oldSelected,live,rootEq,generation,path,mode,?_⟩
-      intro other loan found live different overlaps conflict
-      exact permutation.ancestorLoan_origin (allowed other (permutation.loan loan)
-        (by rw [permutation.world_loans,found]; rfl) live different overlaps conflict)
-    · rintro ⟨⟨root,found⟩,active,selected,live,rootEq,generation,path,mode,allowed⟩
-      refine ⟨⟨permutation.root root,by rw [permutation.world_root,found]; rfl⟩,
-        permutation.loan active,by rw [permutation.world_loans,selected]; rfl,live,rootEq,generation,path,mode,?_⟩
-      intro other loan found live different overlaps conflict
-      rw [permutation.world_loans] at found
-      obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
-      exact permutation.ancestorLoan (allowed other original oldFound live different overlaps conflict)
+      exact ⟨⟨original,oldFound⟩,permutation.loanPermission_iff.mp permitted⟩
+    · rintro ⟨⟨root,found⟩,permitted⟩
+      exact ⟨⟨permutation.root root,by rw [permutation.world_root,found]; rfl⟩,
+        permutation.loanPermission_iff.mpr permitted⟩
   | shared backing ih =>
     constructor
     · rintro ⟨⟨root,found⟩,access,evidence⟩
@@ -283,6 +312,19 @@ theorem RegionPermutation.permitted_iff (permutation : RegionPermutation) {world
       exact ⟨⟨original,oldFound⟩,access,ih.mp evidence⟩
     · rintro ⟨⟨root,found⟩,access,evidence⟩
       exact ⟨⟨permutation.root root,by rw [permutation.world_root,found]; rfl⟩,access,ih.mpr evidence⟩
+  | guarded backing carrier ih =>
+    constructor
+    · rintro ⟨⟨root,found⟩,backing,loan,selected,permitted⟩
+      rw [permutation.world_root] at found
+      obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+      rw [permutation.world_loans] at selected
+      obtain ⟨carrierLoan,oldSelected,rfl⟩ := Option.map_eq_some_iff.mp selected
+      exact ⟨⟨original,oldFound⟩,ih.mp backing,carrierLoan,oldSelected,
+        permutation.loanPermission_iff.mp permitted⟩
+    · rintro ⟨⟨root,found⟩,backing,loan,selected,permitted⟩
+      refine ⟨⟨permutation.root root,by rw [permutation.world_root,found]; rfl⟩,ih.mpr backing,
+        permutation.loan loan,by rw [permutation.world_loans,selected]; rfl,?_⟩
+      exact permutation.loanPermission_iff.mpr permitted
 
 theorem RegionPermutation.injective (permutation : RegionPermutation) : Function.Injective permutation.rename := by
   intro first second equal
@@ -292,8 +334,8 @@ theorem RegionPermutation.injective (permutation : RegionPermutation) : Function
 theorem RegionPermutation.world_wellFormed (permutation : RegionPermutation) {world : World} {originBound : Identity}
     (valid : world.WellFormedWithOrigins originBound) : (permutation.world world).WellFormedWithOrigins originBound := by
   rcases valid with ⟨roots,loans,proofs,regions,available,packs,owners,exclusive,rootBounds,regionBounds,
-    aligned,disjoint,loanBounds,references,overlaps,parents,locations⟩
-  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+    aligned,disjoint,loanBounds,references,overlaps,parents,locations,guards,kinds⟩
+  refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
   · simpa only [RegionPermutation.world,Table.Unique,List.map_map,Function.comp_def] using roots
   · simpa only [RegionPermutation.world,Table.Unique,List.map_map,Function.comp_def] using loans
   · simpa only [RegionPermutation.world,Table.Unique,List.map_map,Function.comp_def] using proofs
@@ -377,6 +419,15 @@ theorem RegionPermutation.world_wellFormed (permutation : RegionPermutation) {wo
     rw [permutation.world_loans] at found
     obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
     exact permutation.located (locations id original oldFound live)
+  · intro id loan guard found member
+    rw [permutation.world_loans] at found
+    obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+    obtain ⟨carrier,carrierFound,bound,live⟩ := guards id original guard oldFound member
+    exact ⟨permutation.loan carrier,by rw [permutation.world_loans,carrierFound]; rfl,bound,live⟩
+  · intro id loan found
+    rw [permutation.world_loans] at found
+    obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+    exact kinds id original oldFound
 
 theorem RegionPermutation.fieldLayouts (permutation : RegionPermutation) {program : Program}
     (valid : ProgramWellFormed program) {context : Context} {types : List Term} {layouts : List Layout}
@@ -441,10 +492,10 @@ theorem RegionPermutation.valueTyped (permutation : RegionPermutation) {program 
     Term.renameRuntimeRegions,RegionPermutation.head,List.map_nil,List.map_cons]
   · intro owner live; exact .unit
   · intro owner value live admissible; exact .scalar admissible
-  · intro owner type head live fields types constructed _ ih
+  · intro owner type head live fields types resources constructed _ ih
     have same := constructed.head_permute permutation
     change Typing.ValueTyped program (permutation.world world)
-      (.resident owner (permutation.term type) (permutation.head head) live (permutation.values fields))
+      (.resident owner (permutation.term type) (permutation.head head) live (permutation.values fields) resources)
     rw [same]
     exact .aggregate (constructed.permute valid permutation) ih
   · intro owner mode region type id loan live found active modeEq regionEq located

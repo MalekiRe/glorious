@@ -46,39 +46,39 @@ theorem Reveals.functional {world : World} {value : Value} {first last : PublicV
     (motive_1 := fun value observed _ => ∀ other, Reveals world value other → observed = other)
     (motive_2 := fun fields observed _ => ∀ other, RevealsFields world fields other → observed = other)
     ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ left last right
-  · intro owner other revealed
+  · intro owner resources other revealed
     cases revealed <;> simp_all
-  · intro owner scalar other revealed
+  · intro owner scalar resources other revealed
     generalize typeEq : Term.scalar scalar.type = type at revealed
     cases revealed <;> simp_all
-  · intro owner type head fields values variant shape _ ih other revealed
+  · intro owner type head fields values variant resources shape _ ih other revealed
     rcases shape with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨id,rfl,rfl⟩ <;>
       cases revealed with
       | aggregate otherShape otherFields =>
         simp_all
         exact ih _ otherFields
-  · intro owner type id loan found active other revealed
+  · intro owner type id loan resources found active other revealed
     cases revealed with
     | reference selected _ =>
       have same := Option.some.inj (found.symm.trans selected)
       cases same
       rfl
     | aggregate shape _ => simp at shape
-  · intro owner type pointer other revealed
+  · intro owner type pointer resources other revealed
     cases revealed <;> simp_all
-  · intro owner type id arguments fields captures _ ih other revealed
+  · intro owner type id arguments fields captures resources _ ih other revealed
     cases revealed with
     | callable fields => rw [ih _ fields]
     | aggregate shape _ => simp at shape
-  · intro owner type id arguments other revealed
+  · intro owner type id arguments resources other revealed
     cases revealed <;> simp_all
-  · intro owner type brand other revealed
+  · intro owner type brand resources other revealed
     cases revealed <;> simp_all
-  · intro owner type id other revealed
+  · intro owner type id resources other revealed
     cases revealed <;> simp_all
-  · intro owner type id other revealed
+  · intro owner type id resources other revealed
     cases revealed <;> simp_all
-  · intro owner type pack fields values _ ih other revealed
+  · intro owner type pack fields values resources _ ih other revealed
     cases revealed with
     | bindings fields => rw [ih _ fields]
     | aggregate shape _ => simp at shape
@@ -95,27 +95,27 @@ theorem Reveals.initialized {world : World} {value : Value} {observed : PublicVa
     (motive_1 := fun value _ _ => value.Initialized)
     (motive_2 := fun fields _ _ => ∀ field ∈ fields, ∃ child, field = some child ∧ child.Initialized)
     ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ revealed
-  · intro owner
+  · intro owner resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner scalar
+  · intro owner scalar resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type head fields values variant shape revealed ih
+  · intro owner type head fields values variant resources shape revealed ih
     exact Value.initialized_iff.mpr ⟨rfl,ih⟩
-  · intro owner type id loan found active
+  · intro owner type id loan resources found active
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type pointer
+  · intro owner type pointer resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type id arguments fields captures revealed ih
+  · intro owner type id arguments fields captures resources revealed ih
     exact Value.initialized_iff.mpr ⟨rfl,ih⟩
-  · intro owner type id arguments
+  · intro owner type id arguments resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type brand
+  · intro owner type brand resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type id
+  · intro owner type id resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type id
+  · intro owner type id resources
     exact Value.initialized_iff.mpr ⟨rfl,by simp [Value.fields]⟩
-  · intro owner type pack fields values revealed ih
+  · intro owner type pack fields values resources revealed ih
     exact Value.initialized_iff.mpr ⟨rfl,ih⟩
   · simp
   · intro value values observed observations revealed fields ih tail field member
@@ -140,7 +140,7 @@ theorem valueTyped_reveals {program : Kernel.Program} {world : World} {value : V
     have same := (initialized [] _ .root).1
     cases same
     exact ⟨_,.scalar⟩
-  · intro owner type head live fields types shape _ ih initialized
+  · intro owner type head live fields types resources shape _ ih initialized
     obtain ⟨active,fieldsLive⟩ := Value.initialized_iff.mp initialized
     change live = true at active
     subst live
@@ -220,11 +220,11 @@ theorem worldTyped_initialized_reveals {program : Kernel.Program} {world : World
   exact ⟨value,observed,stored,revealed⟩
 
 theorem Finished.of_stopped {program : Kernel.Program} {function : Kernel.Function} {state : Execution.State}
-    {address : Address} (typed : Typing.WorldTyped program state.world)
-    (stopped : state.task = .stopped address) (initialized : state.world.Initialized address) :
+    {context : Execution.Context} {address : Address} (typed : Typing.WorldTyped program state.world)
+    (stopped : state.task = .stopped context address) (initialized : state.world.Initialized address) :
     ∃ result, Finished program function state result := by
   obtain ⟨value,observed,stored,revealed⟩ := worldTyped_initialized_reveals typed initialized
-  exact ⟨.returned observed,Or.inl ⟨address,value,observed,stopped,stored,revealed,rfl⟩⟩
+  exact ⟨.returned observed,Or.inl ⟨context,address,value,observed,stopped,stored,revealed,rfl⟩⟩
 
 /-- An admitted outward request is a genuine final public observation, even
 when a payload contains an operation value or captured/contextual residents. -/
@@ -248,14 +248,15 @@ theorem mayAwait_finished {program : Kernel.Program} {function : Kernel.Function
     ⟨context,id,arguments,payload,residents,observations,task,admission,stored,revealed,rfl⟩)⟩
 
 theorem finished_stopped_iff {program : Kernel.Program} {function : Kernel.Function} {state : Execution.State}
-    {address : Address} (typed : Typing.WorldTyped program state.world) (stopped : state.task = .stopped address) :
+    {context : Execution.Context} {address : Address} (typed : Typing.WorldTyped program state.world)
+    (stopped : state.task = .stopped context address) :
     (∃ result, Finished program function state result) ↔ state.world.Initialized address := by
   constructor
   · rintro ⟨result,finished⟩
-    rcases finished with ⟨found,value,observed,task,stored,revealed,_⟩ | ⟨reason,task,_⟩ |
-      ⟨context,id,arguments,payload,residents,observations,task,_⟩
-    · have equal := Execution.Task.stopped.inj (task.symm.trans stopped)
-      subst found
+    rcases finished with ⟨found,stoppedAt,value,observed,task,stored,revealed,_⟩ | ⟨reason,task,_⟩ |
+      ⟨performing,id,arguments,payload,residents,observations,task,_⟩
+    · obtain ⟨_,equal⟩ := Execution.Task.stopped.inj (task.symm.trans stopped)
+      subst stoppedAt
       exact ⟨value,stored,revealed.initialized⟩
     · simp [stopped] at task
     · simp [stopped] at task
@@ -275,9 +276,9 @@ theorem resourceAdmission_safe_iff {program : Kernel.Program} {host : Foreign.Mo
     (inputAccess : ∀ input ∈ inputs, (∃ index, input.origin = .capture index) → input.access = access) :
     (Semantics program host function inputs).Safe ↔
       ∀ state, (Semantics program host function inputs).Reachable state →
-        ∀ address, state.task = .stopped address → state.world.Initialized address := by
+        ∀ context address, state.task = .stopped context address → state.world.Initialized address := by
   constructor
-  · intro safe state reachable address stopped
+  · intro safe state reachable context address stopped
     rcases (safe state reachable).2 with final | ⟨event,after,internal,step,_⟩
     · exact (finished_stopped_iff (reachable_worldTyped valid inventory lawful reachable) stopped).mp final
     · exact False.elim (step.not_stopped stopped)
@@ -287,8 +288,8 @@ theorem resourceAdmission_safe_iff {program : Kernel.Program} {host : Foreign.Mo
     obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
     have progress := (admitted host inputs .isolated start trace state lawful initial inputAccess
       (Contracts.invocation_isolated run)).1
-    rcases progress with ⟨address,stopped⟩ | ⟨reason,fatal⟩ | awaiting | transfer | ⟨event,after,_,step⟩
-    · exact Or.inl (Finished.of_stopped typed stopped (results state reachable address stopped))
+    rcases progress with ⟨address,context,stopped⟩ | ⟨reason,fatal⟩ | awaiting | transfer | ⟨event,after,_,step⟩
+    · exact Or.inl (Finished.of_stopped typed stopped (results state reachable context address stopped))
     · exact Or.inl ⟨.fatal reason,Or.inr (Or.inl ⟨reason,fatal,rfl⟩)⟩
     · exact Or.inl (mayAwait_finished typed awaiting)
     · exact False.elim (Contracts.MayTransfer.isolated_false transfer)
@@ -301,7 +302,7 @@ theorem WellFormed.safe_iff_initialized_returns {program : Kernel.Program} (well
     (inputAccess : ∀ input ∈ inputs, (∃ index, input.origin = .capture index) → input.access = .owned) :
     (Semantics program host function inputs).Safe ↔
       ∀ state, (Semantics program host function inputs).Reachable state →
-        ∀ address, state.task = .stopped address → state.world.Initialized address :=
+        ∀ context address, state.task = .stopped context address → state.world.Initialized address :=
   resourceAdmission_safe_iff well.declarations well.inventory lawful
     (well.functions id arguments function selected).2.1 inputAccess
 

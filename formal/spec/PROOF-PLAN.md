@@ -192,10 +192,15 @@ These recovered boundaries pass a fresh source-only strict 205-job gate over
 Full-source checking still fails: `BasicChecks`, `BindingChecks`,
 `ExecutionChecks`, `ControlChecks`, `PreservationChecks`, `SourceChecks`,
 `CleanupPreservation`, `InvocationLending`, `ForeignEvolution`,
-`ResumptionPreservation`, `RuntimeWorldEquivariance`, `AllocationLayout`,
-`FunctionEntryContextTyping`, `ScalarMachine` and `PublicValues` are stale
+`ResumptionPreservation`, `AllocationLayout`,
+`FunctionEntryContextTyping` and `ScalarMachine` are stale
 consumers outside the checked graph with error sets identical to the pristine
 tree, and no older checkpoint result is evidence for the current graph.
+`RuntimeWorldEquivariance` and `PublicValues` were on that list and have since
+been repaired rather than re-snapshotted, so the current extended gate over the
+same target list plus both consumers passes 211 jobs (208 without the two
+compatibility modules); the running public-safety statements and the
+public-observation repair are recorded below.
 
 The permission-only compatibility foundation and the single-input producer are
 now checked too. `Authority.LoanCompatible` is a pre-state relation for one
@@ -531,13 +536,37 @@ result addresses. This identifies, but does not assume or discharge, the
 remaining return/cleanup lifetime invariant. Source resource admission itself
 remains a semantic obligation rather than a proved structural typing rule.
 
+Both halves of this observer now check again, and the repair records a real
+defect rather than a re-snapshot. `Specification.Reveals` was drafted before
+`Value.resident` gained `resources`, so its five-argument constructor patterns
+silently pinned `resources := []` through the field default; that restricted the
+observer to resource-free residents and would have made the equivalence above
+false. `Reveals` now carries each resident's actual `resources`: erased resource
+obligations are internal ownership state and never part of the public value, so
+the observation is unchanged by them, and there is no new precondition on
+`Finished`. Whether a returned resident's erased obligations are closed remains
+a separate unsafe-invariant duty and is not assumed. `PublicValues` itself is
+migrated to the canonical `Execution.Task.stopped context address`, with
+`resourceAdmission_safe_iff` and `WellFormed.safe_iff_initialized_returns`
+stated as `∀ context address, state.task = .stopped context address →
+state.world.Initialized address`, and its `Reveals` recursions carry the actual
+resource components.
+
 `RuntimeWorldEquivariance` transports the whole existing storage world,
 including loan ancestry, permissions, partial residents and region freshness.
 It constructs the world required by universally quantified pattern coverage;
 neither exhaustiveness nor branch usefulness is assumed stable. Full effect
 coverage uses that same world/permission/matching transport and exact selected
 operation signatures. `RuntimeBodyTyping` then proves transport of all five
-mutual code/arm/handler typing judgments and complete function typing.
+mutual code/arm/handler typing functions and complete function typing. The
+whole-world transport is now migrated to the current storage and permission
+shapes: region renaming retains a resident's erased `resources` verbatim, since
+a `StorageBinding` names root and generation identities and loan authorities
+and no runtime region; loan permission transports the complete conjunct list,
+including the live-guard and shared-guard obligations, and covers the added
+`guarded` authority by observing its carrier's actual loan row; and the
+well-formedness transport discharges all nineteen `WellFormedWithOrigins`
+obligations, including `LoanGuards` and `LoanKinds`.
 
 Finite snapshot relocation now consumes this result through the actual
 `SnapshotMap`: the checked lexical template and supported invocation arguments
