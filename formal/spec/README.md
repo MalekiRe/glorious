@@ -79,6 +79,13 @@ or a dependency of this project.
 - `GeneralAtomTransport`, `LogicalParameterCut`, `LogicalInstantiation`: general
   hygienic parameter cut, actual generic-table composition and closed equality,
   with derived preimages for caller-only parameters, regions and brands.
+- `PositiveSubstitution`, `DefinitionalSubstitution`, `HeadOriginSubstitution`:
+  positive reduction and genuine conversion under lawful caller substitution,
+  consumed to construct actual implementation selection from admitted source
+  origins, including determining alias/projection expansions.
+- `HeadOriginInstantiation`, `RootReductionJoining`: instantiated positive
+  source origins and root-pair reduction to joining actual selected generic
+  tables; global parallel moves and confluence remain unproved.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

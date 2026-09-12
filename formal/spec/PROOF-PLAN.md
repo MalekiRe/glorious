@@ -1106,6 +1106,33 @@ existing fresh specialization, source/head admission, runtime transport and the
 actual whole-machine caller-private consumer. No example or failing aggregate
 target was used as evidence.
 
+`PositiveSubstitution` now proves preservation of actual positive source
+reduction under arbitrary lawful caller substitution. Internal unkinded proof
+nodes use the existing guarded atom map; kinding of both endpoints recovers the
+language's actual simultaneous substitution. Selected implementation and
+projection requirements consume the proved logical parameter cut. This does
+not replace positive reduction by logical or assumed equality.
+`DefinitionalSubstitution` carries genuine conversion into assumption-bearing
+callers using that positive theorem. `HeadOriginSubstitution` consumes it to
+instantiate the actual determining origins in source implementation admission.
+`MatchesImplHead.of_admitted_instantiation` and `SelectsImpl.of_admitted_head`
+construct real matching and selection, including heads determined through
+source alias/projection expansions. A second caller-supplied origin certificate
+is no longer needed for this construction; actual argument kinding and source
+requirements remain necessary.
+
+`HeadOriginInstantiation` retains each source expansion, its positive caller
+instance, the whole-query conversion and its structural determining path.
+`RootReductionJoining` resolves alias, default and override root pairs through
+one relation-parametric proof. Its remaining override case requires positive
+joining of the actual selected generic tables, not merely the convertibility
+witness in declaration coherence. The combined fresh source-only dependency
+gate checks these consumers with warnings as errors and implicit identifiers
+disabled. The global strip/parallel-moves theorem is still open: root/child
+residuals and generic-origin subderivations must provide a well-founded proof
+of common positive reducts. No global confluence, constructor separation,
+conversion-safe Drop inversion or full-language soundness is claimed here.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established
