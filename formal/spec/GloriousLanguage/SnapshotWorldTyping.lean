@@ -174,14 +174,6 @@ theorem Relocation.fieldsTyped {program : Kernel.Program} {before after : World}
           exact .resident (mapped _ List.mem_cons_self) (by rw [map.value_type,same])
             (ih tail (fun value member => mapped value (List.mem_cons_of_mem _ member)))
 
-theorem Value.field_sizeOf {value child : Value} (member : some child ∈ value.fields) : sizeOf child < sizeOf value := by
-  cases value
-  simp only [Value.fields] at member
-  have smaller := List.sizeOf_lt_of_mem member
-  change 1 + sizeOf child < _ at smaller
-  simp_wf
-  omega
-
 theorem World.Resident.child_at {world : World} {address : Address} {value child : Value} {index : Nat}
     (resident : world.Resident address value) (found : value.fields[index]? = some (some child)) :
     world.Resident (address.child index) child := by

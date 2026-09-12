@@ -1,14 +1,60 @@
 import GloriousLanguage.OperationBoundary
 import GloriousLanguage.RootSelection
 import GloriousLanguage.LocalPreservation
+import GloriousLanguage.HandoffProgress
 
-/-! Outward labels carry actual destination and payload-preparation evidence.
+/-! Outward labels carry actual destination and positive payload readiness.
 The callee and retained caller share the same post-payload cleanup selection;
 their permissions construct the ordinary `ControlStep.leave` rule. Admission
 does not assume that a complete machine step already exists. -/
 namespace Glorious.Language.Execution
 
 open Kernel
+
+theorem LabelRoute.label_member {frames inner outer : List Frame} {brand region : Identity}
+    {context : Context} {type : Term}
+    (route : LabelRoute frames brand inner context region type outer) :
+    Frame.label context brand region type ∈ frames := by
+  rw [route.1]
+  exact List.mem_append_right _ List.mem_cons_self
+
+/-- The existing route's no-skipped-brand condition chooses one actual
+delimiter. Its source type cannot be swapped for a later same-brand frame. -/
+theorem LabelRoute.functional {frames firstInner lastInner firstOuter lastOuter : List Frame}
+    {brand firstRegion lastRegion : Identity} {firstContext lastContext : Context}
+    {firstType lastType : Term}
+    (first : LabelRoute frames brand firstInner firstContext firstRegion firstType firstOuter)
+    (last : LabelRoute frames brand lastInner lastContext lastRegion lastType lastOuter) :
+    firstInner = lastInner ∧ firstContext = lastContext ∧ firstRegion = lastRegion ∧
+      firstType = lastType ∧ firstOuter = lastOuter := by
+  rcases List.append_eq_append_iff.mp (first.1.symm.trans last.1) with
+    ⟨between,inner,remaining⟩ | ⟨between,inner,remaining⟩
+  · cases between with
+    | nil =>
+      simp only [List.append_nil] at inner
+      simp only [List.nil_append] at remaining
+      obtain ⟨frame,outer⟩ := List.cons.inj remaining
+      obtain ⟨context,_,region,type⟩ := Frame.label.inj frame
+      exact ⟨inner.symm,context,region,type,outer⟩
+    | cons frame between =>
+      have same := (List.cons.inj remaining).1
+      apply False.elim
+      apply last.2.2 firstContext firstRegion firstType
+      rw [inner]
+      exact List.mem_append_right _ (same ▸ List.mem_cons_self)
+  · cases between with
+    | nil =>
+      simp only [List.append_nil] at inner
+      simp only [List.nil_append] at remaining
+      obtain ⟨frame,outer⟩ := List.cons.inj remaining
+      obtain ⟨context,_,region,type⟩ := Frame.label.inj frame
+      exact ⟨inner,context.symm,region.symm,type.symm,outer.symm⟩
+    | cons frame between =>
+      have same := (List.cons.inj remaining).1
+      apply False.elim
+      apply first.2.2 lastContext lastRegion lastType
+      rw [inner]
+      exact List.mem_append_right _ (same ▸ List.mem_cons_self)
 
 theorem AbandonedRoots.split_membership {world : World} {callee caller : List Frame}
     {kept all calleeRoots callerRoots : List Identity}
@@ -73,14 +119,17 @@ namespace Glorious.Language.Contracts
 
 open Kernel Execution
 
-/-- Destination and payload readiness are nonvacuous. Every actual selected
-route and payload handoff must leave the callee-owned remainder cancelable.
-An active label behind a foreign barrier has no `LabelRoute` witness. -/
+/-- Routing, barrier admission and the resident/request preflight are positive
+before-state facts. Neither protection nor successful allocation is assumed.
+Only a completed actual handoff incurs the callee's residual cleanup duty. -/
 structure InvocationBoundary.LabelReady (boundary : InvocationBoundary) (program : Kernel.Program)
     (before : State) (brand : Identity) (argument : ResolvedPlace) : Prop where
-  prepared : ∃ abandoned context region type outer kept moved,
+  preflight : ∃ abandoned context region type outer value layout,
     LabelRoute before.frames brand abandoned context region type outer ∧
-    Protect program context before.world argument.address argument.authority kept moved
+    ResidentHandoffReady program before.world [argument] [value] [argument.address] ∧
+    AllocationRequest program.declarations before.world context.region value.type layout
+  barriers : ∃ callee, before.frames = callee ++ boundary.ambient ∧
+    ∀ frame ∈ callee, frame.ForeignFree
   residual : ∀ abandoned context region type outer kept moved,
     LabelRoute before.frames brand abandoned context region type outer →
     Protect program context before.world argument.address argument.authority kept moved →
@@ -100,17 +149,29 @@ def InvocationBoundary.LabelCallerPermission (boundary : InvocationBoundary) (pr
 
 theorem InvocationBoundary.LabelReady.foreign_free {boundary : InvocationBoundary} {program : Kernel.Program}
     {before : State} {brand : Identity} {argument : ResolvedPlace}
-    (ready : boundary.LabelReady program before brand argument)
-    (outward : ¬ boundary.InternalLabel before brand) :
-    ∃ callee, before.frames = callee ++ boundary.ambient ∧ ∀ frame ∈ callee, frame.ForeignFree := by
-  obtain ⟨abandoned,context,region,type,outer,kept,moved,route,handoff⟩ := ready.prepared
-  obtain ⟨callee,_,stack,_⟩ := ready.residual abandoned context region type outer kept moved route handoff
-  obtain ⟨caller,frames,_⟩ := route.outward_inner stack outward
-  refine ⟨callee,stack,?_⟩
-  intro frame member
-  apply route.2.1 frame
-  rw [frames]
-  exact List.mem_append_left _ member
+    (ready : boundary.LabelReady program before brand argument) :
+    ∃ callee, before.frames = callee ++ boundary.ambient ∧ ∀ frame ∈ callee, frame.ForeignFree :=
+  ready.barriers
+
+/-- The single payload consumes the common ordered resident preflight. Its
+actual Protect is constructed, or the same ready payload exhausts its request
+without mutating the before-world. -/
+theorem InvocationBoundary.LabelReady.prepare {boundary : InvocationBoundary} {program : Kernel.Program}
+    {before : State} {brand : Identity} {argument : ResolvedPlace}
+    (valid : before.world.WellFormed) (ready : boundary.LabelReady program before brand argument) :
+    ∃ abandoned target region type outer,
+      LabelRoute before.frames brand abandoned target region type outer ∧
+      ((∃ kept moved, Protect program target before.world argument.address argument.authority kept moved) ∨
+        ProtectExhausted program target before.world argument.address argument.authority) := by
+  obtain ⟨abandoned,target,region,type,outer,value,layout,route,payload,request⟩ := ready.preflight
+  have stored := payload.1.get_left (show [argument][0]? = some argument from rfl)
+  obtain ⟨actual,found,stored⟩ := stored
+  have same : actual = value := Option.some.inj found.symm
+  subst actual
+  have admitted := payload.2.1 value List.mem_cons_self
+  exact ⟨abandoned,target,region,type,outer,route,
+    Protect.success_or_exhausted valid stored admitted.1 admitted.2
+      (payload.2.2.2 argument List.mem_cons_self) request⟩
 
 theorem InvocationBoundary.LabelReady.caller_permission {boundary : InvocationBoundary} {program : Kernel.Program}
     {before : State} {brand : Identity} {argument : ResolvedPlace}
@@ -144,14 +205,17 @@ theorem InvocationBoundary.LabelReady.execute {boundary : InvocationBoundary} {p
     (outward : ¬ boundary.InternalLabel before brand)
     (pending : before.task = .leave context brand argument)
     (ambientPermission : boundary.LabelCallerPermission program before brand argument) :
-    ∃ after, ControlStep program before none after ∧ Typing.WorldTyped program after.world := by
-  obtain ⟨abandoned,target,region,type,outer,kept,moved,route,handoff⟩ := ready.prepared
-  have movedTyped := handoff.worldTyped valid inventory typed
-  obtain ⟨all,selected⟩ := AbandonedRoots.exists movedTyped.1.1 abandoned [kept.root]
-  obtain ⟨caller,ambient,permission⟩ := ready.caller_permission outward route handoff selected
-  obtain ⟨callerRoots,callerSelected⟩ := AbandonedRoots.exists movedTyped.1.1 caller [kept.root]
-  have allowed := (permission callerRoots callerSelected).mp
-    (ambientPermission abandoned target region type outer kept moved route handoff caller ambient callerRoots callerSelected)
-  exact ⟨_,.leave pending route handoff selected allowed,movedTyped⟩
+    ∃ after event, ControlStep program before event after ∧ Typing.WorldTyped program after.world ∧
+      (event = none ∨ event = some (.fatal .resource) ∧ after = { before with task := .fatal .resource }) := by
+  obtain ⟨abandoned,target,region,type,outer,route,handoff | exhausted⟩ := ready.prepare typed.1
+  · obtain ⟨kept,moved,handoff⟩ := handoff
+    have movedTyped := handoff.worldTyped valid inventory typed
+    obtain ⟨all,selected⟩ := AbandonedRoots.exists movedTyped.1.1 abandoned [kept.root]
+    obtain ⟨caller,ambient,permission⟩ := ready.caller_permission outward route handoff selected
+    obtain ⟨callerRoots,callerSelected⟩ := AbandonedRoots.exists movedTyped.1.1 caller [kept.root]
+    have allowed := (permission callerRoots callerSelected).mp
+      (ambientPermission abandoned target region type outer kept moved route handoff caller ambient callerRoots callerSelected)
+    exact ⟨_,_,.leave pending route handoff selected allowed,movedTyped,Or.inl rfl⟩
+  · exact ⟨_,_,.leaveExhausted pending route exhausted,typed,Or.inr ⟨rfl,rfl⟩⟩
 
 end Glorious.Language.Contracts

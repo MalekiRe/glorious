@@ -6,6 +6,7 @@ import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.CopyResourcePreservation
+import GloriousLanguage.CopyProgress
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
 import GloriousLanguage.SnapshotWorldTyping
@@ -20,6 +21,9 @@ import GloriousLanguage.BulkMovePreservation
 import GloriousLanguage.BufferAllocationProgress
 import GloriousLanguage.BufferReallocationProgress
 import GloriousLanguage.PointerStorageConstruction
+import GloriousLanguage.UnitStorageConstruction
+import GloriousLanguage.BufferReleaseProgress
+import GloriousLanguage.RawMutationProgress
 import GloriousLanguage.AllocationExecution
 import GloriousLanguage.OperationPayloadPreparation
 import GloriousLanguage.PayloadHandoff
@@ -44,6 +48,7 @@ import GloriousLanguage.ContinuationCreation
 import GloriousLanguage.OperationExecution
 import GloriousLanguage.RootSelection
 import GloriousLanguage.LabelBoundary
+import GloriousLanguage.LabelExecution
 import GloriousLanguage.InvocationLifecycle
 import GloriousLanguage.InvocationLifecyclePreservation
 import GloriousLanguage.PrimitiveDispatch

@@ -112,15 +112,6 @@ theorem Typing.ValueTyped.resident_capability {program : Kernel.Program} (valid 
     obtain ⟨final,finalCapability,last⟩ := ih childTyped childCapability
     exact ⟨final,finalCapability,restriction.trans last⟩
 
-theorem Value.Initialized.resident {value resident : Value} {path : List Nat}
-    (initialized : value.Initialized) (inside : ResidentAt value path resident) : resident.Initialized := by
-  induction inside with
-  | root => exact initialized
-  | field found _ ih =>
-    apply ih
-    intro path value inside
-    exact initialized _ value (.field found inside)
-
 /-- An initialized typed resident with a zero-use capability can be destroyed
 at every nested owned position. Disposal is derived, not an admission input. -/
 theorem Typing.ValueTyped.mayDispose {program : Kernel.Program} (valid : ProgramWellFormed program.declarations) {world : World}

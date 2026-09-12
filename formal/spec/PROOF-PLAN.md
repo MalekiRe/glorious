@@ -51,8 +51,8 @@ The fresh allocator consumes the generalized actual reference-row frame;
 the existing unchanged-table consumers remain wrappers around that proof.
 
 The immediate dependency chain remains general ordinary input/pre-entry
-progress, source-admitted copy construction, physical replay and progress for
-the remaining raw primitives. Input batch readiness must retain permissions and
+progress, source-admitted raw copy and borrow construction, physical replay and
+progress for the remaining raw primitives. Input batch readiness must retain permissions and
 custody under each earlier real loan creation or transfer, allowing compatible
 shared views while excluding genuine mode/guard/custody interference. It must
 not assume every pending post-state is ready or that allocation succeeds.
@@ -127,6 +127,75 @@ these conclusions. This is budget/lifecycle safety, not physical cancellation
 completion or proof that every normally returning clause discharges its pending
 obligations. Frame ownership, reference-lifetime support and cleanup progress
 remain part of the same unfinished full control-state invariant.
+
+The recovered ordinary-copy boundary is now closed rather than assumed.
+`CopyProgress` constructs the one actual `CopyTree`/`CopyFields`/`CopyValue`
+traversal from source duplicability plus the actual closed initialized stored
+value; `CopyTree.origins_unique` derives the fresh origin table's key uniqueness
+from the stored tree's real owner uniqueness, including sibling and parent/child
+disjointness, and `CopyTree.source_owner` reflects that table back to actual
+`ResidentAt` paths. No completed copy, typed post-world or second ownership walk
+is a premise. `Acquires.exists` selects the actual copy, explicit-move or
+default-move branch from the canonical semantic principal, and
+`Acquires.allocate_success_or_exhausted` / `Copies.allocate_success_or_exhausted`
+consume one positive `AllocationRequest` and the existing
+`success_or_exhausted` producer to return actual allocation plus actual
+acquisition, or positive physical `AllocationExhausted` for that same request;
+`AtomStep`/`Step.copy_progress` and `acquire_progress` construct the real
+executable transition and exact event. Source admission required a new law of
+the existing invariant contract: `UnsafeInvariantContract.copyResources` states
+that a valid pre-world, the contract's holds predicate and actual duplicability
+imply the erased retained bindings are read-only. It is never derived from a
+`CopyTree`, and no `UnsafeInvariantContract` instance exists in-tree, so the
+derivation direction is contract -> read-only -> CopyTree only. This is the
+formal counterpart of §7.2's rule that a structural copy creates an additional
+owner only for duplicable types, applied to the §7.3 unsafe invariant contracts
+that determine owner behaviour for residents not stored syntactically by value;
+the normative text does not enumerate the clause, so it is recorded as a formal
+obligation and an interpretation, not added source syntax.
+
+The label boundary now consumes an actual outcome instead of an assumed
+successful protection. `LabelReady` retains the actual first matching
+`LabelRoute`, the common singleton `ResidentHandoffReady` and a positive
+`AllocationRequest`; `LabelReady.prepare` consumes
+`Protect.success_or_exhausted` and `LabelReady.execute` constructs the actual
+`ControlStep.leave`, or `leaveExhausted` retaining exactly the unchanged
+before-world and the actual fatal-resource event. `LabelRoute.functional` fixes
+the selected delimiter so source result evidence for a later same-brand label
+cannot be substituted. `ControlStep.leave_source_result` and
+`MayTransfer.source_execution` keep source `PlaceType`/`Subtype`, the explicit
+before `AddressType` of the resolved payload and the caller permission contract
+as hypotheses and return them as source evidence in the conclusion; no runtime
+equality or `Subtype` after erasing source assumptions is invented, and
+`ObservationAt.label_caller_step` extends the same real run with the caller
+event.
+
+Raw mutation progress is constructive for three admitted leaves.
+`UnitStorageConstruction` shares the common vacant-write/empty-input value
+producer and derives the unit installer's typed result, actual write, framing
+and resource accessibility; `BufferReleaseProgress` constructs the actual
+release and unit result from authenticated empty-buffer admission;
+`RawRead.move_exists` and `RawWrite.exists_with_result` construct the actual
+move-read/write and the actual unit installation from the pointer/range
+relation, stored initialized value, `MoveReady` footprint, owned source
+permission, destination vacancy/type and pairwise disjointness, with the moved
+payload's recursive resources still accessible afterwards. Their inputs are
+before-state facts only; a missing admission is never reclassified as a
+resource fault. Raw copy, raw borrow, pointer arithmetic, ordered
+capture/call-entry totality, missing capture-exhaustion outcomes, physical
+replay and the remaining raw primitives stay open.
+
+These recovered boundaries pass a fresh source-only strict 205-job gate over
+`CopyProgress`, `LabelExecution`, `RawMutationProgress`, `SemanticPreservation`,
+`SnapshotReplayPreservation`, `OperationExecution` and
+`BufferReallocationProgress`, independently reproduced from pristine sources.
+Full-source checking still fails: `BasicChecks`, `BindingChecks`,
+`ExecutionChecks`, `ControlChecks`, `PreservationChecks`, `SourceChecks`,
+`CleanupPreservation`, `InvocationLending`, `ForeignEvolution`,
+`ResumptionPreservation`, `RuntimeWorldEquivariance`, `AllocationLayout`,
+`FunctionEntryContextTyping`, `ScalarMachine` and `PublicValues` are stale
+consumers outside the checked graph with error sets identical to the pristine
+tree, and no older checkpoint result is evidence for the current graph.
 
 ## 2. Source and normative adequacy
 

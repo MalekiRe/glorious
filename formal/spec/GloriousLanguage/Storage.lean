@@ -1010,6 +1010,12 @@ structure UnsafeInvariantContract (program : Program) where
   owner : DeclId
   holds : World → Value → Prop
   framed : ∀ before after value, value.SupportFramed before after → holds before value → holds after value
+  /-- Source Copy admission concerns the actual retained resources before
+  traversal. A nominal's semantic duplicability cannot hide an owning or
+  unique erased binding. The later copied law cannot establish this premise:
+  its CopyTree already requires these resources to be read-only. -/
+  copyResources : ∀ world value, world.WellFormed → holds world value →
+    PrincipalOf program value.type .duplicable → ∀ binding ∈ value.resources, binding.ReadOnly
   /-- Copy preserves the physical representation and shared resources while
   freshening owners and sealed-fact origins. An invariant of a duplicable type
   must be independent of those ghost identities; this law creates no Copy

@@ -87,6 +87,16 @@ or a dependency of this project.
 - `RootSelection`, `LabelBoundary`: constructive reverse-creation cleanup lists
   for the common storage selection and actual label leave execution from
   callee/caller post-payload permissions, without assuming a completed step.
+- `LabelExecution`: the boundary retains the actual first matching route, the
+  common singleton resident handoff preflight and a positive allocation
+  request. `LabelReady.prepare` consumes `Protect.success_or_exhausted` and
+  `LabelReady.execute` constructs the actual `ControlStep.leave` or
+  `leaveExhausted` with exactly the unchanged before-world. `LabelRoute.functional`
+  fixes the selected delimiter, and `MayTransfer.source_execution` composes
+  source `PlaceType`/`Subtype` with the actual moved resident, its physical
+  type, resources and the real caller event trace. The explicit before
+  `AddressType` and source-assumption interpretation remain theorem hypotheses,
+  not runtime equality claims.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
   and whole-run preservation.
@@ -168,10 +178,42 @@ or a dependency of this project.
   Reallocation consumes the same positive source admission on both outcomes;
   no successful move, release or typed post-world is assumed. Source admission
   synthesis and progress for the other raw primitives remain open.
+- `UnitStorageConstruction`, `BufferReleaseProgress`, `RawMutationProgress`:
+  the unit-result installer shares the common vacant write and empty-input
+  value producer and derives its typed result, actual write and framing.
+  Admitted empty-buffer release constructs the real `PrimitiveStep` release and
+  unit result from `BufferAt`, `shellLive = false`, `resources = []`, all-hole
+  fields, claim readiness, unreserved availability and region readiness.
+  `RawRead.move_exists` and `RawWrite.exists_with_result` construct the actual
+  move-read/write and the actual unit installation from the pointer/range
+  relation, stored initialized value, `MoveReady` footprint, owned source
+  permission, destination vacancy/type and pairwise disjointness; the moved
+  payload's resources stay accessible in the result world. Raw copy and raw
+  borrow construction, pointer arithmetic and source-admission synthesis remain
+  open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
-  that common invariant. Ordinary copies retain their shared resource closure;
-  source-admitted copy construction remains a separate progress obligation.
+  that common invariant. Ordinary copies retain their shared resource closure.
+  The source-admitted copy construction is now `CopyProgress` below.
+- `CopyProgress`: source duplication capability and actual closed initialized
+  storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
+  owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
+  stored tree's real owner uniqueness), and `Acquires` selects the actual
+  copy/explicit-move/default-move branch from the canonical principal.
+  `Acquires.allocate_success_or_exhausted` and
+  `Copies.allocate_success_or_exhausted` consume one positive `AllocationRequest`
+  and return actual allocation plus the actual acquisition, or positive physical
+  `AllocationExhausted` for that same request; the actual `AtomStep`/`Step`
+  `copy_progress` and `acquire_progress` lift them. Source admission now
+  requires `UnsafeInvariantContract.copyResources`: a valid pre-world, the
+  contract's holds predicate and actual duplicability imply that the erased
+  retained bindings are read-only. This is the formal counterpart of §7.2's rule
+  that a structural copy creates an additional owner only for duplicable types,
+  applied to the §7.3 unsafe invariant contracts that determine owner behaviour
+  for residents not stored syntactically by value; the normative text does not
+  enumerate this clause itself, so it is recorded here as a formal obligation
+  and an interpretation, not added source syntax. Ordered capture/call-entry
+  totality and missing capture-exhaustion outcomes remain open.
 - `SnapshotResourcePreservation`, `SnapshotReplayPreservation`: one mixed
   copied/external graph proof derives nominal closure and transitive reference
   restoration, retaining old external allocation ownership. Actual copied
@@ -212,12 +254,25 @@ inventory rather than accepting a separately supplied unrelated AST.
 
 ## Checking
 
-Use the pinned toolchain to build the changed proof targets, for example
-`lake build GloriousLanguage.ExecutionPreservation GloriousLanguage.PublicValues`.
-Warnings are errors and implicit identifier creation is disabled. The default
-aggregate also includes the preserved `Checks`; examples are not routine
-evidence for this semantic proof phase. No `sorry`, new axiom, evaluator fuel
-bound, or always-rejecting implementation counts as a completed specification.
+Use the pinned toolchain to build the changed proof targets by name, for example
+the current recovered checkpoint
+
+`lake build GloriousLanguage.CopyProgress GloriousLanguage.LabelExecution GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress`
+
+which passes 205 jobs. Warnings are errors and implicit identifier creation is
+disabled. The default aggregate also includes the preserved `Checks`; examples
+are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
+evaluator fuel bound, or always-rejecting implementation counts as a completed
+specification.
+
+The whole library is not green and is not claimed to be. Named targets that
+currently fail at this revision are `BasicChecks`, `BindingChecks`,
+`ExecutionChecks`, `ControlChecks`, `PreservationChecks`, `SourceChecks`,
+`CleanupPreservation`, `InvocationLending`, `ForeignEvolution`,
+`ResumptionPreservation`, `RuntimeWorldEquivariance`, `AllocationLayout`,
+`FunctionEntryContextTyping`, `ScalarMachine` and `PublicValues`; they are
+stale consumers outside the checked dependency graph and are not evidence for
+or against the recovered boundary.
 
 Checking that definitions and sample propositions elaborate is different
 from proving determinism, type soundness, adequacy of every source rule,

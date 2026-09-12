@@ -120,6 +120,51 @@ common resident-graph frame now observes actual reference rows instead of
 requiring the entire loan table to be unchanged; the actual fresh allocator
 derives its preservation premises. Source admission synthesis is still open.
 
+The recovered strict 205-job gate checks `CopyProgress`, `LabelExecution`,
+`RawMutationProgress`, `SemanticPreservation`, `SnapshotReplayPreservation`,
+`OperationExecution` and `BufferReallocationProgress` on a source-only tree
+(warnings as errors, implicit identifiers disabled, no copied `.olean` data).
+It closes three previously open boundaries. Ordinary Copy: source duplication
+capability and actual closed initialized storage construct the single
+`CopyTree`/`CopyValue` traversal and its fresh owner-origin table, and the
+selected acquisition is the actual copy/explicit-move/default-move branch of
+the canonical principal; `Acquires`/`Copies.allocate_success_or_exhausted`
+consume one positive `AllocationRequest` and return actual allocation plus the
+actual acquisition, or positive physical `AllocationExhausted` for that same
+request, and the actual `AtomStep`/`Step` consumers lift them. Label: the
+boundary retains the actual first matching route, the common singleton resident
+handoff preflight and a positive allocation request, so
+`LabelReady.prepare` yields the actual `Protect` or its physical exhaustion and
+`LabelReady.execute` constructs the actual `ControlStep.leave` or
+`leaveExhausted`, the latter retaining exactly the unchanged before-world.
+Raw: admitted empty-buffer release, raw move-read and raw move-write construct
+the actual primitive and its unit/moved result from before-state admission only
+(authenticated buffer, pointer/range relation, stored initialized value,
+`MoveReady` footprint, owned source permission, destination vacancy/type and
+disjointness), with the moved payload's recursive resources still accessible in
+the result world.
+
+`UnsafeInvariantContract.copyResources` is added as an admission law of the
+existing contract: a valid pre-world, the contract's holds predicate and actual
+duplicability imply the erased retained bindings are read-only. It is the
+formal counterpart of §7.2's rule that a structural copy creates an additional
+owner only for duplicable types, applied to the §7.3 unsafe invariant contracts
+that determine owner behaviour for residents not stored syntactically by value;
+the normative text does not enumerate the clause, so this is recorded as a
+formal obligation and an interpretation, not as added source syntax. No field
+of any runtime relation, rule or language meaning was changed by the recovery.
+
+The whole library is not green. At this revision the named targets
+`BasicChecks`, `BindingChecks`, `ExecutionChecks`, `ControlChecks`,
+`PreservationChecks`, `SourceChecks`, `CleanupPreservation`, `InvocationLending`,
+`ForeignEvolution`, `ResumptionPreservation`, `RuntimeWorldEquivariance`,
+`AllocationLayout`, `FunctionEntryContextTyping`, `ScalarMachine` and
+`PublicValues` fail as stale consumers outside the checked dependency graph;
+their error sets are identical to the pristine pre-recovery tree, and the
+recovery additionally repairs the duplicate `Value.Initialized.resident` that
+previously made `DropCapabilities` fail. Full-source checking therefore still
+fails; an older checkpoint result is not evidence for the current graph.
+
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody

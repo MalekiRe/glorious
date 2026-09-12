@@ -1,5 +1,6 @@
 import GloriousLanguage.BulkMovePreservation
 import GloriousLanguage.PointerStorageConstruction
+import GloriousLanguage.UnitStorageConstruction
 import GloriousLanguage.LocalPreservation
 
 /-! Storage preservation for the actual raw-memory producers. The common
@@ -54,12 +55,6 @@ theorem StoresScalar.worldTyped {program : Kernel.Program} {before after : World
     (typed : Typing.WorldTyped program before)
     (stored : StoresScalar program before destination scalar after) : Typing.WorldTyped program after :=
   stored.2.2.empty_worldTyped valid inventory typed (by simp) (by simp) (.scalar stored.1)
-
-theorem StoresUnit.worldTyped {program : Kernel.Program} {before after : World} {destination}
-    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before)
-    (stored : StoresUnit program before destination after) : Typing.WorldTyped program after :=
-  stored.2.empty_worldTyped valid inventory typed (by simp) (by simp) .unit
 
 
 /-- Every primitive transition preserves complete storage typing, including

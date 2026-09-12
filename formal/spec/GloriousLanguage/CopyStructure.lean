@@ -4,6 +4,14 @@ import GloriousLanguage.Preservation
 its exact copied resident and never reconstruct a second ownership walk. -/
 namespace Glorious.Language
 
+theorem Value.field_sizeOf {value child : Value} (member : some child ∈ value.fields) : sizeOf child < sizeOf value := by
+  cases value
+  simp only [Value.fields] at member
+  have smaller := List.sizeOf_lt_of_mem member
+  change 1 + sizeOf child < _ at smaller
+  simp_wf
+  omega
+
 theorem CopyTree.type_eq {program : Program} {next finish : Nat} {value copied : Value} {origins : Table Identity}
     (copy : CopyTree program next value finish copied origins) : copied.type = value.type := by
   cases copy; rfl

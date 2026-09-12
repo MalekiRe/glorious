@@ -315,7 +315,7 @@ theorem MayAwait.caller_permission {program : Kernel.Program} {function : Functi
   subst actual
   exact ready.caller_permission (awaiting.outward pending) route prepared selectedRoots
 
-/-- An outward label retains an actual destination and payload preparation,
+/-- An outward label retains an actual destination and positive payload request,
 with permission on its callee-owned post-payload remainder. The caller supplies
 its own residual cleanup share when consuming this request. Missing routing or
 impossible protection is not permission for an invalid destination. -/
@@ -326,21 +326,22 @@ def MayTransfer (program : Kernel.Program) (state : State)
 theorem MayTransfer.isolated_false {program : Kernel.Program} {state : State} :
     ¬ MayTransfer program state .isolated := by
   rintro ⟨brand,argument,outward,ready⟩
-  obtain ⟨abandoned,context,region,type,outer,_,_,route,_⟩ := ready.prepared
+  obtain ⟨abandoned,context,region,type,outer,_,_,route,_⟩ := ready.preflight
   exact outward.2 ⟨abandoned,context,region,type,outer,by simpa only [InvocationBoundary.ambient,List.append_nil] using route⟩
 
 theorem MayTransfer.foreign_free {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
     (transfer : MayTransfer program state boundary) :
     ∃ callee, state.frames = callee ++ boundary.ambient ∧ ∀ frame ∈ callee, frame.ForeignFree := by
-  obtain ⟨_,_,outward,ready⟩ := transfer
-  exact ready.foreign_free outward.2
+  obtain ⟨_,_,_,ready⟩ := transfer
+  exact ready.foreign_free
 
 theorem MayTransfer.execute {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program state.world) (transfer : MayTransfer program state boundary)
     (caller : ∀ brand argument, boundary.OutwardLabel state brand argument →
       boundary.LabelCallerPermission program state brand argument) :
-    ∃ after, ControlStep program state none after ∧ Typing.WorldTyped program after.world := by
+    ∃ after event, ControlStep program state event after ∧ Typing.WorldTyped program after.world ∧
+      (event = none ∨ event = some (.fatal .resource) ∧ after = { state with task := .fatal .resource }) := by
   obtain ⟨brand,argument,outward,ready⟩ := transfer
   obtain ⟨context,pending⟩ := outward.1
   exact ready.execute valid inventory typed outward.2 pending (caller brand argument outward)
