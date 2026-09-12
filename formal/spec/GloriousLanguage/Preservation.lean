@@ -637,12 +637,12 @@ theorem FieldOffset.transport {program : Program} {before after : World}
     (shells : (after.read address).map Value.shell = (before.read address).map Value.shell)
     (field : FieldOffset program before address container index type offset) :
     FieldOffset program after address container index type offset := by
-  cases field with
-  | tuple selected layouts layout offset => exact .tuple selected layouts layout offset
-  | bindings selected layouts layout offset => exact .bindings selected layouts layout offset
-  | callable captures selected layouts layout offset => exact .callable captures selected layouts layout offset
+  induction field with
+  | tuple selected layouts layout atOffset => exact .tuple selected layouts layout atOffset
+  | bindings selected layouts layout atOffset => exact .bindings selected layouts layout atOffset
+  | callable captures selected layouts layout atOffset => exact .callable captures selected layouts layout atOffset
   | array nonnegative bound layout => exact .array nonnegative bound layout
-  | nominal constructor id instantiated substituted selected layout stored head offset =>
+  | nominal constructor id instantiated substituted selected layout stored head atOffset =>
       change before.read address = some _ at stored
       rw [stored] at shells
       cases found : after.read address with
@@ -652,7 +652,8 @@ theorem FieldOffset.transport {program : Program} {before after : World}
           have same := Option.some.inj shells
           have sameHead := congrArg Value.head same
           simp only [Value.shell,Value.withFields,Value.head] at sameHead
-          exact .nominal constructor id instantiated substituted selected layout found (sameHead.trans head) offset
+          exact .nominal constructor id instantiated substituted selected layout found (sameHead.trans head) atOffset
+  | alias found instantiated graph inner ih => exact .alias found instantiated graph ih
 
 theorem AddressOffset.retained {program : Program} {before after : World}
     {address : Address} {type : Term} {offset : Nat}

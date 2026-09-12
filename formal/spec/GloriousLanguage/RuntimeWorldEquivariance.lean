@@ -441,16 +441,16 @@ theorem RegionPermutation.fieldOffset (permutation : RegionPermutation) {program
     (valid : ProgramWellFormed program) {world : World} {address : Address} {container type : Term} {index offset : Nat}
     (located : FieldOffset program world address container index type offset) :
     FieldOffset program (permutation.world world) address (permutation.term container) index (permutation.term type) offset := by
-  cases located <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions]
-  case tuple layouts aggregate atType atOffset =>
+  induction located <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions]
+  case tuple atType layouts aggregate atOffset =>
     exact .tuple (by rw [List.getElem?_map,atType]; rfl) (permutation.fieldLayouts valid layouts) aggregate atOffset
-  case bindings layouts aggregate atType atOffset =>
+  case bindings atType layouts aggregate atOffset =>
     exact .bindings (by rw [List.getElem?_map,atType]; rfl) (permutation.fieldLayouts valid layouts) aggregate atOffset
-  case callable declared layouts aggregate atType atOffset =>
+  case callable declared atType layouts aggregate atOffset =>
     exact .callable (declared.permute valid permutation) (by rw [List.getElem?_map,atType]; rfl)
       (permutation.fieldLayouts valid layouts) aggregate atOffset
   case array nonnegative bound layout => exact .array nonnegative bound (layout.permute valid permutation)
-  case nominal constructor identity instantiated substituted layout stored head atType atOffset =>
+  case nominal constructor identity instantiated substituted atType layout stored head atOffset =>
     refine .nominal constructor identity (instantiated.permute permutation)
       (permutation.substitutes_lexical_list ?_ substituted) (by rw [List.getElem?_map,atType]; rfl)
       (by simpa only [RegionPermutation.context,List.map_nil,RegionPermutation.term,Term.renameRuntimeRegions] using layout.permute valid permutation) (permutation.stores stored)
@@ -458,6 +458,11 @@ theorem RegionPermutation.fieldOffset (permutation : RegionPermutation) {program
     intro term member
     obtain ⟨field,present,rfl⟩ := List.mem_map.mp member
     exact valid.field_lexical constructor.1 constructor.2.1 present
+  case alias found instantiated graph inner ih =>
+    exact .alias found (instantiated.permute permutation)
+      (permutation.substitutes_lexical (valid.lexical
+        (List.mem_of_find?_eq_some (Program.alias_lookup found)) _ (by
+          simp only [Definition.terms,List.mem_cons_self])) graph) ih
 
 theorem RegionPermutation.addressOffset (permutation : RegionPermutation) {program : Program}
     (valid : ProgramWellFormed program) {world : World} {address : Address} {type : Term} {offset : Nat}

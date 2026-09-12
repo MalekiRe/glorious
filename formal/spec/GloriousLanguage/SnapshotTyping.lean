@@ -11,7 +11,7 @@ theorem Relocation.old_fieldOffset {program : Program} {world : World} {map : Re
     {address : Address} {container type : Term} {index offset : Nat}
     (field : FieldOffset program world address container index type offset) :
     FieldOffset program (map.copyWorld world homes) address container index type offset := by
-  cases field with
+  induction field with
   | tuple selected layouts layout offset => exact .tuple selected layouts layout offset
   | bindings selected layouts layout offset => exact .bindings selected layouts layout offset
   | callable captures selected layouts layout offset => exact .callable captures selected layouts layout offset
@@ -19,6 +19,7 @@ theorem Relocation.old_fieldOffset {program : Program} {world : World} {map : Re
   | nominal constructor identity instantiated substituted selected layout stored head offset =>
       exact .nominal constructor identity instantiated substituted selected layout
         (World.resident_iff_stores.mp (Relocation.old_resident (World.resident_iff_stores.mpr stored))) head offset
+  | alias found instantiated graph inner ih => exact .alias found instantiated graph ih
 
 theorem Relocation.old_addressOffset {program : Program} {world : World} {map : Relocation} {homes : Table Home}
     {address : Address} {type : Term} {offset : Nat} (typed : AddressOffset program world address type offset) :
@@ -190,19 +191,38 @@ theorem Typing.WorldTyped.resident_runtimeRegionsBelow {program : Kernel.Program
   exact wholeTyped.resident_runtimeRegionsBelow valid inventory
     (same ▸ typed.2.2.2 address.root root found) inside
 
+/-- An alias application's physical expansion stays inside the bound of the
+application itself: the declared body is lexical, so its runtime regions can
+only come from the generic arguments already occurring in the application. -/
+theorem FieldOffset.alias_runtimeRegionsBelow {program : Program} (valid : ProgramWellFormed program)
+    {id : DeclId} {declaration : AliasDefinition} {arguments : List Term} {substitution : Substitution}
+    {expanded : Term} {bound : Identity} (found : program.alias id = some declaration)
+    (instantiated : Instantiates declaration.generics arguments substitution)
+    (graph : Substitutes substitution declaration.value expanded) :
+    (Term.alias id arguments).RuntimeRegionsBelow bound → expanded.RuntimeRegionsBelow bound := by
+  intro supported
+  have lexical : declaration.value.Lexical :=
+    valid.lexical (List.mem_of_find?_eq_some (Program.alias_lookup found)) declaration.value
+      (by simp only [Definition.terms,List.mem_cons_self])
+  rw [graph.2.1]
+  exact Term.substitute_runtimeRegionsBelow substitution declaration.value bound
+    (lexical.runtimeRegionsBelow bound)
+    (fun parameter value selected =>
+      supported.child (by simpa only [Term.children] using instantiated.argument_of_get selected))
+
 /-- The declared type of a vacant location comes from the same byte-layout
 derivation as a populated location, including instantiated nominal fields. -/
 theorem FieldOffset.runtimeRegionsBelow {program : Program} (valid : ProgramWellFormed program)
     {world : World} {address : Address} {container type : Term} {index offset bound : Nat}
     (located : FieldOffset program world address container index type offset)
     (supported : container.RuntimeRegionsBelow bound) : type.RuntimeRegionsBelow bound := by
-  cases located with
+  induction located with
   | tuple selected _ _ _ => exact supported.child (List.mem_of_getElem? selected)
   | bindings selected _ _ _ =>
       exact supported.child (by simp [Term.children,List.mem_of_getElem? selected])
   | callable declared selected _ _ _ =>
       exact declared.runtimeRegionsBelow valid (fun _ present => supported.child present)
-        type (List.mem_of_getElem? selected)
+        _ (List.mem_of_getElem? selected)
   | array _ _ _ => exact supported.child (by simp [Term.children])
   | @nominal id arguments data variant substitution types index type layout offset value selected identity
       instantiated substituted atType _ _ _ _ =>
@@ -210,7 +230,9 @@ theorem FieldOffset.runtimeRegionsBelow {program : Program} (valid : ProgramWell
           (some variant.header.id) types (.constructor variant.header.id) :=
         Or.inr (Or.inr ⟨variant.header.id,arguments,data,variant,substitution,
           by rw [identity],rfl,rfl,selected,instantiated,substituted⟩)
-      exact constructed.runtimeRegionsBelow valid supported type (List.mem_of_getElem? atType)
+      exact constructed.runtimeRegionsBelow valid supported _ (List.mem_of_getElem? atType)
+  | alias found instantiated graph inner ih =>
+      exact ih (FieldOffset.alias_runtimeRegionsBelow valid found instantiated graph supported)
 
 theorem AddressOffset.runtimeRegionsBelow {program : Program} (valid : ProgramWellFormed program)
     {world : World} {address : Address} {type : Term} {offset bound : Nat}

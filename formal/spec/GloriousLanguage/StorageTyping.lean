@@ -173,6 +173,8 @@ theorem Execution.ConstructorHead.field_type {program : Program} {world : World}
         subst subEq
         have typesEq := sourceFields.substitutes_eq_map.trans fields.substitutes_eq_map.symm
         simpa [typesEq] using selected
+  | alias _ _ _ _ =>
+      rcases constructed with ⟨same,_,_⟩ | ⟨_,_,_,_,same,_⟩ | ⟨_,_,_,_,_,same,_⟩ <;> cases same
 
 /-- Inversion and reconstruction use the field type selected by byte layout.
 The returned reconstruction is a proof, not a second resident-shape producer. -/

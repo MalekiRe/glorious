@@ -450,6 +450,21 @@ inductive FieldOffset (program : Language.Program) (world : World) :
         ∃ (tag : Nat) (offsets : List Nat), data.variants[tag]? = some variant ∧ layout.variants[tag]? = some offsets ∧ offsets[index]? = some offset) →
       FieldOffset program world address (.nominal id arguments) index type offset
 
+  /-- A declared container that is an alias application has the physical field
+  offsets of its actual expansion. The program's own alias declaration fixes
+  that expansion and the checked substitution edge that reaches it, exactly as
+  `DefinitionalStep.alias` does; `LayoutOf.alias` then gives container and
+  expansion the same layout, so every offset the layout determines is shared.
+  This is the alias-headed case of the same ordered-layout derivation, not a
+  second field walker, and the selected field keeps the expansion's - the
+  actually stored - type. -/
+  | alias {address id declaration arguments substitution expanded index type offset} :
+      program.alias id = some declaration →
+      Instantiates declaration.generics arguments substitution →
+      Substitutes substitution declaration.value expanded →
+      FieldOffset program world address expanded index type offset →
+      FieldOffset program world address (.alias id arguments) index type offset
+
 inductive AddressOffset (program : Language.Program) (world : World) : Address → Term → Nat → Prop where
   | root {id root} : world.roots.get id = some root → root.live = true →
       AddressOffset program world ⟨id,root.generation,[]⟩ root.type 0

@@ -56,20 +56,20 @@ theorem SnapshotMap.copied_fieldOffset {program : Kernel.Program} {before : Stat
     FieldOffset program.declarations (map.copyWorld before.world homes) (map.address address)
       (map.term container) index (map.term type) offset := by
   revert supported
-  cases located <;> intro supported <;> simp only [Relocation.term,Term.renameRuntimeRegions]
-  case tuple layouts aggregate atType atOffset =>
+  induction located <;> intro supported <;> simp only [Relocation.term,Term.renameRuntimeRegions]
+  case tuple atType layouts aggregate atOffset =>
     exact .tuple (by simp only [List.getElem?_map,atType,Option.map])
       (selected.fieldLayouts valid world (fun _ member => supported.child member) layouts) aggregate atOffset
-  case bindings layouts aggregate atType atOffset =>
+  case bindings atType layouts aggregate atOffset =>
     exact .bindings (by simp only [List.getElem?_map,atType,Option.map])
       (selected.fieldLayouts valid world (fun _ member => supported.child (by simp [Term.children,member])) layouts) aggregate atOffset
-  case callable declared layouts aggregate atType atOffset =>
+  case callable declared atType layouts aggregate atOffset =>
     exact .callable (CallableFields.relocate valid declared map) (by simp only [List.getElem?_map,atType,Option.map,Relocation.term])
       (selected.fieldLayouts valid world
         (declared.runtimeRegionsBelow valid (fun _ member => supported.child member)) layouts) aggregate atOffset
   case array nonnegative bound layout =>
     exact .array nonnegative bound (selected.layoutOf valid world (supported.child (by simp [Term.children])) layout)
-  case nominal constructor identity instantiated substituted layout stored head atType atOffset =>
+  case nominal constructor identity instantiated substituted atType layout stored head atOffset =>
     refine .nominal constructor identity (Instantiates.relocate instantiated map)
       (map.substitutes_list ?_ substituted) (by simp only [List.getElem?_map,atType,Option.map,Relocation.term])
       (by simpa only [Relocation.term,Term.renameRuntimeRegions] using selected.layoutOf valid world supported layout)
@@ -78,6 +78,12 @@ theorem SnapshotMap.copied_fieldOffset {program : Kernel.Program} {before : Stat
     · intro term member
       obtain ⟨field,present,rfl⟩ := List.mem_map.mp member
       exact valid.field_lexical constructor.1 constructor.2.1 present
+  case alias found instantiated graph inner ih =>
+    exact .alias found (Instantiates.relocate instantiated map)
+      (map.substitutes_lexical (valid.lexical
+        (List.mem_of_find?_eq_some (Program.alias_lookup found)) _ (by
+          simp only [Definition.terms,List.mem_cons_self])) graph)
+      (ih (FieldOffset.alias_runtimeRegionsBelow valid found instantiated graph supported))
 
 theorem SnapshotMap.copied_addressOffset {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : ProgramWellFormed program.declarations) (typed : Typing.WorldTyped program before.world)

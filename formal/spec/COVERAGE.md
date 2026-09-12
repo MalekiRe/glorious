@@ -300,6 +300,26 @@ is not derivable. No statement is weakened and no previously derivable fact is
 assumed. Verified exact: the four modules check as 80 jobs, and the composed
 gate including them passes 224 jobs from a fresh source-only tree.
 
+The authoritative alias contract is landed: `FieldOffset` gains the `alias`
+constructor, so an alias application's physical field offsets are its actual
+expansion's (`program.alias` supplies the declaration, the checked
+substitution edge reaches the expansion, and the selected field keeps the
+expansion's — the actually stored — type, which is why initialized residents are
+never alias-headed). The declaration data is carried explicitly rather than as
+an `Equal` premise exactly so the region invariant is derivable
+(`FieldOffset.alias_runtimeRegionsBelow`). Consumers were migrated by their
+owner: `FieldOffset.transport`, `Relocation.old_fieldOffset`,
+`FieldOffset.runtimeRegionsBelow`, `SnapshotMap.copied_fieldOffset`,
+`RegionPermutation.fieldOffset` (all now recursive inductions over the new
+constructor) and `ConstructorHead.field_type`. The same release replaced the
+unprovable world law `TargetRepresentation.structural` with the derived
+`AddressType.structural_of_stored` (an occupied address is read at its resident's
+own type), added `Typing.StructuralExpansion`,
+`DefinitionallyEqual.runtime_context` and the assumption-free interpretation
+producer `SourceInterpreted.of_assumption_free`, and left `TargetRepresentation.offsets`
+without a producer: it needs the allocation/entry layout law that the
+physical-realization lane owns.
+
 One additive shared-core hunk landed for the suspension boundary:
 `UnsafeInvariantContract` gains `rehomed`, the rehoming counterpart of
 `relocated` (a declared invariant cannot depend on internal home bookkeeping,

@@ -314,20 +314,24 @@ def Typing.AddressTyped (program : Kernel.Program) (world : World) (runtime : Ex
   ∃ actual, AddressType program.declarations world address actual ∧
     DefinitionallyEqual program.declarations runtime.static actual (runtime.term type)
 
-/-- The world's realization of declared storage types: each located declared
-type is a structural head, and each source field step of such a type has its
-actual physical field offset. This is the target representation obligation of
+/-- The world's realization of declared storage types: every source field step
+read at a located declared type has its actual physical field offset. The
+container is the type the addressed storage actually has - an occupied address
+is read at its resident's own (structurally headed) type, and the source
+projection only steps through that same structural head, since a source place
+of alias-headed type is first transported to its expansion by `Projections.equal`.
+An alias-headed container therefore has no source field step at all, and its
+physical children are supplied by the alias rule of `FieldOffset` when a
+derivation at it is demanded. This is the target representation obligation of
 the world interpretation - supplied by actual allocation - never an assumption
 about a requested address type. -/
 structure Typing.TargetRepresentation (program : Kernel.Program) (world : World)
     (runtime : Execution.Context) : Prop where
-  structural : ∀ (address : Address) (type : Term),
-    AddressType program.declarations world address type → type.StructuralHead
   offsets : ∀ (address : Address) (container : Term) (index : Nat) (child : Term),
     AddressType program.declarations world address container →
     FieldType program.declarations runtime.static container index child true →
+    container.FrameBound index →
     ∃ offset, FieldOffset program.declarations world address container index child offset
-
 
 /-- Every typed resident's actual type is structurally headed: resident typing
 only produces tuple, array, nominal and the fixed-head forms, so no unexpanded
@@ -347,6 +351,42 @@ theorem Typing.ValueTyped.type_structural {program : Kernel.Program} {world : Wo
   | continuation form => obtain ⟨_,_,_,_,same⟩ := form; rw [same]; trivial
   | available _ _ _ _ _ => trivial
   | bindings _ _ _ _ _ => trivial
+
+
+/-- An occupied address is read at its resident's own type: the located
+declared type and the resident's type are the same term, and resident typing
+only produces structurally headed types. This replaces a world-level
+"every located type is structural" premise, which an admitted alias-headed
+allocation would falsify, by the actual judgement at the point of use. -/
+theorem AddressType.structural_of_stored {program : Kernel.Program} {world : World}
+    {address : Address} {container : Term}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program world)
+    (located : AddressType program.declarations world address container)
+    {value : Value} (stored : world.Stores address value) : container.StructuralHead := by
+  obtain ⟨offset, atOffset⟩ := located
+  have typeEq := atOffset.stored_type valid inventory (Typing.WorldTyped.roots worldTyped) stored
+  rw [← typeEq]
+  exact (World.stores_typed (Typing.WorldTyped.roots worldTyped) stored).type_structural
+
+/-- A resident's own array frame bound: a source field step only selects a slot
+the resident actually has, and a typed array's arity is its declared count. -/
+theorem Typing.ValueTyped.frameBound {program : Kernel.Program} {world : World} {value : Value}
+    (typed : Typing.ValueTyped program world value) {index : Nat} (bound : index < value.fields.length) :
+    value.type.FrameBound index := by
+  cases typed with
+  | aggregate constructed fields =>
+      rcases constructed with ⟨same,_,_⟩ | ⟨element,sign,width,length,same,_,_,arity,_⟩ |
+        ⟨_,_,_,_,_,same,_⟩
+      · rw [same]
+        trivial
+      · rw [same]
+        show index < length.toNat
+        rw [arity, Int.toNat_natCast]
+        exact lt_of_lt_of_eq bound fields.length
+      · rw [same]
+        trivial
+  | _ => trivial
 
 
 /-- The runtime decoding preserves structural heads: it rewrites exactly the
@@ -410,36 +450,79 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
   | nil => cases resolved with | nil => exact baseTyped
   | @field type mutable index rest field result writable located tail ih =>
     obtain ⟨parentActual, parentLocated, parentAgrees⟩ := baseTyped
-    have childTyped : Typing.AddressTyped program world runtime (base.child index) field := by
-      obtain ⟨actualField, physicalField, agrees⟩ := located.instantiated valid (scope := runtime.instantiation)
-        (runtime := runtime) moduleEq (representation.structural base parentActual parentLocated) parentAgrees
-      obtain ⟨offset, fieldOffset⟩ :=
-        representation.offsets base parentActual index actualField parentLocated physicalField
-      obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
-      exact ⟨actualField,⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩,agrees⟩
     cases resolved with
-    | field stored selected inner => exact ih childTyped inner
-    | vacantField stored vacantField =>
+    | field stored selected inner =>
+      have childTyped : Typing.AddressTyped program world runtime (base.child index) field := by
+        obtain ⟨actualField, physicalField, agrees⟩ := located.instantiated valid (scope := runtime.instantiation)
+          (runtime := runtime) moduleEq
+          (AddressType.structural_of_stored valid inventory worldTyped parentLocated stored) parentAgrees
+        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated
+          physicalField (by
+            obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+            have typeEq := parentOffsetLocated.stored_type valid inventory (Typing.WorldTyped.roots worldTyped) stored
+            rw [← typeEq]
+            exact (World.stores_typed (Typing.WorldTyped.roots worldTyped) stored).frameBound
+              (List.getElem?_eq_some_iff.mp selected).1)
+        obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+        exact ⟨actualField,⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩,agrees⟩
+      exact ih childTyped inner
+    | vacantField stored vacant =>
+      have childTyped : Typing.AddressTyped program world runtime (base.child index) field := by
+        obtain ⟨actualField, physicalField, agrees⟩ := located.instantiated valid (scope := runtime.instantiation)
+          (runtime := runtime) moduleEq
+          (AddressType.structural_of_stored valid inventory worldTyped parentLocated stored) parentAgrees
+        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated
+          physicalField (by
+            obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+            have typeEq := parentOffsetLocated.stored_type valid inventory (Typing.WorldTyped.roots worldTyped) stored
+            rw [← typeEq]
+            exact (World.stores_typed (Typing.WorldTyped.roots worldTyped) stored).frameBound
+              (List.getElem?_eq_some_iff.mp vacant).1)
+        obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+        exact ⟨actualField,⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩,agrees⟩
       have convertible := tail.endpoints_convertible.elim id (fun different => absurd rfl different)
       obtain ⟨actualField, childLocated, childAgrees⟩ := childTyped
       exact ⟨actualField,childLocated,childAgrees.trans (closed field result convertible)⟩
   | @index element length mutable localSlot rest result writable indexed tail ih =>
     obtain ⟨parentActual, parentLocated, parentAgrees⟩ := baseTyped
     simp only [Execution.Context.term,ScopeInstantiation.term] at parentAgrees
-    obtain ⟨actualElement, actualLength, shape, elementAgrees, _⟩ :=
-      parentAgrees.array_shape valid (representation.structural base parentActual parentLocated)
     cases resolved with
     | @index headBase headAuthority headLocal headRest headBinding headValue headInteger headResult
         headPermission selected stored valueHead initialized permitted nonnegative inner =>
-      have elementTyped : Typing.AddressTyped program world runtime (base.child headInteger.toNat) element := by
-        refine ⟨actualElement,?_,elementAgrees⟩
-        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual headInteger.toNat actualElement
-          parentLocated (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩))
-        obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
-        exact ⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩
       cases inner with
-      | field storedInArray selectedInArray innerRest => exact ih elementTyped innerRest
+      | field storedInArray selectedInArray innerRest =>
+        obtain ⟨actualElement, actualLength, shape, elementAgrees, _⟩ :=
+          parentAgrees.array_shape valid
+            (AddressType.structural_of_stored valid inventory worldTyped parentLocated storedInArray)
+        have elementTyped : Typing.AddressTyped program world runtime (base.child headInteger.toNat) element := by
+          refine ⟨actualElement,?_,elementAgrees⟩
+          obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual headInteger.toNat actualElement
+            parentLocated (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
+              obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+              have typeEq := parentOffsetLocated.stored_type valid inventory
+                (Typing.WorldTyped.roots worldTyped) storedInArray
+              rw [← typeEq]
+              exact (World.stores_typed (Typing.WorldTyped.roots worldTyped) storedInArray).frameBound
+                (List.getElem?_eq_some_iff.mp selectedInArray).1)
+          obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+          exact ⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩
+        exact ih elementTyped innerRest
       | vacantField storedInArray vacantInArray =>
+        obtain ⟨actualElement, actualLength, shape, elementAgrees, _⟩ :=
+          parentAgrees.array_shape valid
+            (AddressType.structural_of_stored valid inventory worldTyped parentLocated storedInArray)
+        have elementTyped : Typing.AddressTyped program world runtime (base.child headInteger.toNat) element := by
+          refine ⟨actualElement,?_,elementAgrees⟩
+          obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual headInteger.toNat actualElement
+            parentLocated (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
+              obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+              have typeEq := parentOffsetLocated.stored_type valid inventory
+                (Typing.WorldTyped.roots worldTyped) storedInArray
+              rw [← typeEq]
+              exact (World.stores_typed (Typing.WorldTyped.roots worldTyped) storedInArray).frameBound
+                (List.getElem?_eq_some_iff.mp vacantInArray).1)
+          obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
+          exact ⟨_,AddressOffset.child parentOffsetLocated fieldOffset⟩
         have convertible := tail.endpoints_convertible.elim id (fun different => absurd rfl different)
         obtain ⟨actualChild, childLocated, childAgrees⟩ := elementTyped
         exact ⟨actualChild,childLocated,childAgrees.trans (closed element result convertible)⟩
@@ -453,7 +536,8 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
         (Typing.WorldTyped.roots worldTyped) stored
       simp only [Execution.Context.term,ScopeInstantiation.term] at parentAgrees
       obtain ⟨actualRegion, actualReferent, shape, _, referentAgrees⟩ :=
-        parentAgrees.reference_shape valid (representation.structural base parentActual ⟨parentOffset,parentOffsetLocated⟩)
+        parentAgrees.reference_shape valid
+          (AddressType.structural_of_stored valid inventory worldTyped ⟨parentOffset,parentOffsetLocated⟩ stored)
       exact ih ⟨actualReferent,
         valueTyped.reference_referent (valueType.trans shape) valueHead found, referentAgrees⟩ inner
   | @equal a b mutable projections result writable same tail ih =>
