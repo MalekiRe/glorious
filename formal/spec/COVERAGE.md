@@ -165,6 +165,32 @@ recovery additionally repairs the duplicate `Value.Initialized.resident` that
 previously made `DropCapabilities` fail. Full-source checking therefore still
 fails; an older checkpoint result is not evidence for the current graph.
 
+The recovered strict 208-job gate adds `InputBindingProgress` and
+`LoanCompatibility` to the recovered targets above. It closes two narrow
+boundaries, not a batch or pre-entry theorem. `Authority.LoanCompatible` is the
+pre-state compatibility relation for one newly formed live loan: owning, loan,
+shared and guarded authorities observe the actual pre-world loan rows and the
+pre-world guards, so shared access may overlap a shared loan and a carrier
+newly used as a guard becomes shared-only. `LoanCompatibility` then
+characterizes exactly when an existing `Permitted` survives a fresh loan, a
+storage claim or an allocation claim, in both directions, as
+`Permitted after ↔ Permitted before ∧ pre-state compatibility`, consuming the
+actual loan insertion and location extension rather than a post-state
+permission. `InputBindingProgress` constructs the actual binder for each of the
+six real input cases from a positive `InvocationInput.StorageRequest` plus the
+input's `Ready` pre-state facts; only resident allocation may exhaust, and lack
+of semantic evidence is never reclassified as a resource fault.
+
+Open at this boundary: compatibility with already bound outputs, pending
+custody and owning-claim invalidation, the ordered whole-input/pre-entry
+theorem, and the source pre-entry derivation. This is a single-input producer
+plus a permission-only compatibility foundation; it is not general batch
+progress and must not be reported as such. The scoped framing promotions
+(`ReferenceTransferPreservation`, the `Storage` permission-state block and the
+paired `ControlAuthority`/`LoanPreservation`/`SnapshotResourcePreservation`
+relocations) remain in their own workspace until their final manifest is
+checked, and are not part of this gate.
+
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody

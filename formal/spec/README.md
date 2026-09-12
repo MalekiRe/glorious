@@ -195,6 +195,19 @@ or a dependency of this project.
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.
   The source-admitted copy construction is now `CopyProgress` below.
+- `LoanCompatibility`, `InputBindingProgress`: `Authority.LoanCompatible` is the
+  pre-state compatibility relation for one newly formed live loan (owning,
+  loan, shared and guarded carriers observe the actual pre-world rows and
+  guards), and `LoanCompatibility` characterizes exactly when an existing
+  `Permitted` survives a fresh loan, a storage claim or an allocation claim as
+  `Permitted after ↔ Permitted before ∧ pre-state compatibility`.
+  `InputBindingProgress` constructs the actual binder for all six real input
+  cases (`BindsInputAt.success_or_exhausted`) from positive
+  `InvocationInput.StorageRequest` and `input.Ready` pre-state facts, with
+  exhaustion available only for resident allocation. This is not general batch
+  or pre-entry progress: compatibility with previously bound outputs, pending
+  custody and owning-claim invalidation, the ordered whole-input theorem and
+  the source pre-entry derivation all remain open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -257,9 +270,10 @@ inventory rather than accepting a separately supplied unrelated AST.
 Use the pinned toolchain to build the changed proof targets by name, for example
 the current recovered checkpoint
 
-`lake build GloriousLanguage.CopyProgress GloriousLanguage.LabelExecution GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress`
+`lake build GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.CopyProgress GloriousLanguage.LabelExecution GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress`
 
-which passes 205 jobs. Warnings are errors and implicit identifier creation is
+which passes 208 jobs (the same gate without the two compatibility modules
+passes 205). Warnings are errors and implicit identifier creation is
 disabled. The default aggregate also includes the preserved `Checks`; examples
 are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed

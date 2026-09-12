@@ -197,6 +197,31 @@ Full-source checking still fails: `BasicChecks`, `BindingChecks`,
 consumers outside the checked graph with error sets identical to the pristine
 tree, and no older checkpoint result is evidence for the current graph.
 
+The permission-only compatibility foundation and the single-input producer are
+now checked too. `Authority.LoanCompatible` is a pre-state relation for one
+newly formed live loan: owning and loan authorities observe the requested mode
+against the actual referent, and shared and guarded authorities recurse into
+their backing access while a guarded authority also consults the actual
+pre-world loan row of its carrier and the pre-world guards, so shared access
+may overlap a shared loan and a carrier newly used as a guard becomes
+shared-only. No future permission or second resource walk is used.
+`LoanCompatibility` proves that an existing `Permitted` survives a fresh loan,
+a storage claim or an allocation claim exactly when that pre-state compatibility
+holds, in both directions, consuming the actual loan insertion and location
+extension. `InputBindingProgress` constructs the actual binder for each of the
+six real input cases from positive `InvocationInput.StorageRequest` and the
+input's `Ready` pre-state facts, with physical exhaustion possible only for
+resident allocation; erased ports require no invented layout, and raw claims and
+custody transfers retain their actual identities. The composed source-only
+strict gate over these two modules plus the recovered targets passes 208 jobs.
+
+This is not general batch or pre-entry progress. Compatibility with previously
+bound outputs, pending custody and owning-claim invalidation, the ordered
+whole-input/pre-entry theorem and the source pre-entry derivation remain the
+next milestone, and no accumulation of small permission lemmas substitutes for
+it. The scoped framing promotions stay in their own workspace until their final
+manifest is checked.
+
 ## 2. Source and normative adequacy
 
 Storage creation and teardown now compose through the real cleanup steps.

@@ -6,6 +6,7 @@ import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.CopyResourcePreservation
+import GloriousLanguage.LoanCompatibility
 import GloriousLanguage.CopyProgress
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
@@ -29,6 +30,7 @@ import GloriousLanguage.OperationPayloadPreparation
 import GloriousLanguage.PayloadHandoff
 import GloriousLanguage.PatternPlanTransport
 import GloriousLanguage.InputLending
+import GloriousLanguage.InputBindingProgress
 import GloriousLanguage.ControlPreservation
 import GloriousLanguage.TestPreservation
 import GloriousLanguage.EffectPreservation

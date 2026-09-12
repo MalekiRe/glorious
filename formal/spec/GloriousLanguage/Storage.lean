@@ -477,6 +477,22 @@ def Permitted (world : World) (authority : Authority) (requested : Access) (addr
    | .guarded backing carrier => Permitted world backing requested address ∧
        ∃ loan, world.loans.get carrier = some loan ∧ LoanPermission world carrier requested loan.referent)
 
+/-- Source-state compatibility with one new live loan. Shared access can
+overlap a shared loan; a carrier newly used as a guard becomes shared-only.
+Guarded authority observes its actual carrier's referent, not the address
+of the backing access. No future permission or second resource walk is used. -/
+def Authority.LoanCompatible (world : World) (authority : Authority) (requested : Access)
+    (address referent : Address) (mode : Mutability) (guards : List Identity) : Prop :=
+  match authority with
+  | .owner => address.Overlaps referent → ¬ Conflict requested mode
+  | .loan identity => (address.Overlaps referent → ¬ Conflict requested mode) ∧
+      (identity ∈ guards → requested = .shared)
+  | .shared backing => backing.LoanCompatible world requested address referent mode guards
+  | .guarded backing carrier => backing.LoanCompatible world requested address referent mode guards ∧
+      ∀ loan, world.loans.get carrier = some loan →
+        (loan.referent.Overlaps referent → ¬ Conflict requested mode) ∧
+        (carrier ∈ guards → requested = .shared)
+
 /-- The current allocation owner is the latest live owning node for the whole
 physical allocation. Ordinary reference/storage descendants can exist without
 changing that owner; an owning successor makes its ancestor historical. -/
