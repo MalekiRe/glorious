@@ -58,8 +58,10 @@ def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop 
     (index < function.captures.length ∧ input.origin = .capture index) ∨
       (function.captures.length ≤ index ∧ input.origin = .argument (index-function.captures.length)))
 
-def InitialInvocation (program : Kernel.Program) (function : Function) (inputs : List InvocationInput) (state : State) : Prop :=
+def InitialInvocation (program : Kernel.Program) (host : Foreign.Model) (function : Function)
+    (inputs : List InvocationInput) (state : State) : Prop :=
   InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.ControlWellFormed ∧
+  host.AuthoritiesRecorded state.world state.hostState ∧
   ∃ caller, state.task = .enter caller function (.supplied inputs) false ∧ state.frames = [] ∧
     caller.region ∈ state.world.liveRegions ∧ caller.activation < state.nextActivation ∧
     (∀ id root, state.world.roots.get id = some root → OwnedByActivation root state.nextActivation → root.live = false)
@@ -75,12 +77,12 @@ def AtOutcome (state : State) : Outcome → Prop
 
 def Observes (program : Kernel.Program) (host : Foreign.Model) (function : Function) (observation : Observation) : Prop :=
   ∃ start finish,
-    InitialInvocation program function observation.input start ∧ start.world = observation.before ∧
+    InitialInvocation program host function observation.input start ∧ start.world = observation.before ∧
     Run program host start observation.events finish ∧ finish.world = observation.after ∧ AtOutcome finish observation.outcome
 
 def Diverges (program : Kernel.Program) (host : Foreign.Model) (function : Function) (inputs : List InvocationInput)
     (states : Nat → State) (events : Nat → Option Event) : Prop :=
-  InitialInvocation program function inputs (states 0) ∧ ∀ n, Step program host (states n) (events n) (states (n+1))
+  InitialInvocation program host function inputs (states 0) ∧ ∀ n, Step program host (states n) (events n) (states (n+1))
 
 structure Interface where
   finite : Observation → Prop
@@ -114,7 +116,7 @@ admission premise: `SemanticPreservation` derives it for every execution from
 well-formed declarations, the body inventory and the host's actual laws. -/
 def ResourceAdmissionAt (program : Kernel.Program) (function : Function) (access : Access) : Prop :=
   ∀ host inputs start trace finish,
-    Foreign.Model.Lawful program host → InitialInvocation program function inputs start →
+    Foreign.Model.Lawful program host → InitialInvocation program host function inputs start →
     (∀ input ∈ inputs, (∃ index, input.origin = .capture index) → input.access = access) → Run program host start trace finish →
     StateProgress program host function finish ∧
     (∀ result value, finish.task = .stopped result → finish.world.Stores result value →
@@ -187,7 +189,7 @@ prefix, including a hook that subsequently diverges and has no final outcome. -/
 def DropContract (program : Kernel.Program) (self region : Term) (function : Function) : Prop :=
   DropFunction self region function ∧
   (∀ host inputs start events finish, Foreign.Model.Lawful program host →
-    InitialInvocation program function inputs start → Run program host start events finish →
+    InitialInvocation program host function inputs start → Run program host start events finish →
     DropTraceSafe start.world inputs events) ∧
   (∀ host observation, Foreign.Model.Lawful program host → Observes program host function observation →
     ∀ result, observation.outcome = .normal result →

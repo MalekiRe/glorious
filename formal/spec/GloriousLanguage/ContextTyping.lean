@@ -1,4 +1,5 @@
 import GloriousLanguage.BindingPersistence
+import GloriousLanguage.PredicateScope
 
 /-! The source body's one local environment is related to the actual runtime
 environment. Entry constructs this relation from input recipes, fresh scope
@@ -30,6 +31,18 @@ theorem Typing.FunctionType.locals_nodup {program : Kernel.Program} {function : 
   obtain ⟨capture,inCaptures,rfl⟩ := List.mem_map.mp member
   obtain ⟨formal,inFormals,rfl⟩ := List.mem_map.mp present
   exact separate formal inFormals capture inCaptures same.symm
+
+/-- The actual source-body admission already covers its complete signature
+predicate projection. Entry consumes that same evidence for assumptions, not
+an additional output-context certificate or a second predicate analysis. -/
+theorem Typing.FunctionType.assumptions_scoped {program : Kernel.Program} {function : Kernel.Function}
+    (typed : Typing.FunctionType program function) (module : ModuleId) :
+    (Typing.FunctionContext function module).static.AssumptionsScoped := by
+  obtain ⟨_,_,_,_,_,_,admitted,_⟩ := typed
+  intro constraint member term present
+  have nested : term ∈ function.signature.constraints.flatMap Constraint.terms := List.mem_flatMap.mpr ⟨constraint,member,present⟩
+  exact (admitted term (by
+    simp only [Signature.terms,List.mem_append,List.mem_cons,nested,true_or,or_true])).scoped _
 
 theorem Kernel.Instance.locals_scopeClosed {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
     (inventory : Kernel.BodyInventory program) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
@@ -133,6 +146,7 @@ structure ContextBindingsTyped (program : Kernel.Program) (world : World)
   admitted : ∀ localSlot ∈ source.locals, localSlot.type.Scoped source.static.scope
   bindings : ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
     BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment
+  assumptions : source.static.AssumptionsScoped
 
 end Typing
 
@@ -191,7 +205,7 @@ theorem Typing.ContextBindingsTyped.world {program : Kernel.Program} {before aft
       Typing.BindingStorageTyped program.declarations after address type) :
     Typing.ContextBindingsTyped program after source runtime := by
   exact ⟨typed.moduleEq,typed.unsafeEq,typed.covers,typed.distinct,typed.admitted,
-    typed.bindings.imp (fun _ _ pair => ⟨pair.1,preserved _ _ pair.2⟩)⟩
+    typed.bindings.imp (fun _ _ pair => ⟨pair.1,preserved _ _ pair.2⟩),typed.assumptions⟩
 
 /-- Retiring a moved/discarded owner does not remove its lexical declaration
 or pretend that the retired address remains readable. -/
@@ -263,7 +277,7 @@ theorem Typing.ContextBindingsTyped.bind {program : Kernel.Program} {world : Wor
     (located : Typing.BindingStorageTyped program.declarations world address (runtime.term localSlot.type)) :
     Typing.ContextBindingsTyped program world (source.bind localSlot)
       (runtime.bind (runtime.local localSlot) address authority) := by
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,?_⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,?_,typed.assumptions⟩
   · change (localSlot.id :: (source.locals.filter (fun previous => previous.id != localSlot.id)).map (·.id)).Nodup
     refine List.nodup_cons.mpr ⟨?_,?_⟩
     · intro member
@@ -284,7 +298,8 @@ theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world 
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {lexical : Identity} (fresh : lexical ∉ source.static.scope.brands) (brand : RuntimeBrand) :
     Typing.ContextBindingsTyped program world (source.bindBrand lexical) (runtime.bindBrand lexical brand) := by
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindBrand lexical brand,typed.distinct,?_,?_⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindBrand lexical brand,typed.distinct,?_,?_,
+    typed.assumptions.bindBrand lexical⟩
   · intro localSlot member
     exact (typed.admitted localSlot member).mono (fun _ member => member)
       (fun _ member => List.mem_cons_of_mem _ member)
@@ -309,7 +324,8 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
     {lexical : Identity} (fresh : lexical ∉ source.static.scope.regions) (region : Identity) :
     Typing.ContextBindingsTyped program world (source.bindRegion lexical)
       { runtime.bindRegion lexical region with scope := region, region := region } := by
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindRegion lexical region,typed.distinct,?_,?_⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindRegion lexical region,typed.distinct,?_,?_,
+    typed.assumptions.bindRegion lexical⟩
   · intro localSlot member
     exact (typed.admitted localSlot member).mono (fun _ member => List.mem_cons_of_mem _ member)
       (fun _ member => member)
@@ -404,7 +420,7 @@ theorem Execution.Installs.computation_contextBindingsTyped {program : Kernel.Pr
     Typing.ContextBindingsTyped program after source handler.computation := by
   have retained := installed.preserves_contextBindingsTyped valid inventory worldTyped typed
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,rfl⟩ := installed
-  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
+  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,retained.assumptions⟩
 
 /-- The handler's retained environment is produced by the same sequential
 input binding used at function entry. Source captures are closed exactly once
@@ -454,7 +470,7 @@ theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Pr
       cases related with
       | cons head tail => exact .cons head (ih _ tail)
   have declared := transport syntaxNode.captures bindings (captureMap ▸ declared)
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared,typed.assumptions⟩
   · cases handlerTyped with
     | attached captureTyped _ _ _ =>
       simpa only [Execution.CaptureLocals,Kernel.Handler.captures,List.map_map,Function.comp_def] using captureTyped.2
@@ -482,7 +498,7 @@ theorem Execution.StartsClause.contextBindingsTyped {program : Kernel.Program} {
     Typing.ContextBindingsTyped program after source runtime := by
   have retained := started.preserves_contextBindingsTyped typed
   obtain ⟨_,rfl⟩ := started
-  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings⟩
+  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,retained.assumptions⟩
 
 theorem Execution.StartsResumptionClause.preserves_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
     {handler : Execution.InstalledHandler} {lexical : Kernel.Local} {context : Execution.Context} {localSlot : Kernel.Local} {after : World}
@@ -514,7 +530,7 @@ theorem Typing.ContextBindingsTyped.label {program : Kernel.Program} {world : Wo
       { source.bindBrand lexical with labels := (lexical,.scopedRegion region,result) :: source.labels }
       (runtime.bindBrand lexical (.label brand)) := by
   have bound := typed.bindBrand fresh (.label brand)
-  exact ⟨bound.moduleEq,bound.unsafeEq,bound.covers,bound.distinct,bound.admitted,bound.bindings⟩
+  exact ⟨bound.moduleEq,bound.unsafeEq,bound.covers,bound.distinct,bound.admitted,bound.bindings,bound.assumptions⟩
 
 /-- The label frame and its source-visible label value close through the same
 lexical lookup. The surrounding allocation/cleanup region may be different,
@@ -559,7 +575,7 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
   have aligned := prepares.formals formals
   have checked := bound.bindingStorageTypes valid inventory (prepares.worldTyped valid inventory (fresh.worldTyped worldTyped))
   have closed := selected.locals_scopeClosed valid inventory functionTyped
-  refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_⟩
+  refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_,functionTyped.assumptions_scoped _⟩
   · intro localSlot member
     exact (closed localSlot member).scoped _
   · change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧

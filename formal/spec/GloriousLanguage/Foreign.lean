@@ -87,7 +87,8 @@ structure Contract where
   callbackPrecondition : World → ForeignSession → Identity → Prop
   callbackPostcondition : World → ForeignSession → List Nat → Identity → Address → Prop
   /-- Explicit imported storage grants are restricted to that binding's
-  external allocation domain. Source-frame authority comes only from handoff. -/
+  external allocation domain and root authority. Actual loan authority comes
+  from handoff, registered authority or stored references, never a guessed ID. -/
   external : World → ForeignCall → ResolvedPlace → Prop
   writable : World → ForeignSession → Address → Prop
   retainable : World → ForeignSession → Address → Prop
@@ -102,6 +103,13 @@ structure Model where
   step : DeclId → World → ForeignSession → List Nat → World → HostAction → List Nat → Prop
   callbackReturned : DeclId → World → ForeignSession → List Nat → Identity → Address → List Nat → Prop
 
+/-- Opaque host state may retain historical registrations, including retired
+ones, but their loan authorities must already have actual table records.
+This is admission for the initial registry; transitions derive it from the
+same registration-origin relation used to authorize new callbacks. -/
+def Model.AuthoritiesRecorded (model : Model) (world : World) (state : List Nat) : Prop :=
+  ∀ registration ∈ model.registrations state, registration.authority.Recorded world.loans
+
 /-- Authority seeds are actual protocol handoffs, retained callback owners,
 explicit external grants and fresh roots of this host-only mutation chunk.
 An arbitrary source frame or guessed allocation identity is not a seed. -/
@@ -113,7 +121,7 @@ def AccessSeed (program : Kernel.Program) (model : Model) (contract : Contract)
     place = registration.place ∧
     ∃ root domain, current.root registration.owner = some root ∧
       (root.home = .allocation domain ∨ root.home = .external domain)) ∨
-  (contract.external current session.call place ∧
+  (contract.external current session.call place ∧ place.authority.parentLoan = none ∧
     ∃ root domain, current.root place.address = some root ∧ root.home = .external domain ∧
       session.call.binding.domain = some domain ∧ domain ∈ program.declarations.input.manifest.allocationDomains) ∨
   (initial.nextRoot ≤ place.address.root ∧ place.address.fields = [] ∧ place.authority = .owner ∧
@@ -222,17 +230,30 @@ def RegistrationsValid (program : Kernel.Program) (model : Model) (world : World
   (model.registrations state |>.map (·.identity)).Nodup ∧
   ∀ registration ∈ model.registrations state, registration.Valid program world (model.runtimes state)
 
+/-- Unregistering preserves a record's origin without requiring its expired
+callable to remain accessible. Every genuinely new record, even an initially
+inactive one, comes from actual handoff authority. A later activation cannot
+turn guessed inactive metadata into a valid callback authority. -/
+inductive RegistrationOrigin (program : Kernel.Program) (contract : Contract) (model : Model)
+    (initial current : World) (session : ForeignSession) (previous : List Nat) : Registration → Prop where
+  | existing {registration} : registration ∈ model.registrations previous →
+      RegistrationOrigin program contract model initial current session previous registration
+  | unregister {registration} : registration ∈ model.registrations previous →
+      RegistrationOrigin program contract model initial current session previous { registration with active := false }
+  | register {registration} : Accessible program model contract initial current session registration.place →
+      (registration.retained = true → contract.retainable current session registration.owner) →
+      RegistrationOrigin program contract model initial current session previous registration
+
 /-- Registering a callback requires the exact authority later exposed by the
 registry. Address reachability alone cannot upgrade a shared view to ownership.
 Keeping that authority beyond synchronous extent additionally requires the
-contract's retention permission. Unchanged registrations are exact records. -/
+contract's retention permission. This is the one actual registry transition
+contract, including unregister-only changes and inactive historical records. -/
 def RegistrationsPermitted (program : Kernel.Program) (contract : Contract) (model : Model)
     (initial current : World) (session : ForeignSession)
     (before after : List Nat) : Prop :=
-  ∀ registration ∈ model.registrations after, registration.active = true →
-    registration ∈ model.registrations before ∨
-      (Accessible program model contract initial current session registration.place ∧
-        (registration.retained = true → contract.retainable current session registration.owner))
+  ∀ registration ∈ model.registrations after,
+    RegistrationOrigin program contract model initial current session before registration
 
 /-- Laws constrain the model only on its declared contract domain. World
 typing is derived from mutations; no post-world typing assumption occurs. -/

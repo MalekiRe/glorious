@@ -5,14 +5,61 @@ binding order. Shadowing uses the ordinary context binder, including when a
 payload binder shadows a continuation or an outer local. -/
 namespace Glorious.Language
 
-private theorem constructor_field_scoped {program : Language.Program} (valid : ProgramWellFormed program)
-    {data : DataDefinition} {variant : VariantDefinition} {field : FieldDefinition} {scope : LexicalScope}
-    (found : program.data data.header.id = some data) (constructor : variant ∈ data.variants)
+theorem Typing.Context.bindLocals_static (source : Typing.Context) (locals : List Kernel.Local) :
+    (source.bindLocals locals).static = source.static := by
+  induction locals generalizing source with
+  | nil => rfl
+  | cons localSlot rest ih => exact ih (source.bind localSlot)
+
+theorem ProgramWellFormed.variant_field_scoped {program : Language.Program} (valid : ProgramWellFormed program)
+    {id : DeclId} {data : DataDefinition} {variant : VariantDefinition} {field : FieldDefinition} {scope : LexicalScope}
+    (found : program.data id = some data) (constructor : variant ∈ data.variants)
     (member : field ∈ variant.fields) : field.type.Scoped scope := by
   apply Term.ScopeClosed.scoped
   apply valid.scopeClosed (List.mem_of_find?_eq_some (Program.data_lookup found))
   simp only [Definition.terms,List.mem_append,List.mem_map,List.mem_flatMap]
   exact Or.inl (Or.inl (Or.inl ⟨field,⟨variant,constructor,member⟩,rfl⟩))
+
+theorem Typing.FieldType.scoped {program : Language.Program} (valid : ProgramWellFormed program)
+    {context : Language.Context} {type field : Term} {index : Nat} {visible : Bool}
+    (typed : Typing.FieldType program context type index field visible) (admitted : type.Scoped context.scope) :
+    field.Scoped context.scope := by
+  rcases typed with ⟨fields,rfl,found⟩ | ⟨element,length,rfl,rfl⟩ |
+    ⟨id,arguments,data,variant,substitution,types,rfl,found,_,variants,instantiated,substituted,selected,_⟩
+  · exact admitted.child (List.mem_of_getElem? found)
+  · exact admitted.child (by simp only [Term.children,List.mem_cons,true_or])
+  · have member := List.mem_of_getElem? selected
+    rw [ListRel.substitutes_eq_map substituted] at member
+    obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    obtain ⟨definition,inFields,rfl⟩ := List.mem_map.mp present
+    apply Term.Scoped.substitute substitution definition.type
+      (valid.variant_field_scoped found (by rw [variants]; exact List.mem_cons_self) inFields)
+    intro parameter argument selected
+    exact admitted.child (instantiated.argument_of_get selected)
+
+/-- Every projection consumes the same source type and assumption scope.
+The equality constructor is no longer a route around lexical admission. -/
+theorem Typing.Projections.scoped {program : Language.Program} (valid : ProgramWellFormed program)
+    {context : Typing.Context} {type result : Term} {mutable writable : Bool} {projections : List Kernel.Projection}
+    (typed : Typing.Projections program context type mutable projections result writable)
+    (assumptions : context.static.AssumptionsScoped) (admitted : type.Scoped context.static.scope) :
+    result.Scoped context.static.scope := by
+  induction typed with
+  | nil => exact admitted
+  | field field _ ih => exact ih (field.scoped valid admitted)
+  | index _ _ ih => exact ih (admitted.child (by simp only [Term.children,List.mem_cons,true_or]))
+  | dereference _ ih =>
+    exact ih (admitted.child (by simp only [Term.children,List.mem_cons,List.not_mem_nil,or_false,or_true]))
+  | equal equal _ ih => exact ih ((equal.scoped_iff valid assumptions).mp admitted)
+
+theorem Typing.ContextBindingsTyped.place_scoped {program : Kernel.Program} {world : World}
+    {source : Typing.Context} {runtime : Execution.Context}
+    (valid : ProgramWellFormed program.declarations)
+    (bindings : Typing.ContextBindingsTyped program world source runtime)
+    {place : Kernel.Place} {type : Term} {writable : Bool}
+    (typed : Typing.PlaceType program.declarations source place type writable) : type.Scoped source.static.scope := by
+  obtain ⟨localSlot,member,_,projections⟩ := typed
+  exact projections.scoped valid bindings.assumptions (bindings.admitted localSlot member)
 
 /-- Borrowed binders obtain their referent scope from the actual typed
 subject; nominal fields obtain it from the checked declaration substitution.
@@ -58,7 +105,7 @@ theorem Typing.PatternType.locals_scoped {program : Language.Program} (valid : P
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
     obtain ⟨definition,inFields,rfl⟩ := List.mem_map.mp present
     apply Term.Scoped.substitute substitution definition.type
-      (constructor_field_scoped valid constructor.1 constructor.2.1 inFields)
+      (valid.variant_field_scoped constructor.1 constructor.2.1 inFields)
     intro parameter argument found
     exact admitted.child (instantiated.argument_of_get found)
   · intro mode region type pattern access locals typed ih admitted

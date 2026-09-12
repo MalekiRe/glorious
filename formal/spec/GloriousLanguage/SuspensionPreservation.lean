@@ -101,15 +101,15 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.suspensions {program : Kernel.Program} {function : Kernel.Function}
+theorem InitialInvocation.suspensions {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program function inputs state) : state.SuspensionsWellFormed := initial.2.2.1.suspensions
+    (initial : InitialInvocation program host function inputs state) : state.SuspensionsWellFormed := initial.2.2.1.suspensions
 
 theorem InitialInvocation.run_suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program function inputs start)
+    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
     (run : Execution.Run program host start trace finish) : finish.SuspensionsWellFormed :=
   run.suspensions valid inventory lawful initial.1.1 initial.suspensions
 
@@ -119,7 +119,7 @@ theorem Observes.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program function observation.input start ∧
+    ∃ start finish, InitialInvocation program host function observation.input start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
       finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧
       start.SuspensionsWellFormed ∧ finish.SuspensionsWellFormed := by

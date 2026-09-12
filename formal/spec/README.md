@@ -13,7 +13,10 @@ and finite execution, invocation loan exclusion and physical lease cleanup,
 constructibility of the logical/coinductive capability interpretation, typed public-value observations,
 complete code-typing transport for snapshot region renaming, and current/saved
 control-address and loan-authority provenance through every machine step and finite run, with
-saved-home ownership and actual final/copied replay ownership. These are
+saved-home ownership, actual final/copied replay ownership and opaque host-registry
+authority origins. Closed logical equality is proved equivalent to definitional
+conversion, and source predicate scope reaches actual match entry and its first
+binding/cleanup action. These are
 not full-language soundness or conformance: conversion-safe capability inversion,
 source lexical/type normalization,
 task/frame typing and retained-frame liveness, initialized return lifetimes, resource progress and
@@ -41,6 +44,12 @@ or a dependency of this project.
   and whole-run preservation.
 - `ControlAuthority` and its producer modules: actual recorded loan authorities,
   reservation provenance, callback leases and mapped replay authority.
+- `ForeignRegistration`, `ForeignAuthorityOrigin`: exact registry transition
+  grants, host-indexed initial admission and whole-run historical authority recording.
+- `PredicateInterpretation`, `PredicateScope`, `MatchEntryContextTyping`: hygienic
+  predicate semantics and source-derived scope through actual selected-arm entry.
+- `ClosedDefinitionalEquality`, `HeadOriginDecomposition`: assumption-free equality
+  conservativity and positive source origins of actual selected generic bindings.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

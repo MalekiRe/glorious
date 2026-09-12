@@ -34,6 +34,7 @@ import GloriousLanguage.RuntimeBodyTyping
 import GloriousLanguage.DropDispatch
 import GloriousLanguage.ForeignAuthority
 import GloriousLanguage.ForeignRegistration
+import GloriousLanguage.ForeignAuthorityOrigin
 import GloriousLanguage.ForeignSuspension
 import GloriousLanguage.ForeignSuspensionOwnership
 import GloriousLanguage.ScopeClosing
@@ -50,10 +51,13 @@ import GloriousLanguage.SuspensionPreservation
 import GloriousLanguage.ControlOriginPreservation
 import GloriousLanguage.DropSuspension
 import GloriousLanguage.DefinitionalNormalForms
+import GloriousLanguage.ClosedDefinitionalEquality
+import GloriousLanguage.HeadOriginDecomposition
 import GloriousLanguage.ReferencePersistence
 import GloriousLanguage.EffectContextTyping
 import GloriousLanguage.ControlContextTyping
 import GloriousLanguage.OperationContextTyping
 import GloriousLanguage.FunctionEntryContextTyping
 import GloriousLanguage.PatternExecutionTyping
+import GloriousLanguage.MatchEntryContextTyping
 import GloriousLanguage.SuspensionOwnership

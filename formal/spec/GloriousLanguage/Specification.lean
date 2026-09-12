@@ -123,7 +123,7 @@ def Finished (program : Kernel.Program) (function : Function) (state : State) (r
 def Semantics (program : Kernel.Program) (host : Foreign.Model) (function : Function) (inputs : List InvocationInput) :
     TransitionSystem PublicEvent Result where
   State := State
-  initial := Contracts.InitialInvocation program function inputs
+  initial := Contracts.InitialInvocation program host function inputs
   step before event after := ∃ internal, Execution.Step program host before internal after ∧ event = internal.bind publicEvent
   final := Finished program function
   invalid state := ¬ Typing.WorldTyped program state.world

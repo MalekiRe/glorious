@@ -494,15 +494,16 @@ namespace Contracts
 
 open Execution
 
-theorem InitialInvocation.resumptions_accounted {program : Kernel.Program} {function : Kernel.Function}
-    {inputs : List Kernel.InvocationInput} {state : State} (initial : InitialInvocation program function inputs state) :
+theorem InitialInvocation.resumptions_accounted {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
+    {inputs : List Kernel.InvocationInput} {state : State} (initial : InitialInvocation program host function inputs state) :
     state.ResumptionsAccounted := initial.2.2.1.suspensions.budgets
 
 /-- The control invariant is constructible for arbitrary fresh invocations;
 it does not require an execution-safety certificate or a successful run. -/
-theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {function : Kernel.Function}
+theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} {caller : Execution.Context}
     (inputsTyped : InputsTyped program inputs state.world) (functionInputs : FunctionInputs function inputs)
+    (registry : host.AuthoritiesRecorded state.world state.hostState)
     (empty : state.resumptions = [])
     (homes : ∀ rootId root id, state.world.roots.get rootId = some root →
       root.home = .suspended id → id < state.nextContinuation)
@@ -512,8 +513,8 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {funct
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (fresh : ∀ id root, state.world.roots.get id = some root → Kernel.OwnedByActivation root state.nextActivation → root.live = false) :
-    InitialInvocation program function inputs state := by
-  refine ⟨inputsTyped,functionInputs,?_,caller,task,frames,region,activation,fresh⟩
+    InitialInvocation program host function inputs state := by
+  refine ⟨inputsTyped,functionInputs,?_,registry,caller,task,frames,region,activation,fresh⟩
   refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_⟩
   · rw [task]
     apply RootSupport.below_append.mpr
@@ -547,7 +548,7 @@ all finite-run budget and settlement conclusions are derived by preservation,
 independently of `ResourceAdmission` and of host/world typing assumptions. -/
 theorem InitialInvocation.resumption_safety {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {before after : State} {trace : List Event}
-    (initial : InitialInvocation program function inputs before) (run : Run program host before trace after) :
+    (initial : InitialInvocation program host function inputs before) (run : Run program host before trace after) :
     after.ResumptionsAccounted ∧ ∀ id suspension, after.resumptions.get id = some suspension →
       (∀ upper, suspension.quantity.upper = some upper → before.resumptionUses id + ReplayCount id trace ≤ upper) ∧
       (suspension.active = false → suspension.quantity.Contains (before.resumptionUses id + ReplayCount id trace)) := by

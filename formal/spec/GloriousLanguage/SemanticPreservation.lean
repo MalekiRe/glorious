@@ -14,7 +14,7 @@ theorem InitialInvocation.run_worldTyped {program : Kernel.Program} {host : Fore
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program function inputs start)
+    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
     (run : Execution.Run program host start trace finish) : Typing.WorldTyped program finish.world :=
   run.worldTyped valid inventory lawful initial.1.1
 
@@ -98,7 +98,7 @@ by resource and observation contracts. -/
 theorem reachable_execution_iff {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State} :
     (Semantics program host function inputs).Reachable state ↔
-      ∃ start trace, Contracts.InitialInvocation program function inputs start ∧
+      ∃ start trace, Contracts.InitialInvocation program host function inputs start ∧
         Execution.Run program host start trace state := by
   constructor
   · rintro ⟨start,trace,initial,steps⟩

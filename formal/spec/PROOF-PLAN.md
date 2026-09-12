@@ -461,13 +461,13 @@ returned values cannot name hidden leases. Persistent external registration
 invariants and initialized return/cleanup preservation also remain open.
 
 Callback registration now requires the exact handed-off callable authority,
-including its shared view, for every newly active record. Retention adds the
+including its shared view, for every new record, even inactive ones. Retention adds the
 contract's permission; it cannot turn mere address reachability into ownership.
 The old address-only registration admission is removed. `ForeignRegistration`
 derives authority grants from actual start, return and host-step laws and proves
 their origin through arbitrary host continuations, with the exact trace split.
-An unchanged record is retained verbatim; changes to its authority or activation
-must discharge a new grant. This is registration-authority preservation, not
+An unchanged record is retained verbatim; unregistering changes only its active
+flag, while other changes must discharge a new grant. This is registration-authority preservation, not
 yet the source lifetime/frame invariant for externally retained callbacks.
 
 Foreign private-storage preservation now covers the exact root, including
@@ -713,9 +713,39 @@ control gate.
 
 Recording is historical provenance, not permission or live retained-frame
 ownership. General cleanup framing for retained caller homes and reference
-guards remains open. Opaque preloaded host registration/external-grant authority
-also needs its own canonical origin contract; current callback input permission
-does not establish historical non-forgery of such external authority.
+guards remains open. The opaque host-origin gap is closed by the following
+extension; it does not imply live retained-callback permission.
+
+`ForeignAuthorityOrigin` covers actual current and inactive registration records.
+The canonical `InitialInvocation` is now indexed by the real host model and
+requires historical recording of its initial registry authorities; all observation,
+divergence, semantic admission and reachability consumers use that initializer.
+The actual registry transition contract is the declarative `RegistrationOrigin`:
+retain an exact old record, unregister it without changing its authority, or
+register through the shared access resolver and retention grant. Initial inactive
+records cannot guess future loan identities and later launder them by activation.
+Explicit imported external-storage grants supply root authority only; actual
+loan authority comes from a handoff, registration or resident reference, not a
+guessed identity that happens to exist at access time.
+
+Actual start, host continuation, callback entry/return and storage producers derive
+registry recording from those origins. Every execution-step family, arbitrary
+finite run, canonical observation and divergence prefix preserves it, using the
+same control and suspension-storage provenance products. The strict targeted
+host-origin dependency gate passes (95 jobs). Recording is not initial callable
+permission or retained liveness; source mutation and callback lifetime framing
+remain separate obligations.
+
+The existing exact registration-grant history now covers all actual startup,
+host-action and callback-return boundaries, with each grant tied to its real
+intermediate mutation world before source lending or result transfer. The general
+`Execution.Run.registration_origin` consumes every source/host step and produces
+the exact trace split around a grant, or the exact original admitted record.
+Its canonical invocation consumer shares `Execution.Step.host_state` with the
+historical authority invariant; copied replay cannot restore an old opaque host
+registry. The strict combined host-origin/history gate passes (95 jobs). This
+establishes authority history, not the still-open active callback runtime and
+retained callable ownership lifecycle.
 
 The combined frozen control/ownership, retained-context, source-entry,
 predicate, runtime-equivariance and repaired-coherence dependency gate passed
@@ -792,6 +822,36 @@ above; neither full soundness nor the aggregate acceptance gate is claimed.
 Higher-ranked introduction also needs an explicit fresh-placeholder and
 context-extension audit against normative §13.3: fixed-caller-domain
 quantified interpretation alone is not a parametricity or leak-check proof.
+
+The predicate-to-match scope boundary is now closed. The generic interpretation
+proves hygienic simultaneous substitution, alpha-freshening and the actual
+fixed-context quantifier rules. Its concrete scope interpretation proves the
+full mutual entailment/equality judgment preserves admitted lexical scopes.
+Function signature admission supplies assumption scope at actual entry; the
+existing context product carries it through every binder and world constructor.
+The real projection/place consumer uses equality scope preservation, and actual
+match selection derives the chosen arm's scoped locals and exact scheduled
+binding cursor. Its first execution preserves that cursor or retains pending
+destruction explicitly, including bottom-result coercions. No scoped output
+certificate or new source-body walker supplies the result.
+
+The same predicate interpretation has a genuine definitional-quotient model.
+It proves closed logical equality equivalent to actual definitional conversion
+for arbitrary programs, with no confluence premise or constructor-injectivity
+assumption. The full interval/capability inversion debt is not thereby solved:
+conversion must still be shown to admit the required positive structural join.
+Actual generic-origin evidence now has an exact decomposition into positive
+source expansion, a whole-query conversion and an ordered structural determining
+path. Matching and selection expose that origin for each actual substitution
+lookup. Transport of open source reductions through discharged prerequisites,
+global confluence and conversion-safe Drop dispatch remain open.
+
+The frozen combined scope-to-match, closed equality/head-origin, host-origin
+and exact registration-history integration gate passes (129 jobs, warnings as
+errors), together with the existing runtime-equivariance, invocation-cleanup
+and whole-control/suspension consumers. The preserved Drop inversion failure
+and full aggregate soundness gate are not counted as passing. Activation/home
+freshness and active callback-runtime lifetime repairs are continuing separately.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving

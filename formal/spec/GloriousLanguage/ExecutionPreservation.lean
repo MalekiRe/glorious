@@ -11,6 +11,21 @@ theorem CopiesSnapshot.hostState {program : Kernel.Program} {before after : Stat
     (copied : CopiesSnapshot program before suspension map after) : after.hostState = before.hostState := by
   rw [copied.result]
 
+/-- Exactly the foreign family may change opaque host state. Source replay
+restores captured source control, never a historical registry snapshot. Registry
+history and authority preservation consume this same transition classification. -/
+theorem Step.host_state {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event} (step : Step program host before event after) :
+    after.hostState = before.hostState ∨ Foreign.Step program host before event after := by
+  rcases step with localStep | atom | effect | branch | primitive | foreign
+  · cases localStep <;> exact Or.inl rfl
+  · cases atom <;> exact Or.inl rfl
+  · cases effect <;> try exact Or.inl rfl
+    case resumeCopy copied _ => exact Or.inl copied.hostState
+  · cases branch <;> exact Or.inl rfl
+  · cases primitive <;> exact Or.inl rfl
+  · exact Or.inr foreign
+
 /-- The host supplies its actual protocol and mutation laws, not an assumed
 typed output world. No transition-family exception is needed. -/
 theorem Step.worldTyped {program : Kernel.Program} {host : Foreign.Model}

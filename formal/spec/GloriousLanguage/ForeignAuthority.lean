@@ -51,7 +51,7 @@ theorem AccessSeed.avoids_internal_during {program : Kernel.Program} {model : Mo
     (known : ∀ place ∈ session.known, place.address.root ≠ id)
     (seed : AccessSeed program model contract initial current session place) : place.address.root ≠ id := by
   rcases seed with present | ⟨registration,_,_,_,rfl,other,domain,found,home⟩ |
-      ⟨_,other,domain,found,home,_,_⟩ | ⟨fresh,_,_,_⟩
+      ⟨_,_,other,domain,found,home,_,_⟩ | ⟨fresh,_,_,_⟩
   · exact known _ present
   · intro same
     have identity := Option.some.inj ((World.root_found found).1.symm.trans (same ▸ selected))

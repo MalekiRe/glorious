@@ -90,15 +90,15 @@ end Execution
 
 namespace Contracts
 
-theorem InitialInvocation.control {program : Kernel.Program} {function : Kernel.Function}
+theorem InitialInvocation.control {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    (initial : InitialInvocation program function inputs state) : state.ControlWellFormed := initial.2.2.1
+    (initial : InitialInvocation program host function inputs state) : state.ControlWellFormed := initial.2.2.1
 
 theorem InitialInvocation.run_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (initial : InitialInvocation program function inputs start)
+    (lawful : host.Lawful program) (initial : InitialInvocation program host function inputs start)
     (run : Execution.Run program host start trace finish) : finish.ControlWellFormed :=
   run.controlWellFormed valid inventory lawful initial.1.1 initial.control
 
@@ -106,7 +106,7 @@ theorem Observes.control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (observed : Observes program host function observation) :
-    ∃ start finish, InitialInvocation program function observation.input start ∧
+    ∃ start finish, InitialInvocation program host function observation.input start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
       finish.world = observation.after ∧ AtOutcome finish observation.outcome ∧
       start.ControlWellFormed ∧ finish.ControlWellFormed := by
