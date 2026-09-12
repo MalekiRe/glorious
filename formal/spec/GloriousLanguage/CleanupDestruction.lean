@@ -242,11 +242,11 @@ theorem CleanupRun.shell_done_exists {program : Kernel.Program} {host : Foreign.
     (cleared : ∀ field ∈ value.fields, field = none)
     (permission : Permitted before.world authority .owned address)
     (handed : before.world.CustodyHandedOff (.resident value.owner)) :
-    ∃ after, (before.world.RequestReturns (.resident value.owner)).write address none = some after ∧
-      CleanupRun program host before [.destroy address value.owner]
-        ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
+    ∃ mid after, CleanupRun program host before [.destroy address value.owner] mid ∧
+      mid.world = after ∧ mid.task = ReleaseCustodyLoans after (.resident value.owner) next ∧
+      (before.world.RequestReturns (.resident value.owner)).write address none = some after := by
   obtain ⟨after,written⟩ := World.Stores.requestReturns_write_exists stored (.resident value.owner)
-  exact ⟨after,written,CleanupRun.shell_done task stored cleared permission handed written⟩
+  exact ⟨_,after,CleanupRun.shell_done task stored cleared permission handed written,rfl,rfl,written⟩
 
 /-! ## Real loan-ending outcomes -/
 
@@ -371,9 +371,9 @@ theorem CleanupRun.destroy_shell {program : Kernel.Program} {host : Foreign.Mode
       { before with task := .destroyFields context address authority ((List.range value.fields.length).reverse) next } []
       { before with task := .finishShell address authority next } :=
     CleanupRun.destroy_fields_holes rfl vacant
-  obtain ⟨after,written,finish⟩ := CleanupRun.shell_done_exists (before := { before with task := .finishShell address authority next })
+  obtain ⟨mid,after,finish,midWorld,midTask,written⟩ := CleanupRun.shell_done_exists (before := { before with task := .finishShell address authority next })
     rfl stored (List.eq_none_of_getElem? holes) permission handed
-  exact ⟨_,after,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish),rfl,rfl,written⟩
+  exact ⟨_,after,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish),midWorld,midTask,written⟩
 
 /-- The nested field loop with the parent shell tracked: each scheduled child is
 destroyed by its own run (its slot left a hole, every other slot as the parent
