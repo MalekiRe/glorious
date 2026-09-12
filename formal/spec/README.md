@@ -61,6 +61,12 @@ or a dependency of this project.
 - `DeclarationDependencyKinding`, `CapabilitySubstitution`, `LogicalSubstitution`:
   kinded declaration dependencies, recursive structural capability substitution
   and hygienic substitution-domain transport through actual logical equality.
+- `BinderDefaults`, `DeclarationKinding`: ordered default admission and full
+  declaration term-kinding through actual instantiation.
+- `StaticAtomTransport`, `LogicalCut`, `LogicalUniverse`: shared static/runtime
+  atom transport, assumption cut and larger-universe universal evidence.
+- `LogicalPredicateInterpretation`, `PredicateComposition`: admitted predicate
+  interpretation equivalent to entailment and exact generic-table composition.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

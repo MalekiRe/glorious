@@ -24,7 +24,7 @@ theorem InfersHeadArgument.congr_query {program : Program} {context : Context} {
 theorem ProgramWellFormed.implementation_head_determined {program : Program} (valid : ProgramWellFormed program)
     {implementation : ImplDefinition} (declared : Definition.implementation implementation ∈ program.declarations) :
     ImplementationHeadDetermined program implementation := by
-  obtain ⟨_,_,_,_,_,_,_,signature⟩ := (valid.2.2.2.2.1 _ declared).2.1
+  obtain ⟨_,_,_,_,_,_,_,signature,_⟩ := (valid.2.2.2.2.1 _ declared).2.1
   exact signature.2.1
 
 /-- A direct generic head really obtains its value from the actual query;

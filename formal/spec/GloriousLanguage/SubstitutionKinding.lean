@@ -57,38 +57,67 @@ theorem Kinding.substitutes_kinds {program : Program} {context : Context} {term 
     | none => rfl
     | some value => exact (checked id parameterKind value .here found).symm
 
-private theorem parameters_child {program : Program} {context : Context} {term child : Term}
-    {f : Term → Term}
-    (parameters : ∀ id kind, Occurs (.parameter id kind) term → Kinding program context (f (.parameter id kind)) kind)
-    (member : child ∈ term.children) :
-    ∀ id kind, Occurs (.parameter id kind) child → Kinding program context (f (.parameter id kind)) kind :=
-  fun id kind occurs => parameters id kind (.child member occurs)
+theorem Kinding.occurrence {program : Program} {context : Context} {term atom : Term} {kind : Kind}
+    (kinded : Kinding program context term kind) (occurs : Occurs atom term) :
+    Kinding program context atom atom.kind := by
+  induction occurs generalizing kind with
+  | here => simpa only [kinded.term_kind] using kinded
+  | child member _ ih =>
+    obtain ⟨childKind,childKinded⟩ := kinded.child member
+    exact ih childKinded
 
-/-- One structural transport theorem for simultaneous substitutions, alpha
-renamings and support-sensitive changes of context. Only parameters actually
-occurring in the term require target evidence. -/
-theorem Kinding.map_parameters {program : Program} {source target : Context} {term : Term} {kind : Kind}
+theorem Kinding.rigid_level {program : Program} {context : Context} {term : Term} {kind : Kind}
+    (kinded : Kinding program context term kind) {id : Identity} {rigidKind : Kind} {level : Nat}
+    (occurs : Occurs (.rigid id rigidKind level) term) : level ≤ context.universeLevel := by
+  cases kinded.occurrence occurs with | rigid bound => exact bound
+
+theorem Kinding.variable_level {program : Program} {context : Context} {term : Term} {kind : Kind}
+    (kinded : Kinding program context term kind) {id : Identity} {variableKind : Kind} {level : Nat}
+    (occurs : Occurs (.variable id variableKind level) term) : level ≤ context.universeLevel := by
+  cases kinded.occurrence occurs with | «variable» bound => exact bound
+
+private theorem atoms_child {program : Program} {context : Context} {term child : Term}
+    {f : Term → Term}
+    (atoms : ∀ atom, Occurs atom term → match atom with
+      | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program context (f atom) kind
+      | .runtimeRegion _ => Kinding program context (f atom) .region
+      | _ => True)
+    (member : child ∈ term.children) :
+    ∀ atom, Occurs atom child → match atom with
+      | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program context (f atom) kind
+      | .runtimeRegion _ => Kinding program context (f atom) .region
+      | _ => True :=
+  fun atom occurs => atoms atom (.child member occurs)
+
+/-- One structural producer transports lexical parameters, rigid universals
+and inference variables. Evidence is required only at actual occurrences;
+universe lowering does not require an unrelated whole-context inequality. -/
+theorem Kinding.map_atoms {program : Program} {source target : Context} {term : Term} {kind : Kind}
     (kinded : Kinding program source term kind) (f : Term → Term)
     (shape : ∀ term, f term = match term with
       | .parameter id kind => f (.parameter id kind)
+      | .rigid id kind level => f (.rigid id kind level)
+      | .variable id kind level => f (.variable id kind level)
+      | .runtimeRegion id => f (.runtimeRegion id)
       | other => other.mapChildren f)
-    (parameters : ∀ id parameterKind, Occurs (.parameter id parameterKind) term →
-      Kinding program target (f (.parameter id parameterKind)) parameterKind)
-    (levels : source.universeLevel ≤ target.universeLevel)
+    (atoms : ∀ atom, Occurs atom term → match atom with
+      | .parameter _ kind | .rigid _ kind _ | .variable _ kind _ => Kinding program target (f atom) kind
+      | .runtimeRegion _ => Kinding program target (f atom) .region
+      | _ => True)
     (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
     (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands) :
     Kinding program target (f term) kind := by
-  revert parameters
-  induction kinded <;> intro parameters
-  case parameter => exact parameters _ _ .here
+  revert atoms
+  induction kinded <;> intro atoms
+  case parameter => exact atoms _ .here
+  case rigid => exact atoms _ .here
+  case «variable» => exact atoms _ .here
+  case runtimeRegion => exact atoms _ .here
   all_goals rw [shape]; simp only [Term.mapChildren]
   case quantity bounds => exact .quantity bounds
-  case rigid bound => exact .rigid (Nat.le_trans bound levels)
   case scopedRegion member => exact .scopedRegion (regions _ member)
   case scopedBrand member => exact .scopedBrand (brands _ member)
-  case runtimeRegion => exact .runtimeRegion
   case runtimeBrand => exact .runtimeBrand
-  case «variable» bound => exact .variable (Nat.le_trans bound levels)
   case unit => exact .unit
   case bottom => exact .bottom
   case scalar valid => exact .scalar valid
@@ -96,65 +125,65 @@ theorem Kinding.map_parameters {program : Program} {source target : Context} {te
     apply Kinding.tuple
     intro child member
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-    exact ih original present (parameters_child parameters present)
+    exact ih original present (atoms_child atoms present)
   case array _ _ element length =>
-    exact .array (element (parameters_child parameters (by simp [Term.children])))
-      (length (parameters_child parameters (by simp [Term.children])))
+    exact .array (element (atoms_child atoms (by simp [Term.children])))
+      (length (atoms_child atoms (by simp [Term.children])))
   case reference _ _ region referent =>
-    exact .reference (region (parameters_child parameters (by simp [Term.children])))
-      (referent (parameters_child parameters (by simp [Term.children])))
+    exact .reference (region (atoms_child atoms (by simp [Term.children])))
+      (referent (atoms_child atoms (by simp [Term.children])))
   case rawPointer _ referent =>
-    exact .rawPointer (referent (parameters_child parameters (by simp [Term.children])))
+    exact .rawPointer (referent (atoms_child atoms (by simp [Term.children])))
   case nominal found instantiated _ ih =>
-    have arguments := fun child member => ih child member (parameters_child parameters member)
+    have arguments := fun child member => ih child member (atoms_child atoms member)
     exact .nominal found (instantiated.map_kind f (fun child member => (arguments child member).term_kind)) (by
       intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
       rw [(arguments original present).term_kind]
       exact arguments original present)
   case alias found instantiated _ ih =>
-    have arguments := fun child member => ih child member (parameters_child parameters member)
+    have arguments := fun child member => ih child member (atoms_child atoms member)
     exact .alias found (instantiated.map_kind f (fun child member => (arguments child member).term_kind)) (by
       intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
       rw [(arguments original present).term_kind]
       exact arguments original present)
   case callable found instantiated _ ih =>
-    have arguments := fun child member => ih child member (parameters_child parameters member)
+    have arguments := fun child member => ih child member (atoms_child atoms member)
     exact .callable found (instantiated.map_kind f (fun child member => (arguments child member).term_kind)) (by
       intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
       rw [(arguments original present).term_kind]
       exact arguments original present)
   case continuation _ _ _ _ quantity brand argument answer effects =>
-    exact .continuation (brand (parameters_child parameters (by simp [Term.children])))
-      (argument (parameters_child parameters (by simp [Term.children])))
-      (answer (parameters_child parameters (by simp [Term.children])))
-      (effects (parameters_child parameters (by simp [Term.children]))) quantity
+    exact .continuation (brand (atoms_child atoms (by simp [Term.children])))
+      (argument (atoms_child atoms (by simp [Term.children])))
+      (answer (atoms_child atoms (by simp [Term.children])))
+      (effects (atoms_child atoms (by simp [Term.children]))) quantity
   case label _ _ _ brand region result =>
-    exact .label (brand (parameters_child parameters (by simp [Term.children])))
-      (region (parameters_child parameters (by simp [Term.children])))
-      (result (parameters_child parameters (by simp [Term.children])))
+    exact .label (brand (atoms_child atoms (by simp [Term.children])))
+      (region (atoms_child atoms (by simp [Term.children])))
+      (result (atoms_child atoms (by simp [Term.children])))
   case environment _ _ _ brand region ih =>
-    apply Kinding.environment (brand (parameters_child parameters (by simp [Term.children])))
-      (region (parameters_child parameters (by simp [Term.children])))
+    apply Kinding.environment (brand (atoms_child atoms (by simp [Term.children])))
+      (region (atoms_child atoms (by simp [Term.children])))
     intro child member
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-    exact ih original present (parameters_child parameters (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
+    exact ih original present (atoms_child atoms (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
   case available _ _ _ brand region ih =>
-    apply Kinding.available (brand (parameters_child parameters (by simp [Term.children])))
-      (region (parameters_child parameters (by simp [Term.children])))
+    apply Kinding.available (brand (atoms_child atoms (by simp [Term.children])))
+      (region (atoms_child atoms (by simp [Term.children])))
     intro child member
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-    exact ih original present (parameters_child parameters (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
+    exact ih original present (atoms_child atoms (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
   case bindings _ _ _ brand region ih =>
-    apply Kinding.bindings (brand (parameters_child parameters (by simp [Term.children])))
-      (region (parameters_child parameters (by simp [Term.children])))
+    apply Kinding.bindings (brand (atoms_child atoms (by simp [Term.children])))
+      (region (atoms_child atoms (by simp [Term.children])))
     intro child member
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-    exact ih original present (parameters_child parameters (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
+    exact ih original present (atoms_child atoms (by simpa only [Term.children,List.mem_cons] using Or.inr (Or.inr present)))
   case effect found instantiated _ ih =>
-    have arguments := fun child member => ih child member (parameters_child parameters member)
+    have arguments := fun child member => ih child member (atoms_child atoms member)
     exact .effect found (instantiated.map_kind f (fun child member => (arguments child member).term_kind)) (by
       intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
@@ -164,12 +193,12 @@ theorem Kinding.map_parameters {program : Program} {source target : Context} {te
     apply Kinding.row
     · intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-      exact instances original present (parameters_child parameters (List.mem_append_left _ present))
+      exact instances original present (atoms_child atoms (List.mem_append_left _ present))
     · intro child member
       obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-      exact tails original present (parameters_child parameters (List.mem_append_right _ present))
+      exact tails original present (atoms_child atoms (List.mem_append_right _ present))
   case projection found member associated owner owners items _ ih =>
-    have arguments := fun child member => ih child member (parameters_child parameters member)
+    have arguments := fun child member => ih child member (atoms_child atoms member)
     exact .projection found member associated owner
       (owners.map_kind f (fun child present => (arguments child (List.mem_append_left _ present)).term_kind))
       (items.map_kind f (fun child present => (arguments child (List.mem_append_right _ present)).term_kind)) (by
@@ -183,10 +212,10 @@ theorem Kinding.map_parameters {program : Program} {source target : Context} {te
     apply Kinding.tupleConstant
     intro child member
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-    exact ih original present (parameters_child parameters present)
+    exact ih original present (atoms_child atoms present)
   case constructorConstant found instantiated _ count _ arguments ih =>
     have argumentKinds := fun child member => arguments child member
-      (parameters_child parameters (List.mem_append_left _ member))
+      (atoms_child atoms (List.mem_append_left _ member))
     exact .constructorConstant found
       (instantiated.map_kind f (fun child member => (argumentKinds child member).term_kind))
       (by
@@ -198,9 +227,39 @@ theorem Kinding.map_parameters {program : Program} {source target : Context} {te
       (by
         intro child member
         obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        exact ih original present (parameters_child parameters (List.mem_append_right _ present)))
+        exact ih original present (atoms_child atoms (List.mem_append_right _ present)))
   case principal => exact .principal
   case static => exact .static
+
+/-- Ordinary simultaneous substitution and alpha-renaming retain their
+existing API, now as consumers of the same occurrence-indexed atom producer. -/
+theorem Kinding.map_parameters {program : Program} {source target : Context} {term : Term} {kind : Kind}
+    (kinded : Kinding program source term kind) (f : Term → Term)
+    (shape : ∀ term, f term = match term with
+      | .parameter id kind => f (.parameter id kind)
+      | other => other.mapChildren f)
+    (parameters : ∀ id parameterKind, Occurs (.parameter id parameterKind) term →
+      Kinding program target (f (.parameter id parameterKind)) parameterKind)
+    (levels : source.universeLevel ≤ target.universeLevel)
+    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
+    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands) :
+    Kinding program target (f term) kind := by
+  apply kinded.map_atoms f (by
+    intro term
+    cases term <;> try rfl
+    all_goals exact shape _) _ regions brands
+  intro atom occurs
+  cases atom <;> try exact True.intro
+  case parameter id kind => exact parameters id kind occurs
+  case rigid id kind level =>
+    rw [shape]
+    exact .rigid (Nat.le_trans (kinded.rigid_level occurs) levels)
+  case «variable» id kind level =>
+    rw [shape]
+    exact .variable (Nat.le_trans (kinded.variable_level occurs) levels)
+  case runtimeRegion id =>
+    rw [shape]
+    exact .runtimeRegion
 
 /-- Simultaneous source substitution needs target kinding only at the
 parameters used by this term, including parameters below mixed-kind nodes. -/

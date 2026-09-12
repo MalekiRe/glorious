@@ -128,8 +128,12 @@ theorem ConstantType.permute {program : Program} (valid : ProgramWellFormed prog
   · exact .unit
   · intro fields types _ constants
     exact .tuple constants
-  · intro constructor data variant arguments values substitution types found instantiated substituted _ constants
-    refine .constructor found (instantiated.permute permutation) ?_ constants
+  · intro constructor data variant arguments values substitution types found instantiated kinded substituted _ constants
+    refine .constructor found (instantiated.permute permutation) ?_ ?_ constants
+    · intro argument member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      change Kinding program (permutation.context context) (permutation.term original) (permutation.term original).kind
+      simpa only [permutation.term_kind] using (kinded original present).permute permutation
     apply permutation.substitutes_lexical_list _ substituted
     intro type member
     obtain ⟨field,inFields,rfl⟩ := List.mem_map.mp member

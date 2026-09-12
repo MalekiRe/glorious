@@ -23,7 +23,7 @@ theorem ProgramWellFormed.quantity_source {program : Program} (valid : ProgramWe
     Kinding program ⟨data.generics,data.requirements,0,data.header.module,false,{}⟩ source source.kind ∧
       (source.kind = .quantity ∨ source.kind = .type) := by
   have shape := (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.data_lookup found))).2.1
-  obtain ⟨kinded,kind⟩ := shape.2.2.2.2.2.2 source selected
+  obtain ⟨kinded,kind⟩ := shape.2.2.2.2.2.2.1 source selected
   exact ⟨kinded.1,kind⟩
 
 theorem ProgramWellFormed.function_capture_types {program : Program} (valid : ProgramWellFormed program)

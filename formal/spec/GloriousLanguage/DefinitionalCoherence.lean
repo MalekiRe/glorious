@@ -26,7 +26,7 @@ theorem MatchesImplHead.instantiated {program : Program} (valid : ProgramWellFor
       InfersHeadArgument program context implementation (implementation.arguments.map (Term.substitute substitution)) binder value) :
     MatchesImplHead program context implementation (implementation.arguments.map (Term.substitute substitution)) substitution := by
   have declaration := (valid.2.2.2.2.1 _ declared).2.1
-  obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
+  obtain ⟨_,trait,_,_,_,_,_,signature,_⟩ := declaration
   obtain ⟨_,_,ownerSub,_,headKinded,_,_⟩ := signature
   refine .matched (specialized := implementation.arguments.map (Term.substitute substitution)) instantiated valuesKinded ?_ ?_ inferred
   · simpa only [List.map_id] using

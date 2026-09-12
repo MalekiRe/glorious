@@ -2,6 +2,7 @@ import GloriousLanguage.RuntimeSupport
 import GloriousLanguage.CapabilityModels
 import GloriousLanguage.DefinitionalAdmission
 import GloriousLanguage.PredicateHygiene
+import GloriousLanguage.StaticAtomTransport
 
 /-! Static judgments transport along a genuine runtime-region permutation.
 The permutation supplies only fresh-name mathematics, never an assumed
@@ -32,6 +33,57 @@ def RegionPermutation.context (permutation : RegionPermutation) (context : Conte
     binders := context.binders.map permutation.binder
     assumptions := context.assumptions.map permutation.constraint }
 
+/-- Runtime relocation is the universe-preserving instance of the shared
+concrete atom action. It fixes rigid universals and inference variables. -/
+def RegionPermutation.embedding (permutation : RegionPermutation) : AtomEmbedding where
+  region := permutation.rename
+  rigid := fun id _ level => (id,level)
+  inference := fun id _ level => (id,level)
+  inverse := ⟨permutation.rename,fun id _ level => (id,level),fun id _ level => (id,level)⟩
+  levelMap := id
+  region_left := permutation.involutive
+  region_right := permutation.involutive
+  rigid_left := by intros; rfl
+  rigid_right := by intros; rfl
+  inference_left := by intros; rfl
+  inference_right := by intros; rfl
+  rigid_bound := by intros; rfl
+  inference_bound := by intros; rfl
+
+theorem RegionPermutation.embedding_term (permutation : RegionPermutation) (term : Term) :
+    permutation.embedding.term term = permutation.term term := by
+  cases term <;> simp only [RegionPermutation.embedding,AtomRenaming.term,RegionPermutation.term,Term.renameRuntimeRegions]
+  all_goals try rfl
+  all_goals congr 1
+  all_goals first
+  | exact RegionPermutation.embedding_term permutation _
+  | apply List.map_congr_left
+    intro child _
+    exact permutation.embedding_term child
+termination_by term
+
+theorem RegionPermutation.embedding_action (permutation : RegionPermutation) :
+    permutation.embedding.term = permutation.term := funext permutation.embedding_term
+
+theorem RegionPermutation.embedding_binder (permutation : RegionPermutation) (binder : Binder) :
+    permutation.embedding.binder binder = permutation.binder binder := by
+  simp only [AtomRenaming.binder,RegionPermutation.binder,permutation.embedding_action]
+
+theorem RegionPermutation.embedding_constraint (permutation : RegionPermutation) (constraint : Constraint) :
+    permutation.embedding.constraint constraint = permutation.constraint constraint := by
+  simp only [AtomRenaming.constraint,RegionPermutation.constraint,permutation.embedding_action]
+
+theorem RegionPermutation.embedding_substitution (permutation : RegionPermutation) (substitution : Substitution) :
+    permutation.embedding.substitution substitution = permutation.substitution substitution := by
+  simp only [AtomRenaming.substitution,RegionPermutation.substitution,permutation.embedding_action]
+
+theorem RegionPermutation.embedding_context (permutation : RegionPermutation) (context : Context) :
+    permutation.embedding.context context = permutation.context context := by
+  have binders := funext permutation.embedding_binder
+  have constraints := funext permutation.embedding_constraint
+  simp only [AtomEmbedding.context,RegionPermutation.context,binders,constraints]
+  rfl
+
 theorem RegionPermutation.term_involutive (permutation : RegionPermutation) (term : Term) :
     permutation.term (permutation.term term) = term :=
   term.renameRuntimeRegions_involutive permutation.rename permutation.involutive
@@ -48,6 +100,12 @@ theorem RegionPermutation.lexical_term (permutation : RegionPermutation) {term :
   have identity : permutation.term term = term.renameRuntimeRegions id :=
     term.renameRuntimeRegions_congr permutation.rename id (fun id occurs => False.elim (lexical.1 id occurs))
   exact identity.trans term.renameRuntimeRegions_id
+
+theorem RegionPermutation.embedding_fixes (permutation : RegionPermutation) {program : Program}
+    (valid : ProgramWellFormed program) : permutation.embedding.Fixes program := by
+  intro declaration member term present
+  rw [permutation.embedding_term]
+  exact permutation.lexical_term (valid.lexical member term present)
 
 theorem RegionPermutation.term_substitute (permutation : RegionPermutation) (substitution : Substitution) (term : Term) :
     permutation.term (term.substitute substitution) =
@@ -191,44 +249,30 @@ theorem RegionPermutation.substitute_constraint (permutation : RegionPermutation
 theorem Instantiates.permute {binders : List Binder} {arguments : List Term} {substitution : Substitution}
     (instantiated : Instantiates binders arguments substitution) (permutation : RegionPermutation) :
     Instantiates binders (arguments.map permutation.term) (permutation.substitution substitution) := by
-  refine ⟨instantiated.1,?_,?_⟩
-  · have kinds := instantiated.2.1
-    clear instantiated
-    induction kinds with
-    | nil => exact .nil
-    | cons head _ ih => exact .cons (by simpa only [permutation.term_kind] using head) ih
-  · rw [instantiated.2.2]
-    simp only [RegionPermutation.substitution,List.zip_map_right]
-    apply List.map_congr_left
-    intro entry _
-    cases entry
-    rfl
+  simpa only [permutation.embedding_action,permutation.embedding_substitution] using
+    instantiated.renameAtoms permutation.embedding.toAtomRenaming
 
 theorem Instantiates.permute_binders {binders : List Binder} {arguments : List Term} {substitution : Substitution}
     (instantiated : Instantiates binders arguments substitution) (permutation : RegionPermutation) :
     Instantiates (binders.map permutation.binder) arguments substitution := by
-  refine ⟨by simpa only [List.map_map,Function.comp_def,RegionPermutation.binder] using instantiated.1,?_,?_⟩
-  · have kinds := instantiated.2.1
-    clear instantiated
-    induction kinds with
-    | nil => exact .nil
-    | cons head _ ih => exact .cons head ih
-  · simpa only [List.map_map,Function.comp_def,RegionPermutation.binder] using instantiated.2.2
+  have binderMap := funext permutation.embedding_binder
+  simpa only [binderMap] using instantiated.renameBinders permutation.embedding.toAtomRenaming
 
 theorem CallableFields.permute {program : Program} (valid : ProgramWellFormed program)
     {id : DeclId} {arguments fields : List Term} (declared : CallableFields program id arguments fields)
     (permutation : RegionPermutation) :
     CallableFields program id (arguments.map permutation.term) (fields.map permutation.term) := by
-  cases declared with
-  | function found instantiated substituted =>
-      have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup found))
-      exact .function found (instantiated.permute permutation) (permutation.substitutes_lexical_list (by
-        intro term member
-        exact lexical term (by simp only [Definition.terms,List.mem_append]; exact Or.inl (Or.inr member))) substituted)
-  | operation found instantiated => exact .operation found (instantiated.permute permutation)
+  simpa only [permutation.embedding_action] using
+    declared.renameAtoms permutation.embedding.toAtomRenaming (permutation.embedding_fixes valid)
 
 def RegionPermutation.assignment (permutation : RegionPermutation) (assignment : Term → Option Principal) :
     Term → Option Principal := fun term => assignment (permutation.term term)
+
+theorem RegionPermutation.embedding_assignment (permutation : RegionPermutation)
+    (assignment : Term → Option Principal) : permutation.embedding.assignment assignment = permutation.assignment assignment := by
+  have inverse : permutation.embedding.inverse = permutation.embedding.toAtomRenaming := rfl
+  funext term
+  simp only [AtomEmbedding.assignment,RegionPermutation.assignment,inverse,permutation.embedding_term]
 
 theorem RegionPermutation.assignment_at (permutation : RegionPermutation)
     (assignment : Term → Option Principal) (term : Term) :
@@ -249,129 +293,14 @@ theorem CapabilityEquation.permute {program : Program} (valid : ProgramWellForme
     {assignment : Term → Option Principal} {term : Term} {principal : Principal}
     (equation : CapabilityEquation program assignment term principal) (permutation : RegionPermutation) :
     CapabilityEquation program (permutation.assignment assignment) (permutation.term term) principal := by
-  cases equation <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions] <;>
-    (try simp only [← RegionPermutation.term_def])
-  case unit => exact .unit
-  case bottom => exact .bottom
-  case scalar => exact .scalar
-  case raw => exact .raw
-  case shared => exact .shared
-  case unique => exact .unique
-  case label => exact .label
-  case tuple fields => exact .tuple (permutation.assignment_fields fields)
-  case emptyArray => exact .emptyArray
-  case array positive found => exact .array positive (by simpa only [permutation.assignment_at] using found)
-  case alias found instantiated substituted selected =>
-      have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.alias_lookup found))
-      exact .alias found (instantiated.permute permutation)
-        (permutation.substitutes_lexical (lexical _ (by simp [Definition.terms])) substituted)
-        (by simpa only [permutation.assignment_at] using selected)
-  case nominal id data arguments substitution fields principals marker structural found instantiated
-      substituted capabilities marked meets restricted drops =>
-      have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.data_lookup found))
-      refine .nominal found (instantiated.permute permutation)
-        (permutation.substitutes_lexical_list (fun term member => lexical term (by
-          simp only [Definition.terms,List.mem_append]
-          exact Or.inl (Or.inl (Or.inl member)))) substituted)
-        (permutation.assignment_fields capabilities) ?_ meets restricted drops
-      rcases marked with noMarker | ⟨source,value,sourceFound,sourceSub,valueKind⟩
-      · exact Or.inl noMarker
-      · refine Or.inr ⟨source,permutation.term value,sourceFound,
-          permutation.substitutes_lexical (lexical source (by
-            simp only [Definition.terms,List.mem_append]
-            exact Or.inl (Or.inl (Or.inr (by simp [sourceFound]))))) sourceSub,?_⟩
-        rcases valueKind with markerValue | ⟨typeKind,selected⟩
-        · exact Or.inl (by rw [markerValue]; simp only [RegionPermutation.term,Term.renameRuntimeRegions])
-        · exact Or.inr ⟨by simpa only [permutation.term_kind] using typeKind,
-            by simpa only [permutation.assignment_at] using selected⟩
-  case callable fields capabilities => exact .callable (fields.permute valid permutation) (permutation.assignment_fields capabilities)
-  case environment capabilities => exact .environment (permutation.assignment_fields capabilities)
-  case available selected =>
-      apply CapabilityEquation.available
-      simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using
-        (show permutation.assignment assignment (permutation.term _) = _ from
-          (permutation.assignment_at assignment _).trans selected)
-  case bindings capabilities => exact .bindings (permutation.assignment_fields capabilities)
-  case optionalContinuation => exact .optionalContinuation
-  case exactContinuation positive => exact .exactContinuation positive
-
+  simpa only [permutation.embedding_assignment,permutation.embedding_term] using
+    equation.renameAtoms permutation.embedding (permutation.embedding_fixes valid)
 
 theorem Kinding.permute {program : Program} {context : Context} {term : Term} {kind : Kind}
     (typed : Kinding program context term kind) (permutation : RegionPermutation) :
     Kinding program (permutation.context context) (permutation.term term) kind := by
-  induction typed <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions] <;>
-    (try simp only [← RegionPermutation.term_def])
-  case quantity bounds => exact .quantity bounds
-  case parameter binder member =>
-      exact .parameter (binder := permutation.binder binder) (List.mem_map.mpr ⟨binder,member,rfl⟩)
-  case rigid bound => exact .rigid bound
-  case scopedRegion member => exact .scopedRegion member
-  case scopedBrand member => exact .scopedBrand member
-  case runtimeRegion => exact .runtimeRegion
-  case runtimeBrand => exact .runtimeBrand
-  case «variable» bound => exact .variable bound
-  case unit => exact .unit
-  case bottom => exact .bottom
-  case scalar valid => exact .scalar valid
-  case tuple _ ih =>
-      exact .tuple (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case array _ _ element length => exact .array element length
-  case reference _ _ region referent => exact .reference region referent
-  case rawPointer _ referent => exact .rawPointer referent
-  case nominal found instantiated _ ih =>
-      exact .nominal found (instantiated.permute permutation) (by
-        intro term member
-        obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        simpa only [← permutation.term_def,permutation.term_kind] using ih original present)
-  case alias found instantiated _ ih =>
-      exact .alias found (instantiated.permute permutation) (by
-        intro term member
-        obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        simpa only [← permutation.term_def,permutation.term_kind] using ih original present)
-  case callable found instantiated _ ih =>
-      exact .callable found (instantiated.permute permutation) (by
-        intro term member
-        obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        simpa only [← permutation.term_def,permutation.term_kind] using ih original present)
-  case continuation _ _ _ _ quantity brand argument answer effects =>
-      exact .continuation brand argument answer effects quantity
-  case label _ _ _ brand region result => exact .label brand region result
-  case environment _ _ _ brand region ih =>
-      exact .environment brand region (by
-        intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case available _ _ _ brand region ih =>
-      exact .available brand region (by
-        intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case bindings _ _ _ brand region ih =>
-      exact .bindings brand region (by
-        intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case effect found instantiated _ ih =>
-      exact .effect found (instantiated.permute permutation) (by
-        intro term member
-        obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        simpa only [← permutation.term_def,permutation.term_kind] using ih original present)
-  case row _ _ instances tails =>
-      exact .row (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact instances original present)
-        (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact tails original present)
-  case projection found member associated owner owners items _ ih =>
-      exact .projection found member associated owner (owners.permute permutation) (items.permute permutation) (by
-        intro term present
-        rw [← List.map_append] at present
-        obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-        simpa only [← permutation.term_def,permutation.term_kind] using ih original inOriginal)
-  case scalarConstant valid => exact .scalarConstant valid
-  case tupleConstant _ ih =>
-      exact .tupleConstant (by
-        intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case constructorConstant found instantiated _ count _ arguments ih =>
-      exact .constructorConstant found (instantiated.permute permutation)
-        (by
-          intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-          simpa only [← permutation.term_def,permutation.term_kind] using arguments original present)
-        (by simpa only [List.length_map] using count)
-        (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact ih original present)
-  case principal => exact .principal
-  case static => exact .static
+  simpa only [permutation.embedding_context,permutation.embedding_term] using
+    typed.renameAtoms permutation.embedding
 
 theorem RegionPermutation.term_children (permutation : RegionPermutation) (term : Term) :
     (permutation.term term).children = term.children.map permutation.term := by
@@ -533,289 +462,8 @@ theorem RegionPermutation.implementation_context (permutation : RegionPermutatio
 theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {constraint : Constraint} (entailed : Entails program context constraint) (permutation : RegionPermutation) :
     Entails program (permutation.context context) (permutation.constraint constraint) := by
-  refine Entails.rec
-    (motive_1 := fun context type principal _ =>
-      CapabilityEvidence program (permutation.context context) (permutation.term type) principal)
-    (motive_2 := fun context assignment type principal _ => CapabilityUnfolds program (permutation.context context)
-      (permutation.assignment assignment) (permutation.term type) principal)
-    (motive_3 := fun context a b _ => Equal program (permutation.context context) (permutation.term a) (permutation.term b))
-    (motive_4 := fun context trait arguments negative implementation substitution _ =>
-      SelectsImpl program (permutation.context context) trait (arguments.map permutation.term) negative implementation
-        (permutation.substitution substitution))
-    (motive_5 := fun context effect row _ => RowMember program (permutation.context context) (permutation.term effect) (permutation.term row))
-    (motive_6 := fun context required allowed _ => RowSubset program (permutation.context context)
-      (permutation.term required) (permutation.term allowed))
-    (motive_7 := fun context type region _ => TypeOutlives program (permutation.context context)
-      (permutation.term type) (permutation.term region))
-    (motive_8 := fun context constraint _ => Entails program (permutation.context context) (permutation.constraint constraint))
-    (motive_9 := fun context substitution constraint _ => EntailsSubstitution program (permutation.context context)
-      (permutation.substitution substitution) (permutation.constraint constraint))
-    (motive_10 := fun context left right _ =>
-      DefinitionalStep program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_11 := fun context left right _ =>
-      DefinitionallyEqual program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_12 := fun context left right _ =>
-      DefinitionalReduction program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_13 := fun context implementation arguments substitution _ =>
-      Definition.implementation implementation ∈ program.declarations →
-      MatchesImplHead program (permutation.context context) implementation
-        (arguments.map permutation.term) (permutation.substitution substitution))
-    (motive_14 := fun context trait member owners items associated ownerSub itemSub _ =>
-      ProjectionDomain program (permutation.context context) trait member
-        (owners.map permutation.term) (items.map permutation.term) associated
-        (permutation.substitution ownerSub) (permutation.substitution itemSub))
-    (motive_15 := fun sourceContext context binder template query value _ =>
-      InfersHeadParameter program (permutation.context sourceContext) (permutation.context context)
-        (permutation.binder binder) (permutation.term template) (permutation.term query) (permutation.term value))
-    (motive_16 := fun context implementation arguments binder value _ =>
-      Definition.implementation implementation ∈ program.declarations →
-      InfersHeadArgument program (permutation.context context) implementation
-        (arguments.map permutation.term) (permutation.binder binder) (permutation.term value))
-    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence
-    ?refl ?symm ?trans ?congr ?assumed ?equalEntailed ?definitional
-    ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances ?rowEntailed
-    ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
-    ?available ?bindings ?equal_1 ?typeEntailed ?checkedCallable ?checkedRunsIn ?assumed_3 ?constraintCongr ?equality
-    ?outlivesRefl ?outlivesStatic ?outlivesTrans ?typeOutlives
-    ?rows ?implementation ?use ?quantified ?quantifiedInstance ?instantiated
-    ?stepAlias ?stepProjection ?stepDefault
-    ?defRefl ?defSymm ?defTrans ?defCongr ?defStep ?defRow
-    ?redRefl ?redStep ?redTrans ?redCongr ?redRow
-    ?matched ?domainValid ?inferParameter ?inferChild ?inferSource ?inferQuery ?inferArgument entailed
-  all_goals intros
-  all_goals try simp only [RegionPermutation.term,Term.renameRuntimeRegions,RegionPermutation.constraint,Constraint.mapTerms,
-    List.map_cons,List.map_nil]
-  all_goals try simp only [← RegionPermutation.term_def]
-  case capStructural context type principal assignment found _ unfolded =>
-    apply CapabilityEvidence.structural (assignment := permutation.assignment assignment)
-      (by simpa only [permutation.assignment_at] using found)
-    intro term claimed selected
-    have original : assignment (permutation.term term) = some claimed := selected
-    simpa only [permutation.term_involutive] using unfolded (permutation.term term) claimed original
-  case capLogical _ admitted lower logical =>
-    exact .logical (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using logical) admitted lower
-  case capEqual _ _ equal evidence => exact .equal equal evidence
-  case capEquation restriction equation => exact .equation restriction (equation.permute valid permutation)
-  case capEvidence restriction _ evidence => exact .evidence restriction evidence
-  case refl => exact .refl
-  case symm _ ih => exact .symm ih
-  case trans _ _ first second => exact .trans first second
-  case congr same _ children =>
-    exact .congrChildren (same.permute permutation) (permutation.children_at children)
-  case assumed member => exact .assumed (List.mem_map.mpr ⟨_,member,by
-    simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
-  case equalEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
-  case definitional _ ih => exact .definitional ih
-  case rowDuplicate _ ih => exact .rowDuplicate ih
-  case tailDuplicate _ ih => exact .tailDuplicate ih
-  case selected member trait negative _ _ head requirements =>
-    have lexical := valid.lexical member
-    refine .selected member trait negative (head member) ?_
-    intro constraint present
-    simpa only [permutation.lexical_constraint (fun term nested => lexical term (by
-      simp only [Definition.terms,List.mem_append,List.mem_flatMap]
-      exact Or.inl (Or.inr ⟨constraint,present,nested⟩)))] using requirements constraint present
-  case head present _ equal => exact .head (List.mem_map.mpr ⟨_,present,rfl⟩) equal
-  case tail present _ nested => exact .tail (List.mem_map.mpr ⟨_,present,rfl⟩) nested
-  case equal _ _ equal nested => exact .equal equal nested
-  case empty => exact .empty
-  case assumed_1 member => exact .assumed (List.mem_map.mpr ⟨_,member,by
-    simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
-  case same _ equal => exact .same equal
-  case trans_1 _ _ first second => exact .trans first second
-  case instances _ _ instances tails =>
-    refine .instances ?_ ?_
-    · intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact instances original present
-    · intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact tails original present
-  case rowEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
-  case assumed_2 member => exact .assumed (List.mem_map.mpr ⟨_,member,by
-    simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
-  case scalar => exact .scalar
-  case unit => exact .unit
-  case pointer => exact .pointer
-  case reference _ included => exact .reference (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using included)
-  case bottom => exact .bottom
-  case tuple _ fields =>
-    exact .tuple (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
-  case array _ element => exact .array element
-  case nominal found instantiated substituted _ fields =>
-    have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.data_lookup found))
-    exact .nominal found (instantiated.permute permutation)
-      (permutation.substitutes_lexical_list (fun term member => lexical term (by
-        simp only [Definition.terms,List.mem_append]
-        exact Or.inl (Or.inl (Or.inl member)))) substituted)
-      (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
-  case callable selected _ fields =>
-    exact .callable (selected.permute valid permutation)
-      (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
-  case label _ included => exact .label (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using included)
-  case environment context brand long residents short _ _ included fields =>
-    apply TypeOutlives.environment
-    · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
-        (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
-    · intro term member
-      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-      exact (by assumption : ∀ field ∈ _, TypeOutlives program (permutation.context context) (permutation.term field) _) original present
-  case available _ environment =>
-    exact .available (by simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using environment)
-  case bindings context brand long residents short _ _ included fields =>
-    apply TypeOutlives.bindings
-    · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
-        (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
-    · intro term member
-      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-      exact (by assumption : ∀ field ∈ _, TypeOutlives program (permutation.context context) (permutation.term field) _) original present
-  case equal_1 _ _ equal previous => exact .equal equal previous
-  case typeEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
-  case checkedCallable found member receiver arguments result effects =>
-    have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup found))
-    have invocation : ∀ (term : Term), term ∈ _ → term.Lexical := fun term present => lexical term (by
-      simp only [Definition.terms,List.mem_append,List.mem_flatMap]
-      exact Or.inr ⟨_,member,present⟩)
-    exact .checkedCallable found member
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) receiver)
-      (permutation.substitutes_lexical_list (fun term present => invocation term (by simp [InvocationRelation.terms,present])) arguments)
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) result)
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) effects)
-  case checkedRunsIn found member receiver access arguments after =>
-    have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup found))
-    have invocation : ∀ (term : Term), term ∈ _ → term.Lexical := fun term present => lexical term (by
-      simp only [Definition.terms,List.mem_append,List.mem_flatMap]
-      exact Or.inr ⟨_,member,present⟩)
-    exact .checkedRunsIn found member
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) receiver)
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) access)
-      (permutation.substitutes_lexical_list (fun term present => invocation term (by simp [InvocationRelation.terms,present])) arguments)
-      (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) after)
-  case assumed_3 member => exact .assumed (List.mem_map.mpr ⟨_,member,rfl⟩)
-  case constraintCongr context template before after leftSub rightSub _ beforeSub afterSub _ pairs previous =>
-    refine .congrSubstitution (leftSub := permutation.substitution leftSub)
-      (rightSub := permutation.substitution rightSub) ?_
-      (permutation.substitute_constraint beforeSub) (permutation.substitute_constraint afterSub) previous
-    intro id kind
-    rw [permutation.lookup_default,permutation.lookup_default]
-    exact pairs id kind
-  case equality _ equal => exact .equality equal
-  case outlivesRefl => exact .outlivesRefl
-  case outlivesStatic => exact .outlivesStatic
-  case outlivesTrans _ _ first second =>
-    exact .outlivesTrans (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using first)
-      (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using second)
-  case typeOutlives _ outlives => exact .typeOutlives outlives
-  case rows _ subset => exact .rows subset
-  case implementation _ selected => exact .implementation selected
-  case use _ request capability => exact .use capability request
-  case quantified context binders requirements _ allInstances =>
-    apply Entails.quantified
-    intro values substitution instantiated kinds requirement member
-    change Instantiates (binders.map permutation.binder) values substitution at instantiated
-    have originalInstantiation : Instantiates binders (values.map permutation.term) (permutation.substitution substitution) := by
-      have inverse : (binders.map permutation.binder).map permutation.binder = binders := by
-        simp only [List.map_map,Function.comp_def,permutation.binder_involutive,List.map_id']
-      simpa only [inverse] using (instantiated.permute permutation).permute_binders permutation
-    have originalKinds : ∀ term ∈ values.map permutation.term, Kinding program context term term.kind := by
-      intro term present
-      obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-      simpa only [permutation.context_involutive,permutation.term_kind] using (kinds original inOriginal).permute permutation
-    obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
-    have transported := allInstances _ _ originalInstantiation originalKinds original inOriginal
-    simpa only [permutation.substitution_involutive,RegionPermutation.constraint,RegionPermutation.term] using transported
-  case instantiated substituted _ holds => exact .instantiated (permutation.substitute_constraint substituted) holds
-  case quantifiedInstance _ instantiated kinded present substituted quantified =>
-    simp only [RegionPermutation.constraint,Constraint.mapTerms] at quantified
-    refine .quantifiedInstance quantified ((instantiated.permute permutation).permute_binders permutation) ?_
-      (List.mem_map.mpr ⟨_,present,rfl⟩) (permutation.substitute_constraint substituted)
-    intro term member
-    obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
-    simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
-  case stepAlias found instantiated kinded substituted =>
-    have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.alias_lookup found))
-    refine .alias found (instantiated.permute permutation) ?_
-      (permutation.substitutes_lexical (lexical _ (by simp [Definition.terms])) substituted)
-    intro term present
-    obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-    simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
-  case stepProjection _ selected member substituted domainIH selectedIH =>
-    have lexical := valid.lexical selected.declaration
-    exact .projection domainIH selectedIH member (by
-      simpa only [RegionPermutation.substitution,List.map_append] using
-        (permutation.substitutes_lexical (lexical _ (by
-          simp only [Definition.terms,List.mem_append,List.mem_map]
-          exact Or.inl (Or.inl (Or.inr ⟨_,member,rfl⟩)))) substituted))
-  case stepDefault context trait member rawOwners rawItems associated ownerSub itemSub implementation implSub rawBody value
-      domain _ missing default substituted domainIH selectedIH =>
-    have found : program.associated member = some associated := by cases domain; assumption
-    have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.associated_lookup found))
-    exact .defaultProjection domainIH selectedIH missing default (by
-      simpa only [RegionPermutation.substitution,List.map_append] using
-        (permutation.substitutes_lexical (lexical rawBody (by
-          simp only [Definition.terms,List.mem_append]
-          exact Or.inl (Or.inl (by simp [default])))) substituted))
-  case defRefl => exact .refl
-  case defSymm _ ih => exact .symm ih
-  case defTrans _ _ first second => exact .trans first second
-  case defCongr same _ children =>
-    exact .congrChildren (same.permute permutation) (permutation.children_at children)
-  case defStep _ ih => exact .step ih
-  case defRow equal => exact .row (equal.renameRuntimeRegions permutation.rename)
-  case redRefl => exact .refl
-  case redStep _ ih => exact .step ih
-  case redTrans _ _ first second => exact .trans first second
-  case redCongr same _ children =>
-    exact .congrChildren (same.permute permutation) (permutation.children_at children)
-  case redRow equal => exact .row (equal.renameRuntimeRegions permutation.rename)
-  case matched context implementation arguments values substitution specialized
-      instantiated kinded substituted lengths _ _ head inferred member =>
-    have lexical := valid.lexical member
-    refine .inferred (specialized := specialized.map permutation.term) (instantiated.permute permutation) ?_ ?_ ?_ ?_ ?_
-    · intro term present
-      obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-      simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
-    · exact permutation.substitutes_lexical_list (fun term present => lexical term (by
-        simp only [Definition.terms,List.mem_append]
-        exact Or.inl (Or.inl (Or.inl present)))) substituted
-    · simpa only [List.length_map] using lengths
-    · exact permutation.list_at head
-    · intro index binder value binderAt valueAt
-      obtain ⟨original,originalAt,rfl⟩ := Option.map_eq_some_iff.mp (by
-        simpa only [List.getElem?_map] using valueAt)
-      have binderFixed := permutation.implementation_binder valid member (List.mem_of_getElem? binderAt)
-      simpa only [binderFixed,RegionPermutation.term] using inferred index binder original binderAt originalAt member
-  case domainValid traitFound member associatedFound owner ownerInst itemInst kinded _ _ ownerRequirements itemRequirements =>
-    have traitLexical := valid.lexical (List.mem_of_find?_eq_some (Program.trait_lookup traitFound))
-    have itemLexical := valid.lexical (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))
-    refine .valid traitFound member associatedFound owner (ownerInst.permute permutation) (itemInst.permute permutation) ?_ ?_ ?_
-    · intro term present
-      rw [← List.map_append] at present
-      obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
-      simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
-    · intro constraint present
-      simpa only [permutation.lexical_constraint (fun term nested => traitLexical term (by
-        simp only [Definition.terms,List.mem_append,List.mem_flatMap]
-        exact Or.inl ⟨constraint,present,nested⟩))] using ownerRequirements constraint present
-    · intro constraint present
-      simpa only [RegionPermutation.substitution,List.map_append,
-        permutation.lexical_constraint (fun term nested => itemLexical term (by
-          simp only [Definition.terms,List.mem_append,List.mem_flatMap]
-          exact Or.inl (Or.inr ⟨constraint,present,nested⟩)))] using itemRequirements constraint present
-  case inferParameter kind =>
-    exact .parameter (by simpa only [permutation.term_kind,RegionPermutation.binder] using kind)
-  case inferChild structural same templateAt queryAt _ inferred =>
-    exact .child (permutation.structuralHead structural) (same.permute permutation)
-      (by rw [permutation.term_children,List.getElem?_map,templateAt]; rfl)
-      (by rw [permutation.term_children,List.getElem?_map,queryAt]; rfl) inferred
-  case inferSource _ _ reduced inferred => exact .sourceReduction reduced inferred
-  case inferQuery _ _ equal inferred => exact .queryConversion equal inferred
-  case inferArgument context implementation arguments binder value template query index
-      templateAt queryAt _ inferred member =>
-    have lexical := valid.lexical member
-    have templateLexical : template.Lexical := lexical template (by
-      simp only [Definition.terms,List.mem_append]
-      exact Or.inl (Or.inl (Or.inl (List.mem_of_getElem? templateAt))))
-    apply InfersHeadArgument.argument templateAt
-      (by rw [List.getElem?_map,queryAt]; rfl)
-    simpa only [permutation.implementation_context valid member,permutation.lexical_term templateLexical,
-      ← permutation.term_def] using inferred
+  simpa only [permutation.embedding_context,permutation.embedding_constraint] using
+    entailed.renameAtoms permutation.embedding (permutation.embedding_fixes valid)
 
 theorem CapabilityEvidence.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {type : Term} {principal : Principal} (evidence : CapabilityEvidence program context type principal)

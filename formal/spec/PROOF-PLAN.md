@@ -970,6 +970,47 @@ consumer passes its 29-job gate. These are strict general proofs, not examples
 or a completed logical/source-reduction cut. Confluence, conversion-safe Drop
 inversion and full-language soundness remain unproved.
 
+The actual declaration default boundary now uses one ordered lexical producer,
+`BinderDefaultsWellFormed`, for signatures, data, aliases, traits, associated
+items, implementations, effects and constants. Associated defaults retain their
+outer owner scope; a binder default sees only its preceding item prefix.
+`Instantiates.default_step` consumes the source admission and current prefix
+substitution to establish the actual chosen default's kind. Constructor constant
+typing also checks its real generic arguments, closing the other missing source
+term-kinding premise. `DeclarationKinding` derives kind and universe bounds for
+every term in the authoritative declaration inventory, including defaults,
+captures, quantity markers, requirements and invocation contracts.
+
+`StaticAtomTransport` now transports all sixteen mutual static judgments through
+one concrete atom bijection that fixes the actual program. Runtime-region
+equivariance is its universe-preserving instance; the superseded runtime-only
+mutual proof and separate kind/capability/callable transport proofs are removed.
+Actual runtime signatures, code, typing, world, coverage and body consumers keep
+their original interfaces through that shared producer.
+
+`LogicalPredicateInterpretation` establishes admitted interpretation iff actual
+`Entails`, including nested quantifiers. `PredicateComposition` carries the real
+mapped generic table into the instantiated-requirement judgment. `LogicalCut`
+proves assumption replacement across the complete mutual judgment family at
+identical kinding domains, with derived projections for equality, capability,
+rows, type lifetimes and instantiated requirements. It does not silently assume
+that universal evidence tolerates a larger argument domain.
+
+That larger-universe obligation is discharged separately by `LogicalUniverse`.
+A concrete finite-support bijection fixes all declaration, assumption and goal
+atoms while absorbing the new universe level into the old level's infinite atom
+domain. The shared static transport and actual assumption cut then establish
+`Entails.raiseUniverse` for arbitrary larger universes under kinded assumptions
+and a kinded goal. Universal introduction still covers every newly admitted
+value; no quantifier rule, semantic domain or source meaning is weakened.
+General fresh-rigid specialization, source-reduction confluence and the dependent
+conversion-safe Drop inversion remain open. These results do not establish full
+language soundness or close the ambient caller-storage obligations above.
+The frozen combined gate passes 163 targets with warnings as errors, including
+the actual head-inference/coherence admission consumers, source and match entry,
+whole-machine control, exterior cleanup separation, callback runtime lifetime
+and runtime world/coverage/body transport. Existing examples were not run.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

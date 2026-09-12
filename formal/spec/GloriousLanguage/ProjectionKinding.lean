@@ -8,7 +8,7 @@ namespace Glorious.Language
 theorem ProgramWellFormed.alias_body {program : Program} (valid : ProgramWellFormed program)
     {id : DeclId} {alias : AliasDefinition} (found : program.alias id = some alias) :
     Kinding program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type := by
-  exact (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.alias_lookup found))).2.1.2.1
+  exact (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.alias_lookup found))).2.1.2.1.1
 
 theorem ProgramWellFormed.alias_specialization {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {id : DeclId} {alias : AliasDefinition} {arguments : List Term} {substitution : Substitution}
@@ -28,7 +28,7 @@ theorem ProgramWellFormed.default_body {program : Program} (valid : ProgramWellF
       Kinding program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
         0,associated.header.module,false,{}⟩ body associated.kind := by
   have declaration := (valid.2.2.2.2.1 _ (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))).2.1
-  obtain ⟨actual,actualFound,_,unique,bodies⟩ := declaration
+  obtain ⟨actual,actualFound,_,unique,bodies,_⟩ := declaration
   rw [owner,traitFound] at actualFound
   cases Option.some.inj actualFound
   exact ⟨unique,(bodies body default).1⟩
@@ -56,7 +56,7 @@ theorem ProgramWellFormed.override_body {program : Program} (valid : ProgramWell
       ∃ requirements, Kinding program ⟨implementation.generics ++ associated.generics,
         implementation.requirements ++ requirements,0,implementation.header.module,false,{}⟩ body associated.kind := by
   have declaration := (valid.2.2.2.2.1 _ declared).2.1
-  obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
+  obtain ⟨_,trait,_,_,_,_,_,signature,_⟩ := declaration
   obtain ⟨_,_,ownerSub,_,_,_,bodies⟩ := signature
   obtain ⟨actual,requirements,found,_,_,unique,_,kinded⟩ := bodies member body bodyMember
   rw [associatedFound] at found

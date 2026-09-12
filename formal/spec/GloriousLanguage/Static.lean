@@ -505,6 +505,18 @@ unrelated, unused identities from an arbitrary enclosing context. -/
 def Context.bindParameters (context : Context) (binders : List Binder) : Context :=
   { context with binders := binders ++ context.binders.filter (fun previous => !(binders.any (fun binder => binder.id == previous.id))) }
 
+/-- A default sees its preceding binder prefix, never itself or a later
+binder. The same lexical entry operation is used by source declarations and
+quantified predicates, including associated items with outer owner binders. -/
+def BinderDefaultsKinded (program : Program) (context : Context) (binders : List Binder) : Prop :=
+  ∀ i binder value, binders[i]? = some binder → binder.defaultValue = some value →
+    Kinding program (context.bindParameters (binders.take i)) value binder.kind
+
+def BinderDefaultsWellFormed (program : Program) (context : Context) (binders : List Binder) : Prop :=
+  BinderDefaultsKinded program context binders ∧
+  ∀ i binder value, binders[i]? = some binder → binder.defaultValue = some value →
+    DomainValid program (context.bindParameters (binders.take i)) value
+
 /-- Predicate kind admission is distinct from proving the predicate true.
 Its term premises use the same source kinding producer as signatures and
 implementation heads. Nested quantifiers own their binder scope and check
@@ -532,8 +544,7 @@ inductive ConstraintKinded (program : Program) : Context → Constraint → Prop
       Kinding program context access .type → (∀ argument ∈ arguments, Kinding program context argument .type) →
       Kinding program context after .type → ConstraintKinded program context (.runsIn receiver access arguments after unsafeAllowed)
   | quantified {context binders requirements} : (binders.map (·.id)).Nodup →
-      (∀ i binder value, binders[i]? = some binder → binder.defaultValue = some value →
-        Kinding program (context.bindParameters (binders.take i)) value binder.kind) →
+      BinderDefaultsKinded program context binders →
       (∀ requirement ∈ requirements, ConstraintKinded program (context.bindParameters binders) requirement) →
       ConstraintKinded program context (.quantified binders requirements)
 
@@ -544,6 +555,7 @@ inductive ConstantType (program : Program) (context : Context) : Term → Term �
       ConstantType program context (.constantTuple fields) (.tuple types)
   | constructor {constructor data variant arguments values substitution types} :
       program.Constructor constructor data variant → Instantiates data.generics arguments substitution →
+      (∀ argument ∈ arguments, Kinding program context argument argument.kind) →
       ListRel (Substitutes substitution) (variant.fields.map (·.type)) types →
       ListRel (ConstantType program context) values types →
       ConstantType program context (.constantConstructor constructor arguments values) (.nominal data.header.id arguments)
@@ -727,8 +739,7 @@ def SignatureWellFormed (program : Program) (module : ModuleId) (signature : Sig
   (signature.generics.map (·.id)).Nodup ∧
   (∀ parameter ∈ signature.parameters, WellKinded program context parameter .type) ∧
   WellKinded program context signature.result .type ∧ WellKinded program context signature.effects .row ∧
-  (∀ i binder defaultValue, signature.generics[i]? = some binder → binder.defaultValue = some defaultValue →
-    WellKinded program { context with binders := signature.generics.take i } defaultValue binder.kind)
+  BinderDefaultsWellFormed program { context with binders := [] } signature.generics
 
 /-- Implementation heads and associated overrides are checked at the actual
 trait and item domains. Distinct template binder identities permit one
@@ -765,9 +776,11 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
     (data.quantitySource.isSome = true → data.invariant.isSome = true) ∧
     (∀ hook, data.dropHook = some hook → ∃ function, program.function hook = some function) ∧
     (∀ source, data.quantitySource = some source → WellKinded program context source source.kind ∧
-      (source.kind = .quantity ∨ source.kind = .type))
+      (source.kind = .quantity ∨ source.kind = .type)) ∧
+    BinderDefaultsWellFormed program { context with binders := [] } data.generics
   | .alias alias => (alias.generics.map (·.id)).Nodup ∧
-    WellKinded program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type
+    WellKinded program ⟨alias.generics,[],0,alias.header.module,false,{}⟩ alias.value .type ∧
+    BinderDefaultsWellFormed program ⟨[],[],0,alias.header.module,false,{}⟩ alias.generics
   | .function function => SignatureWellFormed program function.header.module function.signature ∧
     function.parameters.length = function.signature.parameters.length ∧ function.parameters.Nodup ∧
     (function.cABI = true → function.signature.generics = [] ∧
@@ -781,25 +794,32 @@ def DeclarationShapeWellFormed (program : Program) : Definition → Prop
       WellKinded program ⟨function.signature.generics,function.signature.constraints,0,function.header.module,false,{}⟩
         capture .type)
   | .trait trait => (trait.generics.map (·.id)).Nodup ∧ trait.members.Nodup ∧
-    (trait.relation ≠ .ordinary → (trait.header.id,trait.relation) ∈ program.input.manifest.sealedRelations)
+    (trait.relation ≠ .ordinary → (trait.header.id,trait.relation) ∈ program.input.manifest.sealedRelations) ∧
+    BinderDefaultsWellFormed program ⟨[],trait.requirements,0,trait.header.module,false,{}⟩ trait.generics
   | .associated associated => ∃ trait, program.trait associated.owner = some trait ∧ associated.header.id ∈ trait.members ∧
     ((trait.generics ++ associated.generics).map (·.id)).Nodup ∧
     (∀ value, associated.defaultValue = some value →
       WellKinded program ⟨trait.generics ++ associated.generics,trait.requirements ++ associated.requirements,
-        0,associated.header.module,false,{}⟩ value associated.kind)
+        0,associated.header.module,false,{}⟩ value associated.kind) ∧
+    BinderDefaultsWellFormed program ⟨trait.generics,trait.requirements ++ associated.requirements,
+      0,associated.header.module,false,{}⟩ associated.generics
   | .implementation implementation => ImplLocal program implementation ∧
     ∃ trait, program.trait implementation.trait = some trait ∧
       (trait.relation = .ordinary ∨ trait.relation = .use ∨ trait.relation = .drop) ∧
       (trait.unsafeAllowed = true → implementation.unsafeAllowed = true) ∧
       (implementation.associated.map Prod.fst).Nodup ∧ (implementation.functions.map Prod.fst).Nodup ∧
-      ImplementationSignatureWellFormed program implementation trait
+      ImplementationSignatureWellFormed program implementation trait ∧
+      BinderDefaultsWellFormed program ⟨[],implementation.requirements,0,implementation.header.module,false,{}⟩
+        implementation.generics
   | .effect effect => (effect.generics.map (·.id)).Nodup ∧ effect.operations.Nodup ∧
-    ∀ operation ∈ effect.operations, ∃ declaration, program.operation operation = some declaration ∧ declaration.family = effect.header.id
+    (∀ operation ∈ effect.operations, ∃ declaration, program.operation operation = some declaration ∧ declaration.family = effect.header.id) ∧
+    BinderDefaultsWellFormed program ⟨[],effect.requirements,0,effect.header.module,false,{}⟩ effect.generics
   | .operation operation => SignatureWellFormed program operation.header.module operation.signature ∧
     (operation.terminal = true ∧ operation.signature.result = .bottom ∧ operation.quantity = none ∨
      operation.terminal = false ∧ operation.signature.result ≠ .bottom ∧
        ∃ quantity, operation.quantity = some quantity ∧ quantity.SurfaceResumption)
-  | .constant constant => ConstantType program ⟨constant.generics,[],0,constant.header.module,false,{}⟩ constant.value constant.type
+  | .constant constant => ConstantType program ⟨constant.generics,[],0,constant.header.module,false,{}⟩ constant.value constant.type ∧
+    BinderDefaultsWellFormed program ⟨[],[],0,constant.header.module,false,{}⟩ constant.generics
   | .global global => WellKinded program ⟨[],[],0,global.header.module,false,{}⟩ global.type .type ∧
     PrincipalOf program global.type .duplicable
   | .module _ => True
