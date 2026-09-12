@@ -3537,6 +3537,32 @@ theorem Kernel.Stores.write_child_none {before after : World} {address : Address
     show (shell.fields.set index none)[other]? = shell.fields[other]?
     exact List.getElem?_set_ne (Ne.symm different)
 
+/-- The owned capture transfer is what empties the receiver's capture slot: the
+transfer's own clear at the capture's storage (the receiver's child slot) makes
+that slot a hole, and its install at the fresh destination root, which is apart
+from the receiver, leaves the receiver's row otherwise exactly as it was. This
+is the binding execution producing the emptiness, so nothing is admitted. -/
+theorem Kernel.Transfers.slot_hole {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {source destination : Address}
+    (transfer : Transfers program before authority source destination after)
+    {receiver : Address} {index : Nat} {value : Value} (whole : receiver.fields = [])
+    (storageIs : source = receiver.child index)
+    (stored : before.Stores receiver value)
+    (apart : ¬ destination.Overlaps receiver) :
+    ∃ changed, after.Stores receiver changed ∧ changed.head = value.head ∧
+      changed.owner = value.owner ∧ changed.type = value.type ∧
+      changed.shellLive = value.shellLive ∧ changed.resources = value.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = value.fields[other]? := by
+  cases transfer with
+  | move storedSource initialized ready permitted vacant separated type clear install =>
+      have clearAt := clear
+      rw [storageIs] at clearAt
+      obtain ⟨changed,clearedStores,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩ :=
+        Kernel.Stores.write_child_none whole stored clearAt
+      refine ⟨changed,?_,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩
+      exact clearedStores.write_other install apart
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
