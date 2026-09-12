@@ -270,10 +270,10 @@ inventory rather than accepting a separately supplied unrelated AST.
 Use the pinned toolchain to build the changed proof targets by name, for example
 the current recovered checkpoint
 
-`lake build GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
+`lake build GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 
-which passes 215 jobs (the same list without the two compatibility modules
-passes 213). Warnings are errors and implicit identifier creation is
+which passes 224 jobs (the same list without the two compatibility modules
+passes 223); the four frame consumers alone check as 80 jobs. Warnings are errors and implicit identifier creation is
 disabled. The default aggregate also includes the preserved `Checks`; examples
 are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed
@@ -282,13 +282,13 @@ specification.
 The whole library is not green and is not claimed to be. Named targets that
 currently fail at this revision are `BasicChecks`, `BindingChecks`,
 `ExecutionChecks`, `ControlChecks`, `PreservationChecks`, `SourceChecks`,
-`CleanupPreservation`, `InvocationLending`, `ForeignEvolution`,
-`ResumptionPreservation`, `AllocationLayout`, `FunctionEntryContextTyping` and
-`ScalarMachine`; they are stale consumers outside the checked dependency graph
-and are not evidence for or against the recovered boundary. `PublicValues` and
-`RuntimeWorldEquivariance` left that list: both were migrated to the current
-`Execution.Task.stopped context address`, `Value.resident … resources` and
-public-observation shapes and now check inside the graph.
+`AllocationLayout`, `FunctionEntryContextTyping` and `ScalarMachine`; they are
+stale consumers outside the checked dependency graph and are not evidence for
+or against the recovered boundary. `PublicValues`, `RuntimeWorldEquivariance`,
+`CleanupPreservation`, `ForeignEvolution`, `InvocationLending` and
+`ResumptionPreservation` left that list: each was migrated to the current
+storage, task, entry-attempt and public-observation shapes and now check inside
+the graph.
 
 Checking that definitions and sample propositions elaborate is different
 from proving determinism, type soundness, adequacy of every source rule,

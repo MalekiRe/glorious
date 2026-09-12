@@ -268,6 +268,56 @@ theorems. The composed strict gate including `SourceAddress` and `LabelExecution
 passes 215 jobs from a fresh source-only tree (213 without the two compatibility
 modules).
 
+The paused task/frame consumers are recovered and checked rather than rebuilt.
+`CleanupPreservation` gains the actual custody-return step (the relinquished
+write precedes the shell write and is performed on the relinquished world) and
+the storage-return step, and forms the destructor lease through `FormsLoan` with
+purpose `.destructor` instead of assuming a source borrow. `ForeignEvolution`
+restates the changed producer graph: a producer may add loan rows or rewrite
+rows in place, never dropping a recorded row and never reviving a dead one, with
+`World.HomeExtension.congr_roots` and `Authority.Recorded.rewrite_loans` as the
+general facts the stability consumers need. `InvocationLending` is migrated to
+the real entry product: the attempt is the six-existential/eight-conjunct
+`EnterWorldAttempt`, and every exclusivity statement is indexed by the actual
+`PreparationOutcome`, so the exhausted prefix of a failed entry is covered by
+the same retention argument as a completed one. Retention runs through the real
+chain (lending, receiver consume, ordered input binder, finishing step) via the
+additive `Kernel.retained_through_entry` and the attempt-level/retained-target
+retentions in `InputLending`; `LocalStep.enter_world` yields the outcome-indexed
+attempt together with either the entered world or a `RelinquishesCustody` step
+to the proper-tail world, and the additive `RelinquishesCustody.permitted_reflected`
+transports permission back across that administration-only change.
+`ResumptionPreservation` derives the caller's whole structural support including
+the bound invocation-resource contracts, derives each input's address support
+from the actual `ReadyFor` product, and takes the inputs' authority provenance
+as an explicit admission hypothesis because a storage-borrow input handed over
+through a shared backing authority names no row for that backing and therefore
+is not derivable. No statement is weakened and no previously derivable fact is
+assumed. Verified exact: the four modules check as 80 jobs, and the composed
+gate including them passes 224 jobs from a fresh source-only tree.
+
+The replay/reconstruction release adds five modules and exactly three new
+`EffectStep` constructors, all fatal-resource steps, so a failed replay does not
+consume the suspension budget. `SnapshotPlacement` (importing only `Storage`)
+defines the ordered placement contract: real extents (positive, aligned, in
+bounds, disjoint from live storage) that do not overlap. Its construction module
+proves the fold total — either the whole captured inventory is placed by a real
+table or the next selected root has no real extent compatible with the
+successful prefix — and `SnapshotPhysicalBlocked.no_extension` proves no
+complete table agreeing with that prefix exists, so the failure is prefix
+relative rather than an assumed impossibility. `SnapshotReplayConstruction`
+builds the real `Relocation`, `SnapshotMap` and `CopiesSnapshot` from the actual
+suspension inventory plus that placement, or reports the real blocked
+exhaustion; `SnapshotReplayProgress` reaches the real replay step through an
+actual `Protect` or the real fatal-resource exhaustion steps, and executes the
+real cancel step from the source `Cancelable` admission without granting any
+extent, copy, Protect or cancellation permission. The three new constructors
+needed arms at exactly three sites, all present here. `Suspension.PhysicalAdmission`
+names the suspend-time source product that replay-time `Replayable` needs; moving
+that admission across intervening steps and the actual post-cancel cleanup
+execution remain open and are owned by the suspension and frame/cleanup lanes
+respectively.
+
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody

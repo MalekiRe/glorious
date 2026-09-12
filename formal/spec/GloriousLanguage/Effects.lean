@@ -1,4 +1,5 @@
 import GloriousLanguage.Relocation
+import GloriousLanguage.SnapshotPlacement
 
 /-! Deep algebraic handlers, exact operation identity, linear suspension
 authority and terminal cleanup. A clause is deliberately outside the
@@ -284,6 +285,23 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       ActiveObligation suspension → 1 < suspension.remaining → CopiesSnapshot program before suspension map copied →
       Protect program (map.context suspension.context) copied.world argument.address argument.authority kept transferred →
       EffectStep program before (some (.replay id false)) { copied with world := transferred, task := .yield (map.context suspension.context) kept, frames := suspension.frames.map map.frame ++ [.handler (map.installed suspension.handler) false,.resumed caller] ++ before.frames, resumptions := before.resumptions.set id { suspension with remaining := suspension.remaining-1, used := suspension.used+1 } }
+  | resumeLastExhausted {before caller id argument suspension after} :
+      before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
+      ActiveObligation suspension → suspension.remaining = 1 →
+      after = restoreRoots before.world suspension.homes →
+      ProtectExhausted program suspension.context after argument.address argument.authority →
+      EffectStep program before (some (.fatal .resource)) { before with world := after, task := .fatal .resource }
+  | resumeCopyExhausted {before caller id argument suspension map copied} :
+      before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
+      ActiveObligation suspension → 1 < suspension.remaining →
+      CopiesSnapshot program before suspension map copied →
+      ProtectExhausted program (map.context suspension.context) copied.world argument.address argument.authority →
+      EffectStep program before (some (.fatal .resource)) { copied with task := .fatal .resource }
+  | resumeCopyBlocked {before caller id argument suspension} :
+      before.task = .resume caller id argument false → before.resumptions.get id = some suspension →
+      ActiveObligation suspension → 1 < suspension.remaining →
+      SnapshotBlocked program.declarations before.world suspension.roots →
+      EffectStep program before (some (.fatal .resource)) { before with task := .fatal .resource }
   | resumeReturns {before context value caller rest kept after} : before.task = .yield context value →
       before.frames = .resumed caller :: rest → Protect program caller before.world value .owner kept after →
       EffectStep program before none { before with world := after, frames := rest, task := .retire value.root (.yield caller kept) }

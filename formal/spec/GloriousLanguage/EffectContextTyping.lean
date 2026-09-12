@@ -159,6 +159,12 @@ theorem EffectStep.contextBindingsTyped {program : Kernel.Program} {before after
     exact kept.contextBindingsTyped (restoreRoots.worldTyped worldTyped) (restoreRoots.contextBindingsTyped typed)
   | resumeCopy _ _ _ _ copied kept =>
     exact kept.contextBindingsTyped (copied.worldTyped valid inventory worldTyped) (copied.contextBindingsTyped typed)
+  | resumeLastExhausted _ _ _ _ restored _ =>
+    subst restored
+    exact restoreRoots.contextBindingsTyped typed
+  | resumeCopyExhausted _ _ _ _ copied _ =>
+    exact copied.contextBindingsTyped typed
+  | resumeCopyBlocked => exact typed
   | resumeReturns _ _ kept => exact kept.contextBindingsTyped worldTyped typed
   | completionIdentity _ _ _ started kept _ _ =>
     exact kept.contextBindingsTyped (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed)

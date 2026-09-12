@@ -22,6 +22,7 @@ theorem Step.host_state {program : Kernel.Program} {host : Foreign.Model}
   · cases atom <;> exact Or.inl rfl
   · cases effect <;> try exact Or.inl rfl
     case resumeCopy copied _ => exact Or.inl copied.hostState
+    case resumeCopyExhausted _ _ _ _ copied _ => exact Or.inl copied.hostState
   · cases branch <;> exact Or.inl rfl
   · cases primitive <;> exact Or.inl rfl
   · exact Or.inr foreign

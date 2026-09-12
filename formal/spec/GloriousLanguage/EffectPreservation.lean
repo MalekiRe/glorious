@@ -39,6 +39,10 @@ theorem CreatesContinuation.worldTyped {program : Kernel.Program} {context : Con
   obtain ⟨argument,actualEffects,shape,_⟩ := type
   exact .continuation ⟨argument,answer,actualEffects,quantity,shape⟩
 
+/-- A task-only state update leaves the machine's storage world unchanged. -/
+theorem State.world_update (state : State) (task : Task) :
+    ({ state with task := task } : State).world = state.world := rfl
+
 /-- Every effect transition, including independently relocated multi-shot
 replay, preserves the full storage invariant. -/
 theorem EffectStep.worldTyped {program : Kernel.Program} {before after : State} {event : Option Event}
@@ -70,6 +74,13 @@ theorem EffectStep.worldTyped {program : Kernel.Program} {before after : State} 
     exact keptTransfer.worldTyped valid inventory (restoreRoots.worldTyped typed)
   | resumeCopy task found obligation remaining copied keptTransfer =>
     exact keptTransfer.worldTyped valid inventory (copied.worldTyped valid inventory typed)
+  | resumeLastExhausted task found obligation remaining restored exhausted =>
+    subst restored
+    exact restoreRoots.worldTyped typed
+  | resumeCopyExhausted task found obligation remaining copied exhausted =>
+    rw [State.world_update]
+    exact copied.worldTyped valid inventory typed
+  | resumeCopyBlocked task found obligation remaining blocked => exact typed
   | resumeReturns task frames keptTransfer => exact keptTransfer.worldTyped valid inventory typed
   | completionIdentity task frames completion started keptTransfer roots permission =>
     exact keptTransfer.worldTyped valid inventory (started.worldTyped typed)

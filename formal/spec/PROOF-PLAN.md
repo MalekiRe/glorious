@@ -268,6 +268,39 @@ text-identical. The composed strict gate over the recovered targets, the two
 repaired public-safety consumers and the promoted framing modules passes 212
 jobs from a fresh source-only tree.
 
+## 1b. Task/frame entry boundary and replay construction — recovered
+
+The paused four-consumer repair is complete and checked. `CleanupPreservation`
+carries the actual custody-return and storage-return steps and forms the
+destructor lease through `FormsLoan` with purpose `.destructor`;
+`ForeignEvolution` states the changed producer graph (rows may be added or
+rewritten in place, never dropped and never revived) with
+`World.HomeExtension.congr_roots` and `Authority.Recorded.rewrite_loans`;
+`InvocationLending` is migrated to the real `EnterWorldAttempt` product and its
+exclusivity statements are indexed by the actual `PreparationOutcome`, with the
+retention chain lending → receiver consume → ordered input binder → finishing
+step (`Kernel.retained_through_entry`); `LocalStep.enter_world` yields the
+outcome-indexed attempt plus either the entered world or a `RelinquishesCustody`
+step, and `RelinquishesCustody.permitted_reflected` transports permission back
+across it; `ResumptionPreservation` derives the caller's whole structural
+support and the per-input address support from the actual `ReadyFor` product and
+takes input authority provenance as an explicit admission hypothesis. The four
+modules check as 80 jobs and the composed gate passes 224 jobs from a fresh
+source-only tree.
+
+Replay construction and progress are checked too. `SnapshotPlacement` gives the
+ordered placement contract; `SnapshotPlacementConstruction` proves the fold
+total with prefix-relative failure and no extension;
+`SnapshotReplayConstruction` builds the real `Relocation`, `SnapshotMap` and
+`CopiesSnapshot` from the actual inventory or reports the real blocked
+exhaustion; `SnapshotReplayProgress` reaches the real replay step or the three
+real fatal-resource exhaustion steps and executes the real cancel step. The
+three new `EffectStep` constructors are fatal-resource only, so a failed replay
+does not consume the suspension budget, and they required new arms at exactly
+three consumer sites. `Suspension.PhysicalAdmission` names the suspend-time
+product that replay-time `Replayable` needs; carrying it across intervening
+steps and executing the post-cancel cleanup chain remain open.
+
 ## 2. Source and normative adequacy
 
 Storage creation and teardown now compose through the real cleanup steps.

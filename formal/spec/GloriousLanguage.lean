@@ -14,6 +14,10 @@ import GloriousLanguage.SnapshotTyping
 import GloriousLanguage.SnapshotWorldTyping
 import GloriousLanguage.SnapshotResourcePreservation
 import GloriousLanguage.SnapshotReplayPreservation
+import GloriousLanguage.SnapshotPlacement
+import GloriousLanguage.SnapshotPlacementConstruction
+import GloriousLanguage.SnapshotReplayConstruction
+import GloriousLanguage.SnapshotReplayProgress
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation

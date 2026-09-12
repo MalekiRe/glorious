@@ -54,6 +54,9 @@ inductive ResumptionChange : State → Option Event → State → Prop where
 theorem EffectStep.resumption_change {program : Kernel.Program} {before after : State} {event : Option Event}
     (step : EffectStep program before event after) : ResumptionChange before event after := by
   cases step
+  case resumeCopyExhausted task found obligation remaining copied exhausted =>
+    rw [copied.result]
+    exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
   all_goals first
     | exact .unchanged rfl rfl (by intros; simp) (by intros; simp) (by intros; simp)
     | skip
