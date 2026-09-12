@@ -376,5 +376,25 @@ theorem RegionEnds.live_root_region {world : World} {region : Identity} {after :
   rw [ended.2]
   exact List.mem_filter.mpr ⟨liveAt,by simpa only [bne_iff_ne,ne_eq] using separate⟩
 
+/-- The captured-roots component of the replay admission's `regionsLive`, in the
+exact shape the suspension inventory uses (`roots.filterMap` of each root's
+region): every region the captured roots really carry is live, from the state's
+capture invariant and world well-formedness. This is the state-level producer
+that `Run.capturedRootRegions_live` composes with the Run-level invariants. -/
+theorem Suspension.roots_regions_live {state : State} {id : Identity} {suspension : Suspension}
+    (well : state.world.WellFormed) (formed : state.SuspensionsWellFormed)
+    (found : state.resumptions.get id = some suspension) (active : suspension.active = true) :
+    ∀ region ∈ suspension.roots.filterMap (fun root => (state.world.roots.get root).map Root.region),
+      region ∈ state.world.liveRegions := by
+  intro region member
+  obtain ⟨rootId,present,selected⟩ := List.mem_filterMap.mp member
+  obtain ⟨root,rootAt,live,_⟩ := (formed.active id suspension found active rootId).mp present
+  have same : (state.world.roots.get rootId).map Root.region = some root.region := by
+    rw [rootAt]
+    rfl
+  rw [same,Option.some.injEq] at selected
+  subst selected
+  exact (well.2.2.2.2.2.2.2.2.1 rootId root rootAt).2.1 live
+
 end Execution
 end Glorious.Language
