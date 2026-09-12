@@ -7,26 +7,6 @@ fieldless witness; contextual receiver consumption retains the owned fields.
 Test publication uses the existing future-owner invariant of its constructor. -/
 namespace Glorious.Language
 
-/-- Shell-liveness changes preserve every existing resident's head, even
-inside the rewritten object. A parent may observe changed child liveness but
-does not acquire a different constructor or reference identity. -/
-theorem World.write_shell_bindingStorageTyped {program : Program} {before after : World}
-    {address : Address} {authority : Authority} {resident : Value} {live : Bool}
-    (valid : before.WellFormed) (stored : before.Stores address resident)
-    (permission : Permitted before authority .owned address)
-    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields)) = some after)
-    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
-    Typing.BindingStorageTyped program after observed type := by
-  cases binding with
-  | root whole declared =>
-    exact .root whole (by rw [World.root_types_of_locations (World.write_locations written)]; exact declared)
-  | lent found active referent referenced located =>
-    refine .lent (by simpa only [World.write_loans written] using found) active referent
-      (World.write_shell_references stored written referenced) ?_
-    apply (World.write_address_types written ?_).mp located
-    rw [← referent]
-    exact permission.owned_no_loan_descendant (World.loanParents valid) found active
-
 theorem Typing.BindingStorageTyped.withProofs {program : Program} {world : World} {address : Address} {type : Term}
     (binding : Typing.BindingStorageTyped program world address type) (proofs : Table Availability) (next : Identity) :
     Typing.BindingStorageTyped program (world.withProofs proofs next) address type :=

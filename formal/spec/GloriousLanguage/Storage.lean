@@ -228,6 +228,14 @@ record, never claim that a handed-off loan retains its old custodian. -/
 def Loan.permissionState (loan : Loan) : Loan :=
   { loan with returnRequested := false, custody := none }
 
+/-- Raw ownership is exclusive, and raw owning/borrowed obligations always
+have an actual custodian. Ordinary source loans use their resident handles. -/
+def LoanKind.Allows (kind : LoanKind) (mode : Mutability) (custody : Option ClaimCustody) : Prop :=
+  (kind = .owning → mode = .unique) ∧
+  (kind = .owning ∨ kind = .storageBorrow → custody.isSome = true)
+
+def Loan.KindValid (loan : Loan) : Prop := loan.kind.Allows loan.mode loan.custody
+
 def Authority.lend (authority : Authority) (access : Access) : Authority :=
   if access = .shared then .shared authority else authority
 
@@ -662,6 +670,342 @@ theorem CopyValue.type_eq {program : Program} {next value finish copied}
   | copy tree _ => cases tree; rfl
 
 
+/-- Reborrows retain a live containing parent and cannot strengthen its mode.
+Fresh loan identities strictly order parent edges, excluding forged cycles. -/
+def World.LoanParents (world : World) : Prop :=
+  ∀ id loan parent, world.loans.get id = some loan → loan.parent = some parent →
+    ∃ ancestor, world.loans.get parent = some ancestor ∧ parent < id ∧
+      ancestor.referent.Prefix loan.referent ∧ (loan.mode = .unique → ancestor.mode = .unique) ∧
+      (loan.live = true → ancestor.live = true)
+
+def World.LoanGuards (world : World) : Prop :=
+  ∀ id loan guard, world.loans.get id = some loan → guard ∈ loan.guards →
+    ∃ carrier, world.loans.get guard = some carrier ∧ guard < id ∧
+      (loan.live = true → carrier.live = true)
+
+def World.LiveLoanLocations (world : World) : Prop :=
+  ∀ id loan, world.loans.get id = some loan → loan.live = true → world.Located loan.referent
+
+def World.LoanKinds (world : World) : Prop :=
+  ∀ id loan, world.loans.get id = some loan → loan.KindValid
+
+/-- Proof factor for atomic construction: binding facts may name the owner
+published by the enclosing result constructor. Actual machine states use
+`WellFormed`, which fixes this bound to the actual allocated-owner frontier. -/
+def World.WellFormedWithOrigins (world : World) (originBound : Identity) : Prop :=
+  world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧
+  world.liveRegions.Nodup ∧
+  (∀ id available, world.availability.get id = some available →
+    id = available.identity ∧ id < world.nextProof ∧ available.brand = .runtimeBrand (.proof id) ∧
+    (available.active = true → available.region ∈ world.liveRegions ∧
+      ∀ place ∈ available.reserved, (world.root place.address).isSome = true) ∧
+    (∀ place ∈ available.reserved, place.authority.Recorded world.loans)) ∧
+  (∀ address value pack, world.Resident address value → value.head = .bindings pack →
+    pack.brand < world.nextProof ∧ pack.region ∈ world.liveRegions ∧
+    pack.fields.length = value.fields.length ∧ pack.fields.Nodup ∧
+    ∀ fact ∈ pack.facts, fact.resultOrigin < originBound) ∧
+  (∀ address value, world.Resident address value → value.owner < world.nextOwner) ∧
+  (∀ a b x y, world.Resident a x → world.Resident b y → x.owner = y.owner → a = b) ∧
+  (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
+    (root.live = true → root.region ∈ world.liveRegions) ∧ root.layout.Valid ∧
+    root.bytes.length = root.layout.size ∧ ∀ byte ∈ root.bytes, ∀ n, byte = some n → n < 256) ∧
+  (∀ region ∈ world.liveRegions, region < world.nextRegion) ∧
+  (∀ id root, world.roots.get id = some root → root.live = true →
+    0 < root.base ∧ root.base % root.layout.alignment = 0) ∧
+  (∀ a b left right, world.roots.get a = some left → world.roots.get b = some right →
+    a ≠ b → left.live = true → right.live = true →
+    left.layout.size = 0 ∨ right.layout.size = 0 ∨
+      left.base+left.layout.size ≤ right.base ∨ right.base+right.layout.size ≤ left.base) ∧
+  (∀ id loan, world.loans.get id = some loan → id = loan.identity ∧ id < world.nextLoan ∧
+    (loan.live = true → loan.region ∈ world.liveRegions ∧ (world.root loan.referent).isSome = true)) ∧
+  (∀ address value id, world.Resident address value → value.head = .reference id →
+    ∃ loan, world.loans.get id = some loan ∧ loan.live = true) ∧
+  (∀ a b left right, world.loans.get a = some left → world.loans.get b = some right →
+    left.live = true → right.live = true → left.referent.Overlaps right.referent →
+    left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a) ∧
+  world.LoanParents ∧ world.LiveLoanLocations ∧ world.LoanGuards ∧ world.LoanKinds
+
+def World.WellFormed (world : World) : Prop := world.WellFormedWithOrigins world.nextOwner
+
+theorem World.reserved_authority_recorded {world : World} {originBound : Identity}
+    (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
+    (found : world.availability.get id = some available) {place : ResolvedPlace}
+    (member : place ∈ available.reserved) : place.authority.Recorded world.loans :=
+  (well.2.2.2.2.1 id available found).2.2.2.2 place member
+
+theorem World.WellFormedWithOrigins.mono {world : World} {first last : Identity}
+    (valid : world.WellFormedWithOrigins first) (bound : first ≤ last) : world.WellFormedWithOrigins last := by
+  rcases valid with ⟨roots,loans,proofs,regions,available,packs,rest⟩
+  refine ⟨roots,loans,proofs,regions,available,?_,rest⟩
+  intro address value pack resident head
+  obtain ⟨brand,region,length,distinct,facts⟩ := packs address value pack resident head
+  exact ⟨brand,region,length,distinct,fun fact member => Nat.lt_of_lt_of_le (facts fact member) bound⟩
+
+theorem World.loanParents {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LoanParents :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
+
+theorem World.liveLoanLocations {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LiveLoanLocations :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
+
+theorem World.loanGuards {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LoanGuards :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
+
+theorem World.loanKinds {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LoanKinds :=
+  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
+
+theorem World.shared_loan_nonowning {world : World} {originBound id : Identity} {loan : Loan}
+    (valid : world.WellFormedWithOrigins originBound) (found : world.loans.get id = some loan)
+    (shared : loan.mode = .shared) : loan.kind ≠ .owning := by
+  intro owning
+  have unique := (World.loanKinds valid id loan found).1 owning
+  cases shared.symm.trans unique
+
+theorem World.owner_bound {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) {address : Address} {value : Value}
+    (resident : world.Resident address value) : value.owner < world.nextOwner :=
+  valid.2.2.2.2.2.2.1 address value resident
+
+theorem World.loanBounds {world : World} {originBound : Identity} (valid : world.WellFormedWithOrigins originBound)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id < world.nextLoan :=
+  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.1
+
+theorem World.loanIdentity {world : World} (valid : world.WellFormed)
+    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id = loan.identity :=
+  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).1
+
+theorem World.freshProof {world : World} (valid : world.WellFormed) :
+    world.availability.get world.nextProof = none ∧
+    ∀ address value pack, world.Resident address value → value.head = .bindings pack → pack.brand ≠ world.nextProof := by
+  rcases valid with ⟨_,_,_,_,availableBounds,packBounds,_⟩
+  constructor
+  · cases found : world.availability.get world.nextProof with
+    | none => rfl
+    | some available =>
+      have impossible := (availableBounds world.nextProof available found).2.1
+      exact False.elim (Nat.lt_irrefl world.nextProof impossible)
+  · intro address value pack resident head equal
+    have bound := (packBounds address value pack resident head).1
+    rw [equal] at bound
+    exact Nat.lt_irrefl world.nextProof bound
+
+def DisjointStorage (world : World) (base size : Nat) : Prop :=
+  ∀ id root, world.roots.get id = some root → root.live = true →
+    size = 0 ∨ root.layout.size = 0 ∨ base+size ≤ root.base ∨ root.base+root.layout.size ≤ base
+
+/-- The positive nonphysical request shared by actual allocation and resource
+exhaustion. Missing type/layout/lifetime evidence is not physical failure. -/
+structure AllocationRequest (program : Program) (world : World) (region : Identity)
+    (type : Term) (layout : Layout) : Prop where
+  region_live : region ∈ world.liveRegions
+  type_supported : type.RuntimeRegionsBelow world.nextRegion
+  layout_valid : layout.Valid
+  size_bound : layout.size ≤ program.input.target.maximumObjectBytes
+  layout_of : ∃ module unsafeAllowed, LayoutOf program ⟨[],[],0,module,unsafeAllowed,{}⟩ type layout
+
+/-- Ordinary homes, raw buffers and exhaustion use this same physical extent
+condition. Zero-sized homes still require an aligned positive address and
+retain distinct logical storage identities. -/
+structure PhysicalExtent (target : TargetProfile) (world : World) (layout : Layout) (base : Nat) : Prop where
+  positive : 0 < base
+  aligned : base % layout.alignment = 0
+  bounded : base + layout.size < 2^target.pointerBits
+  disjoint : DisjointStorage world base layout.size
+
+namespace Execution
+
+structure Relocation where
+  roots : List Identity
+  owners : List Identity
+  loans : List Identity
+  regions : List Identity
+  activations : List Identity
+  scopes : List Identity
+  handlers : List Identity
+  rootBase : Identity
+  ownerBase : Identity
+  loanBase : Identity
+  regionBase : Identity
+  activationBase : Identity
+  scopeBase : Identity
+  handlerBase : Identity
+  physical : Table Nat
+  deriving Repr, Inhabited
+
+def relocateId (selected : List Identity) (base id : Identity) : Identity :=
+  if id ∈ selected then base + id else id
+
+def Relocation.root (map : Relocation) := relocateId map.roots map.rootBase
+def Relocation.owner (map : Relocation) := relocateId map.owners map.ownerBase
+def Relocation.loan (map : Relocation) := relocateId map.loans map.loanBase
+def Relocation.region (map : Relocation) := relocateId map.regions map.regionBase
+def Relocation.activation (map : Relocation) := relocateId map.activations map.activationBase
+def Relocation.scope (map : Relocation) := relocateId map.scopes map.scopeBase
+def Relocation.handler (map : Relocation) := relocateId map.handlers map.handlerBase
+
+def Relocation.address (map : Relocation) (address : Address) : Address :=
+  { address with root := map.root address.root }
+
+def Relocation.pointer (map : Relocation) (pointer : RawPointer) : RawPointer :=
+  match pointer.allocation with
+  | none => pointer
+  | some root =>
+    if root ∈ map.roots then
+      match map.physical.get root with
+      | none => pointer
+      | some base => { pointer with address := base+pointer.offset, allocation := some (map.root root) }
+    else pointer
+
+def Relocation.term (map : Relocation) : Term → Term := Term.renameRuntimeRegions map.region
+
+def Relocation.authority (map : Relocation) : Authority → Authority
+  | .owner => .owner
+  | .loan id => .loan (map.loan id)
+  | .shared backing => .shared (map.authority backing)
+  | .guarded backing carrier => .guarded (map.authority backing) (map.loan carrier)
+
+def Relocation.binding (map : Relocation) (binding : StorageBinding) : StorageBinding :=
+  { binding with address := map.address binding.address, authority := map.authority binding.authority }
+
+def Relocation.home (map : Relocation) : Home → Home
+  | .localSlot activation scope => .localSlot (map.activation activation) (map.scope scope)
+  | .temporary activation scope => .temporary (map.activation activation) (map.scope scope)
+  | home => home
+
+mutual
+  def Relocation.value (map : Relocation) : Value → Value
+    | .resident owner type head live fields resources => .resident (map.ownerBase + owner) (map.term type)
+        (match head with
+         | .reference loan => .reference (map.loan loan)
+         | .callable id arguments => .callable id (arguments.map map.term)
+         | .operation id arguments => .operation id (arguments.map map.term)
+         | .pointer pointer => .pointer (map.pointer pointer)
+         | .bindings pack => .bindings { pack.mapOrigins map.owner with region := map.region pack.region }
+         | other => other)
+        live (map.values fields) (resources.map map.binding)
+
+  def Relocation.values (map : Relocation) : List (Option Value) → List (Option Value)
+    | [] => []
+    | none :: rest => none :: map.values rest
+    | some value :: rest => some (map.value value) :: map.values rest
+end
+
+def Relocation.rootValue (map : Relocation) (id : Identity) (root : Root) : Root :=
+  { root with home := map.home root.home, region := map.region root.region, type := map.term root.type, value := root.value.map map.value, base := (map.physical.get id).getD root.base }
+
+def Relocation.custody (map : Relocation) : ClaimCustody → ClaimCustody
+  | .activation id => .activation (map.activation id)
+  | .resident id => .resident (map.owner id)
+  | .host id => .host (map.root id)
+  | .registration id => .registration id
+
+def Relocation.loanValue (map : Relocation) (loan : Loan) : Loan :=
+  { loan with
+    identity := map.loan loan.identity
+    parent := loan.parent.map map.loan
+    guards := loan.guards.map map.loan
+    custody := loan.custody.map map.custody
+    referent := map.address loan.referent
+    region := map.region loan.region }
+
+def Relocation.copyWorld (map : Relocation) (world : World) (homes : Table Home) : World :=
+  { world with
+    roots := world.roots ++ (world.roots.filter (fun entry => entry.1 ∈ map.roots)).map (fun (id,root) =>
+      (map.root id, map.rootValue id { root with home := (homes.get id).getD root.home }))
+    loans := world.loans ++ (world.loans.filter (fun entry => entry.1 ∈ map.loans)).map
+      (fun (id,loan) => (map.loan id,map.loanValue loan))
+    liveRegions := world.liveRegions ++ map.regions.map map.region
+    nextRoot := map.rootBase + world.nextRoot
+    nextOwner := map.ownerBase + world.nextOwner
+    nextLoan := map.loanBase + world.nextLoan
+    nextRegion := map.regionBase + world.nextRegion }
+
+/-- The actual shared loans named by the captured product, closed over the
+same containment and carrier-dependency edges used by loan admission. Raw
+pointer bits are not roots of this selector. Unique external dependencies
+remain external: this closure never manufactures a copy of unique authority. -/
+inductive SnapshotLoan (world : World) (roots : List Identity) (authorities : List Authority) : Identity → Prop where
+  | reference {id loan address value} : world.loans.get id = some loan → loan.live = true → loan.mode = .shared →
+      address.root ∈ roots → world.Resident address value → value.head = .reference id →
+      SnapshotLoan world roots authorities id
+  | resource {id loan address value binding} : world.loans.get id = some loan → loan.live = true → loan.mode = .shared →
+      address.root ∈ roots → world.Resident address value → binding ∈ value.resources →
+      id ∈ binding.authority.parentLoan.toList ++ binding.authority.guardLoans world →
+      SnapshotLoan world roots authorities id
+  | control {id loan authority} : world.loans.get id = some loan → loan.live = true → loan.mode = .shared →
+      authority ∈ authorities → id ∈ authority.parentLoan.toList ++ authority.guardLoans world →
+      SnapshotLoan world roots authorities id
+  | parent {id loan parent ancestor} : SnapshotLoan world roots authorities id →
+      world.loans.get id = some loan → loan.parent = some parent →
+      world.loans.get parent = some ancestor → ancestor.live = true → ancestor.mode = .shared →
+      SnapshotLoan world roots authorities parent
+  | guard {id loan guard carrier} : SnapshotLoan world roots authorities id →
+      world.loans.get id = some loan → guard ∈ loan.guards →
+      world.loans.get guard = some carrier → carrier.live = true → carrier.mode = .shared →
+      SnapshotLoan world roots authorities guard
+
+/-- This is the pure storage part of the actual snapshot plan. Control
+capture extends it; declared invariants consume it directly. There is one
+copyWorld/value producer and one selector, not a second resource mapping. -/
+theorem SnapshotLoan.record {world : World} {roots : List Identity} {authorities : List Authority} {id : Identity}
+    (selected : SnapshotLoan world roots authorities id) :
+    ∃ loan, world.loans.get id = some loan ∧ loan.live = true ∧ loan.mode = .shared := by
+  cases selected with
+  | reference found live shared _ _ _ => exact ⟨_,found,live,shared⟩
+  | resource found live shared _ _ _ _ => exact ⟨_,found,live,shared⟩
+  | control found live shared _ _ => exact ⟨_,found,live,shared⟩
+  | parent _ _ _ found live shared => exact ⟨_,found,live,shared⟩
+  | guard _ _ _ found live shared => exact ⟨_,found,live,shared⟩
+
+structure Relocation.StoragePlan (program : Program) (world : World) (authorities : List Authority)
+    (map : Relocation) : Prop where
+  rootBase : map.rootBase = world.nextRoot
+  ownerBase : map.ownerBase = world.nextOwner
+  loanBase : map.loanBase = world.nextLoan
+  regionBase : map.regionBase = world.nextRegion
+  owners : ∀ id, id ∈ map.owners ↔ ∃ address value,
+    world.Resident address value ∧ address.root ∈ map.roots ∧ value.owner = id
+  loans : ∀ id, id ∈ map.loans ↔ SnapshotLoan world map.roots authorities id
+  liveRegions : ∀ id ∈ map.regions, id ∈ world.liveRegions
+  physicalUnique : map.physical.Unique
+  physicalRoots : map.physical.map Prod.fst = map.roots
+  physical : ∀ id root, id ∈ map.roots → world.roots.get id = some root → ∃ base,
+    map.physical.get id = some base ∧ 0 < base ∧ base % root.layout.alignment = 0 ∧
+    base+root.layout.size < 2^program.input.target.pointerBits ∧ DisjointStorage world base root.layout.size
+  disjoint : ∀ a b left right x y, a ∈ map.roots → b ∈ map.roots → a ≠ b →
+    world.roots.get a = some left → world.roots.get b = some right →
+    map.physical.get a = some x → map.physical.get b = some y →
+    left.layout.size = 0 ∨ right.layout.size = 0 ∨ x+left.layout.size ≤ y ∨ y+right.layout.size ≤ x
+
+end Execution
+
+/-- A shared wrapper retains only a view of historical backing; an uncapped
+live unique authority cannot be replayed. Explicit carrier guards retain their
+records but do not themselves grant storage permission. -/
+def Authority.Replayable (world : World) : Authority → Prop
+  | .owner => True
+  | .loan id => ∃ loan, world.loans.get id = some loan ∧ (loan.live = true → loan.mode = .shared)
+  | .shared backing => backing.Recorded world.loans
+  | .guarded backing carrier => backing.Replayable world ∧ ∃ loan, world.loans.get carrier = some loan
+
+namespace Execution
+
+/-- The storage projection of replay admission, derived from the same actual
+captured residents and control authorities. Invariants may rely on it without
+depending on later machine types or a typed post-world. -/
+structure Relocation.StorageReady (world : World) (roots : List Identity) (authorities : List Authority) : Prop where
+  resources : ∀ address value, address.root ∈ roots → world.Resident address value →
+    ∀ binding ∈ value.resources, binding.ReadOnly ∧ binding.HeldBy world value.owner
+  references : ∀ address value id loan, address.root ∈ roots → world.Resident address value →
+    value.head = .reference id → world.loans.get id = some loan → loan.mode = .shared
+  loans : ∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ∈ roots → loan.mode = .shared
+  control : ∀ authority ∈ authorities, authority.Replayable world
+
+end Execution
+
 structure UnsafeInvariantContract (program : Program) where
   owner : DeclId
   holds : World → Value → Prop
@@ -673,6 +1017,15 @@ structure UnsafeInvariantContract (program : Program) where
   copied : ∀ world next value finish raw origins (map : Identity → Identity),
     CopyTree program next value finish raw origins → holds world value →
       holds world (raw.mapBindingOrigins map)
+  /-- A replayable invariant is equivariant under the real finite storage
+  relocation, including pointer addresses, erased loans and their custody.
+  The premises concern the admitted source and actual mapping, never the
+  intended closed or well-typed post-state. -/
+  relocated : ∀ world (map : Execution.Relocation) authorities homes address value,
+    world.WellFormed → Execution.Relocation.StoragePlan program world authorities map →
+    Execution.Relocation.StorageReady world map.roots authorities →
+    address.root ∈ map.roots → world.Resident address value → holds world value →
+      holds (map.copyWorld world homes) (map.value value)
 
 structure RuntimeProgram where
   declarations : Program
@@ -836,137 +1189,6 @@ theorem reference_view_shared_carrier {world handle backing id mode permission a
   · exact shared
   · cases shared_authority_cannot_strengthen writable
   · exact shared
-
-/-- Reborrows retain a live containing parent and cannot strengthen its mode.
-Fresh loan identities strictly order parent edges, excluding forged cycles. -/
-def World.LoanParents (world : World) : Prop :=
-  ∀ id loan parent, world.loans.get id = some loan → loan.parent = some parent →
-    ∃ ancestor, world.loans.get parent = some ancestor ∧ parent < id ∧
-      ancestor.referent.Prefix loan.referent ∧ (loan.mode = .unique → ancestor.mode = .unique) ∧
-      (loan.live = true → ancestor.live = true)
-
-def World.LoanGuards (world : World) : Prop :=
-  ∀ id loan guard, world.loans.get id = some loan → guard ∈ loan.guards →
-    ∃ carrier, world.loans.get guard = some carrier ∧ guard < id ∧
-      (loan.live = true → carrier.live = true)
-
-def World.LiveLoanLocations (world : World) : Prop :=
-  ∀ id loan, world.loans.get id = some loan → loan.live = true → world.Located loan.referent
-
-/-- Proof factor for atomic construction: binding facts may name the owner
-published by the enclosing result constructor. Actual machine states use
-`WellFormed`, which fixes this bound to the actual allocated-owner frontier. -/
-def World.WellFormedWithOrigins (world : World) (originBound : Identity) : Prop :=
-  world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧
-  world.liveRegions.Nodup ∧
-  (∀ id available, world.availability.get id = some available →
-    id = available.identity ∧ id < world.nextProof ∧ available.brand = .runtimeBrand (.proof id) ∧
-    (available.active = true → available.region ∈ world.liveRegions ∧
-      ∀ place ∈ available.reserved, (world.root place.address).isSome = true) ∧
-    (∀ place ∈ available.reserved, place.authority.Recorded world.loans)) ∧
-  (∀ address value pack, world.Resident address value → value.head = .bindings pack →
-    pack.brand < world.nextProof ∧ pack.region ∈ world.liveRegions ∧
-    pack.fields.length = value.fields.length ∧ pack.fields.Nodup ∧
-    ∀ fact ∈ pack.facts, fact.resultOrigin < originBound) ∧
-  (∀ address value, world.Resident address value → value.owner < world.nextOwner) ∧
-  (∀ a b x y, world.Resident a x → world.Resident b y → x.owner = y.owner → a = b) ∧
-  (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
-    (root.live = true → root.region ∈ world.liveRegions) ∧ root.layout.Valid ∧
-    root.bytes.length = root.layout.size ∧ ∀ byte ∈ root.bytes, ∀ n, byte = some n → n < 256) ∧
-  (∀ region ∈ world.liveRegions, region < world.nextRegion) ∧
-  (∀ id root, world.roots.get id = some root → root.live = true →
-    0 < root.base ∧ root.base % root.layout.alignment = 0) ∧
-  (∀ a b left right, world.roots.get a = some left → world.roots.get b = some right →
-    a ≠ b → left.live = true → right.live = true →
-    left.layout.size = 0 ∨ right.layout.size = 0 ∨
-      left.base+left.layout.size ≤ right.base ∨ right.base+right.layout.size ≤ left.base) ∧
-  (∀ id loan, world.loans.get id = some loan → id = loan.identity ∧ id < world.nextLoan ∧
-    (loan.live = true → loan.region ∈ world.liveRegions ∧ (world.root loan.referent).isSome = true)) ∧
-  (∀ address value id, world.Resident address value → value.head = .reference id →
-    ∃ loan, world.loans.get id = some loan ∧ loan.live = true) ∧
-  (∀ a b left right, world.loans.get a = some left → world.loans.get b = some right →
-    left.live = true → right.live = true → left.referent.Overlaps right.referent →
-    left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a) ∧
-  world.LoanParents ∧ world.LiveLoanLocations ∧ world.LoanGuards
-
-def World.WellFormed (world : World) : Prop := world.WellFormedWithOrigins world.nextOwner
-
-theorem World.reserved_authority_recorded {world : World} {originBound : Identity}
-    (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
-    (found : world.availability.get id = some available) {place : ResolvedPlace}
-    (member : place ∈ available.reserved) : place.authority.Recorded world.loans :=
-  (well.2.2.2.2.1 id available found).2.2.2.2 place member
-
-theorem World.WellFormedWithOrigins.mono {world : World} {first last : Identity}
-    (valid : world.WellFormedWithOrigins first) (bound : first ≤ last) : world.WellFormedWithOrigins last := by
-  rcases valid with ⟨roots,loans,proofs,regions,available,packs,rest⟩
-  refine ⟨roots,loans,proofs,regions,available,?_,rest⟩
-  intro address value pack resident head
-  obtain ⟨brand,region,length,distinct,facts⟩ := packs address value pack resident head
-  exact ⟨brand,region,length,distinct,fun fact member => Nat.lt_of_lt_of_le (facts fact member) bound⟩
-
-theorem World.loanParents {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) : world.LoanParents :=
-  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
-
-theorem World.liveLoanLocations {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) : world.LiveLoanLocations :=
-  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
-
-theorem World.loanGuards {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) : world.LoanGuards :=
-  valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
-
-theorem World.owner_bound {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) {address : Address} {value : Value}
-    (resident : world.Resident address value) : value.owner < world.nextOwner :=
-  valid.2.2.2.2.2.2.1 address value resident
-
-theorem World.loanBounds {world : World} {originBound : Identity} (valid : world.WellFormedWithOrigins originBound)
-    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id < world.nextLoan :=
-  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.1
-
-theorem World.loanIdentity {world : World} (valid : world.WellFormed)
-    {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) : id = loan.identity :=
-  (valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).1
-
-theorem World.freshProof {world : World} (valid : world.WellFormed) :
-    world.availability.get world.nextProof = none ∧
-    ∀ address value pack, world.Resident address value → value.head = .bindings pack → pack.brand ≠ world.nextProof := by
-  rcases valid with ⟨_,_,_,_,availableBounds,packBounds,_⟩
-  constructor
-  · cases found : world.availability.get world.nextProof with
-    | none => rfl
-    | some available =>
-      have impossible := (availableBounds world.nextProof available found).2.1
-      exact False.elim (Nat.lt_irrefl world.nextProof impossible)
-  · intro address value pack resident head equal
-    have bound := (packBounds address value pack resident head).1
-    rw [equal] at bound
-    exact Nat.lt_irrefl world.nextProof bound
-
-def DisjointStorage (world : World) (base size : Nat) : Prop :=
-  ∀ id root, world.roots.get id = some root → root.live = true →
-    size = 0 ∨ root.layout.size = 0 ∨ base+size ≤ root.base ∨ root.base+root.layout.size ≤ base
-
-/-- The positive nonphysical request shared by actual allocation and resource
-exhaustion. Missing type/layout/lifetime evidence is not physical failure. -/
-structure AllocationRequest (program : Program) (world : World) (region : Identity)
-    (type : Term) (layout : Layout) : Prop where
-  region_live : region ∈ world.liveRegions
-  type_supported : type.RuntimeRegionsBelow world.nextRegion
-  layout_valid : layout.Valid
-  size_bound : layout.size ≤ program.input.target.maximumObjectBytes
-  layout_of : ∃ module unsafeAllowed, LayoutOf program ⟨[],[],0,module,unsafeAllowed,{}⟩ type layout
-
-/-- Ordinary homes, raw buffers and exhaustion use this same physical extent
-condition. Zero-sized homes still require an aligned positive address and
-retain distinct logical storage identities. -/
-structure PhysicalExtent (target : TargetProfile) (world : World) (layout : Layout) (base : Nat) : Prop where
-  positive : 0 < base
-  aligned : base % layout.alignment = 0
-  bounded : base + layout.size < 2^target.pointerBits
-  disjoint : DisjointStorage world base layout.size
 
 /-- Allocation introduces a storage home at a fresh, aligned physical extent,
 never an initialized owner. Its real request is already statically admitted;
@@ -1201,21 +1423,32 @@ release. The discharged set is closed under live guard dependencies: releasing
 an allocation cannot leave an external access dependent on its dead owner.
 This changes neither a generation nor a home; actual storage retirement remains
 a separate transition after the claim obligation has been consumed. -/
+structure ReleasesStorageClaimsReady (before : World) (place : ResolvedPlace) : Prop where
+  claim : ∃ id owner, place.authority = .loan id ∧ before.loans.get id = some owner ∧
+    owner.live = true ∧ owner.kind = .owning ∧ ¬ before.ResourceReferences id
+  whole : place.address.fields = []
+  permission : Permitted before place.authority .owned place.address
+  safe : ∀ key loan, before.loans.get key = some loan → loan.live = true →
+    loan.referent.root = place.address.root → loan.kind = .owning ∧
+      ¬ before.References key ∧ ¬ before.ResourceReferences key
+  dependencies : ∀ key loan guard carrier, before.loans.get key = some loan → loan.live = true →
+    guard ∈ loan.guards → before.loans.get guard = some carrier →
+    carrier.referent.root = place.address.root → loan.referent.root = place.address.root
+
 inductive ReleasesStorageClaims : World → ResolvedPlace → World → Prop where
-  | release {before place id owner} : place.authority = .loan id →
-      place.address.fields = [] → before.loans.get id = some owner →
-      owner.live = true → owner.kind = .owning →
-      Permitted before place.authority .owned place.address →
-      ¬ before.ResourceReferences id →
-      (∀ key loan, before.loans.get key = some loan → loan.live = true →
-        loan.referent.root = place.address.root → loan.kind = .owning ∧
-          ¬ before.References key ∧ ¬ before.ResourceReferences key) →
-      (∀ key loan guard carrier, before.loans.get key = some loan → loan.live = true →
-        guard ∈ loan.guards → before.loans.get guard = some carrier →
-        carrier.referent.root = place.address.root → loan.referent.root = place.address.root) →
+  | release {before place} : ReleasesStorageClaimsReady before place →
       ReleasesStorageClaims before place
         { before with loans := before.loans.map fun (key,loan) =>
           (key,if loan.referent.root = place.address.root then { loan with live := false } else loan) }
+
+theorem ReleasesStorageClaims.ready {before after : World} {place : ResolvedPlace}
+    (released : ReleasesStorageClaims before place after) : ReleasesStorageClaimsReady before place := by
+  cases released with
+  | release ready => exact ready
+
+theorem ReleasesStorageClaimsReady.progress {before : World} {place : ResolvedPlace}
+    (ready : ReleasesStorageClaimsReady before place) : ∃ after, ReleasesStorageClaims before place after :=
+  ⟨_,.release ready⟩
 
 inductive Deconstructs (program : RuntimeProgram) (context : Context) : World → Authority → Address → World → Prop where
   | shell {before authority address value after} : before.Stores address value → value.shellLive = true →

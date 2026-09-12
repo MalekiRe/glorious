@@ -50,6 +50,14 @@ theorem EffectStep.worldTyped {program : Kernel.Program} {before after : State} 
   | operationCall => exact typed
   | terminal task selected terminal continuation routes started keptTransfer roots cancelable plan =>
     exact keptTransfer.worldTyped valid inventory (started.worldTyped typed)
+  | terminalPayloadExhausted _ _ _ _ _ started attempted =>
+    exact attempted.worldTyped valid inventory (started.worldTyped typed)
+  | suspendPayloadExhausted _ _ _ _ _ _ _ started attempted =>
+    exact attempted.worldTyped valid inventory (started.worldTyped typed)
+  | suspendTailPayloadExhausted _ _ _ _ _ _ _ _ started attempted =>
+    exact attempted.worldTyped valid inventory (started.worldTyped typed)
+  | suspendContinuationExhausted _ _ _ _ _ _ _ started keptTransfer _ _ _ _ =>
+    exact suspendRoots.worldTyped (keptTransfer.worldTyped valid inventory (started.worldTyped typed))
   | suspend task selected terminal quantity bound continuation routes started keptTransfer roots permission homes created plan suspension =>
     exact created.worldTyped valid inventory
       (suspendRoots.worldTyped (keptTransfer.worldTyped valid inventory (started.worldTyped typed)))

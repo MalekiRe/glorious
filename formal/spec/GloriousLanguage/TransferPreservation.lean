@@ -260,8 +260,9 @@ theorem Transfers.wellFormed {program : RuntimeProgram} {before after : World} {
   have parents := transfer.loanParents (World.loanParents valid)
   have located := transfer.liveLoanLocations valid
   have guards : after.LoanGuards := by simpa only [World.LoanGuards,loansEq] using World.loanGuards valid
+  have kinds : after.LoanKinds := by simpa only [World.LoanKinds,loansEq] using World.loanKinds valid
   rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,_,roots,regions,bases,ranges,loans,references,overlaps,_,_,_⟩
-  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located,guards⟩
+  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located,guards,kinds⟩
   · simpa only [loansEq] using loansUnique
   · simpa only [proofEq] using proofsUnique
   · simpa only [regionsEq] using regionsUnique

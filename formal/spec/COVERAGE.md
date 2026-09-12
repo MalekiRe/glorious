@@ -64,11 +64,33 @@ The fresh strict 83-job gate checks `ContextTyping`, `PayloadHandoff`,
 examples or the aggregate. Current ABI/layout and guarded capability
 definitions are retained, not replaced by older collaborator backgrounds.
 
-This is not whole-language soundness. The changed raw-resource and failure
-constructors still require the higher operation, private, control, foreign and
-whole-execution consumers to migrate. In particular, operation readiness must
-stop assuming successful payload allocation; continuation-handle failure,
-replay resource closure/custody, the common loan-kind invariant, all remaining
-allocation sites, general entry/lending progress and task/frame preservation
-remain open. Earlier whole-execution checkpoints are historical evidence,
-not a passing acceptance gate for this changed graph.
+The next coherent checkpoint passes the fresh strict 173-job gate for
+`OperationExecution`, `LifecyclePreservation`, `BufferAllocationProgress` and
+`CopyResourcePreservation`, also replayed in the integrated main tree. The
+actual operation source theorem constructs success or resource failure from
+source arm typing, common payload preflight, caller disposition permission and
+positive continuation requests. It derives payload plans and handle
+initialization; it no longer assumes successful allocation. Partial payload
+worlds and completed root suspension survive actual failures, with no invented
+capture event or successful clause cursor. Only a real suspension event
+establishes the request's capture lifecycle.
+
+The same check composes the common loan-kind/custody invariant, actual loan
+mutations and raw buffer-allocation success/fault progress. Owning rows are
+unique; owning and storage-borrow rows have custody, including historical rows.
+Snapshot selection retains actual reference, resource, control and dependency
+loans through the same storage plan and authority support. Current/saved
+resource-input bindings and stopped contexts remain in actual control support.
+Ordinary copy preserves shared resource closure. Copied stored-value typing
+does not by itself establish mixed copied/external snapshot resource closure.
+
+This is not whole-language soundness. Private, control, foreign and
+whole-execution consumers still need the changed raw/failure constructors.
+General input/pre-entry progress needs a mode-aware pending-loan/custody
+interference contract; independent initial input permissions are insufficient.
+Reallocation construction, label and other allocation sites, snapshot resource
+closure/custody, and task/frame preservation remain open. Superseded allocation,
+pointer and shell-binding proofs were removed from their higher consumers;
+the remaining `MemoryPreservation` and `ControlContextTyping` modules are not
+claimed checked here. Earlier whole-execution checkpoints are historical
+evidence, not a passing acceptance gate for this changed graph.

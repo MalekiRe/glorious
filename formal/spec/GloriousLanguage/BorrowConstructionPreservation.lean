@@ -87,9 +87,11 @@ theorem FormsLoan.wellFormed {purpose : LoanPurpose} {program : RuntimeProgram} 
     have modeSame : (if (if mode = .shared then Access.shared else .unique) = .shared then Mutability.shared else .unique) = mode := by
       cases mode <;> decide
     have claimed := before.fresh_loan_wellFormedWithOrigins valid permitted (Or.inl ⟨_,stored⟩) regionLive purpose.kind none
+      (by cases purpose <;> simp [LoanPurpose.kind,LoanKind.Allows])
     simp only [modeSame,← parentEq] at claimed
     have parents := World.loanParents claimed
     have guards := World.loanGuards claimed
+    have kinds := World.loanKinds claimed
     have rest := World.write_rest written
     have proofEq := congrArg World.availability rest
     have regionsEq := congrArg World.liveRegions rest
@@ -99,7 +101,7 @@ theorem FormsLoan.wellFormed {purpose : LoanPurpose} {program : RuntimeProgram} 
     have rootsUnique := World.write_unique_roots valid.1 written
     rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,_,roots,regions,bases,ranges,
       loans,references,_,_,_,_⟩
-    refine ⟨rootsUnique,loansUnique.set _ _,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located,guards⟩
+    refine ⟨rootsUnique,loansUnique.set _ _,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located,guards,kinds⟩
     · simpa only [proofEq] using proofsUnique
     · simpa only [regionsEq] using regionsUnique
     · intro id available found

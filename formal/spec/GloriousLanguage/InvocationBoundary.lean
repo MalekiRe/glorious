@@ -10,8 +10,8 @@ namespace Glorious.Language
 namespace Execution
 
 theorem Step.not_stopped {program : Kernel.Program} {host : Foreign.Model}
-    {before after : State} {event : Option Event} {address : Address}
-    (step : Step program host before event after) (stopped : before.task = .stopped address) : False := by
+    {before after : State} {event : Option Event} {context : Context} {address : Address}
+    (step : Step program host before event after) (stopped : before.task = .stopped context address) : False := by
   rcases step with step | step | step | step | step | step <;>
     cases step <;> simp_all only [reduceCtorEq]
 
@@ -50,7 +50,7 @@ theorem tailFrames_suffix {frames : List Frame} {activation : Identity} {caller 
 
 def InvocationBoundary.Normal (boundary : InvocationBoundary) (state : State) (result : Address) : Prop :=
   match boundary with
-  | .isolated => state.task = .stopped result
+  | .isolated => ∃ context, state.task = .stopped context result
   | .caller returnTo ambient => state.task = .yield returnTo result ∧ state.frames = ambient
 
 /-- The interval stops before any caller result continuation is consumed.
@@ -58,7 +58,7 @@ An incorrect return context does not count as a normal result; it must fail
 progress admission instead of executing the caller inside the callee interval. -/
 def InvocationBoundary.Handoff (boundary : InvocationBoundary) (state : State) : Prop :=
   match boundary with
-  | .isolated => ∃ result, state.task = .stopped result
+  | .isolated => ∃ context result, state.task = .stopped context result
   | .caller _ ambient => ∃ context result, state.task = .yield context result ∧ state.frames = ambient
 
 /-- The ordinary routing producer selects the first accepting handler. Only
@@ -133,14 +133,14 @@ theorem InvocationStep.not_normal {program : Kernel.Program} {host : Foreign.Mod
     {before after : State} {event : Option Event} {result : Address}
     (step : InvocationStep program host boundary before event after) (normal : boundary.Normal before result) : False := by
   cases boundary with
-  | isolated => exact step.2.not_stopped normal
+  | isolated => obtain ⟨context,stopped⟩ := normal; exact step.2.not_stopped stopped
   | caller returnTo ambient => exact step.1.2.1 ⟨returnTo,result,normal⟩
 
 theorem InvocationStep.not_handoff {program : Kernel.Program} {host : Foreign.Model} {boundary : InvocationBoundary}
     {before after : State} {event : Option Event}
     (step : InvocationStep program host boundary before event after) (handoff : boundary.Handoff before) : False := by
   cases boundary with
-  | isolated => obtain ⟨result,stopped⟩ := handoff; exact step.2.not_stopped stopped
+  | isolated => obtain ⟨context,result,stopped⟩ := handoff; exact step.2.not_stopped stopped
   | caller returnTo ambient => exact step.1.2.1 handoff
 
 theorem InvocationStep.not_outward_operation {program : Kernel.Program} {host : Foreign.Model}

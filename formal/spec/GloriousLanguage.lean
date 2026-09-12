@@ -5,6 +5,7 @@ import GloriousLanguage.ConversionPreservation
 import GloriousLanguage.CleanupPreservation
 import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
+import GloriousLanguage.CopyResourcePreservation
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.SnapshotTyping
 import GloriousLanguage.SnapshotWorldTyping
@@ -12,6 +13,9 @@ import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.StorageConstruction
+import GloriousLanguage.BufferAllocationPreservation
+import GloriousLanguage.BufferAllocationProgress
+import GloriousLanguage.PointerStorageConstruction
 import GloriousLanguage.AllocationExecution
 import GloriousLanguage.OperationPayloadPreparation
 import GloriousLanguage.PayloadHandoff

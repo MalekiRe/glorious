@@ -47,18 +47,22 @@ structure Observation where
 
 def InputsTyped (program : Kernel.Program) (inputs : List InvocationInput) (world : World) : Prop :=
   Typing.WorldTyped program world ∧
-  (inputs.map (fun input => input.formal.id)).Nodup ∧
-  (∀ input ∈ inputs, ∃ value, world.Stores input.storage value ∧ value.Initialized ∧ value.type = input.formal.type ∧
-    Permitted world input.authority input.access input.storage) ∧
-  (∀ left ∈ inputs, ∀ right ∈ inputs, left ≠ right → left.storage.Overlaps right.storage →
-    left.access = .shared ∧ right.access = .shared)
+  (inputs.map (fun input => input.formal.key)).Nodup ∧
+  InvocationInputsReady program world inputs
 
+/-- Source locals retain their ordered capture/argument coordinates. Erased
+storage ports remain the actual common inputs with obligation identities,
+not invented resident locals. The same authority-independent projection is
+preserved by ordinary receiver preparation. -/
 def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop :=
-  inputs.map (·.formal) = function.captures ++ function.parameters ∧
-  (∀ index input, inputs[index]? = some input →
-    (index < function.captures.length ∧ input.origin = .capture index) ∨
-      (function.captures.length ≤ index ∧ input.origin = .argument (index-function.captures.length) ∧
-        input.access = .owned))
+  let coordinates := inputs.map (fun input => (input.formal,input.origin,input.access))
+  let residents := coordinates.filter (fun coordinate => coordinate.1.resident?.isSome)
+  residents.map Prod.fst = (function.captures ++ function.parameters).map InputFormal.resident ∧
+  (∀ index formal origin access, residents[index]? = some (formal,origin,access) →
+    (index < function.captures.length ∧ origin = .capture index) ∨
+      (function.captures.length ≤ index ∧ origin = .argument (index-function.captures.length) ∧ access = .owned)) ∧
+  (∀ coordinate ∈ coordinates, ¬ coordinate.1.IsResident →
+    ∃ identity, coordinate.2.1 = .obligation identity ∧ coordinate.1.key = .resourceInput identity)
 
 /-- Admission is at the actual `enter` task, before fresh-region creation,
 receiver lending and ordinary input binding. Original storage/access coordinates
@@ -100,16 +104,9 @@ theorem FunctionInputs.prepared {program : Kernel.Program} {context : Execution.
     {before after : World} {source : EntrySource} {inputs : List InvocationInput}
     (original : FunctionInputs function (source.originalInputs function))
     (prepared : PreparesEntry program context function before source inputs after) : FunctionInputs function inputs := by
-  refine ⟨prepared.input_formals.trans original.1,?_⟩
-  intro index input selected
-  have same := congrArg (fun coordinates => coordinates[index]?)
-    (prepared.map_inputs (fun input => (input.origin,input.access)) (by intros; rfl))
-  simp only [List.getElem?_map,selected,Option.map_some] at same
-  obtain ⟨old,present,equal⟩ := Option.map_eq_some_iff.mp same.symm
-  have origin := original.2 index old present
-  have sameOrigin : old.origin = input.origin := congrArg Prod.fst equal
-  have sameAccess : old.access = input.access := congrArg Prod.snd equal
-  simpa only [sameOrigin,sameAccess] using origin
+  unfold FunctionInputs at original ⊢
+  rw [prepared.map_inputs (fun input => (input.formal,input.origin,input.access)) (by intros; rfl)]
+  exact original
 
 theorem InvocationStart.prepared_inputs {program : Kernel.Program} {host : Foreign.Model} {function : Function}
     {original inputs : List InvocationInput} {boundary : InvocationBoundary} {state : State}
@@ -271,8 +268,8 @@ theorem MayAwait.foreign_free {program : Kernel.Program} {function : Function} {
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,disposition,_,ready⟩ := awaiting
   exact ready.foreign_free
 
-/-- Admission produces ordered payload protection for the actual clause home.
-This is the preparation part of handler execution, not an assumed effect step. -/
+/-- Admission produces the actual ordered payload-preparation outcome for
+the clause home, including a resource-exhausted prefix. -/
 theorem MayAwait.prepare {program : Kernel.Program} {function : Function} {state : State}
     {boundary : InvocationBoundary} {context clause : Execution.Context} {id : DeclId}
     {arguments : List Term} {payload : List ResolvedPlace} {operation : OperationDefinition}
@@ -281,16 +278,17 @@ theorem MayAwait.prepare {program : Kernel.Program} {function : Function} {state
     (pending : state.task = .perform context id arguments payload)
     (selected : OperationInstance program id arguments operation signature)
     (matched : OperationDisposition.Matches operation disposition)
-    (home : OperationPayloadContext state clause withRegion) :
-    ∃ kept moved, Protects program clause withRegion payload kept moved ∧
-      ∃ inner roots, state.frames = inner ++ boundary.ambient ∧
-        (∀ frame ∈ inner, frame.ForeignFree) ∧
+    (home : OperationPayloadContext state clause withRegion) (valid : withRegion.WellFormed) :
+    ∃ kept moved outcome,
+      ProtectsAttemptFor program clause (payload.map ResolvedPlace.address) withRegion payload kept moved outcome ∧
+      moved.WellFormed ∧
+      (outcome = .complete → ∃ inner roots, state.frames = inner ++ boundary.ambient ∧
         AbandonedRoots moved inner (kept.map Address.root) roots ∧
-        OperationDisposition.Permits program moved roots inner disposition := by
+        OperationDisposition.Permits program moved roots inner disposition) := by
   obtain ⟨actual,actualMode,ready⟩ := awaiting.operation_ready pending selected
   have same := actualMode.functional matched
   subst actual
-  exact ready.prepare home
+  exact ready.prepare home valid
 
 /-- For any actual outward route and actual payload preparation, the caller's
 share supplies precisely the remaining permission of the real terminal or
@@ -360,7 +358,7 @@ theorem StateProgress.handoff_normal {program : Kernel.Program} {host : Foreign.
     (progress : StateProgress program host function state boundary)
     (handoff : boundary.Handoff state) : ∃ result, boundary.Normal state result := by
   cases boundary with
-  | isolated => exact handoff
+  | isolated => obtain ⟨context,result,stopped⟩ := handoff; exact ⟨result,context,stopped⟩
   | caller returnTo ambient =>
     obtain ⟨context,result,task,frames⟩ := handoff
     rcases progress with normal | ⟨reason,fatal⟩ | awaiting | transfer | ⟨event,after,step⟩

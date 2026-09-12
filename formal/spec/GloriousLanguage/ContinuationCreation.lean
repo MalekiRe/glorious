@@ -18,7 +18,7 @@ theorem CreatesContinuation.of_allocation {program : Kernel.Program} {context : 
     (allocation : Allocates program.declarations before (.localSlot context.activation context.scope) context.region
       localSlot.type layout localSlot.mutable address allocated) :
     ∃ after, CreatesContinuation program context before id signature answer effects quantity localSlot address after ∧
-      NewValue program.declarations allocated address localSlot.type (.continuation id) [] after := by
+      NewValue program allocated address localSlot.type (.continuation id) [] after := by
   obtain ⟨after,constructed⟩ := allocation.empty_value (.continuation id)
   exact ⟨after,⟨allocated,layout,compatible,allocation,constructed⟩,constructed⟩
 
@@ -40,7 +40,7 @@ theorem SelectsOperation.creates_continuation {program : Kernel.Program} {before
       localSlot.type layout localSlot.mutable address allocated) :
     ∃ after, CreatesContinuation program clause initial before.nextContinuation signature
         (clause.term handler.syntaxNode.result) signature.effects quantity localSlot address after ∧
-      NewValue program.declarations allocated address localSlot.type (.continuation before.nextContinuation) [] after :=
+      NewValue program allocated address localSlot.type (.continuation before.nextContinuation) [] after :=
   CreatesContinuation.of_allocation
     (selected.continuation_binding_type valid armsTyped actual quantityAt continuation started) allocation
 

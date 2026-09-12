@@ -25,8 +25,10 @@ hardest-first dependency chain; `DRAFT.md` retains the earlier draft audit.
 The current raw-resource and allocation-outcome correction changes those
 executable contracts. Its checked boundary covers common resident/raw input
 binding, actual local execution, source-local context entry, payload-pattern
-transport and ordered preparation success/exhaustion. Higher whole-execution,
-operation, private, control and foreign proofs are being migrated; their older
+transport, ordered preparation success/exhaustion and actual source-selected
+operation success/resource failure. Common loan-kind/custody preservation and
+buffer-allocation progress compose with that boundary. Higher whole-execution,
+private, control and foreign proofs are being migrated; their older
 checkpoints do not establish conformance of this changed graph.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
@@ -67,13 +69,15 @@ or a dependency of this project.
 - `OperationBoundary`: selected
   terminal/resumptive permission shared with actual effect execution; exact
   composition of callee-owned and caller-owned post-payload obligations.
-  Migration from assumed successful protection to preparation outcomes is open.
+  Positive payload preflight constructs success or exhaustion; routing barriers
+  are independent of successful allocation.
 - `OperationExecution`: actual terminal, tail-arm and bound-resumption steps
   constructed from those shares and the selected source arm's common mode
   contract, with post-world typing, the actual clause's typed binder cursor and
-  the same request's capture lifecycle. Pattern access and successful physical
-  allocation remain explicit in the earlier proof. Its outcome-aware migration,
-  including continuation-handle exhaustion, is not yet checked.
+  the same request's capture lifecycle. Pattern plans and handle initialization
+  are derived. Positive allocation requests produce actual success or resource
+  failure, retaining payload prefixes and suspended roots; only successful
+  suspension establishes the capture lifecycle.
 - `OperationSignatures`, `ContinuationCreation`, `StorageConstruction`: actual
   source/request signature conversion, exact continuation brand/result/quantity
   and constructed handle initialization. Continuations and scalar results share
@@ -154,6 +158,15 @@ or a dependency of this project.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,
   layouts, provenance, machine leaves, explicit host models and target
   admission requirements.
+- `BufferAllocationPreservation`, `BufferAllocationProgress`,
+  `PointerStorageConstruction`: the actual raw allocator establishes its fresh
+  owning loan and typed vacant shell. Positive physical requests produce an
+  installed typed pointer or an unchanged-world resource fault. Reallocation
+  construction/progress remains open.
+- `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
+  owning/storage-borrow rows retain custody, and actual loan mutations preserve
+  that common invariant. Ordinary copies retain their shared resource closure;
+  mixed copied/external snapshot resource closure remains open.
 - `TargetLayoutValidity`, `LayoutValidity`, `LayoutCoherence`: actual ordered
   ordinary/C layouts are valid and unique modulo closed conversion. C enums
   and scalars consume the same exact target mapping. Callable field conversion

@@ -1,4 +1,6 @@
 import GloriousLanguage.RelocationPreservation
+import GloriousLanguage.BufferAllocationPreservation
+import GloriousLanguage.PointerStorageConstruction
 
 /-! Pointer representation preservation through the actual memory producers,
 storage writes, retirement and snapshot relocation. Allocation provenance does
@@ -48,24 +50,6 @@ theorem AddressOnly.origin (world : World) (integer : Nat) : (AddressOnly intege
   intro id impossible
   cases impossible
 
-theorem AllocatesBuffer.origin {program : Program} {before after : World}
-    {custody : ClaimCustody} {allocation : ResolvedPlace}
-    {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
-    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) : pointer.Origin after := by
-  cases allocated with
-  | fresh =>
-      intro id allocation
-      have equal := Option.some.inj allocation
-      subst id
-      exact ⟨_,Table.get_set _ _ _,by simp,by simp⟩
-
-theorem AllocatesBuffer.bound {program : Program} {before after : World}
-    {custody : ClaimCustody} {allocation : ResolvedPlace}
-    {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
-    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) :
-    pointer.address < 2^program.input.target.pointerBits := by
-  cases allocated with
-  | fresh _ _ _ _ _ _ _ _ extent _ => exact Nat.lt_of_le_of_lt (Nat.le_add_right _ _) extent
 
 theorem PointerOffset.origin {program : Program} {world : World} {pointer result : RawPointer} {bytes : Int}
     (offset : PointerOffset program world pointer bytes result) : result.Origin world := by
@@ -110,7 +94,7 @@ theorem ReleasesBuffer.pointer_origin {pointer released : RawPointer} {program :
     {allocation : ResolvedPlace}
     (origin : pointer.Origin before) (release : ReleasesBuffer program before allocation released domain after) : pointer.Origin after := by
   cases release with
-  | release _ _ _ _ _ _ _ _ _ _ _ _ claims _ written retired closed =>
+  | release _ _ _ _ claims _ written retired closed =>
       have unclaimed := ReleasesStorageClaims.pointer_origin claims origin
       have coherent := (unclaimed.write written).retire retired
       obtain ⟨_,rfl⟩ := closed
@@ -120,16 +104,16 @@ theorem ReallocatesBuffer.origin {program : RuntimeProgram} {before after : Worl
     {custody : ClaimCustody} {oldAllocation allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat}
     (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element count base result allocation after) : result.Origin after := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_,moved,released⟩ := reallocated
-  exact released.pointer_origin (moved.pointer_origin allocated.origin)
+  cases reallocated with
+  | grow _ allocated moved released => exact released.pointer_origin (moved.pointer_origin allocated.origin)
 
 theorem ReallocatesBuffer.bound {program : RuntimeProgram} {before after : World} {old result : RawPointer}
     {custody : ClaimCustody} {oldAllocation allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat}
     (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element count base result allocation after) :
     result.address < 2^program.declarations.input.target.pointerBits := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_⟩ := reallocated
-  exact allocated.bound
+  cases reallocated with
+  | grow _ allocated _ _ => exact allocated.bound
 
 end Memory
 
@@ -143,27 +127,10 @@ theorem RawRange.origin {program : Program} {world : World} {pointer : RawPointe
 
 namespace Execution
 
-/-- The real primitive output installer establishes the resident and its
-typing from the pointer producer, not from a typed post-state. -/
-theorem StoresPointer.typed_result {program : Kernel.Program} {before after : World}
-    {destination : Address} {mode : Mutability} {type : Term} {pointer : RawPointer}
-    (bound : pointer.address < 2^program.declarations.input.target.pointerBits)
-    (origin : pointer.Origin before) (stored : StoresPointer program before destination mode type pointer after) :
-    ∃ value, after.Stores destination value ∧ Typing.ValueTyped program after value ∧ value.head = .pointer pointer := by
-  rcases stored with ⟨_,stored⟩
-  cases stored with
-  | construct _ _ ready _ cleared written =>
-      have sources := ready.1
-      cases sources
-      cases cleared
-      have coherent := origin.write written
-      refine ⟨.resident before.nextOwner (.rawPointer mode type) (.pointer pointer) true [],?_,.pointer bound coherent,rfl⟩
-      have found := World.write_read_inside written []
-      simpa [Value.atPath,World.Stores,World.read,World.root] using found
 
-/-- Every pointer-producing machine primitive reaches a typed installed
-pointer. This composes allocation/reallocation/address derivation with the
-actual destination write, and uses no resource-admission hypothesis. -/
+/-- A pointer-producing primitive either installs its typed pointer or
+terminates with actual resource exhaustion without changing the world. The
+outcome follows the producer, including its failed physical allocation. -/
 theorem PrimitiveStep.pointer_result_typed {program : Kernel.Program} {before after : State}
     {event : Option Event} {context : Context} {destination : Address} {binding : RuntimeBinding}
     {arguments : List Term} {operands : List ResolvedPlace} {next : Kernel.Code}
@@ -171,8 +138,9 @@ theorem PrimitiveStep.pointer_result_typed {program : Kernel.Program} {before af
     (task : before.task = .primitive context destination binding arguments operands next)
     (produces : binding.primitive = some .allocate ∨ binding.primitive = some .reallocate ∨
       binding.primitive = some .pointerOffset ∨ binding.primitive = some .pointerWithAddress) :
-    ∃ value, after.world.Stores destination value ∧ Typing.ValueTyped program after.world value ∧
-      ∃ pointer, value.head = .pointer pointer := by
+    (after.task = .fatal .resource ∧ event = some (.fatal .resource) ∧ after.world = before.world) ∨
+      ∃ value, after.world.Stores destination value ∧ Typing.ValueTyped program after.world value ∧
+        ∃ pointer, value.head = .pointer pointer := by
   cases step <;> simp_all
   case scalar =>
     rename_i calculation _

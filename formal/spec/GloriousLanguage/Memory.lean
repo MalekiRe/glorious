@@ -122,15 +122,29 @@ def ObjectBytes (program : Language.Program) (world : World) (runtime : RuntimeA
       ∃ value, root.value = some value ∧ Encodes program world runtime ⟨id,root.generation,[]⟩ value root.layout bytes ∧
         ∀ offset, ¬ OccupiesByte program world id offset → bytes[offset]? = some none)
 
+/-- Raw-buffer admission is positive evidence of the selected domain, element
+type, count and actual array layout. Physical availability is a separate shared
+extent obligation; absence of admission never denotes exhaustion. -/
+structure BufferAllocationRequest (program : Language.Program) (world : World)
+    (domain : Identity) (element : Term) (count : Nat) (layout : Layout) : Prop where
+  domain_allowed : domain ∈ program.input.manifest.allocationDomains
+  element_supported : element.RuntimeRegionsBelow world.nextRegion
+  count_range : IntegerRange program.input.target false .pointer (Int.ofNat count)
+  array_layout : ∃ elementLayout,
+    LayoutOf program ⟨[],[],0,default,true,{}⟩ element elementLayout ∧
+    ArrayLayout elementLayout count layout
+  size_bound : layout.size ≤ program.input.target.maximumObjectBytes
+
+def BufferAllocationExhausted (program : Language.Program) (world : World)
+    (domain : Identity) (element : Term) (count : Nat) (layout : Layout) : Prop :=
+  BufferAllocationRequest program world domain element count layout ∧
+    ¬ ∃ base, PhysicalExtent program.input.target world layout base
+
 inductive AllocatesBuffer (program : Language.Program) (custody : ClaimCustody) :
     World → Identity → Term → Nat → Nat → RawPointer → ResolvedPlace → World → Prop where
-  | fresh {before domain element count base elementLayout layout} :
-      domain ∈ program.input.manifest.allocationDomains → element.RuntimeRegionsBelow before.nextRegion →
-      IntegerRange program.input.target false .pointer (Int.ofNat count) →
-      LayoutOf program ⟨[],[],0,default,true,{}⟩ element elementLayout →
-      ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
-      0 < base → base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
-      DisjointStorage before base layout.size →
+  | fresh {before domain element count base layout} :
+      BufferAllocationRequest program before domain element count layout →
+      PhysicalExtent program.input.target before layout base →
       AllocatesBuffer program custody before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
         ⟨⟨before.nextRoot,0,[]⟩,.loan before.nextLoan⟩
         { before with
@@ -216,32 +230,62 @@ def BulkMove (program : Language.RuntimeProgram) (before : World) (sources desti
     Clears before (sources.map ResolvedPlace.address) cleared ∧
     InstallsResidents program.declarations cleared (destinations.map ResolvedPlace.address) residents after
 
+/-- The pointer and its erased owner select one actual live allocation and
+resident snapshot. Release and reallocation consume this same authentication;
+neither numeric address equality nor a later release can supply it. -/
+def BufferAt (world : World) (allocation : ResolvedPlace) (pointer : RawPointer)
+    (domain : Identity) (value : Value) : Prop :=
+  ∃ id root,
+    pointer.allocation = some id ∧ pointer.offset = 0 ∧ allocation.address = ⟨id,pointer.generation,[]⟩ ∧
+    pointer.domain = some domain ∧ world.roots.get id = some root ∧ root.live = true ∧
+    root.home = .allocation domain ∧ root.generation = pointer.generation ∧ root.base = pointer.address ∧
+    root.value = some value
+
 inductive ReleasesBuffer (program : Language.Program) : World → ResolvedPlace → RawPointer → Identity → World → Prop where
-  | release {before allocation pointer domain id root value unclaimed cleared retired after} :
-      pointer.allocation = some id → pointer.offset = 0 → allocation.address = ⟨id,pointer.generation,[]⟩ →
-      pointer.domain = some domain → before.roots.get id = some root → root.live = true →
-      root.home = .allocation domain → root.generation = pointer.generation → root.base = pointer.address →
-      root.value = some value → value.shellLive = false → (∀ field ∈ value.fields, field = none) →
-      ReleasesStorageClaims before allocation unclaimed → CanEndStorage unclaimed id →
-      unclaimed.write ⟨id,root.generation,[]⟩ none = some cleared → Retires cleared id retired →
+  | release {before allocation pointer domain value root unclaimed cleared retired after} :
+      BufferAt before allocation pointer domain value → before.root allocation.address = some root →
+      value.shellLive = false → (∀ field ∈ value.fields, field = none) →
+      ReleasesStorageClaims before allocation unclaimed → CanEndStorage unclaimed allocation.address.root →
+      unclaimed.write allocation.address none = some cleared → Retires cleared allocation.address.root retired →
       Execution.RegionEnds retired root.region after → ReleasesBuffer program before allocation pointer domain after
 
-def ReallocatesBuffer (program : Language.RuntimeProgram) (custody : ClaimCustody) (before : World)
-    (oldAllocation : ResolvedPlace) (old : RawPointer)
-    (domain : Identity) (element : Term) (newCount base : Nat) (result : RawPointer)
-    (allocation : ResolvedPlace) (after : World) : Prop :=
-  ∃ oldId root value allocated newId moved oldCount,
-    old.allocation = some oldId ∧ before.roots.get oldId = some root ∧ root.value = some value ∧
-    oldCount = value.fields.length ∧
+/-- Reallocation is admitted at the old allocation before allocating or
+moving anything. The snapshot carries its real resident/resource readiness;
+the same source admission is required for physical success and exhaustion. -/
+structure ReallocationSourceReady (program : Language.RuntimeProgram) (before : World)
+    (allocation : ResolvedPlace) (pointer : RawPointer) (domain : Identity)
+    (element : Term) (oldCount newCount : Nat) : Prop where
+  source : ∃ value, BufferAt before allocation pointer domain value ∧ value.fields.length = oldCount ∧
     value.type = .array element (.constant (.integer false .pointer oldCount)) ∧
-    value.shellLive = false ∧ oldCount ≤ newCount ∧
-    Permitted before oldAllocation.authority .owned oldAllocation.address ∧
-    AllocatesBuffer program.declarations custody before domain element newCount base result allocation allocated ∧
-    result.allocation = some newId ∧
-    BulkMove program allocated
-      ((Slots ⟨oldId,root.generation,[]⟩ 0 oldCount).map (fun address => ⟨address,oldAllocation.authority⟩))
-      ((Slots ⟨newId,0,[]⟩ 0 oldCount).map (fun address => ⟨address,allocation.authority⟩)) moved ∧
-    ReleasesBuffer program.declarations moved oldAllocation old domain after
+    value.shellLive = false ∧
+    ∀ child, some child ∈ value.fields → child.MoveReady program before [allocation.address]
+  growing : oldCount ≤ newCount
+  release_ready : ReleasesStorageClaimsReady before allocation
+  unreserved : ∀ id available, before.availability.get id = some available → available.active = true →
+    ∀ place ∈ available.reserved, place.address.root ≠ allocation.address.root
+
+def BufferReallocationRequest (program : Language.RuntimeProgram) (before : World)
+    (allocation : ResolvedPlace) (pointer : RawPointer) (domain : Identity)
+    (element : Term) (newCount : Nat) (layout : Layout) : Prop :=
+  BufferAllocationRequest program.declarations before domain element newCount layout ∧
+    ∃ oldCount, ReallocationSourceReady program before allocation pointer domain element oldCount newCount
+
+def BufferReallocationExhausted (program : Language.RuntimeProgram) (before : World)
+    (allocation : ResolvedPlace) (pointer : RawPointer) (domain : Identity)
+    (element : Term) (newCount : Nat) (layout : Layout) : Prop :=
+  BufferReallocationRequest program before allocation pointer domain element newCount layout ∧
+    ¬ ∃ base, PhysicalExtent program.declarations.input.target before layout base
+
+inductive ReallocatesBuffer (program : Language.RuntimeProgram) (custody : ClaimCustody) : World →
+    ResolvedPlace → RawPointer → Identity → Term → Nat → Nat → RawPointer → ResolvedPlace → World → Prop where
+  | grow {before oldAllocation old domain element oldCount newCount base result allocation allocated moved after} :
+      ReallocationSourceReady program before oldAllocation old domain element oldCount newCount →
+      AllocatesBuffer program.declarations custody before domain element newCount base result allocation allocated →
+      BulkMove program allocated
+        ((Slots oldAllocation.address 0 oldCount).map (fun address => ⟨address,oldAllocation.authority⟩))
+        ((Slots allocation.address 0 oldCount).map (fun address => ⟨address,allocation.authority⟩)) moved →
+      ReleasesBuffer program.declarations moved oldAllocation old domain after →
+      ReallocatesBuffer program custody before oldAllocation old domain element newCount base result allocation after
 
 structure AllocationContract where
   domain : Identity
@@ -266,12 +310,13 @@ theorem vacant_release_has_no_live_borrow {program : Language.Program} {before a
     (selectedRoot : pointer.allocation = some id) (found : before.loans.get loan.identity = some loan)
     (live : loan.live = true) (borrowed : loan.kind ≠ .owning) : loan.referent.root ≠ id := by
   cases released with
-  | release selected _ address _ _ _ _ _ _ _ _ _ claims _ _ _ _ =>
+  | release located _ _ _ claims _ _ _ _ =>
+    obtain ⟨_,_,selected,_,address,_⟩ := located
     have same := Option.some.inj (selectedRoot.symm.trans selected)
     subst same
     cases claims with
-    | release _ _ _ _ _ _ _ safe _ =>
+    | release ready =>
       intro overlaps
-      exact borrowed (safe loan.identity loan found live (by simpa only [address] using overlaps)).1
+      exact borrowed (ready.safe loan.identity loan found live (by simpa only [address] using overlaps)).1
 
 end Glorious.Language.Memory

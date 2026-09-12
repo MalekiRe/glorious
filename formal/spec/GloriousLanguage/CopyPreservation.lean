@@ -339,7 +339,7 @@ theorem World.install_wellFormedWithOrigins {before middle : World} {destination
     have retained := World.write_located written (vacant.no_located_descendant (located id loan oldFound live))
       (located id loan oldFound live)
     exact retained
-  · simpa only [World.LoanGuards,loansEq] using guards
+  · simpa only [World.LoanGuards,World.LoanKinds,loansEq] using guards
 
 theorem World.install_wellFormed {before middle : World} {destination : Address} {inserted : Value} {next : Nat}
     (valid : before.WellFormed) (vacant : before.Vacant destination) (monotone : before.nextOwner ≤ next)

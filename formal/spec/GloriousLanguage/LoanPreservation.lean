@@ -152,17 +152,26 @@ theorem Permitted.permissionState_transport {before after : World} {authority : 
       have referent := (Loan.permissionState_eq_iff.mp same).2.2.1
       exact ⟨root,ih permission.2.1,current,selected,referent ▸ allowed.permissionState_transport forward backward⟩
 
+theorem Loan.KindValid.transport {original current : Loan} (valid : original.KindValid)
+    (shape : current.permissionState = original.permissionState)
+    (custody : original.custody.isSome = true → current.custody.isSome = true) : current.KindValid := by
+  obtain ⟨_,_,_,mode,_,_,kind,_⟩ := Loan.permissionState_eq_iff.mp shape
+  exact ⟨fun owning => mode.trans (valid.1 (kind ▸ owning)),
+    fun raw => custody (valid.2 (by simpa only [kind] using raw))⟩
+
 theorem World.loan_table_wellFormedWithOrigins {world : World} {loans : Table Loan} {originBound : Identity}
     (valid : world.WellFormedWithOrigins originBound) (unique : loans.Unique)
     (forward : ∀ identity original, world.loans.get identity = some original →
       ∃ current, loans.get identity = some current ∧ current.permissionState = original.permissionState)
     (backward : ∀ identity current, loans.get identity = some current →
-      ∃ original, world.loans.get identity = some original ∧ current.permissionState = original.permissionState) :
+      ∃ original, world.loans.get identity = some original ∧ current.permissionState = original.permissionState)
+    (custody : ∀ identity original current, world.loans.get identity = some original → loans.get identity = some current →
+      original.custody.isSome = true → current.custody.isSome = true) :
     World.WellFormedWithOrigins { world with loans := loans } originBound := by
   obtain ⟨rootsUnique,_,proofsUnique,regionsUnique,proofs,packs,owners,ownersUnique,roots,regions,bases,ranges,
-    bounds,references,overlaps,parents,locations,guards⟩ := valid
+    bounds,references,overlaps,parents,locations,guards,kinds⟩ := valid
   refine ⟨rootsUnique,unique,proofsUnique,regionsUnique,?_,packs,owners,ownersUnique,roots,regions,bases,ranges,
-    ?_,?_,?_,?_,?_,?_⟩
+    ?_,?_,?_,?_,?_,?_,?_⟩
   · intro identity available selected
     obtain ⟨same,bound,brand,active,recorded⟩ := proofs identity available selected
     exact ⟨same,bound,brand,active,fun place member => (recorded place member).transport
@@ -208,15 +217,20 @@ theorem World.loan_table_wellFormedWithOrigins {world : World} {loans : Table Lo
     obtain ⟨currentGuard,guardFound,guardShape⟩ := forward guard carrier atGuard
     have active := (Loan.permissionState_eq_iff.mp guardShape).2.2.2.2.2.1
     exact ⟨currentGuard,guardFound,bound,fun alive => active.trans (guardLive (live ▸ alive))⟩
+  · intro identity current selected
+    obtain ⟨original,found,shape⟩ := backward identity current selected
+    exact (kinds identity original found).transport shape (custody identity original current found selected)
 
 theorem World.loan_table_worldTyped {program : Kernel.Program} {world : World} {loans : Table Loan}
     (typed : Typing.WorldTyped program world) (unique : loans.Unique)
     (forward : ∀ identity original, world.loans.get identity = some original →
       ∃ current, loans.get identity = some current ∧ current.permissionState = original.permissionState)
     (backward : ∀ identity current, loans.get identity = some current →
-      ∃ original, world.loans.get identity = some original ∧ current.permissionState = original.permissionState) :
+      ∃ original, world.loans.get identity = some original ∧ current.permissionState = original.permissionState)
+    (custody : ∀ identity original current, world.loans.get identity = some original → loans.get identity = some current →
+      original.custody.isSome = true → current.custody.isSome = true) :
     Typing.WorldTyped program { world with loans := loans } := by
-  refine ⟨world.loan_table_wellFormedWithOrigins typed.1 unique forward backward,?_,typed.2.2⟩
+  refine ⟨world.loan_table_wellFormedWithOrigins typed.1 unique forward backward custody,?_,typed.2.2⟩
   intro address value resident
   have checked := typed.2.1 address value resident
   apply checked.transport_references (after := { world with loans := loans }) ?_ rfl
@@ -254,21 +268,41 @@ theorem World.set_loan_reflected {world : World} {identity : Identity} {original
     exact ⟨original,selected,shape⟩
   · exact ⟨current,by simpa only [Table.get_set_other _ _ _ _ same] using found,rfl⟩
 
+theorem World.set_loan_custody {world : World} {identity : Identity} {original replacement : Loan}
+    (selected : world.loans.get identity = some original)
+    (custody : original.custody.isSome = true → replacement.custody.isSome = true) :
+    ∀ key previous current, world.loans.get key = some previous →
+      (world.loans.set identity replacement).get key = some current →
+      previous.custody.isSome = true → current.custody.isSome = true := by
+  intro key previous current found changed present
+  by_cases same : key = identity
+  · subst key
+    have oldSame := Option.some.inj (selected.symm.trans found)
+    have newSame := Option.some.inj ((Table.get_set _ _ _).symm.trans changed)
+    subst previous
+    subst current
+    exact custody present
+  · have old := (Table.get_set_other _ _ _ _ same).symm.trans changed
+    have same := Option.some.inj (found.symm.trans old)
+    exact same ▸ present
+
 theorem World.set_loan_wellFormedWithOrigins {world : World} {identity : Identity}
     {original replacement : Loan} {originBound : Identity}
     (valid : world.WellFormedWithOrigins originBound) (selected : world.loans.get identity = some original)
-    (shape : replacement.permissionState = original.permissionState) :
+    (shape : replacement.permissionState = original.permissionState)
+    (custody : original.custody.isSome = true → replacement.custody.isSome = true) :
     World.WellFormedWithOrigins { world with loans := world.loans.set identity replacement } originBound :=
   world.loan_table_wellFormedWithOrigins valid (valid.2.1.set _ _)
-    (world.set_loan_retained selected shape) (world.set_loan_reflected selected shape)
+    (world.set_loan_retained selected shape) (world.set_loan_reflected selected shape) (world.set_loan_custody selected custody)
 
 theorem World.set_loan_worldTyped {program : Kernel.Program} {world : World} {identity : Identity}
     {original replacement : Loan} (typed : Typing.WorldTyped program world)
     (selected : world.loans.get identity = some original)
-    (shape : replacement.permissionState = original.permissionState) :
+    (shape : replacement.permissionState = original.permissionState)
+    (custody : original.custody.isSome = true → replacement.custody.isSome = true) :
     Typing.WorldTyped program { world with loans := world.loans.set identity replacement } :=
   world.loan_table_worldTyped typed (typed.1.2.1.set _ _)
-    (world.set_loan_retained selected shape) (world.set_loan_reflected selected shape)
+    (world.set_loan_retained selected shape) (world.set_loan_reflected selected shape) (world.set_loan_custody selected custody)
 
 theorem World.map_loans_retained {world : World} {map : Loan → Loan}
     (shape : ∀ loan, (map loan).permissionState = loan.permissionState) :
@@ -287,19 +321,32 @@ theorem World.map_loans_reflected {world : World} {map : Loan → Loan}
     ((Table.get_map_values world.loans map identity).symm.trans found)
   exact ⟨original,selected,shape original⟩
 
+theorem World.map_loans_custody {world : World} {map : Loan → Loan}
+    (custody : ∀ loan, loan.custody.isSome = true → (map loan).custody.isSome = true) :
+    ∀ identity original current, world.loans.get identity = some original →
+      Table.get (world.loans.map fun (key,loan) => (key,map loan)) identity = some current →
+      original.custody.isSome = true → current.custody.isSome = true := by
+  intro identity original current found changed present
+  have actual : Table.get (world.loans.map fun (key,loan) => (key,map loan)) identity = some (map original) :=
+    (Table.get_map_values world.loans map identity).trans (by rw [found]; rfl)
+  have same := Option.some.inj (actual.symm.trans changed)
+  exact same ▸ custody original present
+
 theorem World.map_loans_wellFormedWithOrigins {world : World} {originBound : Identity} {map : Loan → Loan}
-    (valid : world.WellFormedWithOrigins originBound) (shape : ∀ loan, (map loan).permissionState = loan.permissionState) :
+    (valid : world.WellFormedWithOrigins originBound) (shape : ∀ loan, (map loan).permissionState = loan.permissionState)
+    (custody : ∀ loan, loan.custody.isSome = true → (map loan).custody.isSome = true) :
     World.WellFormedWithOrigins { world with loans := world.loans.map fun (key,loan) => (key,map loan) } originBound := by
   exact world.loan_table_wellFormedWithOrigins valid
     (by simpa only [Table.Unique,List.map_map,Function.comp_def] using valid.2.1)
-    (world.map_loans_retained shape) (world.map_loans_reflected shape)
+    (world.map_loans_retained shape) (world.map_loans_reflected shape) (world.map_loans_custody custody)
 
 theorem World.map_loans_worldTyped {program : Kernel.Program} {world : World} {map : Loan → Loan}
-    (typed : Typing.WorldTyped program world) (shape : ∀ loan, (map loan).permissionState = loan.permissionState) :
+    (typed : Typing.WorldTyped program world) (shape : ∀ loan, (map loan).permissionState = loan.permissionState)
+    (custody : ∀ loan, loan.custody.isSome = true → (map loan).custody.isSome = true) :
     Typing.WorldTyped program { world with loans := world.loans.map fun (key,loan) => (key,map loan) } := by
   exact world.loan_table_worldTyped typed
     (by simpa only [Table.Unique,List.map_map,Function.comp_def] using typed.1.2.1)
-    (world.map_loans_retained shape) (world.map_loans_reflected shape)
+    (world.map_loans_retained shape) (world.map_loans_reflected shape) (world.map_loans_custody custody)
 
 theorem RelinquishesCustody.retained {before after : World} {custody : ClaimCustody}
     (relinquished : RelinquishesCustody before custody after)
@@ -324,7 +371,7 @@ theorem RelinquishesCustody.wellFormed {before after : World} {custody : ClaimCu
   cases relinquished
   exact before.map_loans_wellFormedWithOrigins valid
     (map := fun loan => if loan.custody = some custody ∧ loan.kind = .storageBorrow then { loan with returnRequested := true } else loan)
-    (fun loan => by split <;> rfl)
+    (fun loan => by split <;> rfl) (fun loan present => by split <;> exact present)
 
 theorem RelinquishesCustody.worldTyped {program : Kernel.Program} {before after : World} {custody : ClaimCustody}
     (typed : Typing.WorldTyped program before) (relinquished : RelinquishesCustody before custody after) :
@@ -332,7 +379,7 @@ theorem RelinquishesCustody.worldTyped {program : Kernel.Program} {before after 
   cases relinquished
   exact before.map_loans_worldTyped typed
     (map := fun loan => if loan.custody = some custody ∧ loan.kind = .storageBorrow then { loan with returnRequested := true } else loan)
-    (fun loan => by split <;> rfl)
+    (fun loan => by split <;> rfl) (fun loan present => by split <;> exact present)
 
 theorem RelinquishesCustody.permitted {before after : World} {custody : ClaimCustody}
     {authority : Authority} {access : Access} {address : Address}
@@ -362,13 +409,13 @@ theorem RequestsStorageReturn.reflected {before after : World} {requested : Iden
 theorem RequestsStorageReturn.wellFormed {before after : World} {requested : Identity}
     (valid : before.WellFormed) (request : RequestsStorageReturn before requested after) : after.WellFormed := by
   cases request with
-  | request found _ _ => exact before.set_loan_wellFormedWithOrigins valid found rfl
+  | request found _ _ => exact before.set_loan_wellFormedWithOrigins valid found rfl (fun present => present)
 
 theorem RequestsStorageReturn.worldTyped {program : Kernel.Program} {before after : World} {requested : Identity}
     (typed : Typing.WorldTyped program before) (request : RequestsStorageReturn before requested after) :
     Typing.WorldTyped program after := by
   cases request with
-  | request found _ _ => exact before.set_loan_worldTyped typed found rfl
+  | request found _ _ => exact before.set_loan_worldTyped typed found rfl (fun present => present)
 
 theorem RequestsStorageReturn.permitted {before after : World} {requested : Identity}
     {authority : Authority} {access : Access} {address : Address}
@@ -400,13 +447,13 @@ theorem TransfersAllocation.worldTyped {program : Kernel.Program} {recipient : C
     {before after : World} {place : ResolvedPlace} (typed : Typing.WorldTyped program before)
     (transferred : TransfersAllocation recipient before place after) : Typing.WorldTyped program after := by
   cases transferred with
-  | transfer _ _ found => exact before.set_loan_worldTyped typed found rfl
+  | transfer _ _ found => exact before.set_loan_worldTyped typed found rfl (fun _ => rfl)
 
 theorem TransfersStorageLoan.worldTyped {program : Kernel.Program} {recipient : ClaimCustody}
     {before after : World} {place : ResolvedPlace} (typed : Typing.WorldTyped program before)
     (transferred : TransfersStorageLoan recipient before place after) : Typing.WorldTyped program after := by
   cases transferred with
-  | unique _ found _ _ _ _ => exact before.set_loan_worldTyped typed found rfl
+  | unique _ found _ _ _ _ => exact before.set_loan_worldTyped typed found rfl (fun _ => rfl)
   | shared => exact typed
 
 /-- Every fresh claim uses the pre-state permission's actual parent and
@@ -416,7 +463,8 @@ theorem World.fresh_loan_wellFormedWithOrigins {world : World} {originBound : Id
     {authority : Authority} {access : Access} {address : Address} {region : Identity}
     (valid : world.WellFormedWithOrigins originBound)
     (permission : Permitted world authority access address) (located : world.Located address)
-    (regionLive : region ∈ world.liveRegions) (kind : LoanKind) (custody : Option ClaimCustody) :
+    (regionLive : region ∈ world.liveRegions) (kind : LoanKind) (custody : Option ClaimCustody)
+    (kindAllowed : kind.Allows (if access = .shared then .shared else .unique) custody) :
     World.WellFormedWithOrigins
       { world with
         loans := world.loans.set world.nextLoan
@@ -443,9 +491,9 @@ theorem World.fresh_loan_wellFormedWithOrigins {world : World} {originBound : Id
     intro identity loan different found
     exact (Table.get_set_other _ _ _ _ different).symm.trans found
   obtain ⟨rootsUnique,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,ownersUnique,roots,regions,bases,ranges,
-    bounds,references,overlaps,parents,locations,guards⟩ := valid
+    bounds,references,overlaps,parents,locations,guards,kinds⟩ := valid
   refine ⟨rootsUnique,loansUnique.set _ _,proofsUnique,regionsUnique,?_,packs,owners,ownersUnique,roots,regions,bases,ranges,
-    ?_,?_,?_,?_,?_,?_⟩
+    ?_,?_,?_,?_,?_,?_,?_⟩
   · intro identity available found
     obtain ⟨same,bound,brand,active,recorded⟩ := proofs identity available found
     exact ⟨same,bound,brand,active,fun place member => (recorded place member).transport
@@ -518,12 +566,20 @@ theorem World.fresh_loan_wellFormedWithOrigins {world : World} {originBound : Id
       exact ⟨carrier,retained guard carrier atGuard,(bounds guard carrier atGuard).2.1,fun _ => live⟩
     · obtain ⟨carrier,atGuard,bound,live⟩ := guards identity loan guard (old identity loan same found) member
       exact ⟨carrier,retained guard carrier atGuard,bound,live⟩
+  · intro identity loan found
+    by_cases same : identity = world.nextLoan
+    · subst identity
+      have equal := Option.some.inj (selected.symm.trans found)
+      subst loan
+      exact kindAllowed
+    · exact kinds identity loan (old identity loan same found)
 
 theorem World.fresh_loan_worldTyped {program : Kernel.Program} {world : World}
     {authority : Authority} {access : Access} {address : Address} {region : Identity}
     (typed : Typing.WorldTyped program world)
     (permission : Permitted world authority access address) (located : world.Located address)
-    (regionLive : region ∈ world.liveRegions) (kind : LoanKind) (custody : Option ClaimCustody) :
+    (regionLive : region ∈ world.liveRegions) (kind : LoanKind) (custody : Option ClaimCustody)
+    (kindAllowed : kind.Allows (if access = .shared then .shared else .unique) custody) :
     Typing.WorldTyped program
       { world with
         loans := world.loans.set world.nextLoan
@@ -538,7 +594,7 @@ theorem World.fresh_loan_worldTyped {program : Kernel.Program} {world : World}
         authority.guardLoans world,false,custody⟩
     nextLoan := world.nextLoan+1 }
   change Typing.WorldTyped program future
-  refine ⟨world.fresh_loan_wellFormedWithOrigins typed.1 permission located regionLive kind custody,?_,typed.2.2⟩
+  refine ⟨world.fresh_loan_wellFormedWithOrigins typed.1 permission located regionLive kind custody kindAllowed,?_,typed.2.2⟩
   intro place value resident
   apply (typed.2.1 place value resident).transport (after := future) ?_ rfl
     (fun _ origin => origin.transport (fun _ => rfl))
@@ -566,6 +622,7 @@ theorem ClaimsStorage.worldTyped {program : Kernel.Program} {custody : ClaimCust
   cases claimed with
   | claim selected located permission =>
       exact before.fresh_loan_worldTyped typed permission located (before.root_region_live typed.1 selected) _ _
+        (by simp [LoanKind.Allows])
 
 theorem ClaimsAllocation.old_loan {custody : ClaimCustody} {before after : World}
     {authority : Authority} {address : Address} {created identity : Identity} {loan : Loan}
@@ -582,7 +639,7 @@ theorem ClaimsAllocation.worldTyped {program : Kernel.Program} {custody : ClaimC
   | claim owning permission selected =>
       obtain ⟨_,_,_,_,_,_,_,_,_,whole,_⟩ := owning
       exact before.fresh_loan_worldTyped typed permission ((World.Located.root_iff whole).mpr ⟨_,selected⟩)
-        (before.root_region_live typed.1 selected) _ _
+        (before.root_region_live typed.1 selected) _ _ (by simp [LoanKind.Allows])
 
 theorem ClaimsStorage.wellFormed {custody : ClaimCustody} {before after : World}
     {authority : Authority} {access : Access} {address : Address} {created : Identity}
@@ -591,6 +648,7 @@ theorem ClaimsStorage.wellFormed {custody : ClaimCustody} {before after : World}
   cases claimed with
   | claim selected located permission =>
       exact before.fresh_loan_wellFormedWithOrigins valid permission located (before.root_region_live valid selected) _ _
+        (by simp [LoanKind.Allows])
 
 theorem ClaimsAllocation.wellFormed {custody : ClaimCustody} {before after : World}
     {authority : Authority} {address : Address} {created : Identity}
@@ -600,19 +658,19 @@ theorem ClaimsAllocation.wellFormed {custody : ClaimCustody} {before after : Wor
   | claim owning permission selected =>
       obtain ⟨_,_,_,_,_,_,_,_,_,whole,_⟩ := owning
       exact before.fresh_loan_wellFormedWithOrigins valid permission ((World.Located.root_iff whole).mpr ⟨_,selected⟩)
-        (before.root_region_live valid selected) _ _
+        (before.root_region_live valid selected) _ _ (by simp [LoanKind.Allows])
 
 theorem TransfersAllocation.wellFormed {recipient : ClaimCustody} {before after : World} {place : ResolvedPlace}
     (valid : before.WellFormed) (transferred : TransfersAllocation recipient before place after) :
     after.WellFormed := by
   cases transferred with
-  | transfer _ _ found => exact before.set_loan_wellFormedWithOrigins valid found rfl
+  | transfer _ _ found => exact before.set_loan_wellFormedWithOrigins valid found rfl (fun _ => rfl)
 
 theorem TransfersStorageLoan.wellFormed {recipient : ClaimCustody} {before after : World} {place : ResolvedPlace}
     (valid : before.WellFormed) (transferred : TransfersStorageLoan recipient before place after) :
     after.WellFormed := by
   cases transferred with
-  | unique _ found _ _ _ _ => exact before.set_loan_wellFormedWithOrigins valid found rfl
+  | unique _ found _ _ _ _ => exact before.set_loan_wellFormedWithOrigins valid found rfl (fun _ => rfl)
   | shared => exact valid
 
 /-- Deactivation preserves the actual loan graph precisely when retained
@@ -643,9 +701,9 @@ theorem World.loan_liveness_wellFormedWithOrigins {world : World} {originBound :
   have ancestry : ∀ {a b}, AncestorLoan world a b → AncestorLoan future a b :=
     fun related => related.transport_parents (fun identity loan found => ⟨update loan,retained identity loan found,rfl⟩)
   obtain ⟨rootUnique,loanUnique,proofUnique,regionUnique,proofs,packs,owners,ownerUnique,
-    roots,regions,bases,ranges,bounds,references,overlaps,parents,locations,guards⟩ := valid
+    roots,regions,bases,ranges,bounds,references,overlaps,parents,locations,guards,kinds⟩ := valid
   refine ⟨rootUnique,?_,proofUnique,regionUnique,?_,packs,owners,ownerUnique,
-    roots,regions,bases,ranges,?_,?_,?_,?_,?_,?_⟩
+    roots,regions,bases,ranges,?_,?_,?_,?_,?_,?_,?_⟩
   · simpa only [future,Table.Unique,List.map_map,Function.comp_def] using loanUnique
   · intro identity available found
     obtain ⟨same,bound,brand,active,recorded⟩ := proofs identity available found
@@ -685,6 +743,9 @@ theorem World.loan_liveness_wellFormedWithOrigins {world : World} {originBound :
     obtain ⟨kept,originalLive⟩ := Bool.and_eq_true_iff.mp active
     exact Bool.and_eq_true_iff.mpr ⟨guardKept identity original guard carrier selected originalLive member atGuard kept,
       live originalLive⟩
+  · intro identity current found
+    obtain ⟨original,selected,rfl⟩ := reflected identity current found
+    exact kinds identity original selected
 
 theorem World.loan_liveness_worldTyped {program : Kernel.Program} {world : World}
     (typed : Typing.WorldTyped program world) (keep : Loan → Bool)
@@ -739,11 +800,11 @@ theorem ReleasesStorageClaims.keep_references {before after : World} {place : Re
     ∀ identity loan, before.loans.get identity = some loan → loan.live = true →
       before.References identity → decide (loan.referent.root ≠ place.address.root) = true := by
   cases released with
-  | release _ _ _ _ _ _ _ safe _ =>
+  | release ready =>
       intro identity loan selected live referenced
       simp only [decide_eq_true_eq]
       intro removed
-      exact (safe identity loan selected live removed).2.1 referenced
+      exact (ready.safe identity loan selected live removed).2.1 referenced
 
 theorem ReleasesStorageClaims.keep_guards {before after : World} {place : ResolvedPlace}
     (released : ReleasesStorageClaims before place after) :
@@ -751,10 +812,10 @@ theorem ReleasesStorageClaims.keep_guards {before after : World} {place : Resolv
       guard ∈ loan.guards → before.loans.get guard = some carrier →
       decide (loan.referent.root ≠ place.address.root) = true → decide (carrier.referent.root ≠ place.address.root) = true := by
   cases released with
-  | release _ _ _ _ _ _ _ _ dependencies =>
+  | release ready =>
       intro identity loan guard carrier selected live member found kept
       simp only [decide_eq_true_eq] at kept ⊢
-      exact fun removed => kept (dependencies identity loan guard carrier selected live member found removed)
+      exact fun removed => kept (ready.dependencies identity loan guard carrier selected live member found removed)
 
 theorem ReleasesStorageClaims.wellFormed {before after : World} {place : ResolvedPlace}
     (valid : before.WellFormed) (released : ReleasesStorageClaims before place after) : after.WellFormed := by
@@ -825,6 +886,10 @@ theorem World.set_loan_dead_wellFormed {world : World} {identity : Identity} {lo
     exact ⟨current,(world.set_loan_dead_lookup valid selected key).trans found,rfl⟩
   · intro key current found
     exact ⟨current,(world.set_loan_dead_lookup valid selected key).symm.trans found,rfl⟩
+  · intro key original current found changed present
+    have old := (world.set_loan_dead_lookup valid selected key).symm.trans changed
+    have same := Option.some.inj (found.symm.trans old)
+    exact same ▸ present
 
 theorem World.set_loan_dead_worldTyped {program : Kernel.Program} {world : World} {identity : Identity} {loan : Loan}
     (typed : Typing.WorldTyped program world) (selected : world.loans.get identity = some loan)

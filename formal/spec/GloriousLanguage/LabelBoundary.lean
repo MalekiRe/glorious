@@ -29,7 +29,7 @@ theorem AbandonedRoots.split_membership {world : World} {callee caller : List Fr
     · obtain ⟨root,found,live,outside,frame,member,owns⟩ := (ambientRoots.2 id).mp member
       exact (whole.2 id).mpr ⟨root,found,live,outside,frame,List.mem_append_right _ member,owns⟩
 
-theorem AbandonedRoots.cancelable_iff {program : Language.Program} {world : World}
+theorem AbandonedRoots.cancelable_iff {program : RuntimeProgram} {world : World}
     {callee caller : List Frame} {kept all calleeRoots callerRoots : List Identity}
     (whole : AbandonedRoots world (callee ++ caller) kept all)
     (localRoots : AbandonedRoots world callee kept calleeRoots)
@@ -85,7 +85,7 @@ structure InvocationBoundary.LabelReady (boundary : InvocationBoundary) (program
     LabelRoute before.frames brand abandoned context region type outer →
     Protect program context before.world argument.address argument.authority kept moved →
     ∃ callee roots, before.frames = callee ++ boundary.ambient ∧
-      AbandonedRoots moved callee [kept.root] roots ∧ Cancelable program.declarations moved roots
+      AbandonedRoots moved callee [kept.root] roots ∧ Cancelable program moved roots
 
 /-- These are only the retained caller's roots, at the same actual destination
 and protected payload as the callee. This obligation is consumed to construct
@@ -96,7 +96,7 @@ def InvocationBoundary.LabelCallerPermission (boundary : InvocationBoundary) (pr
     LabelRoute before.frames brand abandoned context region type outer →
     Protect program context before.world argument.address argument.authority kept moved →
     ∀ caller, boundary.ambient = caller ++ .label context brand region type :: outer →
-    ∀ roots, AbandonedRoots moved caller [kept.root] roots → Cancelable program.declarations moved roots
+    ∀ roots, AbandonedRoots moved caller [kept.root] roots → Cancelable program moved roots
 
 theorem InvocationBoundary.LabelReady.foreign_free {boundary : InvocationBoundary} {program : Kernel.Program}
     {before : State} {brand : Identity} {argument : ResolvedPlace}
@@ -123,7 +123,7 @@ theorem InvocationBoundary.LabelReady.caller_permission {boundary : InvocationBo
     (selected : AbandonedRoots moved abandoned [kept.root] all) :
     ∃ caller, boundary.ambient = caller ++ .label context brand region type :: outer ∧
       ∀ callerRoots, AbandonedRoots moved caller [kept.root] callerRoots →
-        (Cancelable program.declarations moved callerRoots ↔ Cancelable program.declarations moved all) := by
+        (Cancelable program moved callerRoots ↔ Cancelable program moved all) := by
   obtain ⟨callee,calleeRoots,stack,localRoots,localPermission⟩ :=
     ready.residual abandoned context region type outer kept moved route handoff
   obtain ⟨caller,frames,ambient⟩ := route.outward_inner stack outward

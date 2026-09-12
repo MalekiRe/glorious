@@ -22,7 +22,8 @@ namespace Execution
 open Kernel
 
 def Context.rootSupport (context : Context) : List Identity :=
-  context.environment.map (fun binding => binding.address.root)
+  context.environment.map (fun binding => binding.address.root) ++
+    context.resourceContracts.flatMap (fun contract => contract.inputs.map (fun binding => binding.address.root))
 
 def InstalledHandler.rootSupport (handler : InstalledHandler) : List Identity :=
   handler.environment.rootSupport ++ handler.computation.rootSupport ++ handler.outer.rootSupport
@@ -59,7 +60,7 @@ def Task.rootSupport : Task → List Identity
       context.rootSupport ++ destination.root :: operands.map (fun place => place.address.root)
   | .foreign session _ => session.rootSupport
   | .foreignCallbackReturned session _ result _ => session.rootSupport ++ [result.root]
-  | .stopped result => [result.root]
+  | .stopped context result => context.rootSupport ++ [result.root]
   | .fatal _ => []
 
 def Frame.rootSupport : Frame → List Identity

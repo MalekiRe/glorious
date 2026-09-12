@@ -24,6 +24,24 @@ proof. Moving the same assumption into a certificate is not a repair either.
 
 Work outward from the required invariant and its proof failures:
 
+Current integrated checkpoint: actual operation execution composes with the
+common loan-kind/custody invariant and buffer-allocation success/resource-fault
+progress. `MayAwait.source_execution` derives source-selected dispatch, payload
+planning, continuation compatibility/initialization and a typed successful
+clause cursor or the actual fatal resource endpoint. Admission no longer
+assumes successful payload allocation; the real failed prefix is retained.
+The strict 173-job operation/lifecycle/buffer/copy-resource dependency gate
+checks this boundary, not the unmigrated whole-machine theorem.
+
+The immediate dependency chain remains general ordinary input/pre-entry
+progress, mixed copied/external snapshot resource closure, and constructive
+raw reallocation/release. Input batch readiness must retain permissions and
+custody under each earlier real loan creation or transfer, allowing compatible
+shared views while excluding genuine mode/guard/custody interference. It must
+not assume every pending post-state is ready or that allocation succeeds.
+All higher control/private/foreign consumers must then use those same actual
+outcomes. No helpers or checked smaller projection settle full soundness.
+
 1. Prove the storage algebra, typed destination obligations, partial-hole
    invariants and reference preservation for arbitrary storage paths. Keep one
    authoritative address/field product and migrate its real consumers.

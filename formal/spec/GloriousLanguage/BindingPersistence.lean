@@ -176,6 +176,24 @@ theorem World.clear_nonreference_leaf_bindingStorageTyped {program : Program} {b
     rw [← referent]
     exact permission.owned_no_loan_descendant (World.loanParents valid) found live
 
+theorem World.write_shell_bindingStorageTyped {program : Program} {before after : World}
+    {address : Address} {authority : Authority} {resident : Value} {live : Bool}
+    (valid : before.WellFormed) (stored : before.Stores address resident)
+    (permission : Permitted before authority .owned address)
+    (written : before.write address
+      (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)
+    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
+    Typing.BindingStorageTyped program after observed type := by
+  cases binding with
+  | root whole declared =>
+    exact .root whole (by rw [World.root_types_of_locations (World.write_locations written)]; exact declared)
+  | lent found active referent referenced located =>
+    refine .lent (by simpa only [World.write_loans written] using found) active referent
+      (World.write_shell_references stored written referenced) ?_
+    apply (World.write_address_types written ?_).mp located
+    rw [← referent]
+    exact permission.owned_no_loan_descendant (World.loanParents valid) found active
+
 theorem Transfers.bindingStorageTyped {program : RuntimeProgram} {before after : World}
     {authority source destination} (valid : before.WellFormed)
     (transferred : Transfers program before authority source destination after)

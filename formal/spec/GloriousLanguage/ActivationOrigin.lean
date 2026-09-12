@@ -55,14 +55,14 @@ def InstalledHandler.activationSupport (handler : InstalledHandler) : List Ident
 def Task.activationSupport : Task → List Identity
   | .run context _ | .atom context _ _ _ | .yield context _ | .apply context _ _
   | .enter context _ _ _ | .pattern context _ _ | .perform context _ _ _
-  | .resume context _ _ _ | .leave context _ _ | .primitive context _ _ _ _ _ => [context.activation]
+  | .resume context _ _ _ | .leave context _ _ | .primitive context _ _ _ _ _ | .stopped context _ => [context.activation]
   | .destroy context _ _ next | .destroyFields context _ _ _ next
   | .cleanup context _ next | .cancel context _ next => context.activation :: next.activationSupport
   | .finishShell _ _ next | .retire _ next | .closeRegion _ next | .closeLoan _ next
   | .releaseLoan _ next | .transfer _ _ _ next => next.activationSupport
   | .finishClause handler _ _ _ => handler.activationSupport
   | .foreign session _ | .foreignCallbackReturned session _ _ _ => [session.call.context.activation]
-  | .stopped _ | .fatal _ => []
+  | .fatal _ => []
 
 def Frame.activationSupport : Frame → List Identity
   | .binding context _ _ | .scope context _ _ | .label context _ _ _

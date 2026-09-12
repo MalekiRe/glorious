@@ -41,6 +41,7 @@ theorem World.write_wellFormedWithOrigins_of_origin {before after : World} {addr
   have rootsUnique := World.write_unique_roots valid.1 written
   have parents : after.LoanParents := by simpa only [World.LoanParents,loansEq] using World.loanParents valid
   have guards : after.LoanGuards := by simpa only [World.LoanGuards,loansEq] using World.loanGuards valid
+  have kinds : after.LoanKinds := by simpa only [World.LoanKinds,loansEq] using World.loanKinds valid
   have located : after.LiveLoanLocations := by
     intro id loan found live
     have selected : before.loans.get id = some loan := by simpa only [loansEq] using found
@@ -49,7 +50,7 @@ theorem World.write_wellFormedWithOrigins_of_origin {before after : World} {addr
       (World.liveLoanLocations valid id loan selected live)
   rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,unique,
     roots,regions,bases,ranges,loans,references,overlaps,_,_,_⟩
-  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,parents,located,guards⟩
+  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,parents,located,guards,kinds⟩
   · simpa only [loansEq] using loansUnique
   · simpa only [proofEq] using proofsUnique
   · simpa only [regionsEq] using regionsUnique

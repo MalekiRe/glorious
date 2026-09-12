@@ -222,6 +222,24 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       OperationDisposition.Permits program moved roots inner .terminal →
       PayloadPlan program.declarations moved kept (arm.patterns.map (Pattern.mapTerms clause.term)) actions →
       EffectStep program before none { before with world := moved, task := .cleanup context roots (CloseRegions (inner.flatMap Frame.ownedRegions ++ [handler.computation.region]) (.pattern clause (ScheduledPattern actions) arm.body)), frames := .serviced handler owns clause none :: outer, nextActivation := before.nextActivation+1 }
+  /-- Payload transfer and root suspension have completed, but the positively
+  admitted continuation-handle allocation has no physical extent. The fatal
+  endpoint retains that actual partial world without publishing a suspension
+  event, initialized handle or continuation-table entry. -/
+  | suspendContinuationExhausted {before context id arguments payload inner handler owns arm outer operation signature quantity bound
+      clause withRegion kept moved roots lexical localSlot layout} :
+      before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →
+      operation.terminal = false → operation.quantity = some quantity → quantity.upper = some bound →
+      arm.continuation = some lexical → Routes program before id arguments payload inner handler owns arm outer →
+      StartsResumptionClause before handler lexical clause localSlot withRegion → Protects program clause withRegion payload kept moved →
+      DelimitedRoots moved handler inner (kept.map Address.root) roots →
+      OperationDisposition.Permits program moved roots inner (.resumptive quantity) →
+      ContinuationBindingType program.declarations clause.static before.nextContinuation signature
+        (clause.term handler.syntaxNode.result) signature.effects quantity localSlot.type →
+      AllocationExhausted program.declarations (suspendRoots moved roots before.nextContinuation)
+        clause.region localSlot.type layout →
+      EffectStep program before (some (.fatal .resource))
+        { before with world := suspendRoots moved roots before.nextContinuation, task := .fatal .resource, nextActivation := before.nextActivation+1 }
   | suspend {before context id arguments payload inner handler owns arm outer operation signature quantity bound
       clause withRegion kept moved roots homes lexical localSlot address created actions suspension} :
       before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →

@@ -300,7 +300,7 @@ theorem SnapshotMap.selected_loan {program : Kernel.Program} {before : State} {s
     {id : Identity} {loan : Loan} (selected : SnapshotMap program before suspension map)
     (included : id ∈ map.loans) (found : before.world.loans.get id = some loan) :
     loan.live = true ∧ loan.mode = .shared := by
-  obtain ⟨original,_,_,_,present,live,mode,_⟩ := (selected.loans id).mp included
+  obtain ⟨original,present,live,mode⟩ := ((selected.loans id).mp included).record
   have same := Option.some.inj (present.symm.trans found)
   subst original
   exact ⟨live,mode⟩
@@ -311,7 +311,7 @@ theorem SnapshotMap.reference_loan {program : Kernel.Program} {before : State} {
     (resident : before.world.Resident address value) (head : value.head = .reference id)
     (found : before.world.loans.get id = some loan) (live : loan.live = true) (shared : loan.mode = .shared) :
     id ∈ map.loans :=
-  (selected.loans id).mpr ⟨loan,id,address,value,found,live,shared,included,resident,head,.refl⟩
+  (selected.loans id).mpr (.reference found live shared included resident head)
 
 theorem SnapshotMap.owner_unique {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map) (homes : Table Home) :
@@ -375,9 +375,7 @@ theorem SnapshotMap.parent_selected {program : Kernel.Program} {before : State} 
     (included : id ∈ map.loans) (found : before.world.loans.get id = some loan) (parentEq : loan.parent = some parent)
     (parentFound : before.world.loans.get parent = some ancestor) (live : ancestor.live = true) (shared : ancestor.mode = .shared) :
     parent ∈ map.loans := by
-  obtain ⟨_,descendant,address,value,_,_,_,root,resident,head,related⟩ := (selected.loans id).mp included
-  exact (selected.loans parent).mpr ⟨ancestor,descendant,address,value,parentFound,live,shared,root,resident,head,
-    (AncestorLoan.parent found parentEq .refl).trans related⟩
+  exact (selected.loans parent).mpr (.parent ((selected.loans id).mp included) found parentEq parentFound live shared)
 
 theorem SnapshotMap.parent_address {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     {id parent : Identity} {loan ancestor : Loan} (selected : SnapshotMap program before suspension map)
@@ -442,6 +440,18 @@ theorem SnapshotMap.loan_guards {program : Kernel.Program} {before : State} {sus
           Relocation.old_loan (map := map) (homes := homes) atGuard,
         by simpa [Relocation.loan,relocateId,included,copied,selected.loanBase] using
           Nat.lt_of_lt_of_le (World.loanBounds valid atGuard) (Nat.le_add_right before.world.nextLoan old),live⟩
+
+theorem Relocation.loan_kind (map : Relocation) {loan : Loan} (valid : loan.KindValid) :
+    (map.loanValue loan).KindValid := by
+  simpa only [Loan.KindValid,LoanKind.Allows,Relocation.loanValue,Option.isSome_map] using valid
+
+theorem Relocation.loan_kinds {world : World} {map : Relocation}
+    (valid : world.WellFormed) (homes : Table Home) :
+    (map.copyWorld world homes).LoanKinds := by
+  intro id loan found
+  rcases Relocation.loan_origin valid.2.1 found with old | ⟨old,original,present,_,rfl,rfl⟩
+  · exact World.loanKinds valid id loan old
+  · exact map.loan_kind (World.loanKinds valid old original present)
 
 theorem Relocation.reference_origin {map : Relocation} {value : Value} {id : Identity}
     (head : (map.value value).head = .reference id) : ∃ previous, value.head = .reference previous ∧ id = map.loan previous := by
@@ -589,9 +599,10 @@ theorem SnapshotMap.world_wellFormed {program : Kernel.Program} {before : State}
   have parents := selected.loan_parents valid replayable homes
   have locations := selected.live_loan_locations valid homes
   have guards := selected.loan_guards valid homes
+  have kinds := Relocation.loan_kinds (map := map) valid homes
   have oldValid := valid
   rcases valid with ⟨_,_,proofUnique,_,proofs,packs,owners,_,roots,regions,bases,_,loans,references,_,_,_,_⟩
-  refine ⟨rootUnique,loanUnique,proofUnique,regionUnique,?_,?_,?_,ownerUnique,?_,?_,?_,rootSeparate,?_,?_,loanSeparate,parents,locations,guards⟩
+  refine ⟨rootUnique,loanUnique,proofUnique,regionUnique,?_,?_,?_,ownerUnique,?_,?_,?_,rootSeparate,?_,?_,loanSeparate,parents,locations,guards,kinds⟩
   · intro id available found
     obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
     refine ⟨identity,bound,brand,?_,fun place member =>

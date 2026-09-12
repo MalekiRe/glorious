@@ -199,22 +199,34 @@ theorem CanEndStorage.owner_permission {world : World} {id : Identity} {root : R
   intro key loan selected active overlap _
   exact safe.1 key loan selected active overlap.1.symm
 
+theorem CanEndStorage.place_permission {world : World} {address : Address} {root : Root}
+    (safe : CanEndStorage world address.root) (whole : address.fields = [])
+    (selected : world.root address = some root) : Permitted world .owner .owned address := by
+  obtain ⟨found,live,generation⟩ := World.root_found selected
+  have permission := safe.owner_permission found live
+  have same : address = ⟨address.root,root.generation,[]⟩ := by
+    cases address
+    simp_all
+  simpa only [← same] using permission
+
 theorem Memory.ReleasesBuffer.wellFormed {program : Program} {before after : World} {pointer : RawPointer} {domain : Identity}
     {allocation : ResolvedPlace}
     (valid : before.WellFormed) (released : Memory.ReleasesBuffer program before allocation pointer domain after) : after.WellFormed := by
   cases released with
-  | release _ _ _ _ found live _ _ _ _ _ _ claims safe written retired closed =>
+  | release _ selected _ _ claims safe written retired closed =>
       exact closed.wellFormed (retired.wellFormed
-        (World.clear_wellFormed (claims.wellFormed valid) (safe.owner_permission (by cases claims; exact found) live) written))
+        (World.clear_wellFormed (claims.wellFormed valid)
+          (safe.place_permission claims.ready.whole (by cases claims; exact selected)) written))
 
 theorem Memory.ReleasesBuffer.worldTyped {program : Kernel.Program} {before after : World} {pointer : RawPointer} {domain : Identity}
     {allocation : ResolvedPlace}
     (typed : Typing.WorldTyped program before) (released : Memory.ReleasesBuffer program.declarations before allocation pointer domain after) :
     Typing.WorldTyped program after := by
   cases released with
-  | release _ _ _ _ found live _ _ _ _ _ _ claims safe written retired closed =>
+  | release _ selected _ _ claims safe written retired closed =>
       exact closed.worldTyped (retired.worldTyped
-        (World.clear_worldTyped (claims.worldTyped typed) (safe.owner_permission (by cases claims; exact found) live) written))
+        (World.clear_worldTyped (claims.worldTyped typed)
+          (safe.place_permission claims.ready.whole (by cases claims; exact selected)) written))
 
 theorem Execution.RetiresEmpty.worldTyped {program : Kernel.Program} {before after : World} {addresses : List Address}
     (typed : Typing.WorldTyped program before) (retired : Execution.RetiresEmpty before addresses after) :

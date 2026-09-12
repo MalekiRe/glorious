@@ -1,18 +1,17 @@
 import GloriousLanguage.OperationContextTyping
-import GloriousLanguage.ControlContextTyping
 
 /-! The machine consumes the ordered binder product already established by
 source pattern typing. No pattern is reanalysed while actions execute. A
 destructor is scheduled explicitly; its later lifetime proof is not assumed. -/
 namespace Glorious.Language
 
-theorem Deconstructs.bindingStorageTyped {program : Program} {context : Language.Context} {before after : World}
+theorem Deconstructs.bindingStorageTyped {program : RuntimeProgram} {context : Language.Context} {before after : World}
     {authority : Authority} {address : Address} (valid : before.WellFormed)
     (consumed : Deconstructs program context before authority address after)
-    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
-    Typing.BindingStorageTyped program after observed type := by
+    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program.declarations before observed type) :
+    Typing.BindingStorageTyped program.declarations after observed type := by
   cases consumed with
-  | shell stored _ permission _ written => exact World.write_shell_bindingStorageTyped valid stored permission written binding
+  | shell stored _ permission _ _ written => exact World.write_shell_bindingStorageTyped valid stored permission written binding
 
 namespace Execution
 

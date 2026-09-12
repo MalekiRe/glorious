@@ -175,6 +175,11 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       StoresPointer program allocated destination .unique element pointer after →
       PrimitiveStep program before (some (.allocate ⟨before.world.nextRoot,0,[]⟩))
         { before with world := after, task := .run (context.bindResource before.world.nextLoan allocation) next }
+  | allocateExhausted {before context destination binding element countAddress next count domain layout} :
+      before.task = .primitive context destination binding [element] [countAddress] next → binding.primitive = some .allocate →
+      binding.domain = some domain → ScalarAt before.world countAddress (.integer false .pointer count) → 0 ≤ count →
+      BufferAllocationExhausted program.declarations before.world domain element count.toNat layout →
+      PrimitiveStep program before (some (.fatal .resource)) { before with task := .fatal .resource }
   | release {before context destination binding pointerAddress next pointer allocation domain released after} :
       before.task = .primitive context destination binding [] [pointerAddress] next → binding.primitive = some .release →
       binding.domain = some domain → PointerAt before.world pointerAddress pointer →
@@ -192,6 +197,13 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       StoresPointer program allocated destination .unique element pointer after →
       PrimitiveStep program before none
         { before with world := after, task := .run (context.bindResource before.world.nextLoan allocation) next }
+  | reallocateExhausted {before context destination binding element pointerAddress countAddress next old oldAllocation count domain layout} :
+      before.task = .primitive context destination binding [element] [pointerAddress,countAddress] next →
+      binding.primitive = some .reallocate → binding.domain = some domain → PointerAt before.world pointerAddress old →
+      ResolvesResource before.world context.environment (.activation context.activation) oldAllocation →
+      ScalarAt before.world countAddress (.integer false .pointer count) → 0 ≤ count →
+      BufferReallocationExhausted program before.world oldAllocation old domain element count.toNat layout →
+      PrimitiveStep program before (some (.fatal .resource)) { before with task := .fatal .resource }
   | rawRead {before context destination binding type pointerAddress next pointer source after} :
       before.task = .primitive context destination binding [type] [pointerAddress] next → binding.primitive = some .rawRead →
       PointerAt before.world pointerAddress pointer →

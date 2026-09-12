@@ -87,17 +87,28 @@ theorem Protect.contextBindingsTyped {program : Kernel.Program} {context : Conte
   exact typed.world (fun _ _ binding =>
     moved.bindingStorageTyped (allocated.wellFormed worldTyped.1) (allocated.bindingStorageTyped worldTyped.1 binding))
 
-theorem Protects.contextBindingsTyped {program : Kernel.Program} {context : Context} {before after : World}
-    {sources : List ResolvedPlace} {destinations : List Address}
+theorem ProtectsAttemptFor.contextBindingsTyped {footprint : List Address} {program : Kernel.Program} {context : Context} {before after : World}
+    {sources : List ResolvedPlace} {destinations : List Address} {outcome : Kernel.PreparationOutcome}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before)
-    (kept : Protects program context before sources destinations after)
+    (kept : ProtectsAttemptFor program context footprint before sources destinations after outcome)
     {source : Typing.Context} {runtime : Context}
     (typed : Typing.ContextBindingsTyped program before source runtime) :
     Typing.ContextBindingsTyped program after source runtime := by
   induction kept with
   | nil => exact typed
-  | cons first _ ih => exact ih (first.worldTyped valid inventory worldTyped) (first.contextBindingsTyped worldTyped typed)
+  | cons _ first _ ih => exact ih (first.worldTyped valid inventory worldTyped) (first.contextBindingsTyped worldTyped typed)
+  | exhausted => exact typed
+
+theorem ProtectsFor.contextBindingsTyped {footprint : List Address} {program : Kernel.Program} {context : Context} {before after : World}
+    {sources : List ResolvedPlace} {destinations : List Address}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (worldTyped : Typing.WorldTyped program before)
+    (kept : ProtectsFor program context footprint before sources destinations after)
+    {source : Typing.Context} {runtime : Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  ProtectsAttemptFor.contextBindingsTyped valid inventory worldTyped kept typed
 
 theorem CreatesContinuation.preserves_contextBindingsTyped {program : Kernel.Program} {context : Context} {before after : World}
     {id signature answer effects quantity localSlot address}
@@ -124,6 +135,15 @@ theorem EffectStep.contextBindingsTyped {program : Kernel.Program} {before after
   | operationCall => exact typed
   | terminal _ _ _ _ _ started kept _ _ _ =>
     exact kept.contextBindingsTyped valid inventory (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed)
+  | terminalPayloadExhausted _ _ _ _ _ started attempted =>
+    exact attempted.contextBindingsTyped valid inventory (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed)
+  | suspendPayloadExhausted _ _ _ _ _ _ _ started attempted =>
+    exact attempted.contextBindingsTyped valid inventory (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed)
+  | suspendTailPayloadExhausted _ _ _ _ _ _ _ _ started attempted =>
+    exact attempted.contextBindingsTyped valid inventory (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed)
+  | suspendContinuationExhausted _ _ _ _ _ _ _ started kept _ _ _ _ =>
+    exact suspendRoots.contextBindingsTyped
+      (kept.contextBindingsTyped valid inventory (started.worldTyped worldTyped) (started.preserves_contextBindingsTyped typed))
   | suspend _ _ _ _ _ _ _ started kept _ _ _ created _ _ =>
     exact created.preserves_contextBindingsTyped
       (suspendRoots.worldTyped (kept.worldTyped valid inventory (started.worldTyped worldTyped)))

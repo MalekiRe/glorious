@@ -157,10 +157,11 @@ theorem Relocation.value_type (map : Relocation) (value : Value) : (map.value va
   simp only [Relocation.value,Value.type]
 
 theorem Relocation.constructor_value (map : Relocation) {program : Program} {owner : Identity} {type : Term}
-    {head : ValueHead} {live : Bool} {fields : List (Option Value)} {variant : Option DeclId} {types : List Term}
+    {head : ValueHead} {live : Bool} {fields : List (Option Value)} {resources : List StorageBinding}
+    {variant : Option DeclId} {types : List Term}
     (shape : ConstructorHead program type variant types head) :
-    map.value (.resident owner type head live fields) =
-      .resident (map.ownerBase+owner) (map.term type) head live (map.values fields) := by
+    map.value (.resident owner type head live fields resources) =
+      .resident (map.ownerBase+owner) (map.term type) head live (map.values fields) (resources.map map.binding) := by
   rcases shape with ⟨_,_,rfl⟩ | ⟨_,_,_,_,_,_,rfl,_⟩ | ⟨_,_,_,_,_,_,_,rfl,_⟩ <;>
     simp only [Relocation.value]
 
@@ -250,7 +251,7 @@ theorem CopiesSnapshot.valueTyped {program : Kernel.Program}
       obtain ⟨argument,answer,effects,quantity,rfl⟩ := form
       simp only [Relocation.value,Relocation.term,Term.renameRuntimeRegions,Relocation.values]
       exact .continuation ⟨_,_,_,_,rfl⟩
-  | available => exact False.elim ((copied.replayable.2.1 address _ captured resident).2.2 _ rfl)
+  | available => exact False.elim ((copied.replayable.2.1 address _ captured resident).2.2.1 _ rfl)
   | bindings typedFields brand region count distinct =>
       simp only [brand,region,Relocation.value,Relocation.term,Term.renameRuntimeRegions]
       exact .bindings (map.fieldsTyped typedFields fields) rfl rfl

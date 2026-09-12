@@ -274,7 +274,7 @@ theorem Execution.LocalStep.patternBind_context {program : Kernel.Program} {befo
     (admitted : lexical.type.Scoped source.static.scope)
     (bodyTyped : Typing.CodeType program (source.bindLocals (lexical :: remainingLocals)) body result)
     (running : before.task = .pattern runtime (.bind (runtime.local lexical) address authority access :: rest) body)
-    (bound : Kernel.BindsPattern program.declarations runtime.activation runtime.scope runtime.region before.world
+    (bound : Kernel.BindsPattern program runtime.activation runtime.scope runtime.region before.world
       (runtime.local lexical) address authority access binding after) :
     Execution.LocalStep program before none
       { before with world := after, task := .pattern (runtime.bind (runtime.local lexical) binding.address binding.authority) rest body } ∧
