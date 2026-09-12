@@ -40,18 +40,6 @@ theorem DefinitionallyEqual.runtime_context {program : Program} {runtime : Execu
       (by intro requirement member; cases member)))
     (show runtime.static.assumptions = [] from rfl))
 
-/-- An array-shaped declared type is only demanded at an index the physical
-array actually has: `FieldOffset.array` requires `index < count`. Every other
-structurally headed container is unbounded, so the predicate is vacuous there;
-for an array it is exactly the field selection the actual resolution performs. -/
-def Term.FrameBound : Term → Nat → Prop
-  | .array _ (.constant (.integer _ _ count)), index => index < count.toNat
-  | _, _ => True
-
-theorem Term.FrameBound.array {element : Term} {sign : Bool} {width : Width} {count : Int} {index : Nat}
-    (bound : index < count.toNat) :
-    Term.FrameBound (.array element (.constant (.integer sign width count))) index := bound
-
 namespace Typing
 
 /-- Symbolic source equality is read as runtime definitional convertibility of

@@ -3,6 +3,7 @@ import GloriousLanguage.DefinitionalSeparation
 import GloriousLanguage.Preservation
 import GloriousLanguage.ProjectionStorage
 import GloriousLanguage.SourceInterpretation
+import GloriousLanguage.RealizationLayout
 
 /-! The source place/projection bridge to actual physical storage typing.
 
@@ -314,45 +315,6 @@ def Typing.AddressTyped (program : Kernel.Program) (world : World) (runtime : Ex
   ∃ actual, AddressType program.declarations world address actual ∧
     DefinitionallyEqual program.declarations runtime.static actual (runtime.term type)
 
-/-- The world's realization of declared storage types: every source field step
-read at a located declared type has its actual physical field offset. The
-container is the type the addressed storage actually has - an occupied address
-is read at its resident's own (structurally headed) type, and the source
-projection only steps through that same structural head, since a source place
-of alias-headed type is first transported to its expansion by `Projections.equal`.
-An alias-headed container therefore has no source field step at all, and its
-physical children are supplied by the alias rule of `FieldOffset` when a
-derivation at it is demanded. This is the target representation obligation of
-the world interpretation - supplied by actual allocation - never an assumption
-about a requested address type. -/
-structure Typing.TargetRepresentation (program : Kernel.Program) (world : World)
-    (runtime : Execution.Context) : Prop where
-  offsets : ∀ (address : Address) (container : Term) (index : Nat) (child : Term),
-    AddressType program.declarations world address container →
-    FieldType program.declarations runtime.static container index child true →
-    container.FrameBound index →
-    ∃ offset, FieldOffset program.declarations world address container index child offset
-
-/-- Every typed resident's actual type is structurally headed: resident typing
-only produces tuple, array, nominal and the fixed-head forms, so no unexpanded
-alias, projection or row type is ever a resident's type. -/
-theorem Typing.ValueTyped.type_structural {program : Kernel.Program} {world : World} {value : Value}
-    (typed : Typing.ValueTyped program world value) : value.type.StructuralHead := by
-  cases typed with
-  | unit => trivial
-  | scalar _ => trivial
-  | aggregate constructed _ =>
-    rcases constructed with ⟨same,_,_⟩ | ⟨_,_,_,_,same,_,_,_,_⟩ | ⟨_,_,_,_,_,same,_,_,_,_⟩ <;> rw [same] <;> trivial
-  | reference _ _ _ _ _ => trivial
-  | pointer _ _ => trivial
-  | callable _ _ => trivial
-  | operation _ => trivial
-  | label => trivial
-  | continuation form => obtain ⟨_,_,_,_,same⟩ := form; rw [same]; trivial
-  | available _ _ _ _ _ => trivial
-  | bindings _ _ _ _ _ => trivial
-
-
 /-- An occupied address is read at its resident's own type: the located
 declared type and the resident's type are the same term, and resident typing
 only produces structurally headed types. This replaces a world-level
@@ -439,13 +401,16 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
     (worldTyped : Typing.WorldTyped program world)
     (moduleEq : runtime.module = source.static.module)
     (closed : Typing.SourceConversionClosed program.declarations source.static runtime)
-    (representation : Typing.TargetRepresentation program world runtime)
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     {type : Term} {mutable : Bool} {projections : List Kernel.Projection} {result : Term} {writable : Bool}
     (projected : Typing.Projections program.declarations source type mutable projections result writable)
     {base : Address} {authority : Authority} {address : Address} {permission : Authority}
     (baseTyped : Typing.AddressTyped program world runtime base type)
     (resolved : Kernel.ResolvesProjections world runtime.environment base authority projections address permission) :
     Typing.AddressTyped program world runtime address result := by
+  have representation : Typing.TargetRepresentation program world runtime :=
+    World.representation valid inventory worldTyped realized
   induction projected generalizing base authority address permission with
   | nil => cases resolved with | nil => exact baseTyped
   | @field type mutable index rest field result writable located tail ih =>
@@ -456,7 +421,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
         obtain ⟨actualField, physicalField, agrees⟩ := located.instantiated valid (scope := runtime.instantiation)
           (runtime := runtime) moduleEq
           (AddressType.structural_of_stored valid inventory worldTyped parentLocated stored) parentAgrees
-        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated
+        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated stored
           physicalField (by
             obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
             have typeEq := parentOffsetLocated.stored_type valid inventory (Typing.WorldTyped.roots worldTyped) stored
@@ -471,7 +436,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
         obtain ⟨actualField, physicalField, agrees⟩ := located.instantiated valid (scope := runtime.instantiation)
           (runtime := runtime) moduleEq
           (AddressType.structural_of_stored valid inventory worldTyped parentLocated stored) parentAgrees
-        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated
+        obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual index actualField parentLocated stored
           physicalField (by
             obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
             have typeEq := parentOffsetLocated.stored_type valid inventory (Typing.WorldTyped.roots worldTyped) stored
@@ -497,7 +462,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
         have elementTyped : Typing.AddressTyped program world runtime (base.child headInteger.toNat) element := by
           refine ⟨actualElement,?_,elementAgrees⟩
           obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual headInteger.toNat actualElement
-            parentLocated (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
+            parentLocated storedInArray (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
               obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
               have typeEq := parentOffsetLocated.stored_type valid inventory
                 (Typing.WorldTyped.roots worldTyped) storedInArray
@@ -514,7 +479,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
         have elementTyped : Typing.AddressTyped program world runtime (base.child headInteger.toNat) element := by
           refine ⟨actualElement,?_,elementAgrees⟩
           obtain ⟨offset, fieldOffset⟩ := representation.offsets base parentActual headInteger.toNat actualElement
-            parentLocated (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
+            parentLocated storedInArray (Or.inr (Or.inl ⟨actualElement,actualLength,shape,rfl⟩)) (by
               obtain ⟨parentOffset, parentOffsetLocated⟩ := parentLocated
               have typeEq := parentOffsetLocated.stored_type valid inventory
                 (Typing.WorldTyped.roots worldTyped) storedInArray
@@ -598,7 +563,8 @@ theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {worl
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program world)
     (closed : Typing.SourceConversionClosed program.declarations source.static runtime)
-    (representation : Typing.TargetRepresentation program world runtime)
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {place : Kernel.Place} {type : Term} {writable : Bool}
     (placeTyped : Typing.PlaceType program.declarations source place type writable)
@@ -615,7 +581,7 @@ theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {worl
     have located := Typing.ContextBindingsTyped.place_location valid inventory worldTyped typed
       member selected' projections stored
     exact Typing.ResolvesProjections.addressTyped valid inventory worldTyped typed.moduleEq closed
-      representation projected located projections
+      realized projected located projections
 
 end Typing
 end Glorious.Language

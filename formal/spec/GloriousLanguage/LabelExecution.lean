@@ -99,7 +99,8 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     {placeSource : Typing.Context} {place : Kernel.Place} {writable : Bool}
     (bindings : Typing.ContextBindingsTyped program before.world placeSource caller)
     (interpreted : Typing.SourceInterpreted program.declarations caller placeSource.static)
-    (representation : Typing.TargetRepresentation program before.world caller)
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program.declarations before.world module unsafeAllowed)
     (argumentTyped : Typing.PlaceType program.declarations placeSource place actual writable)
     (resolved : Kernel.ResolvesPlace before.world caller.environment place argument.address argument.authority)
     (step : ControlStep program before none after) :
@@ -123,7 +124,7 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     obtain ⟨value,_,stored,_,_⟩ := original
     obtain ⟨source,lexical,sourceRegion,result,body,contextTyped,sourceTyped,closedLabel,_⟩ := label
     have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed conversion
-      representation bindings argumentTyped resolved stored
+      realized bindings argumentTyped resolved stored
     have valueAgrees := Typing.AddressTyped.resident_type valid inventory typed derived stored
     have movedTyped := handoff.worldTyped valid inventory typed
     obtain ⟨kept,initialized,resources,permission⟩ := handoff.handed_off typed.1 stored
@@ -174,7 +175,8 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     (label : Typing.InstalledLabelTyped program state.world target brand region type)
     (sourceTyped : Typing.ContextBindingsTyped program state.world source caller)
     (interpreted : Typing.SourceInterpreted program.declarations caller source.static)
-    (representation : Typing.TargetRepresentation program state.world caller)
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program.declarations state.world module unsafeAllowed)
     (argumentTyped : Typing.PlaceType program.declarations source place actual writable)
     (subtype : Subtype program.declarations source.static actual expected)
     (resolved : ResolvesPlace state.world caller.environment place argument.address argument.authority)
@@ -213,7 +215,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     obtain ⟨kept,value,roots,targetSource,result,frames,task,original,stored,initialized,valueTyped,valueType,
       resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩ :=
       step.leave_source_result valid inventory typed pending route label sourceTyped interpreted
-        representation argumentTyped resolved
+        realized argumentTyped resolved
     exact ⟨kept,value,roots,targetSource,result,rfl,frames,task,resolved,original,stored,initialized,valueTyped,valueType,
       subtype,selectedType.trans closed.symm,resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩
   · exact Or.inl fatal

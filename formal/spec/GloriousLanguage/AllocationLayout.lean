@@ -1,5 +1,6 @@
 import GloriousLanguage.LayoutContext
 import GloriousLanguage.LayoutExecution
+import GloriousLanguage.RealizationLayout
 
 /-! The real allocation producer admits only assumption-free layout evidence.
 Logical cut carries its retained caller metadata into encoding and layout
@@ -12,8 +13,8 @@ theorem Allocates.layoutOf {program : Program} {before after : World}
     {module : ModuleId} {unsafeAllowed : Bool} :
     LayoutOf program ⟨[],[],0,module,unsafeAllowed,{}⟩ type layout := by
   cases allocated with
-  | fresh _ _ _ _ source _ _ _ _ =>
-    obtain ⟨sourceModule,sourceUnsafe,derived⟩ := source
+  | fresh request extent =>
+    obtain ⟨module,unsafeAllowed,derived⟩ := request.layout_of
     exact derived.runtime_context
 
 theorem Allocates.representable {program : Program} {before after : World}
@@ -22,8 +23,9 @@ theorem Allocates.representable {program : Program} {before after : World}
     IntegerRange program.input.target false .pointer layout.size ∧
       IntegerRange program.input.target false .pointer layout.alignment := by
   cases allocated with
-  | @fresh base _ _ _ _ _ positive aligned extent _ =>
-    have alignmentBound : layout.alignment ≤ base := Nat.le_of_dvd positive (Nat.dvd_of_mod_eq_zero aligned)
+  | fresh request extent =>
+    have bounded := extent.bounded
+    have alignmentBound := Nat.le_of_dvd extent.positive (Nat.dvd_of_mod_eq_zero extent.aligned)
     have sizeBound : layout.size < 2^program.input.target.pointerBits := by omega
     have alignBound : layout.alignment < 2^program.input.target.pointerBits := by omega
     have admitted : ∀ value : Nat, value < 2^program.input.target.pointerBits →
@@ -33,6 +35,27 @@ theorem Allocates.representable {program : Program} {before after : World}
       exact ⟨Int.natCast_nonneg _,by
         simpa [integerLimit,Width.bits,Int.natCast_pow] using cast⟩
     exact ⟨admitted _ sizeBound,admitted _ alignBound⟩
+
+/-- Actual allocation realizes the fresh root from the request's own closed
+layout evidence and retains every already-realized live root. -/
+theorem Allocates.layoutRealized {program : Program} {before after : World}
+    {home : Home} {region : Identity} {type : Term} {layout : Layout} {mutable : Bool} {address : Address}
+    (allocated : Allocates program before home region type layout mutable address after)
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (retained : World.LayoutRealized program before module unsafeAllowed) :
+    World.LayoutRealized program after module unsafeAllowed := by
+  cases allocated with
+  | fresh request extent =>
+    intro id root found live
+    by_cases fresh : id = before.nextRoot
+    · subst fresh
+      rw [Table.get_set] at found
+      have same := Option.some.inj found
+      subst same
+      obtain ⟨sourceModule,sourceUnsafe,derived⟩ := request.layout_of
+      exact derived.runtime_context
+    · rw [Table.get_set_other _ _ _ _ fresh] at found
+      exact retained id root found live
 
 theorem Allocates.query_layout_unique {program : Program} (valid : ProgramWellFormed program)
     {before after : World} {home : Home} {region : Identity} {type : Term} {layout other : Layout}

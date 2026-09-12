@@ -29,21 +29,33 @@ theorem Clears.roots_other {before after : World} {addresses : List Address} {id
     exact (ih (fun _ member => outside _ (List.mem_cons_of_mem _ member))).trans
       (World.write_roots_other written (outside _ List.mem_cons_self))
 
-theorem Transfers.roots_other {program : Program} {before after : World} {authority source destination} {id : Identity}
+/-- The allocation-claim release only rewrites the loan table. -/
+theorem ReleasesStorageClaims.roots_other {before after : World} {place : ResolvedPlace} {id : Identity}
+    (released : ReleasesStorageClaims before place after) : after.roots.get id = before.roots.get id := by
+  cases released
+  rfl
+
+theorem Transfers.roots_other {program : RuntimeProgram} {before after : World} {authority : Authority}
+    {source destination : Address} {id : Identity}
     (moved : Transfers program before authority source destination after)
     (sourceOutside : id ≠ source.root) (destinationOutside : id ≠ destination.root) :
     after.roots.get id = before.roots.get id := by
   cases moved with
-  | move _ _ _ _ _ _ cleared installed =>
-    exact (World.write_roots_other installed destinationOutside).trans (World.write_roots_other cleared sourceOutside)
+  | move _ _ _ _ _ _ _ sourceWritten destinationWritten =>
+    exact (World.write_roots_other destinationWritten destinationOutside).trans
+      (World.write_roots_other sourceWritten sourceOutside)
 
-theorem Copies.roots_other {program : Program} {before after : World} {authority source destination} {id : Identity}
+theorem Copies.roots_other {program : RuntimeProgram} {before after : World} {authority : Authority}
+    {source destination : Address} {id : Identity}
     (copied : Copies program before authority source destination after) (outside : id ≠ destination.root) :
     after.roots.get id = before.roots.get id := by
   cases copied with
-  | copy _ _ _ _ _ _ written => have framed := World.write_roots_other written outside; exact framed
+  | copy =>
+    rename_i value cloned next afterWorld stored initialized ready permission vacant typed copiedValue written
+    exact World.write_roots_other (after := afterWorld) written outside
 
-theorem Acquires.roots_other {program : Program} {before after : World} {authority force source destination} {id : Identity}
+theorem Acquires.roots_other {program : RuntimeProgram} {before after : World} {authority : Authority}
+    {force : Bool} {source destination : Address} {id : Identity}
     (acquired : Acquires program before authority force source destination after)
     (sourceOutside : id ≠ source.root) (destinationOutside : id ≠ destination.root) :
     after.roots.get id = before.roots.get id := by
@@ -52,23 +64,27 @@ theorem Acquires.roots_other {program : Program} {before after : World} {authori
   | copy copied => exact copied.roots_other destinationOutside
   | move _ _ _ moved => exact moved.roots_other sourceOutside destinationOutside
 
-theorem NewValue.roots_other {program : Program} {before after : World} {destination type head sources} {id : Identity}
+theorem NewValue.roots_other {program : RuntimeProgram} {before after : World}
+    {destination : Address} {type : Term} {head : ValueHead} {sources : List ResolvedPlace} {id : Identity}
     (constructed : NewValue program before destination type head sources after)
     (destinationOutside : id ≠ destination.root) (sourcesOutside : ∀ source ∈ sources, id ≠ source.address.root) :
     after.roots.get id = before.roots.get id := by
   cases constructed with
-  | construct _ _ _ _ _ _ cleared written =>
-    refine (World.write_roots_other written destinationOutside).trans (cleared.roots_other ?_)
+  | construct =>
+    rename_i residents taken afterWorld vacant typed ready separate cleared written
+    refine (World.write_roots_other (after := afterWorld) written destinationOutside).trans (cleared.roots_other ?_)
     intro address member
     obtain ⟨source,present,rfl⟩ := List.mem_map.mp member
     exact sourcesOutside source present
 
-theorem FormsLoan.roots_other {program : Program} {purpose : LoanPurpose} {before after : World}
-    {authority mode region referent destination} {id : Identity}
+theorem FormsLoan.roots_other {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
+    {authority : Authority} {mode : Mutability} {region : Identity} {referent destination : Address} {id : Identity}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     (outside : id ≠ destination.root) : after.roots.get id = before.roots.get id := by
   cases borrowed with
-  | borrow _ _ _ _ _ _ _ _ _ written => have framed := World.write_roots_other written outside; exact framed
+  | borrow =>
+    rename_i value afterWorld parent stored typed initialized regionLive admitted accessible permitted vacant destTyped parentEq written
+    exact World.write_roots_other (after := afterWorld) written outside
 
 theorem Memory.InstallsResidents.roots_other {program : Program} {before after : World}
     {addresses : List Address} {values : List (Option Value)} {id : Identity}
@@ -81,17 +97,26 @@ theorem Memory.InstallsResidents.roots_other {program : Program} {before after :
     exact (ih (fun _ member => outside _ (List.mem_cons_of_mem _ member))).trans
       (World.write_roots_other written (outside _ List.mem_cons_self))
 
-theorem Memory.BulkMove.roots_other {program : Program} {before after : World} {sources destinations} {id : Identity}
+theorem Memory.BulkMove.roots_other {program : RuntimeProgram} {before after : World}
+    {sources destinations : List ResolvedPlace} {id : Identity}
     (moved : BulkMove program before sources destinations after)
-    (sourcesOutside : ∀ address ∈ sources, id ≠ address.root)
-    (destinationsOutside : ∀ address ∈ destinations, id ≠ address.root) : after.roots.get id = before.roots.get id := by
-  obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
-  exact (installed.roots_other destinationsOutside).trans (cleared.roots_other sourcesOutside)
-
-theorem Memory.AllocatesBuffer.roots_other {program : Program} {before after : World}
-    {domain element count base pointer} {id : Identity}
-    (allocated : AllocatesBuffer program before domain element count base pointer after) (bound : id < before.nextRoot) :
+    (sourcesOutside : ∀ address ∈ sources, id ≠ address.address.root)
+    (destinationsOutside : ∀ address ∈ destinations, id ≠ address.address.root) :
     after.roots.get id = before.roots.get id := by
+  obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
+  refine (installed.roots_other ?_).trans (cleared.roots_other ?_)
+  · intro address member
+    obtain ⟨place,present,rfl⟩ := List.mem_map.mp member
+    exact destinationsOutside place present
+  · intro address member
+    obtain ⟨place,present,rfl⟩ := List.mem_map.mp member
+    exact sourcesOutside place present
+
+theorem Memory.AllocatesBuffer.roots_other {program : Program} {custody : ClaimCustody} {before after : World}
+    {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer} {place : ResolvedPlace}
+    {id : Identity}
+    (allocated : AllocatesBuffer program custody before domain element count base pointer place after)
+    (bound : id < before.nextRoot) : after.roots.get id = before.roots.get id := by
   cases allocated
   exact Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)
 
@@ -128,50 +153,80 @@ theorem World.HomeExtension.internal_root {before after : World} {id : Identity}
   obtain ⟨current,found,home⟩ := Option.map_eq_some_iff.mp homes
   exact ⟨current,found,fun domain => by simpa only [home] using internalHome domain⟩
 
-theorem Memory.ReleasesBuffer.avoids_internal {program : Program} {before after : World}
+theorem Memory.ReleasesBuffer.avoids_internal {program : Program} {before after : World} {place : ResolvedPlace}
     {pointer : RawPointer} {domain allocation id : Identity} {root : Root}
-    (released : ReleasesBuffer program before pointer domain after) (selected : before.roots.get id = some root)
+    (released : ReleasesBuffer program before place pointer domain after) (selected : before.roots.get id = some root)
     (internalHome : Foreign.InternalHome root) (origin : pointer.allocation = some allocation) : allocation ≠ id := by
   cases released with
-  | release allocated _ _ found _ home _ _ _ _ _ _ _ _ _ =>
-    have same := Option.some.inj (origin.symm.trans allocated)
-    subst allocation
+  | release =>
+    rename_i value rootv unclaimed cleared retired bufferAt rootAt shellLive resourcesEmpty fieldsNone claims safe written retires ended
+    obtain ⟨allocated, allocatedRoot, allocationEq, offset, addressEq, domainEq, rootFound, rootLive, home,
+      generation, base, valueEq⟩ := bufferAt
+    have rowEq : allocated = allocation := Option.some.inj (allocationEq.symm.trans origin)
     intro same
-    have identity := Option.some.inj (found.symm.trans (same ▸ selected))
-    subst root
-    exact (internalHome domain).1 home
+    have selected' : before.roots.get allocated = some root := by rw [rowEq, same]; exact selected
+    have equal : allocatedRoot = root := Option.some.inj (rootFound.symm.trans selected')
+    exact (internalHome domain).1 (equal ▸ home)
 
-theorem Memory.ReleasesBuffer.roots_other {program : Program} {before after : World}
+theorem Memory.ReleasesBuffer.roots_other {program : Program} {before after : World} {place : ResolvedPlace}
     {pointer : RawPointer} {domain allocation id : Identity}
-    (released : ReleasesBuffer program before pointer domain after)
+    (released : ReleasesBuffer program before place pointer domain after)
     (origin : pointer.allocation = some allocation) (outside : id ≠ allocation) :
     after.roots.get id = before.roots.get id := by
   cases released with
-  | release allocated _ _ _ _ _ _ _ _ _ _ _ written retired ended =>
-    have same := Option.some.inj (origin.symm.trans allocated)
-    subst allocation
-    rcases ended with ⟨_,_,_,rfl⟩
-    exact (retired.roots_other outside).trans (World.write_roots_other written outside)
+  | release =>
+    rename_i value rootv unclaimed cleared retired bufferAt rootAt shellLive resourcesEmpty fieldsNone claims safe written retires ended
+    obtain ⟨allocated, allocatedRoot, allocationEq, offset, addressEq, domainEq, rootFound, rootLive, home,
+      generation, base, valueEq⟩ := bufferAt
+    have rowEq : allocated = allocation := Option.some.inj (allocationEq.symm.trans origin)
+    have placeOutside : id ≠ place.address.root := by
+      intro same
+      exact outside (rowEq ▸ (by simpa only [addressEq] using same))
+    calc after.roots.get id
+        = _ := by rw [ended.2]
+      _ = _ := retires.roots_other placeOutside
+      _ = _ := World.write_roots_other written placeOutside
+      _ = before.roots.get id := claims.roots_other (id := id)
 
-theorem Memory.ReallocatesBuffer.private_root {program : Program} {before after : World}
-    {old domain element count base result} {id : Identity} {root : Root}
-    (reallocated : ReallocatesBuffer program before old domain element count base result after)
+theorem Memory.ReallocatesBuffer.private_root {program : RuntimeProgram} {custody : ClaimCustody}
+    {before after : World} {oldAllocation allocation : ResolvedPlace} {old : RawPointer} {domain : Identity}
+    {element : Term} {newCount base : Nat} {result : RawPointer} {id : Identity} {root : Root}
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element newCount base result allocation after)
     (bound : id < before.nextRoot) (selected : before.roots.get id = some root) (internalHome : Foreign.InternalHome root) :
     after.roots.get id = before.roots.get id := by
-  obtain ⟨oldId,oldRoot,value,allocated,newId,moved,oldCount,oldOrigin,_,_,_,_,_,_,_,allocation,newOrigin,move,release⟩ := reallocated
-  obtain ⟨current,currentAt,currentInternal⟩ :=
-    (allocation.authorityStable.homes.trans move.authorityStable.homes).internal_root bound selected internalHome
-  have oldOutside := (release.avoids_internal currentAt currentInternal oldOrigin).symm
-  have newOutside : id ≠ newId := by
-    cases allocation
-    simp only [Option.some.injEq] at newOrigin
-    exact newOrigin ▸ Nat.ne_of_lt bound
-  have slots (address : Address) (outside : id ≠ address.root) :
-      ∀ slot ∈ Slots address 0 oldCount, id ≠ slot.root := by
-    intro slot member
-    obtain ⟨index,_,rfl⟩ := List.mem_map.mp member
-    exact outside
-  exact (release.roots_other oldOrigin oldOutside).trans
-    ((move.roots_other (slots _ oldOutside) (slots _ newOutside)).trans (allocation.roots_other bound))
+  cases reallocated with
+  | grow =>
+    rename_i oldCount allocated moved ready bulkMove allocatedRun released
+    obtain ⟨value, bufferAt, countEq, typeEq, shellClosed, resourcesEmpty, readyFields⟩ := ready.source
+    obtain ⟨allocatedId, allocatedRoot, origin, offset, oldAddressEq, domainEq, rootFound, rootLive, home,
+      generation, base, valueEq⟩ := bufferAt
+    have oldOutside : id ≠ allocatedId := by
+      intro same
+      have selected' : before.roots.get allocatedId = some root := same.symm ▸ selected
+      have equal : allocatedRoot = root := Option.some.inj (rootFound.symm.trans selected')
+      exact (internalHome domain).1 (equal ▸ home)
+    have newRoot : allocation.address.root = before.nextRoot := by cases allocatedRun with | fresh _ _ => rfl
+    have newOutside : id ≠ allocation.address.root := by rw [newRoot]; exact Nat.ne_of_lt bound
+    have slots (address : Address) (outer : id ≠ address.root) :
+        ∀ slot ∈ Slots address 0 oldCount, id ≠ slot.root := by
+      intro slot member
+      obtain ⟨index,_,rfl⟩ := List.mem_map.mp member
+      exact outer
+    have oldSlots : ∀ slot ∈ Slots oldAllocation.address 0 oldCount, id ≠ slot.root := by
+      rw [oldAddressEq]
+      exact slots _ oldOutside
+    have newSlots : ∀ slot ∈ Slots allocation.address 0 oldCount, id ≠ slot.root := slots _ newOutside
+    have sourcesOutside : ∀ source ∈ (Slots oldAllocation.address 0 oldCount).map
+        (fun address => (⟨address,oldAllocation.authority⟩ : ResolvedPlace)), id ≠ source.address.root := by
+      intro source member
+      obtain ⟨address,present,rfl⟩ := List.mem_map.mp member
+      exact oldSlots address present
+    have destinationsOutside : ∀ destination ∈ (Slots allocation.address 0 oldCount).map
+        (fun address => (⟨address,allocation.authority⟩ : ResolvedPlace)), id ≠ destination.address.root := by
+      intro destination member
+      obtain ⟨address,present,rfl⟩ := List.mem_map.mp member
+      exact newSlots address present
+    exact (released.roots_other origin oldOutside).trans
+      ((bulkMove.roots_other sourcesOutside destinationsOutside).trans (allocatedRun.roots_other bound))
 
 end Glorious.Language

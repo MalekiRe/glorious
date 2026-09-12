@@ -253,6 +253,25 @@ or a dependency of this project.
   retirements and endings performed. The destructor recursion over nested
   stored residents, the pending-return-list drain to retirement, and arbitrary
   drop-hook body execution remain open.
+- `CleanupDrain`: the general destructor continuation. `CleanupRun.release_queue`
+  executes the pending-return list `shellDone` schedules to its task with the
+  machine's own `releaseLoan` rules, including the parent/guard retry: a silent
+  rule consumes its head, an ending rule ends the loan and re-inserts the
+  recorded dependencies, and the well-founded measure is the pair (live loans,
+  queue length) — silent steps shorten the queue, ending steps strictly reduce
+  the live-loan count (`World.ReleaseReady` is the world invariant the rules
+  read, and `Table.liveCount_set_dead` is the decrease). `release_custody_returns`
+  applies it to the real `ReleaseCustodyLoans` list, and
+  `CleanupRun.cleanup_root_shell_retired` composes the captured shell's
+  destruction, the relinquishment, the drain and the root's actual retirement
+  into one run, transporting the retirement's endability through the drain's
+  release frame. `ForeignRootFraming` and `InvocationLeaseCleanup` were migrated
+  to the current storage/task shapes (the stale `EndsLoan` argument, the
+  allocation-claim release, `ResolvedPlace` roots) so the `Step`-level control
+  lane can be built again; the unused, unprovable `InitializedAncestors`
+  recursion and the unused `referenceRoot_cleanup`/`lendsResident_cleanup` chain
+  were removed rather than re-established, since `EndsLoan.restored` now carries
+  `ResourcesClosed`, which that obligation did not supply.
 - `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
   is discharged from each input's own readiness (permitted rows, the allocation
   claim's owning row, the erased port's handed chain), with the one shape
@@ -311,15 +330,17 @@ are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed
 specification.
 
-The whole library is not green and is not claimed to be. Named targets that
-currently fail at this revision are `BasicChecks`, `BindingChecks`,
-`BorrowChecks`, `ExecutionChecks`, `ControlChecks`, `PreservationChecks`,
-`SourceChecks`, `AllocationLayout`, `FunctionEntryContextTyping`,
-`ScalarMachine`, `DropDispatch`, `ForeignRootFraming` and
-`InvocationLeaseCleanup`; they are stale consumers of earlier storage/task
-shapes, outside the checked dependency graph, and are not evidence for
-or against the recovered boundary. That failing set is unchanged from the
-pristine revision this checkpoint was composed on. `PublicValues`, `RuntimeWorldEquivariance`,
+The whole library is not green and is not claimed to be. `ForeignRootFraming`
+and `InvocationLeaseCleanup` now check inside the graph; the stale frontier is
+larger than the thirteen modules previously recorded here, because any module
+that transitively consumes `BasicChecks` or still uses the pre-migration
+`EndsLoan`/`ForeignAuthority` shapes also fails (for example `ForeignAuthority`,
+`ActivationStorageOrigin`, `SuspensionStorage`, `PrivateStorage` and the `Checks`
+aggregate). The exact list has not been enumerated at this revision. The modules
+below are stale consumers of earlier storage/task shapes and are not evidence
+for or against the recovered boundary.
+
+`PublicValues`, `RuntimeWorldEquivariance`,
 `CleanupPreservation`, `ForeignEvolution`, `InvocationLending` and
 `ResumptionPreservation` left that list: each was migrated to the current
 storage, task, entry-attempt and public-observation shapes and now check inside
