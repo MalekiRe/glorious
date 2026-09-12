@@ -194,6 +194,16 @@ structure World where
   clock : Nat := 0
   deriving Repr, Inhabited
 
+/-- Provenance-bearing pointers retain the allocation's physical extent,
+including one-past and stale pointers. This is representation coherence, not
+permission to access: liveness, generation, domain, initialization and aliasing
+are checked separately by `RawRange` and `PointsTo`. Address-only pointers
+carry no allocation claim. Retiring storage retains its historical metadata. -/
+def RawPointer.Origin (pointer : RawPointer) (world : World) : Prop :=
+  ∀ id, pointer.allocation = some id → ∃ root,
+    world.roots.get id = some root ∧ pointer.address = root.base + pointer.offset ∧
+    pointer.offset ≤ root.layout.size
+
 def World.root (world : World) (address : Address) : Option Root := do
   let root ← world.roots.get address.root
   if root.live && root.generation == address.generation then some root else none

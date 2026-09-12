@@ -548,3 +548,25 @@ This boundary was verified through general Lean proofs, without adding concrete
 test examples. Full relocated value typing, static semantic equivariance,
 control-state validity, replay/cancellation completion and whole-language
 soundness remain unproved.
+
+## Pointer provenance through production and replay
+
+`PointerPreservation.lean` closes the pointer-valued part of the relocated
+typing obligation. The previous resident typing rule bounded only the integer
+address: an arbitrary allocation-relative offset could overflow when rebased.
+`RawPointer.Origin` now requires a provenance-bearing pointer to retain its
+allocation's base and extent. It permits address-only, one-past and stale
+pointers and does not grant access, initialization, live generation or ownership.
+
+General proofs establish this invariant from allocation, reallocation, pointer
+offset and address derivation, and preserve it through writes, bulk movement
+and retirement. The actual `PrimitiveStep` result theorem composes those
+producers with destination installation. Snapshot pointer relocation preserves
+the bound and origin without refreshing generations or domains. The complete
+transfer typing proof now preserves the strengthened pointer rule as well.
+
+The general proof module was checked; no test-style examples were added or run.
+This is not full relocated value typing: declaration-instantiation equivariance
+and external-referent lifetime support remain prerequisites of that theorem.
+Control-state validity, replay/cancellation and noncircular whole-machine
+soundness remain the active larger obligation.

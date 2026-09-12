@@ -1,2 +1,2 @@
 import GloriousLanguage.Checks
-import GloriousLanguage.RelocationPreservation
+import GloriousLanguage.PointerPreservation

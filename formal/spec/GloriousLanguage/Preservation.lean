@@ -243,6 +243,22 @@ theorem World.write_value_update {before after : World} {address : Address} {val
 
 def Root.location (root : Root) : Root := { root with value := none }
 
+theorem RawPointer.Origin.transport {pointer : RawPointer} {before after : World}
+    (origin : pointer.Origin before)
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location) :
+    pointer.Origin after := by
+  intro id allocation
+  obtain ⟨root,found,address,offset⟩ := origin id allocation
+  have location := locations id
+  rw [found] at location
+  obtain ⟨changed,selected,same⟩ := Option.map_eq_some_iff.mp location
+  have base := congrArg Root.base same
+  have layout := congrArg Root.layout same
+  change changed.base = root.base at base
+  change changed.layout = root.layout at layout
+  exact ⟨changed,selected,by simpa only [Root.location] using address.trans (congrArg (· + pointer.offset) base.symm),
+    by simpa only [layout] using offset⟩
+
 theorem World.root_transport {before after : World} {address : Address} {root : Root}
     (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
     (selected : before.root address = some root) :
@@ -756,7 +772,7 @@ theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : Wo
   · exact fun {_ _ _ _ _ _} head _ fields => .aggregate head fields
   · exact fun {_ _ _ _ _ _ _} found active mode region located =>
       transfer.reference_preserved valid (.reference found active mode region located)
-  · exact fun {_ _ _ _ _} bound => .pointer bound
+  · exact fun {_ _ _ _ _} bound origin => .pointer bound (origin.transport transfer.locations)
   · exact fun {_ _ _ _ _ _} selected _ fields => .callable selected fields
   · exact fun {_ _ _ _ _ _} selected => .operation selected
   · exact fun {_ _ _ _ _} => .label

@@ -64,6 +64,18 @@ unique ancestors. This establishes world-invariant preservation and correct
 reference target/region relocation, not full relocated value typing or the
 complete control-state/replay/cancellation theorem. Those remain active.
 
+The copied-pointer case now has a complete producer-to-consumer proof in
+`PointerPreservation`. Resident pointer typing requires allocation/base/offset
+coherence, without claiming liveness or permission to dereference. Allocation,
+reallocation, offset and address derivation establish it; writes, bulk moves
+and retirement preserve it. `PrimitiveStep.pointer_result_typed` proves typing
+of the actual installed outputs, and `CopiesSnapshot.pointer_typed` proves the
+relocated pointer case, including address-width bounds and unchanged generation
+and domain. General transfer preservation consumes the strengthened invariant.
+No post-state typing assumption is added. Full snapshot typing still requires
+declaration-instantiation equivariance and lifetime support for external
+referents; the control-state/replay/cancellation obligation remains open.
+
 ## 2. Source and normative adequacy
 
 After the soundness foundation, prove that elaboration and observations give

@@ -173,6 +173,7 @@ mutual
         AddressType program.declarations world loan.referent type →
         ValueTyped program world (.resident owner (.reference mode region type) (.reference id) live [])
     | pointer {owner mode type pointer live} : pointer.address < 2^program.declarations.input.target.pointerBits →
+        pointer.Origin world →
         ValueTyped program world (.resident owner (.rawPointer mode type) (.pointer pointer) live [])
     | callable {owner id arguments live fields function} : Instance program id arguments function →
         FieldsTyped program world fields (function.captures.map (·.type)) →

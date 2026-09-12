@@ -267,7 +267,7 @@ theorem Typing.ValueTyped.fields_model {program : Kernel.Program} {world : World
   | aggregate head fields => exact ⟨_,fields,fun _ checked => .aggregate head checked⟩
   | reference found live mode region located =>
       exact ⟨[],.nil,fun _ fields => by cases fields; exact .reference found live mode region located⟩
-  | pointer bound => exact ⟨[],.nil,fun _ fields => by cases fields; exact .pointer bound⟩
+  | pointer bound origin => exact ⟨[],.nil,fun _ fields => by cases fields; exact .pointer bound origin⟩
   | callable selected fields => exact ⟨_,fields,fun _ checked => .callable selected checked⟩
   | operation selected => exact ⟨[],.nil,fun _ fields => by cases fields; exact .operation selected⟩
   | label => exact ⟨[],.nil,fun _ fields => by cases fields; exact .label⟩
