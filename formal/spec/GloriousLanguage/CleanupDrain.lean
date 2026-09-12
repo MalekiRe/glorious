@@ -1138,3 +1138,99 @@ theorem World.Vacant.write_child_other {before after : World} {address : Address
   World.Vacant.write_disjoint vacant written (Address.child_not_overlaps different)
 
 end Glorious.Language
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- The drain touches only the loan table, so a stored value stays stored. -/
+theorem World.Stores.loanReleaseFrame {before after : World} {address : Address} {value : Value}
+    (stored : before.Stores address value) (frame : before.LoanReleaseFrame after) :
+    after.Stores address value := by
+  rw [frame.1]
+  exact stored
+
+/-- One scheduled child of the nested field loop is fully destroyed: its own
+shell with every write derived, then the pending returns its custody scheduled, so
+the loop continues at the remaining indices rather than at a release task. The
+parent shell is re-read with that child's slot now a hole and its head, owner,
+type, liveness flag, resources and every other slot untouched. The child's
+machine premises and the drain's obligations are its own tree's, so nothing here
+is assumed. -/
+theorem CleanupRun.destroy_child {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {address : Address} {index : Nat} {authority : Authority}
+    {rest : List Nat} {next : Task} {value shell : Value}
+    (task : before.task = .destroy context (address.child index) .owner (.destroyFields context address authority rest next))
+    (tree : World.Destroys program before.world (address.child index))
+    (parent : before.world.Stores address value)
+    (stored : before.world.Stores (address.child index) shell)
+    (holes : ∀ i, i < shell.fields.length → shell.fields[i]? = some none)
+    (handed : before.world.CustodyHandedOff (.resident shell.owner)) :
+    ∃ trace final changed, CleanupRun program host before trace final ∧
+      final.task = .destroyFields context address authority rest next ∧
+      final.world.Stores address changed ∧ changed.head = value.head ∧ changed.owner = value.owner ∧
+      changed.type = value.type ∧ changed.shellLive = value.shellLive ∧ changed.resources = value.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = value.fields[other]? := by
+  cases tree with
+  | resident treeStored treeDisposable treeShell treeNoContinuation treeNoReference treeNoAvailable permission kinds ancestry children =>
+    have valueEq : shell = _ := Option.some.inj (stored.symm.trans treeStored)
+    obtain ⟨mid, cleared, run, midWorld, midTask, written⟩ := CleanupRun.destroy_shell (before := before)
+      (context := context) (address := address.child index) (authority := .owner)
+      (next := .destroyFields context address authority rest next)
+      task stored (by simpa only [← valueEq] using treeDisposable)
+      (Or.inl (by simpa only [← valueEq] using treeShell))
+      (by simpa only [← valueEq] using treeNoContinuation)
+      (by simpa only [← valueEq] using treeNoReference)
+      (by simpa only [← valueEq] using treeNoAvailable)
+      holes permission handed
+    have parentShifted : (before.world.RequestReturns (.resident shell.owner)).Stores address value := by
+      show (before.world.RequestReturns (.resident shell.owner)).read address = some value
+      rw [show (before.world.RequestReturns (.resident shell.owner)).read address = before.world.read address from rfl]
+      exact parent
+    have kindsShifted : ∀ id loan, (before.world.RequestReturns (.resident shell.owner)).loans.get id = some loan → loan.live = true → loan.kind = .owning ∨ loan.kind = .storageBorrow := by
+      intro id loan found live
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      rw [← same,World.restamp_live] at live
+      rw [← same,World.restamp_kind]
+      exact kinds id original originalFound live
+    have ancestryShifted : ∀ id loan, (before.world.RequestReturns (.resident shell.owner)).loans.get id = some loan → (∀ parent, loan.parent = some parent → (before.world.RequestReturns (.resident shell.owner)).loans.get parent ≠ none) ∧ (∀ guard ∈ loan.guards, (before.world.RequestReturns (.resident shell.owner)).loans.get guard ≠ none) := by
+      intro id loan found
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have linkOriginal : original.parent = some parent := by
+          rw [← same,World.restamp_parent] at link
+          exact link
+        have held := (ancestry id original originalFound).1 parent linkOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+      · have memberOriginal : guard ∈ original.guards := by
+          rw [← same,World.restamp_guards] at member
+          exact member
+        have held := (ancestry id original originalFound).2 guard memberOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+    have drainTask : mid.task = ReleaseCustodyLoans mid.world (.resident shell.owner) (.destroyFields context address authority rest next) := by
+      rw [← midWorld] at midTask
+      exact midTask
+    have midLoans : mid.world.loans = (before.world.RequestReturns (.resident shell.owner)).loans := by
+      rw [midWorld]
+      rw [World.write_rest written]
+    obtain ⟨drained, trace, drainedRun, drainedTask, frame⟩ :=
+      CleanupRun.release_custody_returns (program := program) (host := host) (before := mid)
+        (custody := .resident shell.owner) (next := .destroyFields context address authority rest next)
+        drainTask
+        (by intro id loan found live; rw [midLoans] at found; exact kindsShifted id loan found live)
+        (by intro id loan found; rw [midLoans] at found; rw [midLoans]; exact ancestryShifted id loan found)
+    obtain ⟨changed,changedStored,head,owner,type,live,resources,slotHole,others⟩ := World.Stores.write_child_none parentShifted written
+    have changedAtMid : mid.world.Stores address changed := by
+      rw [midWorld]
+      exact changedStored
+    exact ⟨_,drained,changed,run.append drainedRun,drainedTask,World.Stores.loanReleaseFrame changedAtMid frame,
+      head,owner,type,live,resources,slotHole,others⟩
+
+end Glorious.Language.Execution
