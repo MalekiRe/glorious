@@ -400,6 +400,24 @@ result addresses. This identifies, but does not assume or discharge, the
 remaining return/cleanup lifetime invariant. Source resource admission itself
 remains a semantic obligation rather than a proved structural typing rule.
 
+`RuntimeWorldEquivariance` transports the whole existing storage world,
+including loan ancestry, permissions, partial residents and region freshness.
+It constructs the world required by universally quantified pattern coverage;
+neither exhaustiveness nor branch usefulness is assumed stable. Full effect
+coverage uses that same world/permission/matching transport and exact selected
+operation signatures. `RuntimeBodyTyping` then proves transport of all five
+mutual code/arm/handler typing judgments and complete function typing.
+
+Finite snapshot relocation now consumes this result through the actual
+`SnapshotMap`: the checked lexical template and supported invocation arguments
+determine the exact relocated whole function, including its body. The actual
+snapshot capture/value consumer projects that common producer. The weaker
+existential operation transport and duplicate signature-preserving proof are
+removed. Source lexical scope closing and runtime context/frame typing remain
+open: unrestricted rigid-name admission and the missing relationship between
+body lifetime binders and outward signatures must be repaired at their actual
+producer before a sound copied-frame/control invariant can be established.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

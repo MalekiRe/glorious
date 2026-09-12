@@ -449,17 +449,4 @@ theorem Typing.AtomType.permute {program : Kernel.Program} (valid : ProgramWellF
     apply Typing.AtomType.bindings
     simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using located.permute valid permutation
 
-theorem Execution.OperationInstance.permute_signature {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
-    {id : DeclId} {arguments : List Term} {operation : OperationDefinition} {signature : Signature}
-    (selected : Execution.OperationInstance program id arguments operation signature) (permutation : RegionPermutation) :
-    Execution.OperationInstance program id (arguments.map permutation.term) operation (permutation.signature signature) := by
-  obtain ⟨substitution,found,instantiated,requirements,rfl⟩ := selected
-  have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.operation_lookup found))
-  refine ⟨permutation.substitution substitution,found,instantiated.permute permutation,?_,?_⟩
-  · simpa only [RegionPermutation.context,List.map_nil] using requirements.permute valid (fun constraint member term present => lexical term (by
-      have nested : term ∈ operation.signature.constraints.flatMap Constraint.terms := List.mem_flatMap.mpr ⟨constraint,member,present⟩
-      simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,nested,or_true,true_or])) permutation
-  · rw [permutation.signature_instantiate,permutation.lexical_signature (fun term member => lexical term (by
-      simpa only [Definition.terms] using member))]
-
 end Glorious.Language

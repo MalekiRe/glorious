@@ -308,14 +308,22 @@ theorem RegionPermutation.code_instantiate (permutation : RegionPermutation)
   · exact funext (fun term => permutation.term_substitute substitution term)
   · exact funext (fun signature => permutation.signature_instantiate signature substitution)
 
+theorem Kernel.Function.mapTerms_instantiate (f : Term → Term) (mapped : Substitution → Substitution)
+    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
+    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
+      (mapped substitution).filter (fun entry => keep entry.1))
+    (function : Kernel.Function) (substitution : Substitution) :
+    (function.instantiate substitution).mapTerms f = (function.mapTerms f).instantiate (mapped substitution) := by
+  simp only [Kernel.Function.mapTerms,Kernel.Function.instantiate,Kernel.Function.transformTerms_comp]
+  congr 1
+  · exact funext (terms substitution)
+  · exact funext (fun signature => signature.mapTerms_instantiate f mapped terms filtered substitution)
+
 theorem RegionPermutation.function_instantiate (permutation : RegionPermutation)
     (function : Kernel.Function) (substitution : Substitution) :
     permutation.function (function.instantiate substitution) =
-      (permutation.function function).instantiate (permutation.substitution substitution) := by
-  simp only [RegionPermutation.function,Kernel.Function.mapTerms,Kernel.Function.instantiate,Kernel.Function.transformTerms_comp]
-  congr 1
-  · exact funext (fun term => permutation.term_substitute substitution term)
-  · exact funext (fun signature => permutation.signature_instantiate signature substitution)
+      (permutation.function function).instantiate (permutation.substitution substitution) :=
+  function.mapTerms_instantiate permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
 
 theorem RegionPermutation.lexical_function (permutation : RegionPermutation) {function : Kernel.Function}
     (lexical : function.Lexical) : permutation.function function = function :=
@@ -342,5 +350,30 @@ theorem Kernel.Instance.permute {program : Kernel.Program} (valid : ProgramWellF
     instantiated.permute permutation,?_,?_⟩
   · simpa only [RegionPermutation.context,List.map_nil] using requirements.permute valid constraints permutation
   · rw [permutation.function_instantiate,permutation.lexical_function templateLexical]
+
+theorem Execution.Relocation.substitution_filter (map : Execution.Relocation) (substitution : Substitution)
+    (keep : Identity → Bool) : map.substitution (substitution.filter (fun entry => keep entry.1)) =
+      (map.substitution substitution).filter (fun entry => keep entry.1) := by
+  simp only [Execution.Relocation.substitution,List.filter_map,Function.comp_def]
+
+/-- Argument agreement determines the entire checked instantiated body. No
+independent reconstruction of a body's runtime-name support is necessary. -/
+theorem Kernel.Instance.relocation_permutation {program : Kernel.Program} (inventory : Kernel.BodyInventory program)
+    {id : DeclId} {arguments : List Term} {function : Kernel.Function}
+    (selected : Kernel.Instance program id arguments function) (map : Execution.Relocation) (permutation : RegionPermutation)
+    (argumentsAgree : ∀ argument ∈ arguments, map.term argument = permutation.term argument) :
+    function.mapTerms map.term = permutation.function function := by
+  obtain ⟨template,declaration,substitution,found,_,_,instantiated,_,rfl⟩ := selected
+  have lexical := inventory.lexical (List.mem_of_find?_eq_some found)
+  have fixed : template.mapTerms map.term = template :=
+    template.mapTerms_eq_self map.term (fun term member => map.lexical_term term (lexical term member))
+  have substitutionAgree : map.substitution substitution = permutation.substitution substitution := by
+    simp only [Execution.Relocation.substitution,RegionPermutation.substitution]
+    apply List.map_congr_left
+    intro entry member
+    rw [instantiated.2.2] at member
+    exact congrArg (fun term => (entry.1,term)) (argumentsAgree entry.2 (List.of_mem_zip member).2)
+  rw [template.mapTerms_instantiate map.term map.substitution map.term_substitute map.substitution_filter,
+    fixed,permutation.function_instantiate,permutation.lexical_function lexical,substitutionAgree]
 
 end Glorious.Language

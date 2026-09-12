@@ -120,6 +120,17 @@ theorem SnapshotMap.terms_permutation {program : Kernel.Program} {before : State
     terms.map map.term = terms.map (selected.permutation valid).term :=
   List.map_congr_left (fun term member => selected.term_permutation valid (supported term member))
 
+theorem SnapshotMap.instance_function {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program) (world : before.world.WellFormed)
+    (selected : SnapshotMap program before suspension map) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
+    (instantiated : Kernel.Instance program id arguments function)
+    (supported : ∀ term ∈ arguments, term.RuntimeRegionsBelow before.world.nextRegion) :
+    Kernel.Instance program id (arguments.map map.term) (function.mapTerms map.term) := by
+  rw [instantiated.relocation_permutation inventory map (selected.permutation world)
+    (fun term member => selected.term_permutation world (supported term member))]
+  rw [selected.terms_permutation world supported]
+  exact instantiated.permute valid inventory (selected.permutation world)
+
 theorem SnapshotMap.instance_captures {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program) (world : before.world.WellFormed)
     (selected : SnapshotMap program before suspension map) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
@@ -127,12 +138,8 @@ theorem SnapshotMap.instance_captures {program : Kernel.Program} {before : State
     (supported : ∀ term ∈ arguments, term.RuntimeRegionsBelow before.world.nextRegion) :
     ∃ copied, Kernel.Instance program id (arguments.map map.term) copied ∧
       copied.captures.map (·.type) = (function.captures.map (·.type)).map map.term := by
-  have instanced := instantiated.permute valid inventory (selected.permutation world)
-  rw [← selected.terms_permutation world supported] at instanced
-  refine ⟨_,instanced,?_⟩
-  have captures := selected.terms_permutation world (instantiated.capture_runtimeRegionsBelow valid inventory supported)
-  simpa only [RegionPermutation.function,Kernel.Function.mapTerms,Kernel.Function.transformTerms,
-    Kernel.Local.mapTerms,List.map_map,Function.comp_def] using captures.symm
+  refine ⟨_,selected.instance_function valid inventory world instantiated supported,?_⟩
+  simp only [Kernel.Function.mapTerms,Kernel.Function.transformTerms,Kernel.Local.mapTerms,List.map_map,Function.comp_def]
 
 theorem SnapshotMap.operation_instance {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : ProgramWellFormed program.declarations) (world : before.world.WellFormed)
@@ -141,9 +148,9 @@ theorem SnapshotMap.operation_instance {program : Kernel.Program} {before : Stat
     (instantiated : OperationInstance program id arguments operation signature)
     (supported : ∀ term ∈ arguments, term.RuntimeRegionsBelow before.world.nextRegion) :
     ∃ copiedSignature, OperationInstance program id (arguments.map map.term) operation copiedSignature := by
-  obtain ⟨signature,instanced⟩ := instantiated.permute valid (selected.permutation world)
+  have instanced := instantiated.permute valid (selected.permutation world)
   rw [← selected.terms_permutation world supported] at instanced
-  exact ⟨signature,instanced⟩
+  exact ⟨_,instanced⟩
 
 theorem Relocation.value_type (map : Relocation) (value : Value) : (map.value value).type = map.term value.type := by
   cases value

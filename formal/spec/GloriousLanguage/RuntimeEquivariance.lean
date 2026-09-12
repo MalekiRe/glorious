@@ -101,31 +101,38 @@ theorem RegionPermutation.context_involutive (permutation : RegionPermutation) (
   simp only [RegionPermutation.context,List.map_map,Function.comp_def,
     permutation.binder_involutive,permutation.constraint_involutive,List.map_id']
 
-theorem RegionPermutation.constraint_substitute (permutation : RegionPermutation)
+theorem Constraint.mapTerms_substitute (f : Term → Term) (mapped : Substitution → Substitution)
+    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
+    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
+      (mapped substitution).filter (fun entry => keep entry.1))
     (substitution : Substitution) (constraint : Constraint) :
-    permutation.constraint (constraint.substitute substitution) =
-      (permutation.constraint constraint).substitute (permutation.substitution substitution) := by
+    (constraint.substitute substitution).mapTerms f = (constraint.mapTerms f).substitute (mapped substitution) := by
   cases constraint <;>
-    simp only [RegionPermutation.constraint,Constraint.mapTerms,Constraint.substitute,
-      permutation.term_substitute,List.map_map,Function.comp_def]
+    simp only [Constraint.mapTerms,Constraint.substitute,terms,List.map_map,Function.comp_def]
   all_goals try rfl
   case quantified binders requirements =>
     have restricted :
-        (permutation.substitution substitution).filter
+        (mapped substitution).filter
           (fun entry => !(binders.any (fun binder => binder.id == entry.1))) =
-        permutation.substitution (substitution.filter
+        mapped (substitution.filter
           (fun entry => !(binders.any (fun binder => binder.id == entry.1)))) :=
-      (permutation.substitution_filter substitution
+      (filtered substitution
         (fun id => !(binders.any (fun binder => binder.id == id)))).symm
     simp only [List.any_map,Function.comp_def,restricted,Option.map_map]
     congr 1
     · apply List.map_congr_left
       intro binder _
-      simp only [permutation.term_substitute]
+      simp only [terms]
     · apply List.map_congr_left
       intro requirement _
-      exact permutation.constraint_substitute _ requirement
+      exact requirement.mapTerms_substitute f mapped terms filtered _
 termination_by constraint
+
+theorem RegionPermutation.constraint_substitute (permutation : RegionPermutation)
+    (substitution : Substitution) (constraint : Constraint) :
+    permutation.constraint (constraint.substitute substitution) =
+      (permutation.constraint constraint).substitute (permutation.substitution substitution) :=
+  constraint.mapTerms_substitute permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
 
 theorem RegionPermutation.parameter_origin (permutation : RegionPermutation) {term : Term} {id : Identity} {kind : Kind}
     (same : permutation.term term = .parameter id kind) : term = .parameter id kind := by
@@ -737,20 +744,6 @@ theorem ConstraintsHold.permute {program : Program} (valid : ProgramWellFormed p
   exact ⟨permutation.constraint instantiated,
     permutation.substitute_lexical_constraint (lexical constraint member) substituted,
     entailed.permute valid permutation⟩
-
-theorem Execution.OperationInstance.permute {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
-    {id : DeclId} {arguments : List Term} {operation : OperationDefinition} {signature : Signature}
-    (selected : Execution.OperationInstance program id arguments operation signature) (permutation : RegionPermutation) :
-    ∃ copiedSignature, Execution.OperationInstance program id (arguments.map permutation.term) operation copiedSignature := by
-  obtain ⟨substitution,found,instantiated,requirements,_⟩ := selected
-  have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.operation_lookup found))
-  refine ⟨operation.signature.instantiate (permutation.substitution substitution),permutation.substitution substitution,
-    found,instantiated.permute permutation,?_,rfl⟩
-  apply requirements.permute valid _ permutation
-  intro constraint member term present
-  have nested : term ∈ operation.signature.constraints.flatMap Constraint.terms :=
-    List.mem_flatMap.mpr ⟨constraint,member,present⟩
-  exact lexical term (by simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,nested,or_true,true_or])
 
 theorem RegionPermutation.substitutes_variants (permutation : RegionPermutation) {substitution : Substitution}
     {variants : List VariantDefinition} {types : List (List Term)}

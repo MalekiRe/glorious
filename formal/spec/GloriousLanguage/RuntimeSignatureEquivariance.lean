@@ -87,16 +87,23 @@ theorem Signature.mapTerms_congr (first second : Term → Term) (signature : Sig
 def RegionPermutation.signature (permutation : RegionPermutation) (signature : Signature) : Signature :=
   signature.mapTerms permutation.term
 
-theorem RegionPermutation.signature_instantiate (permutation : RegionPermutation)
+theorem Signature.mapTerms_instantiate (f : Term → Term) (mapped : Substitution → Substitution)
+    (terms : ∀ substitution term, f (term.substitute substitution) = (f term).substitute (mapped substitution))
+    (filtered : ∀ substitution (keep : Identity → Bool), mapped (substitution.filter (fun entry => keep entry.1)) =
+      (mapped substitution).filter (fun entry => keep entry.1))
     (signature : Signature) (substitution : Substitution) :
-    permutation.signature (signature.instantiate substitution) =
-      (permutation.signature signature).instantiate (permutation.substitution substitution) := by
-  simp only [RegionPermutation.signature,Signature.mapTerms,Signature.instantiate,List.map_nil,
-    List.map_map,Function.comp_def,permutation.term_substitute]
+    (signature.instantiate substitution).mapTerms f = (signature.mapTerms f).instantiate (mapped substitution) := by
+  simp only [Signature.mapTerms,Signature.instantiate,List.map_nil,List.map_map,Function.comp_def,terms]
   congr 1
   apply List.map_congr_left
   intro constraint _
-  exact permutation.constraint_substitute substitution constraint
+  exact constraint.mapTerms_substitute f mapped terms filtered substitution
+
+theorem RegionPermutation.signature_instantiate (permutation : RegionPermutation)
+    (signature : Signature) (substitution : Substitution) :
+    permutation.signature (signature.instantiate substitution) =
+      (permutation.signature signature).instantiate (permutation.substitution substitution) :=
+  signature.mapTerms_instantiate permutation.term permutation.substitution permutation.term_substitute permutation.substitution_filter substitution
 
 theorem RegionPermutation.lexical_signature (permutation : RegionPermutation) {signature : Signature}
     (lexical : ∀ term ∈ signature.terms, term.Lexical) : permutation.signature signature = signature := by
@@ -130,6 +137,19 @@ theorem Typing.CallSignature.permute {program : Program} (valid : ProgramWellFor
         simp only [Signature.terms,List.mem_append,List.mem_cons]
         exact Or.inl (Or.inr (List.mem_flatMap.mpr ⟨constraint,member,present⟩)))) permutation,?_⟩
     rw [permutation.signature_instantiate,permutation.lexical_signature signatureLexical]
+
+theorem Execution.OperationInstance.permute {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
+    {id : DeclId} {arguments : List Term} {operation : OperationDefinition} {signature : Signature}
+    (selected : Execution.OperationInstance program id arguments operation signature) (permutation : RegionPermutation) :
+    Execution.OperationInstance program id (arguments.map permutation.term) operation (permutation.signature signature) := by
+  obtain ⟨substitution,found,instantiated,requirements,rfl⟩ := selected
+  have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.operation_lookup found))
+  refine ⟨permutation.substitution substitution,found,instantiated.permute permutation,?_,?_⟩
+  · simpa only [RegionPermutation.context,List.map_nil] using requirements.permute valid (fun constraint member term present => lexical term (by
+      have nested : term ∈ operation.signature.constraints.flatMap Constraint.terms := List.mem_flatMap.mpr ⟨constraint,member,present⟩
+      simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,nested,or_true,true_or])) permutation
+  · rw [permutation.signature_instantiate,permutation.lexical_signature (fun term member => lexical term (by
+      simpa only [Definition.terms] using member))]
 
 theorem ScopeInstantiation.term_renameRuntimeRegions (scope : ScopeInstantiation) (rename : Identity → Identity)
     (term : Term) :
