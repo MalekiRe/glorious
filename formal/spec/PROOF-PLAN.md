@@ -45,11 +45,16 @@ transfer and loan ending preserve the new loan sub-invariants. `StorageTyping`
 now proves agreement of all resident field forms with the same `FieldOffset`
 product, using declaration well-formedness and the shared body inventory.
 Arbitrary-path clear/install proofs compose into typing of every resulting
-transfer resident, including changed ancestor trees. Whole-world ownership
-validity and machine preservation remain open.
-`PreservationChecks` supplies a well-formed typed initial world and real
-whole-root and nested move-and-restore executions with a surviving unique handle;
-it does not establish source-program admission.
+transfer resident, including changed ancestor trees. `TransferPreservation`
+derives resident origins from the actual writes, proves owner uniqueness and
+all world metadata/loan invariants, and establishes `Transfers.wellFormed` and
+`Transfers.worldTyped` for arbitrary storage paths. Neither theorem assumes a
+safe post-state or resource admission. Other storage operations and machine
+preservation remain open.
+The existing `PreservationChecks` examples apply these results to whole-root
+and nested move-and-restore executions; they are not the general soundness proof
+or evidence of source-program admission. Following the current working method,
+further work prioritizes general obligations, not additional examples.
 
 ## 2. Source and normative adequacy
 

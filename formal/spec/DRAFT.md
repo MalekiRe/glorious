@@ -505,3 +505,23 @@ This completes the resident-typing component, not whole-world preservation:
 owner uniqueness, metadata invariants and full root agreement still need their
 composed transfer proofs. Machine validity, replay/cancellation, derived resource
 admission, progress and source-admitted nonvacuity remain open.
+
+## General whole-world transfer preservation
+
+`TransferPreservation.lean` closes the transfer boundary for arbitrary paths.
+`Transfers.wellFormed` derives all world invariants from the pre-state invariant
+and the actual clear/install relation. Its resident-origin proof derives a
+deterministic location change from those writes, establishing owner uniqueness
+and transporting resident binding metadata. Root identity, physical storage,
+freshness bounds, availability and loan invariants are preserved as well.
+`Transfers.worldTyped` combines this result with resident typing and root-type
+agreement, including unchanged dead roots. It requires declaration
+well-formedness and the shared body inventory, not resource admission or an
+assumed safe post-state. These are general Lean-verified theorems, independent
+of the concrete examples already present.
+
+The next soundness boundary is replay/cancellation and its control-state
+invariant. Snapshot copying still assumes its resulting world's invariant;
+that premise must be derived from the source state and actual relocation.
+Other storage transitions, whole-machine preservation/progress, compositional
+resource admission and normative adequacy remain unfinished.

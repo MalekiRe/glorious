@@ -1,4 +1,4 @@
-import GloriousLanguage.Preservation
+import GloriousLanguage.TransferPreservation
 
 /-! Nonvacuous storage witnesses for the preservation proof. In particular,
 an extant unique reference survives a real move-and-restore sequence. -/
@@ -170,6 +170,23 @@ example (program : Kernel.Program) (valid : ProgramWellFormed program.declaratio
     ∀ address value, moved.Resident address value → Typing.ValueTyped program moved value :=
   ((move program.declarations).typed_residents valid inventory (worldTyped program)).1
 
+example (program : Kernel.Program) (valid : ProgramWellFormed program.declarations)
+    (inventory : BodyInventory program) : Typing.WorldTyped program moved ∧ Typing.WorldTyped program world := by
+  have movedTyped := (move program.declarations).worldTyped valid inventory (worldTyped program)
+  exact ⟨movedTyped,(restore program.declarations).worldTyped valid inventory movedTyped⟩
+
+private def duplicated : World := { world with roots := world.roots.set 1 sourceRoot }
+
+/-- Copying the bytes/tree without clearing the source would duplicate the
+same logical owner, despite both unit residents being well typed. -/
+example : world.write destination (some unitValue) = some duplicated ∧ ¬ duplicated.WellFormed := by
+  refine ⟨rfl,?_⟩
+  intro valid
+  have sourceResident : duplicated.Resident source unitValue := ⟨sourceRoot,unitValue,rfl,rfl,rfl,rfl,.root⟩
+  have destinationResident : duplicated.Resident destination unitValue := ⟨sourceRoot,unitValue,rfl,rfl,rfl,rfl,.root⟩
+  have impossible := valid.2.2.2.2.2.2.2.1 source destination unitValue unitValue sourceResident destinationResident rfl
+  cases impossible
+
 private def cyclic : World := { world with loans := [(0,{ loan with parent := some 0 })] }
 
 example : ¬ cyclic.WellFormed := by
@@ -267,6 +284,115 @@ private theorem rootsTyped (program : Kernel.Program) :
     subst value
     exact ⟨referenceTyped program,rfl⟩
 
+private theorem occupants {address value} (resident : world.Resident address value) :
+    (address = ⟨0,0,[]⟩ ∧ value = outer) ∨ (address = ⟨0,0,[0]⟩ ∧ value = inner) ∨
+    (address = source ∧ value = unitValue) ∨ (address = handle ∧ value = referenceValue) := by
+  rcases address with ⟨id,generation,path⟩
+  rcases resident with ⟨resident,whole,found,_,generations,contents,inside⟩
+  have member := Table.mem_of_get found
+  simp [world] at member
+  rcases member with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩
+  · have wholeEq : whole = outer := by simpa [root] using contents.symm
+    have generationEq : generation = 0 := generations
+    subst whole generation
+    have located := ResidentAt.iff_atPath.mp inside
+    cases path with
+    | nil =>
+        have same : value = outer := Option.some.inj located.symm
+        exact Or.inl ⟨rfl,same⟩
+    | cons index path =>
+        cases index with
+        | zero =>
+            have innerLocated : inner.atPath path = some value := located
+            cases path with
+            | nil => exact Or.inr (Or.inl ⟨rfl,Option.some.inj innerLocated.symm⟩)
+            | cons index path =>
+                cases index with
+                | zero =>
+                    have unitLocated : unitValue.atPath path = some value := innerLocated
+                    have unitResident := ResidentAt.iff_atPath.mpr unitLocated
+                    obtain ⟨rfl,rfl⟩ := leaf rfl unitResident
+                    exact Or.inr (Or.inr (Or.inl ⟨rfl,rfl⟩))
+                | succ index => simp [Value.atPath,inner,Value.fields] at innerLocated
+        | succ index =>
+            cases index <;> simp [Value.atPath,outer,Value.fields] at located
+  · have wholeEq : whole = referenceValue := by simpa [handleRoot] using contents.symm
+    have generationEq : generation = 0 := generations
+    subst whole generation
+    obtain ⟨rfl,rfl⟩ := leaf rfl inside
+    exact Or.inr (Or.inr (Or.inr ⟨rfl,rfl⟩))
+
+private theorem rootCases {id resident} (found : world.roots.get id = some resident) :
+    (id = 0 ∧ resident = root) ∨ (id = 2 ∧ resident = handleRoot) := by
+  have member := Table.mem_of_get found
+  simpa [world] using member
+
+private theorem worldValid : world.WellFormed := by
+  refine ⟨by simp [world,Table.Unique],by simp [world,Table.Unique],by simp [world,PreservationChecks.world,Table.Unique],
+    by decide,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+  · intro id available found
+    simp [world,PreservationChecks.world,Table.get] at found
+  · intro address value pack resident head
+    rcases occupants resident with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> cases head
+  · intro address value resident
+    rcases occupants resident with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> decide
+  · intro a b left right first second same
+    rcases occupants first with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;>
+      rcases occupants second with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> first | rfl | cases same
+  · intro id resident found
+    rcases rootCases found with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;>
+      simp [world,PreservationChecks.world,root,sourceRoot,handleRoot,Layout.Valid,PowerOfTwo] <;>
+      first | exact ⟨0,rfl⟩ | exact ⟨3,rfl⟩
+  · intro region member
+    simp [world,PreservationChecks.world] at member
+    subst region
+    decide
+  · intro id resident found _
+    rcases rootCases found with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> decide
+  · intro a b left right first second different _ _
+    rcases rootCases first with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;>
+      rcases rootCases second with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;>
+      first | exact False.elim (different rfl) | exact Or.inl rfl | exact Or.inr (Or.inl rfl)
+  · intro id resident found
+    have member := Table.mem_of_get found
+    simp [world] at member
+    obtain ⟨rfl,rfl⟩ := member
+    exact ⟨rfl,by decide,fun _ => ⟨by decide,by decide⟩⟩
+  · intro address value id resident head
+    rcases occupants resident with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩
+    · cases head
+    · cases head
+    · cases head
+    · have same : id = 0 := by cases head; rfl
+      subst id
+      exact ⟨loan,rfl,rfl⟩
+  · intro a b left right first second _ _ _ _
+    have firstMember := Table.mem_of_get first
+    have secondMember := Table.mem_of_get second
+    simp [world] at firstMember secondMember
+    obtain ⟨rfl,rfl⟩ := firstMember
+    obtain ⟨rfl,rfl⟩ := secondMember
+    exact Or.inl .refl
+  · intro id resident parent found selected
+    have member := Table.mem_of_get found
+    simp [world] at member
+    obtain ⟨rfl,rfl⟩ := member
+    cases selected
+  · intro id resident found _
+    have member := Table.mem_of_get found
+    simp [world] at member
+    obtain ⟨rfl,rfl⟩ := member
+    exact Or.inl ⟨unitValue,rfl⟩
+
+private theorem worldTyped (program : Kernel.Program) : Typing.WorldTyped program world := by
+  refine ⟨worldValid,?_,?_⟩
+  · intro address value resident
+    exact World.stores_typed (rootsTyped program) (World.resident_iff_stores.mp resident)
+  · intro id resident value found contents
+    have live : resident.live = true := by
+      rcases rootCases found with ⟨_,rfl⟩ | ⟨_,rfl⟩ <;> rfl
+    exact (rootsTyped program id resident value found live contents).2
+
 /-- These are the actual two writes of the nested move, including a changed
 parent two levels above the source. No post-state typing is supplied. -/
 example (program : Kernel.Program) (valid : ProgramWellFormed program.declarations)
@@ -317,6 +443,13 @@ private theorem restore (program : Language.Program) : Transfers program moved .
   simp [moved,world] at member
   obtain ⟨rfl,rfl⟩ := member
   simp [Address.Overlaps,source,destination,loan] at overlap
+
+example (program : Kernel.Program) (valid : ProgramWellFormed program.declarations)
+    (inventory : BodyInventory program) : Typing.WorldTyped program moved ∧ Typing.WorldTyped program world := by
+  have movedTyped := (move program.declarations).worldTyped valid inventory (worldTyped program)
+  exact ⟨movedTyped,(restore program.declarations).worldTyped valid inventory movedTyped⟩
+
+example (program : Language.Program) : moved.WellFormed := (move program).wellFormed worldValid
 
 /-- Both endpoints are fields of one root; the source lies two levels deep.
 Its live unique handle survives the hole and the restoring owner transfer. -/
