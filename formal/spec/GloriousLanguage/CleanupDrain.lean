@@ -678,3 +678,56 @@ namespace Glorious.Language
 open Kernel
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Ending one loan leaves a destructible resident destructible: the ending
+only kills a row, so the owning permission's exclusion still holds (a raw-table
+clause), and every pending-return clause reading a living row reads an earlier
+living row through the relinquishment frame. -/
+theorem World.Destroys.end_loan {program : RuntimeProgram} {world : World} {address : Address}
+    (tree : World.Destroys program world address) {id : Identity} {loan : Loan}
+    (found : world.loans.get id = some loan) :
+    World.Destroys program { world with loans := world.loans.set id { loan with live := false } } address := by
+  revert found
+  induction tree with
+  | @resident addressTree value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+    intro found
+    refine .resident stored disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_
+    · refine ⟨?_,fun key row selected live overlap conflict => ?_⟩
+      · obtain ⟨root,rootFound⟩ := permission.1
+        exact ⟨root,by simpa only [World.root] using rootFound⟩
+      · by_cases same : key = id
+        · have selectedSet : (world.loans.set id { loan with live := false }).get key = some row := selected
+          rw [same] at selectedSet
+          rw [Table.get_set] at selectedSet
+          cases selectedSet
+          exact absurd live (by simp)
+        · have selectedSet : (world.loans.set id { loan with live := false }).get key = some row := selected
+          exact permission.2 key row (by rw [Table.get_set_other _ _ _ _ same] at selectedSet; exact selectedSet)
+            live overlap conflict
+    · intro key row selected live
+      obtain ⟨previous,previousFound,sameKind,_,_,_,previousLive⟩ :=
+        World.RequestReturns.frame_set (custody := .resident value.owner) (key := key) (row := row)
+          found selected
+      rw [← sameKind]
+      exact kinds key previous previousFound (previousLive live)
+    · intro key row selected
+      obtain ⟨previous,previousFound,_,_,sameParent,sameGuards,_⟩ :=
+        World.RequestReturns.frame_set (custody := .resident value.owner) (key := key) (row := row)
+          found selected
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have linkPrevious : previous.parent = some parent := by rw [sameParent]; exact link
+        have held := (ancestry key previous previousFound).1 parent linkPrevious
+        intro missing
+        exact held (World.RequestReturns.frame_set_none (custody := .resident value.owner) found missing)
+      · have memberPrevious : guard ∈ previous.guards := by rw [sameGuards]; exact member
+        have held := (ancestry key previous previousFound).2 guard memberPrevious
+        intro missing
+        exact held (World.RequestReturns.frame_set_none (custody := .resident value.owner) found missing)
+    · intro index child selectedTree
+      exact ih index child selectedTree found
+
+end Glorious.Language

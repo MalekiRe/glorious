@@ -291,9 +291,11 @@ or a dependency of this project.
   `World.RequestReturns.frame_set`/`frame_set_none` show an ending row commutes
   with that map (every other row untouched; at the ended identity the restamping
   decision reads only the custody and the kind, neither of which an ending
-  changes). Still to write: the kill transport (`World.Destroys.end_loan`) on top
-  of that frame, the `Retires` transport, the reversed-index field loop and the
-  recursion theorem itself.
+  changes). `World.Destroys.end_loan` is the kill transport on top of that frame:
+  an ending only kills a row, so the owning permission's raw-table exclusion and
+  the pending-return clauses still hold (the latter read earlier living rows
+  through `frame_set`/`frame_set_none`). Still to write: the `Retires` transport,
+  the reversed-index field loop and the recursion theorem itself.
 - `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
   `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
   and `source_execution` now take a `Typing.ScopeReading` indexed by the actual
