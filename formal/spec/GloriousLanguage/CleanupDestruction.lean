@@ -242,10 +242,11 @@ theorem CleanupRun.shell_done_exists {program : Kernel.Program} {host : Foreign.
     (cleared : ∀ field ∈ value.fields, field = none)
     (permission : Permitted before.world authority .owned address)
     (handed : before.world.CustodyHandedOff (.resident value.owner)) :
-    ∃ after, CleanupRun program host before [.destroy address value.owner]
-      ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
+    ∃ after, (before.world.RequestReturns (.resident value.owner)).write address none = some after ∧
+      CleanupRun program host before [.destroy address value.owner]
+        ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
   obtain ⟨after,written⟩ := World.Stores.requestReturns_write_exists stored (.resident value.owner)
-  exact ⟨after,CleanupRun.shell_done task stored cleared permission handed written⟩
+  exact ⟨after,written,CleanupRun.shell_done task stored cleared permission handed written⟩
 
 /-! ## Real loan-ending outcomes -/
 
@@ -355,8 +356,9 @@ theorem CleanupRun.destroy_shell {program : Kernel.Program} {host : Foreign.Mode
     (holes : ∀ index, index < value.fields.length → value.fields[index]? = some none)
     (permission : Permitted before.world authority .owned address)
     (handed : before.world.CustodyHandedOff (.resident value.owner)) :
-    ∃ after, CleanupRun program host before [.destroy address value.owner]
-      ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
+    ∃ after, (before.world.RequestReturns (.resident value.owner)).write address none = some after ∧
+      CleanupRun program host before [.destroy address value.owner]
+        ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
   have structural : Step program host before none
       { before with task := .destroyFields context address authority ((List.range value.fields.length).reverse) next } :=
     Or.inl (LocalStep.destroyStructural task stored disposable permission shell noContinuation noReference noAvailable)
@@ -369,9 +371,9 @@ theorem CleanupRun.destroy_shell {program : Kernel.Program} {host : Foreign.Mode
       { before with task := .destroyFields context address authority ((List.range value.fields.length).reverse) next } []
       { before with task := .finishShell address authority next } :=
     CleanupRun.destroy_fields_holes rfl vacant
-  obtain ⟨after,finish⟩ := CleanupRun.shell_done_exists (before := { before with task := .finishShell address authority next })
+  obtain ⟨after,written,finish⟩ := CleanupRun.shell_done_exists (before := { before with task := .finishShell address authority next })
     rfl stored (List.eq_none_of_getElem? holes) permission handed
-  exact ⟨after,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish)⟩
+  exact ⟨after,written,.silent (by simp [Task.Cleanup,task]) structural (fields.append finish)⟩
 
 /-- The whole non-vacant structural destruction of one captured root, with the
 real machine steps: the captured shell is structurally destroyed field by
