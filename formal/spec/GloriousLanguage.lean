@@ -17,3 +17,7 @@ import GloriousLanguage.EffectPreservation
 import GloriousLanguage.MemoryPreservation
 import GloriousLanguage.FloatProgress
 import GloriousLanguage.RuntimeSignatureEquivariance
+import GloriousLanguage.RuntimeCodeEquivariance
+import GloriousLanguage.SnapshotControlTyping
+import GloriousLanguage.ScalarExecution
+import GloriousLanguage.ExecutionPreservation

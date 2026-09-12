@@ -145,6 +145,56 @@ structure Function where
   namedExit : Option Identity
   deriving Repr, Inhabited
 
+def Pattern.terms : Pattern → List Term
+  | .wildcard | .scalar _ | .unit => []
+  | .bind localSlot => [localSlot.type]
+  | .tuple fields | .array fields | .constructor _ fields => fields.flatMap Pattern.terms
+  | .reference _ pattern => pattern.terms
+
+def Atom.terms : Atom → List Term
+  | .constant value | .borrow _ _ value | .construct value _ _ | .label value => [value]
+  | .closure _ arguments captures => arguments ++ captures.map (·.type)
+  | .function _ arguments | .primitive _ arguments _ => arguments
+  | .operation _ family item => family ++ item
+  | .acquire _ _ | .available _ | .bindings _ => []
+
+def Invocation.terms (call : Invocation) : List Term :=
+  call.signature.terms ++ call.environment.toList.flatMap (fun access => [access.region,access.after])
+
+mutual
+  /-- Complete lexical-template terms, including patterns, nested handler
+  clauses, invocation contracts and binder defaults in their signatures. -/
+  def Code.terms : Code → List Term
+    | .result _ | .abort => []
+    | .bind localSlot atom next => localSlot.type :: (atom.terms ++ next.terms)
+    | .evaluate localSlot value next => localSlot.type :: (value.terms ++ next.terms)
+    | .assign _ _ next | .discard _ next | .scope _ next | .endLoan _ next |
+      .unsafeScope next | .closeAvailable _ next => next.terms
+    | .invoke localSlot call next => localSlot.type :: (call.terms ++ next.terms)
+    | .tail call => call.terms
+    | .label _ _ result body => result :: body.terms
+    | .choose _ arms => arms.flatMap Arm.terms
+    | .handle _ computation handler => computation.terms ++ handler.terms
+    | .test localSlot _ pattern _ next => localSlot.type :: (pattern.terms ++ next.terms)
+    | .reserve localSlot _ _ next => localSlot.type :: next.terms
+
+  def Arm.terms : Arm → List Term
+    | .clause pattern body => pattern.terms ++ body.terms
+
+  def OperationArm.terms : OperationArm → List Term
+    | .clause _ family item patterns continuation body =>
+        family ++ item ++ patterns.flatMap Pattern.terms ++ continuation.toList.map (·.type) ++ body.terms
+
+  def Handler.terms : Handler → List Term
+    | .attached result completion operations captures =>
+        result :: (completion.flatMap Arm.terms ++ operations.flatMap OperationArm.terms ++ captures.map (·.type))
+end
+
+def Function.terms (function : Function) : List Term :=
+  function.signature.terms ++ function.parameters.map (·.type) ++ function.captures.map (·.type) ++ function.body.terms
+
+def Function.Lexical (function : Function) : Prop := ∀ term ∈ function.terms, term.Lexical
+
 structure Program where
   declarations : Language.Program
   functions : List Function
@@ -160,7 +210,8 @@ def BodyInventory (program : Program) : Prop :=
     function.signature = declaration.signature ∧ function.parameters.map (·.id) = declaration.parameters ∧
     function.captures.map (·.type) = declaration.captures) ∧
   (∀ declaration anchor, program.declarations.function declaration.header.id = some declaration → declaration.origin = .source anchor →
-    ∃ function ∈ program.functions, function.declaration = declaration.header.id)
+    ∃ function ∈ program.functions, function.declaration = declaration.header.id) ∧
+  (∀ function ∈ program.functions, function.Lexical)
 
 structure Binding where
   localSlot : Identity

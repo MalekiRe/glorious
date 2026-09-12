@@ -738,42 +738,6 @@ theorem ConstraintsHold.permute {program : Program} (valid : ProgramWellFormed p
     permutation.substitute_lexical_constraint (lexical constraint member) substituted,
     entailed.permute valid permutation⟩
 
-theorem Kernel.Instance.permute_captures {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
-    (inventory : Kernel.BodyInventory program) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
-    (selected : Kernel.Instance program id arguments function) (permutation : RegionPermutation) :
-    ∃ copied, Kernel.Instance program id (arguments.map permutation.term) copied ∧
-      copied.captures.map (·.type) = (function.captures.map (·.type)).map permutation.term := by
-  rcases selected with ⟨template,declaration,substitution,body,signature,agrees,instantiated,requirements,rfl⟩
-  have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.function_lookup signature))
-  have copiedInstance : Kernel.Instance program id (arguments.map permutation.term)
-      (template.instantiate (permutation.substitution substitution)) := by
-    refine ⟨template,declaration,permutation.substitution substitution,body,signature,agrees,
-      instantiated.permute permutation,?_,rfl⟩
-    apply requirements.permute valid _ permutation
-    intro constraint member term present
-    rw [agrees] at member
-    have nested : term ∈ declaration.signature.constraints.flatMap Constraint.terms :=
-      List.mem_flatMap.mpr ⟨constraint,member,present⟩
-    exact lexical term (by simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,nested,or_true,true_or])
-  refine ⟨_,copiedInstance,?_⟩
-  have member : template ∈ program.functions := List.mem_of_find?_eq_some body
-  have identity : template.declaration = id := by
-    have matching := List.find?_some body
-    change (template.declaration.package == id.package && template.declaration.serial == id.serial) = true at matching
-    simp only [Bool.and_eq_true,beq_iff_eq] at matching
-    cases identity : template.declaration
-    cases id
-    simp_all
-  obtain ⟨other,otherFound,_,_,captures⟩ := inventory.2.1 template member
-  have otherEq : other = declaration := Option.some.inj ((identity ▸ otherFound).symm.trans signature)
-  subst other
-  simp only [Kernel.Function.instantiate,Kernel.Local.mapTerms,List.map_map,Function.comp_def]
-  apply List.map_congr_left
-  intro capture present
-  rw [permutation.term_substitute,permutation.lexical_term (lexical capture.type (by
-    simp only [Definition.terms,List.mem_append]
-    exact Or.inl (Or.inr (captures ▸ List.mem_map.mpr ⟨capture,present,rfl⟩))))]
-
 theorem Execution.OperationInstance.permute {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
     {id : DeclId} {arguments : List Term} {operation : OperationDefinition} {signature : Signature}
     (selected : Execution.OperationInstance program id arguments operation signature) (permutation : RegionPermutation) :

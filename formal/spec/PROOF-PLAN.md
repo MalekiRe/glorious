@@ -272,6 +272,51 @@ context-commutation proofs in `RuntimeSignatureEquivariance` reach actual
 continuation-frame transport remain open; those require lexical body support
 and transport of the semantic coverage obligations, not assumed stability.
 
+The lexical body boundary is now closed through the actual callable consumer.
+`BodyInventory` checks the complete function-template term projection, including
+nested bodies, patterns and invocation contracts. Generic instantiation and
+runtime relocation share one structural syntax transformation, with their
+distinct signature actions explicit; the duplicate relocation walker is gone.
+`RuntimeCodeEquivariance` proves exact `Instance.permute`, including the complete
+body, and `SnapshotWorldTyping` consumes it in place of the former captures-only
+instance theorem. Full `CodeType`, pattern coverage and continuation-frame
+transport still require proof; exact instance transport is not their conclusion.
+
+`FloatDeterminism` proves uniqueness of nearest-even rounding, all floating
+calculations (including rational square-root isolation and fused operations),
+and conversion outcomes. `ScalarStorageProgress` constructs the actual vacant
+destination write and derives scalar observations from typed, initialized,
+permitted resident inputs. `ScalarMachine` and `ScalarExecution` compose this
+with all scalar calculations and storage preservation: every lawful scalar
+task has exactly one actual executable normal/fatal step and a typed post-world.
+No calculated result, write witness or typed output is assumed. Deriving those
+lawful task inputs from source/control typing, general non-scalar progress and
+checked source-library result construction remain open.
+
+Foreign calls now carry an immutable selected invocation and thread one ambient
+host state through nested callbacks. The host's declared session protocol and
+actual storage mutations replace the old arbitrary post-world transition.
+`ForeignPreservation` derives every foreign step's world typing from existing
+allocation, copy, borrow, construction, raw-memory and lifecycle producers.
+Registrations refer to the actual callable owner, with evolving runtime and
+registration liveness; captures use the common invocation input relation.
+Lent callbacks obtain real child loans, excluding conflicting re-entry through
+their parent authority, and end the reference handle before restoring that
+parent. Normal result transfer preserves active registered owners, and retained
+owners are excluded from actual source activation/scope cleanup. Full registry
+preservation across arbitrary source callback execution and callback/cleanup
+progress still depend on the complete control-state invariant.
+
+`ExecutionPreservation` now proves `Step.worldTyped` for the sole executable
+relation with all six transition families, and `Run.worldTyped` for every
+finite execution prefix under the host's mutation/protocol laws. This closes
+full storage preservation without resource admission or any typed-post-state
+premise. It does not close semantic soundness: task/frame preservation,
+ownership/lifetime progress, source admission and resource completion remain
+active. In particular, ordinary/contextual invocation still needs the common
+real-loan producer integrated with callee-owned lifetimes, including proper-tail
+entry; merely wrapping owner authority as lent is not an adequate contract.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

@@ -44,9 +44,7 @@ def Context.term (context : Context) := context.instantiation.term
 def Context.local (context : Context) (localSlot : Local) := localSlot.mapTerms context.term
 
 def Context.invocation (context : Context) (call : Invocation) : Invocation :=
-  { call with
-    signature := call.signature.close context.instantiation
-    environment := call.environment.map (EnvironmentAccess.mapTerms context.term) }
+  call.mapTerms context.term
 
 structure InstalledHandler where
   identity : Identity
@@ -54,6 +52,29 @@ structure InstalledHandler where
   environment : Context
   computation : Context
   outer : Context
+  deriving Repr, Inhabited
+
+/-- Immutable selected foreign invocation. Callback results are protocol
+messages, never additional operands of the original call. -/
+structure ForeignCall where
+  context : Context
+  destination : Address
+  binding : RuntimeBinding
+  arguments : List Term
+  signature : Signature
+  operands : List Address
+  deriving Repr, Inhabited
+
+structure ForeignSession where
+  call : ForeignCall
+  state : List Nat
+  deriving Repr, Inhabited
+
+/-- The ordinary reference owner and loan that delimit one lent receiver.
+The owner context is supplied by the invocation's actual lifetime boundary. -/
+structure ReceiverLease where
+  handle : Address
+  loan : Identity
   deriving Repr, Inhabited
 
 inductive Task where
@@ -80,8 +101,7 @@ inductive Task where
   | leave (context : Context) (brand : Identity) (argument : ResolvedPlace)
   | primitive (context : Context) (destination : Address) (binding : RuntimeBinding)
       (arguments : List Term) (operands : List ResolvedPlace) (next : Code)
-  | foreign (context : Context) (destination : Address) (binding : RuntimeBinding)
-      (operands : List Address) (hostState : List Nat) (next : Code)
+  | foreign (session : ForeignSession) (next : Code)
   | stopped (result : Address)
   | fatal (reason : Fatal)
   deriving Repr, Inhabited
@@ -100,8 +120,8 @@ inductive Frame where
   | hook (context : Context) (address : Address) (authority : Authority)
       (handle : Address) (loan : Identity) (next : Task)
   | foreign (identity : Identity)
-  | hostCallback (context : Context) (destination : Address) (binding : RuntimeBinding)
-      (operands : List Address) (hostState : List Nat) (next : Code)
+  | hostCallback (session : ForeignSession) (registration : Identity) (resultType : Term)
+      (lease : Option ReceiverLease) (next : Code)
   deriving Repr, Inhabited
 
 def Frame.ownedRegions : Frame → List Identity
@@ -130,6 +150,9 @@ structure Suspension where
 structure State where
   world : World
   task : Task
+  /-- Ambient external state is not part of a captured continuation. Foreign
+  calls and nested callbacks thread it forward through the same execution. -/
+  hostState : List Nat := []
   frames : List Frame := []
   resumptions : Table Suspension := []
   nextActivation : Identity := 0
@@ -181,6 +204,32 @@ def Temporary (program : Kernel.Program) (context : Context) (type : Term)
     (before : World) (address : Address) (after : World) : Prop :=
   ∃ layout, Allocates program.declarations before (.temporary context.activation context.scope)
     context.region type layout true address after
+
+/-- A lent receiver gets a real child loan. The supplied owner context may be
+a fresh callee activation for tail entry; it is not implicitly the caller's
+soon-to-be-retired storage. Captures consume the resulting loan authority. -/
+inductive LendsReceiver (program : Kernel.Program) (leaseContext : Context) :
+    World → Address → Authority → Access → Option ReceiverLease → Authority → World → Prop where
+  | owned {world receiver authority} :
+      LendsReceiver program leaseContext world receiver authority .owned none authority world
+  | lent {before receiver authority access mode value handle allocated after} :
+      (access = .shared ∧ mode = .shared ∨ access = .unique ∧ mode = .unique) →
+      before.Stores receiver value →
+      Temporary program leaseContext (.reference mode (.runtimeRegion leaseContext.region) value.type)
+        before handle allocated →
+      Borrows program.declarations allocated authority mode leaseContext.region receiver handle after →
+      LendsReceiver program leaseContext before receiver authority access
+        (some ⟨handle,allocated.nextLoan⟩) (.loan allocated.nextLoan) after
+
+/-- Ending a receiver lease consumes its actual reference owner, restores the
+parent only after all child loans end, and retires the now-vacant handle root. -/
+inductive EndsReceiverLease : World → Option ReceiverLease → World → Prop where
+  | none {world} : EndsReceiverLease world none world
+  | some {before lease value cleared ended after} :
+      before.Stores lease.handle value → value.head = .reference lease.loan →
+      Permitted before .owner .owned lease.handle → before.write lease.handle none = some cleared →
+      EndsLoan cleared lease.loan ended → Retires ended lease.handle.root after →
+      EndsReceiverLease before (some lease) after
 
 def Protect (program : Kernel.Program) (outer : Context) (before : World)
     (source : Address) (authority : Authority) (destination : Address) (after : World) : Prop :=

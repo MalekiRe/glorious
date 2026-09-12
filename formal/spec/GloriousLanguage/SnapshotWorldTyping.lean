@@ -1,5 +1,5 @@
 import GloriousLanguage.SnapshotTyping
-import GloriousLanguage.RuntimeEquivariance
+import GloriousLanguage.RuntimeCodeEquivariance
 
 /-! The copied world's typing follows from the actual finite copy, lexical
 declarations, and the input scope closure of retained external referents. -/
@@ -127,10 +127,12 @@ theorem SnapshotMap.instance_captures {program : Kernel.Program} {before : State
     (supported : ∀ term ∈ arguments, term.RuntimeRegionsBelow before.world.nextRegion) :
     ∃ copied, Kernel.Instance program id (arguments.map map.term) copied ∧
       copied.captures.map (·.type) = (function.captures.map (·.type)).map map.term := by
-  obtain ⟨copied,instanced,captures⟩ := instantiated.permute_captures valid inventory (selected.permutation world)
+  have instanced := instantiated.permute valid inventory (selected.permutation world)
   rw [← selected.terms_permutation world supported] at instanced
-  rw [← selected.terms_permutation world (instantiated.capture_runtimeRegionsBelow valid inventory supported)] at captures
-  exact ⟨copied,instanced,captures⟩
+  refine ⟨_,instanced,?_⟩
+  have captures := selected.terms_permutation world (instantiated.capture_runtimeRegionsBelow valid inventory supported)
+  simpa only [RegionPermutation.function,Kernel.Function.mapTerms,Kernel.Function.transformTerms,
+    Kernel.Local.mapTerms,List.map_map,Function.comp_def] using captures.symm
 
 theorem SnapshotMap.operation_instance {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : ProgramWellFormed program.declarations) (world : before.world.WellFormed)

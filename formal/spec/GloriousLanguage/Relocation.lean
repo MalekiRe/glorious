@@ -55,41 +55,12 @@ def Relocation.signature (map : Relocation) (signature : Signature) : Signature 
   signature.mapTerms map.term
 
 def Relocation.invocation (map : Relocation) (call : Invocation) : Invocation :=
-  { call with
-    signature := map.signature call.signature
-    environment := call.environment.map (EnvironmentAccess.mapTerms map.term) }
+  call.mapTerms map.term
 
-mutual
-  def Relocation.code (map : Relocation) : Code → Code
-    | .result value => .result value
-    | .bind localSlot atom next => .bind (localSlot.mapTerms map.term) (atom.mapTerms map.term) (map.code next)
-    | .evaluate localSlot value next => .evaluate (localSlot.mapTerms map.term) (map.code value) (map.code next)
-    | .assign destination value next => .assign destination value (map.code next)
-    | .discard value next => .discard value (map.code next)
-    | .invoke localSlot call next => .invoke (localSlot.mapTerms map.term) (map.invocation call) (map.code next)
-    | .tail call => .tail (map.invocation call)
-    | .scope id body => .scope id (map.code body)
-    | .label brand region result body => .label brand region (map.term result) (map.code body)
-    | .choose subject arms => .choose subject (arms.map map.arm)
-    | .handle id computation handler => .handle id (map.code computation) (map.handlerSyntax handler)
-    | .test localSlot subject pattern id next => .test (localSlot.mapTerms map.term) subject (pattern.mapTerms map.term) id (map.code next)
-    | .endLoan handle next => .endLoan handle (map.code next)
-    | .unsafeScope body => .unsafeScope (map.code body)
-    | .closeAvailable value next => .closeAvailable value (map.code next)
-    | .reserve localSlot brand places next => .reserve (localSlot.mapTerms map.term) brand places (map.code next)
-    | .abort => .abort
-
-  def Relocation.arm (map : Relocation) : Arm → Arm
-    | .clause pattern body => .clause (pattern.mapTerms map.term) (map.code body)
-
-  def Relocation.operationArm (map : Relocation) : OperationArm → OperationArm
-    | .clause id family item patterns continuation body => .clause id (family.map map.term) (item.map map.term)
-        (patterns.map (Pattern.mapTerms map.term)) (continuation.map (Local.mapTerms map.term)) (map.code body)
-
-  def Relocation.handlerSyntax (map : Relocation) : Handler → Handler
-    | .attached result completion operations captures => .attached (map.term result) (completion.map map.arm)
-        (operations.map map.operationArm) (captures.map (Capture.mapTerms map.term))
-end
+def Relocation.code (map : Relocation) : Code → Code := Code.mapTerms map.term
+def Relocation.arm (map : Relocation) : Arm → Arm := Arm.mapTerms map.term
+def Relocation.operationArm (map : Relocation) : OperationArm → OperationArm := OperationArm.mapTerms map.term
+def Relocation.handlerSyntax (map : Relocation) : Handler → Handler := Handler.mapTerms map.term
 
 def Relocation.authority (map : Relocation) : Authority → Authority
   | .owner => .owner

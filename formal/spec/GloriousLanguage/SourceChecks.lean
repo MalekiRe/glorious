@@ -63,8 +63,8 @@ example :
       (.borrow ⟨4,[.dereference]⟩ .shared (.runtimeRegion 7)) (.result ⟨5,[]⟩) ∧
     (instantiated.entryScope 100 200).term instantiated.signature.result =
       .reference .shared (.runtimeRegion 7) .unit := by
-  simp [referenceTemplate, Function.instantiate, Local.mapTerms, Signature.instantiate,
-    Code.instantiate, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
+  simp [referenceTemplate, Function.instantiate, Function.transformTerms, Local.mapTerms, Signature.instantiate,
+    Code.instantiate, Code.transformTerms, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
 
 example (function : Function) (region brand : Identity) :
     (function.entryScope region brand).term (.rigid function.activationRegion .region 0) =

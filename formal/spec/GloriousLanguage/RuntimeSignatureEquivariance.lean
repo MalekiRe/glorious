@@ -1,4 +1,4 @@
-import GloriousLanguage.SnapshotWorldTyping
+import GloriousLanguage.RuntimeEquivariance
 
 /-! Runtime-name transport of the actual invocation signature and scope-closing
 operations. Generic defaults and quantified constraints use the same semantic
@@ -170,11 +170,13 @@ theorem Relocation.context_signature (map : Relocation) (context : Context) (sig
 
 theorem Relocation.context_invocation (map : Relocation) (context : Context) (call : Invocation) :
     map.invocation (context.invocation call) = (map.context context).invocation (map.invocation call) := by
-  simp only [Relocation.invocation,Context.invocation,map.context_signature,Option.map_map,Function.comp_def]
+  simp only [Relocation.invocation,Context.invocation,Invocation.mapTerms,Invocation.transformTerms,
+    Signature.mapTerms_comp,Option.map_map,Function.comp_def]
   congr 1
-  apply Option.map_congr
-  intro access _
-  simp only [EnvironmentAccess.mapTerms,map.context_term]
+  · apply Option.map_congr
+    intro access _
+    simp only [EnvironmentAccess.mapTerms,map.context_term]
+  · exact call.signature.mapTerms_congr _ _ (fun term _ => map.context_term context term)
 
 /-- Closing a relocated tail request produces exactly the relocated call,
 including its selected signature and availability-environment contract. -/
@@ -184,13 +186,8 @@ theorem LocalStep.relocated_tailRequest {program : Kernel.Program} {before : Sta
     LocalStep program before none
       { before with task := .apply (map.context context) (map.invocation (context.invocation call)) true } := by
   rw [map.context_invocation]
-  exact .tailRequest (by simpa only [Relocation.code] using running)
-
-theorem SnapshotMap.signature_permutation {program : Kernel.Program} {before : State} {suspension : Suspension}
-    {map : Relocation} (selected : SnapshotMap program before suspension map) (world : before.world.WellFormed)
-    {signature : Signature} (supported : ∀ term ∈ signature.terms, term.RuntimeRegionsBelow before.world.nextRegion) :
-    map.signature signature = (selected.permutation world).signature signature :=
-  signature.mapTerms_congr _ _ (fun term member => selected.term_permutation world (supported term member))
+  exact .tailRequest (by simpa only [Relocation.code,Code.mapTerms,Code.transformTerms,
+    Relocation.invocation,Invocation.mapTerms] using running)
 
 end Execution
 
