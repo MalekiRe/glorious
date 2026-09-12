@@ -294,8 +294,15 @@ or a dependency of this project.
   changes). `World.Destroys.end_loan` is the kill transport on top of that frame:
   an ending only kills a row, so the owning permission's raw-table exclusion and
   the pending-return clauses still hold (the latter read earlier living rows
-  through `frame_set`/`frame_set_none`). Still to write: the `Retires` transport,
-  the reversed-index field loop and the recursion theorem itself.
+  through `frame_set`/`frame_set_none`). Still to write: the reversed-index field
+  loop and the recursion theorem. The loop's remaining design point is exact: a
+  node's destruction must report a *footprint* — its writes are confined to the
+  subtree's own slots (so the landed `World.Destroys.write_disjoint` transports a
+  sibling's readiness across them) and its endings are confined to its own
+  custody's rows (so `World.Destroys.end_loan` transports it) — because the
+  transports need that relation between the child's produced world and the world
+  the next sibling is read in; `CleanupRun.destroy_tree` then follows by induction
+  on the tree with that footprint conjunct carried through the field loop.
 - `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
   `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
   and `source_execution` now take a `Typing.ScopeReading` indexed by the actual
