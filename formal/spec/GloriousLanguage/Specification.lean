@@ -32,14 +32,6 @@ def ClosedInterfaces (program : Kernel.Program) : Prop :=
     | .constant constant => Closed constant.value ∨ constant.generics ≠ []
     | _ => True
 
-def BodyInventory (program : Kernel.Program) : Prop :=
-  (program.functions.map (·.declaration)).Nodup ∧
-  (∀ function ∈ program.functions, ∃ declaration, program.declarations.function function.declaration = some declaration ∧
-    function.signature = declaration.signature ∧ function.parameters.map (·.id) = declaration.parameters ∧
-    function.captures.map (·.type) = declaration.captures) ∧
-  (∀ declaration anchor, program.declarations.function declaration.header.id = some declaration → declaration.origin = .source anchor →
-    ∃ function ∈ program.functions, function.declaration = declaration.header.id)
-
 def FunctionsAdmitted (program : Kernel.Program) : Prop :=
   ∀ id arguments function, Instance program id arguments function →
     Typing.FunctionType program function ∧ Contracts.ResourceAdmission program function ∧

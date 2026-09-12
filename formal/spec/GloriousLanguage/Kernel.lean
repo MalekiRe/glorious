@@ -152,6 +152,16 @@ structure Program where
 def Program.function (program : Program) (id : DeclId) : Option Function :=
   program.functions.find? (fun function => function.declaration == id)
 
+/-- The body/declaration boundary, shared by specification admission and
+resident typing. This is independent of execution or resource soundness. -/
+def BodyInventory (program : Program) : Prop :=
+  (program.functions.map (·.declaration)).Nodup ∧
+  (∀ function ∈ program.functions, ∃ declaration, program.declarations.function function.declaration = some declaration ∧
+    function.signature = declaration.signature ∧ function.parameters.map (·.id) = declaration.parameters ∧
+    function.captures.map (·.type) = declaration.captures) ∧
+  (∀ declaration anchor, program.declarations.function declaration.header.id = some declaration → declaration.origin = .source anchor →
+    ∃ function ∈ program.functions, function.declaration = declaration.header.id)
+
 structure Binding where
   localSlot : Identity
   address : Address

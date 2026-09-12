@@ -481,3 +481,27 @@ not a consumer-specific ban.
 Whole-world replacement/ownership preservation, complete control-state validity,
 snapshot replay, compositional resource admission, progress and source-admitted
 nonvacuity remain unfinished. No compiler or library acceptance gate was changed.
+
+## Resident-tree replacement typing
+
+`StorageTyping.lean` proves that resident fields agree with the authoritative
+`FieldOffset` relation for tuples, arrays, nominal constructors, callable
+captures and binding packs. Constructor selection is unique under declaration
+well-formedness; capture agreement follows from the existing body inventory,
+now owned by `Kernel` and consumed by both specification admission and this
+proof. Neither resource admission nor top-level semantic well-formedness is
+assumed by these lemmas.
+
+The write proof factors arbitrary nested replacements through the actual
+`Value.replace`/`World.write` operations and inducts over `AddressOffset`.
+Clearing a resident needs no new layout evidence. Composing clear and install
+then transporting references proves typing of **every resulting transfer
+resident**, including modified ancestor trees, without assuming an intermediate
+or final typed world. Focused checks cover the real root transfer, two-level
+replacement, and rejection of a wrong-type field with the same zero-sized
+layout. `lake build` passes all 39 jobs.
+
+This completes the resident-typing component, not whole-world preservation:
+owner uniqueness, metadata invariants and full root agreement still need their
+composed transfer proofs. Machine validity, replay/cancellation, derived resource
+admission, progress and source-admitted nonvacuity remain open.

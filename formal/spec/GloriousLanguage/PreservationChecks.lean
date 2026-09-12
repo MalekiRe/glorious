@@ -114,7 +114,7 @@ private theorem worldValid : world.WellFormed := by
 private theorem referenceTyped (program : Kernel.Program) : Typing.ValueTyped program world referenceValue :=
   .reference (loan := loan) rfl rfl rfl rfl ⟨0,.root (root := sourceRoot) (id := 0) rfl rfl⟩
 
-example (program : Kernel.Program) : Typing.WorldTyped program world := by
+private theorem worldTyped (program : Kernel.Program) : Typing.WorldTyped program world := by
   refine ⟨worldValid,?_,?_⟩
   · intro address value resident
     rcases occupants resident with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩
@@ -164,6 +164,11 @@ example (program : Kernel.Program) : moved.LoanParents ∧ moved.LiveLoanLocatio
   ⟨(move program.declarations).loanParents (World.loanParents worldValid),
     (move program.declarations).liveLoanLocations worldValid,
     (referenceTyped program).transfer worldValid (move program.declarations)⟩
+
+example (program : Kernel.Program) (valid : ProgramWellFormed program.declarations)
+    (inventory : BodyInventory program) :
+    ∀ address value, moved.Resident address value → Typing.ValueTyped program moved value :=
+  ((move program.declarations).typed_residents valid inventory (worldTyped program)).1
 
 private def cyclic : World := { world with loans := [(0,{ loan with parent := some 0 })] }
 
@@ -246,6 +251,48 @@ private theorem destinationTyped (program : Language.Program) : AddressType prog
 
 private theorem referenceTyped (program : Kernel.Program) : Typing.ValueTyped program world referenceValue :=
   .reference (loan := loan) rfl rfl rfl rfl (sourceTyped program.declarations)
+
+private theorem rootsTyped (program : Kernel.Program) :
+    ∀ id resident value, world.roots.get id = some resident → resident.live = true → resident.value = some value →
+      Typing.ValueTyped program world value ∧ value.type = resident.type := by
+  intro id resident value found _ contents
+  have member := Table.mem_of_get found
+  simp [world] at member
+  rcases member with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩
+  · have same : value = outer := by simpa [root] using contents.symm
+    subst value
+    refine ⟨.aggregate (Or.inl ⟨rfl,rfl,rfl⟩) (.resident ?_ rfl (.hole .nil)),rfl⟩
+    exact .aggregate (Or.inl ⟨rfl,rfl,rfl⟩) (.resident .unit rfl .nil)
+  · have same : value = referenceValue := by simpa [handleRoot] using contents.symm
+    subst value
+    exact ⟨referenceTyped program,rfl⟩
+
+/-- These are the actual two writes of the nested move, including a changed
+parent two levels above the source. No post-state typing is supplied. -/
+example (program : Kernel.Program) (valid : ProgramWellFormed program.declarations)
+    (inventory : BodyInventory program) : Typing.ValueTyped program world movedValue := by
+  have clear : world.write source none = some cleared := rfl
+  have install : cleared.write destination (some unitValue) = some moved := rfl
+  obtain ⟨offset,located⟩ := destinationTyped program.declarations
+  have outside : ¬ source.ProperPrefix destination := by simp [Address.ProperPrefix,Address.Prefix,source,destination]
+  have framed := (World.write_address_offsets clear outside).mp located
+  have roots := World.write_typed_roots valid inventory (World.clear_typed_roots (rootsTyped program) clear) framed install
+    (fun value equal => by cases Option.some.inj equal; exact ⟨.unit,rfl⟩)
+  exact (roots 0 { root with value := some movedValue } movedValue rfl rfl rfl).1
+
+/-- Replacing the nested tuple with unit is not a type-preserving edit, even
+though both have zero-sized layouts in this fixture. -/
+example (program : Kernel.Program) : ¬ Typing.ValueTyped program world (outer.withFields [some unitValue,none]) := by
+  intro typed
+  cases typed with
+  | aggregate constructed fields =>
+      rcases constructed with ⟨same,_,_⟩ | ⟨_,_,_,_,same,_⟩ | ⟨_,_,_,_,_,same,_⟩
+      · have typesEq := Term.tuple.inj same
+        cases typesEq
+        cases fields with
+        | resident _ impossible _ => cases impossible
+      · cases same
+      · cases same
 
 private theorem move (program : Language.Program) : Transfers program world (.loan 0) source destination moved := by
   refine .move (value := unitValue) (cleared := cleared) rfl initialized ?_

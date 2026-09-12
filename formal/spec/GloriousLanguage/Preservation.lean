@@ -1,4 +1,4 @@
-import GloriousLanguage.Typing
+import GloriousLanguage.StorageTyping
 
 /-! Preservation obligations for the actual storage and execution relations.
 No result in this module assumes `ResourceAdmission` or the safety conclusion
@@ -767,5 +767,254 @@ theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : Wo
   · exact .nil
   · exact fun {_ _ _} _ fields => .hole fields
   · exact fun {_ _ _ _} _ type _ value fields => .resident value type fields
+
+theorem Value.replace_cons {before child changed : Value} {index : Nat} {path : List Nat}
+    {replacement : Option Value} (found : before.fields[index]? = some (some child))
+    (written : child.replace path replacement = some changed) :
+    before.replace (index :: path) replacement = some (before.withFields (before.fields.set index (some changed))) := by
+  cases path with
+  | nil =>
+      have same : replacement = some changed := written
+      simp [Value.replace,found,same]
+  | cons next rest =>
+      simp only [Value.replace,found,List.isEmpty_cons,Bool.false_eq_true,↓reduceIte]
+      change child.replace (next :: rest) replacement >>= _ = _
+      rw [written]
+      rfl
+
+theorem Value.replace_append_shape {before after : Value} {path suffix : List Nat} {replacement : Option Value}
+    (written : before.replace (path ++ suffix) replacement = some after) (nonempty : suffix ≠ []) :
+    ∃ parent changed, before.atPath path = some parent ∧ parent.replace suffix replacement = some changed ∧
+      before.replace path (some changed) = some after := by
+  induction path generalizing before after with
+  | nil => exact ⟨before,after,rfl,written,rfl⟩
+  | cons index path ih =>
+      rcases Value.replace_cons_shape written with ⟨_,found,⟨empty,_⟩ | ⟨child,changed,rfl,nested,rfl⟩⟩
+      · exact False.elim (nonempty (List.append_eq_nil_iff.mp empty).2)
+      · obtain ⟨parent,replaced,located,rewrite,outer⟩ := ih nested
+        exact ⟨parent,replaced,by simp [Value.atPath,found,located],rewrite,Value.replace_cons found outer⟩
+
+theorem World.write_child_shape {before after : World} {address : Address} {index : Nat}
+    {replacement : Option Value} (written : before.write (address.child index) replacement = some after) :
+    ∃ parent slot, before.Stores address parent ∧ parent.fields[index]? = some slot ∧
+      before.write address (some (parent.withFields (parent.fields.set index replacement))) = some after := by
+  unfold World.write at written
+  cases selected : before.root (address.child index) with
+  | none => simp [selected] at written
+  | some root =>
+      have rootEq : before.root address = some root := selected
+      have nonempty : (address.child index).fields.isEmpty = false := by simp [Address.child]
+      simp only [selected,nonempty,Bool.false_eq_true,↓reduceIte] at written
+      dsimp at written
+      cases resident : root.value with
+      | none => simp [resident] at written
+      | some whole =>
+          simp only [resident] at written
+          dsimp at written
+          cases replaced : whole.replace (address.fields ++ [index]) replacement with
+          | none => simp [Address.child,replaced] at written
+          | some changed =>
+              have result : after = { before with roots := before.roots.set address.root { root with value := some changed } } := by
+                simpa [Address.child,replaced] using written.symm
+              obtain ⟨parent,newParent,located,rewritten,outer⟩ := Value.replace_append_shape replaced (by simp)
+              obtain ⟨slot,found,_⟩ := Value.replace_cons_shape rewritten
+              have newParentEq : newParent = parent.withFields (parent.fields.set index replacement) := by
+                simpa [Value.replace,found] using rewritten.symm
+              refine ⟨parent,slot,?_,found,?_⟩
+              · simp [World.Stores,World.read,rootEq,resident,located]
+              · rw [result]
+                simp only [World.write,rootEq]
+                dsimp
+                split
+                next emptyPath =>
+                  have pathEq : address.fields = [] := List.isEmpty_iff.mp emptyPath
+                  have changedEq : changed = newParent := by simpa [pathEq,Value.replace] using outer.symm
+                  simp [changedEq,newParentEq]
+                next => simp [resident,← newParentEq,outer]
+
+theorem ResidentAt.iff_atPath {value resident : Value} {path : List Nat} :
+    ResidentAt value path resident ↔ value.atPath path = some resident := by
+  constructor
+  · intro inside
+    induction inside with
+    | root => rfl
+    | field found _ ih => simp [Value.atPath,found,ih]
+  · induction path generalizing value with
+    | nil => intro same; cases Option.some.inj same; exact .root
+    | cons index path ih =>
+        intro found
+        obtain ⟨child,selected,nested⟩ := Option.bind_eq_some_iff.mp found
+        have slot : value.fields[index]? = some (some child) := by
+          cases field : value.fields[index]? <;> simp_all
+        exact .field slot (ih nested)
+
+theorem World.resident_iff_stores {world : World} {address : Address} {value : Value} :
+    world.Resident address value ↔ world.Stores address value := by
+  constructor
+  · rintro ⟨root,whole,found,live,generation,resident,inside⟩
+    have selected : world.root address = some root := by simp [World.root,found,live,generation]
+    simp [World.Stores,World.read,selected,resident,ResidentAt.iff_atPath.mp inside]
+  · intro stored
+    obtain ⟨root,selected,read⟩ := Option.bind_eq_some_iff.mp stored
+    obtain ⟨whole,resident,inside⟩ := Option.bind_eq_some_iff.mp read
+    have found := World.root_found selected
+    exact ⟨root,whole,found.1,found.2.1,found.2.2.symm,resident,ResidentAt.iff_atPath.mpr inside⟩
+
+theorem World.stores_typed {program : Kernel.Program} {world typingWorld : World} {address : Address} {value : Value}
+    (roots : ∀ id root resident, world.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type)
+    (stored : world.Stores address value) : Typing.ValueTyped program typingWorld value := by
+  obtain ⟨root,whole,found,live,_,resident,inside⟩ := World.resident_iff_stores.mpr stored
+  exact (roots _ _ _ found live resident).1.resident inside
+
+theorem World.stores_child {world : World} {address : Address} {index : Nat} {value : Value}
+    (stored : world.Stores (address.child index) value) :
+    ∃ parent, world.Stores address parent ∧ parent.fields[index]? = some (some value) := by
+  change world.read { address with fields := address.fields ++ [index] } = some value at stored
+  rw [World.read_append] at stored
+  obtain ⟨parent,found,child⟩ := Option.bind_eq_some_iff.mp stored
+  refine ⟨parent,found,?_⟩
+  cases selected : parent.fields[index]? <;> simp_all [Value.atPath]
+
+theorem AddressOffset.stored_type {program : Kernel.Program} {world typingWorld : World}
+    {address : Address} {type : Term} {offset : Nat} {value : Value}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (roots : ∀ id root resident, world.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type)
+    (located : AddressOffset program.declarations world address type offset)
+    (stored : world.Stores address value) : value.type = type := by
+  induction located generalizing value with
+  | root found live =>
+      exact (roots _ _ _ found live (by simpa [World.Stores,World.read,World.root,found,live,Value.atPath] using stored)).2
+  | child _ field ih =>
+      obtain ⟨parent,parentStored,selected⟩ := World.stores_child stored
+      have parentType := ih parentStored
+      have typed := World.stores_typed roots parentStored
+      obtain ⟨types,fields,atType,_⟩ := typed.field_model valid inventory parentStored (parentType ▸ field)
+      exact Option.some.inj ((fields.get selected).2.symm.trans atType)
+
+theorem World.write_typed_roots {program : Kernel.Program} {before after typingWorld : World}
+    {address : Address} {type : Term} {offset : Nat} {replacement : Option Value}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (roots : ∀ id root resident, before.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type)
+    (located : AddressOffset program.declarations before address type offset)
+    (written : before.write address replacement = some after)
+    (checked : ∀ value, replacement = some value → Typing.ValueTyped program typingWorld value ∧ value.type = type) :
+    ∀ id root resident, after.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type := by
+  induction located generalizing after replacement with
+  | @root rootId original found live =>
+      have selected : before.root ⟨rootId,original.generation,[]⟩ = some original := by
+        simp [World.root,found,live]
+      have result : after = { before with roots := before.roots.set rootId { original with value := replacement } } := by
+        simpa [World.write,selected] using written.symm
+      subst after
+      intro id root resident present active contents
+      by_cases same : rootId = id
+      · subst id
+        have rootEq : root = { original with value := replacement } := by simpa [Table.get_set] using present.symm
+        subst root
+        exact checked resident contents
+      · exact roots id root resident (by simpa [Table.get_set_other,Ne.symm same] using present) active contents
+  | child parent field ih =>
+      obtain ⟨container,slot,stored,_,outer⟩ := World.write_child_shape written
+      have typeEq := parent.stored_type valid inventory roots stored
+      have typed := World.stores_typed roots stored
+      apply ih outer
+      intro value equal
+      cases Option.some.inj equal
+      exact ⟨typed.replace_field valid inventory stored (typeEq ▸ field) checked,typeEq⟩
+
+theorem Typing.ValueTyped.clear_path {program : Kernel.Program} {world : World} {before after : Value}
+    {path : List Nat} (typed : Typing.ValueTyped program world before)
+    (written : before.replace path none = some after) : Typing.ValueTyped program world after := by
+  induction path generalizing before after with
+  | nil => simp [Value.replace] at written
+  | cons index path ih =>
+      rcases Value.replace_cons_shape written with ⟨_,found,⟨_,rfl⟩ | ⟨child,changed,rfl,nested,rfl⟩⟩
+      · exact typed.clear_field (List.getElem?_eq_some_iff.mp found).1
+      · have nonempty : path ≠ [] := by intro empty; simp [empty,Value.replace] at nested
+        have typeEq : changed.type = child.type := by
+          simpa [Value.shell,Value.withFields,Value.type] using congrArg Value.type (Value.replace_shell nested nonempty)
+        exact typed.replace_child found (ih (typed.child found) nested) typeEq
+
+theorem World.clear_typed_roots {program : Kernel.Program} {before after typingWorld : World} {address : Address}
+    (roots : ∀ id root resident, before.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type)
+    (written : before.write address none = some after) :
+    ∀ id root resident, after.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program typingWorld resident ∧ resident.type = root.type := by
+  unfold World.write at written
+  cases selected : before.root address with
+  | none => simp [selected] at written
+  | some original =>
+      simp only [selected] at written
+      dsimp at written
+      split at written
+      next empty =>
+        have result := Option.some.inj written
+        subst after
+        intro id root resident present active contents
+        by_cases same : address.root = id
+        · subst id
+          have rootEq : root = { original with value := none } := by simpa [Table.get_set] using present.symm
+          subst root
+          cases contents
+        · exact roots id root resident (by simpa [Table.get_set_other,Ne.symm same] using present) active contents
+      next nonempty =>
+        cases resident : original.value with
+        | none => simp [resident] at written
+        | some whole =>
+            simp only [resident] at written
+            dsimp at written
+            cases replaced : whole.replace address.fields none with
+            | none => simp [replaced] at written
+            | some changed =>
+                have result : after = { before with roots := before.roots.set address.root { original with value := some changed } } := by
+                  simpa [replaced] using written.symm
+                subst after
+                intro id root value present active contents
+                by_cases same : address.root = id
+                · subst id
+                  have rootEq : root = { original with value := some changed } := by simpa [Table.get_set] using present.symm
+                  subst root
+                  cases Option.some.inj contents
+                  have found := World.root_found selected
+                  have checked := roots _ _ _ found.1 found.2.1 resident
+                  refine ⟨checked.1.clear_path replaced,?_⟩
+                  have pathNonempty : address.fields ≠ [] := by simpa using nonempty
+                  have typeEq : changed.type = whole.type := by
+                    simpa [Value.shell,Value.withFields,Value.type] using congrArg Value.type (Value.replace_shell replaced pathNonempty)
+                  exact typeEq.trans checked.2
+                · exact roots id root value (by simpa [Table.get_set_other,Ne.symm same] using present) active contents
+
+theorem Typing.WorldTyped.roots {program : Kernel.Program} {world : World} (typed : Typing.WorldTyped program world) :
+    ∀ id root resident, world.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program world resident ∧ resident.type = root.type := by
+  intro id root resident found live contents
+  exact ⟨typed.2.1 ⟨id,root.generation,[]⟩ resident ⟨root,resident,found,live,rfl,contents,.root⟩,
+    typed.2.2 id root resident found contents⟩
+
+/-- Both writes preserve all resulting resident trees, including ancestors
+whose field lists changed. References are transported only after composing
+clear and install, so no typed intermediate state is assumed. -/
+theorem Transfers.typed_residents {program : Kernel.Program} {before after : World} {authority source destination}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (transfer : Transfers program.declarations before authority source destination after) :
+    (∀ address value, after.Resident address value → Typing.ValueTyped program after value) ∧
+    (∀ id root value, after.roots.get id = some root → root.live = true → root.value = some value → value.type = root.type) := by
+  have moved := transfer
+  cases transfer with
+  | move stored _ _ _ separate located clear install =>
+      obtain ⟨offset,located⟩ := located
+      have destinationOutside : ¬ source.ProperPrefix destination := fun included => separate included.1.overlaps
+      have framed := (World.write_address_offsets clear destinationOutside).mp located
+      have roots := World.write_typed_roots valid inventory (World.clear_typed_roots typed.roots clear) framed install
+        (fun value equal => by cases Option.some.inj equal; exact ⟨World.stores_typed typed.roots stored,rfl⟩)
+      refine ⟨?_,fun id root value found live resident => (roots id root value found live resident).2⟩
+      intro address value resident
+      exact (World.stores_typed roots (World.resident_iff_stores.mp resident)).transfer typed.1 moved
 
 end Glorious.Language
