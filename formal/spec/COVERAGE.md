@@ -300,6 +300,20 @@ is not derivable. No statement is weakened and no previously derivable fact is
 assumed. Verified exact: the four modules check as 80 jobs, and the composed
 gate including them passes 224 jobs from a fresh source-only tree.
 
+Post-cancellation cleanup is now executed rather than only classified:
+`CleanupExecution` proves that the machine's own `cleanupRoot`, `destroyVacant`
+and `retire` steps actually retire every captured root of a cancelled
+suspension, and connects that to the real cancel rule. It provides the two
+`RegionCanEnd` transport facts the chain needs (ending a region leaves the roots,
+loans and reservations unchanged; retiring storage only removes one root's
+liveness and its now-empty value), composes cleanup segments along their traces,
+and proves the per-root and whole-list retirement runs. The residual readiness is
+exact and named: the captured-root list is duplicate free, and every captured
+root is live, empty and endable in the restored world. Vacancy through the
+destructor chain for non-vacant captured residents, ending the suspension's own
+live loans first, and executing the scheduled region closure (which reuses the
+same shape and the two transport facts proved here) remain open.
+
 The replay/reconstruction release adds five modules and exactly three new
 `EffectStep` constructors, all fatal-resource steps, so a failed replay does not
 consume the suspension budget. `SnapshotPlacement` (importing only `Storage`)

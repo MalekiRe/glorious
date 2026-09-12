@@ -304,6 +304,18 @@ three consumer sites. `Suspension.PhysicalAdmission` names the suspend-time
 product that replay-time `Replayable` needs; carrying it across intervening
 steps and executing the post-cancel cleanup chain remain open.
 
+## 1c. Post-cancellation cleanup execution
+
+`CleanupExecution` executes the cleanup chain cancellation schedules. The
+machine's `cleanupRoot`, `destroyVacant` and `retire` rules actually retire every
+captured root, composed along the real traces; `EffectStep.cancel_roots_execution`
+connects the real cancel rule to that run, ending at the scheduled region
+closures. The module also proves the two `RegionCanEnd` transport facts the chain
+needs. Residual readiness is exact: duplicate-free captured roots, each live,
+empty and endable in the restored world. Remaining: vacancy through the
+destructor chain for non-vacant captured residents, ending the suspension's live
+loans first, and executing the region closure itself.
+
 ## 2. Source and normative adequacy
 
 Storage creation and teardown now compose through the real cleanup steps.
