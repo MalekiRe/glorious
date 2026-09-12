@@ -1,5 +1,6 @@
 import GloriousLanguage.ControlForeignOrigin
 import GloriousLanguage.ControlAuthorityForeign
+import GloriousLanguage.ActivationPreservation
 
 /-! Whole-machine provenance of actual current and saved control. The
 canonical invocation contract supplies this invariant; all finite and
@@ -36,7 +37,8 @@ theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
   exact ⟨step.suspensions valid inventory lawful typed control.suspensions,
     support.1.1,support.1.2,step.saved_control_origin control,support.2.1,support.2.2,
     step.saved_authority_origin valid inventory lawful typed control.suspensions
-      control.taskAuthorities control.frameAuthorities control.savedAuthorities⟩
+      control.taskAuthorities control.frameAuthorities control.savedAuthorities,
+    step.activationsWellFormed lawful typed.1 control.suspensions control.activations⟩
 
 theorem Run.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event}
@@ -86,6 +88,39 @@ theorem Run.old_saved_authority_excludes_future_loan {program : Kernel.Program} 
   rw [support]
   exact control.no_future_saved_authority well beforeAt future
 
+/-- Replay and settlement cannot insert a later activation into old saved
+control. This includes pending cleanup contexts and explicit frame owners. -/
+theorem Run.old_saved_control_excludes_future_activation {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id activation : Identity} {original current : Suspension}
+    (control : before.ControlWellFormed) (run : Run program host before trace after)
+    (beforeAt : before.resumptions.get id = some original) (afterAt : after.resumptions.get id = some current)
+    (future : before.nextActivation ≤ activation) : activation ∉ current.controlActivationSupport := by
+  obtain ⟨retained,present,_,_,_,_,context,handler,frames,_⟩ := run.retains_metadata control.suspensions.budgets beforeAt
+  have same := Option.some.inj (present.symm.trans afterAt)
+  subst retained
+  have support : current.controlActivationSupport = original.controlActivationSupport := by
+    simp only [Suspension.controlActivationSupport,context,handler,frames]
+  rw [support]
+  intro member
+  exact Nat.not_lt_of_ge future (control.activations.saved id original beforeAt activation member)
+
+/-- A home saved before an activation was created cannot later be restored as
+that activation's storage. This follows the real immutable restoration map. -/
+theorem Run.old_saved_home_excludes_future_activation {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id activation root : Identity}
+    {original current : Suspension} {home : Home}
+    (control : before.ControlWellFormed) (run : Run program host before trace after)
+    (beforeAt : before.resumptions.get id = some original) (afterAt : after.resumptions.get id = some current)
+    (future : before.nextActivation ≤ activation) (found : current.homes.get root = some home) :
+    ¬ Kernel.HomeOwnedByActivation home activation := by
+  obtain ⟨retained,present,_,_,homes,_⟩ := run.retains_metadata control.suspensions.budgets beforeAt
+  have same := Option.some.inj (present.symm.trans afterAt)
+  subst retained
+  rw [homes] at found
+  exact fun owned => Nat.not_lt_of_ge future
+    ((control.suspensions.origin id original beforeAt).homes_activationsBelow
+      (control.activations.saved id original beforeAt) found activation owned)
+
 end Execution
 
 namespace Contracts
@@ -93,6 +128,14 @@ namespace Contracts
 theorem InitialInvocation.control {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
     (initial : InitialInvocation program host function inputs state) : state.ControlWellFormed := initial.2.2.1
+
+theorem InitialInvocation.caller_activation_bound {program : Kernel.Program} {host : Foreign.Model}
+    {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
+    {caller : Execution.Context}
+    (initial : InitialInvocation program host function inputs state)
+    (task : state.task = .enter caller function (.supplied inputs) false) : caller.activation < state.nextActivation := by
+  have bounded := initial.control.activations.task
+  simpa only [task,Execution.Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bounded
 
 theorem InitialInvocation.run_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}

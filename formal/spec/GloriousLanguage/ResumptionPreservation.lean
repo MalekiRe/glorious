@@ -512,10 +512,10 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
     (callerAuthorities : ∀ binding ∈ caller.environment, binding.authority.Recorded state.world.loans)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
-    (fresh : ∀ id root, state.world.roots.get id = some root → Kernel.OwnedByActivation root state.nextActivation → root.live = false) :
+    (activationHomes : state.world.ActivationsBelow state.nextActivation) :
     InitialInvocation program host function inputs state := by
-  refine ⟨inputsTyped,functionInputs,?_,registry,caller,task,frames,region,activation,fresh⟩
-  refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_⟩
+  refine ⟨inputsTyped,functionInputs,?_,registry,caller,task,frames,region⟩
+  refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_,?_⟩
   · rw [task]
     apply RootSupport.below_append.mpr
     constructor
@@ -542,6 +542,12 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
   · simp [frames]
   · intros
     simp_all [Table.get]
+
+  · refine ⟨activationHomes,?_,?_,?_⟩
+    · simpa only [task,Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using activation
+    · simp [frames]
+    · intros
+      simp_all [Table.get]
 
 /-- The actual invocation contract supplies the initial control invariant;
 all finite-run budget and settlement conclusions are derived by preservation,

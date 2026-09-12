@@ -21,10 +21,10 @@ def SelectsOperation (program : Kernel.Program) (world : World) (handler : Insta
     ∀ earlier ∈ skipped, ¬ ArmAccepts program world handler.environment.static operation arguments payload (earlier.closeHead handler.environment.instantiation)
 
 def Bypasses (program : Kernel.Program) (world : World) (operation : DeclId)
-    (arguments : List Term) (payload : List ResolvedPlace) : Frame → Prop
-  | .handler handler _ => ¬ ∃ arm, SelectsOperation program world handler operation arguments payload arm
-  | .foreign _ | .hostCallback .. => False
-  | _ => True
+    (arguments : List Term) (payload : List ResolvedPlace) (frame : Frame) : Prop :=
+  frame.ForeignFree ∧ match frame with
+    | .handler handler _ => ¬ ∃ arm, SelectsOperation program world handler operation arguments payload arm
+    | _ => True
 
 def Routes (program : Kernel.Program) (before : State) (operation : DeclId)
     (arguments : List Term) (payload : List ResolvedPlace) (inner : List Frame) (handler : InstalledHandler)
@@ -32,6 +32,12 @@ def Routes (program : Kernel.Program) (before : State) (operation : DeclId)
   before.frames = inner ++ .handler handler owns :: outer ∧
   (∀ frame ∈ inner, Bypasses program before.world operation arguments payload frame) ∧
   SelectsOperation program before.world handler operation arguments payload arm
+
+theorem Routes.foreign_free {program : Kernel.Program} {before : State} {operation : DeclId}
+    {arguments : List Term} {payload : List ResolvedPlace} {inner : List Frame} {handler : InstalledHandler}
+    {owns : Bool} {arm : OperationArm} {outer : List Frame}
+    (route : Routes program before operation arguments payload inner handler owns arm outer) :
+    ∀ frame ∈ inner, frame.ForeignFree := fun frame member => (route.2.1 frame member).1
 
 def FrameOwns (frame : Frame) (root : Root) : Prop :=
   FrameOwnsHome frame root.home

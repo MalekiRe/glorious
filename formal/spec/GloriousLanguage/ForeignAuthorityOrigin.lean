@@ -81,14 +81,14 @@ theorem RegistrationOrigin.recorded {program : Kernel.Program} {model : Model} {
   | @unregister original member => exact old original member
   | register accessible _ => exact Authority.lend_recorded_iff.mp (accessible.recorded known registry)
 
-theorem RegistrationsPermitted.recorded {program : Kernel.Program} {model : Model} {contract : Contract}
+theorem HostStateEvolution.recorded {program : Kernel.Program} {model : Model} {contract : Contract}
     {initial current : World} {session : ForeignSession} {before after : List Nat}
     (known : AuthoritySupport.Recorded (session.known.map ResolvedPlace.authority) current.loans)
     (previous : model.AuthoritiesRecorded current before) (state : session.state = before)
-    (permitted : RegistrationsPermitted program contract model initial current session before after) :
+    (permitted : HostStateEvolution program contract model initial current session before after) :
     model.AuthoritiesRecorded current after := by
   intro registration member
-  exact (permitted registration member).recorded known (state ▸ previous) previous
+  exact (permitted.registrations registration member).recorded known (state ▸ previous) previous
 
 theorem Model.Lawful.start_authorities_recorded {program : Kernel.Program} {model : Model}
     {initial : ForeignSession} {imported : Import} {contract : Contract} {world : World} {state : List Nat}
@@ -148,7 +148,7 @@ theorem Step.host_authorities {program : Kernel.Program} {model : Model} {before
   case result selected active transition _ transferred =>
     exact (lawful.host_authorities_recorded typed.1 selected active transition taskRecorded registry).mono
       transferred.suspensionExtension.recorded
-  case callback selected active transition _ _ _ _ _ _ _ _ _ lent _ _ consumed =>
+  case callback selected active transition _ lent _ _ consumed =>
     exact (lawful.host_authorities_recorded typed.1 selected active transition taskRecorded registry).mono
       (lent.suspensionExtension.trans consumed.suspensionExtension).recorded
   case callbackReturned selected postcondition returned =>

@@ -103,11 +103,11 @@ theorem _root_.Glorious.Language.Foreign.Step.callback_then_enter_context {progr
       tail = false ∧ after.task = .run callee function.body := by
   have enteringWorld := called.worldTyped valid inventory lawful worldTyped
   cases called <;> simp_all
-  case callback selected _ _ _ captures arguments _ =>
+  case callback admitted _ captures arguments _ =>
     have formals : source.HasFormals function := by
       rw [← enteringTask.2.2.1]
       exact arguments.supplied_formals captures
-    obtain ⟨callee,contextTyped,bodyTyped,task⟩ := entered.enter_function_context valid inventory enteringWorld selected functionTyped formals rfl
+    obtain ⟨callee,contextTyped,bodyTyped,task⟩ := entered.enter_function_context valid inventory enteringWorld admitted.selected functionTyped formals rfl
     exact ⟨callee,contextTyped,bodyTyped,by simpa using task⟩
   case callbackResult =>
     unfold Foreign.CallbackReturnTask at enteringTask

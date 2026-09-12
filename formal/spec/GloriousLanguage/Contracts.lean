@@ -63,8 +63,7 @@ def InitialInvocation (program : Kernel.Program) (host : Foreign.Model) (functio
   InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.ControlWellFormed ∧
   host.AuthoritiesRecorded state.world state.hostState ∧
   ∃ caller, state.task = .enter caller function (.supplied inputs) false ∧ state.frames = [] ∧
-    caller.region ∈ state.world.liveRegions ∧ caller.activation < state.nextActivation ∧
-    (∀ id root, state.world.roots.get id = some root → OwnedByActivation root state.nextActivation → root.live = false)
+    caller.region ∈ state.world.liveRegions
 
 def AtOutcome (state : State) : Outcome → Prop
   | .normal result => state.task = .stopped result

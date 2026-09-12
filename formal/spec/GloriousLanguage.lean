@@ -35,6 +35,7 @@ import GloriousLanguage.DropDispatch
 import GloriousLanguage.ForeignAuthority
 import GloriousLanguage.ForeignRegistration
 import GloriousLanguage.ForeignAuthorityOrigin
+import GloriousLanguage.ForeignRuntimePreservation
 import GloriousLanguage.ForeignSuspension
 import GloriousLanguage.ForeignSuspensionOwnership
 import GloriousLanguage.ScopeClosing

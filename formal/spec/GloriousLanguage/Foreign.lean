@@ -249,11 +249,15 @@ registry. Address reachability alone cannot upgrade a shared view to ownership.
 Keeping that authority beyond synchronous extent additionally requires the
 contract's retention permission. This is the one actual registry transition
 contract, including unregister-only changes and inactive historical records. -/
-def RegistrationsPermitted (program : Kernel.Program) (contract : Contract) (model : Model)
+structure HostStateEvolution (program : Kernel.Program) (contract : Contract) (model : Model)
     (initial current : World) (session : ForeignSession)
-    (before after : List Nat) : Prop :=
-  ∀ registration ∈ model.registrations after,
+    (before after : List Nat) : Prop where
+  registrations : ∀ registration ∈ model.registrations after,
     RegistrationOrigin program contract model initial current session before registration
+  /-- Shutdown may not revoke a runtime held by this real callback handoff.
+  The inventory remains the model's ordinary runtime state. -/
+  runtimes : ∀ runtime ∈ session.heldRuntimes,
+    runtime ∈ model.runtimes before → runtime ∈ model.runtimes after
 
 /-- Laws constrain the model only on its declared contract domain. World
 typing is derived from mutations; no post-world typing assumption occurs. -/
@@ -264,7 +268,7 @@ structure Model.Lawful (program : Kernel.Program) (model : Model) : Prop where
     Selected program model initial.call imported contract → world.WellFormed → CallTyped program world initial.call →
     contract.precondition world initial → model.start initial.call.binding.declaration world initial state →
     contract.session world { initial with state } ∧ RegistrationsValid program model world state ∧
-    RegistrationsPermitted program contract model world world initial initial.state state
+    HostStateEvolution program contract model world world initial initial.state state
   step : ∀ session imported contract before observation after action next,
     Selected program model session.call imported contract → before.WellFormed → contract.session before session →
     model.step session.call.binding.declaration before session observation after action next →
@@ -281,14 +285,36 @@ structure Model.Lawful (program : Kernel.Program) (model : Model) : Prop where
     (∀ address value id loan, after.Resident address value → value.head = .reference id →
       after.loans.get id = some loan → ¬ before.References id →
       Retainable program model contract before after session loan.referent ∨ loan.region ∈ before.liveRegions) ∧
-    RegistrationsPermitted program contract model before after session session.state next
+    HostStateEvolution program contract model before after session session.state next
   callbackReturned : ∀ session imported contract world current registration result next,
     Selected program model session.call imported contract → world.WellFormed →
     contract.callbackPostcondition world session current registration result →
     model.callbackReturned session.call.binding.declaration world session current registration result next →
     contract.session world (session.returned result next) ∧ RegistrationsValid program model world next ∧
-    RegistrationsPermitted program contract model world world
+    HostStateEvolution program contract model world world
       (session.returned result current) current next
+
+/-- Actual dispatch owns a current ABI entry and callable permission. A lent
+registration remains exact and active; an owning callback atomically consumes
+its registry ownership before the source receiver is consumed. Runtime liveness
+is checked in the host's new state, not its obsolete pre-action snapshot. -/
+structure CallbackAdmission (program : Kernel.Program) (model : Model) (contract : Contract)
+    (initial current : World) (session : ForeignSession) (state : List Nat) (id : Identity)
+    (registration : Registration) (function : Function) : Prop where
+  registered : registration ∈ model.registrations session.state
+  identity : registration.identity = id
+  active : registration.active = true
+  accessible : Accessible program model contract initial current session registration.place
+  receiver : CallableReceiver current registration.owner registration.authority registration.access
+    registration.function registration.arguments
+  selected : Instance program registration.function registration.arguments function
+  effects : function.signature.effects = .row [] []
+  abi : session.call.binding.cABI = true → ∃ abi, CSignature program.declarations function.signature abi
+  runtime : registration.runtime ∈ model.runtimes state
+  entry : registration.entryAddress < 2^program.declarations.input.target.pointerBits
+  lent : registration.access ≠ .owned → registration ∈ model.registrations state
+  owned : registration.access = .owned → ∀ current ∈ model.registrations state, current.active = true →
+    ¬ registration.owner.Overlaps current.owner
 
 /-- Host payload adapter to ordinary invocation inputs. Captures still use
 CaptureInputs from the actual registered receiver, under retained authority. -/
@@ -302,7 +328,7 @@ def CallbackInputs (world : World) (formals : List Local) (arguments : List Reso
 /-- Callback completion goes through ordinary reference destruction, including
 releaseChild's recursive retry of an unreferenced parent. The host protocol is
 resumed only after that cleanup, against the resulting world and ambient state. -/
-def CallbackReturnTask (session : ForeignSession) (registration : Identity) (result : Address)
+def CallbackReturnTask (session : ForeignSession) (registration : CallbackEntry) (result : Address)
     (lease : Option ReceiverLease) (next : Code) : Task :=
   let complete := Task.foreignCallbackReturned session registration result next
   match lease with
@@ -316,11 +342,11 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
       Protects program context before.world operands addresses prepared →
       CallTyped program prepared ⟨context,destination,binding,arguments,signature,addresses⟩ →
       contract.precondition prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ →
       model.start binding.declaration prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ state →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ state →
       Step program model before none
-        { before with world := prepared, hostState := state, task := .foreign ⟨⟨context,destination,binding,arguments,signature,addresses⟩,state,AmbientExposed before.frames⟩ next }
+        { before with world := prepared, hostState := state, task := .foreign ⟨⟨context,destination,binding,arguments,signature,addresses⟩,state,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ next }
   | host {before session next imported contract observation after nextState} :
       before.task = .foreign session next → before.hostState = session.state → Selected program model session.call imported contract →
       contract.session before.world session →
@@ -340,33 +366,28 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
       before.task = .foreign session next → before.hostState = session.state → Selected program model session.call imported contract →
       contract.session before.world session →
       model.step session.call.binding.declaration before.world session observation after (.callback id arguments) nextState →
-      registration ∈ model.registrations session.state → registration.identity = id → registration.active = true →
-      Accessible program model contract before.world after session registration.place →
-      (registration.access = .owned → ∀ current ∈ model.registrations nextState, current.active = true →
-        ¬ registration.owner.Overlaps current.owner) →
-      CallableReceiver after registration.owner registration.authority registration.access registration.function registration.arguments →
-      Instance program registration.function registration.arguments function → function.signature.effects = .row [] [] →
-      (session.call.binding.cABI = true → ∃ abi, CSignature program.declarations function.signature abi) →
+      CallbackAdmission program model contract before.world after session nextState id registration function →
       LendsReceiver program session.call.context after registration.owner registration.authority registration.access lease authority lent →
       CaptureInputs lent registration.owner authority registration.access function.captures captures →
       CallbackInputs lent function.parameters arguments inputs →
       ConsumesReceiver lent registration.owner authority registration.access consumed →
       Step program model before (some (.host imported.symbol session.state observation))
-        { before with world := consumed, hostState := nextState, task := .enter session.call.context function (.supplied (captures ++ inputs)) false, frames := .hostCallback (session.advance before.world after nextState) id function.signature.result lease next :: before.frames }
+        { before with world := consumed, hostState := nextState, task := .enter session.call.context function (.supplied (captures ++ inputs)) false, frames := .hostCallback (session.advance before.world after nextState) ⟨id,registration.runtime,registration.entryAddress⟩ function.signature.result lease next :: before.frames }
   | callbackResult {before context result session registration resultType lease next rest value kept protectedWorld after} :
       before.task = .yield context result → before.frames = .hostCallback session registration resultType lease next :: rest →
       before.world.Stores result value → value.type = resultType →
       Protect program session.call.context before.world result .owner kept protectedWorld →
       Retires protectedWorld result.root after →
       Step program model before none
-        { before with world := after, frames := rest, task := CallbackReturnTask session registration kept lease next }
-  | callbackReturned {before session registration result next imported contract nextState} :
+        { before with world := after, task := CallbackReturnTask session registration kept lease next }
+  | callbackReturned {before session registration result next imported contract nextState resultType lease rest} :
       before.task = .foreignCallbackReturned session registration result next →
+      before.frames = .hostCallback session registration resultType lease next :: rest →
       Selected program model session.call imported contract →
-      contract.callbackPostcondition before.world session before.hostState registration result →
-      model.callbackReturned session.call.binding.declaration before.world session before.hostState registration result nextState →
+      contract.callbackPostcondition before.world session before.hostState registration.registration result →
+      model.callbackReturned session.call.binding.declaration before.world session before.hostState registration.registration result nextState →
       Step program model before none
-        { before with hostState := nextState, task := .foreign (session.returned result nextState) next }
+        { before with hostState := nextState, frames := rest, task := .foreign (session.returned result nextState) next }
   | fault {before session next imported contract observation after nextState} :
       before.task = .foreign session next → before.hostState = session.state → Selected program model session.call imported contract →
       contract.session before.world session →
@@ -374,13 +395,11 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
       Step program model before (some (.fatal .hostContract)) { before with world := after, hostState := nextState, task := .fatal .hostContract }
 
 def NoForeignCapture (frames : List Frame) : Prop :=
-  ∀ frame ∈ frames, (∀ identity, frame ≠ .foreign identity) ∧
-    ∀ session registration resultType lease next, frame ≠ .hostCallback session registration resultType lease next
+  ∀ frame ∈ frames, frame.ForeignFree
 
 theorem callback_barrier_not_empty {session registration resultType lease next rest} :
     ¬ NoForeignCapture (.hostCallback session registration resultType lease next :: rest) := by
   intro safe
-  exact (safe (.hostCallback session registration resultType lease next) (by simp)).2
-    session registration resultType lease next rfl
+  exact safe (.hostCallback session registration resultType lease next) (by simp)
 
 end Glorious.Language.Foreign

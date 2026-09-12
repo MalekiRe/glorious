@@ -20,18 +20,18 @@ theorem RegistrationOrigin.active_authority {program : Kernel.Program} {contract
   | unregister => cases active
   | register granted retention => exact Or.inr ⟨granted,retention⟩
 
-theorem RegistrationsPermitted.active_authority {program : Kernel.Program} {contract : Contract} {model : Model}
+theorem HostStateEvolution.active_authority {program : Kernel.Program} {contract : Contract} {model : Model}
     {initial current : World} {session : ForeignSession} {before after : List Nat} {registration : Registration}
-    (permitted : RegistrationsPermitted program contract model initial current session before after)
+    (permitted : HostStateEvolution program contract model initial current session before after)
     (member : registration ∈ model.registrations after) (active : registration.active = true) :
     registration ∈ model.registrations before ∨
       (Accessible program model contract initial current session registration.place ∧
         (registration.retained = true → contract.retainable current session registration.owner)) :=
-  (permitted registration member).active_authority active
+  (permitted.registrations registration member).active_authority active
 
-theorem RegistrationsPermitted.new_authority {program : Kernel.Program} {contract : Contract} {model : Model}
+theorem HostStateEvolution.new_authority {program : Kernel.Program} {contract : Contract} {model : Model}
     {initial current : World} {session : ForeignSession} {before after : List Nat} {registration : Registration}
-    (permitted : RegistrationsPermitted program contract model initial current session before after)
+    (permitted : HostStateEvolution program contract model initial current session before after)
     (member : registration ∈ model.registrations after) (active : registration.active = true)
     (new : registration ∉ model.registrations before) :
     Accessible program model contract initial current session registration.place ∧
@@ -82,14 +82,14 @@ inductive RegistrationGranted (program : Kernel.Program) (model : Model) (before
       Protects program context before.world operands addresses prepared →
       Selected program model ⟨context,destination,binding,arguments,signature,addresses⟩ imported contract →
       contract.precondition prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ →
       model.start binding.declaration prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ state →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ state →
       after.hostState = state →
       Accessible program model contract prepared prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ registration.place →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ registration.place →
       (registration.retained = true → contract.retainable prepared
-        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames⟩ registration.owner) →
+        ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ registration.owner) →
       RegistrationGranted program model before after registration
   | host {session next imported contract observation current action state} :
       before.task = .foreign session next →
@@ -101,8 +101,8 @@ inductive RegistrationGranted (program : Kernel.Program) (model : Model) (before
   | returned {session callback result next imported contract state} :
       before.task = .foreignCallbackReturned session callback result next →
       Selected program model session.call imported contract →
-      contract.callbackPostcondition before.world session before.hostState callback result →
-      model.callbackReturned session.call.binding.declaration before.world session before.hostState callback result state →
+      contract.callbackPostcondition before.world session before.hostState callback.registration result →
+      model.callbackReturned session.call.binding.declaration before.world session before.hostState callback.registration result state →
       after.hostState = state →
       Accessible program model contract before.world before.world (session.returned result before.hostState) registration.place →
       (registration.retained = true →
@@ -127,14 +127,14 @@ theorem Step.registrations {program : Kernel.Program} {model : Model} {before af
     · exact Or.inr (.enter task protectedWorld selected precondition started rfl access retention)
   | host task state selected sessionActive changed
   | result task state selected sessionActive changed _ _
-  | callback task state selected sessionActive changed _ _ _ _ _ _ _ _ _ _ _ _ _
+  | callback task state selected sessionActive changed _ _ _ _ _
   | fault task state selected sessionActive changed =>
     have permission := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed).2.2.2.2.2.2.2.2
     rcases permission.active_authority member active with old | ⟨access,retention⟩
     · exact Or.inl (state ▸ old)
     · exact Or.inr (.host task selected sessionActive changed rfl access retention)
   | callbackResult => exact Or.inl member
-  | callbackReturned task selected postcondition returned =>
+  | callbackReturned task _ selected postcondition returned =>
     have permission := (lawful.callbackReturned _ _ _ _ _ _ _ _ selected typed.1 postcondition returned).2.2
     rcases permission.active_authority member active with old | ⟨access,retention⟩
     · exact Or.inl old

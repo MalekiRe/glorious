@@ -48,7 +48,7 @@ theorem Step.suspensionExtension {program : Kernel.Program} {model : Model}
   | host _ _ selected active step => exact lawful.host_suspensionExtension well selected active step
   | result _ _ selected active step _ transferred =>
     exact (lawful.host_suspensionExtension well selected active step).trans transferred.suspensionExtension
-  | callback _ _ selected active step _ _ _ _ _ _ _ _ _ lent _ _ consumed =>
+  | callback _ _ selected active step _ lent _ _ consumed =>
     exact (lawful.host_suspensionExtension well selected active step).trans
       (Kernel.LendsResident.suspensionExtension lent |>.trans consumed.suspensionExtension)
   | callbackResult _ _ _ _ protectedWorld retired =>

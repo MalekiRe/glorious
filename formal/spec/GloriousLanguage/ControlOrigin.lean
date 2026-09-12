@@ -1,4 +1,5 @@
 import GloriousLanguage.ControlAuthority
+import GloriousLanguage.ActivationOrigin
 
 /-! Address provenance of executable control. This is support of the actual
 task, frames and captured control, not another environment or ownership table.
@@ -6,34 +7,6 @@ Code contains lexical places; every runtime address appears in the products
 below. Resident closure fields, pointers and references remain in `World` and
 are governed by its existing storage and value-typing invariants. -/
 namespace Glorious.Language
-
-def RootSupport.Below (roots : List Identity) (limit : Identity) : Prop :=
-  ∀ root ∈ roots, root < limit
-
-theorem RootSupport.Below.mono {roots : List Identity} {first last : Identity}
-    (bounded : RootSupport.Below roots first) (limit : first ≤ last) : RootSupport.Below roots last :=
-  fun root member => Nat.lt_of_lt_of_le (bounded root member) limit
-
-@[simp] theorem RootSupport.below_nil (limit : Identity) : RootSupport.Below [] limit := by
-  simp [Below]
-
-@[simp] theorem RootSupport.below_cons {root : Identity} {roots : List Identity} {limit : Identity} :
-    RootSupport.Below (root :: roots) limit ↔ root < limit ∧ RootSupport.Below roots limit := by
-  simp [Below]
-
-@[simp] theorem RootSupport.below_append {left right : List Identity} {limit : Identity} :
-    RootSupport.Below (left ++ right) limit ↔ RootSupport.Below left limit ∧ RootSupport.Below right limit := by
-  simp [Below, or_imp, forall_and]
-
-@[simp] theorem RootSupport.below_flatMap {α : Type} {items : List α}
-    {support : α → List Identity} {limit : Identity} :
-    RootSupport.Below (items.flatMap support) limit ↔ ∀ item ∈ items, RootSupport.Below (support item) limit := by
-  simp only [Below, List.mem_flatMap]
-  constructor
-  · intro bounded item member root inside
-    exact bounded root ⟨item,member,inside⟩
-  · rintro bounded root ⟨item,member,inside⟩
-    exact bounded item member root inside
 
 namespace Kernel
 
@@ -118,6 +91,7 @@ structure State.ControlWellFormed (state : State) : Prop where
   frameAuthorities : AuthoritySupport.Recorded (state.frames.flatMap Frame.authoritySupport) state.world.loans
   savedAuthorities : ∀ id suspension, state.resumptions.get id = some suspension →
     AuthoritySupport.Recorded suspension.controlAuthoritySupport state.world.loans
+  activations : state.ActivationsWellFormed
 
 theorem State.ControlWellFormed.saved_current {state : State} (valid : state.ControlWellFormed)
     {id : Identity} {suspension : Suspension} (found : state.resumptions.get id = some suspension) :

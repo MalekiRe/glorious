@@ -33,15 +33,15 @@ example {program : Kernel.Program} (world : World) (handler : InstalledHandler) 
       none { world := world, task := .yield handler.environment value } := by
   exact EffectStep.finishedLentClause rfl trivial
 
-example (session : ForeignSession) (registration : Identity) (resultType : Term) (lease : Option ReceiverLease) (next : Code) :
+example (session : ForeignSession) (registration : CallbackEntry) (resultType : Term) (lease : Option ReceiverLease) (next : Code) :
     ¬ SnapshotFrame (.hostCallback session registration resultType lease next) := by
   exact fun impossible => impossible
 
 example (program : Kernel.Program) (world : World) (operation : DeclId)
     (arguments : List Term) (payload : List ResolvedPlace) (session : ForeignSession)
-    (registration : Identity) (resultType : Term) (lease : Option ReceiverLease) (next : Code) :
+    (registration : CallbackEntry) (resultType : Term) (lease : Option ReceiverLease) (next : Code) :
     ¬ Bypasses program world operation arguments payload (.hostCallback session registration resultType lease next) := by
-  exact fun impossible => impossible
+  exact fun impossible => impossible.1
 
 example (map : Relocation) (pointer : RawPointer) (raw : pointer.allocation = none) :
     map.pointer pointer = pointer := by simp [Relocation.pointer, raw]

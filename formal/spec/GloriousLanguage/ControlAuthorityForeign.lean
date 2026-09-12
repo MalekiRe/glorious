@@ -91,7 +91,7 @@ theorem _root_.Glorious.Language.Execution.ForeignSession.advance_authority_supp
   simp only [ForeignSession.advance,ForeignSession.authoritySupport,List.map_append,AuthoritySupport.recorded_append]
   exact ⟨recorded.1,recorded.2,FreshExposed.authority_support⟩
 
-theorem CallbackReturnTask.authority_support {session : ForeignSession} {registration : Identity} {result : Address}
+theorem CallbackReturnTask.authority_support {session : ForeignSession} {registration : CallbackEntry} {result : Address}
     {lease : Option ReceiverLease} {next : Code} {loans : Table Loan}
     (recorded : AuthoritySupport.Recorded session.authoritySupport loans) :
     AuthoritySupport.Recorded (CallbackReturnTask session registration result lease next).authoritySupport loans := by
@@ -120,7 +120,7 @@ theorem Step.authority_support {program : Kernel.Program} {model : Model} {befor
   case enter kept _ _ _ => exact AuthoritySupport.recorded_append.mpr ⟨taskAfter.1,AmbientExposed.authority_support framesAfter⟩
   case host => exact ForeignSession.advance_authority_support taskAfter
   case result => exact (AuthoritySupport.recorded_append.mp taskAfter).1
-  case callback selected active transition _ _ _ _ _ _ _ _ _ lent captures inputs consumed =>
+  case callback selected active transition _ lent captures inputs consumed =>
     have hostRetained := (lawful.host_suspensionExtension well selected active transition).recorded
     have hostToFinal := (lent.suspensionExtension.trans consumed.suspensionExtension).recorded
     have contextRecorded := (AuthoritySupport.recorded_append.mp taskAfter).1

@@ -33,6 +33,11 @@ def AmbientExposed (frames : List Frame) : List ResolvedPlace :=
     | .hostCallback session _ _ _ _ => session.known
     | _ => []
 
+/-- The host receives exactly the runtime obligations retained by actual
+callback and hook continuations on the current control stack. -/
+def AmbientRuntimes (frames : List Frame) : List Identity :=
+  frames.flatMap Frame.callbackRuntimes
+
 /-- Publish only roots allocated during one uninterrupted host mutation
 chunk. Allocations made later by source callbacks are outside this interval. -/
 def FreshExposed (before after : World) : List ResolvedPlace :=

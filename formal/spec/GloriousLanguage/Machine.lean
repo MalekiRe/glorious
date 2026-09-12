@@ -72,6 +72,18 @@ structure ForeignSession where
   enclosing synchronous sessions and completed callback results. Hidden
   invocation leases and arbitrary source callback allocations are not exposed. -/
   exposed : List ResolvedPlace := []
+  /-- Runtime handles of actual enclosing source callbacks. This is the
+  handoff's dynamic no-shutdown requirement, not another runtime inventory. -/
+  heldRuntimes : List Identity := []
+  deriving Repr, Inhabited
+
+/-- The actual foreign entry remains owned by its callback frame until source
+cleanup returns to the host. Its code entry and runtime are not reconstructed
+from a registry that may legitimately consume a one-shot registration. -/
+structure CallbackEntry where
+  registration : Identity
+  runtime : Identity
+  entryAddress : Nat
   deriving Repr, Inhabited
 
 /-- Receiver and per-input lending use the same ordinary reference owner. -/
@@ -123,7 +135,7 @@ inductive Task where
   | primitive (context : Context) (destination : Address) (binding : RuntimeBinding)
       (arguments : List Term) (operands : List ResolvedPlace) (next : Code)
   | foreign (session : ForeignSession) (next : Code)
-  | foreignCallbackReturned (session : ForeignSession) (registration : Identity) (result : Address) (next : Code)
+  | foreignCallbackReturned (session : ForeignSession) (entry : CallbackEntry) (result : Address) (next : Code)
   | stopped (result : Address)
   | fatal (reason : Fatal)
   deriving Repr, Inhabited
@@ -142,9 +154,38 @@ inductive Frame where
   | hook (context : Context) (address : Address) (authority : Authority)
       (handle : Address) (loan : Identity) (next : Task)
   | foreign (identity : Identity)
-  | hostCallback (session : ForeignSession) (registration : Identity) (resultType : Term)
+  | hostCallback (session : ForeignSession) (entry : CallbackEntry) (resultType : Term)
       (lease : Option ReceiverLease) (next : Code)
   deriving Repr, Inhabited
+
+/-- Runtime obligations follow the actual callback continuation, including
+its already-scheduled source destruction. Ordinary contexts add no host pin. -/
+def Task.callbackRuntimes : Task → List Identity
+  | .destroy _ _ _ next | .destroyFields _ _ _ _ next | .finishShell _ _ next
+  | .retire _ next | .cleanup _ _ next | .closeRegion _ next | .closeLoan _ next
+  | .releaseLoan _ next | .transfer _ _ _ next | .cancel _ _ next => next.callbackRuntimes
+  | .foreign session _ => session.heldRuntimes
+  | .foreignCallbackReturned session entry _ _ => entry.runtime :: session.heldRuntimes
+  | _ => []
+
+def Frame.callbackRuntimes : Frame → List Identity
+  | .hook _ _ _ _ _ next => next.callbackRuntimes
+  | .hostCallback session entry _ _ _ => entry.runtime :: session.heldRuntimes
+  | _ => []
+
+/-- A delayed foreign return is a real foreign continuation even when carried
+inside a hook's pending cleanup. Capturing it would fabricate a C stack return. -/
+def Task.ForeignFree : Task → Prop
+  | .destroy _ _ _ next | .destroyFields _ _ _ _ next | .finishShell _ _ next
+  | .retire _ next | .cleanup _ _ next | .closeRegion _ next | .closeLoan _ next
+  | .releaseLoan _ next | .transfer _ _ _ next | .cancel _ _ next => next.ForeignFree
+  | .foreign .. | .foreignCallbackReturned .. => False
+  | _ => True
+
+def Frame.ForeignFree : Frame → Prop
+  | .foreign .. | .hostCallback .. => False
+  | .hook _ _ _ _ _ next => next.ForeignFree
+  | _ => True
 
 /-- Only cleanup-owning frame roles claim homes. A saved caller context is
 an access environment, not ownership of that caller's activation or scope. -/
@@ -231,6 +272,7 @@ structure Suspension.CaptureOrigin (suspension : Suspension) : Prop where
   domain : ∀ root, (∃ home, suspension.homes.get root = some home) ↔ root ∈ suspension.roots
   ownedHomes : ∀ root home, suspension.homes.get root = some home →
     CapturedHome suspension.handler suspension.frames home
+  foreignFree : ∀ frame ∈ suspension.frames, frame.ForeignFree
 
 /-- The executable control invariant combines the existing budget component
 with capture provenance and active ownership of the current root inventory.

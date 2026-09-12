@@ -7,9 +7,7 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
-def LabelBarrier : Frame → Prop
-  | .foreign .. | .hostCallback .. => False
-  | _ => True
+def LabelBarrier (frame : Frame) : Prop := frame.ForeignFree
 
 def LabelRoute (frames : List Frame) (brand : Identity) (inner : List Frame)
     (outerContext : Context) (region : Identity) (type : Term) (outer : List Frame) : Prop :=

@@ -744,8 +744,39 @@ the exact trace split around a grant, or the exact original admitted record.
 Its canonical invocation consumer shares `Execution.Step.host_state` with the
 historical authority invariant; copied replay cannot restore an old opaque host
 registry. The strict combined host-origin/history gate passes (95 jobs). This
-establishes authority history, not the still-open active callback runtime and
-retained callable ownership lifecycle.
+establishes authority history; callback runtime lifetime is established by the
+following actual protocol/control repair.
+
+`CallbackAdmission` now consumes the actual current callable permission,
+selected source function, bounded ABI entry and runtime in the host's new state.
+Previously, a host action could remove a runtime and still dispatch a callback
+using its old registry snapshot. Lent callbacks retain their exact active record;
+owned callbacks atomically consume registration ownership before ordinary source
+receiver consumption. This does not require a consumed callable to remain
+initialized or pretend that a parent's permission remains usable while lent.
+
+The actual `CallbackEntry` replaces the callback frame's old bare registration ID.
+The same frame remains present through reference/Drop cleanup and is popped only
+by the actual callback-return transition. Previously, popping it before cleanup
+also removed the foreign control barrier while the C return was still pending.
+Captured-control origin now requires foreign-free saved frames, derived from the
+real effect route. Pending foreign returns in a hook's cleanup count as foreign
+control too; the shared effect/label barrier preserves ordinary frame behavior
+while rejecting those hidden returns and forged initial saved foreign frames.
+
+`HostStateEvolution` replaces the registration-only transition contract. Its
+existing registration-origin obligation is paired with no shutdown of runtime
+handles actually handed to this host session. Those handles come from actual
+callback/hook control, persist through protocol advance and callback return, and
+refer to the model's existing runtime inventory. `ForeignRuntimePreservation`
+derives handoff coverage and runtime liveness through all six step families,
+arbitrary runs, canonical observations, divergence prefixes and reachable states.
+Active callback frames and pending return tasks therefore retain a live runtime
+through arbitrary intervening source and nested host execution. The strict
+runtime dependency gate passes (97 jobs); the migrated source-entry gate passes
+(64 jobs). General retained-registration callable storage framing against source
+mutation, cleanup and cancellation remains open; this runtime theorem does not
+establish that distinct owning source aliases cannot consume its environment.
 
 The combined frozen control/ownership, retained-context, source-entry,
 predicate, runtime-equivariance and repaired-coherence dependency gate passed
@@ -851,7 +882,37 @@ and exact registration-history integration gate passes (129 jobs, warnings as
 errors), together with the existing runtime-equivariance, invocation-cleanup
 and whole-control/suspension consumers. The preserved Drop inversion failure
 and full aggregate soundness gate are not counted as passing. Activation/home
-freshness and active callback-runtime lifetime repairs are continuing separately.
+freshness and active callback-runtime lifetime repairs were still open at that checkpoint.
+
+Historical activation provenance is now part of the canonical control invariant.
+Every recorded home, current task context, owning frame role and saved context
+is older than the machine's next activation. This includes ended roots and
+inactive suspensions: they cannot anticipate future owners. Entry, fresh clauses,
+ordinary allocation, raw-memory and foreign mutations, final restoration and
+copied replay establish the same bounds through their actual producers. Snapshot
+copying derives its selected activation domain from authenticated capture homes
+and actual saved control, then advances the real allocation supply.
+
+`ActivationPreservation` proves the complete six-family transition theorem;
+`ControlOriginPreservation` consumes it in whole-run, observation, divergence and
+reachable-state preservation. `InitialInvocation` no longer carries the weak
+one-time guard against a live root at exactly the next activation, or a duplicate
+caller-activation bound. Both follow from canonical control admission; arbitrary
+empty invocations remain constructible from ordinary historical home bounds.
+Actual entry excludes all prior homes from its fresh callee owner, and arbitrary
+execution cannot insert a future activation into old saved control or saved
+restoration homes. These are historical ownership facts, not an assertion that
+every retained caller root remains live or private through arbitrary bodies.
+The hidden Drop-handle, initialized return and genuine ambient-stack composition
+obligations remain open on the same chain. In particular, removing caller frames
+can change a nested foreign call's actual exposed storage and held runtimes;
+standalone observations are not automatically observations in an ambient stack.
+
+The frozen combined activation/control, callback-runtime and registry-origin
+gate passes (143 jobs, warnings as errors), including source/match entry,
+runtime world/coverage/body renaming and invocation cleanup consumers. Existing
+example files were mechanically migrated but not executed as routine evidence.
+The known Drop inversion failure and full aggregate soundness remain open.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving

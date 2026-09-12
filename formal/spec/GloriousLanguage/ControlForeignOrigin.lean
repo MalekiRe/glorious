@@ -125,7 +125,7 @@ theorem _root_.Glorious.Language.Execution.ForeignSession.advance_root_support
   simp only [ForeignSession.advance,ForeignSession.rootSupport,List.map_append,RootSupport.below_append]
   exact ⟨bounded.1,bounded.2,FreshExposed.root_support well⟩
 
-theorem CallbackReturnTask.root_support {session : ForeignSession} {registration : Identity} {result : Address}
+theorem CallbackReturnTask.root_support {session : ForeignSession} {registration : CallbackEntry} {result : Address}
     {lease : Option ReceiverLease} {next : Code} {limit : Identity}
     (sessionBound : RootSupport.Below session.rootSupport limit) (resultBound : result.root < limit)
     (leaseBound : RootSupport.Below (lease.toList.map (fun lease => lease.handle.root)) limit) :
@@ -164,7 +164,7 @@ theorem Step.control_support {program : Kernel.Program} {model : Model} {before 
     have hostWell := (lawful.host_worldTyped valid inventory typed selected active transition).1
     have contextBound := (RootSupport.below_append.mp (RootSupport.below_append.mp taskAfter).1).1
     exact ⟨transferred.source_root_bound hostWell,contextBound⟩
-  case callback selected active transition _ _ _ _ _ _ _ _ _ lent captures inputs consumed =>
+  case callback selected active transition _ lent captures inputs consumed =>
     have hostWell := (lawful.host_worldTyped valid inventory typed selected active transition).1
     have lendWell := lent.wellFormed hostWell
     have hostFrontier := (lawful.host_suspensionExtension typed.1 selected active transition).counter

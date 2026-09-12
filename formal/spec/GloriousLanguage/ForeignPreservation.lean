@@ -84,7 +84,7 @@ theorem Step.worldTyped {program : Kernel.Program} {model : Model} {before after
   | host _ _ selected active step => exact lawful.host_worldTyped valid inventory typed selected active step
   | result _ _ selected active step _ transferred =>
     exact transferred.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step)
-  | callback _ _ selected active step _ _ _ _ _ _ _ _ _ lent _ _ consumed =>
+  | callback _ _ selected active step _ lent _ _ consumed =>
     exact consumed.worldTyped (lent.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step))
   | callbackResult _ _ _ _ protectedWorld retired =>
     exact retired.worldTyped (protectedWorld.worldTyped valid inventory typed)
@@ -114,7 +114,7 @@ theorem Step.ready {program : Kernel.Program} {model : Model} {before after : St
     cases task
     have law := lawful.step _ _ _ _ _ _ _ _ selected typed.1 active step
     exact ⟨rfl,_,_,selected,law.2.2.2.2.1 rfl,law.2.2.2.1⟩
-  | callbackReturned _ selected postcondition returned =>
+  | callbackReturned _ _ selected postcondition returned =>
     cases task
     have law := lawful.callbackReturned _ _ _ _ _ _ _ _ selected
       typed.1 postcondition returned
