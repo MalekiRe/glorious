@@ -113,11 +113,21 @@ inductive PayloadPlan (program : Language.Program) (world : World) :
       PayloadPlan program world (address :: addresses) (pattern :: patterns)
         ⟨actions.shells ++ rest.shells,actions.bindings ++ rest.bindings,rest.cleanup ++ actions.cleanup⟩
 
+/-- A continuation keeps the source binder's stored type and exact generative
+brand, answer and quantity. Its argument and effect components may be equal by
+conversion to the selected runtime operation signature: accepting an arm never
+establishes syntactic equality of its generic arguments. -/
+def ContinuationBindingType (program : Language.Program) (context : Language.Context)
+    (id : Identity) (signature : Signature) (answer effects : Term) (quantity : Quantity) (type : Term) : Prop :=
+  ∃ argument actualEffects,
+    type = .continuation (.runtimeBrand (.resumption id)) argument answer actualEffects quantity ∧
+    Equal program context argument signature.result ∧ Equal program context actualEffects effects
+
 def CreatesContinuation (program : Kernel.Program) (context : Context) (before : World)
     (id : Identity) (signature : Signature) (answer effects : Term) (quantity : Quantity)
     (localSlot : Local) (address : Address) (after : World) : Prop :=
   ∃ allocated layout,
-    localSlot.type = .continuation (.runtimeBrand (.resumption id)) signature.result answer effects quantity ∧
+    ContinuationBindingType program.declarations context.static id signature answer effects quantity localSlot.type ∧
     Allocates program.declarations before (.localSlot context.activation context.scope) context.region
       localSlot.type layout localSlot.mutable address allocated ∧
     NewValue program.declarations allocated address localSlot.type (.continuation id) [] after

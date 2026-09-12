@@ -72,26 +72,6 @@ theorem Typing.CompletionType.empty {program : Kernel.Program} {context : Typing
 
 namespace Execution
 
-/-- Installation produces the completion-clause environment and its source
-input scope from HandlerType, through the real capture bindings. -/
-theorem Installs.completion_context {program : Kernel.Program} {before : State}
-    {outer : Context} {syntaxNode : Kernel.Handler} {handler : InstalledHandler} {after : World}
-    {source : Typing.Context} {input result : Term}
-    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (worldTyped : Typing.WorldTyped program before.world)
-    (typed : Typing.ContextBindingsTyped program before.world source outer)
-    (handlerTyped : Typing.HandlerType program source syntaxNode input result)
-    (installed : Installs program before outer syntaxNode handler after) :
-    ∃ environment,
-      Typing.ContextBindingsTyped program after environment handler.environment ∧
-      input.Scoped environment.static.scope ∧
-      Typing.CompletionType program environment handler.syntaxNode.completion input result := by
-  have environment := installed.environment_contextBindingsTyped valid inventory worldTyped typed handlerTyped
-  refine ⟨{ source with locals := CaptureLocals syntaxNode.captures },environment,?_⟩
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,rfl⟩ := installed
-  cases handlerTyped with
-  | attached _ admitted completion _ => exact ⟨admitted _ List.mem_cons_self,completion⟩
-
 /-- The source terminal result and payload binder order are transported by
 the actual clause start and payload protection, before destructive cleanup. -/
 theorem terminal_inputs_context {program : Kernel.Program} {before : State} {source : Typing.Context}
@@ -153,28 +133,27 @@ theorem EffectStep.terminal_clause_context {program : Kernel.Program} {before af
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before.world)
     (handlers : ∀ handler owns, Frame.handler handler owns ∈ before.frames →
-      ∃ source result, Typing.ContextBindingsTyped program before.world source handler.environment ∧
-        Typing.OperationArmsType program source handler.syntaxNode.operations result)
+      Typing.InstalledHandlerTyped program before.world handler)
     (running : before.task = .perform context id arguments payload)
     (step : EffectStep program before none after) :
-    ∃ source clause inner handler owns outer roots actions, ∃ arm : Kernel.OperationArm, ∃ result locals,
+    ∃ source clause inner handler owns outer roots actions, ∃ arm : Kernel.OperationArm, ∃ locals,
       before.frames = inner ++ Frame.handler handler owns :: outer ∧
       after.frames = Frame.serviced handler owns clause none :: outer ∧
       after.task = .cleanup context roots
         (CloseRegions (inner.flatMap Frame.ownedRegions ++ [handler.computation.region])
           (.pattern clause (ScheduledPattern actions) arm.body)) ∧
       Typing.ContextBindingsTyped program after.world source clause ∧
-      Typing.CodeType program (source.bindLocals locals) arm.body result ∧
+      Typing.CodeType program (source.bindLocals locals) arm.body handler.syntaxNode.result ∧
       (ScheduledPattern actions).filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms clause.term) ∧
       ∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope := by
   cases step <;> try (solve | simp_all)
   case terminal running' instanceTyped terminal _ routed started keptValues _ _ planned =>
     rcases Task.perform.inj (running'.symm.trans running) with ⟨rfl,rfl,rfl,rfl⟩
-    obtain ⟨source,result,contextTyped,armsTyped⟩ := handlers _ _ routed.handler_member
+    obtain ⟨source,_,contextTyped,_,_,_,armsTyped⟩ := handlers _ _ routed.handler_member
     obtain ⟨locals,contextTyped,bodyTyped,binders,admitted⟩ :=
       terminal_inputs_context valid inventory worldTyped contextTyped armsTyped routed.2.2
         instanceTyped terminal started keptValues planned
-    exact ⟨source,_,_,_,_,_,_,_,_,result,locals,routed.1,rfl,rfl,contextTyped,bodyTyped,binders,admitted⟩
+    exact ⟨source,_,_,_,_,_,_,_,_,locals,routed.1,rfl,rfl,contextTyped,bodyTyped,binders,admitted⟩
 
 /-- Completion preserves identity completion as a distinct source contract;
 an explicit arm carries its own actual ordered binder product. Both remain
@@ -250,54 +229,51 @@ theorem Step.terminal_clause_context {program : Kernel.Program} {model : Foreign
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before.world)
     (handlers : ∀ handler owns, Frame.handler handler owns ∈ before.frames →
-      ∃ source result, Typing.ContextBindingsTyped program before.world source handler.environment ∧
-        Typing.OperationArmsType program source handler.syntaxNode.operations result)
+      Typing.InstalledHandlerTyped program before.world handler)
     (running : before.task = .perform context id arguments payload)
     (step : Step program model before none after) :
-    ∃ source clause inner handler owns outer roots actions, ∃ arm : Kernel.OperationArm, ∃ result locals,
+    ∃ source clause inner handler owns outer roots actions, ∃ arm : Kernel.OperationArm, ∃ locals,
       before.frames = inner ++ Frame.handler handler owns :: outer ∧
       after.frames = Frame.serviced handler owns clause none :: outer ∧
       after.task = .cleanup context roots
         (CloseRegions (inner.flatMap Frame.ownedRegions ++ [handler.computation.region])
           (.pattern clause (ScheduledPattern actions) arm.body)) ∧
       Typing.ContextBindingsTyped program after.world source clause ∧
-      Typing.CodeType program (source.bindLocals locals) arm.body result ∧
+      Typing.CodeType program (source.bindLocals locals) arm.body handler.syntaxNode.result ∧
       (ScheduledPattern actions).filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms clause.term) ∧
       ∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope :=
   (step.performing_effect running).terminal_clause_context valid inventory worldTyped handlers running
 
 /-- Completion dispatch is established for any actual execution step from a
 yield to an installed handler. Its source environment is an input-frame fact
-derived by Installs.completion_context, not an assumed output certificate. -/
+derived by Installs.handler_context, not an assumed output certificate. -/
 theorem Step.completion_context {program : Kernel.Program} {model : Foreign.Model} {before after : State}
     {event : Option Event} {context : Context} {value : Address}
     {handler : InstalledHandler} {owns : Bool} {rest : List Frame}
     (valid : ProgramWellFormed program.declarations)
     (worldTyped : Typing.WorldTyped program before.world)
     (handlers : ∀ handler owns, Frame.handler handler owns ∈ before.frames →
-      ∃ source input result, Typing.ContextBindingsTyped program before.world source handler.environment ∧
-        input.Scoped source.static.scope ∧
-        Typing.CompletionType program source handler.syntaxNode.completion input result)
+      Typing.InstalledHandlerTyped program before.world handler)
     (running : before.task = .yield context value)
     (frames : before.frames = Frame.handler handler owns :: rest)
     (step : Step program model before event after) :
-    event = none ∧ ∃ source input result clause roots,
+    event = none ∧ ∃ source input clause roots,
       Typing.ContextBindingsTyped program after.world source clause ∧
       after.frames = Frame.completion handler owns clause :: rest ∧
       ((∃ kept, after.task = .cleanup context roots
           (.closeRegion handler.computation.region (.yield clause kept)) ∧
-          Equal program.declarations source.static input result) ∨
+          Equal program.declarations source.static input handler.syntaxNode.result) ∨
         ∃ arm : Kernel.Arm, ∃ actions locals,
           after.task = .cleanup context roots
             (.closeRegion handler.computation.region (.pattern clause (ScheduledPattern actions) arm.body)) ∧
-          Typing.CodeType program (source.bindLocals locals) arm.body result ∧
+          Typing.CodeType program (source.bindLocals locals) arm.body handler.syntaxNode.result ∧
           (ScheduledPattern actions).filterMap Kernel.PatternAction.boundLocal = locals.map (Kernel.Local.mapTerms clause.term) ∧
           ∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope) := by
-  obtain ⟨source,input,result,typed,admitted,completionTyped⟩ :=
+  obtain ⟨source,input,typed,admitted,_,completionTyped,_⟩ :=
     handlers handler owns (by rw [frames]; exact List.mem_cons_self)
   obtain ⟨event,clause,roots,typed,frames,task⟩ :=
     (step.completing_effect running frames).completion_context valid worldTyped typed admitted completionTyped running frames
-  exact ⟨event,source,input,result,clause,roots,typed,frames,task⟩
+  exact ⟨event,source,input,clause,roots,typed,frames,task⟩
 
 end Execution
 end Glorious.Language

@@ -36,7 +36,8 @@ theorem CreatesContinuation.worldTyped {program : Kernel.Program} {context : Con
     Typing.WorldTyped program after := by
   obtain ⟨allocated,layout,type,allocation,constructed⟩ := created
   apply constructed.empty_worldTyped valid inventory (allocation.worldTyped typed) (by simp) (by simp)
-  exact .continuation ⟨_,_,_,_,type⟩
+  obtain ⟨argument,actualEffects,shape,_⟩ := type
+  exact .continuation ⟨argument,answer,actualEffects,quantity,shape⟩
 
 /-- Every effect transition, including independently relocated multi-shot
 replay, preserves the full storage invariant. -/

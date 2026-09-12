@@ -1264,17 +1264,43 @@ the shared source premise as well.
 The strict 155-job dependency gate covers source-driven construction, actual
 clause entry, elaboration, snapshot body transport, lifecycle preservation and
 private-hook preservation; no concrete example is used as proof evidence.
-The remaining bound-continuation obligation is not only physical allocation:
-the source arm and runtime operation signatures are related by actual argument
-conversion, while `CreatesContinuation` currently requires a syntactically exact
-continuation type. The callback still exposes that representation obligation;
-source mode selection does not prove signature syntax equality, unconditional
-allocation success or full handler progress. This boundary needs the actual
-source/runtime conversion transport and allocation failure contract.
+`Installs.handler_context` now produces one `InstalledHandlerTyped` context
+for both completion and operation clauses, retaining the actual declared
+handler result and its scope. All actual clause-entry consumers use this
+product; the separate installation projections and unrelated existential
+result types are removed. Terminal/completion entry now proves precisely the
+selected handler's declared result, not merely some result type.
+
+`OperationSignatures` closes the source/runtime signature boundary from actual
+`SelectsOperation` and the two real generic instantiations. Argument equality
+transports the raw substitution tables to all parameter, result and effect
+components. Scope closing commutes with this same substitution. Fresh source
+continuation brands preserve those earlier signature components at actual
+clause entry. `ContinuationBindingType` therefore retains the source binder's
+literal continuation shape and exact runtime brand, handler answer and quantity,
+while requiring real conversion for its argument/effect components. The former
+syntactic-equality restriction in `CreatesContinuation` is removed; its real
+world-typing consumer retains the exact structural shape.
+
+`ContinuationCreation` derives this type contract and constructs initialization
+from actual successful allocation. `MayAwait.source_execution` consumes it;
+the source-facing callback no longer supplies a completed continuation creation
+or an initialized post-world. The existing vacant-write and empty-input value
+proofs moved unchanged from scalar progress into `StorageConstruction`; scalar
+results and continuation handles use that same construction. Actual allocation
+supplies its original declared address type and vacancy through the common
+allocation producer. Physical extent/layout success, its failure behavior, and
+post-handoff pattern access remain separate open obligations. The construction
+does not infer allocation success from a finite world's typing.
+The strict 174-job dependency gate verifies this construction through actual
+handler execution, scalar storage progress, elaboration, snapshot body typing,
+whole-execution preservation, lifecycle/control-origin and private-hook
+consumers. The unrelated higher Drop conversion-inversion gate remains open.
 This strengthens semantic admission; it does not prove source resource progress.
 General ordered layout/allocation and loan readiness must still produce the
-payload preparation and residual permissions. Matching, clause binding and
-continuation creation remain separate obligations of complete handler progress.
+payload preparation and residual permissions. Ordered matching/pattern access,
+clause binding progress and continuation allocation/failure remain obligations
+of complete handler progress.
 
 `DropInvocation` derives this admission from actual `destroyHook` dispatch,
 including the freshly allocated and borrowed argument handle and unchanged

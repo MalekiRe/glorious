@@ -37,20 +37,6 @@ theorem Allocates.addressType {program : Program} {before after : World}
   | root found live => exact .root (allocated.roots valid found) live
   | child _ field ih => exact .child ih (field.transport (by rw [allocated.read valid]))
 
-theorem Allocates.created_addressType {program : Program} {before after : World}
-    {home region type layout mutable address}
-    (allocated : Allocates program before home region type layout mutable address after) :
-    AddressType program after address type := by
-  cases allocated with
-  | @fresh base _ _ _ _ _ _ _ _ _ =>
-    exact ⟨0,.root (root := ⟨home,0,region,base,layout,type,none,mutable,before.clock,true,List.replicate layout.size none⟩)
-      (Table.get_set _ _ _) rfl⟩
-
-theorem Allocates.fields_nil {program : Program} {before after : World}
-    {home region type layout mutable address}
-    (allocated : Allocates program before home region type layout mutable address after) : address.fields = [] := by
-  cases allocated; rfl
-
 theorem Address.not_properPrefix_of_nil {first second : Address} (empty : second.fields = []) :
     ¬ first.ProperPrefix second := by
   intro included

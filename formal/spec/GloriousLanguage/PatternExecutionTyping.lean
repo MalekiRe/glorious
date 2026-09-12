@@ -99,8 +99,7 @@ theorem Step.suspended_clause_first_step {program : Kernel.Program} {model : For
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before.world)
     (handlers : ∀ handler owns, Frame.handler handler owns ∈ before.frames →
-      ∃ source result, Typing.ContextBindingsTyped program before.world source handler.environment ∧
-        Typing.OperationArmsType program source handler.syntaxNode.operations result)
+      Typing.InstalledHandlerTyped program before.world handler)
     (suspended : Step program model before (some (.suspend id)) middle)
     (advanced : Step program model middle event after) :
     ∃ source runtime locals body result,

@@ -11,6 +11,7 @@ import GloriousLanguage.SnapshotWorldTyping
 import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
+import GloriousLanguage.StorageConstruction
 import GloriousLanguage.ControlPreservation
 import GloriousLanguage.TestPreservation
 import GloriousLanguage.EffectPreservation
@@ -25,6 +26,8 @@ import GloriousLanguage.InvocationLending
 import GloriousLanguage.InvocationInputs
 import GloriousLanguage.InvocationBoundary
 import GloriousLanguage.OperationBoundary
+import GloriousLanguage.OperationSignatures
+import GloriousLanguage.ContinuationCreation
 import GloriousLanguage.OperationExecution
 import GloriousLanguage.RootSelection
 import GloriousLanguage.LabelBoundary

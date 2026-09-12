@@ -13,6 +13,28 @@ theorem Allocates.nextLoan {program : Program} {before after : World} {home regi
     (allocated : Allocates program before home region type layout mutable address after) :
     after.nextLoan = before.nextLoan := by cases allocated; rfl
 
+theorem Allocates.created_addressType {program : Program} {before after : World}
+    {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) :
+    AddressType program after address type := by
+  cases allocated with
+  | @fresh base _ _ _ _ _ _ _ _ _ =>
+    exact ⟨0,.root (root := ⟨home,0,region,base,layout,type,none,mutable,before.clock,true,List.replicate layout.size none⟩)
+      (Table.get_set _ _ _) rfl⟩
+
+theorem Allocates.fields_nil {program : Program} {before after : World}
+    {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) : address.fields = [] := by
+  cases allocated; rfl
+
+theorem Allocates.created_vacant {program : Program} {before after : World}
+    {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) : after.Vacant address := by
+  cases allocated with
+  | @fresh base _ _ _ _ _ _ _ _ _ =>
+    refine ⟨⟨home,0,region,base,layout,type,none,mutable,before.clock,true,List.replicate layout.size none⟩,?_,Or.inl ⟨rfl,rfl⟩⟩
+    simp [World.root,Table.get_set]
+
 theorem World.freshRoot {world : World} {originBound : Identity} (valid : world.WellFormedWithOrigins originBound) :
     world.roots.get world.nextRoot = none := by
   cases found : world.roots.get world.nextRoot with

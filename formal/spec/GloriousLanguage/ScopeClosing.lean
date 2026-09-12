@@ -18,6 +18,27 @@ def ScopeInstantiation.Covers (instantiation : ScopeInstantiation) (scope : Lexi
   (∀ id ∈ scope.regions, ∃ runtime, instantiation.regions.get id = some runtime) ∧
   (∀ id ∈ scope.brands, ∃ runtime, instantiation.brands.get id = some runtime)
 
+/-- Runtime scope closing transports the values of the actual simultaneous
+generic substitution; declaration binder identities remain unchanged. -/
+theorem ScopeInstantiation.term_substitute (scope : ScopeInstantiation) (term : Term) (substitution : Substitution) :
+    scope.term (term.substitute substitution) =
+      (scope.term term).substitute (substitution.map (fun entry => (entry.1,scope.term entry.2))) := by
+  cases term <;> simp only [Term.substitute,ScopeInstantiation.term,List.map_map,Function.comp_def]
+  case parameter id kind =>
+    rw [Table.get_map_values]
+    cases substitution.get id <;> simp only [Option.map,Option.getD,ScopeInstantiation.term]
+  case scopedRegion id =>
+    cases scope.regions.get id <;> simp only [Option.map,Option.getD,Term.substitute]
+  case scopedBrand id =>
+    cases scope.brands.get id <;> simp only [Option.map,Option.getD,Term.substitute]
+  all_goals try rfl
+  all_goals
+    congr 1
+    all_goals first
+    | apply List.map_congr_left; intro child _; exact scope.term_substitute child substitution
+    | exact scope.term_substitute _ substitution
+termination_by term
+
 theorem Term.mapChildren_eq_scopedRegion (f : Term → Term) {term : Term} {id : Identity}
     (same : term.mapChildren f = .scopedRegion id) : term = .scopedRegion id := by
   cases term <;> simp only [Term.mapChildren] at same <;> cases same <;> rfl

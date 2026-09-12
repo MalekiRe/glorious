@@ -53,8 +53,12 @@ or a dependency of this project.
 - `OperationExecution`: actual terminal, tail-arm and bound-resumption steps
   constructed from those shares and the selected source arm's common mode
   contract, with post-world typing, the actual clause's typed binder cursor and
-  the same request's capture lifecycle. Pattern access and continuation
-  representation/allocation readiness remain explicit.
+  the same request's capture lifecycle. Pattern access and successful physical
+  allocation remain explicit.
+- `OperationSignatures`, `ContinuationCreation`, `StorageConstruction`: actual
+  source/request signature conversion, exact continuation brand/result/quantity
+  and constructed handle initialization. Continuations and scalar results share
+  the common vacant-storage write and empty-input value producer.
 - `RootSelection`, `LabelBoundary`: constructive reverse-creation cleanup lists
   for the common storage selection and actual label leave execution from
   callee/caller post-payload permissions, without assuming a completed step.

@@ -6,26 +6,41 @@ Continuation binding precedes the payload's ordered pattern binders, exactly
 as in the executable suspension transition. -/
 namespace Glorious.Language
 
-theorem Typing.CallSignature.parameters_scoped {program : Program} (valid : ProgramWellFormed program)
+theorem Typing.CallSignature.components_scoped {program : Program} (valid : ProgramWellFormed program)
     {context : Language.Context} {id : DeclId} {arguments : List Term} {signature : Signature}
     (selected : Typing.CallSignature program context id arguments signature) :
-    ∀ type ∈ signature.parameters, type.Scoped context.scope := by
+    (∀ type ∈ signature.parameters, type.Scoped context.scope) ∧
+      signature.result.Scoped context.scope ∧ signature.effects.Scoped context.scope := by
   obtain ⟨kinded,selected⟩ := selected
   rcases selected with selected | selected
   all_goals obtain ⟨declaration,substitution,found,instantiated,_,rfl⟩ := selected
-  all_goals intro type member
-  all_goals obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
   all_goals
-    refine Term.Scoped.substitute substitution original ?_
-      (fun _ value found => (kinded value (instantiated.argument_of_get found)).scoped)
-  · apply Term.ScopeClosed.scoped
-    apply valid.scopeClosed (List.mem_of_find?_eq_some (Program.function_lookup found))
-    simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons]
-    exact Or.inl (Or.inl (Or.inl (Or.inl (Or.inr (Or.inr present)))))
-  · apply Term.ScopeClosed.scoped
-    apply valid.scopeClosed (List.mem_of_find?_eq_some (Program.operation_lookup found))
-    simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons]
-    exact Or.inl (Or.inl (Or.inr (Or.inr present)))
+    have substitute {term : Term} (closed : term.ScopeClosed) :
+        (term.substitute substitution).Scoped context.scope :=
+      Term.Scoped.substitute substitution term (closed.scoped _)
+        (fun _ value found => (kinded value (instantiated.argument_of_get found)).scoped)
+  · have closed := valid.scopeClosed (List.mem_of_find?_eq_some (Program.function_lookup found))
+    refine ⟨?_,substitute (closed _ ?_),substitute (closed _ ?_)⟩
+    · intro type member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      apply substitute; apply closed
+      simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons]
+      exact Or.inl (Or.inl (Or.inl (Or.inl (Or.inr (Or.inr present)))))
+    all_goals simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,true_or,or_true]
+  · have closed := valid.scopeClosed (List.mem_of_find?_eq_some (Program.operation_lookup found))
+    refine ⟨?_,substitute (closed _ ?_),substitute (closed _ ?_)⟩
+    · intro type member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      apply substitute; apply closed
+      simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons]
+      exact Or.inl (Or.inl (Or.inr (Or.inr present)))
+    all_goals simp only [Definition.terms,Signature.terms,List.mem_append,List.mem_cons,true_or,or_true]
+
+theorem Typing.CallSignature.parameters_scoped {program : Program} (valid : ProgramWellFormed program)
+    {context : Language.Context} {id : DeclId} {arguments : List Term} {signature : Signature}
+    (selected : Typing.CallSignature program context id arguments signature) :
+    ∀ type ∈ signature.parameters, type.Scoped context.scope :=
+  (selected.components_scoped valid).1
 
 theorem Typing.PatternsType.locals_scoped {program : Program} (valid : ProgramWellFormed program)
     {context : Language.Context} {patterns : List Kernel.Pattern} {types : List Term} {access : Access}
@@ -71,6 +86,18 @@ theorem Typing.Context.scoped_bindResumption {context : Typing.Context} {term : 
   split
   · exact admitted
   · exact admitted.mono (fun _ member => member) (fun _ member => List.mem_cons_of_mem _ member)
+
+/-- Installation retains one source capture context for both kinds of clause.
+Their output is the actual handler's declared result, not an unrelated
+existential type recovered separately by a later dispatch consumer. -/
+def Typing.InstalledHandlerTyped (program : Kernel.Program) (world : World)
+    (handler : Execution.InstalledHandler) : Prop :=
+  ∃ source input,
+    Typing.ContextBindingsTyped program world source handler.environment ∧
+    input.Scoped source.static.scope ∧
+    handler.syntaxNode.result.Scoped source.static.scope ∧
+    Typing.CompletionType program source handler.syntaxNode.completion input handler.syntaxNode.result ∧
+    Typing.OperationArmsType program source handler.syntaxNode.operations handler.syntaxNode.result
 
 namespace Execution
 
@@ -133,9 +160,9 @@ theorem _root_.Glorious.Language.Typing.PatternsType.payload_scheduled_bindingLo
   simp only [ScheduledPattern,List.filterMap_append,empty.1,empty.2,List.nil_append,List.append_nil,
     typed.payload_bindingLocals close planned]
 
-/-- The actual installed frame provides the source operation typing and the
-newly bound capture environment consumed later by dispatch. -/
-theorem Installs.operationArms_context {program : Kernel.Program} {before : State}
+/-- The actual installation provides the common source clause typing and
+newly bound capture environment consumed by operation and completion dispatch. -/
+theorem Installs.handler_context {program : Kernel.Program} {before : State}
     {outer : Context} {syntaxNode : Kernel.Handler} {handler : InstalledHandler} {after : World}
     {source : Typing.Context} {input result : Term}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -143,14 +170,13 @@ theorem Installs.operationArms_context {program : Kernel.Program} {before : Stat
     (typed : Typing.ContextBindingsTyped program before.world source outer)
     (handlerTyped : Typing.HandlerType program source syntaxNode input result)
     (installed : Installs program before outer syntaxNode handler after) :
-    ∃ environment,
-      Typing.ContextBindingsTyped program after environment handler.environment ∧
-      Typing.OperationArmsType program environment handler.syntaxNode.operations result := by
+    Typing.InstalledHandlerTyped program after handler := by
   have environment := installed.environment_contextBindingsTyped valid inventory worldTyped typed handlerTyped
-  refine ⟨{ source with locals := CaptureLocals syntaxNode.captures },environment,?_⟩
+  refine ⟨{ source with locals := CaptureLocals syntaxNode.captures },input,environment,?_⟩
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,rfl⟩ := installed
   cases handlerTyped with
-  | attached _ _ _ operations => exact operations
+  | attached _ admitted completion operations =>
+    exact ⟨admitted _ List.mem_cons_self,admitted _ (List.mem_cons_of_mem _ List.mem_cons_self),completion,operations⟩
 
 theorem CreatesContinuation.contextBindingsTyped {program : Kernel.Program} {context : Context} {before after : World}
     {id signature answer effects quantity address} {lexical : Kernel.Local} {source : Typing.Context}
@@ -238,8 +264,7 @@ theorem EffectStep.suspended_clause_context {program : Kernel.Program} {before a
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program before.world)
     (handlers : ∀ handler owns, Frame.handler handler owns ∈ before.frames →
-      ∃ source result, Typing.ContextBindingsTyped program before.world source handler.environment ∧
-        Typing.OperationArmsType program source handler.syntaxNode.operations result)
+      Typing.InstalledHandlerTyped program before.world handler)
     (step : EffectStep program before (some (.suspend id)) after) :
     ∃ source runtime actions body locals result,
       after.task = .pattern runtime (ScheduledPattern actions) body ∧
@@ -249,12 +274,12 @@ theorem EffectStep.suspended_clause_context {program : Kernel.Program} {before a
       ∀ localSlot ∈ locals, localSlot.type.Scoped source.static.scope := by
   cases step with
   | suspend _ _ _ _ _ continuation routed started keptValues _ _ _ constructed planned _ =>
-    obtain ⟨source,result,contextTyped,armsTyped⟩ := handlers _ _ routed.handler_member
+    obtain ⟨source,_,contextTyped,_,_,_,armsTyped⟩ := handlers _ _ routed.handler_member
     obtain ⟨locals,output,context,body,binders,admitted⟩ := suspend_inputs_context valid inventory worldTyped contextTyped armsTyped
       routed.2.2 continuation started keptValues constructed planned
     exact ⟨_,_,_,_,locals,output,rfl,context,body,binders,admitted⟩
   | suspendTailArm _ _ _ _ _ _ continuation routed started keptValues _ _ _ planned _ =>
-    obtain ⟨source,result,contextTyped,armsTyped⟩ := handlers _ _ routed.handler_member
+    obtain ⟨source,_,contextTyped,_,_,_,armsTyped⟩ := handlers _ _ routed.handler_member
     obtain ⟨locals,output,context,body,binders,admitted⟩ := suspend_tail_inputs_context valid inventory worldTyped contextTyped armsTyped
       routed.2.2 continuation started keptValues planned
     exact ⟨_,_,_,_,locals,output,rfl,context,body,binders,admitted⟩
