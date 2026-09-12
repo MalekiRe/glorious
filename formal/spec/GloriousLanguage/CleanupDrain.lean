@@ -822,7 +822,7 @@ live row of the result is a live row of the original with the same kind, mode an
 referent. -/
 structure World.DestroyFrame (before after : World) (outside : Address) : Prop where
   reads : ∀ probe, ¬ outside.Prefix probe → after.read probe = before.read probe
-  roots : ∀ probe, ¬ outside.Prefix probe → after.root probe = before.root probe
+  roots : ∀ probe, ¬ outside.Prefix probe → (after.root probe).isSome = (before.root probe).isSome
   rows : ∀ key row, after.loans.get key = some row → ∃ original, before.loans.get key = some original ∧
     original.parent = row.parent ∧ original.guards = row.guards
   present : ∀ key original, before.loans.get key = some original → ∃ row, after.loans.get key = some row
@@ -852,7 +852,9 @@ theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after
       exact stored
     · refine ⟨?_,fun key row selected live overlap conflict => ?_⟩
       · obtain ⟨root,rootFound⟩ := permission.1
-        exact ⟨root,by rw [frame.roots addr atRoot]; exact rootFound⟩
+        have same := frame.roots addr atRoot
+        rw [rootFound] at same
+        exact Option.isSome_iff_exists.mp (by simpa using same)
       · obtain ⟨original,originalFound,originalLive,_,sameMode,sameReferent⟩ :=
           frame.liveness key row selected live
         refine permission.2 key original originalFound originalLive (sameReferent ▸ overlap) ?_
@@ -910,5 +912,38 @@ theorem World.DestroyFrame.trans {before middle after : World} {outside : Addres
       first.liveness key middleRow middleFound middleLive
     exact ⟨original, originalFound, originalLive, originalKind.trans sameKind, originalMode.trans sameMode,
       originalReferent.trans sameReferent⟩
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- A write whose target lies inside the frame's sphere leaves the frame: the
+loan table is untouched, the resolved root is read from live and generation
+(which the update keeps), and outside the sphere the read does not move. -/
+theorem World.DestroyFrame.of_write {before after : World} {outside target : Address}
+    {replacement : Option Value} (written : before.write target replacement = some after)
+    (deep : ∀ probe, ¬ outside.Prefix probe → ¬ target.Overlaps probe) :
+    World.DestroyFrame before after outside where
+  reads := fun probe outside' => World.write_disjoint written (deep probe outside')
+  roots := fun probe outside' => by
+    obtain ⟨root, replacement', found, shape⟩ := World.write_value_update written
+    rw [shape]
+    simp only [World.root]
+    by_cases same : probe.root = target.root
+    · rw [same, Table.get_set before.roots target.root { root with value := replacement' }, found]
+      by_cases cond : root.live = true ∧ root.generation = probe.generation <;> simp [cond]
+    · rw [Table.get_set_other before.roots target.root probe.root { root with value := replacement' } same]
+  rows := fun key row found => by
+    refine ⟨row,?_,rfl,rfl⟩
+    rw [World.write_rest written] at found
+    exact found
+  present := fun key original found => by
+    exact ⟨original, by rw [World.write_rest written]; exact found⟩
+  liveness := fun key row found live => by
+    refine ⟨row,?_,live,rfl,rfl,rfl⟩
+    rw [World.write_rest written] at found
+    exact found
 
 end Glorious.Language
