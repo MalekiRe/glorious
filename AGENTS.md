@@ -16,6 +16,34 @@ fact table, duplicated analysis, or isolated passing test is not that repair.
 Incremental work is appropriate only when it advances that same coherent
 pipeline correction, with the remaining integration stated explicitly.
 
+## Lean specification: purpose and working method
+
+The goal is to provide a semantic Lean definition of the compiler's intended
+language semantics and correctness contract **before implementing the compiler**.
+Prioritize faithful semantic definitions and general proofs, not implementation
+work or a growing collection of examples.
+
+- Unit tests and test-style concrete examples are not useful as routine evidence
+  for this phase. Do not add or run them routinely. Use them only in extreme
+  cases, such as isolating a specific suspected modeling error that cannot
+  readily be addressed by the general proof. Preserve existing work.
+- Running Lean to verify definitions and proofs is necessary proof checking,
+  not unit testing. Establish the general theorem; neither example counts nor
+  successful builds alone establish semantic soundness.
+- Take on large, dependency-coherent chunks, hardest obligations first. Aim to
+  close an entire difficult semantic boundary, carrying prerequisite lemmas
+  through to the general preservation, progress, or correctness result that
+  consumes them. Treat helper lemmas as intermediate steps, not the default
+  checkpoint or deliverable.
+- Be aggressive about scope and sustained proof progress without weakening
+  guarantees, assuming the desired conclusion, or claiming unfinished work is
+  complete. When a boundary remains open, identify the exact remaining proof
+  obligation and continue along that same dependency chain.
+
+For Lean specification work, this section overrides the routine positive and
+negative testing guidance below; that guidance still applies to compiler
+implementation work.
+
 ## Shared semantics, explicit transformations
 
 - Prefer typed, inspectable data products and composable transformation or

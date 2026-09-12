@@ -5,6 +5,14 @@ obligation first. A checked draft, a new local feature, or a build count is not
 the completion criterion. This order preserves the standalone language-spec
 scope; it does not add compiler implementation or library-algorithm verification.
 
+The purpose is a semantic Lean definition of the compiler's intended language
+semantics and correctness contract before implementation. Routine unit tests
+and test-style concrete examples are not useful for this phase; use them only
+in extreme cases to isolate a specific modeling error. Lean proof checking
+remains necessary. Work in large, dependency-coherent chunks that close difficult
+general semantic obligations; helper lemmas are intermediate steps, not the
+default deliverable. Do not substitute example coverage for general proofs.
+
 ## 1. Nonvacuous semantic soundness — active
 
 Establish preservation, progress, ownership/lifetime safety and lawful resource
