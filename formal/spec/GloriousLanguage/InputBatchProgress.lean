@@ -3488,9 +3488,20 @@ theorem Value.replace_fields_none {before after : Value} {index : Nat} {path : L
       (by rw [atSlot]; simp)
 
 
-/-- The receiver shell the entry must preserve: a stored value with the callable
-head, the consumed liveness flag, every field a hole and no resources, plus the
-owner permission at the receiver address. -/
+/-- SUPERSEDED framing: this structure states the receiver shell as already
+emptied (every field a hole, no resources), which is a RESULT of binding the
+captures, not a prestate fact, so it must not be instantiated before those
+bindings run. The correct invariant is relative to the shell's admitted value
+and to the set of capture slots the fold has actually cleared, i.e.
+`∃ value, world.Stores receiver value ∧ value.head = initial.head ∧
+ value.shellLive = false ∧ value.resources = initial.resources ∧
+ (∀ index ∈ cleared, value.fields[index]? = some none) ∧
+ (∀ index ∉ cleared, value.fields[index]? = initial.fields[index]?)`, with the
+per-slot step supplied by a binding lemma (`BindsInputAt.shell_shape` plus the
+owned-capture hole from `Transfers.move`'s clear) and the ending emptiness
+produced only when every admitted capture has been bound. Kept here only so the
+surrounding development still builds; the endpoint must not use it as an
+emptiness admission. -/
 def Kernel.ReceiverFramed (world : World) (receiver : Address) (authority : Authority)
     (head : ValueHead) : Prop :=
   (∃ value, world.Stores receiver value ∧ value.head = head ∧ value.shellLive = false ∧
