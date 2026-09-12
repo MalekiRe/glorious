@@ -44,9 +44,7 @@ def FrameOwns (frame : Frame) (root : Root) : Prop :=
 
 def DelimitedRoots (world : World) (handler : InstalledHandler) (inner : List Frame)
     (kept roots : List Identity) : Prop :=
-  NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root,
-    world.roots.get id = some root ∧ root.live = true ∧ id ∉ kept ∧
-    CapturedHome handler inner root.home
+  RootsWhere world (fun id root => root.live = true ∧ id ∉ kept ∧ CapturedHome handler inner root.home) roots
 
 def SaveHomes (world : World) (roots : List Identity) (homes : Table Home) : Prop :=
   homes = (world.roots.filter (fun entry => entry.1 ∈ roots)).map (fun (id,root) => (id,root.home))

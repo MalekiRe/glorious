@@ -1186,8 +1186,25 @@ that original quantity to be optional. World typing and Drop's exclusion of
 escaped lifecycles are derived through the real execution/prefix witnesses.
 Cancellation initiation is not completion of arbitrary destructor cleanup.
 The old table-entry and internal-prefix-event exit classifications are removed.
-Outward label progress requires an executable transfer; missing routing evidence
-does not authorize an invalid destination or abandonment.
+Outward label progress retains its actual destination and nonvacuous payload
+preparation. `LabelBoundary` replaces the prior existential complete-step
+admission with the callee's post-payload cleanup permission. The caller supplies
+its own share for the SAME actual `LabelRoute` and protected payload. Exact
+root-membership composition proves the caller share equivalent to the complete
+leave rule's cancellation permission, under callee admission. `MayTransfer.execute`
+constructs that ordinary `ControlStep.leave`, rather than assuming it; it also
+derives the post-world's typing. A missing or foreign-blocked target is not
+admitted, and the isolated outward-label case is proved impossible.
+
+`RootSelection` constructs reverse-creation, duplicate-free selections from
+the actual finite root table. Scope, activation, delimited handler and abandoned
+label-frame selection are definitionally identical specializations of the
+common `RootsWhere` contract. The label execution proof consumes this general
+existence theorem for actual callee/caller cleanup composition; no extra root
+inventory or preselected complete cleanup list is assumed.
+The strict 147-job dependency gate verifies this label/root-selection migration,
+including ordinary control preservation, the public-safety consumer's derived
+isolated impossibility, private Drop intervals and escaped lifecycle proofs.
 
 `OperationBoundary` replaces the former pre-payload suspension-only check.
 `MayAwait` now retains the actual selected operation's terminal or resumptive

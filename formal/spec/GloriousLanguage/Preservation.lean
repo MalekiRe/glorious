@@ -138,20 +138,6 @@ theorem World.Vacant.no_located_descendant {world : World} {ancestor descendant 
     (vacant : world.Vacant ancestor) (located : world.Located descendant) : ¬ ancestor.ProperPrefix descendant :=
   fun included => vacant.not_stored (located.ancestor_stored included)
 
-theorem Table.mem_of_get {α : Type} {table : Table α} {id : Identity} {value : α}
-    (found : table.get id = some value) : (id,value) ∈ table := by
-  induction table with
-  | nil => simp [Table.get] at found
-  | cons entry rest ih =>
-      rcases entry with ⟨key,resident⟩
-      by_cases same : key = id
-      · subst key
-        have equal : resident = value := by simpa [Table.get] using found
-        subst resident
-        exact List.mem_cons_self
-      · have later : Table.get rest id = some value := by simpa [Table.get,same] using found
-        exact List.mem_cons_of_mem _ (ih later)
-
 theorem World.root_found {world : World} {address : Address} {root : Root}
     (selected : world.root address = some root) :
     world.roots.get address.root = some root ∧ root.live = true ∧ root.generation = address.generation := by

@@ -189,6 +189,20 @@ abbrev Table (α : Type) := List (Identity × α)
 def Table.get (table : Table α) (key : Identity) : Option α :=
   (table.find? (fun entry => entry.1 == key)).map Prod.snd
 
+theorem Table.mem_of_get {α : Type} {table : Table α} {id : Identity} {value : α}
+    (found : table.get id = some value) : (id,value) ∈ table := by
+  induction table with
+  | nil => simp [Table.get] at found
+  | cons entry rest ih =>
+      rcases entry with ⟨key,resident⟩
+      by_cases same : key = id
+      · subst key
+        have equal : resident = value := by simpa [Table.get] using found
+        subst resident
+        exact List.mem_cons_self
+      · have later : Table.get rest id = some value := by simpa [Table.get,same] using found
+        exact List.mem_cons_of_mem _ (ih later)
+
 theorem Table.get_map_values {α β : Type} (table : Table α) (function : α → β) (key : Identity) :
     Table.get (table.map (fun entry => (entry.1,function entry.2))) key = (table.get key).map function := by
   simp [Table.get,Function.comp_def]

@@ -50,6 +50,9 @@ or a dependency of this project.
 - `OperationBoundary`: nonvacuous ordered payload protection and the selected
   terminal/resumptive permission shared with actual effect execution; exact
   composition of callee-owned and caller-owned post-payload obligations.
+- `RootSelection`, `LabelBoundary`: constructive reverse-creation cleanup lists
+  for the common storage selection and actual label leave execution from
+  callee/caller post-payload permissions, without assuming a completed step.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
   and whole-run preservation.

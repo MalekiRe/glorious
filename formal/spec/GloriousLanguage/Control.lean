@@ -16,8 +16,7 @@ def LabelRoute (frames : List Frame) (brand : Identity) (inner : List Frame)
   (∀ context region type, Frame.label context brand region type ∉ inner)
 
 def AbandonedRoots (world : World) (frames : List Frame) (kept roots : List Identity) : Prop :=
-  NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root,
-    world.roots.get id = some root ∧ root.live = true ∧ id ∉ kept ∧ ∃ frame ∈ frames, FrameOwns frame root
+  RootsWhere world (fun id root => root.live = true ∧ id ∉ kept ∧ ∃ frame ∈ frames, FrameOwns frame root) roots
 
 def DisposesReservations (context : Context) (places : List ResolvedPlace) (next : Task) : Task :=
   places.foldr (fun place task => .destroy context place.address place.authority task) next

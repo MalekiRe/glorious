@@ -291,7 +291,7 @@ theorem resourceAdmission_safe_iff {program : Kernel.Program} {host : Foreign.Mo
     · exact Or.inl (Finished.of_stopped typed stopped (results state reachable address stopped))
     · exact Or.inl ⟨.fatal reason,Or.inr (Or.inl ⟨reason,fatal,rfl⟩)⟩
     · exact Or.inl (mayAwait_finished typed awaiting)
-    · exact False.elim transfer
+    · exact False.elim (Contracts.MayTransfer.isolated_false transfer)
     · exact Or.inr ⟨event.bind publicEvent,after,event,step,rfl⟩
 
 theorem WellFormed.safe_iff_initialized_returns {program : Kernel.Program} (well : WellFormed program)

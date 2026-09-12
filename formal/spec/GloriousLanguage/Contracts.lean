@@ -1,7 +1,7 @@
 import GloriousLanguage.Typing
 import GloriousLanguage.ControlOrigin
 import GloriousLanguage.InvocationInputs
-import GloriousLanguage.OperationBoundary
+import GloriousLanguage.LabelBoundary
 import GloriousLanguage.ForeignRuntimeSupport
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
@@ -311,20 +311,40 @@ theorem MayAwait.caller_permission {program : Kernel.Program} {function : Functi
     exact outside
   exact ready.caller_permission outward route prepared selectedRoots
 
-/-- An outward label is a permitted transfer only when the actual executable
-rule can carry it. A missing internal label is not permission for a forged or
-dead destination, crossing a foreign barrier, or abandoning linear resources. -/
-def MayTransfer (program : Kernel.Program) (host : Foreign.Model) (state : State)
+/-- An outward label retains an actual destination and payload preparation,
+with permission on its callee-owned post-payload remainder. The caller supplies
+its own residual cleanup share when consuming this request. Missing routing or
+impossible protection is not permission for an invalid destination. -/
+def MayTransfer (program : Kernel.Program) (state : State)
     (boundary : InvocationBoundary) : Prop :=
-  match boundary with
-  | .isolated => False
-  | .caller _ _ => ∃ brand result, boundary.OutwardLabel state brand result ∧
-      ∃ event after, Step program host state event after
+  ∃ brand result, boundary.OutwardLabel state brand result ∧ boundary.LabelReady program state brand result
+
+theorem MayTransfer.isolated_false {program : Kernel.Program} {state : State} :
+    ¬ MayTransfer program state .isolated := by
+  rintro ⟨brand,argument,outward,ready⟩
+  obtain ⟨abandoned,context,region,type,outer,_,_,route,_⟩ := ready.prepared
+  exact outward.2 ⟨abandoned,context,region,type,outer,by simpa only [InvocationBoundary.ambient,List.append_nil] using route⟩
+
+theorem MayTransfer.foreign_free {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
+    (transfer : MayTransfer program state boundary) :
+    ∃ callee, state.frames = callee ++ boundary.ambient ∧ ∀ frame ∈ callee, frame.ForeignFree := by
+  obtain ⟨_,_,outward,ready⟩ := transfer
+  exact ready.foreign_free outward.2
+
+theorem MayTransfer.execute {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program state.world) (transfer : MayTransfer program state boundary)
+    (caller : ∀ brand argument, boundary.OutwardLabel state brand argument →
+      boundary.LabelCallerPermission program state brand argument) :
+    ∃ after, ControlStep program state none after ∧ Typing.WorldTyped program after.world := by
+  obtain ⟨brand,argument,outward,ready⟩ := transfer
+  obtain ⟨context,pending⟩ := outward.1
+  exact ready.execute valid inventory typed outward.2 pending (caller brand argument outward)
 
 def StateProgress (program : Kernel.Program) (host : Foreign.Model) (function : Function) (state : State)
     (boundary : InvocationBoundary := .isolated) : Prop :=
   (∃ result, boundary.Normal state result) ∨ (∃ reason, state.task = .fatal reason) ∨
-    MayAwait program function state boundary ∨ MayTransfer program host state boundary ∨
+    MayAwait program function state boundary ∨ MayTransfer program state boundary ∨
     ∃ event after, InvocationStep program host boundary state event after
 
 /-- A caller handoff cannot be mistaken for a valid return with the wrong

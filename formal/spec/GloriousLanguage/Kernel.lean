@@ -442,13 +442,17 @@ def NewestFirst (world : World) (roots : List Identity) : Prop :=
   roots.Nodup ∧ ∀ (i j : Nat) a b left right, roots[i]? = some a → roots[j]? = some b →
     world.roots.get a = some left → world.roots.get b = some right → i < j → right.born ≤ left.born
 
+/-- Cleanup selects exact roots from the one current storage table, in reverse
+creation order. Scope, activation, label and handler selection specialize this
+same relation; the predicate does not supply an independent ownership table. -/
+def RootsWhere (world : World) (selected : Identity → Root → Prop) (roots : List Identity) : Prop :=
+  NewestFirst world roots ∧ ∀ id, id ∈ roots ↔ ∃ root, world.roots.get id = some root ∧ selected id root
+
 def ScopeRoots (world : World) (activation scope : Identity) (kept : List Identity) (roots : List Identity) : Prop :=
-  NewestFirst world roots ∧ ∀ id, id ∈ roots ↔
-    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByScope root activation scope ∧ id ∉ kept
+  RootsWhere world (fun id root => root.live = true ∧ OwnedByScope root activation scope ∧ id ∉ kept) roots
 
 def ActivationRoots (world : World) (activation : Identity) (kept : List Identity) (roots : List Identity) : Prop :=
-  NewestFirst world roots ∧ ∀ id, id ∈ roots ↔
-    ∃ root, world.roots.get id = some root ∧ root.live = true ∧ OwnedByActivation root activation ∧ id ∉ kept
+  RootsWhere world (fun id root => root.live = true ∧ OwnedByActivation root activation ∧ id ∉ kept) roots
 
 theorem borrowed_capture_keeps_storage {program : Language.Program} {activation scope region world input binding after}
     (borrowed : input.access ≠ .owned)
