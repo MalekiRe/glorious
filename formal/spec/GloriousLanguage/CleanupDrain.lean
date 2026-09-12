@@ -1394,3 +1394,126 @@ theorem CleanupRun.release_custody_none {program : Kernel.Program} {host : Forei
   exact ⟨[], before, .refl, frozen⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- A node's destruction, with the children supplied as runs. -/
+theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model}
+    {context : Context} {before : State} {address : Address} {next : Task} {value : Value}
+    (task : before.task = .destroy context address .owner next)
+    (tree : World.Destroys program before.world address)
+    (stored : before.world.Stores address value)
+    (permission : Permitted before.world .owner .owned address)
+    (handed : before.world.CustodyHandedOff (.resident value.owner))
+    (childStep : ∀ (field : Nat) (rest : List Nat) (state : State) {parent : Value},
+      state.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) →
+      state.world.Stores address parent →
+      (permission : Permitted state.world .owner .owned address) →
+      (handed : state.world.CustodyHandedOff (.resident parent.owner)) →
+      (kinds : ∀ id loan, state.world.loans.get id = some loan → loan.live = true →
+        loan.kind = .owning ∨ loan.kind = .storageBorrow) →
+      (ancestry : ∀ id loan, state.world.loans.get id = some loan →
+        (∀ parent, loan.parent = some parent → state.world.loans.get parent ≠ none) ∧
+        (∀ guard ∈ loan.guards, state.world.loans.get guard ≠ none)) →
+      ∃ after parent', CleanupRun program host state [] after ∧
+        after.task = .destroyFields context address .owner rest next ∧
+        after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
+        (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
+        parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
+        parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
+        parent'.fields.length = parent.fields.length ∧
+        Permitted after.world .owner .owned address ∧
+        after.world.CustodyHandedOff (.resident parent.owner) ∧
+        (∀ id loan, after.world.loans.get id = some loan → loan.live = true →
+          loan.kind = .owning ∨ loan.kind = .storageBorrow) ∧
+        (∀ id loan, after.world.loans.get id = some loan →
+          (∀ parent, loan.parent = some parent → after.world.loans.get parent ≠ none) ∧
+          (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none)) ∧
+        (∀ other ∈ rest, after.world.Vacant (address.child other))) :
+    ∃ trace after, CleanupRun program host before trace after ∧ after.task = next := by
+  cases tree with
+  | resident treeStored disposable shellLive noContinuation noReference noAvailable _ kinds ancestry children =>
+    have valueEq : value = _ := Option.some.inj (stored.symm.trans treeStored)
+    have structural : Step program host before none
+        { before with task := .destroyFields context address .owner ((List.range value.fields.length).reverse) next } :=
+      Or.inl (LocalStep.destroyStructural task stored (by simpa only [valueEq] using disposable) permission
+        (Or.inl (by simpa only [← valueEq] using shellLive))
+        (by simpa only [← valueEq] using noContinuation) (by simpa only [← valueEq] using noReference)
+        (by simpa only [← valueEq] using noAvailable))
+    obtain ⟨_, midState, midParent, fieldsRun, midTask, midStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, lenEq, midPermission, midHanded, midKinds, midAncestry⟩ :=
+      CleanupRun.destroy_fields_tree (program := program) (host := host) (context := context) (address := address)
+        (indices := (List.range value.fields.length).reverse) (next := next) childStep
+        { before with task := .destroyFields context address .owner ((List.range value.fields.length).reverse) next }
+        value (by rfl) (List.Nodup.reverse List.nodup_range) stored permission handed kinds ancestry
+    have midCustody : midState.world.CustodyHandedOff (.resident midParent.owner) := by
+      rw [ownerEq]
+      exact midHanded
+    have midHoles : ∀ index, index < midParent.fields.length → midParent.fields[index]? = some none := by
+      intro index bound
+      have inRange : index ∈ List.range value.fields.length := by
+        rw [List.mem_range, ← lenEq]
+        exact bound
+      exact holes index (by simpa only [List.mem_reverse] using inRange)
+    obtain ⟨clearedShell, written⟩ := World.Stores.requestReturns_write_exists midStored (.resident midParent.owner)
+    let released : State := { midState with world := clearedShell, task := ReleaseCustodyLoans clearedShell (.resident midParent.owner) next }
+    have finishRun : CleanupRun program host midState [.destroy address midParent.owner] released :=
+      CleanupRun.shell_done (value := midParent) (after := clearedShell) midTask midStored (List.eq_none_of_getElem? midHoles) midPermission midCustody written
+    have afterWrite : released.world.loans = (midState.world.RequestReturns (.resident midParent.owner)).loans := by
+      obtain ⟨root,replacement,found,shape⟩ := World.write_value_update written
+      show clearedShell.loans = _
+      rw [shape]
+    have restampKinds : ∀ id loan, (midState.world.RequestReturns (.resident midParent.owner)).loans.get id = some loan →
+        loan.live = true → loan.kind = .owning ∨ loan.kind = .storageBorrow := by
+      intro id loan found live
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      rw [← same,World.restamp_live] at live
+      rw [← same,World.restamp_kind]
+      exact midKinds id original originalFound live
+    have restampAncestry : ∀ id loan, (midState.world.RequestReturns (.resident midParent.owner)).loans.get id = some loan →
+        (∀ parent, loan.parent = some parent →
+          (midState.world.RequestReturns (.resident midParent.owner)).loans.get parent ≠ none) ∧
+        (∀ guard ∈ loan.guards,
+          (midState.world.RequestReturns (.resident midParent.owner)).loans.get guard ≠ none) := by
+      intro id loan found
+      rw [World.RequestReturns.get_eq] at found
+      obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
+      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
+      · have linkOriginal : original.parent = some parent := by
+          rw [← same,World.restamp_parent] at link
+          exact link
+        have held := (midAncestry id original originalFound).1 parent linkOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+      · have memberOriginal : guard ∈ original.guards := by
+          rw [← same,World.restamp_guards] at member
+          exact member
+        have held := (midAncestry id original originalFound).2 guard memberOriginal
+        intro missing
+        rw [World.RequestReturns.get_eq] at missing
+        exact held (Option.map_eq_none_iff.mp missing)
+    have drainTask : released.task = ReleaseCustodyLoans released.world (.resident midParent.owner) next := by
+      show ({ midState with world := clearedShell, task := ReleaseCustodyLoans clearedShell (.resident midParent.owner) next } : State).task = ReleaseCustodyLoans clearedShell (.resident midParent.owner) next
+      rfl
+    have clearedKinds : ∀ id loan, released.world.loans.get id = some loan → loan.live = true →
+        loan.kind = .owning ∨ loan.kind = .storageBorrow := by
+      intro id loan found live
+      exact restampKinds id loan (by rwa [afterWrite] at found) live
+    have clearedAncestry : ∀ id loan, released.world.loans.get id = some loan →
+        (∀ parent, loan.parent = some parent → released.world.loans.get parent ≠ none) ∧
+        (∀ guard ∈ loan.guards, released.world.loans.get guard ≠ none) := by
+      intro id loan found
+      have bridged : (midState.world.RequestReturns (.resident midParent.owner)).loans.get id = some loan := by
+        rwa [afterWrite] at found
+      have held := restampAncestry id loan bridged
+      rw [afterWrite]
+      exact held
+    obtain ⟨drained, trace, drainedRun, drainedTask', frame⟩ :=
+      CleanupRun.release_custody_returns (program := program) (host := host) (before := released)
+        (custody := .resident midParent.owner) (next := next) drainTask clearedKinds clearedAncestry
+    exact ⟨_, drained, (.silent (by simp [Task.Cleanup,task]) structural (fieldsRun.append finishRun |>.append drainedRun)), drainedTask'⟩
+
+end Glorious.Language.Execution
