@@ -43,6 +43,23 @@ theorem Allocates.fresh_root {program : Program} {before after : World}
   cases allocated
   exact ⟨rfl,rfl⟩
 
+/-- An allocation at a fresh root leaves storage observed elsewhere untouched: the
+allocated address is the fresh `nextRoot`, so the roots-table update cannot be the
+observed row. Stated in the root form the caller has (an allocated address has an
+empty field list, so non-overlap alone does not give the root inequality). -/
+theorem Allocates.stores_other {program : Program} {before after : World}
+    {home : Home} {region : Identity} {type : Term} {layout : Layout} {mutable : Bool}
+    {address observed : Address} {shell : Value}
+    (allocated : Allocates program before home region type layout mutable address after)
+    (stored : before.Stores observed shell)
+    (different : address.root ≠ observed.root) :
+    after.Stores observed shell := by
+  rw [World.Stores] at stored ⊢
+  cases allocated
+  unfold World.read World.root
+  rw [Table.get_set_other _ _ _ _ (Ne.symm different)]
+  exact stored
+
 theorem Allocates.owner_permitted {program : Program} {before after : World}
     {home region type layout mutable address}
     (valid : before.WellFormed)
