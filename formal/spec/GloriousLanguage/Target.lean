@@ -24,6 +24,7 @@ structure Layout where
 structure TargetProfile where
   identity : Identity
   generation : Nat
+  layoutIdentity : Identity
   triple : String
   pointerBits : Nat
   endian : Endianness

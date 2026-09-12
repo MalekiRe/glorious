@@ -1475,6 +1475,30 @@ positive request and physical-extent evidence between success and explicit
 exhaustion, and carry successful ordered handoff prefixes into actual terminal
 resource failures. Missing layout or ownership proof must never imply exhaustion.
 
+The actual ABI producer now owns its previously unchecked layout identity:
+`TargetProfile.layoutIdentity` participates in `Descriptor.Matches`, consumed
+by `Descriptor.Valid` and the real `AdmittedArtifact` loader boundary.
+`ConcreteType.Valid` retains the actual closed layout, principal capability
+and Drop hook together with maximum-object and target-usize size/alignment
+bounds. It does not admit a mathematical layout merely because it exists.
+
+`ABIAdmission` derives layout, principal and Drop agreement from admitted
+concrete type agreement. Descriptor compatibility then has exactly the remaining
+common-identity type-equality obligation; it does not infer type identity from
+equal bytes. Actual decoding determines the accepted artifact uniquely, and
+canonical re-encoding preserves its admission. General rejection theorems cover
+target/layout-identity mismatch, oversized and unrepresentable concrete layouts,
+and disagreement with the actual layout producer. Actual encoding agrees with
+the admitted descriptor. The real `Execution.Step` layout query obtains its
+representation and usize premises from this same accepted concrete entry and
+has storage-safe unique progress, still requiring the actual vacant destination.
+
+The released fresh source-only 127-job ABI gate passes with warnings as errors;
+the integrated semantic source tree was compared exactly and that gate replayed.
+No examples or aggregate soundness gate were run. This repairs concrete ABI
+admission, not code authentication, relocation validity, concrete-site coverage,
+all target obligations or allocation success/exhaustion across runtime sites.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

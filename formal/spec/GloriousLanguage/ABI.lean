@@ -30,17 +30,35 @@ structure Descriptor where
   concrete : List ConcreteType
   deriving Repr, Inhabited
 
-def Descriptor.Valid (program : Kernel.Program) (descriptor : Descriptor) : Prop :=
-  descriptor.generation = program.declarations.input.target.generation ∧
-  descriptor.target = program.declarations.input.target.identity ∧ descriptor.triple = program.declarations.input.target.triple ∧
-  descriptor.pointerBits = program.declarations.input.target.pointerBits ∧ descriptor.endian = program.declarations.input.target.endian ∧
-  descriptor.callableConvention = program.declarations.input.target.callableConvention ∧
-  descriptor.effectConvention = program.declarations.input.target.effectConvention ∧
-  descriptor.manifest = program.declarations.input.manifest.identity ∧
-  (descriptor.concrete.map (·.identity)).Nodup ∧
-  (∀ concrete ∈ descriptor.concrete,
-    Closed concrete.type ∧ LayoutOf program.declarations ⟨[],[],0,default,false,{}⟩ concrete.type concrete.layout ∧
-    PrincipalOf program.declarations concrete.type concrete.principal ∧ DropHook program.declarations concrete.type concrete.drop)
+/-- The selected target owns every ABI identity field. A descriptor cannot
+choose an unrelated layout generation while retaining the target's identity. -/
+structure Descriptor.Matches (program : Kernel.Program) (descriptor : Descriptor) : Prop where
+  generation : descriptor.generation = program.declarations.input.target.generation
+  target : descriptor.target = program.declarations.input.target.identity
+  triple : descriptor.triple = program.declarations.input.target.triple
+  pointerBits : descriptor.pointerBits = program.declarations.input.target.pointerBits
+  endian : descriptor.endian = program.declarations.input.target.endian
+  layoutIdentity : descriptor.layoutIdentity = program.declarations.input.target.layoutIdentity
+  callableConvention : descriptor.callableConvention = program.declarations.input.target.callableConvention
+  effectConvention : descriptor.effectConvention = program.declarations.input.target.effectConvention
+  manifest : descriptor.manifest = program.declarations.input.manifest.identity
+
+/-- A mathematical layout is not yet a concrete ABI admission. Its size must
+respect the advertised object limit, and both public layout-query components
+must be representable as target usize values. -/
+structure ConcreteType.Valid (program : Kernel.Program) (concrete : ConcreteType) : Prop where
+  closed : Closed concrete.type
+  layout : LayoutOf program.declarations ⟨[],[],0,default,false,{}⟩ concrete.type concrete.layout
+  sizeLimit : concrete.layout.size ≤ program.declarations.input.target.maximumObjectBytes
+  sizeRange : IntegerRange program.declarations.input.target false .pointer concrete.layout.size
+  alignmentRange : IntegerRange program.declarations.input.target false .pointer concrete.layout.alignment
+  principal : PrincipalOf program.declarations concrete.type concrete.principal
+  drop : DropHook program.declarations concrete.type concrete.drop
+
+structure Descriptor.Valid (program : Kernel.Program) (descriptor : Descriptor) : Prop where
+  targetContract : descriptor.Matches program
+  identities : (descriptor.concrete.map (·.identity)).Nodup
+  concrete : ∀ concrete ∈ descriptor.concrete, concrete.Valid program
 
 def Compatible (left right : Descriptor) : Prop :=
   left.generation = right.generation ∧ left.target = right.target ∧ left.triple = right.triple ∧
@@ -177,15 +195,21 @@ structure LoaderContract where
   canonical : Artifact → List Nat
   roundtrip : ∀ artifact, artifact.format = format → decode (canonical artifact) = .ok artifact
 
-def AdmittedArtifact (program : Kernel.Program) (loader : LoaderContract) (bytes : List Nat) (artifact : Artifact) : Prop :=
-  loader.decode bytes = .ok artifact ∧ artifact.format = loader.format ∧ artifact.descriptor.Valid program ∧
-  (∀ feature ∈ artifact.requiredFeatures, feature ∈ loader.supportedFeatures) ∧
-  (∀ id ∈ artifact.imports, ∃ binding ∈ program.declarations.input.manifest.bindings, binding.declaration = id) ∧
-  (artifact.relocations.map Prod.fst).Nodup ∧
-  (∀ scalar ∈ artifact.constants, match scalar with
+/-- Decoding alone never admits an artifact. The actual loader boundary
+consumes the target-matched descriptor and its concrete representation bounds
+before any engine can use the artifact's identities or object layouts. -/
+structure AdmittedArtifact (program : Kernel.Program) (loader : LoaderContract)
+    (bytes : List Nat) (artifact : Artifact) : Prop where
+  decoded : loader.decode bytes = .ok artifact
+  format : artifact.format = loader.format
+  descriptor : artifact.descriptor.Valid program
+  features : ∀ feature ∈ artifact.requiredFeatures, feature ∈ loader.supportedFeatures
+  imports : ∀ id ∈ artifact.imports, ∃ binding ∈ program.declarations.input.manifest.bindings, binding.declaration = id
+  relocations : (artifact.relocations.map Prod.fst).Nodup
+  constants : ∀ scalar ∈ artifact.constants, match scalar with
     | .integer _ width bytes => bytes.length = width.bits program.declarations.input.target / 8 ∧ ∀ byte ∈ bytes, byte < 256
     | .floating width bytes => bytes.length = (if width = .single then 4 else 8) ∧ ∀ byte ∈ bytes, byte < 256
-    | .character value => Source.UnicodeScalar value)
+    | .character value => Source.UnicodeScalar value
 
 theorem incompatible_width_not_linkable {left right : Descriptor} (different : left.pointerBits ≠ right.pointerBits) :
     ¬ Compatible left right := by

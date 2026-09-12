@@ -146,6 +146,11 @@ or a dependency of this project.
   runtime layout; logical cut transports caller metadata. Physical admission
   supplies usize bounds, and allocation, encoding and layout queries agree.
   Explicit exhaustion at all runtime allocation sites remains open.
+- `ABIAdmission`: actual loader admission matches the target's layout identity
+  and concrete representation bounds. Admitted descriptors derive layout,
+  capability and Drop agreement from concrete type agreement; accepted layouts
+  supply the real layout query's storage-safe unique progress. Code, relocation
+  and complete concrete-site coverage remain separate open obligations.
 - `Specification`, `Checks`: aggregate language/implementation obligations
   and foundational positive/negative regression propositions.
 
