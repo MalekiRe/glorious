@@ -1310,3 +1310,20 @@ theorem Permitted.of_loanReleaseFrame {world after : World} {requested : Access}
     permission.2 id loan (frame.2 id loan found live) live overlap conflict⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- The ownership permission is monotone in the loan table: it needs a live row of
+the produced world to be a live row of the admitted one, which is exactly what the
+destructor's endings and writes give. -/
+theorem Permitted.of_loans {world after : World} {requested : Access} {address : Address}
+    (permission : Permitted world .owner requested address)
+    (shrink : ∀ id loan, after.loans.get id = some loan → loan.live = true → world.loans.get id = some loan)
+    (existence : ∃ root, after.root address = some root) :
+    Permitted after .owner requested address :=
+  ⟨existence,fun id loan found live overlap conflict =>
+    permission.2 id loan (shrink id loan found live) live overlap conflict⟩
+
+end Glorious.Language.Execution
