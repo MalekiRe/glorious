@@ -418,6 +418,13 @@ open: unrestricted rigid-name admission and the missing relationship between
 body lifetime binders and outward signatures must be repaired at their actual
 producer before a sound copied-frame/control invariant can be established.
 
+Associated defaults now specialize under the owning trait's checked binder
+substitution, followed by the associated item's own substitution. The selected
+implementation's substitution no longer interprets a trait-owned default body.
+The actual equality rule and its runtime-equivariance consumer are migrated.
+General normalized implementation-head selection, row-equivalent solutions
+and associated-result determinacy remain on the same open static boundary.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

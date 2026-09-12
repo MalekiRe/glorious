@@ -161,11 +161,12 @@ mutual
         (member,body) ∈ implementation.associated → Substitutes implSub body specialized →
         Instantiates associated.generics items itemSub → Substitutes itemSub specialized value →
         Equal program context (.projection trait member owners items associated.kind) value
-    | defaultProjection {trait member owners items implementation implSub associated body specialized itemSub value} :
+    | defaultProjection {trait member owners items implementation implSub declaration ownerSub associated body specialized itemSub value} :
         SelectsImpl program context trait owners false implementation implSub →
+        program.trait trait = some declaration → Instantiates declaration.generics owners ownerSub →
         program.associated member = some associated → associated.owner = trait →
         (∀ body, (member,body) ∉ implementation.associated) → associated.defaultValue = some body →
-        Substitutes implSub body specialized → Instantiates associated.generics items itemSub →
+        Substitutes ownerSub body specialized → Instantiates associated.generics items itemSub →
         Substitutes itemSub specialized value → Equal program context (.projection trait member owners items associated.kind) value
     | rowPermutation {instances tails instances' tails'} : instances.Perm instances' → tails.Perm tails' →
         Equal program context (.row instances tails) (.row instances' tails')

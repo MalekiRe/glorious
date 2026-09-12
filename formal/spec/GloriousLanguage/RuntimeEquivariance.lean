@@ -582,9 +582,9 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
         simp only [Definition.terms,List.mem_append,List.mem_map]
         exact Or.inl (Or.inl (Or.inr ⟨_,member,rfl⟩)))) specialized)
       (instantiated.permute permutation) (permutation.substitutes substituted)
-  case defaultProjection _ found owner missing default specialized instantiated substituted ih =>
+  case defaultProjection _ declaration ownerInstantiated found owner missing default specialized instantiated substituted ih =>
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.associated_lookup found))
-    exact .defaultProjection ih found owner missing default
+    exact .defaultProjection ih declaration (ownerInstantiated.permute permutation) found owner missing default
       (permutation.substitutes_lexical (lexical _ (by
         simp only [Definition.terms,List.mem_append]
         exact Or.inl (Or.inl (by simp [default])))) specialized)
