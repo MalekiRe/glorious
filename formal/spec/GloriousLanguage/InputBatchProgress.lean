@@ -3400,6 +3400,19 @@ theorem Execution.FinishesEntry.of_contextual {before after : World}
     Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after :=
   .contextual finished
 
+/-- A lent receiver needs no poststate evidence at all: the admitted lending
+access itself finishes the entry at the very world the binder produced. -/
+theorem Execution.FinishesEntry.lent_resident {before : World} {receiver : ResolvedPlace}
+    {access : Access} {arguments : List Kernel.InvocationInput} (lentAccess : access ≠ .owned) :
+    Execution.FinishesEntry before (.resident receiver access arguments) before :=
+  .resident (.lent lentAccess)
+
+theorem Execution.FinishesEntry.lent_contextual {before : World} {receiver witness : ResolvedPlace}
+    {access witnessAccess : Access} {inputs : List Kernel.InvocationInput}
+    (lentAccess : access ≠ .owned) :
+    Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) before :=
+  .contextual (.lent lentAccess)
+
 
 
 end Kernel
