@@ -36,7 +36,7 @@ private theorem initialized : witness.Initialized := by
   | field member _ => simp [witness, Value.fields] at member
 
 private theorem resolved : ResolvesPlace world context.environment ⟨17,[]⟩ source .owner := by
-  refine .localSlot (binding := ⟨17,source,.owner⟩) (by simp [context]) rfl ?_ .nil
+  refine .localSlot (binding := ⟨17,source,.owner⟩) ⟨by simp [context],rfl,?_⟩ .nil
   intro other member _
   simpa [context] using member
 

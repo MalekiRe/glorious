@@ -473,7 +473,7 @@ it does not require an execution-safety certificate or a successful run. -/
 theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} {caller : Execution.Context}
     (inputsTyped : InputsTyped program inputs state.world) (functionInputs : FunctionInputs function inputs)
-    (empty : state.resumptions = []) (task : state.task = .enter caller function inputs false)
+    (empty : state.resumptions = []) (task : state.task = .enter caller function (.supplied inputs) false)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (fresh : ∀ id root, state.world.roots.get id = some root → Kernel.OwnedByActivation root state.nextActivation → root.live = false) :

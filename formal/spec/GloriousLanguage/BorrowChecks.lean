@@ -1,4 +1,4 @@
-import GloriousLanguage.Typing
+import GloriousLanguage.InvocationLending
 
 /-! Execution witnesses at the invocation/pattern borrowing boundary. These
 are not witnesses of whole-source semantic admission. -/
@@ -45,28 +45,28 @@ private theorem ownedPermission (access : Access) : Permitted world .owner acces
   intro id loan found
   simp [world, Table.get] at found
 
-/-- Captures and ordinary inputs use precisely the same restricted binding
-rule; neither creates a second owner or changes the resident's type. -/
+/-- The former wrapper-only binding is rejected: real lending must create a
+loan, regardless of whether the input was a capture or an explicit argument. -/
 example (program : Language.Program) (origin : InvocationOrigin) :
-    BindsInput program 2 1 1 world ⟨origin,⟨9,.unit,false⟩,source,.owner,.shared⟩
+    ¬ BindsInput program 2 1 1 world ⟨origin,⟨9,.unit,false⟩,source,.owner,.shared⟩
       ⟨9,source,.shared .owner⟩ world := by
-  exact .lent (by intro impossible; cases impossible) (value := unitValue) rfl unitInitialized rfl (ownedPermission .shared)
+  intro bound
+  obtain ⟨_,impossible⟩ := bound.lent_authority (by decide)
+  cases impossible
 
 example (program : Language.Program) :
-    BindsInput program 2 1 1 world ⟨.capture 0,⟨9,.unit,true⟩,source,.owner,.unique⟩
+    ¬ BindsInput program 2 1 1 world ⟨.capture 0,⟨9,.unit,true⟩,source,.owner,.unique⟩
       ⟨9,source,.owner⟩ world := by
-  exact .lent (by decide) (value := unitValue) rfl unitInitialized rfl (ownedPermission .unique)
+  intro bound
+  obtain ⟨_,impossible⟩ := bound.lent_authority (by decide)
+  cases impossible
 
 example {program : Language.Program} {activation scope region before input binding after}
     (shared : input.access = .shared)
     (bound : BindsInput program activation scope region before input binding after) :
     ¬ Permitted after binding.authority .owned binding.address ∧
     ¬ Permitted after binding.authority .unique binding.address := by
-  cases bound with
-  | lent _ _ _ _ _ =>
-      simp only [shared, Authority.lend]
-      constructor <;> intro permission <;> cases shared_authority_cannot_strengthen permission
-  | owned owned _ _ _ _ => simp [shared] at owned
+  exact ⟨bound.shared_no_mutation shared (by decide),bound.shared_no_mutation shared (by decide)⟩
 
 example {program : Language.Program} {activation scope region before input binding after}
     (bound : BindsInput program activation scope region before input binding after) :
@@ -89,12 +89,12 @@ example {world handle backing id mode permission} :
 
 /-- The ordinary projection consumer cannot remove the input's access cap
 merely by finding a unique reference value in its storage. -/
-example {world : World} {handle : Address} {backing : Authority} {id : Identity}
+example {world : World} {environment : Environment} {handle : Address} {backing : Authority} {id : Identity}
     {value : Value} {loan : Loan}
     (stored : world.Stores handle value) (head : value.head = .reference id)
     (initialized : value.Initialized) (readable : Permitted world (.shared backing) .shared handle)
     (found : world.loans.get id = some loan) (live : loan.live = true) (unique : loan.mode = .unique) :
-    ResolvesProjections world handle (.shared backing) [.dereference] loan.referent (.shared (.loan id)) := by
+    ResolvesProjections world environment handle (.shared backing) [.dereference] loan.referent (.shared (.loan id)) := by
   refine .dereference (access := .shared) stored head initialized readable found live ?_ .nil
   refine Or.inr (Or.inr ⟨unique,?_,rfl,rfl⟩)
   intro permission

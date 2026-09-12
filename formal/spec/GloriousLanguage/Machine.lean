@@ -70,19 +70,36 @@ structure ForeignSession where
   state : List Nat
   deriving Repr, Inhabited
 
-/-- The ordinary reference owner and loan that delimit one lent receiver.
-The owner context is supplied by the invocation's actual lifetime boundary. -/
-structure ReceiverLease where
-  handle : Address
-  loan : Identity
+/-- Receiver and per-input lending use the same ordinary reference owner. -/
+abbrev ReceiverLease := InvocationLease
+
+/-- The call selection retains its actual input recipe until the fresh callee
+activation exists. Whole-receiver and witness leases therefore cannot be
+accidentally owned by a caller that proper-tail entry must retire. -/
+inductive EntrySource where
+  | supplied (inputs : List InvocationInput)
+  | resident (receiver : ResolvedPlace) (access : Access) (arguments : List InvocationInput)
+  | contextual (receiver : ResolvedPlace) (receiverAccess : Access)
+      (witness : ResolvedPlace) (witnessAccess : Access) (inputs : List InvocationInput)
   deriving Repr, Inhabited
+
+def InvocationInput.lentStorage (input : InvocationInput) : List Address :=
+  if input.access = .owned then [] else [input.storage]
+
+def EntrySource.lentStorage : EntrySource → List Address
+  | .supplied inputs => inputs.flatMap InvocationInput.lentStorage
+  | .resident receiver access arguments =>
+      (if access = .owned then [] else [receiver.address]) ++ arguments.flatMap InvocationInput.lentStorage
+  | .contextual receiver receiverAccess witness witnessAccess inputs =>
+      (if receiverAccess = .owned then [] else [receiver.address]) ++
+      (if witnessAccess = .owned then [] else [witness.address]) ++ inputs.flatMap InvocationInput.lentStorage
 
 inductive Task where
   | run (context : Context) (code : Code)
   | atom (context : Context) (destination : Address) (atom : Atom) (next : Code)
   | yield (context : Context) (value : Address)
   | apply (context : Context) (invocation : Invocation) (tail : Bool)
-  | enter (context : Context) (function : Function) (inputs : List InvocationInput) (tail : Bool)
+  | enter (context : Context) (function : Function) (source : EntrySource) (tail : Bool)
   | destroy (context : Context) (address : Address) (authority : Authority) (next : Task)
   | destroyFields (context : Context) (address : Address) (authority : Authority) (fields : List Nat) (next : Task)
   | finishShell (address : Address) (authority : Authority) (next : Task)
@@ -102,6 +119,7 @@ inductive Task where
   | primitive (context : Context) (destination : Address) (binding : RuntimeBinding)
       (arguments : List Term) (operands : List ResolvedPlace) (next : Code)
   | foreign (session : ForeignSession) (next : Code)
+  | foreignCallbackReturned (session : ForeignSession) (registration : Identity) (result : Address) (next : Code)
   | stopped (result : Address)
   | fatal (reason : Fatal)
   deriving Repr, Inhabited
@@ -208,28 +226,8 @@ def Temporary (program : Kernel.Program) (context : Context) (type : Term)
 /-- A lent receiver gets a real child loan. The supplied owner context may be
 a fresh callee activation for tail entry; it is not implicitly the caller's
 soon-to-be-retired storage. Captures consume the resulting loan authority. -/
-inductive LendsReceiver (program : Kernel.Program) (leaseContext : Context) :
-    World → Address → Authority → Access → Option ReceiverLease → Authority → World → Prop where
-  | owned {world receiver authority} :
-      LendsReceiver program leaseContext world receiver authority .owned none authority world
-  | lent {before receiver authority access mode value handle allocated after} :
-      (access = .shared ∧ mode = .shared ∨ access = .unique ∧ mode = .unique) →
-      before.Stores receiver value →
-      Temporary program leaseContext (.reference mode (.runtimeRegion leaseContext.region) value.type)
-        before handle allocated →
-      Borrows program.declarations allocated authority mode leaseContext.region receiver handle after →
-      LendsReceiver program leaseContext before receiver authority access
-        (some ⟨handle,allocated.nextLoan⟩) (.loan allocated.nextLoan) after
-
-/-- Ending a receiver lease consumes its actual reference owner, restores the
-parent only after all child loans end, and retires the now-vacant handle root. -/
-inductive EndsReceiverLease : World → Option ReceiverLease → World → Prop where
-  | none {world} : EndsReceiverLease world none world
-  | some {before lease value cleared ended after} :
-      before.Stores lease.handle value → value.head = .reference lease.loan →
-      Permitted before .owner .owned lease.handle → before.write lease.handle none = some cleared →
-      EndsLoan cleared lease.loan ended → Retires ended lease.handle.root after →
-      EndsReceiverLease before (some lease) after
+def LendsReceiver (program : Kernel.Program) (leaseContext : Context) :=
+  LendsResident program.declarations leaseContext.activation leaseContext.scope leaseContext.region
 
 def Protect (program : Kernel.Program) (outer : Context) (before : World)
     (source : Address) (authority : Authority) (destination : Address) (after : World) : Prop :=
@@ -275,6 +273,23 @@ def CaptureInputs (world : World) (receiver : Address) (authority : Authority) (
   inputs = formals.zipIdx.map (fun (formal,index) => ⟨.capture index,formal,receiver.child index,authority,access⟩) ∧
   ∀ input ∈ inputs, world.Initialized input.storage ∧ Permitted world input.authority access input.storage
 
+/-- Every real source of invocation inputs is prepared under the same fresh
+callee lifetime. Resident captures project the newly lent receiver authority;
+contextual inputs keep the actual frozen reservation product and obtain their
+own child loans when the common input binder consumes them. -/
+inductive PreparesEntry (program : Kernel.Program) (callee : Context) (function : Function) :
+    World → EntrySource → List InvocationInput → World → Prop where
+  | supplied {world inputs} : PreparesEntry program callee function world (.supplied inputs) inputs world
+  | resident {before receiver access arguments lease authority after captures} :
+      LendsReceiver program callee before receiver.address receiver.authority access lease authority after →
+      CaptureInputs after receiver.address authority access function.captures captures →
+      PreparesEntry program callee function before (.resident receiver access arguments) (captures ++ arguments) after
+  | contextual {before receiver receiverAccess witness witnessAccess inputs receiverLease receiverAuthority
+      middle witnessLease witnessAuthority after} :
+      LendsReceiver program callee before receiver.address receiver.authority receiverAccess receiverLease receiverAuthority middle →
+      LendsReceiver program callee middle witness.address witness.authority witnessAccess witnessLease witnessAuthority after →
+      PreparesEntry program callee function before (.contextual receiver receiverAccess witness witnessAccess inputs) inputs after
+
 def CallableReceiver (world : World) (address : Address) (authority : Authority) (access : Access)
     (id : DeclId) (arguments : List Term) : Prop :=
   ∃ value, world.Stores address value ∧ value.Initialized ∧ value.head = .callable id arguments ∧
@@ -288,12 +303,13 @@ inductive ConsumesReceiver : World → Address → Authority → Access → Worl
       ConsumesReceiver before address authority .owned after
 
 def EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
-    (function : Function) (inputs : List InvocationInput) (context : Context) (after : World) : Prop :=
-  ∃ withRegion environment declaration,
+    (function : Function) (source : EntrySource) (context : Context) (after : World) : Prop :=
+  ∃ withRegion prepared inputs environment declaration,
     program.declarations.function function.declaration = some declaration ∧
     FreshRegion before.world before.world.nextRegion withRegion ∧
+    PreparesEntry program context function withRegion source inputs prepared ∧
     BindsInputs program.declarations before.nextActivation before.world.nextRegion before.world.nextRegion
-      withRegion inputs environment after ∧
+      prepared inputs environment after ∧
     context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
       function.entryScope before.world.nextRegion before.nextBrand,false⟩ ∧
     (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
@@ -363,15 +379,15 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       ArgumentInputs before.world context 0 function.parameters call.arguments inputs →
       ConsumesReceiver before.world receiver authority call.receiver consumed →
       LocalStep program before (some (.call id (captures ++ inputs)))
-        { before with world := consumed, task := .enter context function (captures ++ inputs) tail }
-  | enter {before caller function inputs context after} : before.task = .enter caller function inputs false →
-      EnterWorld program before caller function inputs context after →
+        { before with world := consumed, task := .enter context function (.resident ⟨receiver,authority⟩ call.receiver inputs) tail }
+  | enter {before caller function source context after} : before.task = .enter caller function source false →
+      EnterWorld program before caller function source context after →
       LocalStep program before none { before with world := after, task := .run context function.body, frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation caller context.activation context.region :: before.frames, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
-  | enterTail {before caller function inputs context after outer regions rest roots} :
-      before.task = .enter caller function inputs true → EnterWorld program before caller function inputs context after →
+  | enterTail {before caller function source context after outer regions rest roots} :
+      before.task = .enter caller function source true → EnterWorld program before caller function source context after →
       TailFrames before.frames caller.activation outer regions rest →
       ActivationRoots after caller.activation [] roots → Suspensible after roots →
-      (∀ input ∈ inputs, input.access ≠ .owned → input.storage.root ∉ roots) →
+      (∀ address ∈ source.lentStorage, address.root ∉ roots) →
       LocalStep program before (some (.tail caller.activation context.activation)) { before with world := after, task := .cleanup caller roots (CloseRegions regions (.run context function.body)), frames := FreshNamedFrame function context before.nextBrand context.region ++ .activation outer context.activation context.region :: rest, nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 }
   | bindReturn {before context value caller destination next rest after} : before.task = .yield context value →
       before.frames = .binding caller destination next :: rest → Transfers program.declarations before.world .owner value destination after →
@@ -433,7 +449,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       Instance program hook [] function → function.parameters.length = 1 → function.captures = [] →
       Temporary program context (.reference .unique (.runtimeRegion context.region) value.type) before.world handle withHandle →
       Borrows program.declarations withHandle authority .unique context.region address handle after → loan = withHandle.nextLoan →
-      LocalStep program before (some (.hookEnter address hook)) { before with world := after, task := .enter { context with unsafeAllowed := false } function [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩] false, frames := .hook context address authority handle loan next :: before.frames }
+      LocalStep program before (some (.hookEnter address hook)) { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle loan next :: before.frames }
   | hookReturned {before context result outer address authority handle loan next rest} : before.task = .yield context result →
       before.frames = .hook outer address authority handle loan next :: rest →
       LocalStep program before none { before with frames := rest, task := .destroy outer result .owner (.retire result.root (.retire handle.root (.closeLoan loan (.destroyFields outer address authority (match before.world.read address with | none => [] | some value => (List.range value.fields.length).reverse) next)))) }

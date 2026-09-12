@@ -510,23 +510,39 @@ inductive Acquires (program : Program) : World → Authority → Bool → Addres
       PrincipalOf program value.type principal → principal ≠ .duplicable → Transfers program before authority source destination after →
       Acquires program before authority false source destination after
 
-inductive Borrows (program : Program) :
+/-- Source reference formation requires an addressable language value. A
+hidden invocation guard can instead lock logical storage (such as an available
+environment witness) without exposing a source reference to that storage. Both
+uses create the same loan and are governed by the same parent/cleanup rules. -/
+inductive LoanPurpose where
+  | source | invocation
+  deriving DecidableEq, BEq, Repr, Inhabited
+
+def LoanPurpose.Admitted (purpose : LoanPurpose) (program : Program) (type : Term) : Prop :=
+  match purpose with
+  | .source => Addressable program ⟨[],[],0,default,false⟩ type
+  | .invocation => True
+
+inductive FormsLoan (program : Program) (purpose : LoanPurpose) :
     World → Authority → Mutability → Identity → Address → Address → World → Prop where
   | borrow {before authority mode region referent destination value after parent} :
       before.Stores referent value → AddressType program before referent value.type →
       (mode = .shared → value.Initialized) → region ∈ before.liveRegions →
-      Addressable program ⟨[],[],0,default,false⟩ value.type →
+      purpose.Admitted program value.type →
       Permitted before authority (if mode = .shared then .shared else .unique) referent →
       before.Vacant destination →
       AddressType program before destination (.reference mode (.runtimeRegion region) value.type) →
       parent = authority.parentLoan →
       before.write destination (some (.resident before.nextOwner
         (.reference mode (.runtimeRegion region) value.type) (.reference before.nextLoan) true [])) = some after →
-      Borrows program before authority mode region referent destination
+      FormsLoan program purpose before authority mode region referent destination
         { after with
           loans := before.loans.set before.nextLoan ⟨before.nextLoan,parent,referent,mode,region,true⟩
           nextOwner := before.nextOwner+1
           nextLoan := before.nextLoan+1 }
+
+/-- The source boundary retains exactly its previous addressability guard. -/
+abbrev Borrows (program : Program) := FormsLoan program .source
 
 inductive EndsLoan : World → Identity → World → Prop where
   | restored {before id loan} : before.loans.get id = some loan → loan.live = true →

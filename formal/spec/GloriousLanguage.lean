@@ -21,3 +21,6 @@ import GloriousLanguage.RuntimeCodeEquivariance
 import GloriousLanguage.SnapshotControlTyping
 import GloriousLanguage.ScalarExecution
 import GloriousLanguage.ExecutionPreservation
+import GloriousLanguage.InvocationLending
+import GloriousLanguage.PrimitiveDispatch
+import GloriousLanguage.RuntimeTypingEquivariance

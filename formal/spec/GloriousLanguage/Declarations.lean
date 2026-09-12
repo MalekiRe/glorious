@@ -173,11 +173,6 @@ def Definition.header : Definition → Header
   | .operation d => d.header | .effect d => d.header | .constant d => d.header
   | .global d => d.header | .module d => d.header | .import d => d.header | .fixity d => d.header
 
-def Signature.terms (signature : Signature) : List Term :=
-  signature.result :: signature.effects :: signature.parameters ++
-    signature.constraints.flatMap Constraint.terms ++
-    signature.generics.flatMap (fun binder => binder.defaultValue.toList)
-
 def InvocationRelation.terms (relation : InvocationRelation) : List Term :=
   relation.receiver :: relation.access :: relation.result :: relation.effects :: relation.after :: relation.arguments
 

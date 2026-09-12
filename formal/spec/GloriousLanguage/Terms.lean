@@ -344,6 +344,13 @@ structure Signature where
   unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
+/-- Complete semantic signature terms, shared by declaration and external
+binding admission, including defaults below quantified constraints. -/
+def Signature.terms (signature : Signature) : List Term :=
+  signature.result :: signature.effects :: signature.parameters ++
+    signature.constraints.flatMap Constraint.terms ++
+    signature.generics.flatMap (fun binder => binder.defaultValue.toList)
+
 def Signature.mapTerms (f : Term → Term) (signature : Signature) : Signature :=
   { signature with
     generics := signature.generics.map (fun binder => { binder with defaultValue := binder.defaultValue.map f })

@@ -378,8 +378,8 @@ theorem Permitted.owned_no_loan_descendant {world : World} {authority : Authorit
         have bound := ((ancestor.containment parents found selected).trans activeContains).length_le
         omega
 
-theorem Borrows.loanParents {program : Program} {before after : World} {authority mode region referent destination}
-    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after) :
+theorem FormsLoan.loanParents {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.LoanParents := by
   cases borrowed with
   | borrow _ _ _ _ _ permitted _ _ parentEq _ =>
@@ -522,8 +522,8 @@ theorem World.write_located {before after : World} {mutation address : Address} 
     (located : before.Located address) : after.Located address :=
   located.transport (World.write_locations written) (fun _ => World.write_read_shell written) outside
 
-theorem Borrows.liveLoanLocations {program : Program} {before after : World} {authority mode region referent destination}
-    (locations : before.LiveLoanLocations) (borrowed : Borrows program before authority mode region referent destination after) :
+theorem FormsLoan.liveLoanLocations {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (locations : before.LiveLoanLocations) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.LiveLoanLocations := by
   cases borrowed with
   | borrow stored _ _ _ _ _ vacant _ _ written =>

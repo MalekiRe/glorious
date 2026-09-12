@@ -491,6 +491,7 @@ def Manifest.WellFormed (target : TargetProfile) (manifest : Manifest) : Prop :=
     (∀ capability, binding.capability = some capability → capability ∈ manifest.grantedCapabilities) ∧
     (∀ domain, binding.domain = some domain → domain ∈ manifest.allocationDomains) ∧
     (binding.cABI = true → target.supportsC = true) ∧
-    (binding.signature.unsafeAllowed = false → binding.safeReviewed = true))
+    (binding.signature.unsafeAllowed = false → binding.safeReviewed = true)) ∧
+  (∀ binding ∈ manifest.bindings, ∀ term ∈ binding.signature.terms, term.Lexical)
 
 end Glorious.Language

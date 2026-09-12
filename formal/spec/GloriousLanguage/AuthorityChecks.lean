@@ -1,4 +1,4 @@
-import GloriousLanguage.Typing
+import GloriousLanguage.InvocationLending
 
 /-! Positive and negative witnesses at the resolved-operand/ownership handoff
 boundary. These do not assume whole-source semantic admission. -/
@@ -31,19 +31,21 @@ private theorem permitted (access : Access) : Permitted world .owner access sour
   simp [world, Table.get] at found
 
 private theorem resolved : ResolvesPlace world context.environment ⟨7,[]⟩ source (.shared .owner) := by
-  refine .localSlot (binding := ⟨7,source,.shared .owner⟩) (by simp [context]) rfl ?_ .nil
+  refine .localSlot (binding := ⟨7,source,.shared .owner⟩) ⟨by simp [context],rfl,?_⟩ .nil
   intro other member _
   simpa [context] using member
 
 private theorem operands : ResolvedOperands world context.environment [⟨7,[]⟩] [⟨source,.shared .owner⟩] := by
   exact .cons ⟨resolved,⟨(permitted .shared).1,rfl,permitted .shared⟩⟩ .nil
 
-/-- This is a real shared invocation binding, even with no active loan-table
-entry. Re-resolving it retains the access cap in the runtime task. -/
+/-- A restricted view alone is not an invocation lease. The original
+wrapper-only transition is now a rejected modeling regression. -/
 example (program : Language.Program) :
-    BindsInput program 0 0 0 world ⟨.capture 0,⟨7,.unit,false⟩,source,.owner,.shared⟩
-      ⟨7,source,.shared .owner⟩ world :=
-  .lent (by decide) rfl initialized rfl (permitted .shared)
+    ¬ BindsInput program 0 0 0 world ⟨.capture 0,⟨7,.unit,false⟩,source,.owner,.shared⟩
+      ⟨7,source,.shared .owner⟩ world := by
+  intro bound
+  obtain ⟨_,impossible⟩ := bound.lent_authority (by decide)
+  cases impossible
 
 example (program : Kernel.Program) (binding : RuntimeBinding)
     (member : binding ∈ program.declarations.input.manifest.bindings)

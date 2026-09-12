@@ -59,7 +59,7 @@ def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop 
 
 def InitialInvocation (program : Kernel.Program) (function : Function) (inputs : List InvocationInput) (state : State) : Prop :=
   InputsTyped program inputs state.world ∧ FunctionInputs function inputs ∧ state.ResumptionsAccounted ∧
-  ∃ caller, state.task = .enter caller function inputs false ∧ state.frames = [] ∧
+  ∃ caller, state.task = .enter caller function (.supplied inputs) false ∧ state.frames = [] ∧
     caller.region ∈ state.world.liveRegions ∧ caller.activation < state.nextActivation ∧
     (∀ id root, state.world.roots.get id = some root → OwnedByActivation root state.nextActivation → root.live = false)
 

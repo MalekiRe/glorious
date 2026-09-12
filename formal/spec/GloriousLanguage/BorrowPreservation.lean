@@ -24,20 +24,20 @@ theorem World.write_leaf_origin {before after : World} {destination observed : A
     obtain ⟨original,found,same⟩ := Option.map_eq_some_iff.mp framed.symm
     exact Or.inr ⟨original,World.resident_iff_stores.mpr found,same.symm⟩
 
-theorem Borrows.locations {program : Program} {before after : World} {authority mode region referent destination}
-    (borrowed : Borrows program before authority mode region referent destination after) (id : Identity) :
+theorem FormsLoan.locations {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after) (id : Identity) :
     (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
   cases borrowed with
   | borrow _ _ _ _ _ _ _ _ _ written => exact World.write_locations written id
 
-theorem Borrows.old_loan {program : Program} {before after : World} {authority mode region referent destination}
-    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after)
+theorem FormsLoan.old_loan {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     {id : Identity} {loan : Loan} (found : before.loans.get id = some loan) : after.loans.get id = some loan := by
   cases borrowed
   simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid found))] using found
 
-theorem Borrows.resident_origin {program : Program} {before after : World} {authority mode region referent destination}
-    (borrowed : Borrows program before authority mode region referent destination after)
+theorem FormsLoan.resident_origin {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     {observed : Address} {value : Value} (resident : after.Resident observed value) :
     (observed = destination ∧ value.owner = before.nextOwner ∧ value.head = .reference before.nextLoan ∧ value.fields = []) ∨
       ∃ original, before.Resident observed original ∧ value.shell = original.shell := by
@@ -61,8 +61,8 @@ theorem Permitted.conflicting_parent {world : World} {authority : Authority} {ac
       · exact permitted.2.choose_spec.2.2.2.2.2.2 id loan found live same overlap conflict
   | shared backing ih => exact ih permitted.2.2
 
-theorem Borrows.owner_unique {program : Program} {before after : World} {authority mode region referent destination}
-    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after) :
+theorem FormsLoan.owner_unique {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     ∀ a b x y, after.Resident a x → after.Resident b y → x.owner = y.owner → a = b := by
   intro a b x y first second same
   rcases borrowed.resident_origin first with ⟨rfl,owner,_,_⟩ | ⟨oldFirst,oldA,shellA⟩
@@ -84,8 +84,8 @@ theorem Borrows.owner_unique {program : Program} {before after : World} {authori
       exact valid.2.2.2.2.2.2.2.1 a b oldFirst oldSecond oldA oldB
         (oldOwnerA.symm.trans (same.trans oldOwnerB))
 
-theorem Borrows.wellFormed {program : Program} {before after : World} {authority mode region referent destination}
-    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region referent destination after) :
+theorem FormsLoan.wellFormed {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+    (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.WellFormed := by
   have locations := borrowed.locations
   have ownersUnique := borrowed.owner_unique valid
@@ -225,10 +225,10 @@ theorem Borrows.wellFormed {program : Program} {before after : World} {authority
           · exact Or.inl (AncestorLoan.weaken (fun _ _ found => oldLoan found) ancestry)
           · exact Or.inr (AncestorLoan.weaken (fun _ _ found => oldLoan found) ancestry)
 
-theorem Typing.ValueTyped.borrow {program : Kernel.Program} {before after : World}
+theorem Typing.ValueTyped.borrow {purpose : LoanPurpose} {program : Kernel.Program} {before after : World}
     {authority mode region referent destination value}
     (valid : before.WellFormed)
-    (borrowed : Borrows program.declarations before authority mode region referent destination after)
+    (borrowed : FormsLoan program.declarations purpose before authority mode region referent destination after)
     (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
   apply typed.transport ?_ ?_ (fun _ origin => origin.transport borrowed.locations)
   · intro id loan found active
@@ -247,10 +247,10 @@ theorem Typing.ValueTyped.borrow {program : Kernel.Program} {before after : Worl
 /-- Borrow construction types both the new handle and every changed enclosing
 aggregate from the actual input address/layout derivation. In particular,
 `Addressable` head classification alone is not a referent-location proof. -/
-theorem Borrows.worldTyped {program : Kernel.Program} {before after : World} {authority mode region referent destination}
+theorem FormsLoan.worldTyped {purpose : LoanPurpose} {program : Kernel.Program} {before after : World} {authority mode region referent destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (borrowed : Borrows program.declarations before authority mode region referent destination after) :
+    (borrowed : FormsLoan program.declarations purpose before authority mode region referent destination after) :
     Typing.WorldTyped program after := by
   have well := borrowed.wellFormed typed.1
   have retained : ∀ value, Typing.ValueTyped program before value → Typing.ValueTyped program after value :=
@@ -297,6 +297,16 @@ theorem Temporary.worldTyped {program : Kernel.Program} {context : Context} {typ
 
 end Execution
 
+theorem Kernel.LendsResident.worldTyped {program : Kernel.Program} {before after : World}
+    {activation scope region address authority access lease permission}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (lent : Kernel.LendsResident program.declarations activation scope region before address authority access lease permission after) :
+    Typing.WorldTyped program after := by
+  cases lent with
+  | owned => exact typed
+  | lent _ _ allocated borrowed => exact borrowed.worldTyped valid inventory (allocated.worldTyped typed)
+
 theorem Kernel.BindsInput.worldTyped {program : Kernel.Program} {before after : World}
     {activation scope region input binding}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -304,7 +314,7 @@ theorem Kernel.BindsInput.worldTyped {program : Kernel.Program} {before after : 
     (bound : Kernel.BindsInput program.declarations activation scope region before input binding after) :
     Typing.WorldTyped program after := by
   cases bound with
-  | lent => exact typed
+  | lent _ _ _ _ _ lent => exact lent.worldTyped valid inventory typed
   | owned _ _ _ allocated transferred => exact transferred.worldTyped valid inventory (allocated.worldTyped typed)
 
 theorem Kernel.BindsPattern.worldTyped {program : Kernel.Program} {before after : World}

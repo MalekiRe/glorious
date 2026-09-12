@@ -196,6 +196,16 @@ def CallbackInputs (world : World) (formals : List Local) (arguments : List Reso
   ListRel (fun formal argument => ∃ value, world.Stores argument.address value ∧ value.Initialized ∧
     value.type = formal.type ∧ Permitted world argument.authority .owned argument.address) formals arguments
 
+/-- Callback completion goes through ordinary reference destruction, including
+releaseChild's recursive retry of an unreferenced parent. The host protocol is
+resumed only after that cleanup, against the resulting world and ambient state. -/
+def CallbackReturnTask (session : ForeignSession) (registration : Identity) (result : Address)
+    (lease : Option ReceiverLease) (next : Code) : Task :=
+  let complete := Task.foreignCallbackReturned session registration result next
+  match lease with
+  | none => complete
+  | some lease => .destroy session.call.context lease.handle .owner (.retire lease.handle.root complete)
+
 inductive Step (program : Kernel.Program) (model : Model) : State → Option Event → State → Prop where
   | enter {before context destination binding arguments operands next imported contract state addresses prepared signature} :
       before.task = .primitive context destination binding arguments operands next →
@@ -236,16 +246,21 @@ inductive Step (program : Kernel.Program) (model : Model) : State → Option Eve
       CallbackInputs lent function.parameters arguments inputs →
       ConsumesReceiver lent registration.owner authority registration.access consumed →
       Step program model before (some (.host imported.symbol session.state observation))
-        { before with world := consumed, hostState := nextState, task := .enter session.call.context function (captures ++ inputs) false, frames := .hostCallback ⟨session.call,nextState⟩ id function.signature.result lease next :: before.frames }
-  | callbackResult {before context result session registration resultType lease next rest value kept protectedWorld retired after imported contract nextState} :
+        { before with world := consumed, hostState := nextState, task := .enter session.call.context function (.supplied (captures ++ inputs)) false, frames := .hostCallback ⟨session.call,nextState⟩ id function.signature.result lease next :: before.frames }
+  | callbackResult {before context result session registration resultType lease next rest value kept protectedWorld after} :
       before.task = .yield context result → before.frames = .hostCallback session registration resultType lease next :: rest →
-      Selected program model session.call imported contract → before.world.Stores result value → value.type = resultType →
+      before.world.Stores result value → value.type = resultType →
       Protect program session.call.context before.world result .owner kept protectedWorld →
-      Retires protectedWorld result.root retired → EndsReceiverLease retired lease after →
-      contract.callbackPostcondition after session before.hostState registration kept →
-      model.callbackReturned session.call.binding.declaration after session before.hostState registration kept nextState →
+      Retires protectedWorld result.root after →
       Step program model before none
-        { before with world := after, hostState := nextState, frames := rest, task := .foreign ⟨session.call,nextState⟩ next }
+        { before with world := after, frames := rest, task := CallbackReturnTask session registration kept lease next }
+  | callbackReturned {before session registration result next imported contract nextState} :
+      before.task = .foreignCallbackReturned session registration result next →
+      Selected program model session.call imported contract →
+      contract.callbackPostcondition before.world session before.hostState registration result →
+      model.callbackReturned session.call.binding.declaration before.world session before.hostState registration result nextState →
+      Step program model before none
+        { before with hostState := nextState, task := .foreign ⟨session.call,nextState⟩ next }
   | fault {before session next imported contract observation after nextState} :
       before.task = .foreign session next → before.hostState = session.state → Selected program model session.call imported contract →
       contract.session before.world session →

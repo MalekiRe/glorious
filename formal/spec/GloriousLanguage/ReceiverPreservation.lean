@@ -10,24 +10,14 @@ theorem LendsReceiver.worldTyped {program : Kernel.Program} {leaseContext : Cont
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
     (lent : LendsReceiver program leaseContext before receiver authority access lease permission after) :
-    Typing.WorldTyped program after := by
-  cases lent with
-  | owned => exact typed
-  | lent _ _ allocated borrowed => exact borrowed.worldTyped valid inventory (allocated.worldTyped typed)
-
-theorem EndsReceiverLease.worldTyped {program : Kernel.Program} {before after : World} {lease : Option ReceiverLease}
-    (typed : Typing.WorldTyped program before) (ended : EndsReceiverLease before lease after) :
-    Typing.WorldTyped program after := by
-  cases ended with
-  | none => exact typed
-  | some _ _ permitted written closed retired =>
-    exact retired.worldTyped (closed.worldTyped (World.clear_worldTyped typed permitted written))
+    Typing.WorldTyped program after :=
+  Kernel.LendsResident.worldTyped valid inventory typed lent
 
 /-- Fresh child loan order rules out renewing conflicting access through the
 original authority while the invocation lease remains active. -/
-theorem Borrows.excludes_parent {program : Language.Program} {before after : World}
+theorem _root_.Glorious.Language.FormsLoan.excludes_parent {purpose : LoanPurpose} {program : Language.Program} {before after : World}
     {authority : Authority} {mode : Mutability} {region : Identity} {receiver handle : Address} {access : Access}
-    (valid : before.WellFormed) (borrowed : Borrows program before authority mode region receiver handle after)
+    (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region receiver handle after)
     (conflict : Conflict access mode) : ¬ Permitted after authority access receiver := by
   have parents := borrowed.loanParents valid
   cases borrowed with
@@ -51,8 +41,7 @@ theorem LendsReceiver.unique_exclusive {program : Kernel.Program} {leaseContext 
   | lent modes _ allocated borrowed =>
     rcases modes with ⟨impossible,_⟩ | ⟨_,rfl⟩
     · cases impossible
-    obtain ⟨_,allocated⟩ := allocated
-    exact Borrows.excludes_parent (allocated.wellFormed valid) borrowed (Or.inr rfl)
+    exact FormsLoan.excludes_parent (allocated.wellFormed valid) borrowed (Or.inr rfl)
 
 theorem LendsReceiver.shared_no_mutation {program : Kernel.Program} {leaseContext : Context}
     {before after : World} {receiver : Address} {authority permission : Authority}
@@ -63,8 +52,7 @@ theorem LendsReceiver.shared_no_mutation {program : Kernel.Program} {leaseContex
   cases lent with
   | lent modes _ allocated borrowed =>
     rcases modes with ⟨_,rfl⟩ | ⟨impossible,_⟩
-    · obtain ⟨_,allocated⟩ := allocated
-      exact Borrows.excludes_parent (allocated.wellFormed valid) borrowed (Or.inl writes)
+    · exact FormsLoan.excludes_parent (allocated.wellFormed valid) borrowed (Or.inl writes)
     · cases impossible
 
 end Glorious.Language.Execution

@@ -221,40 +221,44 @@ structure Binding where
 
 abbrev Environment := List Binding
 
-inductive ResolvesProjections (world : World) :
+/-- Ordinary places and index operands use the same unique lexical binding
+selection. An ambiguous environment supplies no usable binding. -/
+def Environment.Selects (environment : Environment) (localSlot : Identity) (binding : Binding) : Prop :=
+  binding ∈ environment ∧ binding.localSlot = localSlot ∧
+    ∀ other ∈ environment, other.localSlot = localSlot → other = binding
+
+inductive ResolvesProjections (world : World) (environment : Environment) :
     Address → Authority → List Projection → Address → Authority → Prop where
-  | nil {address authority} : ResolvesProjections world address authority [] address authority
+  | nil {address authority} : ResolvesProjections world environment address authority [] address authority
   | field {base authority field projections result permission value child} : world.Stores base value →
       value.fields[field]? = some (some child) →
-      ResolvesProjections world (base.child field) authority projections result permission →
-      ResolvesProjections world base authority (.field field :: projections) result permission
+      ResolvesProjections world environment (base.child field) authority projections result permission →
+      ResolvesProjections world environment base authority (.field field :: projections) result permission
   | vacantField {base authority field value} : world.Stores base value → value.fields[field]? = some none →
-      ResolvesProjections world base authority [.field field] (base.child field) authority
+      ResolvesProjections world environment base authority [.field field] (base.child field) authority
+  | index {base authority localSlot projections binding value integer result permission} :
+      environment.Selects localSlot binding → world.Stores binding.address value →
+      value.head = .scalar (.integer false .pointer integer) → value.Initialized →
+      Permitted world binding.authority .shared binding.address → 0 ≤ integer →
+      ResolvesProjections world environment base authority (.field integer.toNat :: projections) result permission →
+      ResolvesProjections world environment base authority (.index localSlot :: projections) result permission
   | dereference {base authority projections value id loan result permission view access} :
       world.Stores base value → value.head = .reference id → value.Initialized → Permitted world authority .shared base →
       world.loans.get id = some loan → loan.live = true →
       ReferenceView world base authority id loan.mode view access →
-      ResolvesProjections world loan.referent view projections result permission →
-      ResolvesProjections world base authority (.dereference :: projections) result permission
+      ResolvesProjections world environment loan.referent view projections result permission →
+      ResolvesProjections world environment base authority (.dereference :: projections) result permission
 
 inductive ResolvesPlace (world : World) (environment : Environment) : Place → Address → Authority → Prop where
-  | localSlot {place binding address authority} : binding ∈ environment → binding.localSlot = place.localSlot →
-      (∀ other ∈ environment, other.localSlot = place.localSlot → other = binding) →
-      ResolvesProjections world binding.address binding.authority place.projections address authority →
-      ResolvesPlace world environment place address authority
-  | index {place binding prefixForm index suffix indexBinding indexValue sign width integer address authority middle permission} :
-      binding ∈ environment → binding.localSlot = place.localSlot → place.projections = prefixForm ++ .index index :: suffix →
-      indexBinding ∈ environment → indexBinding.localSlot = index → world.Stores indexBinding.address indexValue →
-      indexValue.head = .scalar (.integer sign width integer) → 0 ≤ integer →
-      Permitted world indexBinding.authority .shared indexBinding.address →
-      ResolvesProjections world binding.address binding.authority prefixForm middle permission →
-      ResolvesProjections world middle permission (.field integer.toNat :: suffix) address authority →
+  | localSlot {place binding address authority} : environment.Selects place.localSlot binding →
+      ResolvesProjections world environment binding.address binding.authority place.projections address authority →
       ResolvesPlace world environment place address authority
 
 theorem ResolvesPlace.binding {world environment place address authority}
     (resolved : ResolvesPlace world environment place address authority) :
     ∃ binding ∈ environment, binding.localSlot = place.localSlot := by
-  cases resolved <;> refine ⟨_, ?_, by assumption⟩ <;> assumption
+  cases resolved with
+  | localSlot selected _ => exact ⟨_,selected.1,selected.2.1⟩
 
 mutual
   inductive Matches (program : Language.Program) (world : World) : Address → Pattern → Prop where
@@ -353,15 +357,40 @@ structure InvocationInput where
   access : Access
   deriving Repr, Inhabited
 
+/-- Invocation lending owns an ordinary reference handle. Its location and
+loan identity are the same ones consumed by normal reference cleanup. -/
+structure InvocationLease where
+  handle : Address
+  loan : Identity
+  deriving Repr, Inhabited
+
+/-- Captured storage, whole receivers and contextual witnesses share this
+producer. A lent view creates a real child loan in the supplied activation;
+it is not an authority wrapper that leaves competing parent access enabled. -/
+inductive LendsResident (program : Language.Program) (activation scope region : Identity) :
+    World → Address → Authority → Access → Option InvocationLease → Authority → World → Prop where
+  | owned {world address authority} :
+      LendsResident program activation scope region world address authority .owned none authority world
+  | lent {before address authority access mode value handle allocated after layout} :
+      (access = .shared ∧ mode = .shared ∨ access = .unique ∧ mode = .unique) →
+      before.Stores address value →
+      Allocates program before (.temporary activation scope) region
+        (.reference mode (.runtimeRegion region) value.type) layout true handle allocated →
+      FormsLoan program .invocation allocated authority mode region address handle after →
+      LendsResident program activation scope region before address authority access
+        (some ⟨handle,allocated.nextLoan⟩) (.loan allocated.nextLoan) after
+
 /-- Captures and ordinary arguments bind through the same storage relation.
-Lent capture storage remains the original object, including zero-sized fields. -/
+Lent capture storage remains the original object, including zero-sized fields;
+the fresh reference owner is only the lifetime witness for that access. -/
 inductive BindsInput (program : Language.Program) (activation scope region : Identity) :
     World → InvocationInput → Binding → World → Prop where
-  | lent {world input value} : input.access ≠ .owned →
-      world.Stores input.storage value → value.Initialized → value.type = input.formal.type →
-      Permitted world input.authority input.access input.storage →
-      BindsInput program activation scope region world input
-        ⟨input.formal.id,input.storage,input.authority.lend input.access⟩ world
+  | lent {before input value lease authority after} : input.access ≠ .owned →
+      before.Stores input.storage value → value.Initialized → value.type = input.formal.type →
+      Permitted before input.authority input.access input.storage →
+      LendsResident program activation scope region before input.storage input.authority input.access lease authority after →
+      BindsInput program activation scope region before input
+        ⟨input.formal.id,input.storage,authority⟩ after
   | owned {before input address allocated after layout value} : input.access = .owned →
       before.Stores input.storage value → value.type = input.formal.type →
       Allocates program before (.localSlot activation scope) region input.formal.type layout input.formal.mutable address allocated →
@@ -411,9 +440,9 @@ def ActivationRoots (world : World) (activation : Identity) (kept : List Identit
 theorem borrowed_capture_keeps_storage {program : Language.Program} {activation scope region world input binding after}
     (borrowed : input.access ≠ .owned)
     (bound : BindsInput program activation scope region world input binding after) :
-    binding.address = input.storage ∧ after = world := by
+    binding.address = input.storage := by
   cases bound with
-  | lent _ _ _ _ _ => exact ⟨rfl,rfl⟩
+  | lent => rfl
   | owned owned _ _ _ _ => exact False.elim (borrowed owned)
 
 end Glorious.Language.Kernel

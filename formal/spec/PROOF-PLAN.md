@@ -317,6 +317,43 @@ active. In particular, ordinary/contextual invocation still needs the common
 real-loan producer integrated with callee-owned lifetimes, including proper-tail
 entry; merely wrapping owner authority as lent is not an adequate contract.
 
+That invocation producer is now repaired. `FormsLoan` is the single loan
+constructor; source `Borrows` retains its addressability restriction, while
+hidden invocation leases can lock logical storage without exposing a source
+reference to a label or environment witness. `LendsResident` allocates the
+ordinary cleanup handle and is consumed by receiver lending and every lent
+`BindsInput`. Ordinary and contextual calls retain an explicit entry recipe
+until the fresh callee activation exists. All captures and arguments then use
+the common binder. `InvocationLending` proves parent exclusion survives the
+entire input binding, reaches actual normal/tail entry steps, includes the
+receiver lease in callee cleanup and excludes it from a fresh caller's cleanup.
+The old wrapper-only examples are retained as rejected modeling regressions.
+Full cleanup progress still requires restoration/lifetime obligations from the
+eventual control invariant, not merely this exclusion theorem.
+
+Foreign callback return now schedules ordinary reference destruction, recursive
+parent-loan release and handle retirement before resuming the host protocol.
+The earlier atomic receiver-lease ending relation is removed: it could end a
+child without revisiting an unreferenced parent whose release had been deferred.
+The general execution and resumption preservation proofs consume the new path.
+
+Dynamic indices now belong to the shared recursive projection resolver, with
+one unique environment-binding selection and initialized, readable unsigned
+pointer-sized index values. The separate one-index-only place rule is removed.
+`ProjectionResolution` and `ProjectionStorage` prove unique address/authority,
+arbitrary projection composition and live/vacant storage location transport.
+`PrimitiveDispatch` consumes that resolver and manifest uniqueness to derive
+actual dispatch identity from static primitive admission. Canonical resident
+type agreement through equality, aliases and associated projections remains
+open; it is not supplied by assuming the scalar task's desired input types.
+
+External manifest signatures now use the same complete lexical term seal as
+declarations, before runtime generic instantiation. `RuntimeTypingEquivariance`
+consumes it for full atomic, invocation, pattern, place and subtype transport.
+Full code typing still requires transport of coverage over arbitrary typed
+worlds, and static implementation-head coherence needs repair before associated
+normalization can justify the source-to-runtime representation boundary.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

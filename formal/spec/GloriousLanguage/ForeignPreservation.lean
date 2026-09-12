@@ -1,5 +1,6 @@
 import GloriousLanguage.MemoryPreservation
 import GloriousLanguage.ReceiverPreservation
+import GloriousLanguage.StorageFraming
 
 /-! Typed host interaction, including source callback re-entry. The external
 model supplies mutation and protocol evidence, never the preservation result. -/
@@ -7,80 +8,6 @@ namespace Glorious.Language.Foreign
 
 open Kernel Execution Memory
 
-theorem replace_disjoint {before after : Value} {path observed : List Nat} {replacement : Option Value}
-    (written : before.replace path replacement = some after)
-    (outside : ¬ ∃ suffix, observed = path ++ suffix) (reverse : ¬ ∃ suffix, path = observed ++ suffix) :
-    after.atPath observed = before.atPath observed := by
-  induction path generalizing before after observed with
-  | nil => exact False.elim (outside ⟨observed,rfl⟩)
-  | cons index path ih =>
-    cases observed with
-    | nil => exact False.elim (reverse ⟨index :: path,rfl⟩)
-    | cons other observed =>
-      rcases Value.replace_cons_shape written with ⟨field,found,⟨rfl,rfl⟩ | ⟨child,changed,rfl,replaced,rfl⟩⟩
-      · have different : index ≠ other := by
-          intro same
-          subst other
-          exact outside ⟨observed,rfl⟩
-        simp [Value.atPath,Value.withFields,Value.fields,List.getElem?_set_ne different]
-      · by_cases same : index = other
-        · subst other
-          have bound := List.getElem?_eq_some_iff.mp found |>.1
-          change ((before.fields.set index (some changed))[index]?.join >>= fun child => child.atPath observed) = _
-          rw [List.getElem?_set_self bound]
-          simp only [Value.atPath,found,Option.join_some]
-          exact ih replaced
-            (fun ⟨suffix,equal⟩ => outside ⟨suffix,by simp [equal]⟩)
-            (fun ⟨suffix,equal⟩ => reverse ⟨suffix,by simp [equal]⟩)
-        · simp [Value.atPath,Value.withFields,Value.fields,List.getElem?_set_ne same]
-
-/-- Full value framing, including capture fields rather than only their
-headers. It is consumed by registered-owner handoff preservation below. -/
-theorem write_disjoint {before after : World} {address observed : Address} {value : Option Value}
-    (written : before.write address value = some after) (outside : ¬ address.Overlaps observed) :
-    after.read observed = before.read observed := by
-  have update := World.write_value_update written
-  unfold World.write at written
-  cases selected : before.root address with
-  | none => simp [selected] at written
-  | some root =>
-    obtain ⟨found,live,generation⟩ := World.root_found selected
-    simp only [selected] at written
-    dsimp at written
-    by_cases sameRoot : observed.root = address.root
-    · by_cases sameGeneration : observed.generation = address.generation
-      · have pathOutside : ¬ ∃ suffix, observed.fields = address.fields ++ suffix :=
-          fun included => outside ((show address.Prefix observed from ⟨sameRoot.symm,sameGeneration.symm,included⟩).overlaps)
-        have reverse : ¬ ∃ suffix, address.fields = observed.fields ++ suffix :=
-          fun included => outside ((show observed.Prefix address from ⟨sameRoot,sameGeneration,included⟩).overlaps.symm)
-        split at written
-        next empty =>
-          have fields : address.fields = [] := by simpa using empty
-          exact False.elim (pathOutside ⟨observed.fields,by simp [fields]⟩)
-        next =>
-          cases resident : root.value with
-          | none => simp [resident] at written
-          | some tree =>
-            simp only [resident] at written
-            dsimp at written
-            cases replaced : tree.replace address.fields value with
-            | none => simp [replaced] at written
-            | some changed =>
-              simp only [replaced] at written
-              dsimp at written
-              cases (Option.some.inj written).symm
-              have observedGeneration : root.generation = observed.generation := generation.trans sameGeneration.symm
-              simpa [World.read,World.root,Table.get_set,sameRoot,found,live,observedGeneration,resident]
-                using replace_disjoint replaced pathOutside reverse
-      · rcases update with ⟨changedRoot,_,changedFound,equal⟩
-        have same := Option.some.inj (changedFound.symm.trans found)
-        subst changedRoot
-        subst after
-        have different : root.generation ≠ observed.generation := by omega
-        simp [World.read,World.root,sameRoot,Table.get_set,found,live,different]
-    · rcases update with ⟨_,_,_,equal⟩
-      subst after
-      simp [World.read,World.root,Table.get_set_other _ _ _ _ sameRoot]
 
 theorem Registration.Valid.transfer {program : Kernel.Program} {before after : World}
     {runtimes : List Identity} {registration : Registration} {authority : Authority} {source destination : Address}
@@ -93,7 +20,7 @@ theorem Registration.Valid.transfer {program : Kernel.Program} {before after : W
   have read : after.read registration.owner = before.read registration.owner := by
     cases transferred with
     | move _ _ _ _ _ _ clear install =>
-      exact (write_disjoint install destinationSeparate).trans (write_disjoint clear sourceSeparate)
+      exact (World.write_disjoint install destinationSeparate).trans (World.write_disjoint clear sourceSeparate)
   refine ⟨⟨value,read.trans stored,initialized,head⟩,function,runtime,bound,?_,?_⟩
   · intro sync
     have regions := congrArg World.liveRegions transferred.rest
@@ -159,8 +86,9 @@ theorem Step.worldTyped {program : Kernel.Program} {model : Model} {before after
     exact transferred.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step)
   | callback _ _ selected active step _ _ _ _ _ _ _ _ lent _ _ consumed =>
     exact consumed.worldTyped (lent.worldTyped valid inventory (lawful.host_worldTyped valid inventory typed selected active step))
-  | callbackResult _ _ _ _ _ protectedWorld retired ended _ _ =>
-    exact ended.worldTyped (retired.worldTyped (protectedWorld.worldTyped valid inventory typed))
+  | callbackResult _ _ _ _ protectedWorld retired =>
+    exact retired.worldTyped (protectedWorld.worldTyped valid inventory typed)
+  | callbackReturned => exact typed
   | fault _ _ selected active step => exact lawful.host_worldTyped valid inventory typed selected active step
 
 /-- The invariant needed by every host step is established when that phase is
@@ -186,13 +114,16 @@ theorem Step.ready {program : Kernel.Program} {model : Model} {before after : St
     cases task
     have law := lawful.step _ _ _ _ _ _ _ _ selected typed.1 active step
     exact ⟨rfl,_,_,selected,law.2.2.2.2.1 rfl,law.2.2.2.1⟩
-  | callbackResult _ _ selected _ _ protectedWorld retired ended postcondition returned =>
+  | callbackReturned _ selected postcondition returned =>
     cases task
     have law := lawful.callbackReturned _ _ _ _ _ _ _ _ selected
-      (ended.worldTyped (retired.worldTyped (protectedWorld.worldTyped valid inventory typed))).1 postcondition returned
+      typed.1 postcondition returned
     exact ⟨rfl,_,_,selected,law.1,law.2.1⟩
   | result => cases task
   | callback => cases task
+  | callbackResult =>
+    simp only [CallbackReturnTask] at task
+    split at task <;> cases task
   | fault => cases task
 
 /-- The actual normal-return transfer preserves every active registration,
@@ -213,7 +144,10 @@ theorem Step.result_registrations {program : Kernel.Program} {model : Model}
   | enter => cases task
   | host => cases task
   | callback => cases task
-  | callbackResult => cases task
+  | callbackResult =>
+    simp only [CallbackReturnTask] at task
+    split at task <;> cases task
+  | callbackReturned => cases task
   | fault => cases task
 
 /-- A retained registration's actual owner cannot be selected for implicit

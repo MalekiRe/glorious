@@ -208,7 +208,7 @@ inductive ControlStep (program : Kernel.Program) : State → Option Event → St
       ConsumesReceiver before.world receiver authority call.receiver consumed →
       ConsumesAvailability consumed witness token selected.access after →
       ControlStep program before (some (.call id (captures ++ inputs)))
-        { before with world := after, task := .enter context function (captures ++ inputs) tail }
+        { before with world := after, task := .enter context function (.contextual ⟨receiver,authority⟩ call.receiver ⟨witness,permission⟩ selected.access (captures ++ inputs)) tail }
   | positiveTest {before context lexical bound localSlot subject sourcePattern pattern patternId next source authority bindings destination allocated after layout} :
       before.task = .run context (.test lexical subject sourcePattern patternId next) →
       bound = context.bindBrand patternId (.proof before.world.nextProof) → localSlot = bound.local lexical →

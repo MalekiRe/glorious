@@ -244,14 +244,27 @@ theorem Protects.worldTyped {program : Kernel.Program} {context : Context} {befo
   | nil => exact typed
   | cons first _ ih => exact ih (first.worldTyped valid inventory typed)
 
+theorem PreparesEntry.worldTyped {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (prepared : PreparesEntry program callee function before source inputs after) :
+    Typing.WorldTyped program after := by
+  cases prepared with
+  | supplied => exact typed
+  | resident lent _ => exact Kernel.LendsResident.worldTyped valid inventory typed lent
+  | contextual receiver witness =>
+      exact Kernel.LendsResident.worldTyped valid inventory
+        (Kernel.LendsResident.worldTyped valid inventory typed receiver) witness
+
 theorem EnterWorld.worldTyped {program : Kernel.Program} {before : State} {after : World}
-    {caller context : Context} {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
+    {caller context : Context} {function : Kernel.Function} {source : EntrySource}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
-    (entered : EnterWorld program before caller function inputs context after) :
+    (entered : EnterWorld program before caller function source context after) :
     Typing.WorldTyped program after := by
-  obtain ⟨_,_,_,_,fresh,bound,_,_⟩ := entered
-  exact bound.worldTyped valid inventory (fresh.worldTyped typed)
+  obtain ⟨_,_,_,_,_,_,fresh,prepared,bound,_,_⟩ := entered
+  exact bound.worldTyped valid inventory (prepared.worldTyped valid inventory (fresh.worldTyped typed))
 
 /-- Every ordinary local transition preserves the world typing invariant.
 This includes owned receiver consumption, fresh scope and invocation entry,
@@ -276,7 +289,7 @@ theorem LocalStep.worldTyped {program : Kernel.Program} {before after : State} {
   case scopeReturn => apply Protect.worldTyped valid inventory typed; assumption
   case patternBind bound => exact bound.worldTyped valid inventory typed
   case patternShell consumed => exact consumed.worldTyped typed
-  case destroyHook => apply Borrows.worldTyped valid inventory (program := program); apply Temporary.worldTyped typed <;> assumption; assumption
+  case destroyHook => apply FormsLoan.worldTyped valid inventory (program := program); apply Temporary.worldTyped typed <;> assumption; assumption
   case destroyReference => apply World.clear_worldTyped typed <;> assumption
   case shellDone => apply World.clear_worldTyped typed <;> assumption
   case retire retired => exact retired.worldTyped typed
