@@ -884,3 +884,31 @@ theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after
       exact ih index child selected frame (childExcluded index)
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Destruction frames compose along an actual run. -/
+theorem World.DestroyFrame.trans {before middle after : World} {outside : Address}
+    (first : World.DestroyFrame before middle outside) (second : World.DestroyFrame middle after outside) :
+    World.DestroyFrame before after outside where
+  reads := fun probe outside' => (second.reads probe outside').trans (first.reads probe outside')
+  roots := fun probe outside' => (second.roots probe outside').trans (first.roots probe outside')
+  rows := fun key row found => by
+    obtain ⟨middleRow, middleFound, middleParent, middleGuards⟩ := second.rows key row found
+    obtain ⟨original, originalFound, originalParent, originalGuards⟩ := first.rows key middleRow middleFound
+    exact ⟨original, originalFound, originalParent.trans middleParent, originalGuards.trans middleGuards⟩
+  present := fun key original found => by
+    obtain ⟨middleRow, middleFound⟩ := first.present key original found
+    obtain ⟨row, rowFound⟩ := second.present key middleRow middleFound
+    exact ⟨row, rowFound⟩
+  liveness := fun key row found live => by
+    obtain ⟨middleRow, middleFound, middleLive, sameKind, sameMode, sameReferent⟩ :=
+      second.liveness key row found live
+    obtain ⟨original, originalFound, originalLive, originalKind, originalMode, originalReferent⟩ :=
+      first.liveness key middleRow middleFound middleLive
+    exact ⟨original, originalFound, originalLive, originalKind.trans sameKind, originalMode.trans sameMode,
+      originalReferent.trans sameReferent⟩
+
+end Glorious.Language
