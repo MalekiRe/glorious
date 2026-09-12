@@ -396,5 +396,47 @@ theorem Suspension.roots_regions_live {state : State} {id : Identity} {suspensio
   subst selected
   exact (well.2.2.2.2.2.2.2.2.1 rootId root rootAt).2.1 live
 
+/-! ### The live-control/captured-root separation and its consumer law
+
+`State.ControlSeparated` is the authoritative address-level separation: no
+address the live control of the state names carries a suspended home. It is
+stated over the existing support path (`Task.rootSupport` / `Frame.rootSupport`),
+not over a second inventory, and it is the fact that turns "no write inside the
+captured roots" from an assumption into a consequence of the machine's own
+capture invariant. Its per-step retention is the only remaining producer (it
+needs the activated/temporal `ControlOriginPreservation`/`Private*Preservation`
+chain the integrator is repairing, because the handler-environment activation
+must be shown absent from live control). -/
+
+def State.ControlSeparated (state : State) : Prop :=
+  ∀ root ∈ state.task.rootSupport ++ state.frames.flatMap Frame.rootSupport,
+    ∀ suspension, (state.world.roots.get root).map Root.home ≠ some (.suspended suspension)
+
+theorem State.ControlSeparated.task {state : State} (separated : state.ControlSeparated) {root : Identity}
+    (member : root ∈ state.task.rootSupport) :
+    ∀ suspension, (state.world.roots.get root).map Root.home ≠ some (.suspended suspension) :=
+  fun suspension => separated root (List.mem_append_left _ member) suspension
+
+theorem State.ControlSeparated.frames {state : State} (separated : state.ControlSeparated) {root : Identity}
+    (member : root ∈ state.frames.flatMap Frame.rootSupport) :
+    ∀ suspension, (state.world.roots.get root).map Root.home ≠ some (.suspended suspension) :=
+  fun suspension => separated root (List.mem_append_right _ member) suspension
+
+/-- Under the separation, a root that live control names is never a captured root
+of an active suspension: the capture invariant identifies captured roots with the
+rows whose home is that suspension, and the separation forbids exactly those. This
+is the producer the content-freezing frame library consumes. -/
+theorem State.ControlSeparated.not_captured {state : State} (separated : state.ControlSeparated)
+    (formed : state.SuspensionsWellFormed) {id : Identity} {suspension : Suspension}
+    (found : state.resumptions.get id = some suspension) (active : suspension.active = true)
+    {root : Identity} (member : root ∈ state.task.rootSupport ++ state.frames.flatMap Frame.rootSupport) :
+    root ∉ suspension.roots := by
+  intro captured
+  obtain ⟨row,rowAt,live,home⟩ := (formed.active id suspension found active root).mp captured
+  have rowHome : (state.world.roots.get root).map Root.home = some (.suspended id) := by
+    rw [rowAt]
+    exact congrArg some home
+  exact separated root member id rowHome
+
 end Execution
 end Glorious.Language
