@@ -811,13 +811,13 @@ shell/head facts), the shell write is `World.Stores.write_exists` rather than an
 assumption, and the parent-slot clearing is that same write, so the only
 environmental fact left to thread per node is the custody hand-off
 (`CustodyHandedOff (.resident value.owner)`), whose per-node threading is the
-statement design that remains. The two framing facts the loop still needs are
-also named: after a child's own clear at `address.child other`, the parent's
-stored shell must be re-read as the same shell with that one slot a hole
-(`Kernel.Stores.write_child_none` states this at a `fields = []` address, so the
-general address form is what a nested parent needs), and the vacancies the loop
-has already produced for earlier indices must survive the later children's
-clears, which is a `Vacant`-at-a-sibling-slot framing fact for the same write.
+statement design that remains. The two framing facts that loop needs are now landed: a child's clear re-reads its
+parent shell as the same shell with that one slot a hole at any depth
+(`World.Stores.write_child_none`) and leaves the other child slots of that parent
+vacant (`World.Vacant.write_child_other`). What the loop must still be
+restructured to carry is what those facts let it carry — the parent shell it is
+emptying and the vacancies it has produced — and the last environmental fact
+remains the custody hand-off.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered
