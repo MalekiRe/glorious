@@ -489,5 +489,68 @@ theorem Mutation.liveLoan_origin {program : Kernel.Program} {policy : AuthorityP
   | endLoan ended =>
     exact Or.inl ⟨loan,ended.loan_live_before found live,live,rfl⟩
 
+/-- Every place a host mutation publishes is a destination that mutation really
+allocated, so it lies at or above the mutation's initial root frontier. This is
+the producer that replaces the deleted `FreshExposed` bound: a caller with a
+private root `id < before.nextRoot` can conclude that no published place names
+it. -/
+theorem Mutation.produced_fresh {program : Kernel.Program} {policy : AuthorityPolicy}
+    {before after : World} {action : MutationAction} {custody : ClaimCustody}
+    (changed : Mutation program policy before action after) {resource : ProducedResource}
+    (member : resource ∈ action.produced custody) :
+    before.nextRoot ≤ resource.place.address.root := by
+  cases changed with
+  | allocate _ _ allocated =>
+      simp only [MutationAction.produced,List.mem_singleton] at member
+      subst member
+      cases allocated
+      exact Nat.le_refl _
+  | allocateExterior _ _ allocated =>
+      simp only [MutationAction.produced,List.mem_singleton] at member
+      subst member
+      cases allocated
+      exact Nat.le_refl _
+  | allocateBuffer _ allocated =>
+      simp only [MutationAction.produced,List.mem_singleton] at member
+      subst member
+      cases allocated
+      exact Nat.le_refl _
+  | reallocateBuffer _ _ _ reallocated =>
+      simp only [MutationAction.produced,List.mem_singleton] at member
+      subst member
+      cases reallocated with
+      | grow _ allocated _ _ =>
+        cases allocated
+        exact Nat.le_refl _
+  | scalar => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | unit => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | pointer => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | aggregate => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | acquire => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | borrow => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | releaseBuffer => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | rawRead => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | rawWrite => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | rawBorrow => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | bulkMove => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | retire => simp only [MutationAction.produced,List.not_mem_nil] at member
+  | endLoan => simp only [MutationAction.produced,List.not_mem_nil] at member
+
+/-- The accumulated published places of an actual host transaction are all at or
+above the transaction's initial root frontier, along the whole fold. -/
+theorem Mutations.published_fresh {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {initial : World} {produced : List ProducedResource}
+    {actions : List MutationAction} {after : World}
+    (changed : Mutations program custody policy initial produced actions after) {resource : ProducedResource}
+    (member : resource ∈ TransactionOutputs custody actions) :
+    initial.nextRoot ≤ resource.place.address.root := by
+  induction changed with
+  | refl => simp only [TransactionOutputs,List.flatMap_nil,List.not_mem_nil] at member
+  | cons first _ ih =>
+      simp only [TransactionOutputs,List.flatMap_cons,List.mem_append] at member
+      rcases member with own | published
+      · exact first.produced_fresh own
+      · exact Nat.le_trans first.homeExtension.counter (ih published)
+
 end Foreign
 end Glorious.Language
