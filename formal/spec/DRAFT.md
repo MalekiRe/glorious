@@ -414,3 +414,31 @@ preservation, control-state validity, progress, source-admitted nonvacuity or
 normative adequacy. Those remain the active proof obligations; the new root
 lemmas are not a substitute for them. No compiler or library acceptance gate
 was changed or run.
+
+## Arbitrary-path storage framing
+
+The focused `lake build GloriousLanguage.PreservationChecks` passes all 21
+dependency jobs. The general proof now covers arbitrary successful nested
+writes, not just whole roots. A write preserves the identity, declared type,
+constructor and shell-liveness of every observed resident outside the replaced
+subtree. This lifts to the existing `FieldOffset`/`AddressOffset` derivation:
+every address's type and exact physical offset survive unless the write replaces
+a proper ancestor of that address. Nominal fields use the proven preservation
+of the actual active constructor, not an independently reconstructed shape.
+
+Transfers compose the two write laws, and retained references remain typed
+under the explicit proper-ancestor exclusion. The previous whole-root reference
+theorem is now a corollary of that general theorem. The new concrete witness
+moves an owner from a two-level nested field into a sibling field of the same
+root, retains a typed unique handle to the resulting hole, and restores the
+owner through two actual execution steps. A negative framing witness shows
+that clearing a proper ancestor really removes the nested resident; the proof
+does not silently generalize across that case.
+
+The exclusion is still a hypothesis, not yet a consequence of world validity.
+The current live-loan invariant omits parent containment/acyclicity and permits
+loans whose proper storage ancestors are absent. Repairing and preserving that
+authoritative invariant is the next dependency of unrestricted reference and
+whole-world preservation. Control-state preservation, derived resource
+admission, progress and source-admitted nonvacuity remain open. No broad compiler
+or library gate was run or changed.

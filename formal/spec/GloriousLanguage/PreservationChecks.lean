@@ -187,4 +187,88 @@ example (program : Language.Program) (after : World) :
   intro constructed
   exact noUnitDestination program constructed.destination_type
 
+namespace Nested
+
+private def source : Address := ⟨0,0,[0,0]⟩
+private def destination : Address := ⟨0,0,[1]⟩
+private def innerType : Term := .tuple [.unit]
+private def outerType : Term := .tuple [innerType,.unit]
+private def inner : Value := .resident 3 innerType .tuple true [some unitValue]
+private def innerHole : Value := inner.withFields [none]
+private def outer : Value := .resident 2 outerType .tuple true [some inner,none]
+private def clearedValue : Value := outer.withFields [some innerHole,none]
+private def movedValue : Value := outer.withFields [some innerHole,some unitValue]
+private def root : Root := { sourceRoot with type := outerType, value := some outer, layout := ⟨0,1,[0,0],0,0,[]⟩ }
+private def loan : Loan := ⟨0,none,source,.unique,0,true⟩
+private def world : World :=
+  { PreservationChecks.world with roots := [(0,root),(2,handleRoot)], loans := [(0,loan)], nextOwner := 4 }
+private def cleared : World := { world with roots := world.roots.set 0 { root with value := some clearedValue } }
+private def moved : World := { world with roots := world.roots.set 0 { root with value := some movedValue } }
+
+private theorem zeroValid : (⟨0,1,[],0,0,[]⟩ : Layout).Valid := ⟨⟨0,rfl⟩,rfl,by simp⟩
+private theorem innerLayout : AggregateLayout [⟨0,1,[],0,0,[]⟩] ⟨0,1,[0],0,0,[]⟩ :=
+  ⟨0,.cons zeroValid .nil,rfl,rfl,rfl,rfl,rfl⟩
+private theorem outerLayout : AggregateLayout [⟨0,1,[0],0,0,[]⟩,⟨0,1,[],0,0,[]⟩] ⟨0,1,[0,0],0,0,[]⟩ :=
+  ⟨0,.cons ⟨⟨0,rfl⟩,rfl,by simp⟩ (.cons zeroValid .nil),rfl,rfl,rfl,rfl,rfl⟩
+
+private theorem sourceTyped (program : Language.Program) : AddressType program world source .unit := by
+  have base : AddressOffset program world ⟨0,0,[]⟩ outerType 0 := .root (root := root) rfl rfl
+  have first : AddressOffset program world ⟨0,0,[0]⟩ innerType 0 :=
+    .child (index := 0) base (.tuple rfl (.cons (.tuple (.cons .unit .nil) innerLayout) (.cons .unit .nil)) outerLayout rfl)
+  exact ⟨0,.child (index := 0) first (.tuple rfl (.cons .unit .nil) innerLayout rfl)⟩
+
+private theorem destinationTyped (program : Language.Program) : AddressType program world destination .unit := by
+  have base : AddressOffset program world ⟨0,0,[]⟩ outerType 0 := .root (root := root) rfl rfl
+  exact ⟨0,.child (index := 1) base (.tuple rfl (.cons (.tuple (.cons .unit .nil) innerLayout) (.cons .unit .nil)) outerLayout rfl)⟩
+
+private theorem referenceTyped (program : Kernel.Program) : Typing.ValueTyped program world referenceValue :=
+  .reference (loan := loan) rfl rfl rfl rfl (sourceTyped program.declarations)
+
+private theorem move (program : Language.Program) : Transfers program world (.loan 0) source destination moved := by
+  refine .move (value := unitValue) (cleared := cleared) rfl initialized ?_
+    ⟨root,rfl,Or.inr ⟨[],1,outer,rfl,rfl,outer,rfl,rfl⟩⟩
+    (by simp [Address.Overlaps,source,destination]) (destinationTyped program) rfl rfl
+  refine ⟨⟨root,rfl⟩,loan,rfl,rfl,rfl,rfl,⟨[],rfl⟩,(fun _ => rfl),?_⟩
+  intro other resident found _ different
+  have member := Table.mem_of_get found
+  simp [world] at member
+  exact False.elim (different member.1)
+
+private theorem restore (program : Language.Program) : Transfers program moved .owner destination source world := by
+  have sourceOutside : ¬ source.ProperPrefix source := by rintro ⟨_,length⟩; exact Nat.lt_irrefl _ length
+  have destinationOutside : ¬ destination.ProperPrefix source := by simp [Address.ProperPrefix,Address.Prefix,source,destination]
+  refine .move (value := unitValue) (cleared := cleared) rfl initialized ?_
+    ⟨{ root with value := some movedValue },rfl,Or.inr ⟨[0],0,movedValue,rfl,rfl,innerHole,rfl,rfl⟩⟩
+    (by simp [Address.Overlaps,source,destination])
+    (((move program).address_types sourceOutside destinationOutside).mp (sourceTyped program)) rfl rfl
+  refine ⟨⟨{ root with value := some movedValue },rfl⟩,?_⟩
+  intro id resident found _ overlap
+  have member := Table.mem_of_get found
+  simp [moved,world] at member
+  obtain ⟨rfl,rfl⟩ := member
+  simp [Address.Overlaps,source,destination,loan] at overlap
+
+/-- Both endpoints are fields of one root; the source lies two levels deep.
+Its live unique handle survives the hole and the restoring owner transfer. -/
+example (program : Kernel.Program) (host : Foreign.Model) (next : Task) :
+    Typing.ValueTyped program world referenceValue ∧ Typing.ValueTyped program moved referenceValue ∧
+    moved.Stores handle referenceValue ∧ moved.Vacant source ∧
+    Run program host
+      { world := world, task := .transfer source (.loan 0) destination (.transfer destination .owner source next) }
+      [.move source destination,.move destination source] { world := world, task := next } := by
+  refine ⟨referenceTyped program,?_,rfl,?_,?_⟩
+  · exact (move program.declarations).reference_typed (loan := loan) rfl
+      (by rintro ⟨_,length⟩; exact Nat.lt_irrefl _ length)
+      (by simp [Address.ProperPrefix,Address.Prefix,loan,source,destination]) (referenceTyped program)
+  · exact ⟨{ root with value := some movedValue },rfl,Or.inr ⟨[0],0,movedValue,rfl,rfl,innerHole,rfl,rfl⟩⟩
+  · exact .visible (Or.inl (.transfer rfl (move _))) (.visible (Or.inl (.transfer rfl (restore _))) .refl)
+
+/-- A proper-ancestor clear really destroys the child's resident; the frame
+law deliberately cannot be applied there. -/
+example : (outer.replace [0] none).bind (fun value => value.atPath [0,0]) = none ∧
+    (⟨0,0,[0]⟩ : Address).ProperPrefix source := by
+  exact ⟨rfl,⟨rfl,rfl,[0],rfl⟩,by decide⟩
+
+end Nested
+
 end Glorious.Language.PreservationChecks

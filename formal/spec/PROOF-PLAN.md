@@ -28,12 +28,14 @@ Work outward from the required invariant and its proof failures:
    program is not sufficient evidence. Allocation/host failure and legitimate
    outward outcomes must be explicit, not stuck states.
 
-`Preservation.lean` starts the general proof. Currently it establishes root
-location/loan preservation under writes and transfers and retained whole-root
-reference typing. Nested-path and whole-world/machine preservation are not yet
-proved. `PreservationChecks` supplies a well-formed typed initial world and a
-real move-and-restore execution with a surviving unique handle; it does not
-establish source-program admission.
+`Preservation.lean` starts the general proof. It establishes root location/loan
+preservation and arbitrary-path address/field-offset preservation outside a
+write's proper ancestors. Retained reference typing follows under that explicit
+path condition, including a vacant referent. Deriving the condition from a
+complete live-loan invariant and proving whole-world/machine preservation remain
+open. `PreservationChecks` supplies a well-formed typed initial world and real
+whole-root and nested move-and-restore executions with a surviving unique handle;
+it does not establish source-program admission.
 
 ## 2. Source and normative adequacy
 
