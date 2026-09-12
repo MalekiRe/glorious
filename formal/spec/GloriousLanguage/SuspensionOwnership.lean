@@ -10,19 +10,25 @@ open Kernel
 namespace Execution
 
 /-- Scope return consumes the popped frame's ownership role. The yielding
-context cannot substitute a different activation as the cleanup owner. -/
+context cannot substitute a different activation as the cleanup owner. The
+machine publishes the cleanup continuation inside its custody-release wrapper
+(`ReleaseCustodyLoans`, the identity exactly when it schedules nothing), so the
+frame's own captured roots are named by the step's own `ScopeRoots`. -/
 theorem LocalStep.scope_return_owned {program : Kernel.Program} {before after : State}
     {context outer : Context} {value : Address} {scope region : Identity} {rest : List Frame}
     {roots : List Identity} {next : Task}
     (step : LocalStep program before none after) (task : before.task = .yield context value)
     (frames : before.frames = .scope outer scope region :: rest)
-    (cleanup : after.task = .cleanup context roots next) :
+    (scopeRoots : ScopeRoots after.world outer.activation scope [] roots)
+    (cleanup : after.task = ReleaseCustodyLoans after.world (.activation context.activation)
+      (.cleanup context roots next)) :
     ∀ id ∈ roots, ∃ root, after.world.roots.get id = some root ∧
       FrameOwns (.scope outer scope region) root := by
   cases step <;> simp_all
-  rename_i selected _
+  obtain ⟨⟨rfl,rfl,rfl⟩,rfl⟩ := frames
+  obtain ⟨rfl,rfl⟩ := task
   intro id member
-  obtain ⟨root,found,_,owned,_⟩ := (selected.2 id).mp member
+  obtain ⟨root,found,live,owned,outside⟩ := (scopeRoots.2 id).mp member
   exact ⟨root,found,owned⟩
 
 theorem CapturedHome.frame {handler : InstalledHandler} {inner : List Frame} {home : Home}
@@ -201,6 +207,7 @@ theorem Run.replay_owned {program : Kernel.Program} {host : Foreign.Model}
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (run : Run program host before trace current)
     (selected : current.resumptions.get id = some suspension)
+    (runSafe : run.NonFatal)
     (replay : EffectStep program current (some (.replay id last)) after) :
     (last = true ∧ ∀ rootId ∈ suspension.roots, ∃ root, after.world.roots.get rootId = some root ∧
       ∃ frame ∈ after.frames, FrameOwns frame root) ∨
@@ -208,7 +215,7 @@ theorem Run.replay_owned {program : Kernel.Program} {host : Foreign.Model}
       map.roots = suspension.roots ∧ map.rootBase = current.world.nextRoot ∧
       ∀ rootId ∈ suspension.roots, ∃ root, after.world.roots.get (map.root rootId) = some root ∧
         ∃ frame ∈ after.frames, FrameOwns frame root) := by
-  have currentValid := run.suspensions programValid inventory lawful typed control.suspensions
+  have currentValid := run.suspensions programValid inventory lawful typed control.suspensions runSafe
   have currentWell := (run.worldTyped programValid inventory lawful typed).1
   cases last with
   | true => exact Or.inl ⟨rfl,replay.last_replay_owned currentValid currentWell selected⟩

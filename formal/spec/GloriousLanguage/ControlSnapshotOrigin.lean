@@ -6,7 +6,7 @@ saved execution, including nested hook cleanup tasks. Relocation uses the
 machine's one address map; no copied-control support is independently guessed. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem Routes.control_support {program : Kernel.Program} {before : State}
     {operation : DeclId} {arguments : List Term} {payload : List ResolvedPlace}
@@ -57,11 +57,47 @@ theorem Relocation.root_support_bound {map : Relocation} {root limit : Identity}
 theorem Relocation.context_root_support {map : Relocation} {context : Context} {limit : Identity}
     (bounded : RootSupport.Below context.rootSupport limit) :
     RootSupport.Below (map.context context).rootSupport (map.rootBase + limit) := by
-  simp only [RootSupport.Below,Context.rootSupport,List.mem_map] at bounded ⊢
-  rintro root ⟨binding,member,rfl⟩
-  simp only [Relocation.context,List.mem_map] at member
-  obtain ⟨original,member,rfl⟩ := member
-  exact Relocation.root_support_bound (bounded _ ⟨original,member,rfl⟩)
+  have envBound : ∀ binding ∈ context.environment,
+      (map.binding binding).address.root < map.rootBase + limit := by
+    intro binding inner
+    exact Relocation.root_support_bound (bounded binding.address.root (by
+      simp only [Context.rootSupport]
+      exact List.mem_append_left _ (List.mem_map.mpr ⟨binding,inner,rfl⟩)))
+  have contractsBound : ∀ contract ∈ context.resourceContracts, ∀ binding ∈ contract.inputs,
+      (map.binding binding).address.root < map.rootBase + limit := by
+    intro contract inner binding inner2
+    exact Relocation.root_support_bound (bounded binding.address.root (by
+      simp only [Context.rootSupport]
+      exact List.mem_append_right _ (List.mem_flatMap.mpr
+        ⟨contract,inner,(List.mem_map.mpr ⟨binding,inner2,rfl⟩)⟩)))
+  have envLift : ∀ (binding : Binding), binding ∈ context.environment →
+      (map.binding binding).address.root < map.rootBase + limit := by
+    intro binding inner
+    exact Relocation.root_support_bound (bounded binding.address.root (by
+      simp only [Context.rootSupport]
+      exact List.mem_append_left _ (List.mem_map.mpr ⟨binding,inner,rfl⟩)))
+  have contractsLift : ∀ (contract : _), contract ∈ context.resourceContracts →
+      ∀ (binding : Binding), binding ∈ contract.inputs →
+      (map.binding binding).address.root < map.rootBase + limit := by
+    intro contract outer binding inner
+    exact Relocation.root_support_bound (bounded binding.address.root (by
+      simp only [Context.rootSupport]
+      exact List.mem_append_right _
+        (List.mem_flatMap.mpr ⟨contract,outer,List.mem_map.mpr ⟨binding,inner,rfl⟩⟩)))
+  intro root member
+  rcases List.mem_append.mp (by
+    simpa only [Context.rootSupport,Relocation.context] using member) with h | h
+  · obtain ⟨binding,inner,same⟩ := List.mem_map.mp h
+    obtain ⟨original,member,sameBinding⟩ := List.mem_map.mp inner
+    rw [← sameBinding] at same
+    exact same ▸ envLift original member
+  · obtain ⟨contract,contractMember,rootMember⟩ := List.mem_flatMap.mp h
+    obtain ⟨original,member,sameContract⟩ := List.mem_map.mp contractMember
+    rw [← sameContract] at rootMember
+    obtain ⟨binding,bindingMember,sameBinding⟩ := List.mem_map.mp rootMember
+    obtain ⟨preImage,preMember,samePreImage⟩ := List.mem_map.mp bindingMember
+    rw [← samePreImage] at sameBinding
+    exact sameBinding ▸ contractsLift original member preImage preMember
 
 theorem Relocation.installed_root_support {map : Relocation} {handler : InstalledHandler} {limit : Identity}
     (bounded : RootSupport.Below handler.rootSupport limit) :

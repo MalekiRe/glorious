@@ -61,24 +61,31 @@ end Kernel
 
 namespace Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem Context.bind_root_support {context : Context} {localSlot : Local} {address : Address}
     {authority : Authority} {limit : Identity}
     (bounded : RootSupport.Below context.rootSupport limit) (fresh : address.root < limit) :
     RootSupport.Below (context.bind localSlot address authority).rootSupport limit := by
-  simp only [Context.rootSupport,RootSupport.below_map] at bounded ⊢
-  intro binding member
-  simp only [Context.bind,List.mem_cons,List.mem_filter] at member
-  rcases member with rfl | ⟨member,_⟩
+  rw [Context.rootSupport] at bounded
+  rw [RootSupport.below_append] at bounded
+  rw [Context.rootSupport,Context.bind,RootSupport.below_append]
+  refine ⟨?_,bounded.2⟩
+  rw [RootSupport.below_map]
+  intro entry member
+  simp only [List.mem_cons,List.mem_filter] at member
+  rcases member with rfl | rest
   · exact fresh
-  · exact bounded binding member
+  · exact bounded.1 entry.address.root
+      (List.mem_map.mpr ⟨entry,rest.1,rfl⟩)
 
 theorem Context.resolves_root_bound {context : Context} {world : World} {place : Place}
     {address : Address} {authority : Authority} (well : world.WellFormed)
     (bounded : RootSupport.Below context.rootSupport world.nextRoot)
-    (resolved : ResolvesPlace world context.environment place address authority) : address.root < world.nextRoot :=
-  resolved.root_bound well (RootSupport.below_map.mp bounded)
+    (resolved : ResolvesPlace world context.environment place address authority) : address.root < world.nextRoot := by
+  rw [Context.rootSupport] at bounded
+  rw [RootSupport.below_append] at bounded
+  exact resolved.root_bound well (RootSupport.below_map.mp bounded.1)
 
 theorem ResolvedOperands.root_support {world : World} {environment : Environment}
     {places : List Place} {operands : List ResolvedPlace} (well : world.WellFormed)
@@ -108,11 +115,13 @@ theorem Protects.root_support {program : Kernel.Program} {context : Context} {be
     {sources : List ResolvedPlace} {destinations : List Address}
     (kept : Protects program context before sources destinations after) :
     RootSupport.Below (destinations.map Address.root) after.nextRoot := by
-  induction kept with
-  | nil => simp
-  | cons first rest ih =>
-    simp only [List.map_cons,RootSupport.below_cons]
-    exact ⟨Nat.lt_of_lt_of_le first.root_bound rest.suspensionExtension.counter,ih⟩
+  refine ProtectsFor.inductionOn
+    (motive := fun before sources destinations after _ =>
+      RootSupport.Below (destinations.map Address.root) after.nextRoot) kept
+    (fun world => by simp)
+    (fun ready head tail ih => by
+      simp only [List.map_cons,RootSupport.below_cons]
+      exact ⟨Nat.lt_of_lt_of_le head.root_bound tail.suspensionExtension.counter,ih⟩)
 
 theorem Captures.root_support {program : Kernel.Program} {context : Context} {before after : World}
     {captures : List Capture} {addresses : List Address}
@@ -166,22 +175,56 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.root_support {program : Lang
     split <;> simp_all only [List.flatMap_cons,List.flatMap_nil,PatternAction.rootSupport,
       RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,and_true]
 
+theorem ConsumesReceiver.wellFormed {before after : World} {address : Address} {authority : Authority}
+    {access : Access} (consumed : ConsumesReceiver before address authority access after)
+    (well : before.WellFormed) : after.WellFormed := by
+  cases consumed with
+  | lent => exact well
+  | owned stored live callable permitted written =>
+    exact World.write_wellFormed_of_origin well permitted written
+      (fun _ _ found => World.write_shell_origin stored written found)
+
+theorem ConsumesAvailability.wellFormed {before after : World} {address : Address}
+    {authority : Authority} {id : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority id access after)
+    (well : before.WellFormed) : after.WellFormed := by
+  cases consumed with
+  | lent => exact well
+  | owned stored initialized head available active permitted written =>
+    exact World.deactivateAvailability_wellFormed
+      (World.clear_wellFormed (valid := well) (permission := permitted) (written := written))
+      (by simpa only [congrArg World.availability (World.write_rest written)] using available)
+
 theorem PreparesEntry.wellFormed {program : Kernel.Program} {callee : Context} {function : Function}
     {before after : World} {source : EntrySource} {inputs : List InvocationInput}
     (prepared : PreparesEntry program callee function before source inputs after)
     (well : before.WellFormed) : after.WellFormed := by
   cases prepared with
   | supplied => exact well
-  | resident lent _ => exact lent.wellFormed well
-  | contextual receiver witness => exact witness.wellFormed (receiver.wellFormed well)
+  | resident _ _ lends _ consumes =>
+    exact ConsumesReceiver.wellFormed consumes (LendsResident.wellFormed lends well)
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+    exact ConsumesAvailability.wellFormed consumesAvailability
+      (ConsumesReceiver.wellFormed consumes
+        (LendsResident.wellFormed witnessLends (LendsResident.wellFormed receiverLends well)))
 
 theorem EnterWorld.context_root_support {program : Kernel.Program} {before : State} {caller context : Context}
     {function : Function} {source : EntrySource} {after : World}
     (well : before.world.WellFormed) (entered : EnterWorld program before caller function source context after) :
     RootSupport.Below context.rootSupport after.nextRoot := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,_,region,prepares,bound,rfl,_⟩ := entered
-  apply RootSupport.below_map.mpr
-  exact bound.bindings_root_bound (prepares.wellFormed (region.wellFormed well))
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,functionAt,region,prepares,
+    incoming,binds,finish,contextEq,unsafeOk⟩ := entered
+  have boundAt := BindsInputsFor.bindings_root_bound binds
+    (prepares.wellFormed (region.wellFormed well))
+  have frontier : bound.nextRoot ≤ after.nextRoot := finish.suspensionExtension.counter
+  rw [contextEq, Context.rootSupport, RootSupport.below_append]
+  refine ⟨?_,?_⟩
+  · rw [RootSupport.below_map]
+    exact fun binding member => Nat.lt_of_lt_of_le (boundAt binding member) frontier
+  · simp only [List.flatMap_cons,List.flatMap_nil,RootSupport.below_append,RootSupport.below_nil]
+    refine ⟨?_,trivial⟩
+    rw [RootSupport.below_map]
+    exact fun binding member => Nat.lt_of_lt_of_le (boundAt binding member) frontier
 
 theorem _root_.Glorious.Language.Kernel.ActivationRoots.root_support {world : World} {activation : Identity} {kept roots : List Identity}
     (well : world.WellFormed) (selected : ActivationRoots world activation kept roots) :

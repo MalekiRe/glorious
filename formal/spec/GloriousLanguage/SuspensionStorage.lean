@@ -55,6 +55,14 @@ theorem World.SuspensionExtension.of_roots {before after : World}
     (recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans) :
     before.SuspensionExtension after := .of_locations counter (by intro id; rw [roots]) recorded
 
+/-- A step that only rewrites or extends the loan table retains the suspension
+extension: the roots and every location are literally untouched. -/
+theorem World.SuspensionExtension.of_loans {before after : World}
+    (counter : before.nextRoot ≤ after.nextRoot) (roots : after.roots = before.roots)
+    (retained : ∀ id loan, before.loans.get id = some loan → ∃ current, after.loans.get id = some current) :
+    before.SuspensionExtension after :=
+  .of_roots counter roots (fun _ recorded => recorded.transport retained)
+
 theorem World.write_suspensionExtension {before after : World} {address : Address} {value : Option Value}
     (written : before.write address value = some after) : before.SuspensionExtension after :=
   .of_locations (Nat.le_of_eq (congrArg World.nextRoot (World.write_rest written)).symm) (World.write_locations written)
@@ -80,33 +88,39 @@ theorem Retires.suspensionExtension {before after : World} {retiredId : Identity
     obtain ⟨original,originalAt,location⟩ := retired.suspended_origin found home
     exact ⟨original,originalAt,location.symm⟩
 
-theorem Transfers.suspensionExtension {program : Program} {before after : World} {authority source destination}
+theorem Transfers.suspensionExtension {program : RuntimeProgram} {before after : World} {authority source destination}
     (transferred : Transfers program before authority source destination after) : before.SuspensionExtension after :=
   .of_locations transferred.authorityStable.homes.counter transferred.locations transferred.authorityStable.recorded
 
-theorem Copies.suspensionExtension {program : Program} {before after : World} {authority source destination}
+theorem Copies.suspensionExtension {program : RuntimeProgram} {before after : World} {authority source destination}
     (copied : Copies program before authority source destination after) : before.SuspensionExtension after :=
   .of_locations copied.authorityStable.homes.counter copied.locations copied.authorityStable.recorded
 
-theorem Acquires.suspensionExtension {program : Program} {before after : World} {authority force source destination}
+theorem Acquires.suspensionExtension {program : RuntimeProgram} {before after : World} {authority force source destination}
     (acquired : Acquires program before authority force source destination after) : before.SuspensionExtension after := by
   cases acquired with
   | explicitMove moved => exact moved.suspensionExtension
   | copy copied => exact copied.suspensionExtension
   | move _ _ _ moved => exact moved.suspensionExtension
 
-theorem NewValue.suspensionExtension {program : Program} {before after : World} {destination type head sources}
+theorem NewValue.suspensionExtension {program : RuntimeProgram} {before after : World} {destination type head sources}
     (constructed : NewValue program before destination type head sources after) : before.SuspensionExtension after :=
   .of_locations constructed.authorityStable.homes.counter constructed.locations constructed.authorityStable.recorded
 
-theorem FormsLoan.suspensionExtension {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.suspensionExtension {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     before.SuspensionExtension after := .of_locations borrowed.homeExtension.counter borrowed.locations borrowed.recorded
 
-theorem EndsLoan.suspensionExtension {before after : World} {id : Identity} (ended : EndsLoan before id after) :
-    before.SuspensionExtension after := by
-  exact .of_roots (by cases ended; exact Nat.le_refl _) (by cases ended; rfl) ended.recorded
+theorem EndsLoan.suspensionExtension {program : RuntimeProgram} {before after : World} {id : Identity}
+    (ended : EndsLoan program before id after) : before.SuspensionExtension after :=
+  World.SuspensionExtension.of_loans (by cases ended; exact Nat.le_refl _) (by cases ended; rfl)
+    (by
+      intro key loan found
+      cases ended
+      by_cases same : key = id
+      · subst same; exact ⟨_,Table.get_set _ _ _⟩
+      · exact ⟨loan,by rw [Table.get_set_other _ _ _ _ same]; exact found⟩)
 
 theorem FreshRegion.suspensionExtension {before after : World} {id : Identity}
     (fresh : FreshRegion before id after) : before.SuspensionExtension after := by
@@ -132,9 +146,10 @@ theorem Execution.Protect.suspensionExtension {program : Kernel.Program} {contex
 theorem Execution.Protects.suspensionExtension {program : Kernel.Program} {context : Context}
     {before after : World} {sources : List ResolvedPlace} {destinations : List Address}
     (kept : Protects program context before sources destinations after) : before.SuspensionExtension after := by
-  induction kept with
-  | nil => exact .refl _
-  | cons first _ ih => exact first.suspensionExtension.trans ih
+  exact ProtectsFor.inductionOn
+    (motive := fun before sources destinations after _ => before.SuspensionExtension after)
+    (nil := fun world => .refl world)
+    (cons := fun _ head _ ih => head.suspensionExtension.trans ih) kept
 
 theorem Execution.StartsClause.suspensionExtension {before : State} {handler context after}
     (started : StartsClause before handler context after) : before.world.SuspensionExtension after :=
@@ -153,13 +168,13 @@ theorem Execution.CreatesContinuation.suspensionExtension {program : Kernel.Prog
   obtain ⟨allocated,layout,type,allocation,constructed⟩ := created
   exact (allocation.suspensionExtension (by intro id; simp)).trans constructed.suspensionExtension
 
-theorem Kernel.LendsResident.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+theorem Kernel.LendsResident.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
     {before after : World} {source : Address} {authority result : Authority} {access : Access} {lease : Option InvocationLease}
     (lent : LendsResident program activation scope region before source authority access lease result after) :
     before.SuspensionExtension after := by
   cases lent with
   | owned => exact .refl _
-  | lent _ _ allocated borrowed =>
+  | lent _ _ _ allocated borrowed =>
     exact (allocated.suspensionExtension (by intro id; simp)).trans borrowed.suspensionExtension
 
 theorem Execution.ConsumesReceiver.suspensionExtension {before after : World}
@@ -169,22 +184,106 @@ theorem Execution.ConsumesReceiver.suspensionExtension {before after : World}
   | lent => exact .refl _
   | owned _ _ _ _ written => exact World.write_suspensionExtension written
 
-theorem Kernel.BindsInput.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+/-- A row that exists before a table update still has a row afterwards: either
+the rewritten row or the original one. -/
+theorem Table.get_set_some {α : Type} {table : Table α} {id key : Identity} {value row : α}
+    (found : table.get id = some row) : ∃ after, (table.set key value).get id = some after := by
+  by_cases same : id = key
+  · subst same; exact ⟨value,Table.get_set _ _ _⟩
+  · exact ⟨row,by rw [Table.get_set_other _ _ _ _ same]; exact found⟩
+
+theorem ClaimsStorage.suspensionExtension {custody : ClaimCustody} {before after : World}
+    {authority : Authority} {access : Access} {referent : Address} {loan : Identity}
+    (claimed : ClaimsStorage custody before authority access referent loan after) :
+    before.SuspensionExtension after := by
+  cases claimed
+  refine World.SuspensionExtension.of_locations ?_ ?_ ?_
+  · exact Nat.le_refl _
+  · intro id; rfl
+  · intro current recorded
+    refine Authority.Recorded.transport recorded ?_
+    intro key row found
+    exact Table.get_set_some found
+
+theorem ClaimsAllocation.suspensionExtension {recipient : ClaimCustody} {before after : World}
+    {authority : Authority} {address : Address} {loan : Identity}
+    (claimed : ClaimsAllocation recipient before authority address loan after) :
+    before.SuspensionExtension after := by
+  cases claimed
+  refine World.SuspensionExtension.of_locations ?_ ?_ ?_
+  · exact Nat.le_refl _
+  · intro id; rfl
+  · intro current recorded
+    refine Authority.Recorded.transport recorded ?_
+    intro key row found
+    exact Table.get_set_some found
+
+theorem TransfersAllocation.suspensionExtension {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (transferred : TransfersAllocation recipient before place after) :
+    before.SuspensionExtension after := by
+  cases transferred
+  rename_i identity placeEq claim loanAt
+  refine World.SuspensionExtension.of_locations ?_ ?_ ?_
+  · exact Nat.le_refl _
+  · intro id; rfl
+  · intro current recorded
+    refine Authority.Recorded.transport recorded ?_
+    intro key row found
+    exact Table.get_set_some found
+
+theorem TransfersStorageLoan.suspensionExtension {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (transferred : TransfersStorageLoan recipient before place after) :
+    before.SuspensionExtension after := by
+  cases transferred with
+  | shared => exact World.SuspensionExtension.refl before
+  | unique =>
+    rename_i identity loanAt
+    refine World.SuspensionExtension.of_locations ?_ ?_ ?_
+    · exact Nat.le_refl _
+    · intro id; rfl
+    · intro current recorded
+      refine Authority.Recorded.transport recorded ?_
+      intro key row found
+      exact Table.get_set_some found
+
+theorem Kernel.BindsInput.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
     {before after : World} {input : InvocationInput} {binding : Binding}
     (bound : BindsInput program activation scope region before input binding after) : before.SuspensionExtension after := by
   cases bound with
-  | lent _ _ _ _ _ borrowed => exact borrowed.suspensionExtension
-  | owned _ _ _ allocated transferred =>
+  | lent _ _ _ _ _ _ _ borrowed => exact borrowed.suspensionExtension
+  | owned _ _ _ _ _ allocated transferred =>
     exact (allocated.suspensionExtension (by intro id; simp)).trans transferred.suspensionExtension
+  | storage _ _ _ claimed => exact claimed.suspensionExtension
+  | allocation _ _ _ _ transferred => exact transferred.suspensionExtension
+  | guardedAllocation _ _ _ _ _ claimed => exact claimed.suspensionExtension
+  | loan _ _ _ _ transferred => exact transferred.suspensionExtension
 
-theorem Kernel.BindsInputs.suspensionExtension {program : Language.Program} {activation scope region : Identity}
-    {before after : World} {inputs : List InvocationInput} {bindings : Environment}
-    (bound : BindsInputs program activation scope region before inputs bindings after) : before.SuspensionExtension after := by
-  induction bound with
-  | nil => exact .refl _
-  | cons first _ ih => exact first.suspensionExtension.trans ih
+/-- The general binder: the same preservation as `BindsInput`, for an arbitrary
+recipient custody, so the outcome-indexed fold can consume it directly. -/
+theorem Kernel.BindsInputAt.suspensionExtension {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput} {binding : Binding}
+    (bound : BindsInputAt program recipient activation scope region before input binding after) :
+    before.SuspensionExtension after := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ borrowed => exact borrowed.suspensionExtension
+  | owned _ _ _ _ _ allocated transferred =>
+    exact (allocated.suspensionExtension (by intro id; simp)).trans transferred.suspensionExtension
+  | storage _ _ _ claimed => exact claimed.suspensionExtension
+  | allocation _ _ _ _ transferred => exact transferred.suspensionExtension
+  | guardedAllocation _ _ _ _ _ claimed => exact claimed.suspensionExtension
+  | loan _ _ _ _ transferred => exact transferred.suspensionExtension
 
-theorem Kernel.BindsPattern.suspensionExtension {program : Language.Program} {activation scope region : Identity}
+theorem Kernel.BindsInputs.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {_inputs : List InvocationInput} {_bindings : Environment}
+    (bound : BindsInputs program activation scope region before _inputs _bindings after) :
+    before.SuspensionExtension after :=
+  BindsInputsFor.inductionOn
+    (motive := fun before _ _ after _ => before.SuspensionExtension after)
+    (nil := fun world => .refl world)
+    (cons := fun _ head _ ih => head.suspensionExtension.trans ih)
+    (footprint := _inputs.flatMap InvocationInput.clearedStorage) bound
+
+theorem Kernel.BindsPattern.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
     {before after : World} {localSlot : Local} {source : Address} {authority : Authority} {access : Access} {binding : Binding}
     (bound : BindsPattern program activation scope region before localSlot source authority access binding after) :
     before.SuspensionExtension after := by
@@ -193,32 +292,65 @@ theorem Kernel.BindsPattern.suspensionExtension {program : Language.Program} {ac
   | borrowed _ _ allocated borrowed =>
     exact (allocated.suspensionExtension (by intro id; simp)).trans borrowed.suspensionExtension
 
-theorem Deconstructs.suspensionExtension {program : Program} {context : Language.Context}
+theorem Deconstructs.suspensionExtension {program : RuntimeProgram} {context : Language.Context}
     {before after : World} {authority : Authority} {address : Address}
     (consumed : Deconstructs program context before authority address after) : before.SuspensionExtension after := by
   cases consumed with
-  | shell _ _ _ _ written => exact World.write_suspensionExtension written
+  | shell _ _ _ _ _ written => exact World.write_suspensionExtension written
+
+theorem Execution.ConsumesAvailability.suspensionExtension {before after : World}
+    {address : Address} {authority : Authority} {id : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority id access after) :
+    before.SuspensionExtension after := by
+  cases consumed with
+  | lent => exact .refl _
+  | owned _ _ _ _ _ _ written =>
+    exact (World.write_suspensionExtension written).trans
+      (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
 
 theorem Execution.PreparesEntry.suspensionExtension {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
     {before after : World} {source : EntrySource} {inputs : List InvocationInput}
     (prepared : PreparesEntry program callee function before source inputs after) : before.SuspensionExtension after := by
   cases prepared with
   | supplied => exact .refl _
-  | resident lent _ => exact lent.suspensionExtension
-  | contextual receiver witness => exact receiver.suspensionExtension.trans witness.suspensionExtension
+  | resident _ _ lent _ consumed => exact lent.suspensionExtension.trans consumed.suspensionExtension
+  | contextual _ _ _ _ lends lendsWitness _ consumed finished =>
+    have step1 := lends.suspensionExtension
+    have step2 := lendsWitness.suspensionExtension
+    have step3 := consumed.suspensionExtension
+    have step4 := finished.suspensionExtension
+    exact ((step1.trans step2).trans step3).trans step4
+
+theorem Execution.FinishesReceiver.suspensionExtension {before after : World} {receiver : ResolvedPlace}
+    {access : Access} (finished : FinishesReceiver before receiver access after) :
+    before.SuspensionExtension after := by
+  cases finished with
+  | lent => exact .refl _
+  | owned _ _ _ _ _ _ written => exact World.write_suspensionExtension written
+
+theorem Execution.FinishesEntry.suspensionExtension {before after : World} {source : EntrySource}
+    (finished : FinishesEntry before source after) : before.SuspensionExtension after := by
+  cases finished with
+  | supplied => exact .refl _
+  | resident inner => exact inner.suspensionExtension
+  | contextual inner => exact inner.suspensionExtension
 
 theorem Execution.EnterWorld.suspensionExtension {program : Kernel.Program} {before : State} {after : World}
     {caller context : Context} {function : Kernel.Function} {source : EntrySource}
     (entered : EnterWorld program before caller function source context after) : before.world.SuspensionExtension after := by
-  obtain ⟨_,_,_,_,_,_,fresh,prepared,bound,_,_⟩ := entered
-  exact fresh.suspensionExtension.trans (prepared.suspensionExtension.trans bound.suspensionExtension)
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,
+    functionAt,fresh,entryPrep,resources,attempt,finished,contextEq,unsafeOk⟩ := entered
+  exact fresh.suspensionExtension.trans (entryPrep.suspensionExtension.trans
+    ((Kernel.BindsInputs.suspensionExtension attempt).trans finished.suspensionExtension))
 
 theorem Execution.Captures.suspensionExtension {program : Kernel.Program} {context : Context}
     {before after : World} {captures : List Capture} {addresses : List Address}
     (captured : Captures program context before captures addresses after) : before.SuspensionExtension after := by
   induction captured with
   | nil => exact .refl _
-  | owned _ _ allocated acquired _ ih => exact allocated.suspensionExtension.trans (acquired.suspensionExtension.trans ih)
+  | owned _ _ temporary acquired _ ih =>
+    exact (temporary.choose_spec.suspensionExtension (by intro id; simp)).trans
+      (acquired.suspensionExtension.trans ih)
   | borrowed _ _ _ allocated borrowed _ ih => exact allocated.suspensionExtension.trans (borrowed.suspensionExtension.trans ih)
 
 theorem Execution.RetiresEmpty.suspensionExtension {before after : World} {addresses : List Address}
@@ -268,13 +400,6 @@ theorem Execution.TestResult.suspensionExtension {program : Kernel.Program} {con
     exact copied.suspensionExtension.trans (packed.suspensionExtension.trans
       (fields.choose_spec.2.2.2.2.suspensionExtension.trans constructed.suspensionExtension))
 
-theorem Execution.ConsumesAvailability.suspensionExtension {before after : World}
-    {address : Address} {id : Identity} {access : Access}
-    (consumed : ConsumesAvailability before address id access after) : before.SuspensionExtension after := by
-  cases consumed with
-  | lent => exact .refl _
-  | owned _ written =>
-    exact (World.write_suspensionExtension written).trans
-      (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
+
 
 end Glorious.Language

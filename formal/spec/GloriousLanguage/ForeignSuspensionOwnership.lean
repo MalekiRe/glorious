@@ -9,7 +9,7 @@ namespace Glorious.Language.Foreign
 open Kernel Execution
 
 theorem Mutation.suspensionExtension {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    (changed : Mutation program policy before after)
+    {action : MutationAction} (changed : Mutation program policy before action after)
     (noSuspendedHome : ∀ home region, policy.home home region → ∀ id, home ≠ .suspended id) :
     before.SuspensionExtension after := by
   refine ⟨changed.homeExtension,?_,?_,changed.recorded⟩
@@ -19,23 +19,26 @@ theorem Mutation.suspensionExtension {program : Kernel.Program} {policy : Author
     obtain ⟨original,originalAt,location⟩ := changed.suspended_origin noSuspendedHome found home
     exact ⟨original,originalAt,location.symm⟩
 
-theorem Mutations.suspensionExtension {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    (changed : Mutations program policy before after)
-    (noSuspendedHome : ∀ home region, policy.home home region → ∀ id, home ≠ .suspended id) :
+theorem Mutations.suspensionExtension {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World}
+    {produced : List ProducedResource} {actions : List MutationAction}
+    (changed : Mutations program custody policy before produced actions after)
+    (noSuspendedHome : ∀ emitted home region,
+      (policy emitted).home home region → ∀ id, home ≠ .suspended id) :
     before.SuspensionExtension after := by
   induction changed with
   | refl => exact .refl _
-  | cons first _ ih => exact (first.suspensionExtension noSuspendedHome).trans ih
+  | cons first _ ih => exact (first.suspensionExtension (noSuspendedHome _)).trans ih
 
 theorem Model.Lawful.host_suspensionExtension {program : Kernel.Program} {model : Model}
     {session : ForeignSession} {imported : Import} {contract : Contract} {before after : World}
-    {observation next : List Nat} {action : HostAction}
+    {observation next : List Nat} {actions : List MutationAction} {action : HostAction}
     (lawful : model.Lawful program) (well : before.WellFormed)
     (selected : Selected program model session.call imported contract) (active : contract.session before session)
-    (step : model.step session.call.binding.declaration before session observation after action next) :
+    (step : model.step session.call.binding.declaration before session observation actions after action next) :
     before.SuspensionExtension after :=
-  (lawful.step _ _ _ _ _ _ _ _ selected well active step).1.suspensionExtension
-    (fun _ _ admitted id => Policy.no_suspended_home admitted id)
+  (lawful.step _ _ _ _ _ _ _ _ _ selected well active step).1.suspensionExtension
+    (fun _ _ _ admitted id => Policy.no_suspended_home admitted id)
 
 /-- The entire foreign-step family, including both callback handoffs, uses
 the actual ordinary allocation, lending, move, consume and retirement paths. -/
@@ -48,9 +51,8 @@ theorem Step.suspensionExtension {program : Kernel.Program} {model : Model}
   | host _ _ selected active step => exact lawful.host_suspensionExtension well selected active step
   | result _ _ selected active step _ transferred =>
     exact (lawful.host_suspensionExtension well selected active step).trans transferred.suspensionExtension
-  | callback _ _ selected active step _ lent _ _ consumed =>
-    exact (lawful.host_suspensionExtension well selected active step).trans
-      (Kernel.LendsResident.suspensionExtension lent |>.trans consumed.suspensionExtension)
+  | callback _ _ selected active step _ _ =>
+    exact lawful.host_suspensionExtension well selected active step
   | callbackResult _ _ _ _ protectedWorld retired =>
     exact protectedWorld.suspensionExtension.trans retired.suspensionExtension
   | callbackReturned => exact .refl _
