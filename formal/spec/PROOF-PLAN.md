@@ -386,6 +386,20 @@ part of public safety, not `TransitionSystem.Safe`: task/frame preservation,
 progress, initialized representable results and resource completion remain
 unfinished and must not be inferred from world typing alone.
 
+The public result observer is now complete for initialized typed residents.
+`PublicValues` proves existence, uniqueness and exact initialization of logical
+value views, including operation values and contextual/control carriers.
+Callable observations recursively retain their captured residents instead of
+erasing them. These logical observations do not authorize runtime addresses or
+lifetime escape for proof-only values. The actual `Finished` relation consumes
+the observer for returns and outward effect payloads; every admitted outward
+request now produces a public result. Under existing semantic resource
+admission and its input-access condition, `resourceAdmission_safe_iff` proves
+that full public safety is equivalent to preservation of initialized stopped
+result addresses. This identifies, but does not assume or discharge, the
+remaining return/cleanup lifetime invariant. Source resource admission itself
+remains a semantic obligation rather than a proved structural typing rule.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target

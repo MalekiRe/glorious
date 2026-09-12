@@ -27,3 +27,4 @@ import GloriousLanguage.RuntimeTypingEquivariance
 import GloriousLanguage.InvocationLeaseCleanup
 import GloriousLanguage.SemanticPreservation
 import GloriousLanguage.CapabilityModels
+import GloriousLanguage.PublicValues

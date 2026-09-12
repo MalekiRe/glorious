@@ -53,13 +53,20 @@ structure WellFormed (program : Kernel.Program) : Prop where
   interfaces : Contracts.CheckedInterfaces program
   drops : DropsAdmitted program
 
+/-- Logical source-value observations, not a physical ABI. Captured residents
+remain part of a returned callable. Control/context identities record their
+logical value without granting an address or permission to escape a lifetime. -/
 inductive PublicValue where
   | unit
   | scalar (value : ScalarValue)
   | aggregate (type : Term) (variant : Option DeclId) (fields : List PublicValue)
   | reference (mode : Mutability) (address : Address)
   | pointer (address : Nat)
-  | callable (declaration : DeclId) (arguments : List Term)
+  | callable (declaration : DeclId) (arguments : List Term) (captures : List PublicValue)
+  | label (brand : Identity)
+  | continuation (identity : Identity)
+  | available (identity : Identity)
+  | bindings (pack : BindingPack) (fields : List PublicValue)
   deriving Repr, Inhabited
 
 mutual
@@ -72,7 +79,15 @@ mutual
     | reference {owner type id loan} : world.loans.get id = some loan → loan.live = true →
         Reveals world (.resident owner type (.reference id) true []) (.reference loan.mode loan.referent)
     | pointer {owner type pointer} : Reveals world (.resident owner type (.pointer pointer) true []) (.pointer pointer.address)
-    | callable {owner type id arguments fields} : Reveals world (.resident owner type (.callable id arguments) true fields) (.callable id arguments)
+    | callable {owner type id arguments fields captures} : RevealsFields world fields captures →
+        Reveals world (.resident owner type (.callable id arguments) true fields) (.callable id arguments captures)
+    | operation {owner type id arguments} :
+        Reveals world (.resident owner type (.operation id arguments) true []) (.callable id arguments [])
+    | label {owner type brand} : Reveals world (.resident owner type (.label brand) true []) (.label brand)
+    | continuation {owner type id} : Reveals world (.resident owner type (.continuation id) true []) (.continuation id)
+    | available {owner type id} : Reveals world (.resident owner type (.available id) true []) (.available id)
+    | bindings {owner type pack fields values} : RevealsFields world fields values →
+        Reveals world (.resident owner type (.bindings pack) true fields) (.bindings pack values)
 
   inductive RevealsFields (world : World) : List (Option Value) → List PublicValue → Prop where
     | nil : RevealsFields world [] []
