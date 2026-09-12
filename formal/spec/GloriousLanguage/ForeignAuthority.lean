@@ -1,8 +1,8 @@
-import GloriousLanguage.ForeignEvolution
+import GloriousLanguage.ForeignRootFraming
 import GloriousLanguage.InvocationLeaseCleanup
 
 /-! The actual foreign protocol preserves unexposed internal storage. This
-uses authority reachability and the checked frame contract, not an assertion
+uses authority reachability and the actual mutation producers, not an assertion
 that a host's arbitrary writable predicate happens to exclude private slots. -/
 namespace Glorious.Language
 
@@ -45,26 +45,6 @@ theorem Reachable.avoids_root {program : Language.Program} {world : World}
   | project _ resolved ih => exact resolved.avoids_root ih loans
   | pointer _ _ _ _ _ _ points _ => exact pointers _ _ _ points
 
-/-- Allocation/external objects can be explicitly shared with a host.
-Internal logical homes require an actual source handoff instead. -/
-def InternalHome (root : Root) : Prop :=
-  ∀ domain, root.home ≠ .allocation domain ∧ root.home ≠ .external domain
-
-theorem InternalHome.temporary {root : Root} {activation scope : Identity}
-    (home : root.home = .temporary activation scope) : InternalHome root := by
-  intro domain
-  simp [home]
-
-theorem InternalHome.no_raw {program : Language.Program} {world : World} {id : Identity} {root : Root}
-    (selected : world.roots.get id = some root) (internalHome : InternalHome root)
-    {pointer : RawPointer} {address : Address} {type : Term}
-    (points : PointsTo program world pointer address type) : address.root ≠ id := by
-  intro same
-  obtain ⟨other,_,found,_,_,domain,_,home⟩ := points.2.2.2
-  have identity := Option.some.inj ((World.root_found found).1.symm.trans (same ▸ selected))
-  subst other
-  exact home.elim (internalHome domain).1 (internalHome domain).2
-
 theorem AccessSeed.avoids_internal_during {program : Kernel.Program} {model : Model} {contract : Contract}
     {initial current : World} {session : ForeignSession} {id : Identity} {root : Root} {place : ResolvedPlace}
     (bound : id < initial.nextRoot) (selected : current.roots.get id = some root) (internalHome : InternalHome root)
@@ -101,35 +81,55 @@ theorem Accessible.avoids_internal {program : Kernel.Program} {model : Model} {c
     (accessible : Accessible program model contract world world session place) : place.address.root ≠ id :=
   accessible.avoids_internal_during (World.root_bound well selected) selected internalHome known loans
 
-/-- Every actual host transition preserves every resident of an internal
-root absent from its handoffs and reference reachability. This holds even
-when `contract.writable` is the everywhere-true predicate. -/
-theorem Model.Lawful.private_resident {program : Kernel.Program} {model : Model}
-    {contract : Contract} {imported : Import} {before after : World} {session : ForeignSession}
-    {observation next : List Nat} {action : HostAction} {id : Identity} {root : Root}
-    {address : Address} {value : Value}
-    (lawful : model.Lawful program) (well : before.WellFormed)
-    (selected : Selected program model session.call imported contract) (active : contract.session before session)
-    (step : model.step session.call.binding.declaration before session observation after action next)
-    (rootAt : before.roots.get id = some root) (internalHome : InternalHome root)
+/-- Exact root framing is derived from each actual mutation's selected
+inputs. This includes vacant roots and does not consume FramePreserved. -/
+theorem Mutation.private_root_unchanged {program : Kernel.Program} {model : Model} {contract : Contract}
+    {initial before after : World} {session : ForeignSession} {id : Identity} {root : Root}
+    (changed : Mutation program (Policy program model contract initial session) before after)
+    (bound : id < initial.nextRoot) (counter : initial.nextRoot ≤ before.nextRoot)
+    (selected : before.roots.get id = some root) (internalHome : InternalHome root)
     (known : ∀ place ∈ session.known, place.address.root ≠ id)
-    (loans : ∀ key loan, before.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id)
-    (addressRoot : address.root = id) (resident : before.Resident address value) : after.Stores address value := by
-  have frame := (lawful.step session imported contract before observation after action next
-    selected well active step).2.2.1
-  apply frame address value resident
-  intro ancestor overlaps writable
-  obtain ⟨authority,accessible,_⟩ := writable.2
-  exact accessible.avoids_internal well rootAt internalHome known loans (overlaps.1.trans addressRoot)
-
-theorem _root_.Glorious.Language.World.HomeExtension.internal_root {before after : World} {id : Identity} {root : Root}
-    (changed : before.HomeExtension after) (bound : id < before.nextRoot)
-    (selected : before.roots.get id = some root) (internalHome : InternalHome root) :
-    ∃ current, after.roots.get id = some current ∧ InternalHome current := by
-  have homes := changed.homes id bound
-  rw [selected] at homes
-  obtain ⟨current,found,home⟩ := Option.map_eq_some_iff.mp homes
-  exact ⟨current,found,fun domain => by simpa only [home] using internalHome domain⟩
+    (loans : ∀ key loan, before.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id) :
+    after.roots.get id = before.roots.get id := by
+  have inaccessible (place : ResolvedPlace) (accessible : Accessible program model contract initial before session place) :
+      id ≠ place.address.root := (accessible.avoids_internal_during bound selected internalHome known loans).symm
+  have unwritable (address : Address) (writable : Writable program model contract initial before session address) :
+      id ≠ address.root := inaccessible _ writable.2.choose_spec.1
+  have oldBound := Nat.lt_of_lt_of_le bound counter
+  cases changed with
+  | allocate _ allocated => exact allocated.roots_other oldBound
+  | scalar writable stored => exact stored.2.2.roots_other (unwritable _ writable) (by intro source member; cases member)
+  | unit writable stored => exact stored.2.roots_other (unwritable _ writable) (by intro source member; cases member)
+  | pointer writable _ _ _ stored => exact stored.2.roots_other (unwritable _ writable) (by intro source member; cases member)
+  | aggregate writable sources _ _ constructed =>
+    exact constructed.roots_other (unwritable _ writable)
+      (fun source member => inaccessible source (sources source member))
+  | acquire source destination acquired => exact acquired.roots_other (inaccessible _ source) (unwritable _ destination)
+  | borrow _ destination borrowed => exact borrowed.roots_other (unwritable _ destination)
+  | allocateBuffer _ allocated => exact allocated.roots_other oldBound
+  | reallocateBuffer _ _ reallocated => exact reallocated.private_root oldBound selected internalHome
+  | @releaseBuffer pointer domain _ _ released =>
+    have origin : ∃ allocation, pointer.allocation = some allocation := by cases released; exact ⟨_,by assumption⟩
+    obtain ⟨allocation,origin⟩ := origin
+    exact released.roots_other origin (released.avoids_internal selected internalHome origin).symm
+  | rawRead _ destination read =>
+    cases read with
+    | read points _ _ action =>
+      rcases action with ⟨_,copied⟩ | ⟨_,moved⟩
+      · exact copied.roots_other (unwritable _ destination)
+      · exact moved.roots_other (internalHome.no_raw selected points).symm (unwritable _ destination)
+  | rawWrite source _ written =>
+    cases written with
+    | write _ _ points _ _ moved => exact moved.roots_other (inaccessible _ source) (internalHome.no_raw selected points).symm
+  | rawBorrow _ destination borrowed =>
+    cases borrowed with
+    | borrow _ _ _ _ formed => exact formed.roots_other (unwritable _ destination)
+  | bulkMove sources destinations moved =>
+    exact moved.roots_other
+      (fun source member => inaccessible _ (sources source member))
+      (fun destination member => unwritable destination (destinations destination member))
+  | retire _ accessible retired => exact retired.roots_other (inaccessible _ accessible)
+  | endLoan ended => cases ended; rfl
 
 /-- New logical loans cannot turn an unexposed private home into accessible
 storage. Every new loan follows either an actually reachable source place or
@@ -141,9 +141,9 @@ theorem Mutation.private_root {program : Kernel.Program} {model : Model} {contra
     (selected : before.roots.get id = some root) (internalHome : InternalHome root)
     (known : ∀ place ∈ session.known, place.address.root ≠ id)
     (loans : ∀ key loan, before.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id) :
-    (∃ current, after.roots.get id = some current ∧ InternalHome current) ∧
+    after.roots.get id = some root ∧
     (∀ key loan, after.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id) := by
-  refine ⟨changed.homeExtension.internal_root (Nat.lt_of_lt_of_le bound counter) selected internalHome,?_⟩
+  refine ⟨(changed.private_root_unchanged bound counter selected internalHome known loans).trans selected,?_⟩
   intro key loan found live
   rcases changed.liveLoan_origin found live with old | ⟨authority,accessible⟩ | ⟨pointer,type,points⟩
   · exact loans key loan old live
@@ -157,14 +157,33 @@ theorem Mutations.private_root {program : Kernel.Program} {model : Model} {contr
     (selected : before.roots.get id = some root) (internalHome : InternalHome root)
     (known : ∀ place ∈ session.known, place.address.root ≠ id)
     (loans : ∀ key loan, before.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id) :
-    (∃ current, after.roots.get id = some current ∧ InternalHome current) ∧
+    after.roots.get id = some root ∧
     (∀ key loan, after.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id) := by
   induction changed generalizing root with
-  | refl => exact ⟨⟨root,selected,internalHome⟩,loans⟩
+  | refl => exact ⟨selected,loans⟩
   | cons first _ ih =>
-    obtain ⟨⟨middle,middleAt,middleHome⟩,middleLoans⟩ :=
+    obtain ⟨middleAt,middleLoans⟩ :=
       first.private_root bound counter selected internalHome known loans
-    exact ih (Nat.le_trans counter first.homeExtension.counter) middleAt middleHome middleLoans
+    exact ih (Nat.le_trans counter first.homeExtension.counter) middleAt internalHome middleLoans
+
+/-- Every actual host transition preserves the complete hidden root and
+therefore its residents. Only mutation laws are used: even an everywhere-true
+writable predicate supplies no access to an unexposed internal root. -/
+theorem Model.Lawful.private_resident {program : Kernel.Program} {model : Model}
+    {contract : Contract} {imported : Import} {before after : World} {session : ForeignSession}
+    {observation next : List Nat} {action : HostAction} {id : Identity} {root : Root}
+    {address : Address} {value : Value}
+    (lawful : model.Lawful program) (well : before.WellFormed)
+    (selected : Selected program model session.call imported contract) (active : contract.session before session)
+    (step : model.step session.call.binding.declaration before session observation after action next)
+    (rootAt : before.roots.get id = some root) (internalHome : InternalHome root)
+    (known : ∀ place ∈ session.known, place.address.root ≠ id)
+    (loans : ∀ key loan, before.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id)
+    (addressRoot : address.root = id) (resident : before.Resident address value) : after.Stores address value := by
+  have changed := (lawful.step session imported contract before observation after action next
+    selected well active step).1
+  have roots := (changed.private_root (World.root_bound well rootAt) (Nat.le_refl _) rootAt internalHome known loans).1
+  simpa only [World.Stores,World.read,World.root,addressRoot,roots,rootAt] using World.resident_iff_stores.mp resident
 
 theorem FreshExposed.root_bound {before after : World} {place : ResolvedPlace}
     (exposed : place ∈ FreshExposed before after) : before.nextRoot ≤ place.address.root := by
@@ -208,14 +227,33 @@ theorem ForeignSession.returned_avoids {session : ForeignSession} {result : Addr
   · exact separate
   · exact outside place (List.mem_append_right _ exposed)
 
-/-- Concrete control-boundary invariant for a hidden resident. The source
-control proof must establish its private placement and lack of incoming
-references; the host proof establishes that the resident remains private. -/
+/-- Concrete control-boundary invariant for a hidden root, initialized or
+vacant. The source control proof establishes private placement and lack of
+incoming references; actual host mutations preserve the entire same root. -/
+def InternalRoot (world : World) (session : ForeignSession) (id : Identity) (root : Root) : Prop :=
+  world.roots.get id = some root ∧ InternalHome root ∧
+  (∀ place ∈ session.known, place.address.root ≠ id) ∧
+  (∀ key loan, world.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id)
+
+/-- Resident privacy is a projection of the same root invariant. -/
 def InternalResident (world : World) (session : ForeignSession) (address : Address) (value : Value) : Prop :=
   world.Stores address value ∧
-  (∃ root, world.roots.get address.root = some root ∧ InternalHome root) ∧
-  (∀ place ∈ session.known, place.address.root ≠ address.root) ∧
-  (∀ key loan, world.loans.get key = some loan → loan.live = true → loan.referent.root ≠ address.root)
+  ∃ root, InternalRoot world session address.root root
+
+theorem Model.Lawful.advance_internal_root {program : Kernel.Program} {model : Model}
+    {contract : Contract} {imported : Import} {before after : World} {session : ForeignSession}
+    {observation next : List Nat} {action : HostAction} {id : Identity} {root : Root}
+    (lawful : model.Lawful program) (well : before.WellFormed)
+    (selected : Selected program model session.call imported contract) (active : contract.session before session)
+    (step : model.step session.call.binding.declaration before session observation after action next)
+    (privateRoot : InternalRoot before session id root) :
+    InternalRoot after (session.advance before after next) id root := by
+  obtain ⟨rootAt,internalHome,known,loans⟩ := privateRoot
+  have bound := World.root_bound well rootAt
+  have changed := (lawful.step session imported contract before observation after action next
+    selected well active step).1
+  obtain ⟨roots,loansAfter⟩ := changed.private_root bound (Nat.le_refl _) rootAt internalHome known loans
+  exact ⟨roots,internalHome,ForeignSession.advance_avoids known bound,loansAfter⟩
 
 theorem Model.Lawful.advance_internal {program : Kernel.Program} {model : Model}
     {contract : Contract} {imported : Import} {before after : World} {session : ForeignSession}
@@ -225,19 +263,37 @@ theorem Model.Lawful.advance_internal {program : Kernel.Program} {model : Model}
     (step : model.step session.call.binding.declaration before session observation after action next)
     (privateResident : InternalResident before session address value) :
     InternalResident after (session.advance before after next) address value := by
-  obtain ⟨stored,⟨root,rootAt,internalHome⟩,known,loans⟩ := privateResident
-  have bound := World.root_bound well rootAt
-  have changed := (lawful.step session imported contract before observation after action next
-    selected well active step).1
-  obtain ⟨roots,loansAfter⟩ := changed.private_root bound (Nat.le_refl _) rootAt internalHome known loans
-  exact ⟨lawful.private_resident well selected active step rootAt internalHome known loans rfl
-    (World.resident_iff_stores.mpr stored),roots,ForeignSession.advance_avoids known bound,loansAfter⟩
+  obtain ⟨stored,root,privateRoot⟩ := privateResident
+  exact ⟨lawful.private_resident well selected active step privateRoot.1 privateRoot.2.1 privateRoot.2.2.1 privateRoot.2.2.2 rfl
+    (World.resident_iff_stores.mpr stored),root,lawful.advance_internal_root well selected active step privateRoot⟩
+
+theorem InternalRoot.returned {world : World} {session : ForeignSession} {id : Identity} {root : Root}
+    {result : Address} {state : List Nat} (privateRoot : InternalRoot world session id root)
+    (separate : result.root ≠ id) : InternalRoot world (session.returned result state) id root :=
+  ⟨privateRoot.1,privateRoot.2.1,ForeignSession.returned_avoids privateRoot.2.2.1 separate,privateRoot.2.2.2⟩
 
 theorem InternalResident.returned {world : World} {session : ForeignSession} {address result : Address}
     {value : Value} {state : List Nat} (privateResident : InternalResident world session address value)
     (separate : result.root ≠ address.root) : InternalResident world (session.returned result state) address value :=
-  ⟨privateResident.1,privateResident.2.1,ForeignSession.returned_avoids privateResident.2.2.1 separate,
-    privateResident.2.2.2⟩
+  ⟨privateResident.1,privateResident.2.choose,privateResident.2.choose_spec.returned separate⟩
+
+theorem Step.continue_internal_root {program : Kernel.Program} {model : Model} {before after : State}
+    {event : Option Event} {session continued : ForeignSession} {next following : Code} {id : Identity} {root : Root}
+    (lawful : model.Lawful program) (well : before.world.WellFormed)
+    (step : Step program model before event after)
+    (task : before.task = .foreign session next) (result : after.task = .foreign continued following)
+    (privateRoot : InternalRoot before.world session id root) : InternalRoot after.world continued id root := by
+  cases step with
+  | enter original => cases original.symm.trans task
+  | host original _ selected active changed =>
+    cases original.symm.trans task
+    cases result
+    exact lawful.advance_internal_root well selected active changed privateRoot
+  | result => cases result
+  | callback => cases result
+  | callbackResult original => cases original.symm.trans task
+  | callbackReturned original => cases original.symm.trans task
+  | fault => cases result
 
 /-- The actual continued host transition consumes the internal-resident
 invariant. Callback return is separate: it explicitly exposes its one result,
@@ -250,17 +306,10 @@ theorem Step.continue_internal {program : Kernel.Program} {model : Model} {befor
     (task : before.task = .foreign session next) (result : after.task = .foreign continued following)
     (privateResident : InternalResident before.world session address value) :
     InternalResident after.world continued address value := by
-  cases step with
-  | enter original => cases original.symm.trans task
-  | host original _ selected active changed =>
-    cases original.symm.trans task
-    cases result
-    exact lawful.advance_internal well selected active changed privateResident
-  | result => cases result
-  | callback => cases result
-  | callbackResult original => cases original.symm.trans task
-  | callbackReturned original => cases original.symm.trans task
-  | fault => cases result
+  obtain ⟨stored,root,privateRoot⟩ := privateResident
+  have kept := step.continue_internal_root lawful well task result privateRoot
+  refine ⟨?_,root,kept⟩
+  simpa only [World.Stores,World.read,World.root,kept.1,privateRoot.1] using stored
 
 /-- A consecutive foreign protocol phase, defined only by its actual
 foreign transitions and the foreign task at both endpoints. It cannot hide
@@ -292,9 +341,28 @@ theorem HostRun.run {program : Kernel.Program} {model : Model} {before after : S
     | none => exact .silent (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr step))))) ih
     | some => exact .visible (Or.inr (Or.inr (Or.inr (Or.inr (Or.inr step))))) ih
 
-/-- Arbitrarily many lawful host steps preserve the exact private resident
-and full world typing. The post-state assertion is derived from the existing
-mutation producers and actual frame laws; it is not a host admission premise. -/
+/-- Arbitrarily many lawful host steps preserve the exact private root and
+full world typing, including live vacant handles and their storage metadata.
+No post-state framing assertion is used as a host admission premise. -/
+theorem HostRun.internal_root {program : Kernel.Program} {model : Model} {before after : State}
+    {events : List Event} {session continued : ForeignSession} {next following : Code}
+    {id : Identity} {root : Root}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : model.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (run : HostRun program model before events after)
+    (task : before.task = .foreign session next) (result : after.task = .foreign continued following)
+    (privateRoot : InternalRoot before.world session id root) :
+    Typing.WorldTyped program after.world ∧ InternalRoot after.world continued id root := by
+  induction run generalizing session next with
+  | refl original =>
+    cases task.symm.trans result
+    exact ⟨typed,privateRoot⟩
+  | cons original step rest ih =>
+    obtain ⟨middle,next,middleTask⟩ := rest.start
+    have middleTyped := step.worldTyped valid inventory lawful typed
+    have middlePrivate := step.continue_internal_root lawful typed.1 task middleTask privateRoot
+    exact ih middleTyped middleTask result middlePrivate
+
 theorem HostRun.internal_resident {program : Kernel.Program} {model : Model} {before after : State}
     {events : List Event} {session continued : ForeignSession} {next following : Code}
     {address : Address} {value : Value}
@@ -304,15 +372,10 @@ theorem HostRun.internal_resident {program : Kernel.Program} {model : Model} {be
     (task : before.task = .foreign session next) (result : after.task = .foreign continued following)
     (privateResident : InternalResident before.world session address value) :
     Typing.WorldTyped program after.world ∧ InternalResident after.world continued address value := by
-  induction run generalizing session next with
-  | refl original =>
-    cases task.symm.trans result
-    exact ⟨typed,privateResident⟩
-  | cons original step rest ih =>
-    obtain ⟨middle,next,middleTask⟩ := rest.start
-    have middleTyped := step.worldTyped valid inventory lawful typed
-    have middlePrivate := step.continue_internal lawful typed.1 task middleTask privateResident
-    exact ih middleTyped middleTask result middlePrivate
+  obtain ⟨stored,root,privateRoot⟩ := privateResident
+  obtain ⟨afterTyped,kept⟩ := run.internal_root valid inventory lawful typed task result privateRoot
+  refine ⟨afterTyped,?_,root,kept⟩
+  simpa only [World.Stores,World.read,World.root,kept.1,privateRoot.1] using stored
 
 end Foreign
 
@@ -366,7 +429,7 @@ theorem LendsResident.internal_handle {program : Kernel.Program} {before after :
   obtain ⟨actual,root,same,rootAt,home,_,_⟩ := lent.lease_owned borrowed
   have identity : witness = actual := Option.some.inj same
   subst actual
-  refine ⟨afterTyped,witness,_,selected,rfl,stored,⟨root,(World.root_found rootAt).1,Foreign.InternalHome.temporary home⟩,?_,
+  refine ⟨afterTyped,witness,_,selected,rfl,stored,root,(World.root_found rootAt).1,Foreign.InternalHome.temporary home,?_,
     lent.handle_no_incoming typed.1⟩
   intro place member same
   exact Nat.ne_of_lt (known place member) (same.trans lent.handle_fresh)

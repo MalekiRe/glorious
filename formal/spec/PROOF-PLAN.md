@@ -469,6 +469,16 @@ An unchanged record is retained verbatim; changes to its authority or activation
 must discharge a new grant. This is registration-authority preservation, not
 yet the source lifetime/frame invariant for externally retained callbacks.
 
+Foreign private-storage preservation now covers the exact root, including
+vacancy, liveness, generation and all storage metadata. `ForeignRootFraming`
+derives the root frame from each actual storage producer, including raw buffer
+reallocation and release. `ForeignAuthority.HostRun.internal_root` preserves
+that same root through arbitrary host continuations; resident preservation is
+a projection of this stronger invariant. The former privacy proof's dependency
+on the host's frame-postcondition law is removed. Source callbacks still need
+the shared control-origin invariant: hidden roots must not appear in incoming
+suspension inventories or be exported by source control transitions.
+
 ## 3. Remaining boundary completeness and final audit
 
 Finish total primitive behavior, representation/ABI site coverage and target
