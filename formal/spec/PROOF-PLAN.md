@@ -840,10 +840,13 @@ machine only at the start of a node's destruction (where the shell still has its
 fields) and the shell phase takes `stored`, `cleared`, the permission and the
 custody hand-off rather than the disposal permission. What the shell phase does
 need from the initial facts is the ownership permission re-derived at the final
-world — its root existence from the final `Stores` (the same step
-`Destroys.write_disjoint` uses) and its loan component from the live rows, which
-the endings can only remove from liveness (`kinds_set_dead`/`ancestry_set_dead`)
-and the restamps leave alone. The drain's kinds/ancestry come from the node's own
+world — and since a child's run is a restamp plus a write plus a drain, the
+permission is threaded through the loop rather than transported in one step: the
+restamp half by `Permitted.of_requestReturns` (the restamped row keeps live,
+referent and mode), the ending half by `Permitted.of_loans` (monotonicity in the
+live rows), each with the root existence re-read from the final `Stores`. So the
+shell-tracking loop's step must carry the permission along with the shell, and the
+same is true of the custody hand-off, which is likewise a loans-table fact. The drain's kinds/ancestry come from the node's own
 tree by those same two lemmas. The details, for reference: reconcile the child's own shell witness with the supplied
 shell (`simpa only [← valueEq] using treeX` for the disposal permission, the shell
 flag and the three head exclusions); bridge the drain's `kinds`/`ancestry` from
