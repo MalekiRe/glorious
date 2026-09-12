@@ -3807,4 +3807,34 @@ theorem Kernel.BindsInputAt.nextRoot_le {program : RuntimeProgram} {recipient : 
       exact Nat.le_of_eq (TransfersStorageLoan.nextRoot transferred).symm
 
 
+
+/-- The retained-row law of a step needs only the non-equality with the fresh
+identity, which is what the frontier cases supply. -/
+theorem Kernel.StepFrame.row_of_middle_ne {before middle : World} (frame : StepFrame before middle)
+    {id : Identity} {loan : Loan} (apart : id ≠ before.nextLoan)
+    (found : middle.loans.get id = some loan) :
+    ∃ source, before.loans.get id = some source ∧ source.permissionState = loan.permissionState := by
+  have same := (frame.retained id apart).symm
+  simp only [found,Option.map_some] at same
+  exact Option.map_eq_some_iff.mp same
+
+/-- Every carrier identity a recorded authority opens through is a live recorded
+row below the loan frontier. -/
+theorem Kernel.Authority.carriers_lt {world : World} (valid : world.WellFormed)
+    {authority : Authority} (recorded : authority.Recorded world.loans) :
+    ∀ carrier ∈ Kernel.authorityCarriers authority, carrier < world.nextLoan := by
+  induction authority with
+  | owner => intro carrier member; simp [Kernel.authorityCarriers] at member
+  | loan identity => intro carrier member; simp [Kernel.authorityCarriers] at member
+  | shared backing ih =>
+      intro carrier member
+      exact ih recorded carrier member
+  | guarded backing carrier ih =>
+      intro carrier' member
+      rcases List.mem_cons.mp member with same | later
+      · rw [same]
+        obtain ⟨loan,found⟩ := recorded.2
+        exact World.loanBounds valid found
+      · exact ih recorded.1 carrier' later
+
 end Kernel
