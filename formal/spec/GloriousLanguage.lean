@@ -40,6 +40,11 @@ import GloriousLanguage.SemanticPreservation
 import GloriousLanguage.CapabilityModels
 import GloriousLanguage.CapabilityInversion
 import GloriousLanguage.CapabilityFields
+import GloriousLanguage.TargetLayoutValidity
+import GloriousLanguage.LayoutValidity
+import GloriousLanguage.LayoutCoherence
+import GloriousLanguage.RepresentationCoherence
+import GloriousLanguage.LayoutExecution
 import GloriousLanguage.PublicValues
 import GloriousLanguage.RuntimeWorldEquivariance
 import GloriousLanguage.RuntimeCoverageEquivariance

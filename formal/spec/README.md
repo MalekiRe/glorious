@@ -127,13 +127,21 @@ or a dependency of this project.
   ordinary definitional equality has actual positive common reducts, with no
   normalization or simulation assumption. `DefinitionalSeparation` consumes this
   in constructor, scalar, normal-form and actual definitional-quotient proofs.
-  Capability inversion consumes this separation; runtime representation consumers
-  remain a separate obligation. Arbitrary lexical equality is not assumed consistent.
+  Capability inversion and target layout coherence consume this separation.
+  Arbitrary lexical equality is not assumed consistent.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,
   layouts, provenance, machine leaves, explicit host models and target
   admission requirements.
+- `TargetLayoutValidity`, `LayoutValidity`, `LayoutCoherence`: actual ordered
+  ordinary/C layouts are valid and unique modulo closed conversion. C enums
+  and scalars consume the same exact target mapping. Callable field conversion
+  is shared with capability inversion through `LogicalEvidence`.
+- `RepresentationCoherence`, `LayoutExecution`: actual encoded values retain
+  that layout and exact byte length; the real layout query is deterministic,
+  with storage-safe progress conditional on a representable layout and a
+  real vacant result destination. Allocation admission/exhaustion remains open.
 - `Specification`, `Checks`: aggregate language/implementation obligations
   and foundational positive/negative regression propositions.
 

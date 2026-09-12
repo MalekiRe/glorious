@@ -1,5 +1,6 @@
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.LocalPreservation
+import GloriousLanguage.TargetLayoutValidity
 
 /-! Storage preservation for the actual raw-memory producers. Bulk relocation
 keeps one evaluated source snapshot through clearing and typed installation;
@@ -102,16 +103,6 @@ theorem World.install_owned_worldTyped {program : Kernel.Program} {before after 
   have same : ({ after with nextOwner := before.nextOwner } : World) = after := by rw [← counter]
   rw [same] at result
   exact result
-
-theorem ArrayLayout.valid {element : Layout} {count : Nat} {layout : Layout}
-    (array : ArrayLayout element count layout) : layout.Valid := by
-  obtain ⟨valid,rfl⟩ := array
-  refine ⟨valid.1,?_,?_⟩
-  · change (count * alignUp element.size element.alignment) % element.alignment = 0
-    rw [alignUp,← Nat.mul_assoc,Nat.mul_mod_left]
-  · intro offset member
-    obtain ⟨index,inRange,rfl⟩ := List.mem_map.mp member
-    exact Nat.mul_le_mul_right _ (Nat.le_of_lt (List.mem_range.mp inRange))
 
 theorem Term.RuntimeRegionsBelow.array_count {element : Term} {bound count : Nat}
     (supported : element.RuntimeRegionsBelow bound) :

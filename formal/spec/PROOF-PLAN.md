@@ -1415,6 +1415,42 @@ inversion dependency, not full Drop conformance: authoritative storage effects
 for proper-field handoff, initialized return lifetimes, task/frame typing,
 erased-resource custody and complete resource progress remain open.
 
+The representation boundary now consumes ordinary conversion directly.
+`LayoutCoherence` proves uniqueness of the actual ordered field, aggregate,
+array, enum and C-record layouts. Its mutual derivation proof establishes
+`LayoutOf.unique_convertible`, closed logical-equality uniqueness and the
+corresponding C/field results, including real generic nominal substitutions
+and transparent representation's unique nonzero field. It assumes neither
+layout existence nor constructor injectivity. `LogicalEvidence` now owns the
+shared instantiated-table, field and callable conversion proofs; capability
+inversion and layout coherence both consume them, with the duplicated private
+field-transport proof removed.
+
+This proof also exposed an actual C admission bug: an integer enum used the
+target's C alignment without requiring that scalar's admitted C mapping.
+`TargetProfile.CScalarMapping` is now the common actual scalar/enum premise,
+requiring a valid scalar, target membership and exact alignment agreement.
+`TargetLayoutValidity` derives arithmetic validity from the existing ordered
+layout relations and owns the unchanged array-validity proof now consumed by
+memory preservation. `LayoutValidity` proves every actual ordinary/C layout
+valid, including the continuation target contract and transparent layout.
+
+`RepresentationCoherence` derives layout validity, exact byte length and
+converted layout agreement from actual `Memory.Encodes` evidence. It does not
+claim deterministic padding bytes. `LayoutExecution` consumes the same layout
+coherence at the actual primitive and complete `Execution.Step`: layout queries
+are deterministic, and a representable layout plus a real vacant destination
+constructs the existing successful step with typed storage. No successful
+allocation, layout existence or representability follows from uniqueness alone.
+
+The fresh source-only integrated dependency gate passes 193 jobs with warnings
+as errors, including actual layout execution, ordinary conversion, the shared
+capability field consumers and higher Drop return, runtime equivariance and ABI.
+No examples or aggregate soundness gate were run. Allocation's unconstrained
+logical-context witness remains a producer admission bug to repair; positive
+physical success and explicit exhaustion still have to reach all real runtime
+allocation sites. Full target/ABI coverage and resource progress remain open.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

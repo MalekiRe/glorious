@@ -56,6 +56,13 @@ def Scalar.Valid (target : TargetProfile) : Scalar → Prop
   | .integer _ .pointer => target.pointerBits ∈ [16,32,64,128]
   | _ => True
 
+/-- An exact target C scalar mapping is shared by scalar values and fixed
+integer enum representations. A merely valid Glorious integer is not evidence
+that the target C ABI admits it with the same representation. -/
+def TargetProfile.CScalarMapping (target : TargetProfile) (scalar : Scalar) : Prop :=
+  scalar.Valid target ∧ scalar ∈ target.cCompatibleScalars ∧
+  target.scalarAlignment scalar = target.cScalarAlignment scalar
+
 def PowerOfTwo (n : Nat) : Prop := ∃ k, n = 2^k
 def Layout.Valid (layout : Layout) : Prop :=
   PowerOfTwo layout.alignment ∧ layout.size % layout.alignment = 0 ∧

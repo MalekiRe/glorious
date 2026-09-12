@@ -680,8 +680,7 @@ mutual
     | fields {types layouts layout} : ListRel (LayoutOf program context) types layouts → AggregateLayout layouts layout →
         FieldsHaveLayout program context types layout
   inductive CCompatible (program : Program) (context : Context) : Term → Layout → Prop where
-    | scalar {scalar} : scalar ∈ program.input.target.cCompatibleScalars →
-        program.input.target.scalarAlignment scalar = program.input.target.cScalarAlignment scalar →
+    | scalar {scalar} : program.input.target.CScalarMapping scalar →
         CCompatible program context (.scalar scalar) ⟨scalar.bytes program.input.target,
           program.input.target.cScalarAlignment scalar,[],0,0,[]⟩
     | pointer {mode referent} : CCompatible program context (.rawPointer mode referent)
@@ -693,7 +692,7 @@ mutual
         CCompatible program context (.nominal id arguments) layout
     | enumeration {id data arguments substitution sign width} : program.data id = some data →
         Instantiates data.generics arguments substitution → data.representation = .integer sign width → data.isEnum = true →
-        data.variants ≠ [] → Scalar.Valid program.input.target (.integer sign width) →
+        data.variants ≠ [] → program.input.target.CScalarMapping (.integer sign width) →
         (∀ variant ∈ data.variants, variant.fields = []) →
         IntegerRange program.input.target sign width (Int.ofNat data.variants.length - 1) →
         CCompatible program context (.nominal id arguments)

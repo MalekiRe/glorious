@@ -615,7 +615,7 @@ theorem LayoutOf.permute {program : Program} (valid : ProgramWellFormed program)
       simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using compatible)
   case alias equal _ original => exact .alias (equal.permute valid permutation) original
   case fields _ aggregate fields => exact .fields fields aggregate
-  case cScalar member alignment => exact .scalar member alignment
+  case cScalar mapping => exact .scalar mapping
   case cPointer => exact .pointer
   case record found representation notEnum variants instantiated substituted _ aggregate fields =>
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.data_lookup found))

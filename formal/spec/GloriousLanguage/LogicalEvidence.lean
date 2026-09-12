@@ -89,6 +89,50 @@ theorem Term.substitutions_convert (program : Program) (context : Context) (term
     DefinitionallyEqual program context (term.substitute left) (term.substitute right) :=
   term.substitutions_related DefinitionallyEqual.congr agree
 
+/-- Actual ordered instantiations and field graphs share one conversion
+transport, consumed by both capability inversion and target representation. -/
+theorem Instantiates.convertible_tables {program : Program} {context : Context}
+    {binders : List Binder} {left right : List Term} {first second : Substitution}
+    (before : Instantiates binders left first) (after : Instantiates binders right second)
+    (arguments : ListRel (DefinitionallyEqual program context) left right) :
+    SubstitutionsConvertible program context first second := by
+  rw [after.2.2]
+  exact before.related_values arguments
+
+theorem ListRel.substituted_conversion {program : Program} {context : Context}
+    {templates left right : List Term} {first second : Substitution}
+    (before : ListRel (Substitutes first) templates left) (after : ListRel (Substitutes second) templates right)
+    (tables : SubstitutionsConvertible program context first second) :
+    ListRel (DefinitionallyEqual program context) left right := by
+  induction before generalizing right with
+  | nil => cases after; exact .nil
+  | @cons template left templates rest graph _ ih =>
+    cases after with
+    | cons other tail =>
+      exact .cons (by rw [graph.2.1,other.2.1]; exact template.substitutions_convert program context tables.substitution_getD)
+        (ih tail)
+
+/-- The authoritative callable-field instance transports its own captures
+through the actual related argument tables, including operation values. -/
+theorem CallableFields.convertible {program : Program} {context : Context} {id : DeclId}
+    {left right first second : List Term} (before : CallableFields program id left first)
+    (after : CallableFields program id right second)
+    (arguments : ListRel (DefinitionallyEqual program context) left right) :
+    ListRel (DefinitionallyEqual program context) first second := by
+  cases before with
+  | function found instantiated fields =>
+    cases after with
+    | function other next otherFields =>
+      obtain rfl := Option.some.inj (found.symm.trans other)
+      exact fields.substituted_conversion otherFields (instantiated.convertible_tables next arguments)
+    | operation other _ =>
+      cases (Program.function_lookup found).symm.trans (Program.operation_lookup other)
+  | operation found _ =>
+    cases after with
+    | function other _ _ =>
+      cases (Program.operation_lookup found).symm.trans (Program.function_lookup other)
+    | operation => exact .nil
+
 theorem Substitutes.congr_substitution {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {left right : Substitution} {before after : Term} (substituted : Substitutes left before after)
     (equal : ∀ id kind, DefinitionallyEqual program context ((left.get id).getD (.parameter id kind))

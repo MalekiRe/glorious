@@ -1,4 +1,5 @@
 import GloriousLanguage.CapabilityInversion
+import GloriousLanguage.LogicalEvidence
 
 /-! Structural permission inversion follows the actual local equation and
 converted child positions. Generic fields use the real substitution tables;
@@ -74,21 +75,6 @@ theorem CapabilityEvidence.closed_array_element {program : Program} (valid : Pro
   case array _ selected =>
     exact ⟨_,(leaves _ _ selected).definitionallyEqual (children.at (index := 0) rfl rfl).symm,ordered⟩
 
-private theorem substituted_fields_convert {program : Program} {context : Context}
-    {first last : Substitution} {templates before after : List Term}
-    (left : ListRel (Substitutes first) templates before) (right : ListRel (Substitutes last) templates after)
-    (equal : ∀ id kind, DefinitionallyEqual program context ((first.get id).getD (.parameter id kind))
-      ((last.get id).getD (.parameter id kind))) :
-    ListRel (DefinitionallyEqual program context) before after := by
-  induction left generalizing after with
-  | nil => cases right; exact .nil
-  | @cons template before templates rest firstGraph _ tail =>
-    cases right with
-    | cons lastGraph rest =>
-      exact .cons (by
-        rw [firstGraph.2.1,lastGraph.2.1]
-        exact template.substitutions_convert program context equal) (tail rest)
-
 /-- Nominal fields retain their actual declaration template and actual
 instantiation. All variants and the quantity marker bound the parent; the
 selected resident field is not independently re-inferred. -/
@@ -109,8 +95,7 @@ theorem CapabilityEvidence.closed_nominal_field {program : Program} (valid : Pro
     subst sourceId
     obtain rfl := Option.some.inj (selected.symm.trans found)
     simp only [Term.children] at children
-    have tables := instantiated.congr_values children
-    rw [← sourceInst.2.2] at tables
+    have tables := instantiated.convertible_tables sourceInst children
     obtain ⟨source,present,sourceField⟩ := sourceGraph.member_left member
     obtain ⟨child,inside,capability⟩ := assigned.member_left present
     have converted : DefinitionallyEqual program context field source := by
@@ -138,20 +123,8 @@ theorem CallableFields.closed_field_capability {program : Program} (valid : Prog
   case callable sourceId sourceArguments sourceFields sourcePrincipals sourceDeclaration assigned =>
     have identity : id = sourceId := by injection head
     subst sourceId
-    cases declared with
-    | operation => cases member
-    | function found instantiated graph =>
-      cases sourceDeclaration with
-      | operation selected _ =>
-        have collision := (Program.function_lookup found).symm.trans (Program.operation_lookup selected)
-        cases collision
-      | function selected sourceInst sourceGraph =>
-        obtain rfl := Option.some.inj (found.symm.trans selected)
-        simp only [Term.children] at children
-        have tables := instantiated.congr_values children
-        rw [← sourceInst.2.2] at tables
-        exact converted_field_capability (substituted_fields_convert graph sourceGraph tables.substitution_getD)
-          assigned leaves ordered member
+    exact converted_field_capability (declared.convertible sourceDeclaration children)
+      assigned leaves ordered member
 
 theorem CapabilityEvidence.closed_nominal_restriction {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {id : DeclId} {arguments : List Term} {principal : Principal}
