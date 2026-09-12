@@ -3415,4 +3415,21 @@ theorem Execution.FinishesEntry.lent_contextual {before : World} {receiver witne
 
 
 
+
+/-- Address overlap is symmetric, so an apartness obligation can be read from
+either side. -/
+theorem Address.not_overlaps_symm {first second : Address} (apart : ¬ first.Overlaps second) :
+    ¬ second.Overlaps first :=
+  fun overlap => apart ⟨overlap.1.symm,overlap.2.1.symm,
+    overlap.2.2.elim (fun same => Or.inr same) (fun same => Or.inl same)⟩
+
+/-- The caller's receiver port lies outside every pending binding's write and
+referent set, and below the prepared storage frontier. This is the structural
+prestate admission that lets the receiver shell and its owner permission be
+framed across the ordered fold. -/
+structure Kernel.ReceiverApart (receiver : Address) (world : World)
+    (inputs : List InvocationInput) : Prop where
+  storage : ∀ input ∈ inputs, ¬ input.storage.Overlaps receiver
+  frontier : receiver.root < world.nextRoot
+
 end Kernel
