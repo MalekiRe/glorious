@@ -302,7 +302,15 @@ or a dependency of this project.
   custody's rows (so `World.Destroys.end_loan` transports it) — because the
   transports need that relation between the child's produced world and the world
   the next sibling is read in; `CleanupRun.destroy_tree` then follows by induction
-  on the tree with that footprint conjunct carried through the field loop.
+  on the tree with that footprint conjunct carried through the field loop. The
+  address half of that push-down is checked: `Address.child_not_prefix` (different
+  children are prefix-incomparable), `Address.Prefix.not_outer` (the order is
+  transitive) and `Address.child_prefix_grandchild` (a descendant of one child is
+  only reached from that child). What remains is the frame itself
+  (`World.DestroyFrame` with its outside-the-subtree read/root/loan clauses), its
+  transport `World.Destroys.of_destroy_frame` (which also needs a
+  prefixes-are-comparable lemma to derive `excluded` from `i ≠ j`), and the frame's
+  proof by induction over a node's own `CleanupRun`.
 - `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
   `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
   and `source_execution` now take a `Typing.ScopeReading` indexed by the actual

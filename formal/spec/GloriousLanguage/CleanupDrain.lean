@@ -767,3 +767,19 @@ theorem Address.Prefix.not_outer {outer inner probe : Address}
       exact ⟨firstSuffix ++ secondSuffix,by rw [secondShape,firstShape,List.append_assoc]⟩⟩
 
 end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- A descendant of one child of an address can only be reached from the same
+child: the field lists must agree in the index that follows the shared prefix. -/
+theorem Address.child_prefix_grandchild {address : Address} {first second index : Nat}
+    (included : (address.child first).Prefix ((address.child second).child index)) : first = second := by
+  obtain ⟨_,_,suffix,shape⟩ := included
+  simp only [Address.child,List.append_assoc,List.singleton_append] at shape
+  have equal := List.append_cancel_left shape
+  simp only [List.cons.injEq] at equal
+  exact equal.1.symm
+
+end Glorious.Language
