@@ -51,25 +51,13 @@ def Relocation.pointer (map : Relocation) (pointer : RawPointer) : RawPointer :=
 
 def Relocation.term (map : Relocation) : Term → Term := Term.renameRuntimeRegions map.region
 
-def Relocation.constraint (map : Relocation) : Constraint → Constraint
-  | .equal a b => .equal (map.term a) (map.term b)
-  | .outlives a b => .outlives (map.term a) (map.term b)
-  | .typeOutlives a b => .typeOutlives (map.term a) (map.term b)
-  | .rowIncludes a b => .rowIncludes (map.term a) (map.term b)
-  | .implements trait arguments negative => .implements trait (arguments.map map.term) negative
-  | .use type quantity => .use (map.term type) quantity
-  | .callable receiver arguments output effects unsafeAllowed =>
-      .callable (map.term receiver) (arguments.map map.term) (map.term output) (map.term effects) unsafeAllowed
-  | .runsIn receiver access arguments after unsafeAllowed =>
-      .runsIn (map.term receiver) (map.term access) (arguments.map map.term) (map.term after) unsafeAllowed
-  | .quantified binders requirements => .quantified binders (requirements.map map.constraint)
-
 def Relocation.signature (map : Relocation) (signature : Signature) : Signature :=
-  { signature with
-    parameters := signature.parameters.map map.term
-    result := map.term signature.result
-    effects := map.term signature.effects
-    constraints := signature.constraints.map map.constraint }
+  signature.mapTerms map.term
+
+def Relocation.invocation (map : Relocation) (call : Invocation) : Invocation :=
+  { call with
+    signature := map.signature call.signature
+    environment := call.environment.map (EnvironmentAccess.mapTerms map.term) }
 
 mutual
   def Relocation.code (map : Relocation) : Code → Code
@@ -78,14 +66,8 @@ mutual
     | .evaluate localSlot value next => .evaluate (localSlot.mapTerms map.term) (map.code value) (map.code next)
     | .assign destination value next => .assign destination value (map.code next)
     | .discard value next => .discard value (map.code next)
-    | .invoke localSlot call next => .invoke (localSlot.mapTerms map.term)
-        { call with
-          signature := map.signature call.signature
-          environment := call.environment.map (EnvironmentAccess.mapTerms map.term) } (map.code next)
-    | .tail call => .tail
-        { call with
-          signature := map.signature call.signature
-          environment := call.environment.map (EnvironmentAccess.mapTerms map.term) }
+    | .invoke localSlot call next => .invoke (localSlot.mapTerms map.term) (map.invocation call) (map.code next)
+    | .tail call => .tail (map.invocation call)
     | .scope id body => .scope id (map.code body)
     | .label brand region result body => .label brand region (map.term result) (map.code body)
     | .choose subject arms => .choose subject (arms.map map.arm)

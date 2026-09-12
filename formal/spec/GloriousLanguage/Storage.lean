@@ -333,7 +333,10 @@ def World.LoanParents (world : World) : Prop :=
 def World.LiveLoanLocations (world : World) : Prop :=
   ∀ id loan, world.loans.get id = some loan → loan.live = true → world.Located loan.referent
 
-def World.WellFormed (world : World) : Prop :=
+/-- Proof factor for atomic construction: binding facts may name the owner
+published by the enclosing result constructor. Actual machine states use
+`WellFormed`, which fixes this bound to the actual allocated-owner frontier. -/
+def World.WellFormedWithOrigins (world : World) (originBound : Identity) : Prop :=
   world.roots.Unique ∧ world.loans.Unique ∧ world.availability.Unique ∧
   world.liveRegions.Nodup ∧
   (∀ id available, world.availability.get id = some available →
@@ -343,7 +346,7 @@ def World.WellFormed (world : World) : Prop :=
   (∀ address value pack, world.Resident address value → value.head = .bindings pack →
     pack.brand < world.nextProof ∧ pack.region ∈ world.liveRegions ∧
     pack.fields.length = value.fields.length ∧ pack.fields.Nodup ∧
-    ∀ fact ∈ pack.facts, fact.resultOrigin < world.nextOwner) ∧
+    ∀ fact ∈ pack.facts, fact.resultOrigin < originBound) ∧
   (∀ address value, world.Resident address value → value.owner < world.nextOwner) ∧
   (∀ a b x y, world.Resident a x → world.Resident b y → x.owner = y.owner → a = b) ∧
   (∀ id root, world.roots.get id = some root → id < world.nextRoot ∧
@@ -365,10 +368,22 @@ def World.WellFormed (world : World) : Prop :=
     left.mode = .unique ∨ right.mode = .unique → AncestorLoan world a b ∨ AncestorLoan world b a) ∧
   world.LoanParents ∧ world.LiveLoanLocations
 
-theorem World.loanParents {world : World} (valid : world.WellFormed) : world.LoanParents :=
+def World.WellFormed (world : World) : Prop := world.WellFormedWithOrigins world.nextOwner
+
+theorem World.WellFormedWithOrigins.mono {world : World} {first last : Identity}
+    (valid : world.WellFormedWithOrigins first) (bound : first ≤ last) : world.WellFormedWithOrigins last := by
+  rcases valid with ⟨roots,loans,proofs,regions,available,packs,rest⟩
+  refine ⟨roots,loans,proofs,regions,available,?_,rest⟩
+  intro address value pack resident head
+  obtain ⟨brand,region,length,distinct,facts⟩ := packs address value pack resident head
+  exact ⟨brand,region,length,distinct,fun fact member => Nat.lt_of_lt_of_le (facts fact member) bound⟩
+
+theorem World.loanParents {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LoanParents :=
   valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.1
 
-theorem World.liveLoanLocations {world : World} (valid : world.WellFormed) : world.LiveLoanLocations :=
+theorem World.liveLoanLocations {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) : world.LiveLoanLocations :=
   valid.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2.2
 
 theorem World.loanBounds {world : World} (valid : world.WellFormed)

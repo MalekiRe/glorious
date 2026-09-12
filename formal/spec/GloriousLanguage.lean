@@ -12,6 +12,8 @@ import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.ControlPreservation
+import GloriousLanguage.TestPreservation
 import GloriousLanguage.EffectPreservation
 import GloriousLanguage.MemoryPreservation
 import GloriousLanguage.FloatProgress
+import GloriousLanguage.RuntimeSignatureEquivariance

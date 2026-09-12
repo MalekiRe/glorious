@@ -209,43 +209,5 @@ theorem ConsumesAvailability.worldTyped {program : Kernel.Program} {before after
       have proofs := congrArg World.availability (World.write_rest written)
       simpa only [proofs] using found
 
-/-- Test construction has an additional atomic binding-pack/carrier
-publication obligation. All other control steps, including the entire
-reservation cycle and contextual call entry, are covered here. -/
-def Task.ConstructsTest : Task → Prop
-  | .run _ (.test ..) => True
-  | _ => False
-
-theorem ControlStep.nonTest_worldTyped {program : Kernel.Program} {before after : State} {event : Option Event}
-    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before.world) (step : ControlStep program before event after)
-    (notTest : ¬ before.task.ConstructsTest) : Typing.WorldTyped program after.world := by
-  cases step <;> try exact typed
-  case leave => apply Protect.worldTyped valid inventory typed; assumption
-  case reserve resolved types distinct disjoint exclusive typeEq allocation created =>
-    rw [typeEq] at allocation created
-    apply reserve_worldTyped valid inventory typed allocation ?_ created
-    intro place member
-    have allowed := resolved.permitted place member
-    obtain ⟨root,found⟩ := allowed.root
-    exact Option.isSome_iff_exists.mpr ⟨root,found⟩
-  case available moved => exact moved.worldTyped valid inventory typed
-  case destroyAvailable =>
-    apply World.deactivateAvailability_worldTyped
-    · apply World.clear_worldTyped typed <;> assumption
-    · have written := by assumption
-      have proofs := congrArg World.availability (World.write_rest written)
-      simpa only [proofs] using (by assumption)
-  case destroySpentAvailable => apply World.clear_worldTyped typed <;> assumption
-  case contextualCall consumed used =>
-    apply used.worldTyped (consumed.worldTyped typed)
-    intro access
-    apply Permitted.transport consumed.locations consumed.loans
-    rw [← access]
-    assumption
-  case positiveTest => simp_all [Task.ConstructsTest]
-  case negativeTest => simp_all [Task.ConstructsTest]
-  case bindings moved => exact moved.worldTyped valid inventory typed
-
 end Execution
 end Glorious.Language

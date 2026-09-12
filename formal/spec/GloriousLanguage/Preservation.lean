@@ -1022,12 +1022,18 @@ theorem World.clear_typed_roots {program : Kernel.Program} {before after typingW
                   exact typeEq.trans checked.2
                 · exact roots id root value (by simpa [Table.get_set_other,Ne.symm same] using present) active contents
 
-theorem Typing.WorldTyped.roots {program : Kernel.Program} {world : World} (typed : Typing.WorldTyped program world) :
+theorem Typing.WorldTypedWithOrigins.roots {program : Kernel.Program} {world : World} {originBound : Identity}
+    (typed : Typing.WorldTypedWithOrigins program world originBound) :
     ∀ id root resident, world.roots.get id = some root → root.live = true → root.value = some resident →
       Typing.ValueTyped program world resident ∧ resident.type = root.type := by
   intro id root resident found live contents
   exact ⟨typed.2.1 ⟨id,root.generation,[]⟩ resident ⟨root,resident,found,live,rfl,contents,.root⟩,
     typed.2.2.1 id root resident found contents⟩
+
+theorem Typing.WorldTyped.roots {program : Kernel.Program} {world : World} (typed : Typing.WorldTyped program world) :
+    ∀ id root resident, world.roots.get id = some root → root.live = true → root.value = some resident →
+      Typing.ValueTyped program world resident ∧ resident.type = root.type :=
+  Typing.WorldTypedWithOrigins.roots typed
 
 /-- Both writes preserve all resulting resident trees, including ancestors
 whose field lists changed. References are transported only after composing

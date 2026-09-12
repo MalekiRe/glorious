@@ -117,11 +117,10 @@ inductive UnitFields (program : Kernel.Program) (context : Context) :
       UnitFields program context created types none pack rest after →
       UnitFields program context before (.unit :: types) none pack (address :: rest) after
 
-def CarrierFields (program : Kernel.Program) (context : Context) (before : World) (variant : DeclId)
-    (arguments : List Term) (pack : Address) (packIndex : Nat) (fields : List Address) (after : World) : Prop :=
-  ∃ data constructor substitution types,
-    program.declarations.Constructor variant data constructor ∧ Instantiates data.generics arguments substitution ∧
-    ListRel (Substitutes substitution) (constructor.fields.map (·.type)) types ∧ fields.length = types.length ∧
+def CarrierFields (program : Kernel.Program) (context : Context) (before : World) (type : Term) (variant : DeclId)
+    (pack : Address) (packIndex : Nat) (fields : List Address) (after : World) : Prop :=
+  ∃ types,
+    ConstructorHead program.declarations type (some variant) types (.constructor variant) ∧ fields.length = types.length ∧
     fields[packIndex]? = some pack ∧
     (∀ index address type, fields[index]? = some address → types[index]? = some type →
       index = packIndex ∨ type = .unit ∧ ∃ value, after.Stores address value ∧ value.type = .unit ∧ value.head = .unit) ∧
@@ -133,7 +132,7 @@ inductive TestResult (program : Kernel.Program) (context : Context) :
       program.declarations.input.manifest.testCarrier = some carrier → type = .nominal carrier.declaration dataArguments →
       CopiesObservations program context before observations bindings copied →
       PacksBindings program context copied pattern assembled.nextOwner positive bindings pack packed →
-      CarrierFields program context packed (if positive then carrier.positive else carrier.negative) dataArguments pack
+      CarrierFields program context packed type (if positive then carrier.positive else carrier.negative) pack
         (if positive then carrier.positiveBindings else carrier.negativeBindings) fields assembled →
       NewValue program.declarations assembled destination type
         (.constructor (if positive then carrier.positive else carrier.negative))

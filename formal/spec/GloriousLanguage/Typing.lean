@@ -204,10 +204,17 @@ mutual
         FieldsTyped program world fields types → FieldsTyped program world (some value :: fields) (type :: types)
 end
 
-def WorldTyped (program : Kernel.Program) (world : World) : Prop :=
-  world.WellFormed ∧ (∀ address value, world.Resident address value → ValueTyped program world value) ∧
+def WorldTypedWithOrigins (program : Kernel.Program) (world : World) (originBound : Identity) : Prop :=
+  world.WellFormedWithOrigins originBound ∧ (∀ address value, world.Resident address value → ValueTyped program world value) ∧
   (∀ id root value, world.roots.get id = some root → root.value = some value → value.type = root.type) ∧
   (∀ id root, world.roots.get id = some root → root.type.RuntimeRegionsBelow world.nextRegion)
+
+def WorldTyped (program : Kernel.Program) (world : World) : Prop :=
+  WorldTypedWithOrigins program world world.nextOwner
+
+theorem WorldTypedWithOrigins.mono {program : Kernel.Program} {world : World} {first last : Identity}
+    (typed : WorldTypedWithOrigins program world first) (bound : first ≤ last) :
+    WorldTypedWithOrigins program world last := ⟨typed.1.mono bound,typed.2⟩
 
 def PatternCoverage (program : Kernel.Program) (type : Term) (arms : List Arm) : Prop :=
   (∀ world address value, WorldTyped program world → world.Stores address value → value.type = type → value.Initialized →

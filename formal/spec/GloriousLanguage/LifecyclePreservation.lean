@@ -87,13 +87,13 @@ theorem World.clear_resident_origin {before after : World} {address observed : A
 /-- Framing a write that retains old resident identities, heads and arities.
 The operation-specific origin proof supplies these facts from the actual
 write, rather than assuming a well-formed result. -/
-theorem World.write_wellFormed_of_origin {before after : World} {address : Address} {authority : Authority}
-    {replacement : Option Value}
-    (valid : before.WellFormed) (permission : Permitted before authority .owned address)
+theorem World.write_wellFormedWithOrigins_of_origin {before after : World} {address : Address} {authority : Authority}
+    {replacement : Option Value} {originBound : Identity}
+    (valid : before.WellFormedWithOrigins originBound) (permission : Permitted before authority .owned address)
     (written : before.write address replacement = some after)
     (origin : ∀ observed value, after.Resident observed value → ∃ original,
       before.Resident observed original ∧ value.owner = original.owner ∧ value.head = original.head ∧
-        value.fields.length = original.fields.length) : after.WellFormed := by
+        value.fields.length = original.fields.length) : after.WellFormedWithOrigins originBound := by
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
@@ -129,7 +129,7 @@ theorem World.write_wellFormed_of_origin {before after : World} {address : Addre
       simp [selected]
   · intro observed value pack resident head
     obtain ⟨original,found,_,headEq,arity⟩ := origin observed value resident
-    simpa only [proofBound,regionsEq,ownerBound,arity] using packs observed original pack found (headEq.symm.trans head)
+    simpa only [proofBound,regionsEq,arity] using packs observed original pack found (headEq.symm.trans head)
   · intro observed value resident
     obtain ⟨original,found,owner,_,_⟩ := origin observed value resident
     simpa only [ownerBound,owner] using owners observed original found
@@ -172,10 +172,21 @@ theorem World.write_wellFormed_of_origin {before after : World} {address : Addre
     exact (overlaps a b left right leftFound rightFound leftLive rightLive overlap unique).imp
       (AncestorLoan.transport (before := before) loansEq) (AncestorLoan.transport (before := before) loansEq)
 
-theorem World.clear_wellFormed {before after : World} {address : Address} {authority : Authority}
+theorem World.write_wellFormed_of_origin {before after : World} {address : Address} {authority : Authority}
+    {replacement : Option Value}
     (valid : before.WellFormed) (permission : Permitted before authority .owned address)
-    (written : before.write address none = some after) : after.WellFormed := by
-  apply World.write_wellFormed_of_origin valid permission written
+    (written : before.write address replacement = some after)
+    (origin : ∀ observed value, after.Resident observed value → ∃ original,
+      before.Resident observed original ∧ value.owner = original.owner ∧ value.head = original.head ∧
+        value.fields.length = original.fields.length) : after.WellFormed := by
+  have checked := World.write_wellFormedWithOrigins_of_origin valid permission written origin
+  simpa only [World.WellFormed,congrArg World.nextOwner (World.write_rest written)] using checked
+
+theorem World.clear_wellFormedWithOrigins {before after : World} {address : Address} {authority : Authority}
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (permission : Permitted before authority .owned address)
+    (written : before.write address none = some after) : after.WellFormedWithOrigins originBound := by
+  apply World.write_wellFormedWithOrigins_of_origin valid permission written
   intro observed value resident
   obtain ⟨original,found,shell⟩ := World.clear_resident_origin written resident
   refine ⟨original,found,?_,?_,?_⟩
@@ -183,15 +194,22 @@ theorem World.clear_wellFormed {before after : World} {address : Address} {autho
   · simpa [Value.shell,Value.withFields,Value.head] using congrArg Value.head shell
   · simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) shell
 
-theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
-    {address : Address} {authority : Authority} (typed : Typing.WorldTyped program before)
+theorem World.clear_wellFormed {before after : World} {address : Address} {authority : Authority}
+    (valid : before.WellFormed) (permission : Permitted before authority .owned address)
+    (written : before.write address none = some after) : after.WellFormed := by
+  have checked := World.clear_wellFormedWithOrigins valid permission written
+  simpa only [World.WellFormed,congrArg World.nextOwner (World.write_rest written)] using checked
+
+theorem World.clear_worldTypedWithOrigins {program : Kernel.Program} {before after : World}
+    {address : Address} {authority : Authority} {originBound : Identity}
+    (typed : Typing.WorldTypedWithOrigins program before originBound)
     (permission : Permitted before authority .owned address) (written : before.write address none = some after) :
-    Typing.WorldTyped program after := by
+    Typing.WorldTypedWithOrigins program after originBound := by
   have roots := World.clear_typed_roots typed.roots written
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
-  refine ⟨World.clear_wellFormed typed.1 permission written,?_,?_,?_⟩
+  refine ⟨World.clear_wellFormedWithOrigins typed.1 permission written,?_,?_,?_⟩
   · intro observed value resident
     have checked := World.stores_typed roots (World.resident_iff_stores.mp resident)
     apply checked.transport ?_ proofEq (fun _ origin => origin.write written)
@@ -205,6 +223,13 @@ theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
   · apply World.root_regions_transport typed.2.2.2 (World.write_locations written)
     have same := congrArg World.nextRegion rest
     exact Nat.le_of_eq same.symm
+
+theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
+    {address : Address} {authority : Authority} (typed : Typing.WorldTyped program before)
+    (permission : Permitted before authority .owned address) (written : before.write address none = some after) :
+    Typing.WorldTyped program after := by
+  have checked := World.clear_worldTypedWithOrigins typed permission written
+  simpa only [Typing.WorldTyped,congrArg World.nextOwner (World.write_rest written)] using checked
 
 theorem Retires.roots_other {before after : World} {id : Identity}
     (retired : Retires before id after) {other : Identity} (different : other ≠ id) :

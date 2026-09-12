@@ -5,26 +5,29 @@ home, not a resident owner; existing addresses, loans and pointer origins keep
 their original authority. -/
 namespace Glorious.Language
 
-theorem World.freshRoot {world : World} (valid : world.WellFormed) :
+theorem World.freshRoot {world : World} {originBound : Identity} (valid : world.WellFormedWithOrigins originBound) :
     world.roots.get world.nextRoot = none := by
   cases found : world.roots.get world.nextRoot with
   | none => rfl
   | some root => exact False.elim (Nat.lt_irrefl _ (World.root_bound valid found))
 
 theorem Allocates.roots {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after)
     {id : Identity} {root : Root} (found : before.roots.get id = some root) : after.roots.get id = some root := by
   cases allocated
   simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.root_bound valid found))] using found
 
 theorem Allocates.root {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after)
     {observed : Address} {root : Root} (found : before.root observed = some root) : after.root observed = some root := by
   obtain ⟨selected,live,generation⟩ := World.root_found found
   simp [World.root,allocated.roots valid selected,live,generation]
 
 theorem Allocates.read {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after)
     (observed : Address) : after.read observed = before.read observed := by
   cases allocated
   by_cases same : observed.root = before.nextRoot
@@ -32,20 +35,23 @@ theorem Allocates.read {program : Program} {before after : World} {home region t
   · simp [World.read,World.root,Table.get_set_other _ _ _ _ same]
 
 theorem Allocates.resident {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after)
     {observed : Address} {value : Value} : after.Resident observed value ↔ before.Resident observed value := by
   simp only [World.resident_iff_stores,World.Stores,allocated.read valid]
 
 theorem Allocates.located {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after)
     {observed : Address} (located : before.Located observed) : after.Located observed := by
   rcases located with ⟨value,stored⟩ | ⟨root,selected,vacant⟩
   · exact Or.inl ⟨value,by simpa only [World.Stores,allocated.read valid] using stored⟩
   · exact Or.inr ⟨root,allocated.root valid selected,vacant⟩
 
-theorem Allocates.wellFormed {program : Program} {before after : World} {home region type layout mutable address}
-    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after) :
-    after.WellFormed := by
+theorem Allocates.wellFormedWithOrigins {program : Program} {before after : World} {home region type layout mutable address}
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
+    (allocated : Allocates program before home region type layout mutable address after) :
+    after.WellFormedWithOrigins originBound := by
   have resident : ∀ {observed value}, after.Resident observed value ↔ before.Resident observed value :=
     allocated.resident valid
   have root : ∀ {observed root}, before.root observed = some root → after.root observed = some root :=
@@ -130,11 +136,18 @@ theorem Allocates.wellFormed {program : Program} {before after : World} {home re
     · intro id loan found live
       exact located (locations id loan found live)
 
-theorem Allocates.worldTyped {program : Kernel.Program} {before after : World} {home region type layout mutable address}
-    (typed : Typing.WorldTyped program before)
+theorem Allocates.wellFormed {program : Program} {before after : World} {home region type layout mutable address}
+    (valid : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after) :
+    after.WellFormed := by
+  have checked := allocated.wellFormedWithOrigins valid
+  cases allocated
+  exact checked
+
+theorem Allocates.worldTypedWithOrigins {program : Kernel.Program} {before after : World} {home region type layout mutable address}
+    {originBound : Identity} (typed : Typing.WorldTypedWithOrigins program before originBound)
     (allocated : Allocates program.declarations before home region type layout mutable address after) :
-    Typing.WorldTyped program after := by
-  refine ⟨allocated.wellFormed typed.1,?_,?_,?_⟩
+    Typing.WorldTypedWithOrigins program after originBound := by
+  refine ⟨allocated.wellFormedWithOrigins typed.1,?_,?_,?_⟩
   · intro observed value resident
     have old := (allocated.resident typed.1).mp resident
     apply (typed.2.1 observed value old).resident_transport
@@ -164,5 +177,13 @@ theorem Allocates.worldTyped {program : Kernel.Program} {before after : World} {
         cases found
         exact supported
       · exact typed.2.2.2 id root (by simpa only [Table.get_set_other _ _ _ _ fresh] using found)
+
+theorem Allocates.worldTyped {program : Kernel.Program} {before after : World} {home region type layout mutable address}
+    (typed : Typing.WorldTyped program before)
+    (allocated : Allocates program.declarations before home region type layout mutable address after) :
+    Typing.WorldTyped program after := by
+  have checked := allocated.worldTypedWithOrigins typed
+  cases allocated
+  exact checked
 
 end Glorious.Language

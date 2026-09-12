@@ -198,10 +198,10 @@ Reservation formation authenticates the actual locations and exact types;
 capability, lifetime, layout and contextual invocation consume that same product.
 `ControlPreservation` proves atomic witness publication from the actual storage
 constructor, then storage preservation for the complete reserve/call/consume/
-close cycle. `ControlStep.nonTest_worldTyped` covers every control transition
-except pattern-test result construction. That remaining boundary needs the
-atomic binding-pack/carrier proof; full task/frame typing and progress are not
-claimed by this storage theorem.
+close cycle. `TestPreservation` completes the pattern-result construction and
+proves `ControlStep.worldTyped` for every control transition. The earlier test
+exception and its partial theorem have been removed. Full task/frame typing
+and progress are not claimed by this storage theorem.
 
 `ConstructionPreservation` now proves full world preservation for `NewValue`
 from actual head/field typing and fresh-owner facts, and consumes it in
@@ -251,6 +251,26 @@ contract. The proof uses the actual snapshot map and its input scope closure;
 it assumes neither declaration commutation nor a typed copied world. Full
 continuation task/frame typing, code relocation and replay/cancellation
 progress remain separate unfinished consumers.
+
+Atomic pattern construction uses a proof factor of the same world invariant:
+private binding packs may refer to the enclosing result's future owner, while
+actual owner allocation, uniqueness and every other invariant remain intact.
+`World.WellFormed` and `Typing.WorldTyped` retain exactly their previous
+allocated-origin bound. The complete result theorem closes that bound at the
+actual final constructor. Existing allocation, clear and construction proofs
+consume this factor internally and retain their original public guarantees.
+Observed bindings and unit fields derive their exact types from actual
+locations/reads. `CarrierFields` now consumes the shared `ConstructorHead`,
+removing a separate constructor lookup that did not authenticate agreement
+with the manifest-selected nominal result type.
+
+Relocated signatures and scope closing now share `Signature.mapTerms`,
+including generic defaults and quantified-constraint defaults. The incomplete
+independent relocation constraint walker has been removed. The signature and
+context-commutation proofs in `RuntimeSignatureEquivariance` reach actual
+`Typing.CallSignature` and relocated tail requests. Full body/coverage and
+continuation-frame transport remain open; those require lexical body support
+and transport of the semantic coverage obligations, not assumed stability.
 
 ## 3. Remaining boundary completeness and final audit
 

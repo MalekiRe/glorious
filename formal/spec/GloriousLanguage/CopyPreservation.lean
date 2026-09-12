@@ -365,19 +365,19 @@ theorem World.write_value_origin {before after : World} {destination observed : 
 Owner separation and header obligations are premises on the inserted tree,
 not a well-formed post-state. Copy and moving aggregate construction derive
 these obligations from their respective authoritative producers. -/
-theorem World.install_wellFormed {before middle : World} {destination : Address} {inserted : Value} {next : Nat}
-    (valid : before.WellFormed) (vacant : before.Vacant destination) (monotone : before.nextOwner ≤ next)
+theorem World.install_wellFormedWithOrigins {before middle : World} {destination : Address} {inserted : Value} {next originBound : Nat}
+    (valid : before.WellFormedWithOrigins originBound) (vacant : before.Vacant destination) (monotone : before.nextOwner ≤ next)
     (owners : ∀ path value, ResidentAt inserted path value → value.owner < next)
     (unique : ∀ a b x y, ResidentAt inserted a x → ResidentAt inserted b y → x.owner = y.owner → a = b)
     (separate : ∀ path value, ResidentAt inserted path value →
       ∀ address original, before.Resident address original → value.owner ≠ original.owner)
     (packs : ∀ path value pack, ResidentAt inserted path value → value.head = .bindings pack →
       pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = value.fields.length ∧
-      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < next)
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < originBound)
     (references : ∀ path value id, ResidentAt inserted path value → value.head = .reference id →
       ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
     (written : before.write destination (some inserted) = some middle) :
-    ({ middle with nextOwner := next } : World).WellFormed := by
+    ({ middle with nextOwner := next } : World).WellFormedWithOrigins originBound := by
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
@@ -417,7 +417,7 @@ theorem World.install_wellFormed {before middle : World} {destination : Address}
         simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) shell
       obtain ⟨brand,region,length,distinct,facts⟩ := oldPacks address original pack oldResident oldHead
       exact ⟨by simpa only [proofBound] using brand,by simpa only [regionsEq] using region,
-        length.trans arity.symm,distinct,fun fact member => Nat.lt_of_lt_of_le (facts fact member) monotone⟩
+        length.trans arity.symm,distinct,facts⟩
   · intro address value resident
     rcases World.write_value_origin written resident with ⟨path,_,inside⟩ | ⟨original,oldResident,shell⟩
     · exact owners path value inside
@@ -487,6 +487,21 @@ theorem World.install_wellFormed {before middle : World} {destination : Address}
     have retained := World.write_located written (vacant.no_located_descendant (located id loan oldFound live))
       (located id loan oldFound live)
     exact retained
+
+theorem World.install_wellFormed {before middle : World} {destination : Address} {inserted : Value} {next : Nat}
+    (valid : before.WellFormed) (vacant : before.Vacant destination) (monotone : before.nextOwner ≤ next)
+    (owners : ∀ path value, ResidentAt inserted path value → value.owner < next)
+    (unique : ∀ a b x y, ResidentAt inserted a x → ResidentAt inserted b y → x.owner = y.owner → a = b)
+    (separate : ∀ path value, ResidentAt inserted path value →
+      ∀ address original, before.Resident address original → value.owner ≠ original.owner)
+    (packs : ∀ path value pack, ResidentAt inserted path value → value.head = .bindings pack →
+      pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = value.fields.length ∧
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < next)
+    (references : ∀ path value id, ResidentAt inserted path value → value.head = .reference id →
+      ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
+    (written : before.write destination (some inserted) = some middle) :
+    ({ middle with nextOwner := next } : World).WellFormed :=
+  World.install_wellFormedWithOrigins (valid.mono monotone) vacant monotone owners unique separate packs references written
 
 theorem World.Stores.residentAt {world : World} {address : Address} {whole value : Value} {path : List Nat}
     (stored : world.Stores address whole) (inside : ResidentAt whole path value) :

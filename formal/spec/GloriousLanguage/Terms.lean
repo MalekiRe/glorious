@@ -344,13 +344,16 @@ structure Signature where
   unsafeAllowed : Bool := false
   deriving Repr, Inhabited
 
-def Signature.close (signature : Signature) (scope : ScopeInstantiation) : Signature :=
+def Signature.mapTerms (f : Term → Term) (signature : Signature) : Signature :=
   { signature with
-    generics := signature.generics.map (fun binder => { binder with defaultValue := binder.defaultValue.map scope.term })
-    parameters := signature.parameters.map scope.term
-    result := scope.term signature.result
-    effects := scope.term signature.effects
-    constraints := signature.constraints.map (Constraint.mapTerms scope.term) }
+    generics := signature.generics.map (fun binder => { binder with defaultValue := binder.defaultValue.map f })
+    parameters := signature.parameters.map f
+    result := f signature.result
+    effects := f signature.effects
+    constraints := signature.constraints.map (Constraint.mapTerms f) }
+
+def Signature.close (signature : Signature) (scope : ScopeInstantiation) : Signature :=
+  signature.mapTerms scope.term
 
 inductive Visibility where
   | privateScope | publicScope | package | parent

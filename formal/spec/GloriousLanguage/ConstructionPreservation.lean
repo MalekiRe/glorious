@@ -52,18 +52,25 @@ theorem Clears.permitted {before after : World} {addresses : List Address}
     (permission : Permitted before authority access address) : Permitted after authority access address :=
   permission.transport cleared.locations cleared.loans
 
-theorem Clears.wellFormed {before after : World} {addresses : List Address}
-    (valid : before.WellFormed)
+theorem Clears.wellFormedWithOrigins {before after : World} {addresses : List Address} {originBound : Identity}
+    (valid : before.WellFormedWithOrigins originBound)
     (allowed : ∀ address ∈ addresses, ∃ authority, Permitted before authority .owned address)
-    (cleared : Clears before addresses after) : after.WellFormed := by
+    (cleared : Clears before addresses after) : after.WellFormedWithOrigins originBound := by
   induction cleared with
   | nil => exact valid
   | cons written rest ih =>
       obtain ⟨authority,permission⟩ := allowed _ List.mem_cons_self
-      apply ih (World.clear_wellFormed valid permission written)
+      apply ih (World.clear_wellFormedWithOrigins valid permission written)
       intro address member
       obtain ⟨authority,permission⟩ := allowed address (List.mem_cons_of_mem _ member)
       exact ⟨authority,permission.transport (World.write_locations written) (World.write_loans written)⟩
+
+theorem Clears.wellFormed {before after : World} {addresses : List Address}
+    (valid : before.WellFormed)
+    (allowed : ∀ address ∈ addresses, ∃ authority, Permitted before authority .owned address)
+    (cleared : Clears before addresses after) : after.WellFormed := by
+  have checked := cleared.wellFormedWithOrigins valid allowed
+  simpa only [World.WellFormed,congrArg World.nextOwner cleared.rest] using checked
 
 theorem Clears.worldTyped {program : Kernel.Program} {before after : World} {addresses : List Address}
     (typed : Typing.WorldTyped program before)
@@ -198,7 +205,8 @@ theorem Value.constructed_origin {world : World} {owner : Identity} {type : Term
       exact Or.inr ⟨index,path,source,child,rfl,atSource,stored,nested⟩
 
 theorem Value.constructed_owner_bound {world : World} {type : Term} {head : ValueHead}
-    {sources : List ResolvedPlace} {values : List Value} (valid : world.WellFormed)
+    {sources : List ResolvedPlace} {values : List Value} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound)
     (inputs : ListRel (fun source value => world.Stores source.address value) sources values)
     {path : List Nat} {value : Value} (inside : ResidentAt (.resident world.nextOwner type head true (values.map some)) path value) :
     value.owner < world.nextOwner+1 := by
@@ -207,7 +215,8 @@ theorem Value.constructed_owner_bound {world : World} {type : Term} {head : Valu
   · exact Nat.lt_succ_of_lt (World.owner_bound valid (stored.residentAt nested))
 
 theorem Value.constructed_owner_unique {world : World} {type : Term} {head : ValueHead}
-    {sources : List ResolvedPlace} {values : List Value} (valid : world.WellFormed)
+    {sources : List ResolvedPlace} {values : List Value} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound)
     (inputs : ListRel (fun source value => world.Stores source.address value) sources values)
     (separate : sources.Pairwise (fun left right => ¬ left.address.Overlaps right.address)) :
     ∀ left right x y, ResidentAt (.resident world.nextOwner type head true (values.map some)) left x →
@@ -246,13 +255,13 @@ theorem NewValue.locations {program : Program} {before after : World} {destinati
   cases constructed with
   | construct _ _ _ _ _ _ cleared written => exact (World.write_locations written id).trans (cleared.locations id)
 
-theorem NewValue.wellFormed {program : Program} {before after : World} {destination type head sources}
-    (valid : before.WellFormed)
+theorem NewValue.wellFormedWithOrigins {program : Program} {before after : World} {destination type head sources}
+    {originBound : Identity} (valid : before.WellFormedWithOrigins originBound)
     (headReferences : ∀ id, head = .reference id → ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
     (headPacks : ∀ pack, head = .bindings pack →
       pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = sources.length ∧
-      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < before.nextOwner+1)
-    (constructed : NewValue program before destination type head sources after) : after.WellFormed := by
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < originBound)
+    (constructed : NewValue program before destination type head sources after) : after.WellFormedWithOrigins originBound := by
   cases constructed with
   | construct vacant destinationType inputs initialized separate permissions cleared written =>
     have allowed : ∀ address ∈ sources.map ResolvedPlace.address, ∃ authority, Permitted before authority .owned address := by
@@ -267,7 +276,7 @@ theorem NewValue.wellFormed {program : Program} {before after : World} {destinat
     have ownerEq := congrArg World.nextOwner rest
     have proofEq := congrArg World.nextProof rest
     have regionsEq := congrArg World.liveRegions rest
-    apply World.install_wellFormed (cleared.wellFormed valid allowed) (cleared.vacant vacant outside)
+    apply World.install_wellFormedWithOrigins (cleared.wellFormedWithOrigins valid allowed) (cleared.vacant vacant outside)
       (by simpa only [ownerEq] using Nat.le_succ before.nextOwner)
       (fun _ _ inside => Value.constructed_owner_bound valid inputs inside)
       (Value.constructed_owner_unique valid inputs separate) ?_ ?_ ?_ written
@@ -294,7 +303,7 @@ theorem NewValue.wellFormed {program : Program} {before after : World} {destinat
         simpa only [Value.fields,List.length_map] using length.trans inputs.length_eq
       · obtain ⟨brand,region,length,distinct,facts⟩ := valid.2.2.2.2.2.1 _ value pack (stored.residentAt nested) headEq
         exact ⟨by simpa only [proofEq] using brand,by simpa only [regionsEq] using region,length,distinct,
-          fun fact member => Nat.lt_succ_of_lt (facts fact member)⟩
+          facts⟩
     · intro path value id inside headEq
       have live : ∃ loan, before.loans.get id = some loan ∧ loan.live = true := by
         rcases Value.constructed_origin inputs inside with ⟨_,rfl⟩ | ⟨_,_,_,_,_,_,stored,nested⟩
@@ -311,8 +320,19 @@ theorem NewValue.rest {program : Program} {before after : World} {destination ty
       have last := World.write_rest written
       conv => lhs; rw [last,first]
 
+theorem NewValue.wellFormed {program : Program} {before after : World} {destination type head sources}
+    (valid : before.WellFormed)
+    (headReferences : ∀ id, head = .reference id → ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
+    (headPacks : ∀ pack, head = .bindings pack →
+      pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = sources.length ∧
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < before.nextOwner+1)
+    (constructed : NewValue program before destination type head sources after) : after.WellFormed := by
+  have checked := constructed.wellFormedWithOrigins (valid.mono (Nat.le_succ _)) headReferences headPacks
+  simpa only [World.WellFormed,congrArg World.nextOwner constructed.rest] using checked
+
 theorem Typing.ValueTyped.construct {program : Kernel.Program} {before after : World}
-    {destination type head sources value} (valid : before.WellFormed)
+    {destination type head sources value} {originBound : Identity}
+    (valid : before.WellFormedWithOrigins originBound)
     (constructed : NewValue program.declarations before destination type head sources after)
     (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
   apply typed.transport ?_ ?_ (fun _ origin => origin.transport constructed.locations)
@@ -353,17 +373,19 @@ theorem Clears.dead_root {before after : World} {addresses : List Address} {id :
 /-- The head proof concerns the already evaluated input tree in the input
 world. Actual construction consumers supply it from ConstructorHead, checked
 callable instances or another specific value producer, never post-state typing. -/
-theorem NewValue.worldTyped {program : Kernel.Program} {before after : World} {destination type head sources}
+theorem NewValue.worldTypedWithOrigins {program : Kernel.Program} {before after : World} {destination type head sources}
+    {originBound : Identity}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before)
+    (typed : Typing.WorldTypedWithOrigins program before originBound)
     (headReferences : ∀ id, head = .reference id → ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
     (headPacks : ∀ pack, head = .bindings pack →
       pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = sources.length ∧
-      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < before.nextOwner+1)
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < originBound)
     (headTyped : ∀ values, ListRel (fun source value => before.Stores source.address value) sources values →
       Typing.ValueTyped program before (.resident before.nextOwner type head true (values.map some)))
-    (constructed : NewValue program.declarations before destination type head sources after) : Typing.WorldTyped program after := by
-  have well := constructed.wellFormed typed.1 headReferences headPacks
+    (constructed : NewValue program.declarations before destination type head sources after) :
+    Typing.WorldTypedWithOrigins program after originBound := by
+  have well := constructed.wellFormedWithOrigins typed.1 headReferences headPacks
   have retained : ∀ value, Typing.ValueTyped program before value → Typing.ValueTyped program after value :=
     fun _ value => value.construct typed.1 constructed
   have support : ∀ id root, after.roots.get id = some root → root.type.RuntimeRegionsBelow after.nextRegion := by
@@ -387,6 +409,19 @@ theorem NewValue.worldTyped {program : Kernel.Program} {before after : World} {d
       by_cases live : root.live = true
       · exact (roots id root value found live contents).2
       · exact typed.2.2.1 id root value (cleared.dead_root (World.write_dead_root written found live) live) contents
+
+theorem NewValue.worldTyped {program : Kernel.Program} {before after : World} {destination type head sources}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (headReferences : ∀ id, head = .reference id → ∃ loan, before.loans.get id = some loan ∧ loan.live = true)
+    (headPacks : ∀ pack, head = .bindings pack →
+      pack.brand < before.nextProof ∧ pack.region ∈ before.liveRegions ∧ pack.fields.length = sources.length ∧
+      pack.fields.Nodup ∧ ∀ fact ∈ pack.facts, fact.resultOrigin < before.nextOwner+1)
+    (headTyped : ∀ values, ListRel (fun source value => before.Stores source.address value) sources values →
+      Typing.ValueTyped program before (.resident before.nextOwner type head true (values.map some)))
+    (constructed : NewValue program.declarations before destination type head sources after) : Typing.WorldTyped program after := by
+  have checked := constructed.worldTypedWithOrigins valid inventory (typed.mono (Nat.le_succ _)) headReferences headPacks headTyped
+  simpa only [Typing.WorldTyped,congrArg World.nextOwner constructed.rest] using checked
 
 theorem ListRel.functional {α β : Type} {relation : α → β → Prop} {left : List α} {first second : List β}
     (functional : ∀ a b c, relation a b → relation a c → b = c)

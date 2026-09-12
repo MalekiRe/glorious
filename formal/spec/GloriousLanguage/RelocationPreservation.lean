@@ -54,11 +54,13 @@ theorem Table.Unique.append_shift {α : Type} {table : Table α} {base : Nat}
     have freshGe : base ≤ fresh := by rw [← atFresh]; exact Nat.le_add_right _ _
     exact (Nat.not_lt_of_ge freshGe) (same ▸ oldLess)
 
-theorem World.root_bound {world : World} (valid : world.WellFormed) {id : Identity} {root : Root}
+theorem World.root_bound {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) {id : Identity} {root : Root}
     (found : world.roots.get id = some root) : id < world.nextRoot :=
   (valid.2.2.2.2.2.2.2.2.1 id root found).1
 
-theorem World.owner_bound {world : World} (valid : world.WellFormed) {address : Address} {value : Value}
+theorem World.owner_bound {world : World} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) {address : Address} {value : Value}
     (resident : world.Resident address value) : value.owner < world.nextOwner :=
   valid.2.2.2.2.2.2.1 address value resident
 
