@@ -1349,3 +1349,25 @@ theorem Permitted.of_requestReturns {world : World} {custody : ClaimCustody} {re
     exact permission.2 id original originalFound live overlap conflict⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
+
+/-- Reversing a duplicate-free list keeps it duplicate-free. This core has no
+such lemma, and the destructor's schedule is the reverse of `List.range`, so it is
+established here once. -/
+theorem List.Nodup.reverse {α : Type} {l : List α} (nodup : l.Nodup) : l.reverse.Nodup := by
+  induction l with
+  | nil => exact List.nodup_nil
+  | cons head tail ih =>
+      rw [List.nodup_cons] at nodup
+      rw [List.reverse_cons, List.nodup_append]
+      refine ⟨ih nodup.2,by simp,?_⟩
+      intro a member b memberHead same
+      rw [List.mem_singleton] at memberHead
+      subst memberHead
+      subst same
+      exact nodup.1 (by simpa using member)
+
+end Glorious.Language.Execution
