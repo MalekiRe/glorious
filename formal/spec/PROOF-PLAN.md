@@ -879,6 +879,24 @@ append itself only works because `destroy_shell` now binds its middle state as a
 variable and reports its world and task as equalities — a record literal that
 prints identically does not unify.
 
+The input endpoint's remaining two prerequisites are recorded here because its
+owner stopped with the map complete: the endpoint (Kernel.EntryBatch's
+enterWorldAttempt) must drop `consumed`/`finishes` and choose its existential's
+successor per source shape, which needs (1) the receiver-slot/capture-index
+correspondence out of ResidentCaptureInputs and CaptureInputs.formals — each
+capture's storage is the receiver's child at its own index, so `attemptFor_shell`'s
+cleared-slot holes become `owned_of_stored`'s all-fields-holes requirement — and
+(2) a producer for the receiver's emptied resource list, which nothing in the tree
+yet supplies: the resource-erasing bindings have congruences but no lemma that the
+receiver's list ends empty, and the batch product already relates the inputs to the
+receiver's resources, so a small resource-conjunct companion of
+`attemptFor_shell` (a claimed-resource accumulator mirroring its cleared-slot one)
+is the cheaper route. With those, the owned branch takes its successor from
+`World.Stores.write_exists` on the stored marked shell and closes with
+`Execution.FinishesReceiver.owned_of_stored` plus `FinishesEntry.of_resident`
+(or `of_contextual`), and the lent branch closes with `lent_resident` at the fold's
+world.
+
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered
 row equivalence. The superseded eager-normalization matcher is removed. Actual
