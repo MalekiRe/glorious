@@ -939,9 +939,10 @@ machine-step families. `ControlOrigin` defines support of current tasks, frames,
 callback sessions and captured control, including nested hook-cleanup tasks.
 Saved contexts, handlers and frames are bounded by the existing immutable
 capture frontier, not merely by the current world's allocation counter.
-`ControlOriginPreservation` establishes this combined control/suspension
-invariant for arbitrary runs, observed states, divergence prefixes and public
-reachable states. The canonical `InitialInvocation` contract consumes it;
+`ControlOriginPreservation` states this combined control/suspension invariant for
+arbitrary runs, observed states, divergence prefixes and public reachable states,
+but it is NOT checked at this revision: its closure contains the stale
+`ForeignAuthority`, so the whole-run preservation is stated, not exercised. The canonical `InitialInvocation` contract consumes it;
 the empty-entry constructor derives supplied-input support and requires
 caller-environment bounds and recorded authorities. No alternate execution relation, new runtime
 inventory, post-state certificate or resource-admission premise supplies it.
@@ -1214,8 +1215,9 @@ copying derives its selected activation domain from authenticated capture homes
 and actual saved control, then advances the real allocation supply.
 
 `ActivationPreservation` proves the complete six-family transition theorem;
-`ControlOriginPreservation` consumes it in whole-run, observation, divergence and
-reachable-state preservation. `InitialInvocation` no longer carries the weak
+`ControlOriginPreservation` is written to consume it in whole-run, observation,
+divergence and reachable-state preservation, but that module is unimportable at
+this revision (stale `ForeignAuthority`), so those consumers are not exercised. `InitialInvocation` no longer carries the weak
 one-time guard against a live root at exactly the next activation, or a duplicate
 caller-activation bound. Both follow from canonical control admission; arbitrary
 empty invocations remain constructible from ordinary historical home bounds.

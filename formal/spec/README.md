@@ -99,7 +99,13 @@ or a dependency of this project.
   not runtime equality claims.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
-  and whole-run preservation.
+  and whole-run preservation. NOT checked at this revision: the module is
+  unimportable because its closure still contains the stale `ForeignAuthority`
+  (renamed `Reachable.pointer` constructor, rewritten `AccessSeed`, removed
+  `FreshExposed`, `liveLoan_origin`'s fourth fresh-root disjunct), so
+  `Execution.Step.controlWellFormed`, `Run.controlWellFormed`, `Observes.control`,
+  `Diverges.control` and `Specification.reachable_control` are stated but not
+  exercised; the earlier note calling them re-verified was wrong.
 - `ControlAuthority` and its producer modules: actual recorded loan authorities,
   reservation provenance, callback leases and mapped replay authority.
 - `ActivationOrigin`, its producer modules and `ActivationPreservation`: historical
@@ -323,8 +329,15 @@ the current recovered checkpoint
 
 `lake build GloriousLanguage.CleanupExecution GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.CustodyDischarge GloriousLanguage.CleanupDestruction GloriousLanguage.InputAuthorityProvenance GloriousLanguage.SuspensionCapture GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 
-which passes 232 jobs from a fresh source-only tree. The four frame consumers
-alone check as 80 jobs. Warnings are errors and implicit identifier creation is
+which passed 232 jobs from a fresh source-only tree at the previous revision;
+that count and target list were not re-exercised at 7bc81b08. The targets
+actually built and green at 7bc81b08 are the changed closure:
+`GloriousLanguage.CleanupDrain`, `GloriousLanguage.CleanupDestruction`,
+`GloriousLanguage.CustodyDischarge`, `GloriousLanguage.ForeignRootFraming`,
+`GloriousLanguage.InvocationLeaseCleanup`, `GloriousLanguage.RealizationLayout`,
+`GloriousLanguage.AllocationLayout`, `GloriousLanguage.SourceInterpretation`,
+`GloriousLanguage.SourceAddress`, `GloriousLanguage.LabelExecution` (184 jobs,
+strict flags). The four frame consumers alone check as 80 jobs. Warnings are errors and implicit identifier creation is
 disabled. The default aggregate also includes the preserved `Checks`; examples
 are not routine evidence for this semantic proof phase. No `sorry`, new axiom,
 evaluator fuel bound, or always-rejecting implementation counts as a completed
