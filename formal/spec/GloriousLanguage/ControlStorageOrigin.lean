@@ -161,6 +161,99 @@ theorem _root_.Glorious.Language.RelinquishesCustody.counter {before after : Wor
     (relinquished : RelinquishesCustody before custody after) : before.nextRoot ≤ after.nextRoot :=
   Nat.le_of_eq (_root_.Glorious.Language.RelinquishesCustody.nextRoot_eq relinquished).symm
 
+/-- The receiver's inheritance of the source's implicit environment stays inside
+any limit both contexts are already inside: the added rows come from the source's
+environment and the retained rows from the receiver's own. -/
+theorem Context.inheritResources_root_support {source receiver : Context} {limit : Identity}
+    (sourceBound : RootSupport.Below source.rootSupport limit)
+    (receiverBound : RootSupport.Below receiver.rootSupport limit) :
+    RootSupport.Below (receiver.inheritResources source).rootSupport limit := by
+  have sourceParts : RootSupport.Below (source.environment.map (fun binding => binding.address.root))
+        limit ∧ RootSupport.Below
+        (source.resourceContracts.flatMap
+          (fun contract => contract.inputs.map (fun binding => binding.address.root))) limit := by
+    rw [Context.rootSupport] at sourceBound
+    exact RootSupport.below_append.mp sourceBound
+  have receiverParts : RootSupport.Below (receiver.environment.map (fun binding => binding.address.root))
+        limit ∧ RootSupport.Below
+        (receiver.resourceContracts.flatMap
+          (fun contract => contract.inputs.map (fun binding => binding.address.root))) limit := by
+    rw [Context.rootSupport] at receiverBound
+    exact RootSupport.below_append.mp receiverBound
+  intro root member
+  rw [Context.rootSupport,Context.inheritResources,Environment.inheritImplicit,Environment.install,
+    List.map_append] at member
+  rcases List.mem_append.mp member with first | contractPart
+  · rcases List.mem_append.mp first with sourcePart | receiverPart
+    · obtain ⟨binding,bindingMember,same⟩ := List.mem_map.mp sourcePart
+      rw [← same]
+      exact sourceParts.1 _ (List.mem_map.mpr ⟨binding,(List.mem_filter.mp bindingMember).1,rfl⟩)
+    · obtain ⟨binding,bindingMember,same⟩ := List.mem_map.mp receiverPart
+      rw [← same]
+      exact receiverParts.1 _
+        (List.mem_map.mpr ⟨binding,(List.mem_filter.mp bindingMember).1,rfl⟩)
+  · obtain ⟨contract,contractMember,inner⟩ := List.mem_flatMap.mp contractPart
+    obtain ⟨binding,bindingMember,same⟩ := List.mem_map.mp inner
+    rw [← same]
+    exact receiverParts.2 _ (List.mem_flatMap.mpr ⟨contract,contractMember,
+      List.mem_map.mpr ⟨binding,bindingMember,rfl⟩⟩)
+
+/-- Installing hand-off bindings into an environment stays inside any limit the
+context and the bindings are already inside. -/
+theorem Context.install_root_support {context : Context} {bindings : Environment} {limit : Identity}
+    (contextBound : RootSupport.Below context.rootSupport limit)
+    (bindingsBound : RootSupport.Below (bindings.map (fun binding => binding.address.root)) limit) :
+    RootSupport.Below
+      ({ context with environment :=
+        context.environment.install (bindings.map StorageBinding.asObligation) }).rootSupport limit := by
+  have contextParts : RootSupport.Below (context.environment.map (fun binding => binding.address.root))
+        limit ∧ RootSupport.Below
+        (context.resourceContracts.flatMap
+          (fun contract => contract.inputs.map (fun binding => binding.address.root))) limit := by
+    rw [Context.rootSupport] at contextBound
+    exact RootSupport.below_append.mp contextBound
+  intro root member
+  rw [Context.rootSupport,Environment.install,List.map_append] at member
+  rcases List.mem_append.mp member with first | contractPart
+  · rcases List.mem_append.mp first with bindingPart | retainedPart
+    · obtain ⟨mapped,mappedMember,sameRoot⟩ := List.mem_map.mp bindingPart
+      obtain ⟨original,originalMember,sameBinding⟩ := List.mem_map.mp mappedMember
+      rw [← sameBinding] at sameRoot
+      rw [← sameRoot]
+      exact bindingsBound _ (List.mem_map.mpr ⟨original,originalMember,rfl⟩)
+    · obtain ⟨binding,bindingMember,same⟩ := List.mem_map.mp retainedPart
+      rw [← same]
+      exact contextParts.1 _
+        (List.mem_map.mpr ⟨binding,(List.mem_filter.mp bindingMember).1,rfl⟩)
+  · obtain ⟨contract,contractMember,inner⟩ := List.mem_flatMap.mp contractPart
+    obtain ⟨binding,bindingMember,same⟩ := List.mem_map.mp inner
+    rw [← same]
+    exact contextParts.2 _ (List.mem_flatMap.mpr ⟨contract,contractMember,
+      List.mem_map.mpr ⟨binding,bindingMember,rfl⟩⟩)
+
+theorem ReturnsResources.context_root_support {program : Kernel.Program} {source receiver : Context}
+    {before after : World} {result : Address} {context : Context}
+    (returned : ReturnsResources program source receiver before result context after)
+    (well : before.WellFormed)
+    (sourceBound : RootSupport.Below source.rootSupport after.nextRoot)
+    (receiverBound : RootSupport.Below receiver.rootSupport after.nextRoot) :
+    RootSupport.Below context.rootSupport after.nextRoot := by
+  cases returned with
+  | localReturn same => exact Context.inheritResources_root_support sourceBound receiverBound
+  | invocationReturn activationNe outputs outgoing bound relinquished =>
+    exact Context.install_root_support receiverBound
+      (RootSupport.below_map.mpr (fun binding member =>
+        Nat.lt_of_lt_of_le (bound.bindings_root_bound well binding member) relinquished.counter))
+
+theorem ReturnsResources.counter {program : Kernel.Program} {source receiver : Context}
+    {before after : World} {result : Address} {context : Context}
+    (returned : ReturnsResources program source receiver before result context after) :
+    before.nextRoot ≤ after.nextRoot := by
+  cases returned with
+  | localReturn same => exact Nat.le_refl _
+  | invocationReturn activationNe outputs outgoing bound relinquished =>
+    exact Nat.le_trans (Kernel.BindsInputs.suspensionExtension bound).counter relinquished.counter
+
 theorem ArgumentInputs.root_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
     (well : world.WellFormed) (bounded : RootSupport.Below context.rootSupport world.nextRoot)
