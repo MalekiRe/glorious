@@ -26,9 +26,9 @@ open Kernel
 /-- Relinquishment marks the pending storage returns of that custody. This is
 the successor world of the actual `RelinquishesCustody.relinquish` rule. -/
 def World.RequestReturns (world : World) (custody : ClaimCustody) : World :=
-  { world with loans := world.loans.map fun (identity,loan) =>
-      (identity,if loan.custody = some custody ∧ loan.kind = .storageBorrow then
-        { loan with returnRequested := true } else loan) }
+  { world with loans := world.loans.map fun entry =>
+      (entry.1,if entry.2.custody = some custody ∧ entry.2.kind = .storageBorrow then
+        { entry.2 with returnRequested := true } else entry.2) }
 
 theorem RelinquishesCustody.of_handedOff {world : World} {custody : ClaimCustody}
     (handed : world.CustodyHandedOff custody) :

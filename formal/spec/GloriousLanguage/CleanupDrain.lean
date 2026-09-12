@@ -239,6 +239,42 @@ theorem Table.get_isSome_of_mem {α : Type} {table : Table α} {id : Identity} {
 
 end Glorious.Language
 
+namespace Glorious.Language
+
+open Kernel
+
+/-- Marking pending returns restamps only `returnRequested`: it changes neither a
+loan's referent nor its liveness, so a retirable root stays retirable across the
+relinquishment that precedes the shell write. -/
+theorem World.RootClear.of_requestReturns {world : World} {custody : ClaimCustody} {rootId : Identity}
+    (clear : world.RootClear rootId) : (world.RequestReturns custody).RootClear rootId := by
+  refine ⟨?_,?_,?_⟩
+  · intro id loan found live
+    have canonical : Table.get (List.map (fun entry : Identity × Loan =>
+        (entry.1, (fun current : Loan => if current.custody = some custody ∧ current.kind = .storageBorrow then
+          { current with returnRequested := true } else current) entry.2)) world.loans) id = some loan := by
+      show Table.get (world.RequestReturns custody).loans id = some loan
+      exact found
+    rw [Table.get_map_values world.loans (fun current : Loan =>
+      if current.custody = some custody ∧ current.kind = .storageBorrow then
+        { current with returnRequested := true } else current) id] at canonical
+    obtain ⟨original,selected,shape⟩ := Option.map_eq_some_iff.mp canonical
+    rw [← shape]
+    have referent : (if original.custody = some custody ∧ original.kind = .storageBorrow then
+        { original with returnRequested := true } else original).referent = original.referent := by
+      by_cases chosen : original.custody = some custody ∧ original.kind = .storageBorrow <;> simp [chosen]
+    have liveOriginal : original.live = true := by
+      by_cases chosen : original.custody = some custody ∧ original.kind = .storageBorrow <;>
+        simpa [chosen,← shape] using live
+    rw [referent]
+    exact clear.loans id original selected liveOriginal
+  · intro id available found active
+    exact clear.reservations id available found active
+  · intro other otherFound suspension
+    exact clear.home other otherFound suspension
+
+end Glorious.Language
+
 namespace Glorious.Language.Execution
 
 /-- The pending-return queue drains to the task the relinquishment scheduled.
@@ -408,7 +444,6 @@ theorem CleanupRun.cleanup_root_shell_retired {program : Kernel.Program} {host :
     (noAvailable : ∀ inner, value.head ≠ .available inner)
     (holes : ∀ index, index < value.fields.length → value.fields[index]? = some none)
     (clear : before.world.RootClear id)
-    (endable : (before.world.RequestReturns (.resident value.owner)).RootClear id)
     (handed : before.world.CustodyHandedOff (.resident value.owner))
     (written : (before.world.RequestReturns (.resident value.owner)).write ⟨id,root.generation,[]⟩ none = some cleared)
     (clearedRoot : cleared.roots.get id = some { root with value := none })
@@ -430,7 +465,7 @@ theorem CleanupRun.cleanup_root_shell_retired {program : Kernel.Program} {host :
     rw [congrArg World.roots frame.1]
     exact clearedRoot
   have safe : CanEndStorage released.world id :=
-    frame.canEndStorage (endable.of_write written).canEndStorage
+    frame.canEndStorage ((clear.of_requestReturns (custody := .resident value.owner)).of_write written).canEndStorage
   let retiredWorld : World := { released.world with
     roots := released.world.roots.set id { root with value := none, live := false, generation := root.generation + 1 } }
   have retired : Retires released.world id retiredWorld :=
