@@ -392,18 +392,22 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
         after.task = .destroyFields context address .owner rest next ∧
         after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
         (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
+        parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
+        parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources ∧
         (∀ other ∈ rest, after.world.Vacant (address.child other))) :
     ∀ (before : State) (parent : Value), before.task = .destroyFields context address .owner indices next →
       indices.Nodup → before.world.Stores address parent →
       ∃ trace after parent', CleanupRun program host before trace after ∧
         after.task = .finishShell address .owner next ∧ after.world.Stores address parent' ∧
         (∀ field ∈ indices, parent'.fields[field]? = some none) ∧
-        (∀ field, field ∉ indices → parent'.fields[field]? = parent.fields[field]?) := by
+        (∀ field, field ∉ indices → parent'.fields[field]? = parent.fields[field]?) ∧
+        parent'.owner = parent.owner ∧ parent'.head = parent.head ∧ parent'.type = parent.type ∧
+        parent'.shellLive = parent.shellLive ∧ parent'.resources = parent.resources := by
   induction indices with
   | nil =>
       intro before parent task nodup stored
       exact ⟨_,{ before with task := .finishShell address .owner next },parent,CleanupRun.fields_done task,rfl,
-        by simpa using stored,by simp,by intro field _; rfl⟩
+        by simpa using stored,by simp,by intro field _; rfl,rfl,rfl,rfl,rfl,rfl⟩
   | cons field rest ih =>
       intro before parent task nodup stored
       obtain ⟨notRest, nodupRest⟩ := List.nodup_cons.mp nodup
@@ -412,11 +416,12 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
       obtain ⟨scheduled, movedRun, schedTask, schedWorld⟩ : ∃ scheduled, CleanupRun program host before [] scheduled ∧
           scheduled.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) ∧
           scheduled.world = before.world := ⟨_,moved,rfl,rfl⟩
-      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, vacant⟩ :=
+      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, vacant⟩ :=
         step field rest scheduled (parent := parent) schedTask (by rw [schedWorld]; exact stored)
-      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched⟩ :=
+      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq⟩ :=
         ih middle middleParent running nodupRest midStored
-      refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_⟩
+      refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_,
+        ownerEq.trans midOwner,headEq.trans midHead,typeEq.trans midType,liveEq.trans midLive,resEq.trans midRes⟩
       · intro other member
         rcases List.mem_cons.mp member with same | member
         · have notMember : other ∉ rest := by rw [same]; exact notRest
