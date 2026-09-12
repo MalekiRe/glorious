@@ -2,6 +2,7 @@ import GloriousLanguage.LogicalInstantiation
 import GloriousLanguage.SubstitutionAtomModel
 import GloriousLanguage.AtomRelations
 import GloriousLanguage.AtomOpening
+import GloriousLanguage.HeadInspection
 
 /-! Positive source reductions survive lawful caller instantiation. Logical
 requirements use the proved hygienic cut; they are not smuggled into the
@@ -24,8 +25,8 @@ private theorem Instantiates.guarded_substitution_table {program : Program} {sou
     exact (List.of_mem_zip member).2
   rw [SubstitutionAtomModel.kinded_eq (typed entry.2 present) outer parameters]
 
-theorem DefinitionalReduction.map_substitute {program : Program} (valid : ProgramWellFormed program)
-    {source target : Context} {left right : Term} (reduced : DefinitionalReduction program source left right)
+theorem DefinitionalStep.map_substitute_inspected {program : Program} (valid : ProgramWellFormed program)
+    {source target : Context} {left right : Term} (stepped : DefinitionalStep program source left right)
     (sourceKinded : ∀ requirement ∈ source.assumptions, ConstraintKinded program source requirement)
     (targetKinded : ∀ requirement ∈ target.assumptions, ConstraintKinded program target requirement)
     (outer : Substitution)
@@ -35,7 +36,8 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
     (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands)
     (assumptions : ∀ requirement ∈ source.assumptions, EntailsSubstitution program target outer requirement) :
-    DefinitionalReduction program target (SubstitutionAtomModel.term outer left) (SubstitutionAtomModel.term outer right) := by
+    ∃ mapped : DefinitionalStep program target (SubstitutionAtomModel.term outer left) (SubstitutionAtomModel.term outer right),
+      ∀ level, HeadInspectionStepAt program level stepped → HeadInspectionStepAt program level mapped := by
   let map := SubstitutionAtomModel.term outer
   let mapSub := fun (substitution : Substitution) => substitution.map (fun entry => (entry.1,map entry.2))
   have shape : AtomHomomorphism map := SubstitutionAtomModel.shape outer
@@ -45,7 +47,7 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     change Kinding program target (SubstitutionAtomModel.term outer term) kind
     rw [SubstitutionAtomModel.kinded_eq typed outer parameters]
     exact typed.substitute outer parameters levels regions brands
-  refine DefinitionalReduction.rec
+  refine DefinitionalStep.rec
     (motive_1 := fun _ _ _ _ => True)
     (motive_2 := fun _ _ _ _ _ => True)
     (motive_3 := fun _ _ _ _ => True)
@@ -56,7 +58,9 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     (motive_7 := fun _ _ _ _ => True)
     (motive_8 := fun _ _ _ => True)
     (motive_9 := fun _ _ _ _ => True)
-    (motive_10 := fun context left right _ => context = source → DefinitionalStep program target (map left) (map right))
+    (motive_10 := fun context left right stepped => context = source →
+      ∃ mapped : DefinitionalStep program target (map left) (map right),
+        ∀ level, HeadInspectionStepAt program level stepped → HeadInspectionStepAt program level mapped)
     (motive_11 := fun context left right _ => context = source → DefinitionallyEqual program target (map left) (map right))
     (motive_12 := fun context left right _ => context = source → DefinitionalReduction program target (map left) (map right))
     (motive_13 := fun context implementation arguments substitution _ => context = source →
@@ -78,7 +82,7 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     ?alias ?projection ?defaultProjection
     ?refl ?symm ?trans ?congr ?step ?row
     ?refl_1 ?step_1 ?trans_1 ?congr_1 ?row_1
-    ?inferred ?domainValid ?parameter ?child ?sourceReduction ?queryConversion ?argument reduced rfl
+    ?inferred ?domainValid ?parameter ?child ?sourceReduction ?queryConversion ?argument stepped rfl
   all_goals intros
   all_goals try exact True.intro
   case selected _ _ _ _ implementation substitution declared trait negative matched requirements headIH _ sameContext =>
@@ -96,14 +100,18 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
       (predicates requirement member) instantiated typed outer parameters (Nat.zero_le _)
       (fun _ member => False.elim (List.not_mem_nil member))
       (fun _ member => False.elim (List.not_mem_nil member)) levels regions brands assumptions
-  case alias _ _ _ _ _ _ found instantiated typed graph sameContext =>
+  case alias _ _ _ arguments _ _ found instantiated typed graph sameContext =>
     cases sameContext
     rw [shape (.alias _ _)]
-    exact .alias found (instantiated.map_values map (fun term _ => mapKinds term))
-      (fun term member => by
-        obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
-        simpa only [mapKinds] using mappedKind (typed original present))
-      (graph.map_instantiated (valid.alias_body found) instantiated map shape (SubstitutionAtomModel.fixed outer _) mapKinds)
+    have targetInst := instantiated.map_values map (fun term _ => mapKinds term)
+    have targetKinds : ∀ term ∈ arguments.map map, Kinding program target term term.kind := by
+      intro term member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      simpa only [mapKinds] using mappedKind (typed original present)
+    have targetGraph := graph.map_instantiated (valid.alias_body found) instantiated map shape
+      (SubstitutionAtomModel.fixed outer _) mapKinds
+    exact ⟨.alias found targetInst targetKinds targetGraph,fun _ _ =>
+      .alias (found := found) (instantiated := targetInst) (kinded := targetKinds) (substituted := targetGraph)⟩
   case projection _ _ _ _ _ _ _ _ _ _ _ domain selected member graph domainIH selectedIH sameContext =>
     cases sameContext
     rw [shape (.projection _ _ _ _ _)]
@@ -112,19 +120,31 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     cases domain with
     | valid _ _ associatedFound _ _ itemInst _ _ _ =>
       obtain ⟨unique,_,bodyKinded⟩ := valid.override_body selected.declaration associatedFound member
-      exact .projection targetDomain (selectedIH rfl) member (by
-        simpa only [mapSub,List.map_append] using graph.map_instantiated bodyKinded
-          (instantiated.append itemInst unique) map shape (SubstitutionAtomModel.fixed outer _) mapKinds)
-  case defaultProjection _ _ _ _ _ _ _ _ _ _ _ _ domain _ absent default graph domainIH selectedIH sameContext =>
+      have targetGraph := graph.map_instantiated bodyKinded
+        (instantiated.append itemInst unique) map shape (SubstitutionAtomModel.fixed outer _) mapKinds
+      have targetSelected := selectedIH rfl
+      simp only [List.map_append] at targetGraph
+      refine ⟨.projection targetDomain targetSelected member targetGraph,?_⟩
+      intro bound certificate
+      obtain ⟨level,inspected,lower⟩ := certificate.selected_level valid rfl selected
+      exact .projection (domain := targetDomain) (selected := targetSelected)
+        (present := member) (substituted := targetGraph) inspected lower
+  case defaultProjection _ _ _ _ _ _ _ _ _ _ _ _ domain selected absent default graph domainIH selectedIH sameContext =>
     cases sameContext
     rw [shape (.projection _ _ _ _ _)]
     have targetDomain := domainIH rfl
     cases domain with
     | valid traitFound _ associatedFound owner ownerInst itemInst _ _ _ =>
       obtain ⟨unique,bodyKinded⟩ := valid.default_body traitFound associatedFound owner default
-      exact .defaultProjection targetDomain (selectedIH rfl) absent default (by
-        simpa only [mapSub,List.map_append] using graph.map_instantiated bodyKinded
-          (ownerInst.append itemInst unique) map shape (SubstitutionAtomModel.fixed outer _) mapKinds)
+      have targetGraph := graph.map_instantiated bodyKinded
+        (ownerInst.append itemInst unique) map shape (SubstitutionAtomModel.fixed outer _) mapKinds
+      have targetSelected := selectedIH rfl
+      simp only [List.map_append] at targetGraph
+      refine ⟨.defaultProjection targetDomain targetSelected absent default targetGraph,?_⟩
+      intro bound certificate
+      obtain ⟨level,inspected,lower⟩ := certificate.selected_level valid rfl selected
+      exact .defaultProjection (domain := targetDomain) (selected := targetSelected)
+        (absent := absent) (default := default) (substituted := targetGraph) inspected lower
   case refl _ _ sameContext => cases sameContext; exact .refl
   case symm _ _ _ _ ih sameContext => cases sameContext; exact .symm (ih rfl)
   case trans _ _ _ _ _ _ first second sameContext => cases sameContext; exact .trans (first rfl) (second rfl)
@@ -132,10 +152,16 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
     cases sameContext
     exact shape.congr_relation (fun _ => .refl) DefinitionallyEqual.congr same
       (ListRel.of_at same.children_length (fun index first second leftAt rightAt => children index first second leftAt rightAt rfl))
-  case step _ _ _ _ ih sameContext => cases sameContext; exact .step (ih rfl)
+  case step _ _ _ _ ih sameContext =>
+    cases sameContext
+    obtain ⟨mapped,_⟩ := ih rfl
+    exact .step mapped
   case row _ _ _ equivalent sameContext => cases sameContext; exact .row (equivalent.map_atoms map shape)
   case refl_1 _ _ sameContext => cases sameContext; exact .refl
-  case step_1 _ _ _ _ ih sameContext => cases sameContext; exact .step (ih rfl)
+  case step_1 _ _ _ _ ih sameContext =>
+    cases sameContext
+    obtain ⟨mapped,_⟩ := ih rfl
+    exact .step mapped
   case trans_1 _ _ _ _ _ _ first second sameContext => cases sameContext; exact .trans (first rfl) (second rfl)
   case congr_1 _ _ _ same _ children sameContext =>
     cases sameContext
@@ -209,6 +235,73 @@ theorem DefinitionalReduction.map_substitute {program : Program} (valid : Progra
   case argument _ _ _ _ _ _ _ _ leftAt rightAt _ ih sameContext =>
     cases sameContext
     exact .argument leftAt (by rw [List.getElem?_map,rightAt]; rfl) (ih rfl)
+
+theorem DefinitionalStep.map_substitute {program : Program} (valid : ProgramWellFormed program)
+    {source target : Context} {left right : Term} (stepped : DefinitionalStep program source left right)
+    (sourceKinded : ∀ requirement ∈ source.assumptions, ConstraintKinded program source requirement)
+    (targetKinded : ∀ requirement ∈ target.assumptions, ConstraintKinded program target requirement)
+    (outer : Substitution)
+    (parameters : ∀ binder ∈ source.binders,
+      Kinding program target ((Term.parameter binder.id binder.kind).substitute outer) binder.kind)
+    (levels : source.universeLevel ≤ target.universeLevel)
+    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
+    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands)
+    (assumptions : ∀ requirement ∈ source.assumptions, EntailsSubstitution program target outer requirement) :
+    DefinitionalStep program target (SubstitutionAtomModel.term outer left) (SubstitutionAtomModel.term outer right) := by
+  obtain ⟨mapped,_⟩ := stepped.map_substitute_inspected valid sourceKinded targetKinded outer parameters levels regions brands assumptions
+  exact mapped
+
+/-- Positive closure delegates every genuine root step to the single
+selection-and-predicate transport above. -/
+theorem DefinitionalReduction.map_substitute {program : Program} (valid : ProgramWellFormed program)
+    {source target : Context} {left right : Term} (reduced : DefinitionalReduction program source left right)
+    (sourceKinded : ∀ requirement ∈ source.assumptions, ConstraintKinded program source requirement)
+    (targetKinded : ∀ requirement ∈ target.assumptions, ConstraintKinded program target requirement)
+    (outer : Substitution)
+    (parameters : ∀ binder ∈ source.binders,
+      Kinding program target ((Term.parameter binder.id binder.kind).substitute outer) binder.kind)
+    (levels : source.universeLevel ≤ target.universeLevel)
+    (regions : ∀ id ∈ source.scope.regions, id ∈ target.scope.regions)
+    (brands : ∀ id ∈ source.scope.brands, id ∈ target.scope.brands)
+    (assumptions : ∀ requirement ∈ source.assumptions, EntailsSubstitution program target outer requirement) :
+    DefinitionalReduction program target (SubstitutionAtomModel.term outer left) (SubstitutionAtomModel.term outer right) := by
+  let map := SubstitutionAtomModel.term outer
+  have shape : AtomHomomorphism map := SubstitutionAtomModel.shape outer
+  have transported : source = source → DefinitionalReduction program target (map left) (map right) := by
+    apply DefinitionalReduction.rec
+      (motive_1 := fun _ _ _ _ => True)
+      (motive_2 := fun _ _ _ _ _ => True)
+      (motive_3 := fun _ _ _ _ => True)
+      (motive_4 := fun _ _ _ _ _ _ _ => True)
+      (motive_5 := fun _ _ _ _ => True)
+      (motive_6 := fun _ _ _ _ => True)
+      (motive_7 := fun _ _ _ _ => True)
+      (motive_8 := fun _ _ _ => True)
+      (motive_9 := fun _ _ _ _ => True)
+      (motive_10 := fun _ _ _ _ => True)
+      (motive_11 := fun _ _ _ _ => True)
+      (motive_12 := fun context left right _ => context = source → DefinitionalReduction program target (map left) (map right))
+      (motive_13 := fun _ _ _ _ _ => True)
+      (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+      (motive_15 := fun _ _ _ _ _ _ _ => True)
+      (motive_16 := fun _ _ _ _ _ _ => True)
+      <;> try assumption
+    all_goals intros
+    all_goals try exact True.intro
+    case refl _ _ sameContext => cases sameContext; exact .refl
+    case step _ _ _ stepped _ sameContext =>
+      cases sameContext
+      exact .step (stepped.map_substitute valid sourceKinded targetKinded outer parameters levels regions brands assumptions)
+    case trans _ _ _ _ _ _ first second sameContext =>
+      cases sameContext
+      exact .trans (first rfl) (second rfl)
+    case congrChildren _ _ _ same _ children sameContext =>
+      cases sameContext
+      exact shape.congr_relation (fun _ => .refl) DefinitionalReduction.congr same
+        (ListRel.of_at same.children_length (fun index first second leftAt rightAt =>
+          children index first second leftAt rightAt rfl))
+    case row _ _ _ equivalent sameContext => cases sameContext; exact .row (equivalent.map_atoms map shape)
+  exact transported rfl
 
 /-- The proof-model map agrees with actual simultaneous substitution on
 both endpoints of every admitted positive source reduction. -/

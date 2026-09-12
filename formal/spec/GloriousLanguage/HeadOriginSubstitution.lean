@@ -1,5 +1,5 @@
 import GloriousLanguage.DefinitionalSubstitution
-import GloriousLanguage.HeadInferenceConstruction
+import GloriousLanguage.HeadInspectionInstantiation
 
 /-! Admitted finite source origins construct actual caller matching evidence
 under arbitrary lawful instantiation, including source aliases and associated
@@ -82,9 +82,9 @@ theorem InfersHeadArgument.map_substitute {program : Program} (valid : ProgramWe
     exact .argument sourceAt (by rw [List.getElem?_map,queryAt]; rfl)
       (origin.map_substitute valid sourceKinded targetKinded outer parameters levels regions brands assumptions)
 
-/-- Every source-admitted determining origin is instantiated in the caller.
-No second origin search and no completeness hypothesis for source expansion
-is requested: the actual admission proof supplies the finite derivation. -/
+/-- Every source-admitted determining origin is instantiated in the caller
+through paired positive inspection. No second origin search or completeness
+hypothesis is requested: actual admission supplies the finite source proof. -/
 theorem ProgramWellFormed.implementation_instantiated_origins {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {implementation : ImplDefinition} {values : List Term} {substitution : Substitution}
     (declared : Definition.implementation implementation ∈ program.declarations)
@@ -94,26 +94,8 @@ theorem ProgramWellFormed.implementation_instantiated_origins {program : Program
     (requirements : ∀ requirement ∈ implementation.requirements,
       EntailsSubstitution program context substitution requirement) :
     ∀ (index : Nat) binder value, implementation.generics[index]? = some binder → values[index]? = some value →
-      InfersHeadArgument program context implementation (implementation.arguments.map (Term.substitute substitution)) binder value := by
-  obtain ⟨_,_,_,_,_,_,_,signature,_⟩ := (valid.2.2.2.2.1 _ declared).2.1
-  obtain ⟨_,_,_,_,headKinded,_,_⟩ := signature
-  have parameters := instantiated.kinding_parameters valuesKinded
-  have argumentsEqual : implementation.arguments.map (SubstitutionAtomModel.term substitution) =
-      implementation.arguments.map (Term.substitute substitution) := by
-    apply List.map_congr_left
-    intro term present
-    exact SubstitutionAtomModel.kinded_eq (headKinded term present).1 substitution parameters
-  intro index binder value binderAt valueAt
-  have member := List.mem_of_getElem? binderAt
-  have origin := (valid.implementation_head_determined declared binder member).map_substitute valid
-    (valid.implementation_requirements declared) contextKinded substitution parameters (Nat.zero_le _)
-    (fun _ absent => False.elim (List.not_mem_nil absent))
-    (fun _ absent => False.elim (List.not_mem_nil absent)) requirements
-  have parameterKinded : Kinding program implementation.context (.parameter binder.id binder.kind) binder.kind :=
-    .parameter member
-  rw [argumentsEqual,SubstitutionAtomModel.kinded_eq parameterKinded substitution parameters,
-    Term.substitute,instantiated.binder_lookup_at binderAt valueAt] at origin
-  exact origin
+      InfersHeadArgument program context implementation (implementation.arguments.map (Term.substitute substitution)) binder value :=
+  valid.implementation_inspected_origins declared contextKinded instantiated valuesKinded requirements
 
 /-- Matching the actual instantiated head of any admitted implementation is
 constructible, including heads whose determining positions need source

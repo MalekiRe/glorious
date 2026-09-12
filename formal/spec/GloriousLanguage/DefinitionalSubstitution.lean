@@ -54,8 +54,8 @@ theorem DefinitionallyEqual.map_substitute {program : Program} (valid : ProgramW
           children index first second leftAt rightAt rfl))
     case step _ _ _ stepped _ sameContext =>
       cases sameContext
-      exact ((DefinitionalReduction.step stepped).map_substitute valid sourceKinded targetKinded
-        outer parameters levels regions brands assumptions).equal
+      exact .step (stepped.map_substitute valid sourceKinded targetKinded
+        outer parameters levels regions brands assumptions)
     case row _ _ _ equivalent sameContext =>
       cases sameContext
       exact .row (equivalent.map_atoms map shape)
