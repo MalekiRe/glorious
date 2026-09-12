@@ -120,6 +120,18 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
+/-- The shell write of the destructor is a conclusion, not an input: a stored
+shell is still located after its custody's pending returns have been restamped
+(the restamp rewrites the loan table only), so the clear at that address exists. -/
+theorem World.Stores.requestReturns_write_exists {world : World} {address : Address} {value : Value}
+    (stored : world.Stores address value) (custody : ClaimCustody) :
+    ∃ after, (world.RequestReturns custody).write address none = some after := by
+  have shifted : (world.RequestReturns custody).Stores address value := by
+    show (world.RequestReturns custody).read address = some value
+    rw [show (world.RequestReturns custody).read address = world.read address from rfl]
+    exact stored
+  exact shifted.write_exists none
+
 /-! ## Real destructor outcomes -/
 
 theorem CleanupRun.destroy_vacant {program : Kernel.Program} {host : Foreign.Model}
@@ -218,6 +230,21 @@ theorem CleanupRun.shell_done {program : Kernel.Program} {host : Foreign.Model}
     CleanupRun program host before [.destroy address value.owner] ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) :=
   .visible (by simp [Task.Cleanup,task])
     (Or.inl (LocalStep.shellDone task stored cleared permission (.relinquish handed) written)) .refl
+
+/-- The shell outcome with its write derived rather than supplied: the clear at
+the shell's own address exists because the shell is still stored after the
+custody's pending returns have been restamped. -/
+theorem CleanupRun.shell_done_exists {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {address : Address} {authority : Authority} {next : Task} {value : Value}
+    (task : before.task = .finishShell address authority next)
+    (stored : before.world.Stores address value)
+    (cleared : ∀ field ∈ value.fields, field = none)
+    (permission : Permitted before.world authority .owned address)
+    (handed : before.world.CustodyHandedOff (.resident value.owner)) :
+    ∃ after, CleanupRun program host before [.destroy address value.owner]
+      ({ before with world := after, task := ReleaseCustodyLoans after (.resident value.owner) next }) := by
+  obtain ⟨after,written⟩ := World.Stores.requestReturns_write_exists stored (.resident value.owner)
+  exact ⟨after,CleanupRun.shell_done task stored cleared permission handed written⟩
 
 /-! ## Real loan-ending outcomes -/
 
