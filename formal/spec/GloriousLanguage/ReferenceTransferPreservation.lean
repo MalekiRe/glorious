@@ -53,23 +53,44 @@ theorem Permitted.locationExtension {before after : World} {authority : Authorit
       obtain ⟨loan,selected,guard⟩ := permission.2.2
       exact ⟨⟨changed,found⟩,ih permission.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
 
-theorem Authority.guardLoans_same_loans {before after : World} (loans : after.loans = before.loans)
+/-- Only the inherited guard list is observed while forming authority views.
+An unrelated new loan with no guards preserves this observation even though
+the complete loan tables differ. -/
+def World.GuardsFramed (before after : World) : Prop :=
+  ∀ identity, ((after.loans.get identity).map Loan.guards).getD [] =
+    ((before.loans.get identity).map Loan.guards).getD []
+
+theorem Authority.guardLoans_framed {before after : World} (guards : before.GuardsFramed after)
     (authority : Authority) : authority.guardLoans after = authority.guardLoans before := by
   induction authority with
   | owner => rfl
-  | loan identity => simp only [Authority.guardLoans,loans]
+  | loan identity => exact guards identity
   | shared backing ih => exact ih
-  | guarded backing carrier ih => simp only [Authority.guardLoans,loans,ih]
+  | guarded backing carrier ih => simp only [Authority.guardLoans,guards carrier,ih]
+
+theorem Authority.referenceView_framed {before after : World} (guards : before.GuardsFramed after)
+    (authority : Authority) (identity : Identity) (access : Access) :
+    authority.referenceView after identity access = authority.referenceView before identity access := by
+  simp only [Authority.referenceView,Authority.throughReference,Authority.guardLoans_framed guards]
+
+theorem Authority.resourceView_framed {before after : World} (guards : before.GuardsFramed after)
+    (authority : Authority) (binding : StorageBinding) (access : Access) :
+    authority.resourceView after binding access = authority.resourceView before binding access := by
+  simp only [Authority.resourceView,Authority.guardLoans_framed guards]
+
+theorem Authority.guardLoans_same_loans {before after : World} (loans : after.loans = before.loans)
+    (authority : Authority) : authority.guardLoans after = authority.guardLoans before :=
+  authority.guardLoans_framed (by intro identity; simp only [loans])
 
 theorem Authority.referenceView_same_loans {before after : World} (loans : after.loans = before.loans)
     (authority : Authority) (identity : Identity) (access : Access) :
-    authority.referenceView after identity access = authority.referenceView before identity access := by
-  simp only [Authority.referenceView,Authority.throughReference,Authority.guardLoans_same_loans loans]
+    authority.referenceView after identity access = authority.referenceView before identity access :=
+  authority.referenceView_framed (by intro identity; simp only [loans]) identity access
 
 theorem Authority.resourceView_same_loans {before after : World} (loans : after.loans = before.loans)
     (authority : Authority) (binding : StorageBinding) (access : Access) :
-    authority.resourceView after binding access = authority.resourceView before binding access := by
-  simp only [Authority.resourceView,Authority.guardLoans_same_loans loans]
+    authority.resourceView after binding access = authority.resourceView before binding access :=
+  authority.resourceView_framed (by intro identity; simp only [loans]) binding access
 
 theorem Value.ReachableResident.nested {world : World} {value carrier resident : Value}
     {authority current : Authority} {incoming access : Access} {path : List Nat}
@@ -122,11 +143,37 @@ theorem Value.SupportFramed.reachable {before after : World} {value resident : V
     resident.SupportFramed before after :=
   fun address supported => framed address (supported.reachable reachable)
 
-/-- Both directions use the same pre-state support. Backward traversal first
-recovers the actual prior node before consulting its framed outgoing edge. -/
-theorem Value.ReachableResident.frame {before after : World} {value resident : Value}
+/-- Framing consults exactly the reference identities observed by the actual
+pre-state graph. This includes absence; it never manufactures a new edge. -/
+def Value.ReferenceRowsFramed (before after : World) (value : Value) : Prop :=
+  ∀ identity current access, value.ReachableReference before .owner .shared identity current access →
+    after.loans.get identity = before.loans.get identity
+
+theorem Value.ReferenceRowsFramed.lookup {before after : World} {value : Value}
+    {authority current : Authority} {incoming access : Access} {identity : Identity}
+    (rows : value.ReferenceRowsFramed before after)
+    (reached : value.ReachableReference before authority incoming identity current access) :
+    after.loans.get identity = before.loans.get identity := by
+  obtain ⟨current,access,reached⟩ := reached.rebase .owner .shared
+  exact rows identity current access reached
+
+theorem Value.ReferenceRowsFramed.reachable {before after : World} {value resident : Value}
     {authority current : Authority} {incoming access : Access}
-    (loans : after.loans = before.loans) (framed : value.SupportFramed before after) :
+    (rows : value.ReferenceRowsFramed before after)
+    (reached : value.ReachableResident before authority incoming resident current access) :
+    resident.ReferenceRowsFramed before after := by
+  intro identity next requested reference
+  obtain ⟨base,access,prior⟩ := reached.rebase .owner .shared
+  obtain ⟨final,access,carrier,nested,head⟩ := reference.rebase base access
+  exact rows identity final access ⟨carrier,prior.trans nested,head⟩
+
+/-- Both directions use the same pre-state support and observed rows.
+Backward traversal recovers the prior node before consulting its outgoing
+edge. The unchanged-loan-table case below is only a wrapper around this walk. -/
+theorem Value.ReachableResident.frame_observed {before after : World} {value resident : Value}
+    {authority current : Authority} {incoming access : Access}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after) :
     value.ReachableResident before authority incoming resident current access ↔
       value.ReachableResident after authority incoming resident current access := by
   constructor
@@ -136,47 +183,77 @@ theorem Value.ReachableResident.frame {before after : World} {value resident : V
     | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
         have preserved := (framed loan.referent (Value.Support.reference ⟨carrier,prior,reference⟩ found)).1
         have nextStored : after.Stores loan.referent target := preserved.trans stored
-        simpa only [Authority.referenceView_same_loans loans] using
-          Value.ReachableResident.referent ih reference (by simpa only [loans] using found) nextStored located
+        have nextFound := (rows.lookup ⟨carrier,prior,reference⟩).trans found
+        simpa only [Authority.referenceView_framed guards] using
+          Value.ReachableResident.referent ih reference nextFound nextStored located
     | resource prior member stored located ih =>
         have preserved := (framed _ (Value.Support.resource prior member)).1
-        simpa only [Authority.resourceView_same_loans loans] using
+        simpa only [Authority.resourceView_framed guards] using
           Value.ReachableResident.resource ih member (preserved.trans stored) located
   · intro reached
     induction reached with
     | resident located => exact .resident located
     | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
-        have oldFound : before.loans.get parent = some loan := by simpa only [loans] using found
+        have oldFound := (rows.lookup ⟨carrier,ih,reference⟩).symm.trans found
         have preserved := (framed loan.referent (Value.Support.reference ⟨carrier,ih,reference⟩ oldFound)).1
         have oldStored : before.Stores loan.referent target := preserved.symm.trans stored
-        simpa only [Authority.referenceView_same_loans loans] using
+        simpa only [Authority.referenceView_framed guards] using
           Value.ReachableResident.referent ih reference oldFound oldStored located
     | resource _ member stored located ih =>
         have preserved := (framed _ (Value.Support.resource ih member)).1
-        simpa only [Authority.resourceView_same_loans loans] using
+        simpa only [Authority.resourceView_framed guards] using
           Value.ReachableResident.resource ih member (preserved.symm.trans stored) located
+
+theorem Value.ReachableResident.frame {before after : World} {value resident : Value}
+    {authority current : Authority} {incoming access : Access}
+    (loans : after.loans = before.loans) (framed : value.SupportFramed before after) :
+    value.ReachableResident before authority incoming resident current access ↔
+      value.ReachableResident after authority incoming resident current access :=
+  Value.ReachableResident.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed
+
+theorem Value.ReachableReference.frame_observed {before after : World} {value : Value}
+    {authority current : Authority} {incoming access : Access} {identity : Identity}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after) :
+    value.ReachableReference before authority incoming identity current access ↔
+      value.ReachableReference after authority incoming identity current access := by
+  constructor
+  · rintro ⟨resident,reached,reference⟩
+    exact ⟨resident,(Value.ReachableResident.frame_observed rows guards framed).mp reached,reference⟩
+  · rintro ⟨resident,reached,reference⟩
+    exact ⟨resident,(Value.ReachableResident.frame_observed rows guards framed).mpr reached,reference⟩
 
 theorem Value.ReachableReference.frame {before after : World} {value : Value}
     {authority current : Authority} {incoming access : Access} {identity : Identity}
     (loans : after.loans = before.loans) (framed : value.SupportFramed before after) :
     value.ReachableReference before authority incoming identity current access ↔
-      value.ReachableReference after authority incoming identity current access := by
-  constructor
-  · rintro ⟨resident,reached,reference⟩
-    exact ⟨resident,(Value.ReachableResident.frame loans framed).mp reached,reference⟩
-  · rintro ⟨resident,reached,reference⟩
-    exact ⟨resident,(Value.ReachableResident.frame loans framed).mpr reached,reference⟩
+      value.ReachableReference after authority incoming identity current access :=
+  Value.ReachableReference.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed
 
-theorem Value.Support.frame {before after : World} {value : Value} {address : Address}
-    (loans : after.loans = before.loans) (framed : value.SupportFramed before after) :
+theorem Value.Support.frame_observed {before after : World} {value : Value} {address : Address}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after) :
     value.Support before address ↔ value.Support after address := by
   constructor
   · rintro ⟨resident,authority,access,reached,edge⟩
-    exact ⟨resident,authority,access,(Value.ReachableResident.frame loans framed).mp reached,
-      by simpa only [loans] using edge⟩
+    refine ⟨resident,authority,access,(Value.ReachableResident.frame_observed rows guards framed).mp reached,?_⟩
+    rcases edge with ⟨identity,loan,head,found,equal⟩ | resource
+    · exact Or.inl ⟨identity,loan,head,(rows.lookup ⟨resident,reached,head⟩).trans found,equal⟩
+    · exact Or.inr resource
   · rintro ⟨resident,authority,access,reached,edge⟩
-    exact ⟨resident,authority,access,(Value.ReachableResident.frame loans framed).mpr reached,
-      by simpa only [loans] using edge⟩
+    have prior := (Value.ReachableResident.frame_observed rows guards framed).mpr reached
+    refine ⟨resident,authority,access,prior,?_⟩
+    rcases edge with ⟨identity,loan,head,found,equal⟩ | resource
+    · exact Or.inl ⟨identity,loan,head,(rows.lookup ⟨resident,prior,head⟩).symm.trans found,equal⟩
+    · exact Or.inr resource
+
+theorem Value.Support.frame {before after : World} {value : Value} {address : Address}
+    (loans : after.loans = before.loans) (framed : value.SupportFramed before after) :
+    value.Support before address ↔ value.Support after address :=
+  Value.Support.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed
 
 theorem Authority.Custodied.same_loans {before after : World} {authority : Authority} {custody : ClaimCustody}
     (loans : after.loans = before.loans) (held : authority.Custodied before custody) :
@@ -207,14 +284,15 @@ theorem StorageBinding.HeldBy.frame {before after : World} {binding : StorageBin
   · exact Or.inl ⟨claim.frame locations loans,writable⟩
   · exact Or.inr (by simpa only [loans] using storage)
 
-theorem Value.ResourcesClosed.frame {program : RuntimeProgram} {before after : World} {value : Value}
-    (locations : before.LocationExtension after)
-    (loans : after.loans = before.loans) (framed : value.SupportFramed before after)
+theorem Value.ResourcesClosed.frame_observed {program : RuntimeProgram} {before after : World} {value : Value}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after)
+    (heldBy : ∀ binding owner, StorageBinding.HeldBy before owner binding → binding.HeldBy after owner)
     (closed : value.ResourcesClosed program before) : value.ResourcesClosed program after := by
   intro resident authority access reached
-  have prior := (Value.ReachableResident.frame loans framed).mpr reached
+  have prior := (Value.ReachableResident.frame_observed rows guards framed).mpr reached
   obtain ⟨held,declared⟩ := closed resident authority access prior
-  refine ⟨fun binding member => (held binding member).frame locations loans,?_⟩
+  refine ⟨fun binding member => heldBy binding resident.owner (held binding member),?_⟩
   unfold Value.InvariantClosed at declared ⊢
   cases type : resident.type with
   | nominal identity arguments =>
@@ -229,51 +307,98 @@ theorem Value.ResourcesClosed.frame {program : RuntimeProgram} {before after : W
           exact ⟨selected,found,owner,selected.framed before after resident (framed.reachable prior) holds⟩
   | _ => simpa only [type] using declared
 
-theorem Value.LoansRestored.frame {program : RuntimeProgram} {before after : World} {value : Value}
+theorem Value.ResourcesClosed.frame {program : RuntimeProgram} {before after : World} {value : Value}
     (locations : before.LocationExtension after)
     (loans : after.loans = before.loans) (framed : value.SupportFramed before after)
+    (closed : value.ResourcesClosed program before) : value.ResourcesClosed program after :=
+  closed.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed (fun _ _ held => held.frame locations loans)
+
+theorem Value.LoansRestored.frame_observed {program : RuntimeProgram} {before after : World} {value : Value}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after)
+    (heldBy : ∀ binding owner, StorageBinding.HeldBy before owner binding → binding.HeldBy after owner)
     (restored : value.LoansRestored program before) : value.LoansRestored program after := by
   intro identity authority access reached
-  have prior := (Value.ReachableReference.frame loans framed).mpr reached
+  have prior := (Value.ReachableReference.frame_observed rows guards framed).mpr reached
   obtain ⟨loan,found,live,⟨target,stored,initialized⟩,closed⟩ := restored identity authority access prior
   have preserved := (framed _ (Value.Support.reference prior found)).1
-  refine ⟨loan,by simpa only [loans] using found,live,⟨target,preserved.trans stored,initialized⟩,?_⟩
+  refine ⟨loan,(rows.lookup prior).trans found,live,⟨target,preserved.trans stored,initialized⟩,?_⟩
   intro referent newStored
   have oldStored : before.Stores loan.referent referent := preserved.symm.trans newStored
   have nested := Value.ReachableResident.referent_prefix prior found oldStored (.resident (.root (value := referent)))
-  exact (closed referent oldStored).frame locations loans (framed.reachable nested)
+  exact (closed referent oldStored).frame_observed (rows.reachable nested) guards (framed.reachable nested) heldBy
+
+theorem Value.LoansRestored.frame {program : RuntimeProgram} {before after : World} {value : Value}
+    (locations : before.LocationExtension after)
+    (loans : after.loans = before.loans) (framed : value.SupportFramed before after)
+    (restored : value.LoansRestored program before) : value.LoansRestored program after :=
+  restored.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed (fun _ _ held => held.frame locations loans)
+
+theorem Value.ReferencesAccessible.frame_observed {before after : World} {value : Value}
+    {authority : Authority} {incoming : Access}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after)
+    (permitted : ∀ authority access address, Permitted before authority access address → Permitted after authority access address)
+    (ready : value.ReferencesAccessible before authority incoming) : value.ReferencesAccessible after authority incoming := by
+  intro identity current access reached
+  have prior := (Value.ReachableReference.frame_observed rows guards framed).mpr reached
+  obtain ⟨loan,found,live,permission⟩ := ready identity current access prior
+  exact ⟨loan,(rows.lookup prior).trans found,live,
+    by simpa only [Authority.referenceView_framed guards] using permitted _ _ _ permission⟩
 
 theorem Value.ReferencesAccessible.frame {before after : World} {value : Value}
     {authority : Authority} {incoming : Access}
     (locations : before.LocationExtension after)
     (loans : after.loans = before.loans) (framed : value.SupportFramed before after)
-    (ready : value.ReferencesAccessible before authority incoming) : value.ReferencesAccessible after authority incoming := by
-  intro identity current access reached
-  obtain ⟨loan,found,live,permitted⟩ := ready identity current access
-    ((Value.ReachableReference.frame loans framed).mpr reached)
-  exact ⟨loan,by simpa only [loans] using found,live,
-    by simpa only [Authority.referenceView_same_loans loans] using permitted.locationExtension locations loans⟩
+    (ready : value.ReferencesAccessible before authority incoming) : value.ReferencesAccessible after authority incoming :=
+  ready.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed (fun _ _ _ permission => permission.locationExtension locations loans)
+
+theorem Value.ResourcesAccessible.frame_observed {program : RuntimeProgram} {before after : World}
+    {value : Value} {access : Access}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after)
+    (heldBy : ∀ binding owner, StorageBinding.HeldBy before owner binding → binding.HeldBy after owner)
+    (permitted : ∀ authority access address, Permitted before authority access address → Permitted after authority access address)
+    (ready : value.ResourcesAccessible program before access) : value.ResourcesAccessible program after access := by
+  refine ⟨ready.1.frame_observed rows guards framed heldBy,ready.2.1.frame_observed rows guards framed heldBy,
+    ready.references.frame_observed rows guards framed permitted,?_⟩
+  intro resident authority incoming reached binding member
+  have permission := ready.2.2.2 resident authority incoming
+    ((Value.ReachableResident.frame_observed rows guards framed).mpr reached) binding member
+  simpa only [Authority.resourceView_framed guards] using permitted _ _ _ permission
 
 theorem Value.ResourcesAccessible.frame {program : RuntimeProgram} {before after : World} {value : Value} {access : Access}
     (locations : before.LocationExtension after)
     (loans : after.loans = before.loans) (framed : value.SupportFramed before after)
-    (ready : value.ResourcesAccessible program before access) : value.ResourcesAccessible program after access := by
-  refine ⟨ready.1.frame locations loans framed,ready.2.1.frame locations loans framed,
-    ready.references.frame locations loans framed,?_⟩
-  intro resident authority incoming reached binding member
-  have permitted := ready.2.2.2 resident authority incoming
-    ((Value.ReachableResident.frame loans framed).mpr reached) binding member
-  simpa only [Authority.resourceView_same_loans loans] using permitted.locationExtension locations loans
+    (ready : value.ResourcesAccessible program before access) : value.ResourcesAccessible program after access :=
+  ready.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed (fun _ _ held => held.frame locations loans)
+    (fun _ _ _ permission => permission.locationExtension locations loans)
+
+theorem Value.HandoffReady.frame_observed {program : RuntimeProgram} {before after : World}
+    {value : Value} {access : Access} {footprint : List Address}
+    (rows : value.ReferenceRowsFramed before after) (guards : before.GuardsFramed after)
+    (framed : value.SupportFramed before after)
+    (heldBy : ∀ binding owner, StorageBinding.HeldBy before owner binding → binding.HeldBy after owner)
+    (permitted : ∀ authority access address, Permitted before authority access address → Permitted after authority access address)
+    (ready : value.HandoffReady program before access footprint) :
+    value.HandoffReady program after access footprint := by
+  refine ⟨ready.1.frame_observed rows guards framed heldBy permitted,?_⟩
+  intro source member observed supported
+  exact ready.2 source member observed ((Value.Support.frame_observed rows guards framed).mpr supported)
 
 theorem Value.HandoffReady.frame {program : RuntimeProgram} {before after : World}
     {value : Value} {access : Access} {footprint : List Address}
     (locations : before.LocationExtension after) (loans : after.loans = before.loans)
     (framed : value.SupportFramed before after)
     (ready : value.HandoffReady program before access footprint) :
-    value.HandoffReady program after access footprint := by
-  refine ⟨ready.1.frame locations loans framed,?_⟩
-  intro source member observed supported
-  exact ready.2 source member observed ((Value.Support.frame loans framed).mpr supported)
+    value.HandoffReady program after access footprint :=
+  ready.frame_observed (by intro identity current access reached; rw [loans])
+    (by intro identity; rw [loans]) framed (fun _ _ held => held.frame locations loans)
+    (fun _ _ _ permission => permission.locationExtension locations loans)
 
 theorem Transfers.moveReady {program : RuntimeProgram} {before after : World}
     {authority : Authority} {source destination : Address} {value : Value}

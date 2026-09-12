@@ -108,11 +108,23 @@ structural array typing cannot justify silently discarding raw bindings.
 Reallocation's common success/fault source admission also records the positive
 old-region root/loan/availability/binding-pack facts needed by actual teardown.
 
+The strict 195-job `BufferReallocationProgress`, `SemanticPreservation`,
+`SnapshotReplayPreservation` and `OperationExecution` gate passed on the
+integrated source. The constructive raw-growth chain consumes admission through actual
+fresh allocation, disjoint snapshot/clear/install, owning-claim discharge,
+storage retirement and region end. `BufferReallocationRequest.progress` and
+the actual `PrimitiveStep`/`Step.reallocate_typed_progress` conclude a typed
+pointer result or unchanged-world physical exhaustion of the same positive
+request. They assume no completed move/release or typed after-world. The
+common resident-graph frame now observes actual reference rows instead of
+requiring the entire loan table to be unchanged; the actual fresh allocator
+derives its preservation premises. Source admission synthesis is still open.
+
 This is not whole-language soundness. Private, complete control-lifetime and
 foreign-runtime consumers still need the changed raw/failure constructors.
 General input/pre-entry progress needs a mode-aware pending-loan/custody
 interference contract; independent initial input permissions are insufficient.
-Reallocation construction, label and other allocation sites, physical replay,
+Label and other allocation sites, remaining raw primitive progress, physical replay,
 cancellation execution and task/frame preservation/progress remain open.
 Storage preservation and source-conditional replay admission do not prove
 those obligations or replace the unfinished source resource-soundness theorem.

@@ -18,6 +18,7 @@ import GloriousLanguage.StorageConstruction
 import GloriousLanguage.BufferAllocationPreservation
 import GloriousLanguage.BulkMovePreservation
 import GloriousLanguage.BufferAllocationProgress
+import GloriousLanguage.BufferReallocationProgress
 import GloriousLanguage.PointerStorageConstruction
 import GloriousLanguage.AllocationExecution
 import GloriousLanguage.OperationPayloadPreparation

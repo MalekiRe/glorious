@@ -161,10 +161,13 @@ or a dependency of this project.
   layouts, provenance, machine leaves, explicit host models and target
   admission requirements.
 - `BufferAllocationPreservation`, `BufferAllocationProgress`,
-  `PointerStorageConstruction`: the actual raw allocator establishes its fresh
-  owning loan and typed vacant shell. Positive physical requests produce an
-  installed typed pointer or an unchanged-world resource fault. Reallocation
-  construction/progress remains open.
+  `BufferReallocationProgress`, `PointerStorageConstruction`: the actual raw
+  allocator establishes its fresh owning loan and typed vacant shell. Positive
+  requests construct allocation or the complete old-slot move and old-region
+  release, followed by a typed pointer, or an unchanged-world resource fault.
+  Reallocation consumes the same positive source admission on both outcomes;
+  no successful move, release or typed post-world is assumed. Source admission
+  synthesis and progress for the other raw primitives remain open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure;

@@ -42,9 +42,17 @@ source cancellation permission is not manufactured by copying. The actual raw
 release/source boundary now discharges retained shell resources and old-region
 lifetime facts before its eventual teardown.
 
+Constructive raw-buffer growth now carries those prerequisites through actual
+fresh allocation, evaluated slot movement, claim discharge, retirement and
+region closure, then into `PrimitiveStep`/`Step.reallocate_typed_progress`.
+The result is a typed pointer or physical exhaustion of the same positive
+request, without successful-move/release or post-world typing assumptions.
+The fresh allocator consumes the generalized actual reference-row frame;
+the existing unchanged-table consumers remain wrappers around that proof.
+
 The immediate dependency chain remains general ordinary input/pre-entry
-progress, source-admitted copy construction, physical replay and constructive
-raw reallocation/release. Input batch readiness must retain permissions and
+progress, source-admitted copy construction, physical replay and progress for
+the remaining raw primitives. Input batch readiness must retain permissions and
 custody under each earlier real loan creation or transfer, allowing compatible
 shared views while excluding genuine mode/guard/custody interference. It must
 not assume every pending post-state is ready or that allocation succeeds.
