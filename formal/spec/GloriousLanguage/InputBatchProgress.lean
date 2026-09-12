@@ -3837,4 +3837,92 @@ theorem Kernel.Authority.carriers_lt {world : World} (valid : world.WellFormed)
         exact World.loanBounds valid found
       · exact ih recorded.1 carrier' later
 
+
+/-- The ordered fold also returns the receiver shell and its owner permission
+for the world it stopped at: the receiver framing is threaded through the
+induction with the per-step premises (address apartness, frontier bound and the
+authority-data facts) carried alongside. -/
+theorem Kernel.BatchPrepared.attemptFor_framed {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address}
+    {receiver : Address} {receiverAuthority : Authority} {receiverHead : ValueHead} :
+    ∀ (world : World) (pending : List InvocationInput) (outputs : List (Binding × InvocationInput)),
+      world.WellFormed →
+      BatchPrepared program footprint region world pending outputs →
+      receiverAuthority.Recorded world.loans →
+      (∀ input ∈ pending, ¬ input.storage.Overlaps receiver) →
+      receiver.root < world.nextRoot →
+      ReceiverFramed world receiver receiverAuthority receiverHead →
+      (∀ input ∈ pending,
+        (∀ identity, receiverAuthority.parentLoan = some identity →
+          identity ∉ input.authority.guardLoans world) ∧
+        (∀ carrier, carrier ∈ Kernel.authorityCarriers receiverAuthority →
+          carrier ∉ input.authority.guardLoans world) ∧
+        (∀ carrier loan, world.loans.get carrier = some loan →
+          carrier ∈ Kernel.authorityCarriers receiverAuthority →
+          ¬ loan.referent.Overlaps input.storage)) →
+      ∃ environment after outcome,
+        BindsInputsAttemptFor program recipient activation scope region footprint world pending
+          environment after outcome ∧
+        (∀ place ∈ outputs, OutputFramed program after place.2 place.1) ∧
+        ReceiverFramed after receiver receiverAuthority receiverHead := by
+  intro world pending
+  induction pending generalizing world with
+  | nil =>
+      intro outputs valid prepared recorded apart frontier shell guardData
+      exact ⟨[],world,.complete,.nil,prepared.outputs,shell⟩
+  | cons input rest ih =>
+      intro outputs valid prepared recorded apart frontier shell guardData
+      have headReady : input.Ready program world := prepared.ready.member List.mem_cons_self
+      rcases BindsInputAt.success_or_exhausted valid headReady
+        (prepared.requests input List.mem_cons_self) with ⟨binding,middle,bound⟩ | exhausted
+      · have middleValid : middle.WellFormed :=
+          BindsInputAt.wellFormed (recipient := recipient) (activation := activation)
+            (scope := scope) bound valid
+        have frame : StepFrame world middle := BindsInputAt.stepFrame valid bound
+        have middleRecorded : receiverAuthority.Recorded middle.loans :=
+          recorded.transport (fun id loan found =>
+            let ⟨current,selected,_⟩ := BindsInputAt.loan_retained valid bound found
+            ⟨current,selected⟩)
+        have headGuard := guardData input List.mem_cons_self
+        have middleShell : ReceiverFramed middle receiver receiverAuthority receiverHead :=
+          Kernel.ReceiverFramed.step valid bound (apart input List.mem_cons_self) frontier
+            headGuard.1 headGuard.2.1 headGuard.2.2 shell
+        have middleApart : ∀ other ∈ rest, ¬ other.storage.Overlaps receiver :=
+          fun other member => apart other (List.mem_cons_of_mem input member)
+        have middleGuard : ∀ other ∈ rest,
+            (∀ identity, receiverAuthority.parentLoan = some identity →
+              identity ∉ other.authority.guardLoans middle) ∧
+            (∀ carrier, carrier ∈ Kernel.authorityCarriers receiverAuthority →
+              carrier ∉ other.authority.guardLoans middle) ∧
+            (∀ carrier loan, middle.loans.get carrier = some loan →
+              carrier ∈ Kernel.authorityCarriers receiverAuthority →
+              ¬ loan.referent.Overlaps other.storage) := by
+          intro other member
+          have otherFact := prepared.facts other (List.mem_cons_of_mem input member)
+          have guardEq := StepFrame.guards valid frame otherFact.1
+          have old := guardData other (List.mem_cons_of_mem input member)
+          refine ⟨?_,?_,?_⟩
+          · intro identity same
+            rw [guardEq]
+            exact old.1 identity same
+          · intro carrier member'
+            rw [guardEq]
+            exact old.2.1 carrier member'
+          · intro carrier loan found member'
+            have freshNe : carrier ≠ world.nextLoan :=
+              fun same =>
+                Nat.ne_of_lt (Authority.carriers_lt valid recorded carrier member') same
+            obtain ⟨source,sourceFound,shape⟩ := StepFrame.row_of_middle_ne frame freshNe found
+            have referentEq := (Loan.permissionState_eq_iff.mp shape).2.2.1
+            have apartSource := old.2.2 carrier source sourceFound member'
+            rw [← referentEq]
+            exact apartSource
+        obtain ⟨environment,after,outcome,attempt,framed,shellAfter⟩ :=
+          ih middle (⟨binding,input⟩ :: outputs) middleValid (prepared.step valid middleValid bound)
+            middleRecorded middleApart (Nat.lt_of_lt_of_le frontier (BindsInputAt.nextRoot_le bound))
+            middleShell middleGuard
+        exact ⟨binding :: environment,after,outcome,.cons prepared.ready bound attempt,
+          (fun place member => framed place (List.mem_cons_of_mem _ member)),shellAfter⟩
+      · exact ⟨[],world,.exhausted,.exhausted prepared.ready exhausted,prepared.outputs,shell⟩
+
 end Kernel
