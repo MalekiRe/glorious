@@ -3684,6 +3684,74 @@ theorem Kernel.LendsResident.stores {program : RuntimeProgram} {activation scope
       exact Kernel.FormsLoan.stores_other formed allocStored
         (World.not_overlaps_of_root_ne (by rw [freshRoot]; exact different))
 
+/-- The fold's per-step obligation for the receiver's captured shell, in the
+disjunctive form the rules actually have: every binding leaves the receiver
+storing its shell unchanged, except the owned binding of the capture at that
+slot, whose own transfer produces the hole and preserves everything else. This
+is the step that carries the cleared-slot set through the batch. -/
+theorem Kernel.BindsInputAt.shell_step {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before : World} {input : InvocationInput}
+    {binding : Binding} {after : World}
+    (step : BindsInputAt program recipient activation scope region before input binding after)
+    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
+    (storageIs : input.storage = receiver.child index)
+    (stored : before.Stores receiver shell)
+    (freshApart : before.nextRoot ≠ receiver.root) :
+    ∃ changed, after.Stores receiver changed ∧
+      (changed = shell ∨ (changed.head = shell.head ∧ changed.owner = shell.owner ∧
+        changed.type = shell.type ∧ changed.shellLive = shell.shellLive ∧
+        changed.resources = shell.resources ∧ changed.fields[index]? = some none ∧
+        ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]?)) := by
+  cases step with
+  | lent _ _ _ _ _ _ _ lends =>
+      exact ⟨shell,Kernel.LendsResident.stores lends stored freshApart,Or.inl rfl⟩
+  | owned _ _ _ _ _ allocates transfers =>
+      have freshRoot := (Allocates.fresh_root allocates).1
+      have allocatedStored := Kernel.Allocates.stores_other allocates stored
+        (by rw [freshRoot]; exact freshApart)
+      obtain ⟨changed,stored',head',owner',type',live',resources',hole,others⟩ :=
+        Kernel.BindsInputAt.owned_slot allocates transfers whole storageIs allocatedStored freshApart
+      exact ⟨changed,stored',Or.inr ⟨head',owner',type',live',resources',hole,others⟩⟩
+  | storage _ _ _ claims =>
+      exact ⟨shell,Kernel.ClaimsStorage.stores claims stored,Or.inl rfl⟩
+  | allocation _ _ _ _ transfers =>
+      exact ⟨shell,Kernel.TransfersAllocation.stores transfers stored,Or.inl rfl⟩
+  | guardedAllocation _ _ _ _ _ claims =>
+      exact ⟨shell,Kernel.ClaimsAllocation.stores claims stored,Or.inl rfl⟩
+  | loan _ _ _ _ transfers =>
+      exact ⟨shell,Kernel.TransfersStorageLoan.stores transfers stored,Or.inl rfl⟩
+
+/-- A pending capture of an owned entry is bound by the owned rule, so its slot
+is emptied: an owned access rules out lending, and a resident formal rules out
+the storage, allocation and loan claims, leaving the rule whose own transfer
+clears the receiver's child slot. -/
+theorem Kernel.BindsInputAt.owned_capture_step {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before : World} {input : InvocationInput}
+    {binding : Binding} {after : World}
+    (step : BindsInputAt program recipient activation scope region before input binding after)
+    (ownedAccess : input.access = .owned) (resident : input.formal.IsResident)
+    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
+    (storageIs : input.storage = receiver.child index)
+    (stored : before.Stores receiver shell)
+    (frontier : receiver.root < before.nextRoot) :
+    ∃ changed, after.Stores receiver changed ∧ changed.head = shell.head ∧
+      changed.owner = shell.owner ∧ changed.type = shell.type ∧
+      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
+  cases step with
+  | lent _ notOwned _ _ _ _ _ _ => exact absurd ownedAccess notOwned
+  | owned _ _ _ _ _ allocates transfers =>
+      have freshRoot := (Allocates.fresh_root allocates).1
+      have apart : before.nextRoot ≠ receiver.root := Ne.symm (Nat.ne_of_lt frontier)
+      have allocatedStored := Kernel.Allocates.stores_other allocates stored
+        (by rw [freshRoot]; exact apart)
+      exact Kernel.BindsInputAt.owned_slot allocates transfers whole storageIs allocatedStored apart
+  | storage _ formalEq _ _ => rw [formalEq] at resident; exact resident.elim
+  | allocation _ formalEq _ _ _ => rw [formalEq] at resident; exact resident.elim
+  | guardedAllocation _ formalEq _ _ _ _ => rw [formalEq] at resident; exact resident.elim
+  | loan _ formalEq _ _ _ => rw [formalEq] at resident; exact resident.elim
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
