@@ -52,6 +52,8 @@ or a dependency of this project.
   grants, host-indexed initial admission and whole-run historical authority recording.
 - `ForeignRuntimeSupport`, `ForeignRuntimePreservation`: actual callback entries,
   retained cleanup barriers, runtime handoff coverage and whole-run runtime liveness.
+- `ExternalHomePreservation`: whole-run external/allocation-home preservation,
+  actual registration-owner origin and source cleanup/cancellation separation.
 - `PredicateInterpretation`, `PredicateScope`, `MatchEntryContextTyping`: hygienic
   predicate semantics and source-derived scope through actual selected-arm entry.
 - `ClosedDefinitionalEquality`, `HeadOriginDecomposition`: assumption-free equality

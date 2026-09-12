@@ -449,8 +449,23 @@ theorem CopiesSnapshot.suspensionExtension {program : Kernel.Program} {before af
     (origin : suspension.CaptureOrigin) (copied : CopiesSnapshot program before suspension map after) :
     before.world.SuspensionExtension after.world := by
   rw [copied.result]
-  refine ⟨Nat.le_add_left _ _,?_,?_,fun _ recorded =>
+  refine ⟨⟨Nat.le_add_left _ _,?_⟩,?_,?_,fun _ recorded =>
     recorded.transport (fun _ loan found => ⟨loan,Relocation.old_loan found⟩)⟩
+  · intro id bound
+    cases found : before.world.roots.get id with
+    | none =>
+      have bounded : id < map.rootBase := by simpa only [copied.relocation.rootBase] using bound
+      cases afterAt : (map.copyWorld before.world suspension.homes).roots.get id with
+      | none => rfl
+      | some root =>
+        rcases Relocation.root_origin well.1 afterAt with old | ⟨old,original,_,member,equal,_⟩
+        · rw [found] at old
+          cases old
+        · simp only [Relocation.root,relocateId,member,↓reduceIte] at equal
+          change id < map.rootBase at bounded
+          change id = map.rootBase+old at equal
+          exact False.elim ((Nat.not_lt_of_ge (Nat.le_add_right map.rootBase old)) (equal ▸ bounded))
+    | some root => rw [Relocation.old_root found]
   · intro id root _ _ found _
     rw [Relocation.old_root found]; rfl
   · intro id root suspensionId found home

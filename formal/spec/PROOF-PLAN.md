@@ -774,9 +774,36 @@ arbitrary runs, canonical observations, divergence prefixes and reachable states
 Active callback frames and pending return tasks therefore retain a live runtime
 through arbitrary intervening source and nested host execution. The strict
 runtime dependency gate passes (97 jobs); the migrated source-entry gate passes
-(64 jobs). General retained-registration callable storage framing against source
-mutation, cleanup and cancellation remains open; this runtime theorem does not
-establish that distinct owning source aliases cannot consume its environment.
+(64 jobs). This runtime theorem does not establish that distinct owning source
+aliases cannot consume a retained callable's environment.
+
+`ExternalHomePreservation` now carries the retained-storage ownership projection
+through arbitrary execution. The existing ordinary `SuspensionExtension`
+extends the authoritative `HomeExtension`, removing its duplicate root counter;
+all real storage producers and consumers share exact old-home preservation.
+The exceptional capture and restore cases use actual `DelimitedRoots` and the
+selected suspension's current active ownership, so historical saved metadata
+cannot rehome an unrelated exterior root. Copied replay preserves old homes
+through the actual fresh relocation.
+
+The general run theorem retains every external/allocation home across source
+code, nested host callbacks, unique lending, owning consumption and cancellation.
+Actual registry-changing producers establish that every active retained record
+has an exterior owner at introduction. Whole-run consumers distinguish exact
+initial records from later introduced records; canonical initial historical
+authority alone is not silently treated as storage evidence for an old record.
+After actual checked host handoff or normal return, every later active retained
+owner is excluded from scope cleanup, activation cleanup and active cancellation
+inventories, including the actual root list scheduled by cancellation. The strict
+combined home/control/callback-runtime dependency gate passes (108 jobs).
+
+This closes implicit source cleanup/cancellation ownership separation, not
+retained callable liveness. Exterior metadata survives explicit retirement and
+value mutation, so its presence proves neither a live root nor initialized
+callable contents. The remaining boundary is authoritative role-aware ownership
+against explicit aliases, including the ready/lent/owned-consumed lifecycle;
+requiring blanket post-state callable permission would incorrectly reject real
+unique loans and one-shot receiver consumption.
 
 The combined frozen control/ownership, retained-context, source-entry,
 predicate, runtime-equivariance and repaired-coherence dependency gate passed

@@ -12,7 +12,7 @@ theorem Mutation.suspensionExtension {program : Kernel.Program} {policy : Author
     (changed : Mutation program policy before after)
     (noSuspendedHome : ∀ home region, policy.home home region → ∀ id, home ≠ .suspended id) :
     before.SuspensionExtension after := by
-  refine ⟨changed.homeExtension.counter,?_,?_,changed.recorded⟩
+  refine ⟨changed.homeExtension,?_,?_,changed.recorded⟩
   · intro id root suspension bound found home
     exact changed.suspended_location bound found home
   · intro id root suspension found home

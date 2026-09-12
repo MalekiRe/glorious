@@ -7,8 +7,7 @@ namespace Glorious.Language
 
 open Kernel Execution Memory
 
-structure World.SuspensionExtension (before after : World) : Prop where
-  counter : before.nextRoot ≤ after.nextRoot
+structure World.SuspensionExtension (before after : World) : Prop extends before.HomeExtension after where
   retained : ∀ id root suspension, id < before.nextRoot → before.roots.get id = some root →
     root.home = .suspended suspension → (after.roots.get id).map Root.location = some root.location
   origin : ∀ id root suspension, after.roots.get id = some root → root.home = .suspended suspension →
@@ -16,13 +15,13 @@ structure World.SuspensionExtension (before after : World) : Prop where
   recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans
 
 theorem World.SuspensionExtension.refl (world : World) : world.SuspensionExtension world :=
-  ⟨Nat.le_refl _,fun _ _ _ _ found _ => by rw [found]; rfl,fun _ root _ found _ => ⟨root,found,rfl⟩,
+  ⟨.refl _,fun _ _ _ _ found _ => by rw [found]; rfl,fun _ root _ found _ => ⟨root,found,rfl⟩,
     fun _ recorded => recorded⟩
 
 theorem World.SuspensionExtension.trans {before middle after : World}
     (first : before.SuspensionExtension middle) (last : middle.SuspensionExtension after) :
     before.SuspensionExtension after := by
-  refine ⟨Nat.le_trans first.counter last.counter,?_,?_,
+  refine ⟨first.toHomeExtension.trans last.toHomeExtension,?_,?_,
     fun authority recorded => last.recorded authority (first.recorded authority recorded)⟩
   · intro id root suspension bound found home
     obtain ⟨current,currentAt,location⟩ := Option.map_eq_some_iff.mp (first.retained id root suspension bound found home)
@@ -44,7 +43,7 @@ theorem World.SuspensionExtension.of_locations {before after : World}
     (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
     (recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans) :
     before.SuspensionExtension after := by
-  refine ⟨counter,?_,?_,recorded⟩
+  refine ⟨.of_locations counter locations,?_,?_,recorded⟩
   · intro id root _ _ found _
     simpa only [found,Option.map_some] using locations id
   · intro id root _ found _
@@ -65,7 +64,7 @@ theorem Allocates.suspensionExtension {program : Program} {before after : World}
     {home region type layout mutable address}
     (allocated : Allocates program before home region type layout mutable address after)
     (ordinary : ∀ id, home ≠ .suspended id) : before.SuspensionExtension after := by
-  refine ⟨allocated.authorityStable.homes.counter,?_,?_,allocated.authorityStable.recorded⟩
+  refine ⟨allocated.authorityStable.homes,?_,?_,allocated.authorityStable.recorded⟩
   · intro id root suspension bound found home
     rw [allocated.roots_other bound,found]; rfl
   · intro id root suspension found homeEq
@@ -74,7 +73,7 @@ theorem Allocates.suspensionExtension {program : Program} {before after : World}
 
 theorem Retires.suspensionExtension {before after : World} {retiredId : Identity}
     (retired : Retires before retiredId after) : before.SuspensionExtension after := by
-  refine ⟨retired.authorityStable.homes.counter,?_,?_,retired.authorityStable.recorded⟩
+  refine ⟨retired.authorityStable.homes,?_,?_,retired.authorityStable.recorded⟩
   · intro id root suspension _ selected home
     exact retired.suspended_location selected home
   · intro id root suspension found home

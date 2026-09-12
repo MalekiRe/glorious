@@ -109,9 +109,8 @@ theorem CopiesSnapshot.inventory_owned {program : Kernel.Program} {before after 
 
 theorem Protect.homeExtension {program : Kernel.Program} {context : Context} {before after : World}
     {source destination : Address} {authority : Authority}
-    (kept : Protect program context before source authority destination after) : before.HomeExtension after := by
-  obtain ⟨value,allocated,stored,⟨layout,allocation⟩,transfer⟩ := kept
-  exact allocation.authorityStable.homes.trans transfer.authorityStable.homes
+    (kept : Protect program context before source authority destination after) : before.HomeExtension after :=
+  kept.suspensionExtension.toHomeExtension
 
 /-- A last replay returns each original inventory root to one of the
 cleanup-owning frames it actually reinstalls, after the real argument move. -/

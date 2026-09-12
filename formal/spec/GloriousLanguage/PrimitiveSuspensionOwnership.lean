@@ -11,7 +11,7 @@ theorem Memory.AllocatesBuffer.suspensionExtension {program : Program} {before a
     {domain element count base pointer}
     (allocated : AllocatesBuffer program before domain element count base pointer after) :
     before.SuspensionExtension after := by
-  refine ⟨allocated.authorityStable.homes.counter,?_,?_,allocated.authorityStable.recorded⟩
+  refine ⟨allocated.authorityStable.homes,?_,?_,allocated.authorityStable.recorded⟩
   · intro id root suspension bound found home
     rw [allocated.roots_other bound,found]; rfl
   · intro id root suspension found home
@@ -78,7 +78,7 @@ theorem PrimitiveStep.suspensionExtension {program : Kernel.Program} {before aft
   | pointerWithAddress _ _ _ _ _ _ stored => exact stored.2.suspensionExtension
   | layout _ _ _ _ _ written _ =>
     have changed := World.write_suspensionExtension written
-    exact ⟨changed.counter,changed.retained,changed.origin,changed.recorded⟩
+    exact ⟨⟨changed.counter,changed.homes⟩,changed.retained,changed.origin,changed.recorded⟩
   | abort => exact .refl _
 
 theorem PrimitiveStep.suspensions {program : Kernel.Program} {before after : State} {event : Option Event}

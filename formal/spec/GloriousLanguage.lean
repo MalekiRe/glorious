@@ -36,6 +36,7 @@ import GloriousLanguage.ForeignAuthority
 import GloriousLanguage.ForeignRegistration
 import GloriousLanguage.ForeignAuthorityOrigin
 import GloriousLanguage.ForeignRuntimePreservation
+import GloriousLanguage.ExternalHomePreservation
 import GloriousLanguage.ForeignSuspension
 import GloriousLanguage.ForeignSuspensionOwnership
 import GloriousLanguage.ScopeClosing
