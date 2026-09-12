@@ -1,5 +1,6 @@
 import GloriousLanguage.Declarations
 import GloriousLanguage.RowSemantics
+import GloriousLanguage.HeadStructure
 
 /-! Declarative static semantics. Proof search, inference-cell mutation and
 normalization algorithms are deliberately not definitions of these relations. -/
@@ -13,6 +14,9 @@ structure Context where
   unsafeAllowed : Bool := false
   scope : LexicalScope := {}
   deriving Repr, Inhabited
+
+def ImplDefinition.context (implementation : ImplDefinition) : Context :=
+  ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false,{}⟩
 
 /-- The concrete resident fields of either a source callable or an operation
 value. Capability, layout and byte addressing consume this same instance. -/
@@ -135,21 +139,6 @@ inductive CapabilityEquation (program : Program) (assignment : Term → Option P
   | exactContinuation {brand argument answer effects n} : 0 < n →
       CapabilityEquation program assignment (.continuation brand argument answer effects ⟨n,some n⟩) .exact
 
-/-- Absence is an explicit unknown, not an unconstrained principal. Every
-published answer, including one involving abstract regions or brands, must
-satisfy an equation; unsupported types cannot gain permission by omission. -/
-def CapabilitySolution (program : Program) (assignment : Term → Option Principal) : Prop :=
-  ∀ term principal, assignment term = some principal ↔ CapabilityEquation program assignment term principal
-
-structure CapabilityModel (program : Program) where
-  principal : Term → Option Principal
-  equations : CapabilitySolution program principal
-  greatest : ∀ other, CapabilitySolution program other → ∀ term result,
-    other term = some result → ∃ selected, principal term = some selected ∧ result.Restricts selected
-
-def PrincipalOf (program : Program) (type : Term) (principal : Principal) : Prop :=
-  ∃ model : CapabilityModel program, model.principal type = some principal
-
 /-- Logical replacement shares the existing predicate template and its two
 actual capture-admissible simultaneous substitutions. In particular, quantified
 binder identities are masked by `SubstituteConstraint`, while the predicate
@@ -162,132 +151,162 @@ inductive ConstraintCongruence (relation : Term → Term → Prop) : Constraint 
       ConstraintCongruence relation left right
 
 mutual
-  inductive Equal (program : Program) (context : Context) : Term → Term → Prop where
-    | refl {a} : Equal program context a a
-    | symm {a b} : Equal program context a b → Equal program context b a
-    | trans {a b c} : Equal program context a b → Equal program context b c → Equal program context a c
-    | congr {a b} : SameHead a b → ListRel (Equal program context) a.children b.children → Equal program context a b
-    | assumed {a b} : Constraint.equal a b ∈ context.assumptions → Equal program context a b
-    | entailed {a b} : Entails program context (.equal a b) → Equal program context a b
-    | definitional {a b} : DefinitionallyEqual program context a b → Equal program context a b
-    | rowDuplicate {a b rest tails} : Equal program context a b →
+  /-- Evidence is a lower bound on permissions, not a claim that a requested
+  interval identifies the principal class. Recursive structural dependencies
+  are coinductive; every logical leaf has a finite derivation in this mutual
+  inductive judgment. A projection depending on Use cannot justify that same
+  Use through an unsupported logical cycle. -/
+  inductive CapabilityEvidence (program : Program) : Context → Term → Principal → Prop where
+    | structural {context type principal assignment} : assignment type = some principal →
+        (∀ term claimed, assignment term = some claimed → CapabilityUnfolds program context assignment term claimed) →
+        CapabilityEvidence program context type principal
+    | logical {context type quantity principal} : Entails program context (.use type quantity) →
+        quantity.Valid → (∀ permitted, quantity.Request permitted → principal.Restricts permitted) →
+        CapabilityEvidence program context type principal
+    | equal {context left right principal} : Equal program context left right →
+        CapabilityEvidence program context left principal → CapabilityEvidence program context right principal
+
+  /-- One structural layer or one already justified logical leaf. Keeping
+  this layer explicit separates the greatest structural recursion from the
+  finite logical proof tree; it introduces no second dependency analysis. -/
+  inductive CapabilityUnfolds (program : Program) :
+      Context → (Term → Option Principal) → Term → Principal → Prop where
+    | equation {context assignment type claimed supported} : claimed.Restricts supported →
+        CapabilityEquation program assignment type supported → CapabilityUnfolds program context assignment type claimed
+    | evidence {context assignment type claimed supported} : claimed.Restricts supported →
+        CapabilityEvidence program context type supported → CapabilityUnfolds program context assignment type claimed
+
+  inductive Equal (program : Program) : Context → Term → Term → Prop where
+    | refl {context a} : Equal program context a a
+    | symm {context a b} : Equal program context a b → Equal program context b a
+    | trans {context a b c} : Equal program context a b → Equal program context b c → Equal program context a c
+    | congrChildren {context a b} : SameHead a b →
+        (∀ (index : Nat) first second, a.children[index]? = some first → b.children[index]? = some second →
+          Equal program context first second) → Equal program context a b
+    | assumed {context a b} : Constraint.equal a b ∈ context.assumptions → Equal program context a b
+    | entailed {context a b} : Entails program context (.equal a b) → Equal program context a b
+    | definitional {context a b} : DefinitionallyEqual program context a b → Equal program context a b
+    | rowDuplicate {context a b rest tails} : Equal program context a b →
         Equal program context (.row (a :: b :: rest) tails) (.row (a :: rest) tails)
-    | tailDuplicate {instances a b tails} : Equal program context a b →
+    | tailDuplicate {context instances a b tails} : Equal program context a b →
         Equal program context (.row instances (a :: b :: tails)) (.row instances (a :: tails))
 
-  inductive SelectsImpl (program : Program) (context : Context) :
-      DeclId → List Term → Bool → ImplDefinition → Substitution → Prop where
-    | selected {trait arguments negative implementation substitution} :
+  inductive SelectsImpl (program : Program) :
+      Context → DeclId → List Term → Bool → ImplDefinition → Substitution → Prop where
+    | selected {context trait arguments negative implementation substitution} :
         Definition.implementation implementation ∈ program.declarations → implementation.trait = trait →
         implementation.negative = negative → MatchesImplHead program context implementation arguments substitution →
         (∀ requirement ∈ implementation.requirements, EntailsSubstitution program context substitution requirement) →
         SelectsImpl program context trait arguments negative implementation substitution
 
-  inductive RowMember (program : Program) (context : Context) : Term → Term → Prop where
-    | head {effect instances tails instanceTerm} : instanceTerm ∈ instances → Equal program context effect instanceTerm →
+  inductive RowMember (program : Program) : Context → Term → Term → Prop where
+    | head {context effect instances tails instanceTerm} : instanceTerm ∈ instances → Equal program context effect instanceTerm →
         RowMember program context effect (.row instances tails)
-    | tail {effect instances tails tail} : tail ∈ tails → RowMember program context effect tail →
+    | tail {context effect instances tails tail} : tail ∈ tails → RowMember program context effect tail →
         RowMember program context effect (.row instances tails)
-    | equal {effect a b} : Equal program context a b → RowMember program context effect a → RowMember program context effect b
+    | equal {context effect a b} : Equal program context a b → RowMember program context effect a → RowMember program context effect b
 
-  inductive RowSubset (program : Program) (context : Context) : Term → Term → Prop where
-    | empty {allowed} : RowSubset program context (.row [] []) allowed
-    | assumed {required allowed} : Constraint.rowIncludes allowed required ∈ context.assumptions →
+  inductive RowSubset (program : Program) : Context → Term → Term → Prop where
+    | empty {context allowed} : RowSubset program context (.row [] []) allowed
+    | assumed {context required allowed} : Constraint.rowIncludes allowed required ∈ context.assumptions →
         RowSubset program context required allowed
-    | same {a b} : Equal program context a b → RowSubset program context a b
-    | trans {a b c} : RowSubset program context a b → RowSubset program context b c → RowSubset program context a c
-    | instances {instances tails allowed} : (∀ instanceTerm ∈ instances, RowMember program context instanceTerm allowed) →
+    | same {context a b} : Equal program context a b → RowSubset program context a b
+    | trans {context a b c} : RowSubset program context a b → RowSubset program context b c → RowSubset program context a c
+    | instances {context instances tails allowed} : (∀ instanceTerm ∈ instances, RowMember program context instanceTerm allowed) →
         (∀ tail ∈ tails, RowSubset program context tail allowed) → RowSubset program context (.row instances tails) allowed
-    | entailed {required allowed} : Entails program context (.rowIncludes allowed required) →
+    | entailed {context required allowed} : Entails program context (.rowIncludes allowed required) →
         RowSubset program context required allowed
 
-  inductive TypeOutlives (program : Program) (context : Context) : Term → Term → Prop where
-    | assumed {type region} : Constraint.typeOutlives type region ∈ context.assumptions → TypeOutlives program context type region
-    | scalar {type region} : TypeOutlives program context (.scalar type) region
-    | unit {region} : TypeOutlives program context .unit region
-    | pointer {mode type region} : TypeOutlives program context (.rawPointer mode type) region
-    | reference {mode long type short} : Entails program context (.outlives long short) →
+  inductive TypeOutlives (program : Program) : Context → Term → Term → Prop where
+    | assumed {context type region} : Constraint.typeOutlives type region ∈ context.assumptions → TypeOutlives program context type region
+    | scalar {context type region} : TypeOutlives program context (.scalar type) region
+    | unit {context region} : TypeOutlives program context .unit region
+    | pointer {context mode type region} : TypeOutlives program context (.rawPointer mode type) region
+    | reference {context mode long type short} : Entails program context (.outlives long short) →
         TypeOutlives program context (.reference mode long type) short
-    | bottom {region} : TypeOutlives program context .bottom region
-    | tuple {fields region} : (∀ field ∈ fields, TypeOutlives program context field region) →
+    | bottom {context region} : TypeOutlives program context .bottom region
+    | tuple {context fields region} : (∀ field ∈ fields, TypeOutlives program context field region) →
         TypeOutlives program context (.tuple fields) region
-    | array {element count region} : TypeOutlives program context element region →
+    | array {context element count region} : TypeOutlives program context element region →
         TypeOutlives program context (.array element count) region
-    | nominal {id arguments data substitution fields region} : program.data id = some data →
+    | nominal {context id arguments data substitution fields region} : program.data id = some data →
         Instantiates data.generics arguments substitution →
         ListRel (Substitutes substitution) ((data.variants.flatMap (·.fields)).map (·.type)) fields →
         (∀ field ∈ fields, TypeOutlives program context field region) →
         TypeOutlives program context (.nominal id arguments) region
-    | callable {id arguments fields region} : CallableFields program id arguments fields →
+    | callable {context id arguments fields region} : CallableFields program id arguments fields →
         (∀ field ∈ fields, TypeOutlives program context field region) →
         TypeOutlives program context (.callable id arguments) region
-    | label {brand long result short} : Entails program context (.outlives long short) →
+    | label {context brand long result short} : Entails program context (.outlives long short) →
         TypeOutlives program context (.label brand long result) short
-    | environment {brand long residents short} : Entails program context (.outlives long short) →
+    | environment {context brand long residents short} : Entails program context (.outlives long short) →
         (∀ field ∈ residents, TypeOutlives program context field short) →
         TypeOutlives program context (.environment brand long residents) short
-    | available {brand long residents short} : TypeOutlives program context (.environment brand long residents) short →
+    | available {context brand long residents short} : TypeOutlives program context (.environment brand long residents) short →
         TypeOutlives program context (.available brand long residents) short
-    | bindings {brand long fields short} : Entails program context (.outlives long short) →
+    | bindings {context brand long fields short} : Entails program context (.outlives long short) →
         (∀ field ∈ fields, TypeOutlives program context field short) →
         TypeOutlives program context (.bindings brand long fields) short
-    | equal {a b region} : Equal program context a b → TypeOutlives program context a region → TypeOutlives program context b region
-    | entailed {type region} : Entails program context (.typeOutlives type region) → TypeOutlives program context type region
+    | equal {context a b region} : Equal program context a b → TypeOutlives program context a region → TypeOutlives program context b region
+    | entailed {context type region} : Entails program context (.typeOutlives type region) → TypeOutlives program context type region
 
-  inductive Entails (program : Program) (context : Context) : Constraint → Prop where
-    | checkedCallable {function relation substitution receiver arguments result effects} :
+  inductive Entails (program : Program) : Context → Constraint → Prop where
+    | checkedCallable {context function relation substitution receiver arguments result effects} :
         program.function function.header.id = some function → relation ∈ function.invocations →
         Substitutes substitution relation.receiver receiver → ListRel (Substitutes substitution) relation.arguments arguments →
         Substitutes substitution relation.result result → Substitutes substitution relation.effects effects →
         Entails program context (.callable receiver arguments result effects relation.unsafeAllowed)
-    | checkedRunsIn {function relation substitution receiver access arguments after} :
+    | checkedRunsIn {context function relation substitution receiver access arguments after} :
         program.function function.header.id = some function → relation ∈ function.invocations →
         Substitutes substitution relation.receiver receiver → Substitutes substitution relation.access access →
         ListRel (Substitutes substitution) relation.arguments arguments → Substitutes substitution relation.after after →
         Entails program context (.runsIn receiver access arguments after relation.unsafeAllowed)
-    | assumed {constraint} : constraint ∈ context.assumptions → Entails program context constraint
-    | congr {before after} : ConstraintCongruence (Equal program context) before after →
+    | assumed {context constraint} : constraint ∈ context.assumptions → Entails program context constraint
+    | congrSubstitution {context template before after leftSub rightSub} :
+        (∀ id kind, Equal program context ((leftSub.get id).getD (.parameter id kind))
+          ((rightSub.get id).getD (.parameter id kind))) →
+        SubstituteConstraint leftSub template before → SubstituteConstraint rightSub template after →
         Entails program context before → Entails program context after
-    | equality {a b} : Equal program context a b → Entails program context (.equal a b)
-    | outlivesRefl {region} : Entails program context (.outlives region region)
-    | outlivesStatic {region} : Entails program context (.outlives .staticRegion region)
-    | outlivesTrans {a b c} : Entails program context (.outlives a b) → Entails program context (.outlives b c) →
+    | equality {context a b} : Equal program context a b → Entails program context (.equal a b)
+    | outlivesRefl {context region} : Entails program context (.outlives region region)
+    | outlivesStatic {context region} : Entails program context (.outlives .staticRegion region)
+    | outlivesTrans {context a b c} : Entails program context (.outlives a b) → Entails program context (.outlives b c) →
         Entails program context (.outlives a c)
-    | typeOutlives {type region} : TypeOutlives program context type region → Entails program context (.typeOutlives type region)
-    | rows {allowed required} : RowSubset program context required allowed → Entails program context (.rowIncludes allowed required)
-    | implementation {trait arguments negative implementation substitution} :
+    | typeOutlives {context type region} : TypeOutlives program context type region → Entails program context (.typeOutlives type region)
+    | rows {context allowed required} : RowSubset program context required allowed → Entails program context (.rowIncludes allowed required)
+    | implementation {context trait arguments negative implementation substitution} :
         SelectsImpl program context trait arguments negative implementation substitution →
         Entails program context (.implements trait arguments negative)
-    | use {type quantity principal} : PrincipalOf program type principal → quantity.Request principal →
+    | use {context type quantity principal} : CapabilityEvidence program context type principal → quantity.Request principal →
         Entails program context (.use type quantity)
-    | quantified {binders requirements} :
+    | quantified {context binders requirements} :
         (∀ values substitution, Instantiates binders values substitution →
           (∀ value ∈ values, Kinding program context value value.kind) →
           ∀ requirement ∈ requirements, EntailsSubstitution program context substitution requirement) →
         Entails program context (.quantified binders requirements)
-    | quantifiedInstance {binders requirements values substitution requirement result} :
+    | quantifiedInstance {context binders requirements values substitution requirement result} :
         Entails program context (.quantified binders requirements) → Instantiates binders values substitution →
         (∀ value ∈ values, Kinding program context value value.kind) → requirement ∈ requirements →
         SubstituteConstraint substitution requirement result → Entails program context result
 
-  inductive EntailsSubstitution (program : Program) (context : Context) : Substitution → Constraint → Prop where
-    | instantiated {substitution requirement result} : SubstituteConstraint substitution requirement result →
+  inductive EntailsSubstitution (program : Program) : Context → Substitution → Constraint → Prop where
+    | instantiated {context substitution requirement result} : SubstituteConstraint substitution requirement result →
         Entails program context result → EntailsSubstitution program context substitution requirement
 
   /-- Positive, demand-driven declaration expansion. Opaque arguments need
   only be kinded; unused alias and GAT arguments are not eagerly normalized.
   One simultaneous substitution preserves the identity of caller parameters. -/
-  inductive DefinitionalStep (program : Program) (context : Context) : Term → Term → Prop where
-    | alias {id declaration arguments substitution value} :
+  inductive DefinitionalStep (program : Program) : Context → Term → Term → Prop where
+    | alias {context id declaration arguments substitution value} :
         program.alias id = some declaration → Instantiates declaration.generics arguments substitution →
         (∀ argument ∈ arguments, Kinding program context argument argument.kind) →
         Substitutes substitution declaration.value value → DefinitionalStep program context (.alias id arguments) value
-    | projection {trait member owners items associated ownerSub itemSub implementation implSub body value} :
+    | projection {context trait member owners items associated ownerSub itemSub implementation implSub body value} :
         ProjectionDomain program context trait member owners items associated ownerSub itemSub →
         SelectsImpl program context trait owners false implementation implSub →
         (member,body) ∈ implementation.associated → Substitutes (implSub ++ itemSub) body value →
         DefinitionalStep program context (.projection trait member owners items associated.kind) value
-    | defaultProjection {trait member owners items associated ownerSub itemSub implementation implSub body value} :
+    | defaultProjection {context trait member owners items associated ownerSub itemSub implementation implSub body value} :
         ProjectionDomain program context trait member owners items associated ownerSub itemSub →
         SelectsImpl program context trait owners false implementation implSub →
         (∀ body, (member,body) ∉ implementation.associated) → associated.defaultValue = some body →
@@ -297,45 +316,51 @@ mutual
   /-- Definitional convertibility contains no arbitrary context equality.
   In particular, an opaque projection compares reflexively without an assumed
   absence of reduction or a fabricated normal form. -/
-  inductive DefinitionallyEqual (program : Program) (context : Context) : Term → Term → Prop where
-    | refl {term} : DefinitionallyEqual program context term term
-    | symm {left right} : DefinitionallyEqual program context left right → DefinitionallyEqual program context right left
-    | trans {left middle right} : DefinitionallyEqual program context left middle →
+  inductive DefinitionallyEqual (program : Program) : Context → Term → Term → Prop where
+    | refl {context term} : DefinitionallyEqual program context term term
+    | symm {context left right} : DefinitionallyEqual program context left right → DefinitionallyEqual program context right left
+    | trans {context left middle right} : DefinitionallyEqual program context left middle →
         DefinitionallyEqual program context middle right → DefinitionallyEqual program context left right
-    | congr {left right} : SameHead left right →
-        ListRel (DefinitionallyEqual program context) left.children right.children → DefinitionallyEqual program context left right
-    | step {left right} : DefinitionalStep program context left right → DefinitionallyEqual program context left right
-    | row {left right} : RowEquivalent left right → DefinitionallyEqual program context left right
+    | congrChildren {context left right} : SameHead left right →
+        (∀ (index : Nat) first second, left.children[index]? = some first → right.children[index]? = some second →
+          DefinitionallyEqual program context first second) → DefinitionallyEqual program context left right
+    | step {context left right} : DefinitionalStep program context left right → DefinitionallyEqual program context left right
+    | row {context left right} : RowEquivalent left right → DefinitionallyEqual program context left right
 
   /-- The positive reduction closure is kept distinct from symmetric
   convertibility. Its joinability and confluence are proof obligations, not
   constructor premises or assertions that an eager evaluator terminates. -/
-  inductive DefinitionalReduction (program : Program) (context : Context) : Term → Term → Prop where
-    | refl {term} : DefinitionalReduction program context term term
-    | step {left right} : DefinitionalStep program context left right → DefinitionalReduction program context left right
-    | trans {left middle right} : DefinitionalReduction program context left middle →
+  inductive DefinitionalReduction (program : Program) : Context → Term → Term → Prop where
+    | refl {context term} : DefinitionalReduction program context term term
+    | step {context left right} : DefinitionalStep program context left right → DefinitionalReduction program context left right
+    | trans {context left middle right} : DefinitionalReduction program context left middle →
         DefinitionalReduction program context middle right → DefinitionalReduction program context left right
-    | congr {left right} : SameHead left right →
-        ListRel (DefinitionalReduction program context) left.children right.children → DefinitionalReduction program context left right
-    | row {left right} : RowEquivalent left right → DefinitionalReduction program context left right
+    | congrChildren {context left right} : SameHead left right →
+        (∀ (index : Nat) first second, left.children[index]? = some first → right.children[index]? = some second →
+          DefinitionalReduction program context first second) → DefinitionalReduction program context left right
+    | row {context left right} : RowEquivalent left right → DefinitionalReduction program context left right
 
-  /-- Actual inferred arguments and the single source substitution graph are
-  authoritative. Matching compares instantiated heads by positive conversion,
-  including opaque and row-equivalent arguments. -/
-  inductive MatchesImplHead (program : Program) (context : Context) :
-      ImplDefinition → List Term → Substitution → Prop where
-    | matched {implementation arguments values substitution specialized} :
+  /-- Every instantiated generic value has a finite origin in the actual
+  query. The final whole-head conversion checks all remaining constraints,
+  including repeated occurrences; it cannot create a missing parameter origin. -/
+  inductive MatchesImplHead (program : Program) :
+      Context → ImplDefinition → List Term → Substitution → Prop where
+    | inferred {context implementation arguments values substitution specialized} :
         Instantiates implementation.generics values substitution →
         (∀ value ∈ values, Kinding program context value value.kind) →
         ListRel (Substitutes substitution) implementation.arguments specialized →
-        ListRel (DefinitionallyEqual program context) specialized arguments →
+        specialized.length = arguments.length →
+        (∀ (index : Nat) first second, specialized[index]? = some first → arguments[index]? = some second →
+          DefinitionallyEqual program context first second) →
+        (∀ (index : Nat) binder value, implementation.generics[index]? = some binder → values[index]? = some value →
+          InfersHeadArgument program context implementation arguments binder value) →
         MatchesImplHead program context implementation arguments substitution
 
   /-- Actual lexical trait and GAT domains. Ordered arguments are instantiated
   once against disjoint template binders, without normalizing unused items. -/
-  inductive ProjectionDomain (program : Program) (context : Context) :
-      DeclId → DeclId → List Term → List Term → AssociatedDefinition → Substitution → Substitution → Prop where
-    | valid {trait member owners items declaration associated ownerSub itemSub} :
+  inductive ProjectionDomain (program : Program) :
+      Context → DeclId → DeclId → List Term → List Term → AssociatedDefinition → Substitution → Substitution → Prop where
+    | valid {context trait member owners items declaration associated ownerSub itemSub} :
         program.trait trait = some declaration → member ∈ declaration.members →
         program.associated member = some associated → associated.owner = trait →
         Instantiates declaration.generics owners ownerSub → Instantiates associated.generics items itemSub →
@@ -343,7 +368,92 @@ mutual
         (∀ requirement ∈ declaration.requirements, EntailsSubstitution program context ownerSub requirement) →
         (∀ requirement ∈ associated.requirements, EntailsSubstitution program context (ownerSub ++ itemSub) requirement) →
         ProjectionDomain program context trait member owners items associated ownerSub itemSub
+
+  /-- Source templates can expose a determining position only by actual
+  positive expansion or by an ordered injective constructor. Query conversion
+  preserves the language's existing definitional matching, but never changes
+  which source parameter is being inferred. Both contexts are real indices. -/
+  inductive InfersHeadParameter (program : Program) :
+      Context → Context → Binder → Term → Term → Term → Prop where
+    | parameter {context sourceContext binder value} : value.kind = binder.kind →
+        InfersHeadParameter program sourceContext context binder (.parameter binder.id binder.kind) value value
+    | child {context sourceContext binder template query templateChild queryChild value} {index : Nat} :
+        template.StructuralHead → SameHead template query →
+        template.children[index]? = some templateChild → query.children[index]? = some queryChild →
+        InfersHeadParameter program sourceContext context binder templateChild queryChild value →
+        InfersHeadParameter program sourceContext context binder template query value
+    | sourceReduction {context sourceContext binder template reduced query value} :
+        DefinitionalReduction program sourceContext template reduced →
+        InfersHeadParameter program sourceContext context binder reduced query value →
+        InfersHeadParameter program sourceContext context binder template query value
+    | queryConversion {context sourceContext binder template query converted value} :
+        DefinitionallyEqual program context query converted →
+        InfersHeadParameter program sourceContext context binder template converted value →
+        InfersHeadParameter program sourceContext context binder template query value
+
+  /-- One generic argument is inferred at one actual paired head position.
+  Keeping this constructor explicit makes the recursive occurrence positive
+  without hiding its source context inside an existential encoding. -/
+  inductive InfersHeadArgument (program : Program) :
+      Context → ImplDefinition → List Term → Binder → Term → Prop where
+    | argument {context implementation arguments binder value template query} {index : Nat} :
+        implementation.arguments[index]? = some template → arguments[index]? = some query →
+        InfersHeadParameter program implementation.context context binder template query value →
+        InfersHeadArgument program context implementation arguments binder value
 end
+
+/-- These public interfaces consume the same ordered relation as before;
+their kernel constructors use its equivalent pointwise presentation. -/
+theorem Equal.congr {program : Program} {context : Context} {left right : Term}
+    (same : SameHead left right) (children : ListRel (Equal program context) left.children right.children) :
+    Equal program context left right := .congrChildren same (fun _ _ _ first second => children.at first second)
+
+theorem DefinitionallyEqual.congr {program : Program} {context : Context} {left right : Term}
+    (same : SameHead left right) (children : ListRel (DefinitionallyEqual program context) left.children right.children) :
+    DefinitionallyEqual program context left right :=
+  .congrChildren same (fun _ _ _ first second => children.at first second)
+
+theorem DefinitionalReduction.congr {program : Program} {context : Context} {left right : Term}
+    (same : SameHead left right) (children : ListRel (DefinitionalReduction program context) left.children right.children) :
+    DefinitionalReduction program context left right :=
+  .congrChildren same (fun _ _ _ first second => children.at first second)
+
+theorem Entails.congr {program : Program} {context : Context} {before after : Constraint}
+    (congruent : ConstraintCongruence (Equal program context) before after) (held : Entails program context before) :
+    Entails program context after := by
+  cases congruent with
+  | substitution equal left right => exact .congrSubstitution equal left right held
+
+theorem MatchesImplHead.matched {program : Program} {context : Context} {implementation : ImplDefinition}
+    {arguments values specialized : List Term} {substitution : Substitution}
+    (instantiated : Instantiates implementation.generics values substitution)
+    (kinded : ∀ value ∈ values, Kinding program context value value.kind)
+    (substituted : ListRel (Substitutes substitution) implementation.arguments specialized)
+    (equal : ListRel (DefinitionallyEqual program context) specialized arguments)
+    (inferred : ∀ (index : Nat) binder value, implementation.generics[index]? = some binder → values[index]? = some value →
+      InfersHeadArgument program context implementation arguments binder value) :
+    MatchesImplHead program context implementation arguments substitution :=
+  .inferred instantiated kinded substituted equal.length_eq (fun _ _ _ first second => equal.at first second) inferred
+
+/-- Runtime permissions may use only assumption-free evidence. Different
+checking scopes cannot smuggle an open Use/equality assumption into this
+context-free judgment. Unsupported types have no fallback certificate. -/
+def CapabilitySupport (program : Program) (type : Term) (principal : Principal) : Prop :=
+  ∃ context, context.assumptions = [] ∧ CapabilityEvidence program context type principal
+
+/-- A principal is the greatest certified permission class, not an arbitrary
+lower bound. The finite class lattice permits construction without assuming
+normalization or the structural inversion theorem needed by destruction. -/
+def PrincipalOf (program : Program) (type : Term) (principal : Principal) : Prop :=
+  CapabilitySupport program type principal ∧
+    ∀ other, CapabilitySupport program type other → other.Restricts principal
+
+def CapabilitySolution (program : Program) (assignment : Term → Option Principal) : Prop :=
+  ∀ term principal, assignment term = some principal ↔ PrincipalOf program term principal
+
+structure CapabilityModel (program : Program) where
+  principal : Term → Option Principal
+  equations : CapabilitySolution program principal
 
 /-- Joining is positive evidence from the declared reductions. -/
 def DefinitionallyJoinable (program : Program) (context : Context) (left right : Term) : Prop :=
@@ -624,10 +734,16 @@ def SignatureWellFormed (program : Program) (module : ModuleId) (signature : Sig
 trait and item domains. Distinct template binder identities permit one
 simultaneous substitution; caller arguments are never recursively rewritten
 by another template's parameter binding. -/
+def ImplementationHeadDetermined (program : Program) (implementation : ImplDefinition) : Prop :=
+  ∀ binder ∈ implementation.generics,
+    InfersHeadArgument program implementation.context implementation implementation.arguments binder
+      (.parameter binder.id binder.kind)
+
 def ImplementationSignatureWellFormed (program : Program) (implementation : ImplDefinition)
     (trait : TraitDefinition) : Prop :=
   let context : Context := ⟨implementation.generics,implementation.requirements,0,implementation.header.module,false,{}⟩
   (implementation.generics.map (·.id)).Nodup ∧
+  ImplementationHeadDetermined program implementation ∧
   ∃ ownerSub, Instantiates trait.generics implementation.arguments ownerSub ∧
     (∀ argument ∈ implementation.arguments, WellKinded program context argument argument.kind) ∧
     ConstraintsHold program context ownerSub trait.requirements ∧

@@ -86,7 +86,8 @@ theorem World.registerAvailability_wellFormed {world : World} {available : Avail
     (valid : world.WellFormed) (identity : available.identity = world.nextProof)
     (brand : available.brand = .runtimeBrand (.proof world.nextProof))
     (region : available.region ∈ world.liveRegions)
-    (reserved : ∀ place ∈ available.reserved, (world.root place.address).isSome = true) :
+    (reserved : ∀ place ∈ available.reserved, (world.root place.address).isSome = true)
+    (recorded : ∀ place ∈ available.reserved, place.authority.Recorded world.loans) :
     (world.withProofs (world.availability.set world.nextProof available) (world.nextProof+1)).WellFormed := by
   rcases valid with ⟨rootsUnique,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,unique,
     roots,regions,bases,ranges,loans,references,overlaps,parents,locations⟩
@@ -97,10 +98,10 @@ theorem World.registerAvailability_wellFormed {world : World} {available : Avail
     · subst id
       simp only [World.withProofs,Table.get_set] at found
       cases found
-      exact ⟨identity.symm,Nat.lt_succ_self _,brand,fun _ => ⟨region,reserved⟩⟩
-    · obtain ⟨oldIdentity,bound,oldBrand,active⟩ := proofs id proof
+      exact ⟨identity.symm,Nat.lt_succ_self _,brand,fun _ => ⟨region,reserved⟩,recorded⟩
+    · obtain ⟨oldIdentity,bound,oldBrand,active,oldRecorded⟩ := proofs id proof
         (by simpa only [World.withProofs,Table.get_set_other _ _ _ _ same] using found)
-      exact ⟨oldIdentity,Nat.lt_succ_of_lt bound,oldBrand,active⟩
+      exact ⟨oldIdentity,Nat.lt_succ_of_lt bound,oldBrand,active,oldRecorded⟩
   · intro address value pack resident head
     obtain ⟨bound,live,length,distinct,facts⟩ := packs address value pack resident head
     exact ⟨Nat.lt_succ_of_lt bound,live,length,distinct,facts⟩
@@ -113,9 +114,10 @@ theorem World.registerAvailability_worldTyped {program : Kernel.Program} {world 
     (typed : Typing.WorldTyped program world) (identity : available.identity = world.nextProof)
     (brand : available.brand = .runtimeBrand (.proof world.nextProof))
     (region : available.region ∈ world.liveRegions)
-    (reserved : ∀ place ∈ available.reserved, (world.root place.address).isSome = true) :
+    (reserved : ∀ place ∈ available.reserved, (world.root place.address).isSome = true)
+    (recorded : ∀ place ∈ available.reserved, place.authority.Recorded world.loans) :
     Typing.WorldTyped program (world.withProofs (world.availability.set world.nextProof available) (world.nextProof+1)) := by
-  refine ⟨World.registerAvailability_wellFormed typed.1 identity brand region reserved,?_,typed.2.2⟩
+  refine ⟨World.registerAvailability_wellFormed typed.1 identity brand region reserved recorded,?_,typed.2.2⟩
   intro address value resident
   apply (typed.2.1 address value resident).extendProofs
   intro id proof found
@@ -155,7 +157,7 @@ theorem reserve_worldTyped {program : Kernel.Program} {before allocated after : 
     (allocation : Allocates program.declarations before home region
       (.available (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion region) types)
       layout mutable destination allocated)
-    (rooted : ∀ place ∈ reserved, (before.root place.address).isSome = true)
+    (permitted : ∀ place ∈ reserved, Permitted before place.authority .shared place.address)
     (created : NewValue program.declarations allocated destination
       (.available (.runtimeBrand (.proof before.nextProof)) (.runtimeRegion region) types)
       (.available before.nextProof) [] after) :
@@ -171,12 +173,13 @@ theorem reserve_worldTyped {program : Kernel.Program} {before allocated after : 
     | fresh live _ _ _ _ _ _ _ _ => exact live
   have allocatedRoots : ∀ place ∈ reserved, (allocated.root place.address).isSome = true := by
     intro place member
-    obtain ⟨root,found⟩ := Option.isSome_iff_exists.mp (rooted place member)
+    obtain ⟨root,found⟩ := (permitted place member).root
     exact Option.isSome_iff_exists.mpr ⟨root,allocation.root typed.1 found⟩
   have registered : Typing.WorldTyped program
       (allocated.withProofs (allocated.availability.set before.nextProof available) (before.nextProof+1)) := by
     have prepared := World.registerAvailability_worldTyped (available := available) (allocation.worldTyped typed)
       proofBase.symm (congrArg (fun id => Term.runtimeBrand (.proof id)) proofBase.symm) regionLive allocatedRoots
+      (fun place member => by simpa only [allocation.loans] using (permitted place member).recorded)
     simpa only [proofBase] using prepared
   have made := (created.withProofs (allocated.availability.set before.nextProof available) (before.nextProof+1)).empty_worldTyped
     valid inventory registered (by intro id impossible; cases impossible) (by intro pack impossible; cases impossible)

@@ -32,8 +32,8 @@ theorem World.advanceProof_wellFormedWithOrigins {world : World} {originBound ne
   refine ⟨rootsUnique,loansUnique,proofsUnique,regionsUnique,?_,?_,owners,unique,
     roots,regions,bases,ranges,loans,references,?_,parents,locations⟩
   · intro id proof found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id proof found
-    exact ⟨identity,Nat.lt_of_lt_of_le bound monotone,brand,active⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id proof found
+    exact ⟨identity,Nat.lt_of_lt_of_le bound monotone,brand,active,recorded⟩
   · intro address value pack resident head
     obtain ⟨brand,region,length,distinct,facts⟩ := packs address value pack resident head
     exact ⟨Nat.lt_of_lt_of_le brand monotone,region,length,distinct,facts⟩
@@ -316,11 +316,7 @@ theorem ControlStep.worldTyped {program : Kernel.Program} {before after : State}
   case leave => apply Protect.worldTyped valid inventory typed; assumption
   case reserve resolved types distinct disjoint exclusive typeEq allocation created =>
     rw [typeEq] at allocation created
-    apply reserve_worldTyped valid inventory typed allocation ?_ created
-    intro place member
-    have allowed := resolved.permitted place member
-    obtain ⟨root,found⟩ := allowed.root
-    exact Option.isSome_iff_exists.mpr ⟨root,found⟩
+    exact reserve_worldTyped valid inventory typed allocation resolved.permitted created
   case available moved => exact moved.worldTyped valid inventory typed
   case destroyAvailable =>
     apply World.deactivateAvailability_worldTyped

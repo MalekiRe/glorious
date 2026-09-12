@@ -300,14 +300,18 @@ theorem RegionPermutation.world_wellFormed (permutation : RegionPermutation) {wo
   · intro id proof found
     rw [permutation.world_availability] at found
     obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
-    obtain ⟨identity,bound,brand,active⟩ := available id original oldFound
-    refine ⟨identity,bound,by simp only [RegionPermutation.availability,brand,RegionPermutation.term,Term.renameRuntimeRegions],?_⟩
-    intro live
-    obtain ⟨region,places⟩ := active live
-    refine ⟨List.mem_map.mpr ⟨_,region,rfl⟩,?_⟩
-    intro place member
-    rw [permutation.world_root,Option.isSome_map]
-    exact places place member
+    obtain ⟨identity,bound,brand,active,recorded⟩ := available id original oldFound
+    refine ⟨identity,bound,by simp only [RegionPermutation.availability,brand,RegionPermutation.term,Term.renameRuntimeRegions],?_,?_⟩
+    · intro live
+      obtain ⟨region,places⟩ := active live
+      refine ⟨List.mem_map.mpr ⟨_,region,rfl⟩,?_⟩
+      intro place member
+      rw [permutation.world_root,Option.isSome_map]
+      exact places place member
+    · intro place member
+      apply (recorded place member).transport
+      intro id loan found
+      exact ⟨permutation.loan loan,by rw [permutation.world_loans,found]; rfl⟩
   · intro address value pack resident head
     obtain ⟨original,oldResident,rfl⟩ := permutation.resident_origin resident
     rw [permutation.value_head] at head

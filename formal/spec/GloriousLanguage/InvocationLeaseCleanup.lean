@@ -208,7 +208,7 @@ theorem MayDispose.reference {program : Language.Program}
     · intro _
       cases mode with
       | shared => exact ⟨.duplicable,PrincipalOf.shared program region type,by simp [Principal.MayDiscard,Principal.Permits]⟩
-      | unique => exact ⟨.affine,PrincipalOf.unique program region type,by simp [Principal.MayDiscard,Principal.Permits]⟩
+      | unique => exact PrincipalOf.unique_reference_discardable program region type
     · intro hook _
       intro path value resident
       cases resident with

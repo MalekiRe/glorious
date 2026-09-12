@@ -166,6 +166,32 @@ def Authority.parentLoan : Authority → Option Identity
   | .loan id => some id
   | .shared backing => backing.parentLoan
 
+/-- Historical authority provenance, distinct from permission or liveness.
+A saved authority can outlive its loan, but cannot name a loan not yet made. -/
+def Authority.Recorded : Authority → Table Loan → Prop
+  | .owner, _ => True
+  | .loan id, loans => ∃ loan, loans.get id = some loan
+  | .shared backing, loans => backing.Recorded loans
+
+theorem Authority.Recorded.transport {authority : Authority} {before after : Table Loan}
+    (recorded : authority.Recorded before)
+    (retained : ∀ id loan, before.get id = some loan → ∃ current, after.get id = some current) :
+    authority.Recorded after := by
+  induction authority with
+  | owner => trivial
+  | loan id => obtain ⟨loan,found⟩ := recorded; exact retained id loan found
+  | shared backing ih => exact ih recorded
+
+theorem Authority.Recorded.set {authority : Authority} {loans : Table Loan}
+    (recorded : authority.Recorded loans) (id : Identity) (loan : Loan) :
+    authority.Recorded (loans.set id loan) := by
+  apply recorded.transport
+  intro key original found
+  by_cases same : key = id
+  · subst key
+    exact ⟨loan,Table.get_set _ _ _⟩
+  · exact ⟨original,by simpa only [Table.get_set_other _ _ _ _ same] using found⟩
+
 /-- A resolved storage location always travels with its access authority.
 An address alone is not permission to consume the resident. -/
 structure ResolvedPlace where
@@ -303,6 +329,13 @@ def Permitted (world : World) (authority : Authority) (requested : Access) (addr
          address.Overlaps loan.referent → Conflict requested loan.mode → AncestorLoan world other id
    | .shared backing => requested = .shared ∧ Permitted world backing requested address)
 
+theorem Permitted.recorded {world : World} {authority : Authority} {requested : Access} {address : Address}
+    (permitted : Permitted world authority requested address) : authority.Recorded world.loans := by
+  induction authority with
+  | owner => trivial
+  | loan id => obtain ⟨loan,found,_⟩ := permitted.2; exact ⟨loan,found⟩
+  | shared backing ih => exact ih permitted.2.2
+
 /-- Loading a unique handle through a shared place does not recover unique
 referent access. All dereference consumers use this same view selection. -/
 def ReferenceView (world : World) (handle : Address) (authority : Authority)
@@ -342,7 +375,8 @@ def World.WellFormedWithOrigins (world : World) (originBound : Identity) : Prop 
   (∀ id available, world.availability.get id = some available →
     id = available.identity ∧ id < world.nextProof ∧ available.brand = .runtimeBrand (.proof id) ∧
     (available.active = true → available.region ∈ world.liveRegions ∧
-      ∀ place ∈ available.reserved, (world.root place.address).isSome = true)) ∧
+      ∀ place ∈ available.reserved, (world.root place.address).isSome = true) ∧
+    (∀ place ∈ available.reserved, place.authority.Recorded world.loans)) ∧
   (∀ address value pack, world.Resident address value → value.head = .bindings pack →
     pack.brand < world.nextProof ∧ pack.region ∈ world.liveRegions ∧
     pack.fields.length = value.fields.length ∧ pack.fields.Nodup ∧
@@ -369,6 +403,12 @@ def World.WellFormedWithOrigins (world : World) (originBound : Identity) : Prop 
   world.LoanParents ∧ world.LiveLoanLocations
 
 def World.WellFormed (world : World) : Prop := world.WellFormedWithOrigins world.nextOwner
+
+theorem World.reserved_authority_recorded {world : World} {originBound : Identity}
+    (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
+    (found : world.availability.get id = some available) {place : ResolvedPlace}
+    (member : place ∈ available.reserved) : place.authority.Recorded world.loans :=
+  (well.2.2.2.2.1 id available found).2.2.2.2 place member
 
 theorem World.WellFormedWithOrigins.mono {world : World} {first last : Identity}
     (valid : world.WellFormedWithOrigins first) (bound : first ≤ last) : world.WellFormedWithOrigins last := by

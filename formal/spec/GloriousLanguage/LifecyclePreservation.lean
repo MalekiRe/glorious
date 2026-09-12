@@ -120,8 +120,9 @@ theorem World.write_wellFormedWithOrigins_of_origin {before after : World} {addr
   · simpa only [regionsEq] using regionsUnique
   · intro id available found
     have selected : before.availability.get id = some available := by simpa only [proofEq] using found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available selected
-    refine ⟨identity,by simpa only [proofBound] using bound,brand,fun live => ⟨?_,?_⟩⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available selected
+    refine ⟨identity,by simpa only [proofBound] using bound,brand,fun live => ⟨?_,?_⟩,
+      by simpa only [loansEq] using recorded⟩
     · simpa only [regionsEq] using (active live).1
     · intro place member
       obtain ⟨root,found⟩ := Option.isSome_iff_exists.mp ((active live).2 place member)
@@ -284,8 +285,8 @@ theorem Retires.wellFormed {before after : World} {id : Identity}
         roots,regions,bases,ranges,loans,references,overlaps,parents,located⟩
       refine ⟨rootUnique.set _ _,loanUnique,proofUnique,regionUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,parents,?_⟩
       · intro key available found
-        obtain ⟨identity,bound,brand,active⟩ := proofs key available found
-        refine ⟨identity,bound,brand,fun live => ⟨(active live).1,?_⟩⟩
+        obtain ⟨identity,bound,brand,active,recorded⟩ := proofs key available found
+        refine ⟨identity,bound,brand,fun live => ⟨(active live).1,?_⟩,recorded⟩
         intro place member
         simpa only [rootFrame (safe.2.1 key available found live place member)] using (active live).2 place member
       · exact fun address value pack resident head => packs address value pack (residents resident) head
@@ -385,8 +386,11 @@ theorem EndsLoan.wellFormed {before after : World} {id : Identity}
   | restored selected _ _ unreferenced _ =>
       rcases valid with ⟨rootUnique,loanUnique,proofUnique,regionUnique,proofs,packs,owners,ownerUnique,
         roots,regions,bases,ranges,loans,references,overlaps,_,_⟩
-      refine ⟨rootUnique,loanUnique.set _ _,proofUnique,regionUnique,proofs,packs,owners,ownerUnique,
+      refine ⟨rootUnique,loanUnique.set _ _,proofUnique,regionUnique,?_,packs,owners,ownerUnique,
         roots,regions,bases,ranges,?_,?_,?_,parents,locations⟩
+      · intro key available found
+        obtain ⟨identity,bound,brand,active,recorded⟩ := proofs key available found
+        exact ⟨identity,bound,brand,active,fun place member => (recorded place member).set _ _⟩
       · intro key loan found
         by_cases same : key = id
         · subst key
@@ -430,8 +434,8 @@ theorem RegionEnds.wellFormed {before after : World} {region : Identity}
     roots,regions,bases,ranges,loans,references,overlaps,parents,locations⟩
   refine ⟨rootUnique,loanUnique,proofUnique,regionUnique.filter _,?_,?_,owners,ownerUnique,?_,?_,bases,ranges,?_,references,?_,parents,locations⟩
   · intro id available found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available found
-    refine ⟨identity,bound,brand,fun live => ⟨?_,(active live).2⟩⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
+    refine ⟨identity,bound,brand,fun live => ⟨?_,(active live).2⟩,recorded⟩
     simpa using And.intro (active live).1 (noProofs id available found live)
   · intro address value pack resident head
     obtain ⟨bound,live,length,distinct,facts⟩ := packs address value pack resident head
@@ -539,8 +543,8 @@ theorem World.deactivateAvailability_wellFormed {world : World} {id : Identity} 
     · subst key
       simp only [Table.get_set] at found
       cases found
-      obtain ⟨identity,bound,brand,_⟩ := proofs id available selected
-      exact ⟨identity,bound,brand,by simp⟩
+      obtain ⟨identity,bound,brand,_,recorded⟩ := proofs id available selected
+      exact ⟨identity,bound,brand,by simp,recorded⟩
     · exact proofs key proof (by simpa only [Table.get_set_other _ _ _ _ same] using found)
   · intro a b left right first second leftLive rightLive overlap unique
     rcases overlaps a b left right first second leftLive rightLive overlap unique with ancestor | ancestor

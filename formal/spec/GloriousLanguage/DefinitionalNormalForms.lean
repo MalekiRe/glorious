@@ -115,36 +115,33 @@ theorem DefinitionalReduction.normal_rowEquivalent {program : Program} (valid : 
     {context : Context} {left right : Term} (reduced : DefinitionalReduction program context left right)
     (normal : ExpansionNormal program context left) : RowEquivalent left right := by
   apply DefinitionalReduction.rec
-    (motive_1 := fun _ _ _ => True)
-    (motive_2 := fun _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ => True)
-    (motive_4 := fun _ _ _ => True)
-    (motive_5 := fun _ _ _ => True)
-    (motive_6 := fun _ _ => True)
-    (motive_7 := fun _ _ _ => True)
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
     (motive_8 := fun _ _ _ => True)
-    (motive_9 := fun _ _ _ => True)
-    (motive_10 := fun left right _ => ExpansionNormal program context left → RowEquivalent left right)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
     (motive_11 := fun _ _ _ _ => True)
-    (motive_12 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_13 := fun _ _ _ => True)
-    (motive_14 := fun _ _ _ => True)
-    (motive_15 := fun _ _ _ => True)
-    (motive_16 := fun left right _ => ListRel (fun first second =>
-      ExpansionNormal program context first → RowEquivalent first second) left right)
+    (motive_12 := fun context left right _ => ExpansionNormal program context left → RowEquivalent left right)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
     <;> try assumption
   all_goals intros
   all_goals try exact True.intro
   case refl => exact .refl
-  case step _ _ step _ normal => exact False.elim (normal.root step)
-  case trans _ _ _ _ _ first second normal =>
+  case step _ _ _ step _ normal => exact False.elim (normal.root step)
+  case trans _ _ _ _ _ _ first second normal =>
     have same := first normal
     exact same.trans (second ((same.expansionNormal_iff valid).mp normal))
-  case congr _ _ same _ children normal =>
-    exact .congr same (children.apply_left (fun _ present => normal.child present))
-  case row _ _ same _ => exact same
-  case nil => exact .nil
-  case cons _ _ _ _ _ _ head tail => exact .cons head tail
+  case congrChildren _ _ _ same _ children normal =>
+    exact .congr same ((ListRel.of_at same.children_length children).apply_left (fun _ present => normal.child present))
+  case row _ _ _ same _ => exact same
 
 theorem DefinitionallyJoinable.normal_unique {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {left right : Term} (joined : DefinitionallyJoinable program context left right)

@@ -87,7 +87,7 @@ theorem SelectsImpl.requirements_kinded {program : Program} (valid : ProgramWell
   cases selected with
   | selected declared _ _ matched holds =>
     cases matched with
-    | matched instantiated kinded _ _ =>
+    | inferred instantiated kinded _ _ _ _ =>
       intro requirement member
       have admitted := (valid.implementation_requirements declared requirement member).instantiate instantiated kinded
         (Nat.zero_le _) (fun _ absent => False.elim (List.not_mem_nil absent))

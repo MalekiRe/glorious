@@ -240,8 +240,9 @@ theorem Transfers.wellFormed {program : Program} {before after : World} {authori
   · simpa only [regionsEq] using regionsUnique
   · intro id available found
     have oldFound : before.availability.get id = some available := by simpa only [proofEq] using found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available oldFound
-    refine ⟨identity,by simpa only [proofBound] using bound,brand,?_⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available oldFound
+    refine ⟨identity,by simpa only [proofBound] using bound,brand,?_,
+      by simpa only [loansEq] using recorded⟩
     intro live
     obtain ⟨region,reserved⟩ := active live
     refine ⟨by simpa only [regionsEq] using region,?_⟩

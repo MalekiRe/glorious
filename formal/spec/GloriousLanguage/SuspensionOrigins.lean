@@ -445,7 +445,8 @@ theorem CopiesSnapshot.suspensionExtension {program : Kernel.Program} {before af
     (origin : suspension.CaptureOrigin) (copied : CopiesSnapshot program before suspension map after) :
     before.world.SuspensionExtension after.world := by
   rw [copied.result]
-  refine ⟨Nat.le_add_left _ _,?_,?_⟩
+  refine ⟨Nat.le_add_left _ _,?_,?_,fun _ recorded =>
+    recorded.transport (fun _ loan found => ⟨loan,Relocation.old_loan found⟩)⟩
   · intro id root _ _ found _
     rw [Relocation.old_root found]; rfl
   · intro id root suspensionId found home
@@ -461,48 +462,54 @@ theorem CopiesSnapshot.suspensionExtension {program : Kernel.Program} {before af
 /-- Cancellation really restores saved homes before scheduling destruction.
 This is the complete unified invariant for that transition, not a cleanup
 postcondition assumed by the cancellation instruction. -/
-theorem EffectStep.cancel_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+theorem EffectStep.cancel_suspension_storage {program : Kernel.Program} {before after : State} {id : Identity}
     (valid : before.SuspensionsWellFormed)
-    (step : EffectStep program before (some (.cancel id)) after) : after.SuspensionsWellFormed := by
+    (step : EffectStep program before (some (.cancel id)) after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
   cases step with
   | @cancel context _ next suspension task found obligation optional cancelable =>
     have settled := valid.restore_settled found obligation.1 (obligation.cancel_accounted optional)
       (valid.budgets.identity id suspension found) rfl rfl rfl rfl rfl rfl
-    exact ⟨settled.budgets.transport rfl (Nat.le_refl _),settled.origin,settled.frontier,settled.active,settled.homeFresh⟩
+    exact ⟨⟨settled.budgets.transport rfl (Nat.le_refl _),settled.origin,settled.frontier,settled.active,settled.homeFresh⟩,
+      fun _ recorded => recorded⟩
 
 /-- The last replay releases the original inventory, then executes the
 ordinary protected argument transfer. Other active captures remain owned. -/
-theorem EffectStep.last_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+theorem EffectStep.last_suspension_storage {program : Kernel.Program} {before after : State} {id : Identity}
     (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
-    (step : EffectStep program before (some (.replay id true)) after) : after.SuspensionsWellFormed := by
+    (step : EffectStep program before (some (.replay id true)) after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
   cases step with
   | resumeLast task found obligation remaining restored keptTransfer =>
     subst restored
     have identity := valid.budgets.identity _ _ found
     have settled := valid.restore_settled found obligation.1 (obligation.last_accounted remaining)
       identity rfl rfl rfl rfl rfl rfl
-    exact settled.transport (restoreRoots.worldTyped typed).1 keptTransfer.suspensionExtension rfl (Nat.le_refl _)
+    exact ⟨settled.transport (restoreRoots.worldTyped typed).1 keptTransfer.suspensionExtension rfl (Nat.le_refl _),
+      keptTransfer.suspensionExtension.recorded⟩
 
 /-- Multi-shot replay leaves the original capture active and executes on
 fresh local copies. Both old and newly allocated suspended-home origins are
 accounted for by the actual finite relocation. -/
-theorem EffectStep.copy_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+theorem EffectStep.copy_suspension_storage {program : Kernel.Program} {before after : State} {id : Identity}
     (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
-    (step : EffectStep program before (some (.replay id false)) after) : after.SuspensionsWellFormed := by
+    (step : EffectStep program before (some (.replay id false)) after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
   cases step with
   | resumeCopy task found obligation remaining copied keptTransfer =>
     have identity := valid.budgets.identity _ _ found
     have replaced := valid.replace_budget found (obligation.copy_accounted remaining) identity rfl rfl rfl rfl rfl rfl
     have stored := copied.suspensionExtension typed.1 (valid.origin _ _ found)
-    exact replaced.transport typed.1 (stored.trans keptTransfer.suspensionExtension) rfl
-      (by rw [copied.result]; exact Nat.le_refl _)
+    exact ⟨replaced.transport typed.1 (stored.trans keptTransfer.suspensionExtension) rfl
+      (by rw [copied.result]; exact Nat.le_refl _), (stored.trans keptTransfer.suspensionExtension).recorded⟩
 
 /-- Both executable capture forms preserve the entire suspension invariant,
 including new continuation allocation after the captured root limit. -/
-theorem EffectStep.create_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+theorem EffectStep.create_suspension_storage {program : Kernel.Program} {before after : State} {id : Identity}
     (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
-    (step : EffectStep program before (some (.suspend id)) after) : after.SuspensionsWellFormed := by
+    (step : EffectStep program before (some (.suspend id)) after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
   cases step with
   | suspend task selected terminal quantity bound continuation routes started keptTransfer roots permission homes created plan suspension =>
     rename_i newSuspension
@@ -514,7 +521,9 @@ theorem EffectStep.create_suspensions {program : Kernel.Program} {before after :
     have captured := movedValid.capture (suspension := newSuspension) movedTyped.1 roots homes accounted
       (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension])
       (by simp [suspension]) (by simp [suspension])
-    exact captured.transport (suspendRoots.worldTyped movedTyped).1 created.suspensionExtension rfl (Nat.le_refl _)
+    exact ⟨captured.transport (suspendRoots.worldTyped movedTyped).1 created.suspensionExtension rfl (Nat.le_refl _),
+      fun authority recorded => created.suspensionExtension.recorded authority
+        ((started.suspensionExtension.trans keptTransfer.suspensionExtension).recorded authority recorded)⟩
   | suspendTailArm task selected terminal quantity bound contains continuation routes started keptTransfer roots permission homes plan suspension =>
     rename_i newSuspension
     have movedTyped := keptTransfer.worldTyped programValid inventory (started.worldTyped typed)
@@ -525,7 +534,29 @@ theorem EffectStep.create_suspensions {program : Kernel.Program} {before after :
     have captured := movedValid.capture (suspension := newSuspension) movedTyped.1 roots homes accounted
       (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension]) (by simp [suspension])
       (by simp [suspension]) (by simp [suspension])
-    exact captured.transport (suspendRoots.worldTyped movedTyped).1 (.refl _) rfl (Nat.le_refl _)
+    exact ⟨captured.transport (suspendRoots.worldTyped movedTyped).1 (.refl _) rfl (Nat.le_refl _),
+      (started.suspensionExtension.trans keptTransfer.suspensionExtension).recorded⟩
+
+theorem EffectStep.cancel_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+    (valid : before.SuspensionsWellFormed)
+    (step : EffectStep program before (some (.cancel id)) after) : after.SuspensionsWellFormed :=
+  (step.cancel_suspension_storage valid).1
+
+theorem EffectStep.last_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before (some (.replay id true)) after) : after.SuspensionsWellFormed :=
+  (step.last_suspension_storage valid typed).1
+
+theorem EffectStep.copy_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before (some (.replay id false)) after) : after.SuspensionsWellFormed :=
+  (step.copy_suspension_storage valid typed).1
+
+theorem EffectStep.create_suspensions {program : Kernel.Program} {before after : State} {id : Identity}
+    (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before (some (.suspend id)) after) : after.SuspensionsWellFormed :=
+  (step.create_suspension_storage programValid inventory valid typed).1
 
 end Execution
 end Glorious.Language

@@ -40,6 +40,10 @@ theorem World.AuthorityStable.trans {before middle after : World}
     (first : before.AuthorityStable middle) (last : middle.AuthorityStable after) : before.AuthorityStable after :=
   ⟨first.homes.trans last.homes,last.loans.trans first.loans⟩
 
+theorem World.AuthorityStable.recorded {before after : World} (stable : before.AuthorityStable after)
+    (authority : Authority) (recorded : authority.Recorded before.loans) : authority.Recorded after.loans :=
+  stable.loans.symm ▸ recorded
+
 theorem World.write_authorityStable {before after : World} {address : Address} {value : Option Value}
     (written : before.write address value = some after) : before.AuthorityStable after :=
   ⟨.of_locations (Nat.le_of_eq (congrArg World.nextRoot (World.write_rest written)).symm)
@@ -84,6 +88,13 @@ theorem FormsLoan.homeExtension {program : Program} {purpose : LoanPurpose} {bef
   cases borrowed with
   | borrow _ _ _ _ _ _ _ _ _ written => exact (World.write_authorityStable written).homes.counter
 
+theorem FormsLoan.recorded {program : Program} {purpose : LoanPurpose} {before after : World}
+    {authority mode region referent destination}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after)
+    (saved : Authority) (recorded : saved.Recorded before.loans) : saved.Recorded after.loans := by
+  cases borrowed
+  exact recorded.set _ _
+
 theorem FormsLoan.loan_origin {program : Program} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination} {id : Identity} {loan : Loan}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
@@ -101,6 +112,11 @@ theorem EndsLoan.homeExtension {before after : World} {id : Identity} (ended : E
     before.HomeExtension after := by
   cases ended
   exact ⟨Nat.le_refl _,fun _ _ => rfl⟩
+
+theorem EndsLoan.recorded {before after : World} {id : Identity} (ended : EndsLoan before id after)
+    (authority : Authority) (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
+  cases ended
+  exact recorded.set _ _
 
 theorem Retires.authorityStable {before after : World} {id : Identity} (retired : Retires before id after) :
     before.AuthorityStable after := by
@@ -166,6 +182,27 @@ theorem Memory.RawWrite.authorityStable {program : Program} {before after : Worl
   | write _ _ _ _ _ moved => exact moved.authorityStable
 
 namespace Foreign
+
+theorem Mutation.recorded {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
+    (changed : Mutation program policy before after) (authority : Authority)
+    (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
+  cases changed with
+  | allocate _ allocated => exact allocated.authorityStable.recorded authority recorded
+  | scalar _ stored => exact stored.2.2.authorityStable.recorded authority recorded
+  | unit _ stored => exact stored.2.authorityStable.recorded authority recorded
+  | pointer _ _ _ _ stored => exact stored.2.authorityStable.recorded authority recorded
+  | aggregate _ _ _ _ constructed => exact constructed.authorityStable.recorded authority recorded
+  | acquire _ _ acquired => exact acquired.authorityStable.recorded authority recorded
+  | borrow _ _ borrowed => exact borrowed.recorded authority recorded
+  | allocateBuffer _ allocated => exact allocated.authorityStable.recorded authority recorded
+  | reallocateBuffer _ _ reallocated => exact reallocated.authorityStable.recorded authority recorded
+  | releaseBuffer _ _ released => exact released.authorityStable.recorded authority recorded
+  | rawRead _ _ read => exact read.authorityStable.recorded authority recorded
+  | rawWrite _ _ written => exact written.authorityStable.recorded authority recorded
+  | rawBorrow _ _ borrowed => cases borrowed with | borrow _ _ _ _ formed => exact formed.recorded authority recorded
+  | bulkMove _ _ moved => exact moved.authorityStable.recorded authority recorded
+  | retire _ _ retired => exact retired.authorityStable.recorded authority recorded
+  | endLoan ended => exact ended.recorded authority recorded
 
 theorem Mutation.homeExtension {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
     (changed : Mutation program policy before after) : before.HomeExtension after := by

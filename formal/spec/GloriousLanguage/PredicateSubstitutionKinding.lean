@@ -33,7 +33,7 @@ private theorem ConstraintKinded.renameSupported {program : Program} {context : 
   kinded.renameParameters rename used injective (fun _ member supported => renamedContext.parameter rename member supported)
     (Nat.le_refl _) (fun _ member => member) (fun _ member => member)
 
-private theorem Table.get_filter_key {α : Type} (table : Table α) (selected : Identity → Bool) (id : Identity)
+theorem Table.get_filter_key {α : Type} (table : Table α) (selected : Identity → Bool) (id : Identity)
     (retained : selected id = true) :
     Table.get (table.filter (fun entry => selected entry.1)) id = table.get id := by
   induction table with
@@ -45,7 +45,7 @@ private theorem Table.get_filter_key {α : Type} (table : Table α) (selected : 
       · simpa [Table.get,same,keep] using ih
       · simpa [Table.get,same,keep] using ih
 
-private theorem Table.get_none_of_absent {α : Type} {table : Table α} {id : Identity}
+theorem Table.get_none_of_absent {α : Type} {table : Table α} {id : Identity}
     (absent : ∀ entry ∈ table, entry.1 ≠ id) : table.get id = none := by
   cases found : table.get id with
   | none => rfl

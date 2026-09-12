@@ -1,4 +1,4 @@
-import GloriousLanguage.ProjectionKinding
+import GloriousLanguage.HeadInference
 
 /-! Constructive coherence of actual declared reductions. This module does not
 infer global confluence from local peaks or assume normalization terminates. -/
@@ -21,12 +21,14 @@ theorem MatchesImplHead.instantiated {program : Program} (valid : ProgramWellFor
     {context : Context} {implementation : ImplDefinition} {values : List Term} {substitution : Substitution}
     (declared : Definition.implementation implementation ∈ program.declarations)
     (instantiated : Instantiates implementation.generics values substitution)
-    (valuesKinded : ∀ value ∈ values, Kinding program context value value.kind) :
+    (valuesKinded : ∀ value ∈ values, Kinding program context value value.kind)
+    (inferred : ∀ (index : Nat) binder value, implementation.generics[index]? = some binder → values[index]? = some value →
+      InfersHeadArgument program context implementation (implementation.arguments.map (Term.substitute substitution)) binder value) :
     MatchesImplHead program context implementation (implementation.arguments.map (Term.substitute substitution)) substitution := by
   have declaration := (valid.2.2.2.2.1 _ declared).2.1
   obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
-  obtain ⟨_,ownerSub,_,headKinded,_,_⟩ := signature
-  refine .matched (specialized := implementation.arguments.map (Term.substitute substitution)) instantiated valuesKinded ?_ ?_
+  obtain ⟨_,_,ownerSub,_,headKinded,_,_⟩ := signature
+  refine .matched (specialized := implementation.arguments.map (Term.substitute substitution)) instantiated valuesKinded ?_ ?_ inferred
   · simpa only [List.map_id] using
       (ListRel.maps implementation.arguments id (Term.substitute substitution) (by
         intro argument member
@@ -42,10 +44,12 @@ theorem SelectsImpl.instantiated_head {program : Program} (valid : ProgramWellFo
     (declared : Definition.implementation implementation ∈ program.declarations)
     (instantiated : Instantiates implementation.generics values substitution)
     (valuesKinded : ∀ value ∈ values, Kinding program context value value.kind)
+    (inferred : ∀ (index : Nat) binder value, implementation.generics[index]? = some binder → values[index]? = some value →
+      InfersHeadArgument program context implementation (implementation.arguments.map (Term.substitute substitution)) binder value)
     (requirements : ∀ requirement ∈ implementation.requirements, EntailsSubstitution program context substitution requirement) :
     SelectsImpl program context implementation.trait (implementation.arguments.map (Term.substitute substitution))
       implementation.negative implementation substitution :=
-  .selected declared rfl rfl (.instantiated valid declared instantiated valuesKinded) requirements
+  .selected declared rfl rfl (.instantiated valid declared instantiated valuesKinded inferred) requirements
 
 theorem MatchesImplHead.congr_query {program : Program} {context : Context} {implementation : ImplDefinition}
     {first second : List Term} {substitution : Substitution}
@@ -53,10 +57,11 @@ theorem MatchesImplHead.congr_query {program : Program} {context : Context} {imp
     (equal : ListRel (DefinitionallyEqual program context) first second) :
     MatchesImplHead program context implementation second substitution := by
   cases matched with
-  | matched instantiated kinded specialized head =>
+  | inferred instantiated kinded specialized lengths head inferred =>
     exact .matched instantiated kinded specialized
       (ListRel.transitive (relation := DefinitionallyEqual program context)
-        (fun _ _ _ first second => DefinitionallyEqual.trans first second) head equal)
+        (fun _ _ _ first second => DefinitionallyEqual.trans first second) (ListRel.of_at lengths head) equal)
+      (fun index binder value sourceAt valueAt => (inferred index binder value sourceAt valueAt).congr_query equal)
 
 /-- Alias/row/associated convertibility transports the existing selection and
 its requirements without changing inferred source arguments or consulting

@@ -1,4 +1,4 @@
-import GloriousLanguage.Machine
+import GloriousLanguage.ControlAuthority
 
 /-! Address provenance of executable control. This is support of the actual
 task, frames and captured control, not another environment or ownership table.
@@ -114,6 +114,10 @@ structure State.ControlWellFormed (state : State) : Prop where
   frames : RootSupport.Below (state.frames.flatMap Frame.rootSupport) state.world.nextRoot
   saved : ∀ id suspension, state.resumptions.get id = some suspension →
     RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit
+  taskAuthorities : AuthoritySupport.Recorded state.task.authoritySupport state.world.loans
+  frameAuthorities : AuthoritySupport.Recorded (state.frames.flatMap Frame.authoritySupport) state.world.loans
+  savedAuthorities : ∀ id suspension, state.resumptions.get id = some suspension →
+    AuthoritySupport.Recorded suspension.controlAuthoritySupport state.world.loans
 
 theorem State.ControlWellFormed.saved_current {state : State} (valid : state.ControlWellFormed)
     {id : Identity} {suspension : Suspension} (found : state.resumptions.get id = some suspension) :
@@ -125,6 +129,16 @@ theorem State.ControlWellFormed.no_future_saved {state : State} (valid : state.C
     {root : Identity} (future : state.world.nextRoot ≤ root) : root ∉ suspension.controlRootSupport := by
   intro member
   exact Nat.not_lt_of_ge future (valid.saved_current found root member)
+
+/-- An old saved authority cannot anticipate a future loan identity, even
+when its referenced address already exists. Ended loan records remain valid
+historical evidence, but do not recover access permission. -/
+theorem State.ControlWellFormed.no_future_saved_authority {state : State} (valid : state.ControlWellFormed)
+    (well : state.world.WellFormed) {id loan : Identity} {suspension : Suspension}
+    (found : state.resumptions.get id = some suspension) (future : state.world.nextLoan ≤ loan) :
+    ∀ authority ∈ suspension.controlAuthoritySupport, authority.parentLoan ≠ some loan := by
+  intro authority member parent
+  exact Nat.not_lt_of_ge future ((valid.savedAuthorities id suspension found authority member).loan_bound well parent)
 
 end Execution
 end Glorious.Language

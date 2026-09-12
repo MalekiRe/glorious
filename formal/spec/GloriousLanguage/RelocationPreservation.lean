@@ -65,7 +65,7 @@ theorem World.reserved_root_bound {world : World} {originBound : Identity}
     (active : available.active = true) (member : place ∈ available.reserved) :
     place.address.root < world.nextRoot := by
   obtain ⟨root,selected⟩ := Option.isSome_iff_exists.mp
-    (((well.2.2.2.2.1 id available found).2.2.2 active).2 place member)
+    (((well.2.2.2.2.1 id available found).2.2.2.1 active).2 place member)
   exact World.root_bound well (World.root_found selected).1
 
 theorem World.owner_bound {world : World} {originBound : Identity}
@@ -587,8 +587,9 @@ theorem SnapshotMap.world_wellFormed {program : Kernel.Program} {before : State}
   rcases valid with ⟨_,_,proofUnique,_,proofs,packs,owners,_,roots,regions,bases,_,loans,references,_,_,_⟩
   refine ⟨rootUnique,loanUnique,proofUnique,regionUnique,?_,?_,?_,ownerUnique,?_,?_,?_,rootSeparate,?_,?_,loanSeparate,parents,locations⟩
   · intro id available found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available found
-    refine ⟨identity,bound,brand,?_⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
+    refine ⟨identity,bound,brand,?_,fun place member =>
+      (recorded place member).transport (fun _ loan found => ⟨loan,Relocation.old_loan found⟩)⟩
     intro live
     obtain ⟨region,reserved⟩ := active live
     refine ⟨List.mem_append_left _ region,?_⟩

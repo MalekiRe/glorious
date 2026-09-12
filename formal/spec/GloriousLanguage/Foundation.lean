@@ -72,6 +72,29 @@ def Quantity.Valid (q : Quantity) : Prop := ∃ n, q.Contains n
 def Quantity.Request (q : Quantity) (p : Principal) : Prop :=
   q.Valid ∧ ∀ n, q.Contains n → p.Permits n
 
+/-- The full interval of a class, as opposed to an arbitrary request that
+the class may satisfy. Logical transport of capability evidence uses this
+whole interval so an exact-once request cannot be mistaken for Copy. -/
+def Principal.quantity : Principal → Quantity
+  | .duplicable => ⟨0,none⟩
+  | .affine => ⟨0,some 1⟩
+  | .exact => ⟨1,some 1⟩
+
+theorem Principal.quantity_contains (principal : Principal) (n : Nat) :
+    principal.quantity.Contains n ↔ principal.Permits n := by
+  cases principal <;> simp [Principal.quantity,Quantity.Contains,Principal.Permits] <;> omega
+
+theorem Principal.quantity_valid (principal : Principal) : principal.quantity.Valid :=
+  ⟨1,(principal.quantity_contains 1).mpr (Principal.once_does_not_identify_principal principal)⟩
+
+theorem Principal.quantity_request (first last : Principal) :
+    first.quantity.Request last ↔ first.Restricts last := by
+  constructor
+  · intro request n permitted
+    exact request.2 n ((first.quantity_contains n).mpr permitted)
+  · intro ordered
+    exact ⟨first.quantity_valid,fun n contained => ordered n ((first.quantity_contains n).mp contained)⟩
+
 def Quantity.sequence (a b : Quantity) : Quantity :=
   ⟨a.lower + b.lower, match a.upper, b.upper with
     | some x, some y => some (x + y)

@@ -13,14 +13,17 @@ structure World.SuspensionExtension (before after : World) : Prop where
     root.home = .suspended suspension → (after.roots.get id).map Root.location = some root.location
   origin : ∀ id root suspension, after.roots.get id = some root → root.home = .suspended suspension →
     ∃ original, before.roots.get id = some original ∧ root.location = original.location
+  recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans
 
 theorem World.SuspensionExtension.refl (world : World) : world.SuspensionExtension world :=
-  ⟨Nat.le_refl _,fun _ _ _ _ found _ => by rw [found]; rfl,fun _ root _ found _ => ⟨root,found,rfl⟩⟩
+  ⟨Nat.le_refl _,fun _ _ _ _ found _ => by rw [found]; rfl,fun _ root _ found _ => ⟨root,found,rfl⟩,
+    fun _ recorded => recorded⟩
 
 theorem World.SuspensionExtension.trans {before middle after : World}
     (first : before.SuspensionExtension middle) (last : middle.SuspensionExtension after) :
     before.SuspensionExtension after := by
-  refine ⟨Nat.le_trans first.counter last.counter,?_,?_⟩
+  refine ⟨Nat.le_trans first.counter last.counter,?_,?_,
+    fun authority recorded => last.recorded authority (first.recorded authority recorded)⟩
   · intro id root suspension bound found home
     obtain ⟨current,currentAt,location⟩ := Option.map_eq_some_iff.mp (first.retained id root suspension bound found home)
     have currentHome : current.home = .suspended suspension := by
@@ -38,9 +41,10 @@ theorem World.SuspensionExtension.trans {before middle after : World}
 
 theorem World.SuspensionExtension.of_locations {before after : World}
     (counter : before.nextRoot ≤ after.nextRoot)
-    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location) :
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
+    (recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans) :
     before.SuspensionExtension after := by
-  refine ⟨counter,?_,?_⟩
+  refine ⟨counter,?_,?_,recorded⟩
   · intro id root _ _ found _
     simpa only [found,Option.map_some] using locations id
   · intro id root _ found _
@@ -48,18 +52,20 @@ theorem World.SuspensionExtension.of_locations {before after : World}
     exact ⟨original,originalAt,location.symm⟩
 
 theorem World.SuspensionExtension.of_roots {before after : World}
-    (counter : before.nextRoot ≤ after.nextRoot) (roots : after.roots = before.roots) :
-    before.SuspensionExtension after := .of_locations counter (by intro id; rw [roots])
+    (counter : before.nextRoot ≤ after.nextRoot) (roots : after.roots = before.roots)
+    (recorded : ∀ (authority : Authority), authority.Recorded before.loans → authority.Recorded after.loans) :
+    before.SuspensionExtension after := .of_locations counter (by intro id; rw [roots]) recorded
 
 theorem World.write_suspensionExtension {before after : World} {address : Address} {value : Option Value}
     (written : before.write address value = some after) : before.SuspensionExtension after :=
   .of_locations (Nat.le_of_eq (congrArg World.nextRoot (World.write_rest written)).symm) (World.write_locations written)
+    (World.write_authorityStable written).recorded
 
 theorem Allocates.suspensionExtension {program : Program} {before after : World}
     {home region type layout mutable address}
     (allocated : Allocates program before home region type layout mutable address after)
     (ordinary : ∀ id, home ≠ .suspended id) : before.SuspensionExtension after := by
-  refine ⟨allocated.authorityStable.homes.counter,?_,?_⟩
+  refine ⟨allocated.authorityStable.homes.counter,?_,?_,allocated.authorityStable.recorded⟩
   · intro id root suspension bound found home
     rw [allocated.roots_other bound,found]; rfl
   · intro id root suspension found homeEq
@@ -68,7 +74,7 @@ theorem Allocates.suspensionExtension {program : Program} {before after : World}
 
 theorem Retires.suspensionExtension {before after : World} {retiredId : Identity}
     (retired : Retires before retiredId after) : before.SuspensionExtension after := by
-  refine ⟨retired.authorityStable.homes.counter,?_,?_⟩
+  refine ⟨retired.authorityStable.homes.counter,?_,?_,retired.authorityStable.recorded⟩
   · intro id root suspension _ selected home
     exact retired.suspended_location selected home
   · intro id root suspension found home
@@ -77,11 +83,11 @@ theorem Retires.suspensionExtension {before after : World} {retiredId : Identity
 
 theorem Transfers.suspensionExtension {program : Program} {before after : World} {authority source destination}
     (transferred : Transfers program before authority source destination after) : before.SuspensionExtension after :=
-  .of_locations transferred.authorityStable.homes.counter transferred.locations
+  .of_locations transferred.authorityStable.homes.counter transferred.locations transferred.authorityStable.recorded
 
 theorem Copies.suspensionExtension {program : Program} {before after : World} {authority source destination}
     (copied : Copies program before authority source destination after) : before.SuspensionExtension after :=
-  .of_locations copied.authorityStable.homes.counter copied.locations
+  .of_locations copied.authorityStable.homes.counter copied.locations copied.authorityStable.recorded
 
 theorem Acquires.suspensionExtension {program : Program} {before after : World} {authority force source destination}
     (acquired : Acquires program before authority force source destination after) : before.SuspensionExtension after := by
@@ -92,27 +98,26 @@ theorem Acquires.suspensionExtension {program : Program} {before after : World} 
 
 theorem NewValue.suspensionExtension {program : Program} {before after : World} {destination type head sources}
     (constructed : NewValue program before destination type head sources after) : before.SuspensionExtension after :=
-  .of_locations constructed.authorityStable.homes.counter constructed.locations
+  .of_locations constructed.authorityStable.homes.counter constructed.locations constructed.authorityStable.recorded
 
 theorem FormsLoan.suspensionExtension {program : Program} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
-    before.SuspensionExtension after := .of_locations borrowed.homeExtension.counter borrowed.locations
+    before.SuspensionExtension after := .of_locations borrowed.homeExtension.counter borrowed.locations borrowed.recorded
 
 theorem EndsLoan.suspensionExtension {before after : World} {id : Identity} (ended : EndsLoan before id after) :
     before.SuspensionExtension after := by
-  cases ended
-  exact .of_roots (Nat.le_refl _) rfl
+  exact .of_roots (by cases ended; exact Nat.le_refl _) (by cases ended; rfl) ended.recorded
 
 theorem FreshRegion.suspensionExtension {before after : World} {id : Identity}
     (fresh : FreshRegion before id after) : before.SuspensionExtension after := by
   rcases fresh with ⟨_,rfl⟩
-  exact .of_roots (Nat.le_refl _) rfl
+  exact .of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded)
 
 theorem Execution.RegionEnds.suspensionExtension {before after : World} {id : Identity}
     (ended : RegionEnds before id after) : before.SuspensionExtension after := by
   rcases ended with ⟨_,rfl⟩
-  exact .of_roots (Nat.le_refl _) rfl
+  exact .of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded)
 
 theorem Execution.Temporary.suspensionExtension {program : Kernel.Program} {context : Context} {type : Term}
     {before after : World} {address : Address} (allocated : Temporary program context type before address after) :
@@ -243,7 +248,8 @@ theorem Execution.PacksBindings.suspensionExtension {program : Kernel.Program} {
     (packed : PacksBindings program context before pattern resultOrigin positive bindings pack after) :
     before.SuspensionExtension after := by
   obtain ⟨allocated,created,type,_,temporary,_,constructed,rfl⟩ := packed
-  exact (temporary.suspensionExtension.trans constructed.suspensionExtension).trans (.of_roots (Nat.le_refl _) rfl)
+  exact (temporary.suspensionExtension.trans constructed.suspensionExtension).trans
+    (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
 
 theorem Execution.UnitFields.suspensionExtension {program : Kernel.Program} {context : Context}
     {before after : World} {types : List Term} {index : Option Nat} {pack : Address} {fields : List Address}
@@ -268,6 +274,8 @@ theorem Execution.ConsumesAvailability.suspensionExtension {before after : World
     (consumed : ConsumesAvailability before address id access after) : before.SuspensionExtension after := by
   cases consumed with
   | lent => exact .refl _
-  | owned _ written => exact (World.write_suspensionExtension written).trans (.of_roots (Nat.le_refl _) rfl)
+  | owned _ written =>
+    exact (World.write_suspensionExtension written).trans
+      (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
 
 end Glorious.Language

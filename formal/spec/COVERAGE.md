@@ -29,7 +29,9 @@ The full initial draft must be written before the first build. Afterward:
 
 1. Repair Lean elaboration failures without weakening semantic premises or
    replacing unfinished proofs with axioms/admissions.
-2. Check foundational positive and negative propositions in `Checks`.
+2. Establish general preservation, progress and correctness theorems with
+   strict Lean proof checking. Preserve `Checks` as regression material, not
+   routine evidence of semantic soundness.
 3. Audit every source form against the normative text, including generics,
    associated bindings, ownership markers, implicit operation instances,
    bodyless declarations, contextual alternatives and source-origin paths.

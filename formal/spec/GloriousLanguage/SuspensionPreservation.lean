@@ -10,32 +10,52 @@ namespace Glorious.Language
 
 namespace Execution
 
+theorem Step.suspension_storage {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed)
+    (step : Step program host before event after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
+  rcases step with localStep | atom | effect | control | primitive | foreign
+  · exact ⟨localStep.suspensions suspensions typed.1,localStep.suspensionExtension.recorded⟩
+  · exact ⟨atom.suspensions suspensions typed.1,atom.suspensionExtension.recorded⟩
+  · exact effect.suspension_storage valid inventory suspensions typed
+  · exact ⟨control.suspensions suspensions typed.1,control.suspensionExtension.recorded⟩
+  · exact ⟨primitive.suspensions typed.1 suspensions,primitive.suspensionExtension.recorded⟩
+  · exact ⟨foreign.suspensions lawful typed.1 suspensions,(foreign.suspensionExtension lawful typed.1).recorded⟩
+
 theorem Step.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (suspensions : before.SuspensionsWellFormed)
-    (step : Step program host before event after) : after.SuspensionsWellFormed := by
-  rcases step with localStep | atom | effect | control | primitive | foreign
-  · exact localStep.suspensions suspensions typed.1
-  · exact atom.suspensions suspensions typed.1
-  · exact effect.suspensions valid inventory suspensions typed
-  · exact control.suspensions suspensions typed.1
-  · exact primitive.suspensions typed.1 suspensions
-  · exact foreign.suspensions lawful typed.1 suspensions
+    (step : Step program host before event after) : after.SuspensionsWellFormed :=
+  (step.suspension_storage valid inventory lawful typed suspensions).1
 
 /-- Every finite prefix retains the same complete suspension invariant;
 arbitrary body execution is included, not restricted to cleanup tasks. -/
+theorem Run.suspension_storage {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed)
+    (run : Run program host before trace after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
+  induction run with
+  | refl => exact ⟨suspensions,fun _ recorded => recorded⟩
+  | silent step _ ih | visible step _ ih =>
+    have first := step.suspension_storage valid inventory lawful typed suspensions
+    have last := ih (step.worldTyped valid inventory lawful typed) first.1
+    exact ⟨last.1,fun authority recorded => last.2 authority (first.2 authority recorded)⟩
+
 theorem Run.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (suspensions : before.SuspensionsWellFormed)
-    (run : Run program host before trace after) : after.SuspensionsWellFormed := by
-  induction run with
-  | refl => exact suspensions
-  | silent step _ ih | visible step _ ih =>
-    exact ih (step.worldTyped valid inventory lawful typed) (step.suspensions valid inventory lawful typed suspensions)
+    (run : Run program host before trace after) : after.SuspensionsWellFormed :=
+  (run.suspension_storage valid inventory lawful typed suspensions).1
 
 theorem State.SuspensionsWellFormed.root_bound {state : State} (valid : state.SuspensionsWellFormed)
     {id root : Identity} {suspension : Suspension} (found : state.resumptions.get id = some suspension)

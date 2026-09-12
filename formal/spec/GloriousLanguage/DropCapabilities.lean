@@ -2,19 +2,11 @@ import GloriousLanguage.CapabilityModels
 import GloriousLanguage.StorageTyping
 
 /-! The intrinsic affine Drop bound is checked by ordinary entailment.
-Canonical capability equations propagate that bound through the actual typed
-resident tree; no independent capability walk or assumed disposal permission
-is added to the language's admission path. -/
+The semantic capability interpretation consumes that evidence, including
+logical congruence and quantified elimination. Propagation through the actual
+typed resident tree still requires conversion-safe structural inversion;
+raw syntax-indexed inversion is not a substitute for that obligation. -/
 namespace Glorious.Language
-
-/-- In a closed checking context, Use evidence cannot come from a copied
-assumption. It supplies a real answer of the canonical capability solution. -/
-theorem Entails.use_principal {program : Program} {context : Context} {type : Term} {quantity : Quantity}
-    (closed : context.assumptions = []) (entailed : Entails program context (.use type quantity)) :
-    ∃ principal, PrincipalOf program type principal ∧ quantity.Request principal := by
-  cases entailed with
-  | assumed member => simp [closed] at member
-  | use selected allowed => exact ⟨_,selected,allowed⟩
 
 theorem Quantity.affine_request_iff {principal : Principal} :
     Quantity.Request ⟨0,some 1⟩ principal ↔ principal.MayDiscard := by
@@ -33,7 +25,7 @@ theorem Quantity.affine_request_iff {principal : Principal} :
 theorem Entails.drop_capability {program : Program} {context : Context} {type : Term}
     (closed : context.assumptions = []) (entailed : Entails program context (.use type ⟨0,some 1⟩)) :
     ∃ principal, (CapabilityModel.canonical program).principal type = some principal ∧ principal.MayDiscard := by
-  obtain ⟨principal,selected,allowed⟩ := entailed.use_principal closed
+  obtain ⟨principal,selected,allowed⟩ := entailed.valid_use_principal closed ⟨1,by simp [Quantity.Contains]⟩
   exact ⟨principal,principalOf_canonical.mp selected,Quantity.affine_request_iff.mp allowed⟩
 
 theorem Principal.meet_restricts_left (first last : Principal) : (first.meet last).Restricts first :=

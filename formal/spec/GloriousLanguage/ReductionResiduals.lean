@@ -72,7 +72,7 @@ theorem DefinitionalStep.projection_argument_relation {program : Program} (valid
     ∃ newValue, DefinitionalStep program context (.projection trait member newOwners newItems kind) newValue ∧
       relation value newValue := by
   cases step with
-  | @projection _ _ _ _ associated ownerSub itemSub implementation implSub body value
+  | @projection _ _ _ _ _ associated ownerSub itemSub implementation implSub body value
       domain selected memberBody substituted =>
     obtain ⟨newOwnerSub,newItemSub,next,_,itemEnvironments⟩ :=
       domain.relate_arguments valid converts ownerReduces itemReduces

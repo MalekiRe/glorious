@@ -5,6 +5,14 @@ home, not a resident owner; existing addresses, loans and pointer origins keep
 their original authority. -/
 namespace Glorious.Language
 
+theorem Allocates.loans {program : Program} {before after : World} {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) :
+    after.loans = before.loans := by cases allocated; rfl
+
+theorem Allocates.nextLoan {program : Program} {before after : World} {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) :
+    after.nextLoan = before.nextLoan := by cases allocated; rfl
+
 theorem World.freshRoot {world : World} {originBound : Identity} (valid : world.WellFormedWithOrigins originBound) :
     world.roots.get world.nextRoot = none := by
   cases found : world.roots.get world.nextRoot with
@@ -63,8 +71,8 @@ theorem Allocates.wellFormedWithOrigins {program : Program} {before after : Worl
       roots,regions,bases,ranges,loans,references,overlaps,parents,locations⟩
     refine ⟨rootsUnique.set _ _,loansUnique,proofsUnique,regionsUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,?_,?_⟩
     · intro id available found
-      obtain ⟨identity,bound,brand,active⟩ := proofs id available found
-      refine ⟨identity,bound,brand,?_⟩
+      obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
+      refine ⟨identity,bound,brand,?_,recorded⟩
       intro live
       obtain ⟨region,reserved⟩ := active live
       refine ⟨region,?_⟩

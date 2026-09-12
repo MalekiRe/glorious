@@ -10,11 +10,12 @@ explicit contracts.
 Status: whole-specification draft, in its semantic repair and proof pass.
 General proofs now cover storage preservation for every executable transition
 and finite execution, invocation loan exclusion and physical lease cleanup,
-constructibility of recursive capabilities, typed public-value observations,
+constructibility of the logical/coinductive capability interpretation, typed public-value observations,
 complete code-typing transport for snapshot region renaming, and current/saved
-control-address provenance through every machine step and finite run, with
+control-address and loan-authority provenance through every machine step and finite run, with
 saved-home ownership and actual final/copied replay ownership. These are
-not full-language soundness or conformance: source lexical/type normalization,
+not full-language soundness or conformance: conversion-safe capability inversion,
+source lexical/type normalization,
 task/frame typing and retained-frame liveness, initialized return lifetimes, resource progress and
 complete target contracts remain open. `PROOF-PLAN.md` records the current
 hardest-first dependency chain; `DRAFT.md` retains the earlier draft audit.
@@ -36,7 +37,10 @@ or a dependency of this project.
   quantities, snapshots, labels, guarded environments and body-checked
   invocation contracts.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
-  control-address support, canonical invocation admission and whole-run preservation.
+  control-address and historical authority support, canonical invocation admission
+  and whole-run preservation.
+- `ControlAuthority` and its producer modules: actual recorded loan authorities,
+  reservation provenance, callback leases and mapped replay authority.
 - `SuspensionOrigins`, `SuspensionOwnership`: authenticated capture homes,
   historical inventories and ownership by the actual replayed cleanup frames.
 - `Target`, `Memory`, `Primitives`, `Foreign`, `ABI`: scalar mathematics,

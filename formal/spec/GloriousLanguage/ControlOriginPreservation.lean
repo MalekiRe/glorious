@@ -1,4 +1,5 @@
 import GloriousLanguage.ControlForeignOrigin
+import GloriousLanguage.ControlAuthorityForeign
 
 /-! Whole-machine provenance of actual current and saved control. The
 canonical invocation contract supplies this invariant; all finite and
@@ -13,17 +14,29 @@ theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (step : Step program host before event after) :
     after.ControlWellFormed := by
-  have support : RootSupport.Below after.task.rootSupport after.world.nextRoot ∧
-      RootSupport.Below (after.frames.flatMap Frame.rootSupport) after.world.nextRoot := by
+  have support :
+      (RootSupport.Below after.task.rootSupport after.world.nextRoot ∧
+        RootSupport.Below (after.frames.flatMap Frame.rootSupport) after.world.nextRoot) ∧
+      (AuthoritySupport.Recorded after.task.authoritySupport after.world.loans ∧
+        AuthoritySupport.Recorded (after.frames.flatMap Frame.authoritySupport) after.world.loans) := by
     rcases step with localStep | atom | effect | branch | primitive | foreign
-    · exact localStep.control_support valid inventory typed control.task control.frames
-    · exact atom.control_support typed.1 control.task control.frames
-    · exact effect.control_support valid inventory typed control
-    · exact branch.control_support valid inventory typed control.task control.frames
-    · exact primitive.control_support control.task control.frames
-    · exact foreign.control_support valid inventory lawful typed control.task control.frames
+    · exact ⟨localStep.control_support valid inventory typed control.task control.frames,
+        localStep.authority_support typed control.taskAuthorities control.frameAuthorities⟩
+    · exact ⟨atom.control_support typed.1 control.task control.frames,
+        atom.authority_support control.taskAuthorities control.frameAuthorities⟩
+    · exact ⟨effect.control_support valid inventory typed control,
+        effect.authority_support valid inventory typed control.suspensions
+          control.taskAuthorities control.frameAuthorities control.savedAuthorities⟩
+    · exact ⟨branch.control_support valid inventory typed control.task control.frames,
+        branch.authority_support typed.1 control.taskAuthorities control.frameAuthorities⟩
+    · exact ⟨primitive.control_support control.task control.frames,
+        primitive.authority_support control.taskAuthorities control.frameAuthorities⟩
+    · exact ⟨foreign.control_support valid inventory lawful typed control.task control.frames,
+        foreign.authority_support lawful typed.1 control.taskAuthorities control.frameAuthorities⟩
   exact ⟨step.suspensions valid inventory lawful typed control.suspensions,
-    support.1,support.2,step.saved_control_origin control⟩
+    support.1.1,support.1.2,step.saved_control_origin control,support.2.1,support.2.2,
+    step.saved_authority_origin valid inventory lawful typed control.suspensions
+      control.taskAuthorities control.frameAuthorities control.savedAuthorities⟩
 
 theorem Run.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event}
@@ -54,6 +67,24 @@ theorem Run.old_saved_control_excludes_future_root {program : Kernel.Program} {h
   have below := finish.saved id current afterAt root member
   rw [limit] at below
   exact Nat.not_lt_of_ge future (Nat.lt_of_lt_of_le below (control.suspensions.frontier id original beforeAt))
+
+/-- Capture metadata is immutable through arbitrary execution. Consequently
+an old context, frame, callback lease or pending cleanup cannot acquire a
+later-created loan identity merely because that identity eventually exists. -/
+theorem Run.old_saved_authority_excludes_future_loan {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id loan : Identity} {original current : Suspension}
+    (well : before.world.WellFormed) (control : before.ControlWellFormed)
+    (run : Run program host before trace after)
+    (beforeAt : before.resumptions.get id = some original) (afterAt : after.resumptions.get id = some current)
+    (future : before.world.nextLoan ≤ loan) :
+    ∀ authority ∈ current.controlAuthoritySupport, authority.parentLoan ≠ some loan := by
+  obtain ⟨retained,present,_,_,_,_,context,handler,frames,_⟩ := run.retains_metadata control.suspensions.budgets beforeAt
+  have same := Option.some.inj (present.symm.trans afterAt)
+  subst retained
+  have support : current.controlAuthoritySupport = original.controlAuthoritySupport := by
+    simp only [Suspension.controlAuthoritySupport,context,handler,frames]
+  rw [support]
+  exact control.no_future_saved_authority well beforeAt future
 
 end Execution
 

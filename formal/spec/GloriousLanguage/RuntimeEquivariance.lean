@@ -1,4 +1,5 @@
 import GloriousLanguage.RuntimeSupport
+import GloriousLanguage.CapabilityModels
 import GloriousLanguage.DefinitionalAdmission
 import GloriousLanguage.PredicateHygiene
 
@@ -294,37 +295,6 @@ theorem CapabilityEquation.permute {program : Program} (valid : ProgramWellForme
   case optionalContinuation => exact .optionalContinuation
   case exactContinuation positive => exact .exactContinuation positive
 
-theorem CapabilitySolution.permute {program : Program} (valid : ProgramWellFormed program)
-    {assignment : Term → Option Principal} (solution : CapabilitySolution program assignment)
-    (permutation : RegionPermutation) : CapabilitySolution program (permutation.assignment assignment) := by
-  intro term principal
-  constructor
-  · intro selected
-    have equation := ((solution (permutation.term term) principal).mp selected).permute valid permutation
-    simpa only [permutation.term_involutive] using equation
-  · intro equation
-    have original := equation.permute valid permutation
-    have identity : permutation.assignment (permutation.assignment assignment) = assignment := by
-      funext term
-      exact permutation.assignment_at assignment term
-    rw [identity] at original
-    exact (solution (permutation.term term) principal).mpr original
-
-def CapabilityModel.permute {program : Program} (valid : ProgramWellFormed program)
-    (model : CapabilityModel program) (permutation : RegionPermutation) : CapabilityModel program where
-  principal := permutation.assignment model.principal
-  equations := model.equations.permute valid permutation
-  greatest other solution term result selected := by
-    have reflected : permutation.assignment other (permutation.term term) = some result := by
-      simpa only [permutation.assignment_at] using selected
-    exact model.greatest (permutation.assignment other) (solution.permute valid permutation)
-      (permutation.term term) result reflected
-
-theorem PrincipalOf.permute {program : Program} (valid : ProgramWellFormed program)
-    {type : Term} {principal : Principal} (capability : PrincipalOf program type principal)
-    (permutation : RegionPermutation) : PrincipalOf program (permutation.term type) principal := by
-  obtain ⟨model,selected⟩ := capability
-  exact ⟨model.permute valid permutation,by simpa only [CapabilityModel.permute,permutation.assignment_at] using selected⟩
 
 theorem Kinding.permute {program : Program} {context : Context} {term : Term} {kind : Kind}
     (typed : Kinding program context term kind) (permutation : RegionPermutation) :
@@ -502,44 +472,106 @@ theorem RegionPermutation.lexical_terms (permutation : RegionPermutation) {terms
     (lexical : ∀ term ∈ terms, term.Lexical) : terms.map permutation.term = terms :=
   List.map_eq_self_of _ _ (fun term member => permutation.lexical_term (lexical term member))
 
+theorem RegionPermutation.lookup_default (permutation : RegionPermutation)
+    (substitution : Substitution) (id : Identity) (kind : Kind) :
+    ((permutation.substitution substitution).get id).getD (.parameter id kind) =
+      permutation.term ((substitution.get id).getD (.parameter id kind)) := by
+  rw [RegionPermutation.substitution,Table.get_map_values]
+  cases substitution.get id <;> simp only [Option.map,Option.getD,RegionPermutation.term,Term.renameRuntimeRegions]
+
+theorem RegionPermutation.list_at (permutation : RegionPermutation)
+    {relation : Term → Term → Prop} {left right : List Term}
+    (related : ∀ (index : Nat) first second, left[index]? = some first → right[index]? = some second →
+      relation (permutation.term first) (permutation.term second)) :
+    ∀ (index : Nat) first second, (left.map permutation.term)[index]? = some first →
+      (right.map permutation.term)[index]? = some second → relation first second := by
+  intro index first second leftAt rightAt
+  rw [List.getElem?_map] at leftAt rightAt
+  obtain ⟨a,atA,rfl⟩ := Option.map_eq_some_iff.mp leftAt
+  obtain ⟨b,atB,rfl⟩ := Option.map_eq_some_iff.mp rightAt
+  exact related index a b atA atB
+
+theorem RegionPermutation.children_at (permutation : RegionPermutation)
+    {relation : Term → Term → Prop} {left right : Term}
+    (related : ∀ (index : Nat) first second, left.children[index]? = some first →
+      right.children[index]? = some second → relation (permutation.term first) (permutation.term second)) :
+    ∀ (index : Nat) first second, (permutation.term left).children[index]? = some first →
+      (permutation.term right).children[index]? = some second → relation first second := by
+  rw [permutation.term_children,permutation.term_children]
+  exact permutation.list_at related
+
+theorem RegionPermutation.structuralHead (permutation : RegionPermutation) {term : Term}
+    (structural : term.StructuralHead) : (permutation.term term).StructuralHead := by
+  cases term <;> simp only [RegionPermutation.term,Term.renameRuntimeRegions,Term.StructuralHead] at structural ⊢
+  all_goals trivial
+
+theorem RegionPermutation.implementation_binder (permutation : RegionPermutation)
+    {program : Program} (valid : ProgramWellFormed program) {implementation : ImplDefinition}
+    (member : Definition.implementation implementation ∈ program.declarations)
+    {binder : Binder} (present : binder ∈ implementation.generics) :
+    permutation.binder binder = binder := by
+  apply permutation.lexical_binder
+  intro term found
+  exact valid.lexical member term (by
+    simp only [Definition.terms,List.mem_append,List.mem_flatMap]
+    exact Or.inr ⟨binder,present,by simp [found]⟩)
+
+theorem RegionPermutation.implementation_context (permutation : RegionPermutation)
+    {program : Program} (valid : ProgramWellFormed program) {implementation : ImplDefinition}
+    (member : Definition.implementation implementation ∈ program.declarations) :
+    permutation.context implementation.context = implementation.context := by
+  have binders : implementation.generics.map permutation.binder = implementation.generics :=
+    List.map_eq_self_of _ _ (fun binder present => permutation.implementation_binder valid member present)
+  have requirements : implementation.requirements.map permutation.constraint = implementation.requirements := by
+    apply List.map_eq_self_of
+    intro constraint present
+    exact permutation.lexical_constraint (fun term nested => valid.lexical member term (by
+      simp only [Definition.terms,List.mem_append,List.mem_flatMap]
+      exact Or.inl (Or.inr ⟨constraint,present,nested⟩)))
+  simp only [RegionPermutation.context,ImplDefinition.context,binders,requirements]
+
 theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {constraint : Constraint} (entailed : Entails program context constraint) (permutation : RegionPermutation) :
     Entails program (permutation.context context) (permutation.constraint constraint) := by
   refine Entails.rec
-    (motive_1 := fun a b _ => Equal program (permutation.context context) (permutation.term a) (permutation.term b))
-    (motive_2 := fun trait arguments negative implementation substitution _ =>
+    (motive_1 := fun context type principal _ =>
+      CapabilityEvidence program (permutation.context context) (permutation.term type) principal)
+    (motive_2 := fun context assignment type principal _ => CapabilityUnfolds program (permutation.context context)
+      (permutation.assignment assignment) (permutation.term type) principal)
+    (motive_3 := fun context a b _ => Equal program (permutation.context context) (permutation.term a) (permutation.term b))
+    (motive_4 := fun context trait arguments negative implementation substitution _ =>
       SelectsImpl program (permutation.context context) trait (arguments.map permutation.term) negative implementation
         (permutation.substitution substitution))
-    (motive_3 := fun effect row _ => RowMember program (permutation.context context) (permutation.term effect) (permutation.term row))
-    (motive_4 := fun required allowed _ => RowSubset program (permutation.context context)
+    (motive_5 := fun context effect row _ => RowMember program (permutation.context context) (permutation.term effect) (permutation.term row))
+    (motive_6 := fun context required allowed _ => RowSubset program (permutation.context context)
       (permutation.term required) (permutation.term allowed))
-    (motive_5 := fun type region _ => TypeOutlives program (permutation.context context)
+    (motive_7 := fun context type region _ => TypeOutlives program (permutation.context context)
       (permutation.term type) (permutation.term region))
-    (motive_6 := fun constraint _ => Entails program (permutation.context context) (permutation.constraint constraint))
-    (motive_7 := fun substitution constraint _ => EntailsSubstitution program (permutation.context context)
+    (motive_8 := fun context constraint _ => Entails program (permutation.context context) (permutation.constraint constraint))
+    (motive_9 := fun context substitution constraint _ => EntailsSubstitution program (permutation.context context)
       (permutation.substitution substitution) (permutation.constraint constraint))
-    (motive_8 := fun left right _ =>
+    (motive_10 := fun context left right _ =>
       DefinitionalStep program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_9 := fun left right _ =>
+    (motive_11 := fun context left right _ =>
       DefinitionallyEqual program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_10 := fun left right _ =>
+    (motive_12 := fun context left right _ =>
       DefinitionalReduction program (permutation.context context) (permutation.term left) (permutation.term right))
-    (motive_11 := fun implementation arguments substitution _ =>
+    (motive_13 := fun context implementation arguments substitution _ =>
       Definition.implementation implementation ∈ program.declarations →
       MatchesImplHead program (permutation.context context) implementation
         (arguments.map permutation.term) (permutation.substitution substitution))
-    (motive_12 := fun trait member owners items associated ownerSub itemSub _ =>
+    (motive_14 := fun context trait member owners items associated ownerSub itemSub _ =>
       ProjectionDomain program (permutation.context context) trait member
         (owners.map permutation.term) (items.map permutation.term) associated
         (permutation.substitution ownerSub) (permutation.substitution itemSub))
-    (motive_13 := fun left right _ => ListRel (Equal program (permutation.context context))
-      (left.map permutation.term) (right.map permutation.term))
-    (motive_14 := fun left right _ => ConstraintCongruence (Equal program (permutation.context context))
-      (permutation.constraint left) (permutation.constraint right))
-    (motive_15 := fun left right _ => ListRel (DefinitionallyEqual program (permutation.context context))
-      (left.map permutation.term) (right.map permutation.term))
-    (motive_16 := fun left right _ => ListRel (DefinitionalReduction program (permutation.context context))
-      (left.map permutation.term) (right.map permutation.term))
+    (motive_15 := fun sourceContext context binder template query value _ =>
+      InfersHeadParameter program (permutation.context sourceContext) (permutation.context context)
+        (permutation.binder binder) (permutation.term template) (permutation.term query) (permutation.term value))
+    (motive_16 := fun context implementation arguments binder value _ =>
+      Definition.implementation implementation ∈ program.declarations →
+      InfersHeadArgument program (permutation.context context) implementation
+        (arguments.map permutation.term) (permutation.binder binder) (permutation.term value))
+    ?capStructural ?capLogical ?capEqual ?capEquation ?capEvidence
     ?refl ?symm ?trans ?congr ?assumed ?equalEntailed ?definitional
     ?rowDuplicate ?tailDuplicate ?selected ?head ?tail ?equal ?empty ?assumed_1 ?same ?trans_1 ?instances ?rowEntailed
     ?assumed_2 ?scalar ?unit ?pointer ?reference ?bottom ?tuple ?array ?nominal ?callable ?label ?environment
@@ -549,18 +581,27 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
     ?stepAlias ?stepProjection ?stepDefault
     ?defRefl ?defSymm ?defTrans ?defCongr ?defStep ?defRow
     ?redRefl ?redStep ?redTrans ?redCongr ?redRow
-    ?matched ?domainValid ?nil ?cons ?constraintSubstitution ?defNil ?defCons ?redNil ?redCons entailed
+    ?matched ?domainValid ?inferParameter ?inferChild ?inferSource ?inferQuery ?inferArgument entailed
   all_goals intros
   all_goals try simp only [RegionPermutation.term,Term.renameRuntimeRegions,RegionPermutation.constraint,Constraint.mapTerms,
     List.map_cons,List.map_nil]
   all_goals try simp only [← RegionPermutation.term_def]
+  case capStructural context type principal assignment found _ unfolded =>
+    apply CapabilityEvidence.structural (assignment := permutation.assignment assignment)
+      (by simpa only [permutation.assignment_at] using found)
+    intro term claimed selected
+    have original : assignment (permutation.term term) = some claimed := selected
+    simpa only [permutation.term_involutive] using unfolded (permutation.term term) claimed original
+  case capLogical _ admitted lower logical =>
+    exact .logical (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using logical) admitted lower
+  case capEqual _ _ equal evidence => exact .equal equal evidence
+  case capEquation restriction equation => exact .equation restriction (equation.permute valid permutation)
+  case capEvidence restriction _ evidence => exact .evidence restriction evidence
   case refl => exact .refl
   case symm _ ih => exact .symm ih
   case trans _ _ first second => exact .trans first second
   case congr same _ children =>
-    exact .congr (same.permute permutation) (by
-      rw [permutation.term_children,permutation.term_children]
-      exact children)
+    exact .congrChildren (same.permute permutation) (permutation.children_at children)
   case assumed member => exact .assumed (List.mem_map.mpr ⟨_,member,by
     simp only [RegionPermutation.constraint,Constraint.mapTerms]⟩)
   case equalEntailed _ ih => exact .entailed (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using ih)
@@ -608,7 +649,7 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
     exact .callable (selected.permute valid permutation)
       (by intro term member; obtain ⟨original,present,rfl⟩ := List.mem_map.mp member; exact fields original present)
   case label _ included => exact .label (by simpa only [RegionPermutation.constraint,Constraint.mapTerms] using included)
-  case environment =>
+  case environment context brand long residents short _ _ included fields =>
     apply TypeOutlives.environment
     · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
         (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
@@ -617,7 +658,7 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
       exact (by assumption : ∀ field ∈ _, TypeOutlives program (permutation.context context) (permutation.term field) _) original present
   case available _ environment =>
     exact .available (by simpa only [RegionPermutation.term,Term.renameRuntimeRegions] using environment)
-  case bindings =>
+  case bindings context brand long residents short _ _ included fields =>
     apply TypeOutlives.bindings
     · simpa only [RegionPermutation.constraint,Constraint.mapTerms] using
         (by assumption : Entails program (permutation.context context) (permutation.constraint (.outlives _ _)))
@@ -647,7 +688,13 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
       (permutation.substitutes_lexical_list (fun term present => invocation term (by simp [InvocationRelation.terms,present])) arguments)
       (permutation.substitutes_lexical (invocation _ (by simp [InvocationRelation.terms])) after)
   case assumed_3 member => exact .assumed (List.mem_map.mpr ⟨_,member,rfl⟩)
-  case constraintCongr _ _ congruent previous => exact .congr congruent previous
+  case constraintCongr context template before after leftSub rightSub _ beforeSub afterSub _ pairs previous =>
+    refine .congrSubstitution (leftSub := permutation.substitution leftSub)
+      (rightSub := permutation.substitution rightSub) ?_
+      (permutation.substitute_constraint beforeSub) (permutation.substitute_constraint afterSub) previous
+    intro id kind
+    rw [permutation.lookup_default,permutation.lookup_default]
+    exact pairs id kind
   case equality _ equal => exact .equality equal
   case outlivesRefl => exact .outlivesRefl
   case outlivesStatic => exact .outlivesStatic
@@ -657,8 +704,8 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
   case typeOutlives _ outlives => exact .typeOutlives outlives
   case rows _ subset => exact .rows subset
   case implementation _ selected => exact .implementation selected
-  case use capability request => exact .use (capability.permute valid permutation) request
-  case quantified binders requirements _ allInstances =>
+  case use _ request capability => exact .use capability request
+  case quantified context binders requirements _ allInstances =>
     apply Entails.quantified
     intro values substitution instantiated kinds requirement member
     change Instantiates (binders.map permutation.binder) values substitution at instantiated
@@ -681,17 +728,6 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
     intro term member
     obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp member
     simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
-  case constraintSubstitution template left right leftSub rightSub _ before after pairs =>
-    refine .substitution (leftSub := permutation.substitution leftSub) (rightSub := permutation.substitution rightSub) ?_
-      (permutation.substitute_constraint before) (permutation.substitute_constraint after)
-    intro id kind
-    have lookup (substitution : Substitution) :
-        ((permutation.substitution substitution).get id).getD (.parameter id kind) =
-          permutation.term ((substitution.get id).getD (.parameter id kind)) := by
-      rw [RegionPermutation.substitution,Table.get_map_values]
-      cases substitution.get id <;> simp only [Option.map,Option.getD,RegionPermutation.term,Term.renameRuntimeRegions]
-    rw [lookup,lookup]
-    exact pairs id kind
   case stepAlias found instantiated kinded substituted =>
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.alias_lookup found))
     refine .alias found (instantiated.permute permutation) ?_
@@ -706,7 +742,7 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
         (permutation.substitutes_lexical (lexical _ (by
           simp only [Definition.terms,List.mem_append,List.mem_map]
           exact Or.inl (Or.inl (Or.inr ⟨_,member,rfl⟩)))) substituted))
-  case stepDefault trait member rawOwners rawItems associated ownerSub itemSub implementation implSub rawBody value
+  case stepDefault context trait member rawOwners rawItems associated ownerSub itemSub implementation implSub rawBody value
       domain _ missing default substituted domainIH selectedIH =>
     have found : program.associated member = some associated := by cases domain; assumption
     have lexical := valid.lexical (List.mem_of_find?_eq_some (Program.associated_lookup found))
@@ -719,28 +755,32 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
   case defSymm _ ih => exact .symm ih
   case defTrans _ _ first second => exact .trans first second
   case defCongr same _ children =>
-    exact .congr (same.permute permutation) (by
-      rw [permutation.term_children,permutation.term_children]
-      exact children)
+    exact .congrChildren (same.permute permutation) (permutation.children_at children)
   case defStep _ ih => exact .step ih
   case defRow equal => exact .row (equal.renameRuntimeRegions permutation.rename)
   case redRefl => exact .refl
   case redStep _ ih => exact .step ih
   case redTrans _ _ first second => exact .trans first second
   case redCongr same _ children =>
-    exact .congr (same.permute permutation) (by
-      rw [permutation.term_children,permutation.term_children]
-      exact children)
+    exact .congrChildren (same.permute permutation) (permutation.children_at children)
   case redRow equal => exact .row (equal.renameRuntimeRegions permutation.rename)
-  case matched instantiated kinded specialized _ head member =>
+  case matched context implementation arguments values substitution specialized
+      instantiated kinded substituted lengths _ _ head inferred member =>
     have lexical := valid.lexical member
-    refine .matched (instantiated.permute permutation) ?_ ?_ head
+    refine .inferred (specialized := specialized.map permutation.term) (instantiated.permute permutation) ?_ ?_ ?_ ?_ ?_
     · intro term present
       obtain ⟨original,inOriginal,rfl⟩ := List.mem_map.mp present
       simpa only [← permutation.term_def,permutation.term_kind] using (kinded original inOriginal).permute permutation
     · exact permutation.substitutes_lexical_list (fun term present => lexical term (by
         simp only [Definition.terms,List.mem_append]
-        exact Or.inl (Or.inl (Or.inl present)))) specialized
+        exact Or.inl (Or.inl (Or.inl present)))) substituted
+    · simpa only [List.length_map] using lengths
+    · exact permutation.list_at head
+    · intro index binder value binderAt valueAt
+      obtain ⟨original,originalAt,rfl⟩ := Option.map_eq_some_iff.mp (by
+        simpa only [List.getElem?_map] using valueAt)
+      have binderFixed := permutation.implementation_binder valid member (List.mem_of_getElem? binderAt)
+      simpa only [binderFixed,RegionPermutation.term] using inferred index binder original binderAt originalAt member
   case domainValid traitFound member associatedFound owner ownerInst itemInst kinded _ _ ownerRequirements itemRequirements =>
     have traitLexical := valid.lexical (List.mem_of_find?_eq_some (Program.trait_lookup traitFound))
     have itemLexical := valid.lexical (List.mem_of_find?_eq_some (Program.associated_lookup associatedFound))
@@ -758,12 +798,66 @@ theorem Entails.permute {program : Program} (valid : ProgramWellFormed program) 
         permutation.lexical_constraint (fun term nested => itemLexical term (by
           simp only [Definition.terms,List.mem_append,List.mem_flatMap]
           exact Or.inl (Or.inr ⟨constraint,present,nested⟩)))] using itemRequirements constraint present
-  case nil => exact .nil
-  case cons _ _ first rest => exact .cons first rest
-  case defNil => exact .nil
-  case defCons _ _ first rest => exact .cons first rest
-  case redNil => exact .nil
-  case redCons _ _ first rest => exact .cons first rest
+  case inferParameter kind =>
+    exact .parameter (by simpa only [permutation.term_kind,RegionPermutation.binder] using kind)
+  case inferChild structural same templateAt queryAt _ inferred =>
+    exact .child (permutation.structuralHead structural) (same.permute permutation)
+      (by rw [permutation.term_children,List.getElem?_map,templateAt]; rfl)
+      (by rw [permutation.term_children,List.getElem?_map,queryAt]; rfl) inferred
+  case inferSource _ _ reduced inferred => exact .sourceReduction reduced inferred
+  case inferQuery _ _ equal inferred => exact .queryConversion equal inferred
+  case inferArgument context implementation arguments binder value template query index
+      templateAt queryAt _ inferred member =>
+    have lexical := valid.lexical member
+    have templateLexical : template.Lexical := lexical template (by
+      simp only [Definition.terms,List.mem_append]
+      exact Or.inl (Or.inl (Or.inl (List.mem_of_getElem? templateAt))))
+    apply InfersHeadArgument.argument templateAt
+      (by rw [List.getElem?_map,queryAt]; rfl)
+    simpa only [permutation.implementation_context valid member,permutation.lexical_term templateLexical,
+      ← permutation.term_def] using inferred
+
+theorem CapabilityEvidence.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
+    {type : Term} {principal : Principal} (evidence : CapabilityEvidence program context type principal)
+    (permutation : RegionPermutation) :
+    CapabilityEvidence program (permutation.context context) (permutation.term type) principal := by
+  have transported := evidence.entails.permute valid permutation
+  simp only [RegionPermutation.constraint,Constraint.mapTerms] at transported
+  exact transported.capabilityEvidence
+
+theorem CapabilitySupport.permute {program : Program} (valid : ProgramWellFormed program)
+    {type : Term} {principal : Principal} (supported : CapabilitySupport program type principal)
+    (permutation : RegionPermutation) : CapabilitySupport program (permutation.term type) principal := by
+  obtain ⟨context,closed,evidence⟩ := supported
+  exact ⟨permutation.context context,by simp [RegionPermutation.context,closed],evidence.permute valid permutation⟩
+
+/-- Runtime renaming preserves the complete semantic maximum. Its proof
+uses the finite logical/coinductive evidence in both directions, not the
+superseded claim that every semantic principal has a raw structural equation. -/
+theorem PrincipalOf.permute {program : Program} (valid : ProgramWellFormed program)
+    {type : Term} {principal : Principal} (capability : PrincipalOf program type principal)
+    (permutation : RegionPermutation) : PrincipalOf program (permutation.term type) principal := by
+  refine ⟨capability.1.permute valid permutation,?_⟩
+  intro other evidence
+  have original := evidence.permute valid permutation
+  rw [permutation.term_involutive] at original
+  exact capability.2 other original
+
+theorem CapabilitySolution.permute {program : Program} (valid : ProgramWellFormed program)
+    {assignment : Term → Option Principal} (solution : CapabilitySolution program assignment)
+    (permutation : RegionPermutation) : CapabilitySolution program (permutation.assignment assignment) := by
+  intro type principal
+  constructor
+  · intro found
+    have transformed := ((solution (permutation.term type) principal).mp found).permute valid permutation
+    simpa only [permutation.term_involutive] using transformed
+  · intro capability
+    exact (solution (permutation.term type) principal).mpr (capability.permute valid permutation)
+
+def CapabilityModel.permute {program : Program} (valid : ProgramWellFormed program)
+    (model : CapabilityModel program) (permutation : RegionPermutation) : CapabilityModel program where
+  principal := permutation.assignment model.principal
+  equations := model.equations.permute valid permutation
 
 theorem Equal.permute {program : Program} (valid : ProgramWellFormed program) {context : Context}
     {a b : Term} (equal : Equal program context a b) (permutation : RegionPermutation) :

@@ -180,8 +180,8 @@ theorem FreshRegion.wellFormed {before after : World} {region : Identity}
   refine ⟨rootUnique,loanUnique,proofUnique,?_,?_,?_,owners,ownerUnique,?_,?_,bases,ranges,?_,references,?_,parents,locations⟩
   · exact List.nodup_cons.mpr ⟨fun member => Nat.lt_irrefl _ (regions _ member),regionUnique⟩
   · intro id available found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available found
-    exact ⟨identity,bound,brand,fun live => ⟨List.mem_cons_of_mem _ (active live).1,(active live).2⟩⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
+    exact ⟨identity,bound,brand,fun live => ⟨List.mem_cons_of_mem _ (active live).1,(active live).2⟩,recorded⟩
   · intro address value pack resident head
     obtain ⟨bound,live,length,distinct,facts⟩ := packs address value pack resident head
     exact ⟨bound,List.mem_cons_of_mem _ live,length,distinct,facts⟩

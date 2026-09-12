@@ -7,14 +7,6 @@ Receiver exclusion survives the common binding of every capture and argument;
 the original caller authority is not regained by entering the body. -/
 namespace Glorious.Language
 
-theorem Allocates.loans {program : Program} {before after : World} {home region type layout mutable address}
-    (allocated : Allocates program before home region type layout mutable address after) :
-    after.loans = before.loans := by cases allocated; rfl
-
-theorem Allocates.nextLoan {program : Program} {before after : World} {home region type layout mutable address}
-    (allocated : Allocates program before home region type layout mutable address after) :
-    after.nextLoan = before.nextLoan := by cases allocated; rfl
-
 theorem Allocates.new_root {program : Program} {before after : World} {home region type layout mutable address}
     (allocated : Allocates program before home region type layout mutable address after) :
     ∃ root, after.root address = some root ∧ root.home = home ∧ root.region = region ∧ address.fields = [] := by

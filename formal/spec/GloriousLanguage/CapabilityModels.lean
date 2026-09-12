@@ -19,6 +19,9 @@ theorem Principal.Restricts.antisymm {first last : Principal}
   have twoRight := right 2
   cases first <;> cases last <;> simp_all [Principal.Permits]
 
+theorem Principal.Restricts.total (first last : Principal) : first.Restricts last ∨ last.Restricts first := by
+  cases first <;> cases last <;> simp [Principal.Restricts,Principal.Permits]
+
 theorem Principal.meet_monotone {first second last final : Principal}
     (left : first.Restricts last) (right : second.Restricts final) :
     (first.meet second).Restricts (last.meet final) := by
@@ -283,57 +286,19 @@ theorem CapabilityEquation.functional {program : Program} {assignment : Term →
     cases right with
     | exactContinuation => rfl
 
-/-- Proof-level selection from the existing equation relation. There is no
-independent reconstruction of a type's capability dependencies. -/
-noncomputable def capabilityOperator (program : Program) (assignment : Term → Option Principal)
-    (term : Term) : Option Principal := by
+
+/-- Selection in the complete logical/coinductive capability interpretation.
+Absence remains unknown; a most permissive class must itself have evidence. -/
+noncomputable def Principal.greatest (supported : Principal → Prop) : Option Principal := by
   classical
-  exact if supported : ∃ principal, CapabilityEquation program assignment term principal
-    then some supported.choose else none
+  exact if supported .duplicable then some .duplicable
+    else if supported .affine then some .affine
+    else if supported .exact then some .exact else none
 
-theorem capabilityOperator_spec {program : Program} {assignment : Term → Option Principal}
-    {term : Term} {principal : Principal} :
-    capabilityOperator program assignment term = some principal ↔ CapabilityEquation program assignment term principal := by
+theorem Principal.greatest_origin {supported : Principal → Prop} {principal : Principal}
+    (found : Principal.greatest supported = some principal) : supported principal := by
   classical
-  unfold capabilityOperator
-  split
-  next supported =>
-    constructor
-    · intro same
-      exact (Option.some.inj same) ▸ supported.choose_spec
-    · intro equation
-      exact congrArg some (supported.choose_spec.functional equation)
-  next absent =>
-    constructor
-    · intro impossible; cases impossible
-    · intro equation; exact False.elim (absent ⟨principal,equation⟩)
-
-theorem capabilityOperator_monotone {program : Program} {first last : Term → Option Principal}
-    (related : CapabilityRefines first last) :
-    CapabilityRefines (capabilityOperator program first) (capabilityOperator program last) := by
-  intro term principal found
-  obtain ⟨result,equation,order⟩ := (capabilityOperator_spec.mp found).monotone related
-  exact ⟨result,capabilityOperator_spec.mpr equation,order⟩
-
-private def capabilityPostfixed (program : Program) (assignment : Term → Option Principal) : Prop :=
-  CapabilityRefines assignment (capabilityOperator program assignment)
-
-private def capabilityCandidate (program : Program) (term : Term) (principal : Principal) : Prop :=
-  ∃ assignment, capabilityPostfixed program assignment ∧ assignment term = some principal
-
-/-- The principal order is the finite chain exact ≤ affine ≤ duplicable.
-Taking the greatest supported point over all post-fixed assignments therefore
-requires no finiteness assumption on recursive types or generic instances. -/
-noncomputable def greatestCapabilities (program : Program) (term : Term) : Option Principal := by
-  classical
-  exact if capabilityCandidate program term .duplicable then some .duplicable
-    else if capabilityCandidate program term .affine then some .affine
-    else if capabilityCandidate program term .exact then some .exact else none
-
-private theorem greatestCapabilities_origin {program : Program} {term : Term} {principal : Principal}
-    (found : greatestCapabilities program term = some principal) : capabilityCandidate program term principal := by
-  classical
-  unfold greatestCapabilities at found
+  unfold Principal.greatest at found
   split at found
   next supported => cases found; exact supported
   next =>
@@ -344,11 +309,11 @@ private theorem greatestCapabilities_origin {program : Program} {term : Term} {p
       next supported => cases found; exact supported
       next => cases found
 
-private theorem greatestCapabilities_upper {program : Program} {term : Term} {principal : Principal}
-    (supported : capabilityCandidate program term principal) :
-    ∃ selected, greatestCapabilities program term = some selected ∧ principal.Restricts selected := by
+theorem Principal.greatest_upper {supported : Principal → Prop} {principal : Principal}
+    (evidence : supported principal) :
+    ∃ selected, Principal.greatest supported = some selected ∧ principal.Restricts selected := by
   classical
-  unfold greatestCapabilities
+  unfold Principal.greatest
   split
   next => exact ⟨_,rfl,by intro n _; trivial⟩
   next noCopy =>
@@ -356,7 +321,7 @@ private theorem greatestCapabilities_upper {program : Program} {term : Term} {pr
     next =>
       refine ⟨_,rfl,?_⟩
       cases principal with
-      | duplicable => exact False.elim (noCopy supported)
+      | duplicable => exact False.elim (noCopy evidence)
       | affine => exact .refl _
       | exact => intro n one; simpa [Principal.Permits] using Nat.le_of_eq one
     next noDrop =>
@@ -364,92 +329,250 @@ private theorem greatestCapabilities_upper {program : Program} {term : Term} {pr
       next =>
         refine ⟨_,rfl,?_⟩
         cases principal with
-        | duplicable => exact False.elim (noCopy supported)
-        | affine => exact False.elim (noDrop supported)
+        | duplicable => exact False.elim (noCopy evidence)
+        | affine => exact False.elim (noDrop evidence)
         | exact => exact .refl _
       next noExact => cases principal <;> contradiction
 
-private theorem greatestCapabilities_greatest {program : Program} {assignment : Term → Option Principal}
-    (supported : capabilityPostfixed program assignment) : CapabilityRefines assignment (greatestCapabilities program) :=
-  fun _ _ found => greatestCapabilities_upper ⟨assignment,supported,found⟩
+theorem Principal.greatest_spec {supported : Principal → Prop} {principal : Principal} :
+    Principal.greatest supported = some principal ↔
+      supported principal ∧ ∀ other, supported other → other.Restricts principal := by
+  constructor
+  · intro found
+    refine ⟨Principal.greatest_origin found,?_⟩
+    intro other evidence
+    obtain ⟨selected,chosen,ordered⟩ := Principal.greatest_upper evidence
+    exact Option.some.inj (chosen.symm.trans found) ▸ ordered
+  · rintro ⟨evidence,maximum⟩
+    obtain ⟨selected,found,ordered⟩ := Principal.greatest_upper evidence
+    have same := ordered.antisymm (maximum selected (Principal.greatest_origin found))
+    exact same.symm ▸ found
 
-private theorem greatestCapabilities_postfixed (program : Program) :
-    capabilityPostfixed program (greatestCapabilities program) := by
+
+/-- A proposed recursive family is checked against the actual local
+equations or already derived logical leaves. All leaves are finite positive
+evidence; no assumed output capability or normalization oracle enters. -/
+theorem CapabilityEvidence.coinduction {program : Program} {context : Context}
+    {assignment : Term → Option Principal} {type : Term} {principal : Principal}
+    (found : assignment type = some principal)
+    (supported : ∀ term claimed, assignment term = some claimed → ∃ result,
+      claimed.Restricts result ∧
+        (CapabilityEquation program assignment term result ∨ CapabilityEvidence program context term result)) :
+    CapabilityEvidence program context type principal := by
+  apply CapabilityEvidence.structural found
+  intro term claimed selected
+  obtain ⟨result,ordered,equation | evidence⟩ := supported term claimed selected
+  · exact .equation ordered equation
+  · exact .evidence ordered evidence
+
+
+theorem CapabilityEvidence.restrict {program : Program} {context : Context} {type : Term} {first last : Principal}
+    (evidence : CapabilityEvidence program context type last) (restriction : first.Restricts last) :
+    CapabilityEvidence program context type first := by
+  classical
+  apply CapabilityEvidence.structural (assignment := fun term => if term = type then some first else none)
+    (by simp)
   intro term principal found
-  obtain ⟨assignment,supported,selected⟩ := greatestCapabilities_origin found
-  obtain ⟨result,unfolded,first⟩ := supported term principal selected
-  obtain ⟨final,unfolded,last⟩ := capabilityOperator_monotone (greatestCapabilities_greatest supported) term result unfolded
-  exact ⟨final,unfolded,first.trans last⟩
+  by_cases same : term = type
+  · subst term
+    have equal : first = principal := by simpa using found
+    subst principal
+    exact .evidence restriction evidence
+  · simp [same] at found
 
-theorem greatestCapabilities_fixed (program : Program) :
-    greatestCapabilities program = capabilityOperator program (greatestCapabilities program) := by
-  have below := greatestCapabilities_postfixed program
-  have next : capabilityPostfixed program (capabilityOperator program (greatestCapabilities program)) :=
-    capabilityOperator_monotone below
-  exact below.antisymm (greatestCapabilities_greatest next)
+/-- Finite composition is a consequence of the same coinductive producer.
+The local equation may mention the parent recursively; enlarging that one
+proposal entry uses monotonicity, while every other dependency is supplied
+by actual prior evidence. No second structural type walk is needed. -/
+theorem CapabilityEquation.realize {program : Program} {context : Context}
+    {assignment : Term → Option Principal} {type : Term} {principal : Principal}
+    (equation : CapabilityEquation program assignment type principal)
+    (leaves : ∀ term claimed, assignment term = some claimed → CapabilityEvidence program context term claimed) :
+    CapabilityEvidence program context type principal := by
+  classical
+  by_cases prior : ∃ selected, assignment type = some selected ∧ principal.Restricts selected
+  · obtain ⟨selected,found,ordered⟩ := prior
+    exact (leaves _ _ found).restrict ordered
+  · let extended : Term → Option Principal := fun term => if term = type then some principal else assignment term
+    have grows : CapabilityRefines assignment extended := by
+      intro term claimed found
+      by_cases same : term = type
+      · subst term
+        refine ⟨principal,by simp [extended],?_⟩
+        rcases Principal.Restricts.total claimed principal with ordered | ordered
+        · exact ordered
+        · exact False.elim (prior ⟨claimed,found,ordered⟩)
+      · exact ⟨claimed,by simpa [extended,same] using found,.refl _⟩
+    obtain ⟨supported,unfolded,ordered⟩ := equation.monotone grows
+    apply CapabilityEvidence.structural (assignment := extended) (by simp [extended])
+    intro term claimed found
+    by_cases same : term = type
+    · subst term
+      have same : principal = claimed := by simpa [extended] using found
+      subst claimed
+      exact .equation ordered unfolded
+    · exact .evidence (.refl _) (leaves term claimed (by simpa [extended,same] using found))
 
-/-- A greatest recursive capability model is constructible for every program.
-Unsupported equations still yield None, rather than a granted permission. -/
+theorem CapabilityEvidence.support {program : Program} {context : Context} {type : Term} {principal : Principal}
+    (evidence : CapabilityEvidence program context type principal) (closed : context.assumptions = []) :
+    CapabilitySupport program type principal := ⟨context,closed,evidence⟩
+
+theorem PrincipalOf.functional {program : Program} {type : Term} {first last : Principal}
+    (left : PrincipalOf program type first) (right : PrincipalOf program type last) : first = last :=
+  (right.2 _ left.1).antisymm (left.2 _ right.1)
+
+/-- The greatest complete interpretation is selected from finite logical
+certificates with coinductive structural components, not from raw syntax. -/
+noncomputable def greatestCapabilities (program : Program) (type : Term) : Option Principal :=
+  Principal.greatest (CapabilitySupport program type)
+
+theorem greatestCapabilities_spec {program : Program} {type : Term} {principal : Principal} :
+    greatestCapabilities program type = some principal ↔ PrincipalOf program type principal :=
+  Principal.greatest_spec
+
 noncomputable def CapabilityModel.canonical (program : Program) : CapabilityModel program where
   principal := greatestCapabilities program
-  equations term principal := by
-    constructor
-    · intro selected
-      apply capabilityOperator_spec.mp
-      rw [← greatestCapabilities_fixed program]
-      exact selected
-    · intro equation
-      have selected := capabilityOperator_spec.mpr equation
-      rw [← greatestCapabilities_fixed program] at selected
-      exact selected
-  greatest other solution term result selected := by
-    apply greatestCapabilities_greatest (assignment := other) ?_ term result selected
-    intro term principal found
-    exact ⟨principal,capabilityOperator_spec.mpr ((solution term principal).mp found),.refl _⟩
+  equations _ _ := greatestCapabilities_spec
 
 theorem CapabilityModel.exists (program : Program) : Nonempty (CapabilityModel program) := ⟨.canonical program⟩
 
-/-- General coinduction admits a recursive proposal only when each of its
-answers is justified by the actual local equations. The conclusion is an
-answer of the constructed greatest model, not an assumed recursive solution. -/
-theorem CapabilityModel.coinduction {program : Program} {assignment : Term → Option Principal}
-    (supported : ∀ term principal, assignment term = some principal →
-      ∃ selected, CapabilityEquation program assignment term selected ∧ principal.Restricts selected) :
-    CapabilityRefines assignment (CapabilityModel.canonical program).principal := by
-  apply greatestCapabilities_greatest
-  intro term principal found
-  obtain ⟨selected,equation,ordered⟩ := supported term principal found
-  exact ⟨selected,capabilityOperator_spec.mpr equation,ordered⟩
-
 theorem CapabilityModel.principal_unique {program : Program} (first last : CapabilityModel program) :
-    first.principal = last.principal :=
-  CapabilityRefines.antisymm
-    (fun term result found => last.greatest first.principal first.equations term result found)
-    (fun term result found => first.greatest last.principal last.equations term result found)
+    first.principal = last.principal := by
+  funext type
+  cases found : first.principal type with
+  | none =>
+    cases chosen : last.principal type with
+    | none => rfl
+    | some principal =>
+      have same := (first.equations type principal).mpr ((last.equations type principal).mp chosen)
+      simp [found] at same
+  | some principal =>
+    exact ((last.equations type principal).mpr ((first.equations type principal).mp found)).symm
 
-/-- The pre-existing existential semantic judgment selects exactly the
-constructed greatest solution; the model is consumed by static admission. -/
-theorem principalOf_canonical {program : Program} {term : Term} {principal : Principal} :
-    PrincipalOf program term principal ↔ (CapabilityModel.canonical program).principal term = some principal := by
-  constructor
-  · rintro ⟨model,found⟩
-    simpa only [model.principal_unique (.canonical program)] using found
-  · intro found
-    exact ⟨.canonical program,found⟩
+theorem principalOf_canonical {program : Program} {type : Term} {principal : Principal} :
+    PrincipalOf program type principal ↔ (CapabilityModel.canonical program).principal type = some principal :=
+  greatestCapabilities_spec.symm
 
-theorem principalOf_equation {program : Program} {term : Term} {principal : Principal} :
-    PrincipalOf program term principal ↔ CapabilityEquation program (greatestCapabilities program) term principal :=
-  principalOf_canonical.trans ((CapabilityModel.canonical program).equations term principal)
+theorem CapabilitySupport.principal {program : Program} {type : Term} {principal : Principal}
+    (supported : CapabilitySupport program type principal) :
+    ∃ selected, PrincipalOf program type selected ∧ principal.Restricts selected := by
+  obtain ⟨selected,found,ordered⟩ := Principal.greatest_upper supported
+  exact ⟨selected,greatestCapabilities_spec.mp found,ordered⟩
+
+theorem CapabilitySupport.mayDiscard {program : Program} {type : Term} {principal : Principal}
+    (supported : CapabilitySupport program type principal) (discard : principal.MayDiscard) :
+    ∃ selected, PrincipalOf program type selected ∧ selected.MayDiscard := by
+  obtain ⟨selected,capability,ordered⟩ := supported.principal
+  exact ⟨selected,capability,ordered 0 discard⟩
+
+/-- A recursive proposal is dominated by the canonical semantic model when
+each entry unfolds through the actual equations or finite logical evidence.
+It requires no separate syntax-only fixed point or assumed model. -/
+theorem CapabilityModel.coinduction {program : Program} {context : Context}
+    {assignment : Term → Option Principal} (closed : context.assumptions = [])
+    (supported : ∀ type principal, assignment type = some principal →
+      CapabilityUnfolds program context assignment type principal) :
+    CapabilityRefines assignment (CapabilityModel.canonical program).principal := by
+  intro type principal found
+  obtain ⟨selected,capability,ordered⟩ := (CapabilityEvidence.structural found supported).support closed |>.principal
+  exact ⟨selected,principalOf_canonical.mp capability,ordered⟩
+
+theorem CapabilitySupport.duplicable {program : Program} {type : Term}
+    (supported : CapabilitySupport program type .duplicable) : PrincipalOf program type .duplicable :=
+  ⟨supported,fun _ _ _ _ => trivial⟩
+
+/-- A local equation without recursive dependencies supplies its evidence
+through the same composition theorem as every recursive constructor. -/
+theorem CapabilityEquation.closedEvidence {program : Program} {context : Context}
+    {type : Term} {principal : Principal}
+    (equation : CapabilityEquation program (fun _ => none) type principal) :
+    CapabilityEvidence program context type principal :=
+  equation.realize (fun _ _ found => nomatch found)
 
 theorem PrincipalOf.unit (program : Program) : PrincipalOf program .unit .duplicable :=
-  ⟨.canonical program,((CapabilityModel.canonical program).equations _ _).mpr .unit⟩
+  (CapabilityEquation.unit.closedEvidence (program := program) (context := { module := default })).support rfl |>.duplicable
 
 theorem PrincipalOf.shared (program : Program) (region type : Term) :
     PrincipalOf program (.reference .shared region type) .duplicable :=
-  ⟨.canonical program,((CapabilityModel.canonical program).equations _ _).mpr .shared⟩
+  (CapabilityEquation.shared.closedEvidence (program := program) (context := { module := default })).support rfl |>.duplicable
 
-theorem PrincipalOf.unique (program : Program) (region type : Term) :
-    PrincipalOf program (.reference .unique region type) .affine :=
-  ⟨.canonical program,((CapabilityModel.canonical program).equations _ _).mpr .unique⟩
+/-- The handle's discard permission is unconditional. Claiming its precise
+canonical class also requires excluding contradictory type equalities; that
+stronger rigidity theorem is not smuggled into this producer. -/
+theorem PrincipalOf.unique_reference_discardable (program : Program) (region type : Term) :
+    ∃ principal, PrincipalOf program (.reference .unique region type) principal ∧ principal.MayDiscard :=
+  ((CapabilityEquation.unique.closedEvidence (program := program) (context := { module := default })).support rfl).mayDiscard
+    (by simp [Principal.MayDiscard,Principal.Permits])
+
+theorem CapabilityEvidence.definitionallyEqual {program : Program} {context : Context}
+    {left right : Term} {principal : Principal} (evidence : CapabilityEvidence program context left principal)
+    (equal : DefinitionallyEqual program context left right) : CapabilityEvidence program context right principal :=
+  .equal (.definitional equal) evidence
+
+/-- Actual alias or associated-item expansion transports permission back to
+the source type. Selection, generic domains and the substituted body all come
+from the existing positive expansion judgment, not a second normalizer. -/
+theorem DefinitionalStep.capability {program : Program} {context : Context} {left right : Term} {principal : Principal}
+    (step : DefinitionalStep program context left right) (evidence : CapabilityEvidence program context right principal) :
+    CapabilityEvidence program context left principal :=
+  evidence.definitionallyEqual (.symm (.step step))
+
+theorem DefinitionalStep.closed_capability {program : Program} {context : Context}
+    {left right : Term} {principal : Principal} (closed : context.assumptions = [])
+    (step : DefinitionalStep program context left right) (capability : CapabilityEvidence program context right principal) :
+    ∃ selected, PrincipalOf program left selected ∧ principal.Restricts selected :=
+  (step.capability capability).support closed |>.principal
+
+/-- Exact-once is the least requested class only when the interval actually
+requests no other count. A bound never silently identifies a principal. -/
+theorem Quantity.minimal_request {quantity : Quantity} (valid : quantity.Valid) :
+    ∃ principal, quantity.Request principal ∧
+      ∀ permitted, quantity.Request permitted → principal.Restricts permitted := by
+  classical
+  by_cases exactRequest : quantity.Request .exact
+  · refine ⟨.exact,exactRequest,?_⟩
+    intro permitted _ n one
+    have one : n = 1 := one
+    rw [one]
+    exact Principal.once_does_not_identify_principal permitted
+  · by_cases affineRequest : quantity.Request .affine
+    · refine ⟨.affine,affineRequest,?_⟩
+      intro permitted request
+      cases permitted with
+      | duplicable => intro _ _; trivial
+      | affine => exact .refl _
+      | exact => exact False.elim (exactRequest request)
+    · refine ⟨.duplicable,⟨valid,by intro _ _; trivial⟩,?_⟩
+      intro permitted request
+      cases permitted with
+      | duplicable => exact .refl _
+      | affine => exact False.elim (affineRequest request)
+      | exact => exact False.elim (exactRequest request)
+
+theorem Quantity.Request.mono {quantity : Quantity} {first last : Principal}
+    (request : quantity.Request first) (ordered : first.Restricts last) : quantity.Request last :=
+  ⟨request.1,fun n contained => ordered n (request.2 n contained)⟩
+
+theorem CapabilityEvidence.entails {program : Program} {context : Context} {type : Term} {principal : Principal}
+    (evidence : CapabilityEvidence program context type principal) :
+    Entails program context (.use type principal.quantity) :=
+  .use evidence ((principal.quantity_request principal).mpr (.refl _))
+
+theorem Entails.capabilityEvidence {program : Program} {context : Context} {type : Term} {principal : Principal}
+    (entailed : Entails program context (.use type principal.quantity)) :
+    CapabilityEvidence program context type principal :=
+  .logical entailed principal.quantity_valid (fun other requested => (principal.quantity_request other).mp requested)
+
+/-- Closed, admitted Use evidence publishes the greatest actual semantic
+answer. This includes congruence and quantified evidence without pretending
+that their types are already raw structural forms. Structural inversion of
+that answer is a separate correctness theorem, not an admission assumption. -/
+theorem Entails.valid_use_principal {program : Program} {context : Context} {type : Term} {quantity : Quantity}
+    (closed : context.assumptions = []) (valid : quantity.Valid)
+    (entailed : Entails program context (.use type quantity)) :
+    ∃ principal, PrincipalOf program type principal ∧ quantity.Request principal := by
+  obtain ⟨least,request,minimal⟩ := Quantity.minimal_request valid
+  obtain ⟨principal,selected,ordered⟩ := (CapabilityEvidence.logical entailed valid minimal).support closed |>.principal
+  exact ⟨principal,selected,request.mono ordered⟩
 
 end Glorious.Language

@@ -650,8 +650,8 @@ capture frontier, not merely by the current world's allocation counter.
 `ControlOriginPreservation` establishes this combined control/suspension
 invariant for arbitrary runs, observed states, divergence prefixes and public
 reachable states. The canonical `InitialInvocation` contract consumes it;
-the empty-entry constructor derives supplied-input support and needs only
-caller-environment bounds. No alternate execution relation, new runtime
+the empty-entry constructor derives supplied-input support and requires
+caller-environment bounds and recorded authorities. No alternate execution relation, new runtime
 inventory, post-state certificate or resource-admission premise supplies it.
 
 This repairs a real hole in the earlier suspension invariant: an incoming old
@@ -684,9 +684,38 @@ restores only authenticated homes. The same audit repaired `scopeReturn`:
 its cleanup selector now uses the popped frame's activation, not a potentially
 unrelated yielding context's activation; the actual transition's selected
 roots are proved owned by that frame. The current-source control-preservation
-gate passes 85 jobs with these dependencies. This does not yet establish
-retained caller-frame lifetime or saved loan-authority provenance; those are
-the next obligations in the same control/ownership invariant.
+gate passes 85 jobs with these dependencies. Retained caller-frame lifetime
+remains open; saved loan-authority provenance is established by the following
+extension of the same control/ownership invariant.
+
+`Authority.Recorded` now requires an actual historical loan-table entry for
+every non-owner authority, including shared backing authorities. The existing
+world well-formedness contract requires it for all reservation entries, even
+inactive ones. Previously, a vacant reserved place could carry a guessed future
+loan identity and later introduce it into cleanup. Actual reservation creation
+derives the requirement from its resolved operand permissions; all world
+producers and runtime permutation preserve the stronger contract.
+
+The same `ControlWellFormed` now records authorities of actual current tasks,
+retained frames and saved control, including pending loan release, hook loans
+and callback leases. The existing suspension-storage product carries historical
+recording through ordinary storage, host mutations, capture and settlement.
+The single saved-property classifier serves both address and authority support;
+copied replay proves authority recording from the actual mapped loan entries.
+All six machine-step families, arbitrary runs, observations, divergence prefixes
+and public reachable states preserve the canonical combined invariant.
+Immutable resumption metadata now includes saved contexts, handlers and frames,
+so an old saved authority cannot acquire a newly created loan identity after
+arbitrary execution, even when its referent address was already known. The
+corresponding Drop-guard integration remains unverified: its consumer's gate
+is blocked by capability inversion, not certified by the successful general
+control gate.
+
+Recording is historical provenance, not permission or live retained-frame
+ownership. General cleanup framing for retained caller homes and reference
+guards remains open. Opaque preloaded host registration/external-grant authority
+also needs its own canonical origin contract; current callback input permission
+does not establish historical non-forgery of such external authority.
 
 The combined frozen control/ownership, retained-context, source-entry,
 predicate, runtime-equivariance and repaired-coherence dependency gate passed
@@ -711,6 +740,58 @@ pointwise conversion alone is not the complete coherence contract. The next
 repair must establish actual generic determination at the head producer,
 without using the ambiguous associated results as inference evidence. The
 111-job gate establishes the stated theorems, not global confluence.
+
+The capability/equality mismatch is now repaired at the authoritative
+producer. `CapabilityEvidence` and `CapabilityUnfolds` combine greatest
+structural recursion with finite logical leaves in the same positive mutual
+judgment as entailment, equality and declaration reduction. An interval
+establishes a permission lower bound, not an arbitrary principal class.
+`Principal.quantity` distinguishes a class's complete interval from an
+exact-once request. The semantic `PrincipalOf` selects the greatest actually
+supported class in an assumption-free context. `CapabilityModels` proves its
+existence, uniqueness, general coinduction, finite equation composition and
+extraction from every valid closed Use derivation. Actual alias/associated
+expansion transports this evidence; unsupported types retain no answer.
+
+The superseded syntax-only model, its separate greatest-fixed-point selector
+and its raw-principal inversion interface have been removed. Runtime
+entailment, code/type/world renaming and invocation lease cleanup consume the
+new interpretation. Unique references retain unconditional discard evidence;
+their precise affine-only classification is not claimed without the missing
+constructor-rigidity theorem. The Drop gate still fails at its old
+`principalOf_equation` uses: conversion-safe propagation into the actual
+resident fields, nominal restrictions and destructor dispatch remains to be
+proved. The removed equation interface must not be restored by assuming that
+semantic principal evidence already has raw structural form.
+
+Implementation-head inference now records finite origins for every inferred
+generic argument. Source templates expose determining positions through
+ordered structural children or actual positive source-context reduction;
+query conversion retains that origin. Matching also checks the complete
+instantiated head, including repeated occurrences. Source declaration
+admission requires actual head determination. The mutual judgments now index
+their contexts explicitly, so source-head expansion uses the implementation's
+own lexical context. Selection, coherent query transport, contextual reduction,
+residuals, constructor decomposition and runtime renaming consume this same
+inference relation. General missing-origin exclusion now rejects nonparameter
+structural leaves and actual unit-erasing aliases, even when erased raw
+arguments syntactically contain a generic. The rejection reaches both actual
+matching and source declaration admission. The positive structural-origin
+theorem constructs source admission, actual matching and selected
+implementations from ordinary occurrences, lawful substitutions, whole-head
+conversion and real requirements; it does not ask callers for the inferred
+answer. General source-reduction instantiation, global confluence and
+conversion-safe structural inversion remain open.
+
+The combined frozen capability/head, runtime-equivariance, invocation-cleanup,
+predicate-admission, clause-entry and whole-run control/suspension dependency
+gate, including canonical recorded-control authority preservation, passed
+(122 jobs, warnings as errors, no routine example suite).
+The separate Drop capability/dispatch gate failed at the inversion obligation
+above; neither full soundness nor the aggregate acceptance gate is claimed.
+Higher-ranked introduction also needs an explicit fresh-placeholder and
+context-extension audit against normative §13.3: fixed-caller-domain
+quantified interpretation alone is not a parametricity or leak-check proof.
 
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving

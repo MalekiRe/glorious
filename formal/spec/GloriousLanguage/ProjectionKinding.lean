@@ -57,7 +57,7 @@ theorem ProgramWellFormed.override_body {program : Program} (valid : ProgramWell
         implementation.requirements ++ requirements,0,implementation.header.module,false,{}⟩ body associated.kind := by
   have declaration := (valid.2.2.2.2.1 _ declared).2.1
   obtain ⟨_,trait,_,_,_,_,_,signature⟩ := declaration
-  obtain ⟨_,ownerSub,_,_,_,bodies⟩ := signature
+  obtain ⟨_,_,ownerSub,_,_,_,bodies⟩ := signature
   obtain ⟨actual,requirements,found,_,_,unique,_,kinded⟩ := bodies member body bodyMember
   rw [associatedFound] at found
   cases Option.some.inj found
@@ -86,7 +86,7 @@ theorem SelectsImpl.instantiates {program : Program} {context : Context} {trait 
   cases selected with
   | selected _ _ _ matched _ =>
     cases matched with
-    | matched instantiated kinded _ _ => exact ⟨_,instantiated,kinded⟩
+    | inferred instantiated kinded _ _ _ _ => exact ⟨_,instantiated,kinded⟩
 
 theorem ProjectionDomain.kinding {program : Program} {context : Context} {trait member : DeclId}
     {owners items : List Term} {associated : AssociatedDefinition} {ownerSub itemSub : Substitution}

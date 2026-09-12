@@ -39,7 +39,9 @@ theorem LocalStep.suspensionExtension {program : Kernel.Program} {before after :
 theorem AtomStep.suspensionExtension {program : Kernel.Program} {before after : State} {event : Option Event}
     (step : AtomStep program before event after) : before.world.SuspensionExtension after.world := by
   cases step with
-  | constant _ _ _ written => exact (World.write_suspensionExtension written).trans (.of_roots (Nat.le_refl _) rfl)
+  | constant _ _ _ written =>
+    exact (World.write_suspensionExtension written).trans
+      (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
   | acquire _ _ acquired => exact acquired.suspensionExtension
   | borrow _ _ borrowed => exact borrowed.suspensionExtension
   | construct _ _ _ _ _ constructed => exact constructed.suspensionExtension
@@ -55,12 +57,12 @@ theorem ControlStep.suspensionExtension {program : Kernel.Program} {before after
   case leave => apply Protect.suspensionExtension; assumption
   case reserve resolved types distinct disjoint exclusive typeEq allocation created =>
     exact ((allocation.suspensionExtension (by intro id; simp)).trans created.suspensionExtension).trans
-      (.of_roots (Nat.le_refl _) rfl)
+      (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
   case available moved => exact moved.suspensionExtension
   case destroyAvailable =>
     apply World.SuspensionExtension.trans
     · apply World.write_suspensionExtension; assumption
-    · exact .of_roots (Nat.le_refl _) rfl
+    · exact .of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded)
   case destroySpentAvailable => apply World.write_suspensionExtension; assumption
   case contextualCall consumed used => exact consumed.suspensionExtension.trans used.suspensionExtension
   case positiveTest allocation tested => exact (allocation.suspensionExtension (by intro id; simp)).trans tested.suspensionExtension
@@ -124,22 +126,32 @@ theorem EffectStep.ordinary_suspensions {program : Kernel.Program} {before after
 
 /-- Full effect preservation covers both capture forms, the last and copied
 replay, cancellation, and every ordinary handler transition. -/
-theorem EffectStep.suspensions {program : Kernel.Program} {before after : State} {event : Option Event}
+theorem EffectStep.suspension_storage {program : Kernel.Program} {before after : State} {event : Option Event}
     (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
-    (step : EffectStep program before event after) : after.SuspensionsWellFormed := by
+    (step : EffectStep program before event after) : after.SuspensionsWellFormed ∧
+      ∀ (authority : Authority), authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
   by_cases capture : ∃ id, event = some (.suspend id)
   · obtain ⟨id,rfl⟩ := capture
-    exact step.create_suspensions programValid inventory valid typed
+    exact step.create_suspension_storage programValid inventory valid typed
   by_cases replay : ∃ id last, event = some (.replay id last)
   · obtain ⟨id,last,rfl⟩ := replay
     cases last with
-    | false => exact step.copy_suspensions valid typed
-    | true => exact step.last_suspensions valid typed
+    | false => exact step.copy_suspension_storage valid typed
+    | true => exact step.last_suspension_storage valid typed
   by_cases cancel : ∃ id, event = some (.cancel id)
   · obtain ⟨id,rfl⟩ := cancel
-    exact step.cancel_suspensions valid
-  exact step.ordinary_suspensions valid typed.1
-    (fun id same => capture ⟨id,same⟩) (fun id last same => replay ⟨id,last,same⟩) (fun id same => cancel ⟨id,same⟩)
+    exact step.cancel_suspension_storage valid
+  have notCapture := fun id same => capture ⟨id,same⟩
+  have notReplay := fun id last same => replay ⟨id,last,same⟩
+  have notCancel := fun id same => cancel ⟨id,same⟩
+  exact ⟨step.ordinary_suspensions valid typed.1 notCapture notReplay notCancel,
+    (step.ordinary_suspensionExtension notCapture notReplay notCancel).recorded⟩
+
+theorem EffectStep.suspensions {program : Kernel.Program} {before after : State} {event : Option Event}
+    (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before event after) : after.SuspensionsWellFormed :=
+  (step.suspension_storage programValid inventory valid typed).1
 
 end Glorious.Language.Execution

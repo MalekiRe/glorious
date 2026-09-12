@@ -77,31 +77,31 @@ theorem DefinitionallyEqual.kind_eq {program : Program} (valid : ProgramWellForm
     {context : Context} {left right : Term} (equal : DefinitionallyEqual program context left right) :
     left.kind = right.kind := by
   apply DefinitionallyEqual.rec
-    (motive_1 := fun _ _ _ => True)
-    (motive_2 := fun _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ => True)
-    (motive_4 := fun _ _ _ => True)
-    (motive_5 := fun _ _ _ => True)
-    (motive_6 := fun _ _ => True)
-    (motive_7 := fun _ _ _ => True)
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
     (motive_8 := fun _ _ _ => True)
-    (motive_9 := fun left right _ => left.kind = right.kind)
-    (motive_10 := fun _ _ _ => True)
-    (motive_11 := fun _ _ _ _ => True)
-    (motive_12 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_13 := fun _ _ _ => True)
-    (motive_14 := fun _ _ _ => True)
-    (motive_15 := fun _ _ _ => True)
-    (motive_16 := fun _ _ _ => True)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
+    (motive_11 := fun _ left right _ => left.kind = right.kind)
+    (motive_12 := fun _ _ _ _ => True)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
   all_goals intros
   all_goals try exact True.intro
   all_goals try assumption
   case refl => rfl
-  case symm _ _ _ ih => exact ih.symm
-  case trans _ _ _ _ _ first second => exact first.trans second
-  case congr _ _ same _ _ => exact sameHead_kind same
-  case step _ _ step _ => exact step.kind_eq valid
-  case row _ _ same => exact same.kind_eq
+  case symm _ _ _ _ ih => exact ih.symm
+  case trans _ _ _ _ _ _ first second => exact first.trans second
+  case congrChildren _ _ _ same _ _ => exact sameHead_kind same
+  case step _ _ _ step _ => exact step.kind_eq valid
+  case row _ _ _ same => exact same.kind_eq
 
 abbrev KindTransport (program : Program) (context : Context) (before after : Term) : Prop :=
   ∀ kind, Kinding program context before kind → Kinding program context after kind
@@ -343,71 +343,67 @@ theorem DefinitionallyEqual.kinding_iff {program : Program} (valid : ProgramWell
     {context : Context} {left right : Term} (equal : DefinitionallyEqual program context left right) :
     ∀ kind, Kinding program context left kind ↔ Kinding program context right kind := by
   apply DefinitionallyEqual.rec
-    (motive_1 := fun _ _ _ => True)
-    (motive_2 := fun _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ => True)
-    (motive_4 := fun _ _ _ => True)
-    (motive_5 := fun _ _ _ => True)
-    (motive_6 := fun _ _ => True)
-    (motive_7 := fun _ _ _ => True)
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
     (motive_8 := fun _ _ _ => True)
-    (motive_9 := fun left right _ => ∀ kind,
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
+    (motive_11 := fun context left right _ => ∀ kind,
       Kinding program context left kind ↔ Kinding program context right kind)
-    (motive_10 := fun _ _ _ => True)
-    (motive_11 := fun _ _ _ _ => True)
-    (motive_12 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_13 := fun _ _ _ => True)
-    (motive_14 := fun _ _ _ => True)
-    (motive_15 := fun left right _ => ListRel (fun first second => ∀ kind,
-      Kinding program context first kind ↔ Kinding program context second kind) left right)
-    (motive_16 := fun _ _ _ => True)
+    (motive_12 := fun _ _ _ _ => True)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
   all_goals intros
   all_goals try exact True.intro
   all_goals try assumption
   case refl => rfl
-  case symm _ _ _ ih kind => exact (ih kind).symm
-  case trans _ _ _ _ _ first second kind => exact (first kind).trans (second kind)
-  case congr _ _ same _ children kind =>
+  case symm _ _ _ _ ih kind => exact (ih kind).symm
+  case trans _ _ _ _ _ _ first second kind => exact (first kind).trans (second kind)
+  case congrChildren _ _ _ same _ children kind =>
+    have children := ListRel.of_at same.children_length children
     exact ⟨fun typed => typed.congr_children same (children.imp (fun _ _ relation kind => (relation kind).mp)),
       fun typed => typed.congr_children same.symm children.reverse_kind_transport⟩
-  case step _ _ step _ kind =>
+  case step _ _ _ step _ kind =>
     constructor
     · intro typed; rw [← typed.term_kind]; exact (step.kinding valid).2
     · intro typed; rw [← typed.term_kind,← step.kind_eq valid]; exact (step.kinding valid).1
-  case row _ _ same kind => exact same.kinding_iff kind
-  case nil => exact .nil
-  case cons _ _ _ _ _ _ head tail => exact .cons head tail
+  case row _ _ _ same kind => exact same.kinding_iff kind
 
 theorem DefinitionalReduction.equal {program : Program} {context : Context} {left right : Term}
     (reduced : DefinitionalReduction program context left right) :
     DefinitionallyEqual program context left right := by
   apply DefinitionalReduction.rec
-    (motive_1 := fun _ _ _ => True)
-    (motive_2 := fun _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ => True)
-    (motive_4 := fun _ _ _ => True)
-    (motive_5 := fun _ _ _ => True)
-    (motive_6 := fun _ _ => True)
-    (motive_7 := fun _ _ _ => True)
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
     (motive_8 := fun _ _ _ => True)
-    (motive_9 := fun _ _ _ => True)
-    (motive_10 := fun left right _ => DefinitionallyEqual program context left right)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
     (motive_11 := fun _ _ _ _ => True)
-    (motive_12 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_13 := fun _ _ _ => True)
-    (motive_14 := fun _ _ _ => True)
-    (motive_15 := fun _ _ _ => True)
-    (motive_16 := fun left right _ => ListRel (DefinitionallyEqual program context) left right)
+    (motive_12 := fun context left right _ => DefinitionallyEqual program context left right)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
   all_goals intros
   all_goals try exact True.intro
   all_goals try assumption
   case refl => exact .refl
-  case step _ _ step _ => exact .step step
-  case trans _ _ _ _ _ first second => exact .trans first second
-  case congr _ _ same _ children => exact .congr same children
-  case row _ _ same => exact .row same
-  case nil => exact .nil
-  case cons _ _ _ _ _ _ head tail => exact .cons head tail
+  case step _ _ _ step _ => exact .step step
+  case trans _ _ _ _ _ _ first second => exact .trans first second
+  case congrChildren _ _ _ same _ children => exact .congrChildren same children
+  case row _ _ _ same => exact .row same
 
 theorem DefinitionalReduction.kinding {program : Program} (valid : ProgramWellFormed program)
     {context : Context} {left right : Term} {kind : Kind}

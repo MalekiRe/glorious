@@ -107,15 +107,14 @@ theorem CopiesSnapshot.control_support {program : Kernel.Program} {before after 
   subst frame
   exact map.frame_root_support (RootSupport.below_flatMap.mp bounded.2 original originalMember)
 
-theorem ResumptionChange.saved_control_origin {before after : State} {event : Option Event}
+theorem ResumptionChange.saved_property {before after : State} {event : Option Event} {property : Suspension → Prop}
     (change : ResumptionChange before event after)
-    (saved : ∀ id suspension, before.resumptions.get id = some suspension →
-      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit)
+    (budget : ∀ suspension remaining used active, property suspension →
+      property { suspension with remaining := remaining, used := used, active := active })
+    (saved : ∀ id suspension, before.resumptions.get id = some suspension → property suspension)
     (created : ∀ id, event = some (.suspend id) → ∃ suspension,
-      after.resumptions.get id = some suspension ∧
-      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit) :
-    ∀ id suspension, after.resumptions.get id = some suspension →
-      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit := by
+      after.resumptions.get id = some suspension ∧ property suspension) :
+    ∀ id suspension, after.resumptions.get id = some suspension → property suspension := by
   cases change with
   | unchanged table _ _ _ => simpa only [table] using saved
   | create _ _ _ _ _ _ table _ =>
@@ -131,7 +130,7 @@ theorem ResumptionChange.saved_control_origin {before after : State} {event : Op
     · subst id
       rw [table,Table.get_set] at found
       cases found
-      exact saved target original present
+      exact budget original _ _ _ (saved target original present)
     · exact saved id suspension (by simpa only [table,Table.get_set_other _ _ _ _ same] using found)
   | @copy _ target original present _ _ table _ =>
     intro id suspension found
@@ -139,7 +138,7 @@ theorem ResumptionChange.saved_control_origin {before after : State} {event : Op
     · subst id
       rw [table,Table.get_set] at found
       cases found
-      exact saved target original present
+      exact budget original _ _ _ (saved target original present)
     · exact saved id suspension (by simpa only [table,Table.get_set_other _ _ _ _ same] using found)
   | @cancel _ target original present _ _ table _ =>
     intro id suspension found
@@ -147,8 +146,19 @@ theorem ResumptionChange.saved_control_origin {before after : State} {event : Op
     · subst id
       rw [table,Table.get_set] at found
       cases found
-      exact saved target original present
+      exact budget original _ _ _ (saved target original present)
     · exact saved id suspension (by simpa only [table,Table.get_set_other _ _ _ _ same] using found)
+
+theorem ResumptionChange.saved_control_origin {before after : State} {event : Option Event}
+    (change : ResumptionChange before event after)
+    (saved : ∀ id suspension, before.resumptions.get id = some suspension →
+      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit)
+    (created : ∀ id, event = some (.suspend id) → ∃ suspension,
+      after.resumptions.get id = some suspension ∧
+      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit) :
+    ∀ id suspension, after.resumptions.get id = some suspension →
+      RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit :=
+  change.saved_property (fun _ _ _ _ bounded => bounded) saved created
 
 /-- Every actual transition preserves saved address provenance. Capture
 establishes it from routed control; replay and cancellation retain it exactly. -/

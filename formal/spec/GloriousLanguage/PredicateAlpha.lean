@@ -129,7 +129,7 @@ theorem Instantiates.congr_binders {before after : List Binder} {values : List T
     cases alignment with
     | cons kind tail => exact .cons (head.2.symm.trans kind) (ih tail)
 
-private theorem ListRel.map_mapIdx {α β γ : Type} {relation : β → γ → Prop}
+theorem ListRel.map_mapIdx {α β γ : Type} {relation : β → γ → Prop}
     (values : List α) (left : α → β) (right : Nat → α → γ)
     (related : ∀ index value, value ∈ values → relation (left value) (right index value)) :
     ListRel relation (values.map left) (values.mapIdx right) := by

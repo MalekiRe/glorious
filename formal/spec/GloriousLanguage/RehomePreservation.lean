@@ -103,8 +103,8 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
   refine ⟨⟨?_,loanUnique,proofUnique,regionUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,parents,?_⟩,?_,?_,?_⟩
   · simpa only [after,Table.Unique,List.map_map,Function.comp_def] using rootUnique
   · intro id available found
-    obtain ⟨identity,bound,brand,active⟩ := proofs id available found
-    refine ⟨identity,bound,brand,?_⟩
+    obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
+    refine ⟨identity,bound,brand,?_,recorded⟩
     intro live
     obtain ⟨region,homes⟩ := active live
     refine ⟨region,?_⟩
