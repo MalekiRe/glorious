@@ -12,6 +12,11 @@ import GloriousLanguage.ScalarProgress
 import GloriousLanguage.IntegerDeterminism
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.StorageConstruction
+import GloriousLanguage.AllocationExecution
+import GloriousLanguage.OperationPayloadPreparation
+import GloriousLanguage.PayloadHandoff
+import GloriousLanguage.PatternPlanTransport
+import GloriousLanguage.InputLending
 import GloriousLanguage.ControlPreservation
 import GloriousLanguage.TestPreservation
 import GloriousLanguage.EffectPreservation

@@ -10,40 +10,6 @@ namespace Glorious.Language
 /-- Shell-liveness changes preserve every existing resident's head, even
 inside the rewritten object. A parent may observe changed child liveness but
 does not acquire a different constructor or reference identity. -/
-theorem World.write_shell_stores_head {before after : World} {address observed : Address}
-    {resident value : Value} {live : Bool}
-    (stored : before.Stores address resident)
-    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields)) = some after)
-    (found : before.Stores observed value) :
-    ∃ changed, after.Stores observed changed ∧ changed.head = value.head := by
-  by_cases included : address.Prefix observed
-  · obtain ⟨suffix,equal⟩ := Address.prefix_extension included
-    change before.read observed = some value at found
-    rw [equal,World.read_append,stored] at found
-    cases suffix with
-    | nil =>
-      have same : resident = value := Option.some.inj found
-      have location : observed = address := by simpa using equal
-      refine ⟨.resident resident.owner resident.type resident.head live resident.fields,?_,same ▸ rfl⟩
-      rw [location]
-      simpa [World.Stores,Value.atPath] using World.write_read_inside written []
-    | cons index rest =>
-      refine ⟨value,?_,rfl⟩
-      change after.read observed = some value
-      rw [equal,World.write_read_inside written (index :: rest)]
-      exact found
-  · obtain ⟨changed,present,same⟩ := World.write_retains_shell written included (World.resident_iff_stores.mpr found)
-    refine ⟨changed,World.resident_iff_stores.mp present,?_⟩
-    simpa only [Value.shell,Value.withFields,Value.head] using congrArg Value.head same
-
-theorem World.write_shell_references {before after : World} {address : Address} {resident : Value} {live : Bool}
-    (stored : before.Stores address resident)
-    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields)) = some after)
-    {id : Identity} (referenced : before.References id) : after.References id := by
-  obtain ⟨observed,value,found,head⟩ := referenced
-  obtain ⟨changed,present,same⟩ := World.write_shell_stores_head stored written (World.resident_iff_stores.mp found)
-  exact ⟨observed,changed,World.resident_iff_stores.mpr present,same.trans head⟩
-
 theorem World.write_shell_bindingStorageTyped {program : Program} {before after : World}
     {address : Address} {authority : Authority} {resident : Value} {live : Bool}
     (valid : before.WellFormed) (stored : before.Stores address resident)
@@ -61,62 +27,12 @@ theorem World.write_shell_bindingStorageTyped {program : Program} {before after 
     rw [← referent]
     exact permission.owned_no_loan_descendant (World.loanParents valid) found active
 
-theorem Typing.ValueTyped.available_fields {program : Kernel.Program} {world : World} {value : Value} {id : Identity}
-    (typed : Typing.ValueTyped program world value) (head : value.head = .available id) : value.fields = [] := by
-  cases typed with
-  | aggregate shape _ =>
-    rcases shape with ⟨_,_,impossible⟩ | ⟨_,_,_,_,_,_,impossible,_,_⟩ | ⟨_,_,_,_,_,_,_,impossible,_⟩
-    all_goals simp_all only [Value.head]
-    all_goals cases head
-  | callable => cases head
-  | bindings => cases head
-  | unit => rfl
-  | scalar => rfl
-  | reference => rfl
-  | pointer => rfl
-  | operation => rfl
-  | label => rfl
-  | continuation => rfl
-  | available => rfl
-
 theorem Typing.BindingStorageTyped.withProofs {program : Program} {world : World} {address : Address} {type : Term}
     (binding : Typing.BindingStorageTyped program world address type) (proofs : Table Availability) (next : Identity) :
     Typing.BindingStorageTyped program (world.withProofs proofs next) address type :=
   binding.roots_loans (before := world) (after := world.withProofs proofs next) rfl rfl
 
 namespace Execution
-
-theorem ConsumesReceiver.stores_head {before after : World} {address : Address} {authority : Authority} {access : Access}
-    (consumed : ConsumesReceiver before address authority access after)
-    {observed : Address} {value : Value} (stored : before.Stores observed value) :
-    ∃ changed, after.Stores observed changed ∧ changed.head = value.head := by
-  cases consumed with
-  | lent => exact ⟨value,stored,rfl⟩
-  | owned found _ _ _ written => exact World.write_shell_stores_head found written stored
-
-theorem ConsumesReceiver.bindingStorageTyped {program : Program} {before after : World}
-    {address : Address} {authority : Authority} {access : Access} (valid : before.WellFormed)
-    (consumed : ConsumesReceiver before address authority access after)
-    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program before observed type) :
-    Typing.BindingStorageTyped program after observed type := by
-  cases consumed with
-  | lent => exact binding
-  | owned stored _ _ permission written => exact World.write_shell_bindingStorageTyped valid stored permission written binding
-
-theorem ConsumesAvailability.bindingStorageTyped {program : Kernel.Program} {before after : World}
-    {address : Address} {id : Identity} {authority : Authority} {access : Access} {value : Value}
-    (typed : Typing.WorldTyped program before) (stored : before.Stores address value) (head : value.head = .available id)
-    (permission : access = .owned → Permitted before authority .owned address)
-    (consumed : ConsumesAvailability before address id access after)
-    {observed : Address} {type : Term} (binding : Typing.BindingStorageTyped program.declarations before observed type) :
-    Typing.BindingStorageTyped program.declarations after observed type := by
-  cases consumed with
-  | lent => exact binding
-  | owned _ written =>
-    have valueTyped := World.stores_typed typed.roots stored
-    have retained := World.clear_nonreference_leaf_bindingStorageTyped typed.1 stored
-      (valueTyped.available_fields head) (by intro loan; rw [head]; exact ValueHead.noConfusion) (permission rfl) written binding
-    exact retained.withProofs _ _
 
 theorem CopiesObservations.bindingStorageTyped {program : Kernel.Program} {context : Context}
     {before after : World} {observations bindings}

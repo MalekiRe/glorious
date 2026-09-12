@@ -1,3 +1,4 @@
+import GloriousLanguage.OperationPayloadPreparation
 import GloriousLanguage.InvocationBoundary
 import GloriousLanguage.RootSelection
 import GloriousLanguage.LocalPreservation
@@ -9,70 +10,6 @@ ordered `Protects` relation and must have a witness before admission can hold. -
 namespace Glorious.Language.Execution
 
 open Kernel
-
-theorem Protect.same_home {program : Kernel.Program} {source target : Context}
-    {before after : World} {address destination : Address} {authority : Authority}
-    (handoff : Protect program source before address authority destination after)
-    (activation : source.activation = target.activation) (scope : source.scope = target.scope)
-    (region : source.region = target.region) :
-    Protect program target before address authority destination after := by
-  obtain ⟨value,allocated,stored,temporary,transferred⟩ := handoff
-  refine ⟨value,allocated,stored,?_,transferred⟩
-  simpa only [Temporary,activation,scope,region] using temporary
-
-theorem Protects.same_home {program : Kernel.Program} {source target : Context}
-    {before after : World} {payload : List ResolvedPlace} {kept : List Address}
-    (handoff : Protects program source before payload kept after)
-    (activation : source.activation = target.activation) (scope : source.scope = target.scope)
-    (region : source.region = target.region) : Protects program target before payload kept after := by
-  induction handoff with
-  | nil => exact .nil
-  | cons first _ ih => exact .cons (first.same_home activation scope region) ih
-
-theorem StartsClause.payload_context {before : State} {handler : InstalledHandler}
-    {context : Context} {withRegion : World} (started : StartsClause before handler context withRegion) :
-    OperationPayloadContext before context withRegion := by
-  obtain ⟨fresh,rfl⟩ := started
-  exact ⟨fresh,rfl,rfl,rfl⟩
-
-theorem StartsResumptionClause.payload_context {before : State} {handler : InstalledHandler}
-    {lexical localSlot : Local} {context : Context} {withRegion : World}
-    (started : StartsResumptionClause before handler lexical context localSlot withRegion) :
-    OperationPayloadContext before context withRegion := by
-  obtain ⟨outer,brand,started,_,rfl,_⟩ := started
-  have home := started.payload_context
-  exact ⟨home.fresh,home.activation,home.scope,home.region⟩
-
-theorem PreparedOperationPayload.of_clause {program : Kernel.Program} {before : State}
-    {handler : InstalledHandler} {payload : List ResolvedPlace} {context : Context}
-    {withRegion moved : World} {kept : List Address}
-    (started : StartsClause before handler context withRegion)
-    (handoff : Protects program context withRegion payload kept moved) :
-    PreparedOperationPayload program before payload context kept moved :=
-  ⟨withRegion,started.payload_context,handoff⟩
-
-theorem PreparedOperationPayload.of_resumption_clause {program : Kernel.Program} {before : State}
-    {handler : InstalledHandler} {payload : List ResolvedPlace} {context : Context}
-    {lexical localSlot : Local} {withRegion moved : World} {kept : List Address}
-    (started : StartsResumptionClause before handler lexical context localSlot withRegion)
-    (handoff : Protects program context withRegion payload kept moved) :
-    PreparedOperationPayload program before payload context kept moved :=
-  ⟨withRegion,started.payload_context,handoff⟩
-
-/-- A nonempty preparation witness works at the exact fresh home chosen by
-any actual accepting clause. Only environment/brand coordinates may differ;
-the protected addresses and resulting world remain the same. -/
-theorem PreparedOperationPayload.at_context {program : Kernel.Program} {before : State}
-    {payload : List ResolvedPlace} {source target : Context} {kept : List Address}
-    {moved withRegion : World}
-    (prepared : PreparedOperationPayload program before payload source kept moved)
-    (targetHome : OperationPayloadContext before target withRegion) :
-    Protects program target withRegion payload kept moved := by
-  obtain ⟨original,sourceHome,handoff⟩ := prepared
-  have same : original = withRegion := sourceHome.fresh.2.trans targetHome.fresh.2.symm
-  subst original
-  exact handoff.same_home (sourceHome.activation.trans targetHome.activation.symm)
-    (sourceHome.scope.trans targetHome.scope.symm) (sourceHome.region.trans targetHome.region.symm)
 
 theorem Suspensible.covered {world : World} {all left right : List Identity}
     (cover : ∀ id ∈ all, id ∈ left ∨ id ∈ right)

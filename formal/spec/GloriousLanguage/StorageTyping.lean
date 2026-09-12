@@ -231,7 +231,7 @@ theorem Typing.ValueTyped.child {program : Kernel.Program} {world : World}
     {value child : Value} {index : Nat} (typed : Typing.ValueTyped program world value)
     (found : value.fields[index]? = some (some child)) : Typing.ValueTyped program world child := by
   cases typed <;> try { simp [Value.fields] at found }
-  · rename_i _ _ _ _ _ _ _ fields
+  · rename_i _ _ _ _ _ _ _ _ fields
     exact (fields.get found).1
   · rename_i _ _ _ _ _ _ _ fields
     exact (fields.get found).1

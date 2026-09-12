@@ -1,6 +1,7 @@
 import GloriousLanguage.BindingPersistence
 import GloriousLanguage.PredicateScope
 import GloriousLanguage.InvocationInputs
+import GloriousLanguage.BindingDomain
 
 /-! The source body's one local environment is related to the actual runtime
 environment. Entry constructs this relation from input recipes, fresh scope
@@ -68,9 +69,10 @@ theorem ArgumentInputs.resident_formals {world : World} {context : Context} {fun
 
 theorem ReservationInputs.formals {world : World} {available : Availability} {access : Access}
     {formals : List Kernel.Local} {inputs : List Kernel.InvocationInput}
-    (selected : ReservationInputs world available access formals inputs) : inputs.map (·.formal) = formals := by
+    (selected : ReservationInputs world available access formals inputs) :
+    inputs.filterMap (fun input => input.formal.resident?) = formals := by
   rw [selected.2.2.1]
-  simp only [List.map_map,Function.comp_def]
+  simp only [List.filterMap_map,Function.comp_def,Kernel.InputFormal.resident?,List.filterMap_eq_map']
   calc
     _ = ((formals.zip available.reserved).zipIdx.map Prod.fst).map Prod.fst := by rw [List.map_map]; rfl
     _ = (formals.zip available.reserved).map Prod.fst := congrArg (List.map Prod.fst) (List.zipIdx_map_fst 0 _)
@@ -82,13 +84,14 @@ theorem ReservationInputs.contextual_formals {world : World} {context : Context}
     (arguments : ArgumentInputs world context 0 function.parameters places inputs)
     (receiver witness : ResolvedPlace) (receiverAccess witnessAccess : Access) :
     (EntrySource.contextual receiver receiverAccess witness witnessAccess (captures ++ inputs)).HasFormals function := by
-  simp only [EntrySource.HasFormals,List.map_append,selected.formals,arguments.formals]
+  simp only [EntrySource.HasFormals,List.filterMap_append,selected.formals,arguments.formals]
 
 theorem _root_.Glorious.Language.Foreign.CallbackInputs.formals {world : World} {formals : List Kernel.Local}
     {arguments : List ResolvedPlace} {inputs : List Kernel.InvocationInput}
-    (selected : Foreign.CallbackInputs world formals arguments inputs) : inputs.map (·.formal) = formals := by
+    (selected : Foreign.CallbackInputs world formals arguments inputs) :
+    inputs.filterMap (fun input => input.formal.resident?) = formals := by
   rw [selected.1]
-  simp only [List.map_map,Function.comp_def]
+  simp only [List.filterMap_map,Function.comp_def,Kernel.InputFormal.resident?,List.filterMap_eq_map']
   calc
     _ = ((formals.zip arguments).zipIdx.map Prod.fst).map Prod.fst := by rw [List.map_map]; rfl
     _ = (formals.zip arguments).map Prod.fst := congrArg (List.map Prod.fst) (List.zipIdx_map_fst 0 _)
@@ -99,7 +102,7 @@ theorem _root_.Glorious.Language.Foreign.CallbackInputs.supplied_formals {world 
     (captureInputs : CaptureInputs world receiver authority access function.captures captures)
     (selected : Foreign.CallbackInputs world function.parameters arguments inputs) :
     (EntrySource.supplied (captures ++ inputs)).HasFormals function := by
-  simp only [EntrySource.HasFormals,List.map_append,captureInputs.formals,selected.formals]
+  simp only [EntrySource.HasFormals,List.filterMap_append,captureInputs.formals,selected.formals]
 
 end Execution
 
@@ -115,47 +118,19 @@ structure ContextBindingsTyped (program : Kernel.Program) (world : World)
   covers : runtime.instantiation.Covers source.static.scope
   distinct : (source.locals.map (·.id)).Nodup
   admitted : ∀ localSlot ∈ source.locals, localSlot.type.Scoped source.static.scope
-  bindings : ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
-    BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment
+  bindings : ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
+    BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment.locals
   assumptions : source.static.AssumptionsScoped
 
 end Typing
-
-theorem Kernel.Environment.selects_of_nodup {environment : Kernel.Environment} {binding : Kernel.Binding}
-    (distinct : (environment.map (·.localSlot)).Nodup) (member : binding ∈ environment) :
-    environment.Selects binding.localSlot binding := by
-  refine ⟨member,rfl,?_⟩
-  intro other present same
-  induction environment with
-  | nil => cases member
-  | cons first rest ih =>
-    have separated := List.nodup_cons.mp distinct
-    rcases List.mem_cons.mp member with rfl | bindingInRest
-    · rcases List.mem_cons.mp present with rfl | otherInRest
-      · rfl
-      · apply False.elim; apply separated.1
-        simpa only [same] using (List.mem_map.mpr ⟨other,otherInRest,rfl⟩ : other.localSlot ∈ rest.map (·.localSlot))
-    · rcases List.mem_cons.mp present with rfl | otherInRest
-      · apply False.elim; apply separated.1
-        simpa only [same] using (List.mem_map.mpr ⟨binding,bindingInRest,rfl⟩ : binding.localSlot ∈ rest.map (·.localSlot))
-      · exact ih separated.2 bindingInRest otherInRest
 
 theorem Typing.ContextBindingsTyped.selects {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {localSlot : Kernel.Local} (member : localSlot ∈ source.locals) :
     ∃ binding, runtime.environment.Selects localSlot.id binding ∧
-      Typing.BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type) := by
-  have related := typed.bindings
-  have ids : runtime.environment.map (·.localSlot) = source.locals.map (·.id) := by
-    generalize source.locals = locals at related ⊢
-    generalize runtime.environment = environment at related ⊢
-    induction related with
-    | nil => rfl
-    | cons first _ ih => simp only [List.map_cons,first.1,ih]
-  have distinct : (runtime.environment.map (·.localSlot)).Nodup := ids ▸ typed.distinct
-  obtain ⟨binding,present,identity,located⟩ := related.member_left member
-  exact ⟨binding,identity ▸ Kernel.Environment.selects_of_nodup distinct present,located⟩
+      Typing.BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type) :=
+  Kernel.Environment.selects_local_of_related typed.bindings typed.distinct member
 
 theorem Typing.ContextBindingsTyped.read_local {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
@@ -187,10 +162,16 @@ theorem Retires.contextBindingsTyped {program : Kernel.Program} {before after : 
   typed.world (fun _ _ binding => retired.bindingStorageTyped binding)
 
 theorem EndsLoan.contextBindingsTyped {program : Kernel.Program} {before after : World} {id : Identity}
-    (ended : EndsLoan before id after) {source : Typing.Context} {runtime : Execution.Context}
+    (ended : EndsLoan program before id after) {source : Typing.Context} {runtime : Execution.Context}
     (typed : Typing.ContextBindingsTyped program before source runtime) :
     Typing.ContextBindingsTyped program after source runtime :=
   typed.world (fun _ _ binding => ended.bindingStorageTyped binding)
+
+theorem ReturnsStorageLoan.contextBindingsTyped {program : Kernel.Program} {before after : World} {id : Identity}
+    (returned : ReturnsStorageLoan before id after) {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  typed.world (fun _ _ binding => returned.bindingStorageTyped binding)
 
 /-- Every actual close/release transition preserves retained contexts. The
 proof consumes their resident invocation guards and the existing EndsLoan
@@ -204,7 +185,9 @@ theorem Execution.LocalStep.loanRelease_contextBindingsTyped {program : Kernel.P
     Typing.ContextBindingsTyped program after.world source runtime := by
   cases step <;> obtain ⟨id,next,request | request⟩ := releasing
   all_goals simp_all
-  all_goals apply EndsLoan.contextBindingsTyped <;> assumption
+  all_goals first
+    | apply EndsLoan.contextBindingsTyped <;> assumption
+    | apply ReturnsStorageLoan.contextBindingsTyped <;> assumption
 
 theorem Execution.AtomStep.contextBindingsTyped {program : Kernel.Program} {before after : Execution.State} {event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -260,9 +243,16 @@ theorem Typing.ContextBindingsTyped.bind {program : Kernel.Program} {world : Wor
     rcases List.mem_cons.mp member with rfl | present
     · exact admitted
     · exact typed.admitted previous (List.mem_filter.mp present).1
-  · apply ListRel.cons ⟨rfl,located⟩
+  · change ListRel _ _ (Kernel.Environment.locals
+      ({ key := .localSlot localSlot.id, address := address, authority := authority } ::
+        (runtime.environment.filter (fun entry => entry.key != .localSlot localSlot.id))))
+    change ListRel _ _ (({ key := .localSlot localSlot.id, address := address, authority := authority } : Kernel.Binding) ::
+      Kernel.Environment.locals (runtime.environment.filter (fun entry => entry.key != .localSlot localSlot.id)))
+    rw [Kernel.Environment.locals_filter]
+    apply ListRel.cons ⟨rfl,located⟩
     exact typed.bindings.filter _ _ (fun _ _ pair => by
-      simp only [pair.1,Execution.Context.local,Kernel.Local.mapTerms])
+      rw [pair.1]
+      rfl)
 
 theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
@@ -276,11 +266,11 @@ theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world 
       (fun _ member => List.mem_cons_of_mem _ member)
   · have related := typed.bindings
     have admitted := typed.admitted
-    change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+    change ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
       Typing.BindingStorageTyped program.declarations world binding.address ((runtime.bindBrand lexical brand).term localSlot.type))
-      source.locals runtime.environment
+      source.locals runtime.environment.locals
     generalize source.locals = locals at related admitted ⊢
-    generalize runtime.environment = environment at related ⊢
+    generalize runtime.environment.locals = environment at related ⊢
     induction related with
     | nil => exact .nil
     | @cons localSlot binding locals bindings first rest ih =>
@@ -302,11 +292,11 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
       (fun _ member => member)
   · have related := typed.bindings
     have admitted := typed.admitted
-    change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+    change ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
       Typing.BindingStorageTyped program.declarations world binding.address ((runtime.bindRegion lexical region).term localSlot.type))
-      source.locals runtime.environment
+      source.locals runtime.environment.locals
     generalize source.locals = locals at related admitted ⊢
-    generalize runtime.environment = environment at related ⊢
+    generalize runtime.environment.locals = environment at related ⊢
     induction related with
     | nil => exact .nil
     | @cons localSlot binding locals bindings first rest ih =>
@@ -335,7 +325,7 @@ theorem Kernel.BindsPattern.contextBindingsTyped {program : Kernel.Program} {bef
     (worldTyped : Typing.WorldTyped program before)
     (typed : Typing.ContextBindingsTyped program before source runtime)
     (admitted : localSlot.type.Scoped source.static.scope)
-    (bound : Kernel.BindsPattern program.declarations runtime.activation runtime.scope runtime.region before
+    (bound : Kernel.BindsPattern program runtime.activation runtime.scope runtime.region before
       (runtime.local localSlot) address authority access binding after) :
     Typing.ContextBindingsTyped program after (source.bind localSlot)
       (runtime.bind (runtime.local localSlot) binding.address binding.authority) :=
@@ -409,28 +399,24 @@ theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Pr
       { source with locals := Execution.CaptureLocals syntaxNode.captures } handler.environment := by
   obtain ⟨first,second,sources,captures,captured,bindings,bound,disposed,one,two,captureMap,capturedValues,boundValues,retired,rfl,rfl⟩ := installed
   have capturedWorld := capturedValues.worldTyped valid inventory (two.worldTyped (one.worldTyped worldTyped))
-  have checked := boundValues.bindingStorageTypes valid inventory capturedWorld
+  have checked := boundValues.residentStorageTypes valid inventory capturedWorld
   have aligned : (((Execution.CaptureLocals captures).zip sources).map (fun (localSlot,address) =>
-      (⟨.capture 0,localSlot,address,.owner,.owned⟩ : Kernel.InvocationInput))).map (·.formal) =
+      (⟨.capture 0,localSlot,address,.owner,.owned⟩ : Kernel.InvocationInput))).filterMap
+      (fun input => input.formal.resident?) =
       Execution.CaptureLocals captures := by
-    simp only [List.map_map,Function.comp_def]
+    simp only [List.filterMap_map,Function.comp_def,Kernel.InputFormal.resident?,List.filterMap_eq_map']
     exact List.map_fst_zip (by
       simpa only [Execution.CaptureLocals,List.length_map] using (Nat.le_of_eq capturedValues.length_eq))
-  have declared : ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+  have declared : ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
       Typing.BindingStorageTyped program.declarations after binding.address localSlot.type)
-      (Execution.CaptureLocals captures) bindings := by
+      (Execution.CaptureLocals captures) bindings.locals := by
     rw [← aligned]
-    clear aligned boundValues
-    generalize (((Execution.CaptureLocals captures).zip sources).map (fun (localSlot,address) =>
-      (⟨.capture 0,localSlot,address,.owner,.owned⟩ : Kernel.InvocationInput))) = inputs at checked ⊢
-    induction checked with
-    | nil => exact .nil
-    | cons head _ ih => exact .cons ⟨head.1,retired.bindingStorageTyped head.2⟩ ih
+    exact checked.imp (fun _ _ pair => ⟨pair.1,retired.bindingStorageTyped pair.2⟩)
   have transport : ∀ (lexical : List Kernel.Capture) (environment : Kernel.Environment),
-      ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+      ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
         Typing.BindingStorageTyped program.declarations after binding.address localSlot.type)
         (Execution.CaptureLocals (lexical.map (Kernel.Capture.mapTerms outer.term))) environment →
-      ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+      ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
         Typing.BindingStorageTyped program.declarations after binding.address (outer.term localSlot.type))
         (Execution.CaptureLocals lexical) environment := by
     intro lexical
@@ -440,7 +426,7 @@ theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Pr
       intro environment related
       cases related with
       | cons head tail => exact .cons head (ih _ tail)
-  have declared := transport syntaxNode.captures bindings (captureMap ▸ declared)
+  have declared := transport syntaxNode.captures bindings.locals (captureMap ▸ declared)
   refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared,typed.assumptions⟩
   · cases handlerTyped with
     | attached captureTyped _ _ _ =>
@@ -542,29 +528,30 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
     (formals : source.HasFormals function)
     (entered : Execution.EnterWorld program before caller function source runtime after) :
     Typing.ContextBindingsTyped program after (Typing.FunctionContext function runtime.module) runtime := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,_,fresh,prepares,bound,rfl,_⟩ := entered
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,boundWorld,_,fresh,prepares,_,bound,finished,rfl,_⟩ := entered
   have aligned := prepares.formals formals
-  have checked := bound.bindingStorageTypes valid inventory (prepares.worldTyped valid inventory (fresh.worldTyped worldTyped))
+  have preparedTyped := prepares.worldTyped valid inventory (fresh.worldTyped worldTyped)
+  have checked : ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
+      Typing.BindingStorageTyped program.declarations after binding.address localSlot.type)
+      (inputs.filterMap (fun input => input.formal.resident?)) environment.locals :=
+    (Kernel.BindsInputsFor.residentStorageTypes valid inventory preparedTyped bound).imp
+    (fun _ _ pair => ⟨pair.1,finished.bindingStorageTyped (bound.worldTyped valid inventory preparedTyped).1 pair.2⟩)
+  rw [aligned] at checked
   have closed := selected.locals_scopeClosed valid inventory functionTyped
   refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_,functionTyped.assumptions_scoped _⟩
   · intro localSlot member
     exact (closed localSlot member).scoped _
-  · change ListRel (fun localSlot binding => binding.localSlot = localSlot.id ∧
+  · change ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
       Typing.BindingStorageTyped program.declarations after binding.address
         ((function.entryScope before.world.nextRegion before.nextBrand).term localSlot.type))
-      (function.captures ++ function.parameters) environment
-    have inputClosed : ∀ input ∈ inputs, input.formal.type.ScopeClosed := by
-      intro input member
-      apply closed
-      rw [← aligned]
-      exact List.mem_map.mpr ⟨input,member,rfl⟩
-    rw [← aligned]
-    clear aligned prepares bound formals closed
+      (function.captures ++ function.parameters) environment.locals
+    generalize function.captures ++ function.parameters = locals at checked closed ⊢
+    generalize environment.locals = bindings at checked ⊢
     induction checked with
     | nil => exact .nil
     | cons first _ ih =>
-      refine .cons ⟨first.1,?_⟩ (ih (fun input member => inputClosed input (List.mem_cons_of_mem _ member)))
-      rw [ScopeInstantiation.term_fixed _ _ (inputClosed _ List.mem_cons_self)]
+      refine .cons ⟨first.1,?_⟩ (ih (fun localSlot member => closed localSlot (List.mem_cons_of_mem _ member)))
+      rw [ScopeInstantiation.term_fixed _ _ (closed _ List.mem_cons_self)]
       exact first.2
 
 end Glorious.Language

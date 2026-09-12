@@ -66,12 +66,16 @@ def Relocation.authority (map : Relocation) : Authority → Authority
   | .owner => .owner
   | .loan id => .loan (map.loan id)
   | .shared backing => .shared (map.authority backing)
+  | .guarded backing carrier => .guarded (map.authority backing) (map.loan carrier)
+
+def Relocation.binding (map : Relocation) (binding : StorageBinding) : StorageBinding :=
+  { binding with address := map.address binding.address, authority := map.authority binding.authority }
 
 def Relocation.context (map : Relocation) (context : Context) : Context :=
   { context with
-    environment := context.environment.map (fun binding => { binding with
-      address := map.address binding.address
-      authority := map.authority binding.authority })
+    environment := context.environment.map map.binding
+    resourceContracts := context.resourceContracts.map (fun entry =>
+      { entry with inputs := entry.inputs.map map.binding })
     activation := map.activation context.activation
     scope := map.scope context.scope
     region := map.region context.region
@@ -104,7 +108,7 @@ def Relocation.home (map : Relocation) : Home → Home
 
 mutual
   def Relocation.value (map : Relocation) : Value → Value
-    | .resident owner type head live fields => .resident (map.ownerBase + owner) (map.term type)
+    | .resident owner type head live fields resources => .resident (map.ownerBase + owner) (map.term type)
         (match head with
          | .reference loan => .reference (map.loan loan)
          | .callable id arguments => .callable id (arguments.map map.term)
@@ -112,7 +116,7 @@ mutual
          | .pointer pointer => .pointer (map.pointer pointer)
          | .bindings pack => .bindings { pack.mapOrigins map.owner with region := map.region pack.region }
          | other => other)
-        live (map.values fields)
+        live (map.values fields) (resources.map map.binding)
 
   def Relocation.values (map : Relocation) : List (Option Value) → List (Option Value)
     | [] => []
@@ -123,10 +127,18 @@ end
 def Relocation.rootValue (map : Relocation) (id : Identity) (root : Root) : Root :=
   { root with home := map.home root.home, region := map.region root.region, type := map.term root.type, value := root.value.map map.value, base := (map.physical.get id).getD root.base }
 
+def Relocation.custody (map : Relocation) : ClaimCustody → ClaimCustody
+  | .activation id => .activation (map.activation id)
+  | .resident id => .resident (map.owner id)
+  | .host id => .host (map.root id)
+  | .registration id => .registration id
+
 def Relocation.loanValue (map : Relocation) (loan : Loan) : Loan :=
   { loan with
     identity := map.loan loan.identity
     parent := loan.parent.map map.loan
+    guards := loan.guards.map map.loan
+    custody := loan.custody.map map.custody
     referent := map.address loan.referent
     region := map.region loan.region }
 
@@ -204,7 +216,7 @@ def Relocation.copyWorld (map : Relocation) (world : World) (homes : Table Home)
 `RelocationPreservation`, not required as permission to execute the copy. -/
 structure CopiesSnapshot (program : Kernel.Program) (before : State) (suspension : Suspension)
     (map : Relocation) (after : State) : Prop where
-  replayable : Replayable program.declarations before.world suspension.roots
+  replayable : Replayable program before.world suspension.roots
   frames : ∀ frame ∈ suspension.frames, SnapshotFrame frame
   relocation : SnapshotMap program before suspension map
   roots : map.roots.Nodup

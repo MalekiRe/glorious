@@ -1,3 +1,4 @@
+import GloriousLanguage.ReceiverPreservation
 import GloriousLanguage.ConstructionPreservation
 import GloriousLanguage.LocalPreservation
 
@@ -130,10 +131,6 @@ theorem World.registerAvailability_worldTyped {program : Kernel.Program} {world 
 
 namespace Execution
 
-theorem _root_.Glorious.Language.Permitted.root {world : World} {authority : Authority} {access : Access} {address : Address}
-    (allowed : Permitted world authority access address) : ∃ root, world.root address = some root := by
-  cases authority <;> exact allowed.1
-
 theorem ResolvedOperands.permitted {world : World} {environment : Kernel.Environment}
     {places : List Kernel.Place} {sources : List ResolvedPlace}
     (resolved : ResolvedOperands world environment places sources) :
@@ -186,31 +183,6 @@ theorem reserve_worldTyped {program : Kernel.Program} {before allocated after : 
     (.available (Table.get_set _ _ _) rfl rfl rfl rfl)
   have proofs := congrArg World.availability created.rest
   simpa only [World.withProofs,available,proofs] using made
-
-theorem ConsumesReceiver.locations {before after : World} {address authority access}
-    (consumed : ConsumesReceiver before address authority access after) :
-    ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
-  cases consumed with
-  | lent => intro; rfl
-  | owned _ _ _ _ written => exact World.write_locations written
-
-theorem ConsumesReceiver.loans {before after : World} {address authority access}
-    (consumed : ConsumesReceiver before address authority access after) : after.loans = before.loans := by
-  cases consumed with
-  | lent => rfl
-  | owned _ _ _ _ written => exact World.write_loans written
-
-theorem ConsumesAvailability.worldTyped {program : Kernel.Program} {before after : World}
-    {address : Address} {id : Identity} {authority : Authority} {access : Access}
-    (typed : Typing.WorldTyped program before)
-    (permission : access = .owned → Permitted before authority .owned address)
-    (consumed : ConsumesAvailability before address id access after) : Typing.WorldTyped program after := by
-  cases consumed with
-  | lent => exact typed
-  | owned found written =>
-      apply World.deactivateAvailability_worldTyped (World.clear_worldTyped typed (permission rfl) written)
-      have proofs := congrArg World.availability (World.write_rest written)
-      simpa only [proofs] using found
 
 end Execution
 end Glorious.Language

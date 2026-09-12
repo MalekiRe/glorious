@@ -1499,6 +1499,57 @@ No examples or aggregate soundness gate were run. This repairs concrete ABI
 admission, not code authentication, relocation validity, concrete-site coverage,
 all target obligations or allocation success/exhaustion across runtime sites.
 
+The common raw/resident handoff now has one authoritative runtime binding
+domain. Resident formals, raw storage, allocation custody and storage-loan
+custody use distinct keys in the actual environment. Source locals are its
+local-key projection, not a second runtime domain. Pointer values and numeric
+allocation identities no longer produce pointee authority: source raw access
+resolves real bindings, and foreign mutation histories publish their actual
+ordered resource outputs rather than scanning post-world roots.
+
+The actual storage producer retains erased bindings in residents, guarded
+loans and custody. Structural value typing is distinct from recursive unsafe
+resource closure and handoff readiness. Copy, move, borrow, nominal opening,
+storage claim, return and release use these real contracts; raw ports are not
+pretended to be initialized resident values. The common six-case input binder,
+receiver/witness preparation, entry finishing, resource returns and ordinary
+local transitions derive world preservation from their actual constructors.
+`ContextBindingsTyped` consumes those bindings and proves source-local
+selection and ordinary/handler entry. Receiver/witness consumption requires
+the real stored initialized witness and its owned authority, not a supplied
+permission callback.
+
+`BindsInputsAttemptFor` and `ProtectsAttemptFor` retain the original complete
+clear footprint through every prefix; successful relations are their complete
+specializations. Handoff framing transports actual residents and resources,
+and `SelectsOperation.handoff_payloadPlan` constructs the real selected arm's
+plan after protection. Plan transport through root rehome and fresh empty-input
+continuation construction does not assume arbitrary nominal invariants ignore
+administrative changes. Promoted low proofs replace their former duplicates.
+
+`AllocationRequest` retains closed runtime layout, lifetime and size admission;
+the same `PhysicalExtent` supplies success or positively validated exhaustion.
+`StorageWrites` constructs actual writes at located storage, and
+`HandoffProgress` uses those writes to construct the entire ordered payload
+preparation outcome. No successful allocator, write or handoff is a premise.
+`PreparationOutcomes` exposes the real complete prefix and ready failed head.
+Actual local entry and operation payload failure retain the resulting partial
+world. General input/protection/entry attempt preservation is consumed by
+`LocalStep.worldTyped`; fatal states have no executable suffix or cleanup.
+
+The integrated and fresh source-only gates pass 83 strict jobs for source
+contexts, payload handoff/plan transport, input lending, local allocation
+execution, operation payload preparation and shared empty-value construction.
+The complete semantic source tree was compared exactly to that checked
+release. No examples or aggregate gate were run. This checkpoint deliberately
+does not claim the older high proof graph composes with the new resource and
+failure constructors. Its actual operation readiness still assumes successful
+payloads, and must now consume positive preflight and success/fatal outcomes.
+Continuation-handle exhaustion, common loan-kind validity, replay resource
+closure/custody, buffer allocation/reallocation, full entry/lending progress,
+and higher private/control/foreign preservation remain on that same active
+dependency chain. Task/frame typing and complete semantic admission are open.
+
 Finish total primitive behavior, representation/ABI site coverage and target
 obligations. Audit every requirement against authoritative evidence, preserving
 negative regressions and distinguishing conditional theorems from established

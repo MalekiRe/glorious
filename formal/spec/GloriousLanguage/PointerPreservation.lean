@@ -39,13 +39,19 @@ theorem RawPointer.Origin.retire {pointer : RawPointer} {before after : World} {
 
 namespace Memory
 
+theorem ReleasesStorageClaims.pointer_origin {before after : World} {place : ResolvedPlace}
+    {pointer : RawPointer} (released : Language.ReleasesStorageClaims before place after)
+    (origin : pointer.Origin before) : pointer.Origin after :=
+  origin.transport (by cases released; intro id; rfl)
+
 theorem AddressOnly.origin (world : World) (integer : Nat) : (AddressOnly integer).Origin world := by
   intro id impossible
   cases impossible
 
 theorem AllocatesBuffer.origin {program : Program} {before after : World}
+    {custody : ClaimCustody} {allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
-    (allocated : AllocatesBuffer program before domain element count base pointer after) : pointer.Origin after := by
+    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) : pointer.Origin after := by
   cases allocated with
   | fresh =>
       intro id allocation
@@ -54,8 +60,9 @@ theorem AllocatesBuffer.origin {program : Program} {before after : World}
       exact ⟨_,Table.get_set _ _ _,by simp,by simp⟩
 
 theorem AllocatesBuffer.bound {program : Program} {before after : World}
+    {custody : ClaimCustody} {allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
-    (allocated : AllocatesBuffer program before domain element count base pointer after) :
+    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) :
     pointer.address < 2^program.input.target.pointerBits := by
   cases allocated with
   | fresh _ _ _ _ _ _ _ _ extent _ => exact Nat.lt_of_le_of_lt (Nat.le_add_right _ _) extent
@@ -94,29 +101,33 @@ theorem InstallsResidents.pointer_origin {program : Program} {pointer : RawPoint
   | hole _ _ ih => exact ih origin
   | resident _ _ written _ ih => exact ih (origin.write written)
 
-theorem BulkMove.pointer_origin {program : Program} {pointer : RawPointer} {before after : World} {sources destinations : List Address}
+theorem BulkMove.pointer_origin {program : RuntimeProgram} {pointer : RawPointer} {before after : World} {sources destinations : List ResolvedPlace}
     (origin : pointer.Origin before) (moved : BulkMove program before sources destinations after) : pointer.Origin after := by
   obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
   exact installed.pointer_origin (origin.clear cleared)
 
 theorem ReleasesBuffer.pointer_origin {pointer released : RawPointer} {program : Program} {before after : World} {domain : Identity}
-    (origin : pointer.Origin before) (release : ReleasesBuffer program before released domain after) : pointer.Origin after := by
+    {allocation : ResolvedPlace}
+    (origin : pointer.Origin before) (release : ReleasesBuffer program before allocation released domain after) : pointer.Origin after := by
   cases release with
-  | release _ _ _ _ _ _ _ _ _ _ _ _ written retired closed =>
-      have coherent := (origin.write written).retire retired
+  | release _ _ _ _ _ _ _ _ _ _ _ _ claims _ written retired closed =>
+      have unclaimed := ReleasesStorageClaims.pointer_origin claims origin
+      have coherent := (unclaimed.write written).retire retired
       obtain ⟨_,rfl⟩ := closed
       exact coherent
 
-theorem ReallocatesBuffer.origin {program : Program} {before after : World} {old result : RawPointer}
+theorem ReallocatesBuffer.origin {program : RuntimeProgram} {before after : World} {old result : RawPointer}
+    {custody : ClaimCustody} {oldAllocation allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat}
-    (reallocated : ReallocatesBuffer program before old domain element count base result after) : result.Origin after := by
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element count base result allocation after) : result.Origin after := by
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_,moved,released⟩ := reallocated
   exact released.pointer_origin (moved.pointer_origin allocated.origin)
 
-theorem ReallocatesBuffer.bound {program : Program} {before after : World} {old result : RawPointer}
+theorem ReallocatesBuffer.bound {program : RuntimeProgram} {before after : World} {old result : RawPointer}
+    {custody : ClaimCustody} {oldAllocation allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat}
-    (reallocated : ReallocatesBuffer program before old domain element count base result after) :
-    result.address < 2^program.input.target.pointerBits := by
+    (reallocated : ReallocatesBuffer program custody before oldAllocation old domain element count base result allocation after) :
+    result.address < 2^program.declarations.input.target.pointerBits := by
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,allocated,_⟩ := reallocated
   exact allocated.bound
 
@@ -141,7 +152,8 @@ theorem StoresPointer.typed_result {program : Kernel.Program} {before after : Wo
     ∃ value, after.Stores destination value ∧ Typing.ValueTyped program after value ∧ value.head = .pointer pointer := by
   rcases stored with ⟨_,stored⟩
   cases stored with
-  | construct _ _ sources _ _ _ cleared written =>
+  | construct _ _ ready _ cleared written =>
+      have sources := ready.1
       cases sources
       cases cleared
       have coherent := origin.write written

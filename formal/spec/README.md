@@ -8,7 +8,7 @@ language rules as application code. Machine and foreign boundaries are
 explicit contracts.
 
 Status: whole-specification draft, in its semantic repair and proof pass.
-General proofs now cover storage preservation for every executable transition
+Earlier verified checkpoints cover storage preservation for every executable transition
 and finite execution, invocation loan exclusion and physical lease cleanup,
 constructibility of the logical/coinductive capability interpretation, typed public-value observations,
 complete code-typing transport for snapshot region renaming, and current/saved
@@ -22,6 +22,12 @@ not full-language soundness or conformance: source lexical/type normalization,
 task/frame typing and retained-frame liveness, initialized return lifetimes, resource progress and
 complete target contracts remain open. `PROOF-PLAN.md` records the current
 hardest-first dependency chain; `DRAFT.md` retains the earlier draft audit.
+The current raw-resource and allocation-outcome correction changes those
+executable contracts. Its checked boundary covers common resident/raw input
+binding, actual local execution, source-local context entry, payload-pattern
+transport and ordered preparation success/exhaustion. Higher whole-execution,
+operation, private, control and foreign proofs are being migrated; their older
+checkpoints do not establish conformance of this changed graph.
 The earlier compiler work remains reference material, not the foundation
 or a dependency of this project.
 
@@ -36,6 +42,18 @@ or a dependency of this project.
   structural typing.
 - `Storage`, `Kernel`, `Machine`, `Atoms`: one storage world, explicit
   sequencing, invocation, transfers, borrowing and executable cleanup.
+- `BindingDomain`, `InputTyping`, `InputLending`, `ContextTyping`: source
+  locals are a projection of the same resident/raw binding environment.
+  Invocation custody, raw ports and real reference permissions are retained;
+  erased resources do not acquire fictitious source locals.
+- `OrderedHandoff`, `HandoffPreservation`, `PayloadHandoff`,
+  `PatternPlanTransport`: one whole-batch clear footprint through actual
+  ordered handoffs, source-selected payload plans and retained reference support.
+- `AllocationOutcomes`, `PreparationOutcomes`, `HandoffProgress`,
+  `AllocationExecution`, `OperationPayloadPreparation`: positive allocation
+  requests produce actual success or physical exhaustion. Failed preparation
+  retains its successful prefix and partial world. Entry and payload protection
+  share outcome-indexed folds; actual fatal states admit no executable suffix.
 - `Effects`, `Relocation`, `Control`, `Contracts`: handlers, continuation
   quantities, snapshots, labels, guarded environments and body-checked
   invocation contracts.
@@ -46,14 +64,16 @@ or a dependency of this project.
 - `InvocationLifecycle`, `InvocationLifecyclePreservation`: escaped continuation
   creation and cancellation initiation tied to the same actual outward request;
   separate caller traces and preserved capture identity, not internal-event exits.
-- `OperationBoundary`: nonvacuous ordered payload protection and the selected
+- `OperationBoundary`: selected
   terminal/resumptive permission shared with actual effect execution; exact
   composition of callee-owned and caller-owned post-payload obligations.
+  Migration from assumed successful protection to preparation outcomes is open.
 - `OperationExecution`: actual terminal, tail-arm and bound-resumption steps
   constructed from those shares and the selected source arm's common mode
   contract, with post-world typing, the actual clause's typed binder cursor and
   the same request's capture lifecycle. Pattern access and successful physical
-  allocation remain explicit.
+  allocation remain explicit in the earlier proof. Its outcome-aware migration,
+  including continuation-handle exhaustion, is not yet checked.
 - `OperationSignatures`, `ContinuationCreation`, `StorageConstruction`: actual
   source/request signature conversion, exact continuation brand/result/quantity
   and constructed handle initialization. Continuations and scalar results share
@@ -145,7 +165,9 @@ or a dependency of this project.
 - `LayoutContext`, `AllocationLayout`: actual allocation admits only a closed
   runtime layout; logical cut transports caller metadata. Physical admission
   supplies usize bounds, and allocation, encoding and layout queries agree.
-  Explicit exhaustion at all runtime allocation sites remains open.
+  Explicit exhaustion is now connected to ordinary local allocation, entry
+  input binding and ordered operation payloads; complete runtime-site coverage
+  and actual source-derived progress remain open.
 - `ABIAdmission`: actual loader admission matches the target's layout identity
   and concrete representation bounds. Admitted descriptors derive layout,
   capability and Drop agreement from concrete type agreement; accepted layouts

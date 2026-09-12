@@ -193,9 +193,13 @@ mutual
     | unit {owner live} : ValueTyped program world (.resident owner .unit .unit live [])
     | scalar {owner value live} : value.Valid program.declarations.input.target →
         ValueTyped program world (.resident owner (.scalar value.type) (.scalar value) live [])
-    | aggregate {owner type head live fields types} : Execution.ConstructorHead program.declarations type
+    /-- Structural typing retains erased bindings without claiming that the
+    unsafe invariant is closed. Ordinary handoff separately requires the one
+    recursive ResourcesClosed contract, including nominal declaration checks.
+    This also permits the intermediate open representation inside unsafe code. -/
+    | aggregate {owner type head live fields types resources} : Execution.ConstructorHead program.declarations type
         (match head with | .constructor id => some id | _ => none) types head →
-        FieldsTyped program world fields types → ValueTyped program world (.resident owner type head live fields)
+        FieldsTyped program world fields types → ValueTyped program world (.resident owner type head live fields resources)
     | reference {owner mode region type id loan live} : world.loans.get id = some loan → loan.live = true → loan.mode = mode →
         region = .runtimeRegion loan.region →
         AddressType program.declarations world loan.referent type →

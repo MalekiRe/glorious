@@ -122,8 +122,8 @@ def ObjectBytes (program : Language.Program) (world : World) (runtime : RuntimeA
       ∃ value, root.value = some value ∧ Encodes program world runtime ⟨id,root.generation,[]⟩ value root.layout bytes ∧
         ∀ offset, ¬ OccupiesByte program world id offset → bytes[offset]? = some none)
 
-inductive AllocatesBuffer (program : Language.Program) :
-    World → Identity → Term → Nat → Nat → RawPointer → World → Prop where
+inductive AllocatesBuffer (program : Language.Program) (custody : ClaimCustody) :
+    World → Identity → Term → Nat → Nat → RawPointer → ResolvedPlace → World → Prop where
   | fresh {before domain element count base elementLayout layout} :
       domain ∈ program.input.manifest.allocationDomains → element.RuntimeRegionsBelow before.nextRegion →
       IntegerRange program.input.target false .pointer (Int.ofNat count) →
@@ -131,8 +131,22 @@ inductive AllocatesBuffer (program : Language.Program) :
       ArrayLayout elementLayout count layout → layout.size ≤ program.input.target.maximumObjectBytes →
       0 < base → base % layout.alignment = 0 → base+layout.size < 2^program.input.target.pointerBits →
       DisjointStorage before base layout.size →
-      AllocatesBuffer program before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
-        { before with roots := before.roots.set before.nextRoot ⟨.allocation domain,0,before.nextRegion,base,layout, .array element (.constant (.integer false .pointer count)), some (.resident before.nextOwner (.array element (.constant (.integer false .pointer count))) .array false (List.replicate count none)),true,before.clock,true,List.replicate layout.size none⟩, liveRegions := before.nextRegion :: before.liveRegions, nextRegion := before.nextRegion+1, nextRoot := before.nextRoot+1, nextOwner := before.nextOwner+1, clock := before.clock+1 }
+      AllocatesBuffer program custody before domain element count base ⟨base,some before.nextRoot,0,0,some domain⟩
+        ⟨⟨before.nextRoot,0,[]⟩,.loan before.nextLoan⟩
+        { before with
+          roots := before.roots.set before.nextRoot
+            ⟨.allocation domain,0,before.nextRegion,base,layout,
+              .array element (.constant (.integer false .pointer count)),
+              some (.resident before.nextOwner (.array element (.constant (.integer false .pointer count)))
+                .array false (List.replicate count none)),true,before.clock,true,List.replicate layout.size none⟩
+          loans := before.loans.set before.nextLoan
+            ⟨before.nextLoan,none,⟨before.nextRoot,0,[]⟩,.unique,before.nextRegion,true,.owning,[],false,some custody⟩
+          liveRegions := before.nextRegion :: before.liveRegions
+          nextRegion := before.nextRegion+1
+          nextRoot := before.nextRoot+1
+          nextOwner := before.nextOwner+1
+          nextLoan := before.nextLoan+1
+          clock := before.clock+1 }
 
 def PointerOffset (program : Language.Program) (world : World) (pointer : RawPointer) (bytes : Int) (result : RawPointer) : Prop :=
   ∃ id root offset,
@@ -148,25 +162,29 @@ def WithAddress (program : Language.Program) (world : World) (pointer : RawPoint
     root.base ≤ address ∧ address ≤ root.base+root.layout.size ∧ address < 2^program.input.target.pointerBits ∧
     result = { pointer with address := address, offset := address-root.base }
 
-inductive RawRead (program : Language.Program) : World → RawPointer → Term → Bool → Address → World → Prop where
-  | read {before pointer type copy source destination after layout} : PointsTo program before pointer source type →
-      LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout → RawRange program before pointer layout.size layout.alignment →
-      (copy = true ∧ Copies program before .owner source destination after ∨
-        copy = false ∧ Transfers program before .owner source destination after) →
-      RawRead program before pointer type copy destination after
+inductive RawRead (program : Language.RuntimeProgram) :
+    World → ResolvedPlace → RawPointer → Term → Bool → Address → World → Prop where
+  | read {before pointer type copy source destination after layout} : PointsTo program.declarations before pointer source.address type →
+      LayoutOf program.declarations ⟨[],[],0,default,true,{}⟩ type layout → RawRange program.declarations before pointer layout.size layout.alignment →
+      (copy = true ∧ Copies program before source.authority source.address destination after ∨
+        copy = false ∧ Transfers program before source.authority source.address destination after) →
+      RawRead program before source pointer type copy destination after
 
-inductive RawWrite (program : Language.Program) : World → Authority → Address → RawPointer → Term → World → Prop where
-  | write {before authority source pointer type destination after layout value} : before.Stores source value → value.type = type →
-      PointsTo program before pointer destination type → LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout →
-      RawRange program before pointer layout.size layout.alignment → Transfers program before authority source destination after →
-      RawWrite program before authority source pointer type after
+inductive RawWrite (program : Language.RuntimeProgram) :
+    World → ResolvedPlace → ResolvedPlace → RawPointer → Term → World → Prop where
+  | write {before source pointer type destination after layout value} : before.Stores source.address value → value.type = type →
+      PointsTo program.declarations before pointer destination.address type → LayoutOf program.declarations ⟨[],[],0,default,true,{}⟩ type layout →
+      RawRange program.declarations before pointer layout.size layout.alignment →
+      Permitted before destination.authority .unique destination.address →
+      Transfers program before source.authority source.address destination.address after →
+      RawWrite program before source destination pointer type after
 
-inductive RawBorrow (program : Language.Program) :
-    World → RawPointer → Term → Mutability → Identity → Address → World → Prop where
-  | borrow {before pointer type mode region source destination after layout} : PointsTo program before pointer source type →
-      LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout → RawRange program before pointer layout.size layout.alignment →
-      before.Initialized source → Borrows program before .owner mode region source destination after →
-      RawBorrow program before pointer type mode region destination after
+inductive RawBorrow (program : Language.RuntimeProgram) :
+    World → ResolvedPlace → RawPointer → Term → Mutability → Identity → Address → World → Prop where
+  | borrow {before pointer type mode region source destination after layout} : PointsTo program.declarations before pointer source.address type →
+      LayoutOf program.declarations ⟨[],[],0,default,true,{}⟩ type layout → RawRange program.declarations before pointer layout.size layout.alignment →
+      before.Initialized source.address → Borrows program before source.authority mode region source.address destination after →
+      RawBorrow program before source pointer type mode region destination after
 
 def Slots (base : Address) (start count : Nat) : List Address :=
   (List.range count).map (fun index => base.child (start+index))
@@ -184,35 +202,46 @@ inductive InstallsResidents (program : Language.Program) : World → List Addres
 /-- Reads all sources before clearing, then writes the preserved snapshot.
 Destination overlap is legal only with the source range; unrelated initialized
 owners cannot be overwritten. This is relocation, never implicit Copy. -/
-def BulkMove (program : Language.Program) (before : World) (sources destinations : List Address) (after : World) : Prop :=
+def BulkMove (program : Language.RuntimeProgram) (before : World) (sources destinations : List ResolvedPlace) (after : World) : Prop :=
   ∃ residents cleared,
     sources.length = destinations.length ∧
-    sources.Pairwise (fun left right => ¬ left.Overlaps right) ∧
-    destinations.Pairwise (fun left right => ¬ left.Overlaps right) ∧
-    ListRel (fun address value => before.read address = value) sources residents ∧
-    (∀ address ∈ sources, Permitted before .owner .owned address) ∧
-    (∀ address ∈ destinations, address ∈ sources ∨ before.Vacant address) ∧
-    Clears before sources cleared ∧ InstallsResidents program cleared destinations residents after
+    sources.Pairwise (fun left right => ¬ left.address.Overlaps right.address) ∧
+    destinations.Pairwise (fun left right => ¬ left.address.Overlaps right.address) ∧
+    ListRel (fun place value => before.read place.address = value) sources residents ∧
+    (∀ place ∈ sources, Permitted before place.authority .owned place.address ∧
+      ∀ value, before.Stores place.address value →
+        value.MoveReady program before ((sources ++ destinations).map ResolvedPlace.address)) ∧
+    (∀ place ∈ destinations, Permitted before place.authority .unique place.address ∧
+      (place.address ∈ sources.map ResolvedPlace.address ∨ before.Vacant place.address)) ∧
+    Clears before (sources.map ResolvedPlace.address) cleared ∧
+    InstallsResidents program.declarations cleared (destinations.map ResolvedPlace.address) residents after
 
-inductive ReleasesBuffer (program : Language.Program) : World → RawPointer → Identity → World → Prop where
-  | release {before pointer domain id root value cleared retired after} : pointer.allocation = some id → pointer.offset = 0 →
+inductive ReleasesBuffer (program : Language.Program) : World → ResolvedPlace → RawPointer → Identity → World → Prop where
+  | release {before allocation pointer domain id root value unclaimed cleared retired after} :
+      pointer.allocation = some id → pointer.offset = 0 → allocation.address = ⟨id,pointer.generation,[]⟩ →
       pointer.domain = some domain → before.roots.get id = some root → root.live = true →
       root.home = .allocation domain → root.generation = pointer.generation → root.base = pointer.address →
       root.value = some value → value.shellLive = false → (∀ field ∈ value.fields, field = none) →
-      CanEndStorage before id → before.write ⟨id,root.generation,[]⟩ none = some cleared → Retires cleared id retired →
-      Execution.RegionEnds retired root.region after → ReleasesBuffer program before pointer domain after
+      ReleasesStorageClaims before allocation unclaimed → CanEndStorage unclaimed id →
+      unclaimed.write ⟨id,root.generation,[]⟩ none = some cleared → Retires cleared id retired →
+      Execution.RegionEnds retired root.region after → ReleasesBuffer program before allocation pointer domain after
 
-def ReallocatesBuffer (program : Language.Program) (before : World) (old : RawPointer)
-    (domain : Identity) (element : Term) (newCount base : Nat) (result : RawPointer) (after : World) : Prop :=
+def ReallocatesBuffer (program : Language.RuntimeProgram) (custody : ClaimCustody) (before : World)
+    (oldAllocation : ResolvedPlace) (old : RawPointer)
+    (domain : Identity) (element : Term) (newCount base : Nat) (result : RawPointer)
+    (allocation : ResolvedPlace) (after : World) : Prop :=
   ∃ oldId root value allocated newId moved oldCount,
     old.allocation = some oldId ∧ before.roots.get oldId = some root ∧ root.value = some value ∧
     oldCount = value.fields.length ∧
     value.type = .array element (.constant (.integer false .pointer oldCount)) ∧
     value.shellLive = false ∧ oldCount ≤ newCount ∧
-    CanEndStorage before oldId ∧ AllocatesBuffer program before domain element newCount base result allocated ∧
+    Permitted before oldAllocation.authority .owned oldAllocation.address ∧
+    AllocatesBuffer program.declarations custody before domain element newCount base result allocation allocated ∧
     result.allocation = some newId ∧
-    BulkMove program allocated (Slots ⟨oldId,root.generation,[]⟩ 0 oldCount) (Slots ⟨newId,0,[]⟩ 0 oldCount) moved ∧
-    ReleasesBuffer program moved old domain after
+    BulkMove program allocated
+      ((Slots ⟨oldId,root.generation,[]⟩ 0 oldCount).map (fun address => ⟨address,oldAllocation.authority⟩))
+      ((Slots ⟨newId,0,[]⟩ 0 oldCount).map (fun address => ⟨address,allocation.authority⟩)) moved ∧
+    ReleasesBuffer program.declarations moved oldAllocation old domain after
 
 structure AllocationContract where
   domain : Identity
@@ -232,14 +261,17 @@ theorem address_integer_has_no_provenance {program : Language.Program} {world : 
   intro points
   cases points.1
 
-theorem vacant_release_has_no_live_loan {program : Language.Program} {before after : World}
-    {pointer domain id loan} (released : ReleasesBuffer program before pointer domain after)
-    (allocation : pointer.allocation = some id) (found : before.loans.get loan.identity = some loan)
-    (live : loan.live = true) : loan.referent.root ≠ id := by
+theorem vacant_release_has_no_live_borrow {program : Language.Program} {before after : World}
+    {allocation pointer domain id loan} (released : ReleasesBuffer program before allocation pointer domain after)
+    (selectedRoot : pointer.allocation = some id) (found : before.loans.get loan.identity = some loan)
+    (live : loan.live = true) (borrowed : loan.kind ≠ .owning) : loan.referent.root ≠ id := by
   cases released with
-  | release selected _ _ _ _ _ _ _ _ _ _ safe _ _ _ =>
-    have same := Option.some.inj (allocation.symm.trans selected)
+  | release selected _ address _ _ _ _ _ _ _ _ _ claims _ _ _ _ =>
+    have same := Option.some.inj (selectedRoot.symm.trans selected)
     subst same
-    exact safe.1 loan.identity loan found live
+    cases claims with
+    | release _ _ _ _ _ _ _ safe _ =>
+      intro overlaps
+      exact borrowed (safe loan.identity loan found live (by simpa only [address] using overlaps)).1
 
 end Glorious.Language.Memory

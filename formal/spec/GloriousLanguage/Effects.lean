@@ -69,11 +69,11 @@ def Installs (program : Kernel.Program) (before : State) (outer : Context) (synt
     FreshRegion before.world before.world.nextRegion first ∧ FreshRegion first first.nextRegion second ∧
     captures = syntaxNode.captures.map (Capture.mapTerms outer.term) ∧
     Captures program outer second captures sources captured ∧
-    BindsInputs program.declarations before.nextActivation before.world.nextRegion before.world.nextRegion captured
+    BindsInputs program before.nextActivation before.world.nextRegion before.world.nextRegion captured
       ((CaptureLocals captures).zip sources |>.map (fun (localSlot,address) => ⟨.capture 0,localSlot,address,.owner,.owned⟩)) bindings bound ∧
     RetiresEmpty bound sources disposed ∧ after = disposed ∧
     handler = ⟨before.nextHandler,syntaxNode,
-      ⟨bindings,outer.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,outer.instantiation,outer.unsafeAllowed⟩,
+      ⟨bindings,outer.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,outer.instantiation,outer.unsafeAllowed,[]⟩,
       { outer with scope := first.nextRegion, region := first.nextRegion },outer⟩
 
 def StartsClause (before : State) (handler : InstalledHandler) (context : Context) (after : World) : Prop :=
@@ -100,10 +100,14 @@ structure OperationPayloadContext (before : State) (context : Context) (withRegi
 /-- Actual payload protection, including every ordered transfer and its output
 homes. Admission quantifies over this same preparation used by effect steps;
 it does not inspect an invented post-payload world. -/
-def PreparedOperationPayload (program : Kernel.Program) (before : State) (payload : List ResolvedPlace)
-    (context : Context) (kept : List Address) (moved : World) : Prop :=
+def PreparedOperationPayloadAttempt (program : Kernel.Program) (before : State) (payload : List ResolvedPlace)
+    (context : Context) (kept : List Address) (moved : World) (outcome : PreparationOutcome) : Prop :=
   ∃ withRegion, OperationPayloadContext before context withRegion ∧
-    Protects program context withRegion payload kept moved
+    ProtectsAttemptFor program context (payload.map ResolvedPlace.address) withRegion payload kept moved outcome
+
+abbrev PreparedOperationPayload (program : Kernel.Program) (before : State) (payload : List ResolvedPlace)
+    (context : Context) (kept : List Address) (moved : World) : Prop :=
+  PreparedOperationPayloadAttempt program before payload context kept moved .complete
 
 inductive PayloadPlan (program : Language.Program) (world : World) :
     List Address → List Pattern → PatternActions → Prop where
@@ -130,7 +134,7 @@ def CreatesContinuation (program : Kernel.Program) (context : Context) (before :
     ContinuationBindingType program.declarations context.static id signature answer effects quantity localSlot.type ∧
     Allocates program.declarations before (.localSlot context.activation context.scope) context.region
       localSlot.type layout localSlot.mutable address allocated ∧
-    NewValue program.declarations allocated address localSlot.type (.continuation id) [] after
+    NewValue program allocated address localSlot.type (.continuation id) [] after
 
 def ActiveObligation (suspension : Suspension) : Prop :=
   suspension.active = true ∧ suspension.original = true ∧
@@ -139,9 +143,9 @@ def ActiveObligation (suspension : Suspension) : Prop :=
 
 def SuspendPermission (program : Kernel.Program) (world : World) (roots : List Identity)
     (quantity : Quantity) (frames : List Frame) : Prop :=
-  quantity.SurfaceResumption ∧ Suspensible world roots ∧
-  (quantity.lower = 0 → Cancelable program.declarations world roots) ∧
-  (∀ n, quantity.upper = some n → 1 < n → Replayable program.declarations world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame)
+  quantity.SurfaceResumption ∧ Suspensible program world roots ∧
+  (quantity.lower = 0 → Cancelable program world roots) ∧
+  (∀ n, quantity.upper = some n → 1 < n → Replayable program world roots ∧ ∀ frame ∈ frames, SnapshotFrame frame)
 
 /-- The selected operation determines disposition, independently of whether
 the accepting delimiter is internal to an invocation or belongs to its caller. -/
@@ -159,7 +163,7 @@ request's share of that same execution. These specializations retain the
 ordinary cleanup and snapshot predicates, including exact replay quantities. -/
 def OperationDisposition.Permits (program : Kernel.Program) (world : World) (roots : List Identity)
     (frames : List Frame) : OperationDisposition → Prop
-  | .terminal => Cancelable program.declarations world roots
+  | .terminal => Cancelable program world roots
   | .resumptive quantity => SuspendPermission program world roots quantity frames
 
 def SuspensionRegions (suspension : Suspension) : List Identity :=
@@ -173,6 +177,32 @@ def ClauseSettled (state : State) : Option Identity → Prop
       suspension.quantity.Contains suspension.used ∧ suspension.active = false
 
 inductive EffectStep (program : Kernel.Program) : State → Option Event → State → Prop where
+  | terminalPayloadExhausted {before context id arguments payload inner handler owns arm outer
+      operation signature clause withRegion kept moved} :
+      before.task = .perform context id arguments payload →
+      OperationInstance program id arguments operation signature → operation.terminal = true → arm.continuation = none →
+      Routes program before id arguments payload inner handler owns arm outer → StartsClause before handler clause withRegion →
+      ProtectsAttemptFor program clause (payload.map ResolvedPlace.address) withRegion payload kept moved .exhausted →
+      EffectStep program before (some (.fatal .resource)) { before with
+        world := moved, task := .fatal .resource, nextActivation := before.nextActivation+1 }
+  | suspendPayloadExhausted {before context id arguments payload inner handler owns arm outer
+      operation signature quantity bound clause withRegion kept moved lexical localSlot} :
+      before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →
+      operation.terminal = false → operation.quantity = some quantity → quantity.upper = some bound →
+      arm.continuation = some lexical → Routes program before id arguments payload inner handler owns arm outer →
+      StartsResumptionClause before handler lexical clause localSlot withRegion →
+      ProtectsAttemptFor program clause (payload.map ResolvedPlace.address) withRegion payload kept moved .exhausted →
+      EffectStep program before (some (.fatal .resource)) { before with
+        world := moved, task := .fatal .resource, nextActivation := before.nextActivation+1 }
+  | suspendTailPayloadExhausted {before context id arguments payload inner handler owns arm outer
+      operation signature quantity bound clause withRegion kept moved} :
+      before.task = .perform context id arguments payload → OperationInstance program id arguments operation signature →
+      operation.terminal = false → operation.quantity = some quantity → quantity.upper = some bound → quantity.Contains 1 →
+      arm.continuation = none → Routes program before id arguments payload inner handler owns arm outer →
+      StartsClause before handler clause withRegion →
+      ProtectsAttemptFor program clause (payload.map ResolvedPlace.address) withRegion payload kept moved .exhausted →
+      EffectStep program before (some (.fatal .resource)) { before with
+        world := moved, task := .fatal .resource, nextActivation := before.nextActivation+1 }
   | install {before context id computation syntaxNode handler after} :
       before.task = .run context (.handle id computation syntaxNode) → Installs program before context syntaxNode handler after →
       EffectStep program before none { before with world := after, task := .run handler.computation computation, frames := .handler handler true :: before.frames, nextActivation := before.nextActivation+1, nextHandler := before.nextHandler+1 }
@@ -243,12 +273,12 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       before.task = .yield context value → before.frames = .handler handler owns :: rest →
       handler.syntaxNode.completion = [] → StartsClause before handler clause withRegion →
       Protect program clause withRegion value .owner kept after →
-      ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible after roots →
+      ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible program after roots →
       EffectStep program before none { before with world := after, task := .cleanup context roots (.closeRegion handler.computation.region (.yield clause kept)), frames := .completion handler owns clause :: rest, nextActivation := before.nextActivation+1 }
   | completion {before context value handler owns rest clause withRegion kept after roots arm actions} :
       before.task = .yield context value → before.frames = .handler handler owns :: rest →
       StartsClause before handler clause withRegion → Protect program clause withRegion value .owner kept after →
-      ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible after roots →
+      ScopeRoots after handler.computation.activation handler.computation.scope [] roots → Suspensible program after roots →
       FirstArm program.declarations after kept handler.syntaxNode.completion arm →
       PatternPlan program.declarations after kept .owner .owned (arm.pattern.mapTerms clause.term) actions →
       EffectStep program before none { before with world := after, task := .cleanup context roots (.closeRegion handler.computation.region (.pattern clause (ScheduledPattern actions) arm.body)), frames := .completion handler owns clause :: rest, nextActivation := before.nextActivation+1 }
@@ -256,17 +286,17 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       before.task = .yield context value → before.frames = .completion handler owns clause :: rest →
       context.activation = clause.activation →
       Protect program (if owns then handler.outer else handler.environment) before.world value .owner kept after →
-      ActivationRoots after clause.activation [] roots → Suspensible after roots →
+      ActivationRoots after clause.activation [] roots → Suspensible program after roots →
       EffectStep program before none { before with world := after, frames := rest, task := .cleanup context roots (.closeRegion clause.region (.finishClause handler owns none kept)) }
   | serviced {before context value handler owns clause id rest kept after roots} :
       before.task = .yield context value → before.frames = .serviced handler owns clause id :: rest →
       context.activation = clause.activation →
       Protect program (if owns then handler.outer else handler.environment) before.world value .owner kept after →
-      ActivationRoots after clause.activation [] roots → Suspensible after roots →
+      ActivationRoots after clause.activation [] roots → Suspensible program after roots →
       EffectStep program before none { before with world := after, frames := rest, task := .cleanup context roots (.closeRegion clause.region (.finishClause handler owns id kept)) }
   | finishedOwnedClause {before handler id value roots} : before.task = .finishClause handler true id value →
       ClauseSettled before id → ActivationRoots before.world handler.environment.activation [] roots →
-      Suspensible before.world roots →
+      Suspensible program before.world roots →
       EffectStep program before none { before with task := .cleanup handler.environment roots (.closeRegion handler.environment.region (.yield handler.outer value)) }
   | finishedLentClause {before handler id value} : before.task = .finishClause handler false id value →
       ClauseSettled before id →
@@ -278,7 +308,7 @@ inductive EffectStep (program : Kernel.Program) : State → Option Event → Sta
       EffectStep program before (some (.destroy address value.owner)) { before with world := cleared, task := if suspension.active then .cancel context id next else next }
   | cancel {before context id next suspension} : before.task = .cancel context id next →
       before.resumptions.get id = some suspension → ActiveObligation suspension → suspension.quantity.lower = 0 →
-      Cancelable program.declarations before.world suspension.roots →
+      Cancelable program before.world suspension.roots →
       EffectStep program before (some (.cancel id)) { before with world := restoreRoots before.world suspension.homes, task := .cleanup context suspension.roots (CloseRegions (SuspensionRegions suspension) next), resumptions := before.resumptions.set id { suspension with active := false, remaining := 0 } }
 
 theorem exact_resumption_not_cancelable {program : Kernel.Program} {before after : State}

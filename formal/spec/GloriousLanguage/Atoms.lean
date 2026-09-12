@@ -49,7 +49,7 @@ inductive Captures (program : Kernel.Program) (context : Context) :
   | owned {before capture rest source authority destination allocated middle after addresses} : capture.mode = .own →
       ResolvesPlace before context.environment capture.place source authority →
       Temporary program context capture.type before destination allocated →
-      Acquires program.declarations allocated authority false source destination middle →
+      Acquires program allocated authority false source destination middle →
       Captures program context middle rest addresses after →
       Captures program context before (capture :: rest) (destination :: addresses) after
   | borrowed {before capture rest source authority destination allocated middle after addresses mode region referent} :
@@ -57,7 +57,7 @@ inductive Captures (program : Kernel.Program) (context : Context) :
       capture.type = .reference mode (.runtimeRegion region) referent →
       ResolvesPlace before context.environment capture.place source authority →
       Temporary program context capture.type before destination allocated →
-      Borrows program.declarations allocated authority mode region source destination middle →
+      Borrows program allocated authority mode region source destination middle →
       Captures program context middle rest addresses after →
       Captures program context before (capture :: rest) (destination :: addresses) after
 
@@ -73,14 +73,14 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
   | acquire {before context destination place force next source authority after} :
       before.task = .atom context destination (.acquire place force) next →
       ResolvesPlace before.world context.environment place source authority →
-      Acquires program.declarations before.world authority force source destination after →
+      Acquires program before.world authority force source destination after →
       AtomStep program before (some (if force then .move source destination else
         if (after.read source).isSome then .copy source destination else .move source destination))
         { before with world := after, task := .run context next }
   | borrow {before context destination place mode region next source authority after} :
       before.task = .atom context destination (.borrow place mode (.runtimeRegion region)) next →
       ResolvesPlace before.world context.environment place source authority →
-      Borrows program.declarations before.world authority mode region source destination after →
+      Borrows program before.world authority mode region source destination after →
       AtomStep program before (some (.borrow source before.world.nextLoan))
         { before with world := after, task := .run context next }
   | construct {before context destination type variant fields next sources residents head after} :
@@ -88,31 +88,31 @@ inductive AtomStep (program : Kernel.Program) : State → Option Event → State
       ResolvedOperands before.world context.environment fields sources →
       ListRel (fun source value => before.world.Stores source.address value) sources residents →
       ConstructorHead program.declarations type variant (residents.map Value.type) head →
-      DestinationType before.world destination type → NewValue program.declarations before.world destination type head sources after →
+      DestinationType before.world destination type → NewValue program before.world destination type head sources after →
       AtomStep program before none { before with world := after, task := .run context next }
   | closure {before context destination id arguments captures next sources captured after function} :
       before.task = .atom context destination (.closure id arguments captures) next → Instance program id arguments function →
       Captures program context before.world captures sources captured →
       ListRel (fun formal address => ∃ value, captured.Stores address value ∧ value.type = formal.type) function.captures sources →
       DestinationType captured destination (.callable id arguments) →
-      NewValue program.declarations captured destination (.callable id arguments) (.callable id arguments)
+      NewValue program captured destination (.callable id arguments) (.callable id arguments)
         (sources.map (fun address => ⟨address,.owner⟩)) after →
       AtomStep program before none { before with world := after, task := sources.foldr (fun address nextTask => .retire address.root nextTask) (.run context next) }
   | function {before context destination id arguments next function after} :
       before.task = .atom context destination (.function id arguments) next → Instance program id arguments function →
       function.captures = [] → DestinationType before.world destination (.callable id arguments) →
-      NewValue program.declarations before.world destination (.callable id arguments) (.callable id arguments) [] after →
+      NewValue program before.world destination (.callable id arguments) (.callable id arguments) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
   | operation {before context destination id family item next operation signature after} :
       before.task = .atom context destination (.operation id family item) next →
       OperationInstance program id (family ++ item) operation signature →
-      NewValue program.declarations before.world destination (.callable id (family ++ item)) (.operation id (family ++ item)) [] after →
+      NewValue program before.world destination (.callable id (family ++ item)) (.operation id (family ++ item)) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
   | label {before context destination next brand root after} :
       before.task = .atom context destination (.label (.runtimeBrand (.label brand))) next →
       before.world.root destination = some root →
       (∃ region result, root.type = .label (.runtimeBrand (.label brand)) region result) →
-      NewValue program.declarations before.world destination root.type (.label brand) [] after →
+      NewValue program before.world destination root.type (.label brand) [] after →
       AtomStep program before none { before with world := after, task := .run context next }
   | primitive {before context destination id arguments operands next binding addresses} :
       before.task = .atom context destination (.primitive id arguments operands) next →

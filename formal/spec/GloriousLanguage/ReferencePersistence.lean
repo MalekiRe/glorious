@@ -44,12 +44,12 @@ theorem World.write_vacant_references {before after : World} {address : Address}
   obtain ⟨retained,stored,head⟩ := World.write_keeps_reference written outside resident head
   exact ⟨observed,retained,stored,head⟩
 
-/-- Replacing a fieldless non-reference cannot destroy any reference guard.
-The actual stored shape is essential: an aggregate's head alone says
-nothing about the references owned by its fields. -/
-theorem World.write_nonreference_leaf_references {before after : World} {address : Address}
+/-- Replacing a non-reference shell whose fields have all been consumed
+cannot destroy any reference guard. The actual field premises matter even
+when the retained representation has nonzero arity. -/
+theorem World.write_nonreference_shell_references {before after : World} {address : Address}
     {value : Value} {replacement : Option Value}
-    (stored : before.Stores address value) (fields : value.fields = [])
+    (stored : before.Stores address value) (fields : ∀ field ∈ value.fields, field = none)
     (notReference : ∀ id, value.head ≠ .reference id)
     (written : before.write address replacement = some after)
     {id : Identity} (referenced : before.References id) : after.References id := by
@@ -64,9 +64,23 @@ theorem World.write_nonreference_leaf_references {before after : World} {address
     | nil =>
       have same : value = reference := Option.some.inj nested
       exact notReference id (same ▸ head)
-    | cons index rest => simp [Value.atPath,fields] at nested
+    | cons index rest =>
+      change value.atPath (index :: rest) = some reference at nested
+      obtain ⟨child,selected,_⟩ := Option.bind_eq_some_iff.mp nested
+      have slot : value.fields[index]? = some (some child) := by
+        cases found : value.fields[index]? <;> simp_all
+      have empty := fields (some child) (List.mem_of_getElem? slot)
+      cases empty
   obtain ⟨retained,present,head⟩ := World.write_keeps_reference written outside resident head
   exact ⟨observed,retained,present,head⟩
+
+theorem World.write_nonreference_leaf_references {before after : World} {address : Address}
+    {value : Value} {replacement : Option Value}
+    (stored : before.Stores address value) (fields : value.fields = [])
+    (notReference : ∀ id, value.head ≠ .reference id)
+    (written : before.write address replacement = some after)
+    {id : Identity} (referenced : before.References id) : after.References id :=
+  World.write_nonreference_shell_references stored (by simp [fields]) notReference written referenced
 
 theorem Allocates.references {program : Program} {before after : World}
     {home region type layout mutable address originBound} (valid : before.WellFormedWithOrigins originBound)
@@ -74,12 +88,12 @@ theorem Allocates.references {program : Program} {before after : World}
     {id : Identity} (referenced : before.References id) : after.References id :=
   referenced.reads (allocated.read valid)
 
-theorem Transfers.references {program : Program} {before after : World} {authority source destination}
+theorem Transfers.references {program : RuntimeProgram} {before after : World} {authority source destination}
     (transferred : Transfers program before authority source destination after)
     {id : Identity} (referenced : before.References id) : after.References id := by
   obtain ⟨address,value,resident,head⟩ := referenced
   cases transferred with
-  | move stored _ _ vacant separate _ cleared written =>
+  | move stored _ _ _ vacant separate _ cleared written =>
     by_cases included : source.Prefix address
     · obtain ⟨suffix,equal⟩ := Address.prefix_extension included
       have nested := World.resident_iff_stores.mp resident
@@ -93,53 +107,53 @@ theorem Transfers.references {program : Program} {before after : World} {authori
       exact World.write_vacant_references (vacant.clear cleared (fun inside => separate inside.1.overlaps)) written
         ⟨address,retained,present,head⟩
 
-theorem FormsLoan.references {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.references {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     {id : Identity} (referenced : before.References id) : after.References id := by
   cases borrowed with
-  | borrow _ _ _ _ _ _ vacant _ _ written =>
+  | borrow _ _ _ _ _ _ _ vacant _ _ written =>
     exact (World.write_vacant_references vacant written referenced).roots_congr rfl
 
-theorem FormsLoan.region_live {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.region_live {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     region ∈ after.liveRegions := by
   cases borrowed with
-  | borrow _ _ _ live _ _ _ _ _ written =>
+  | borrow _ _ _ live _ _ _ _ _ _ written =>
     have same := congrArg World.liveRegions (World.write_rest written)
     simpa only [same] using live
 
 /-- The handle and loan record come from the same actual formation write.
 All invocation and source-reference witnesses project this single product. -/
-theorem FormsLoan.created_handle {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.created_handle {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     ∃ type, after.Stores destination (.resident before.nextOwner (.reference mode (.runtimeRegion region) type)
       (.reference before.nextLoan) true []) ∧
-      after.loans.get before.nextLoan = some ⟨before.nextLoan,authority.parentLoan,referent,mode,region,true⟩ := by
+      after.loans.get before.nextLoan = some ⟨before.nextLoan,authority.parentLoan,referent,mode,region,true,purpose.kind,authority.guardLoans before,false,none⟩ := by
   cases borrowed with
-  | @borrow original middle parent _ _ _ _ _ _ _ _ parentEq written =>
+  | @borrow original middle parent _ _ _ _ _ _ _ _ _ parentEq written =>
     refine ⟨original.type,?_,?_⟩
     · change middle.read destination = some _
       simpa [Value.atPath] using World.write_read_inside written []
     · rw [Table.get_set,parentEq]
 
-theorem FormsLoan.created_reference {program : Program} {purpose : LoanPurpose} {before after : World}
+theorem FormsLoan.created_reference {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
     {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.References before.nextLoan := by
   obtain ⟨type,stored,_⟩ := borrowed.created_handle
   exact ⟨destination,_,World.resident_iff_stores.mpr stored,rfl⟩
 
-theorem Copies.references {program : Program} {before after : World} {authority source destination}
+theorem Copies.references {program : RuntimeProgram} {before after : World} {authority source destination}
     (copied : Copies program before authority source destination after)
     {id : Identity} (referenced : before.References id) : after.References id := by
   cases copied with
-  | copy _ _ _ vacant _ _ written =>
+  | copy _ _ _ _ vacant _ _ written =>
     exact (World.write_vacant_references vacant written referenced).roots_congr rfl
 
-theorem Acquires.references {program : Program} {before after : World} {authority force source destination}
+theorem Acquires.references {program : RuntimeProgram} {before after : World} {authority force source destination}
     (acquired : Acquires program before authority force source destination after)
     {id : Identity} (referenced : before.References id) : after.References id := by
   cases acquired with
@@ -167,12 +181,13 @@ theorem ListRel.get_left {α β : Type} {relation : α → β → Prop} {left : 
     | zero => cases Option.some.inj found; exact ⟨_,rfl,relation⟩
     | succ index => exact ih found
 
-theorem NewValue.references {program : Program} {before after : World} {destination type head sources}
+theorem NewValue.references {program : RuntimeProgram} {before after : World} {destination type head sources}
     (constructed : NewValue program before destination type head sources after)
     {id : Identity} (referenced : before.References id) : after.References id := by
   obtain ⟨address,value,resident,atHead⟩ := referenced
   cases constructed with
-  | construct vacant _ inputs _ _ permissions cleared written =>
+  | construct vacant _ ready disjoint cleared written =>
+    have inputs := ready.1
     by_cases moved : ∃ source ∈ sources, source.address.Prefix address
     · obtain ⟨source,member,included⟩ := moved
       obtain ⟨index,bound,atSource⟩ := List.mem_iff_getElem.mp member
@@ -194,7 +209,7 @@ theorem NewValue.references {program : Program} {before after : World} {destinat
       have stillVacant := cleared.vacant vacant (by
         intro mutation member included
         obtain ⟨source,present,rfl⟩ := List.mem_map.mp member
-        exact (permissions source present).2 included.1.overlaps)
+        exact disjoint source present included.1.overlaps)
       exact (World.write_vacant_references stillVacant written ⟨address,retained,present,head⟩).roots_congr rfl
 
 theorem Retires.references {before after : World} {root id : Identity}

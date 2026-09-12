@@ -1,3 +1,4 @@
+import GloriousLanguage.HandoffAccess
 import GloriousLanguage.TransferPreservation
 
 /-! Snapshot preservation derives its invariants from the actual relocation.
@@ -54,11 +55,6 @@ theorem Table.Unique.append_shift {α : Type} {table : Table α} {base : Nat}
     have freshGe : base ≤ fresh := by rw [← atFresh]; exact Nat.le_add_right _ _
     exact (Nat.not_lt_of_ge freshGe) (same ▸ oldLess)
 
-theorem World.root_bound {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) {id : Identity} {root : Root}
-    (found : world.roots.get id = some root) : id < world.nextRoot :=
-  (valid.2.2.2.2.2.2.2.2.1 id root found).1
-
 theorem World.reserved_root_bound {world : World} {originBound : Identity}
     (well : world.WellFormedWithOrigins originBound) {id : Identity} {available : Availability}
     {place : ResolvedPlace} (found : world.availability.get id = some available)
@@ -67,11 +63,6 @@ theorem World.reserved_root_bound {world : World} {originBound : Identity}
   obtain ⟨root,selected⟩ := Option.isSome_iff_exists.mp
     (((well.2.2.2.2.1 id available found).2.2.2.1 active).2 place member)
   exact World.root_bound well (World.root_found selected).1
-
-theorem World.owner_bound {world : World} {originBound : Identity}
-    (valid : world.WellFormedWithOrigins originBound) {address : Address} {value : Value}
-    (resident : world.Resident address value) : value.owner < world.nextOwner :=
-  valid.2.2.2.2.2.2.1 address value resident
 
 theorem World.region_bound {world : World} (valid : world.WellFormed) {region : Identity}
     (member : region ∈ world.liveRegions) : region < world.nextRegion :=
@@ -103,9 +94,6 @@ theorem AncestorLoan.unique_ancestor {world : World} {ancestor descendant : Iden
       subst last
       obtain ⟨middle,located,_,_,mode,_⟩ := parents child loan parent found selected
       exact ih located (mode unique)
-
-theorem Address.Overlaps.symm {left right : Address} (overlap : left.Overlaps right) : right.Overlaps left :=
-  ⟨overlap.1.symm,overlap.2.1.symm,overlap.2.2.symm⟩
 
 theorem World.live_loan_root_bound {world : World} {id : Identity} {loan : Loan} (valid : world.WellFormed)
     (found : world.loans.get id = some loan) (live : loan.live = true) : loan.referent.root < world.nextRoot := by
@@ -393,7 +381,7 @@ theorem SnapshotMap.parent_selected {program : Kernel.Program} {before : State} 
 
 theorem SnapshotMap.parent_address {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     {id parent : Identity} {loan ancestor : Loan} (selected : SnapshotMap program before suspension map)
-    (replayable : Replayable program.declarations before.world suspension.roots)
+    (replayable : Replayable program.toRuntimeProgram before.world suspension.roots)
     (included : id ∈ map.loans) (found : before.world.loans.get id = some loan) (parentEq : loan.parent = some parent)
     (parentFound : before.world.loans.get parent = some ancestor) (live : ancestor.live = true) (outside : parent ∉ map.loans) :
     map.address ancestor.referent = ancestor.referent := by
@@ -404,7 +392,7 @@ theorem SnapshotMap.parent_address {program : Kernel.Program} {before : State} {
 
 theorem SnapshotMap.loan_parents {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
-    (replayable : Replayable program.declarations before.world suspension.roots) (homes : Table Home) :
+    (replayable : Replayable program.toRuntimeProgram before.world suspension.roots) (homes : Table Home) :
     (map.copyWorld before.world homes).LoanParents := by
   intro id loan parent found parentEq
   rcases Relocation.loan_origin valid.2.1 found with old | ⟨old,original,present,included,rfl,rfl⟩
@@ -438,6 +426,23 @@ theorem SnapshotMap.live_loan_locations {program : Kernel.Program} {before : Sta
     · simpa [Relocation.loanValue,Relocation.address_unselected root] using
         Relocation.old_located (map := map) (homes := homes) oldLocated
 
+theorem SnapshotMap.loan_guards {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
+    (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map) (homes : Table Home) :
+    (map.copyWorld before.world homes).LoanGuards := by
+  intro id loan guard found member
+  rcases Relocation.loan_origin valid.2.1 found with old | ⟨old,original,present,included,rfl,rfl⟩
+  · obtain ⟨carrier,atGuard,bound,live⟩ := World.loanGuards valid id loan guard old member
+    exact ⟨carrier,Relocation.old_loan atGuard,bound,live⟩
+  · obtain ⟨oldGuard,inGuards,rfl⟩ := List.mem_map.mp member
+    obtain ⟨carrier,atGuard,bound,live⟩ := World.loanGuards valid old original oldGuard present inGuards
+    by_cases copied : oldGuard ∈ map.loans
+    · exact ⟨map.loanValue carrier,selected.copied_loan valid atGuard copied,
+        by simpa [Relocation.loan,relocateId,included,copied] using Nat.add_lt_add_left bound map.loanBase,live⟩
+    · exact ⟨carrier,by simpa [Relocation.loan,relocateId,copied] using
+          Relocation.old_loan (map := map) (homes := homes) atGuard,
+        by simpa [Relocation.loan,relocateId,included,copied,selected.loanBase] using
+          Nat.lt_of_lt_of_le (World.loanBounds valid atGuard) (Nat.le_add_right before.world.nextLoan old),live⟩
+
 theorem Relocation.reference_origin {map : Relocation} {value : Value} {id : Identity}
     (head : (map.value value).head = .reference id) : ∃ previous, value.head = .reference previous ∧ id = map.loan previous := by
   cases value with
@@ -451,7 +456,7 @@ when the referent is external. Parent edges are preserved by `loan_parents`. -/
 theorem SnapshotMap.reference_target {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     {homes : Table Home} {address : Address} {value : Value} {id : Identity} {loan : Loan}
     (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
-    (replayable : Replayable program.declarations before.world suspension.roots)
+    (replayable : Replayable program.toRuntimeProgram before.world suspension.roots)
     (included : address.root ∈ map.roots) (resident : before.world.Resident address value)
     (head : value.head = .reference id) (found : before.world.loans.get id = some loan) (live : loan.live = true) :
     (map.copyWorld before.world homes).loans.get (map.loan id) = some (map.loanValue loan) ∧
@@ -573,7 +578,7 @@ physical separation, regions and the full reborrow graph are all derived;
 the copied world's well-formedness is not an admission premise. -/
 theorem SnapshotMap.world_wellFormed {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
-    (replayable : Replayable program.declarations before.world suspension.roots) (distinctRegions : map.regions.Nodup)
+    (replayable : Replayable program.toRuntimeProgram before.world suspension.roots) (distinctRegions : map.regions.Nodup)
     (homes : Table Home) : (map.copyWorld before.world homes).WellFormed := by
   have rootUnique := selected.unique_roots valid homes
   have loanUnique := selected.unique_loans valid homes
@@ -583,9 +588,10 @@ theorem SnapshotMap.world_wellFormed {program : Kernel.Program} {before : State}
   have loanSeparate := selected.loan_exclusivity valid homes
   have parents := selected.loan_parents valid replayable homes
   have locations := selected.live_loan_locations valid homes
+  have guards := selected.loan_guards valid homes
   have oldValid := valid
-  rcases valid with ⟨_,_,proofUnique,_,proofs,packs,owners,_,roots,regions,bases,_,loans,references,_,_,_⟩
-  refine ⟨rootUnique,loanUnique,proofUnique,regionUnique,?_,?_,?_,ownerUnique,?_,?_,?_,rootSeparate,?_,?_,loanSeparate,parents,locations⟩
+  rcases valid with ⟨_,_,proofUnique,_,proofs,packs,owners,_,roots,regions,bases,_,loans,references,_,_,_,_⟩
+  refine ⟨rootUnique,loanUnique,proofUnique,regionUnique,?_,?_,?_,ownerUnique,?_,?_,?_,rootSeparate,?_,?_,loanSeparate,parents,locations,guards⟩
   · intro id available found
     obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
     refine ⟨identity,bound,brand,?_,fun place member =>

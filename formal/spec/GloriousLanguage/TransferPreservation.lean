@@ -82,14 +82,14 @@ theorem Address.prefix_extension {ancestor descendant : Address} (included : anc
 /-- Every post-transfer resident has exactly an old resident shell and follows
 the deterministic location change above. Modified ancestors retain their own
 shell; residents in the moved subtree retain their complete contents. -/
-theorem Transfers.resident_origin {program : Program} {before after : World} {authority source destination}
+theorem Transfers.resident_origin {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) {address : Address} {value : Value}
     (resident : after.Resident address value) :
     ∃ previous original, before.Resident previous original ∧ value.shell = original.shell ∧
       Address.TransferredTo source destination previous address := by
   have afterStored := World.resident_iff_stores.mp resident
   cases transfer with
-  | move stored _ _ _ _ _ clear install =>
+  | move stored _ _ _ _ _ _ clear install =>
       by_cases inside : destination.Prefix address
       · obtain ⟨suffix,equal⟩ := Address.prefix_extension inside
         have read := World.write_read_inside install suffix
@@ -115,7 +115,7 @@ theorem Transfers.resident_origin {program : Program} {before after : World} {au
         obtain ⟨original,oldStored,oldEq⟩ := Option.map_eq_some_iff.mp oldShell.symm
         exact ⟨address,original,World.resident_iff_stores.mpr oldStored,middleEq.symm.trans oldEq.symm,Or.inl ⟨rfl,outside⟩⟩
 
-theorem Transfers.owner_unique {program : Program} {before after : World} {authority source destination}
+theorem Transfers.owner_unique {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (transfer : Transfers program before authority source destination after) :
     ∀ a b left right, after.Resident a left → after.Resident b right → left.owner = right.owner → a = b := by
   intro a b left right leftStored rightStored same
@@ -154,10 +154,10 @@ theorem World.write_canEndStorage {before after : World} {address : Address} {re
   simpa [Option.map_map,Function.comp_def,Root.location] using
     congrArg (Option.map Root.home) (World.write_locations written id)
 
-theorem Transfers.rest {program : Program} {before after : World} {authority source destination}
+theorem Transfers.rest {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) : after = { before with roots := after.roots } := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install =>
+  | move _ _ _ _ _ _ _ clear install =>
       have first := World.write_rest clear
       have last := World.write_rest install
       conv => lhs; rw [last,first]
@@ -167,10 +167,10 @@ theorem World.write_unique_roots {before after : World} {address : Address} {rep
   obtain ⟨_,_,_,rfl⟩ := World.write_value_update written
   exact unique.set _ _
 
-theorem Transfers.unique_roots {program : Program} {before after : World} {authority source destination}
+theorem Transfers.unique_roots {program : RuntimeProgram} {before after : World} {authority source destination}
     (unique : before.roots.Unique) (transfer : Transfers program before authority source destination after) : after.roots.Unique := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install => exact World.write_unique_roots (World.write_unique_roots unique clear) install
+  | move _ _ _ _ _ _ _ clear install => exact World.write_unique_roots (World.write_unique_roots unique clear) install
 
 theorem Root.of_location_eq {before after : Root} (same : after.location = before.location) :
     after = { before with value := after.value } := by
@@ -206,11 +206,11 @@ theorem World.write_dead_root {before after : World} {address : Address} {replac
     exact False.elim (dead (rootEq ▸ live))
   · simpa [Table.get_set_other _ _ _ _ same] using found
 
-theorem Transfers.dead_root {program : Program} {before after : World} {authority source destination}
+theorem Transfers.dead_root {program : RuntimeProgram} {before after : World} {authority source destination}
     {id : Identity} {root : Root} (transfer : Transfers program before authority source destination after)
     (found : after.roots.get id = some root) (dead : root.live ≠ true) : before.roots.get id = some root := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install => exact World.write_dead_root clear (World.write_dead_root install found dead) dead
+  | move _ _ _ _ _ _ _ clear install => exact World.write_dead_root clear (World.write_dead_root install found dead) dead
 
 theorem AncestorLoan.transport {before after : World} {ancestor child : Identity}
     (loans : after.loans = before.loans) (related : AncestorLoan before ancestor child) : AncestorLoan after ancestor child := by
@@ -218,7 +218,33 @@ theorem AncestorLoan.transport {before after : World} {ancestor child : Identity
   | refl => exact .refl
   | parent found parent _ ih => exact .parent (by simpa [loans] using found) parent ih
 
-theorem Transfers.wellFormed {program : Program} {before after : World} {authority source destination}
+theorem LoanPermission.transport {before after : World} {identity : Identity} {access : Access} {address : Address}
+    (loans : after.loans = before.loans) (permission : LoanPermission before identity access address) :
+    LoanPermission after identity access address := by
+  obtain ⟨active,found,live,root,generation,path,mode,allowed,guards,dependent⟩ := permission
+  refine ⟨active,by simpa only [loans] using found,live,root,generation,path,mode,?_,
+    by simpa only [loans] using guards,by simpa only [loans] using dependent⟩
+  intro other loan found live different overlap conflict
+  exact AncestorLoan.transport loans
+    (allowed other loan (by simpa only [loans] using found) live different overlap conflict)
+
+theorem Permitted.transport {before after : World} {authority : Authority} {access : Access} {address : Address}
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
+    (loans : after.loans = before.loans) (permission : Permitted before authority access address) :
+    Permitted after authority access address := by
+  have rootExists : ∃ root, before.root address = some root := by
+    cases authority <;> exact permission.1
+  obtain ⟨root,selected⟩ := rootExists
+  obtain ⟨changed,found,_⟩ := World.root_transport locations selected
+  induction authority with
+  | owner => exact ⟨⟨changed,found⟩,by simpa only [loans] using permission.2⟩
+  | loan id => exact ⟨⟨changed,found⟩,permission.2.transport loans⟩
+  | shared backing ih => exact ⟨⟨changed,found⟩,permission.2.1,ih permission.2.2⟩
+  | guarded backing carrier ih =>
+      obtain ⟨loan,selected,guard⟩ := permission.2.2
+      exact ⟨⟨changed,found⟩,ih permission.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
+
+theorem Transfers.wellFormed {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (transfer : Transfers program before authority source destination after) : after.WellFormed := by
   have rest := transfer.rest
   have loansEq := congrArg World.loans rest
@@ -233,8 +259,9 @@ theorem Transfers.wellFormed {program : Program} {before after : World} {authori
   have ownersUnique := transfer.owner_unique valid
   have parents := transfer.loanParents (World.loanParents valid)
   have located := transfer.liveLoanLocations valid
-  rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,_,roots,regions,bases,ranges,loans,references,overlaps,_,_⟩
-  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located⟩
+  have guards : after.LoanGuards := by simpa only [World.LoanGuards,loansEq] using World.loanGuards valid
+  rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,_,roots,regions,bases,ranges,loans,references,overlaps,_,_,_⟩
+  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,ownersUnique,?_,?_,?_,?_,?_,?_,?_,parents,located,guards⟩
   · simpa only [loansEq] using loansUnique
   · simpa only [proofEq] using proofsUnique
   · simpa only [regionsEq] using regionsUnique
@@ -316,7 +343,7 @@ theorem World.root_regions_transport {before after : World}
 theorem Transfers.worldTyped {program : Kernel.Program} {before after : World} {authority source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (transfer : Transfers program.declarations before authority source destination after) : Typing.WorldTyped program after := by
+    (transfer : Transfers program before authority source destination after) : Typing.WorldTyped program after := by
   obtain ⟨residents,roots⟩ := transfer.typed_residents valid inventory typed
   refine ⟨transfer.wellFormed typed.1,residents,?_,?_⟩
   · intro id root value found contents

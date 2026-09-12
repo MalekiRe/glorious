@@ -1,0 +1,122 @@
+import GloriousLanguage.PreparationOutcomes
+import GloriousLanguage.AllocationPreservation
+
+/-! Positively admitted local allocation requests progress in the actual
+machine, either to fresh storage or to terminal resource exhaustion. Entry
+exhaustion retains its successful preparation prefix and partial world. -/
+namespace Glorious.Language
+open Kernel
+
+theorem Kernel.BindsInputExhausted.allocation {program : RuntimeProgram} {region : Identity}
+    {before : World} {input : InvocationInput} (failed : BindsInputExhausted program region before input) :
+    ∃ type layout, AllocationExhausted program.declarations before region type layout := by
+  cases failed with
+  | owned _ _ _ exhausted => exact ⟨_,_,exhausted⟩
+  | lent _ _ exhausted => cases exhausted with
+    | lent _ _ _ _ _ _ exhausted => exact ⟨_,_,exhausted⟩
+
+namespace Execution
+
+/-- Fatal states have no executable suffix at all, including cleanup,
+completion clauses, foreign callbacks and source-level cancellation. -/
+theorem Step.fatal_no_step {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {reason : Fatal} {event : Option Event}
+    (fatal : before.task = .fatal reason) : ¬ Step program host before event after := by
+  intro step
+  rcases step with ordinary | atom | effect | control | primitive | foreign
+  · cases ordinary <;> simp_all
+  · cases atom <;> simp_all
+  · cases effect <;> simp_all
+  · cases control <;> simp_all
+  · cases primitive <;> simp_all
+  · cases foreign <;> simp_all
+
+theorem Run.fatal_refl {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {reason : Fatal} {trace : List Event}
+    (fatal : before.task = .fatal reason) (run : Run program host before trace after) :
+    trace = [] ∧ after = before := by
+  cases run with
+  | refl => exact ⟨rfl,rfl⟩
+  | silent step _ | visible step _ => exact False.elim (Step.fatal_no_step fatal step)
+
+/-- The original whole pending batch, the completed prefix and the remaining
+batch all come from the one actual entry derivation. This does not admit an
+arbitrary prefix whose unexecuted suffix was never ready. -/
+theorem EnterWorldAttempt.exhausted_prefix {program : Kernel.Program} {before : State}
+    {caller callee : Context} {function : Function} {source : EntrySource} {after : World}
+    (attempted : EnterWorldAttempt program before caller function source callee after .exhausted) :
+    ∃ withRegion prepared inputs front input rest bindings,
+      FreshRegion before.world before.world.nextRegion withRegion ∧
+      PreparesEntry program callee function withRegion source inputs prepared ∧
+      IncomingResources program function prepared inputs ∧
+      InvocationInputsReadyFor program prepared (inputs.flatMap InvocationInput.clearedStorage) inputs ∧
+      inputs = front ++ input :: rest ∧
+      BindsInputsFor program (.activation before.nextActivation)
+        before.nextActivation before.world.nextRegion before.world.nextRegion
+        (inputs.flatMap InvocationInput.clearedStorage) prepared front bindings after ∧
+      InvocationInputsReadyFor program after (inputs.flatMap InvocationInput.clearedStorage) (input :: rest) ∧
+      BindsInputExhausted program before.world.nextRegion after input := by
+  obtain ⟨withRegion,prepared,inputs,bindings,_,bound,_,fresh,entry,incoming,binding,ending,_,_⟩ := attempted
+  dsimp at ending
+  subst after
+  obtain ⟨front,input,rest,equation,beginning,remaining,failed⟩ := binding.exhausted_prefix
+  exact ⟨withRegion,prepared,inputs,front,input,rest,bindings,
+    fresh,entry,incoming,binding.ready,equation,beginning,remaining,failed⟩
+
+theorem EnterWorldAttempt.exhausted_allocation {program : Kernel.Program} {before : State}
+    {caller callee : Context} {function : Function} {source : EntrySource} {after : World}
+    (attempted : EnterWorldAttempt program before caller function source callee after .exhausted) :
+    ∃ type layout, AllocationExhausted program.declarations after before.world.nextRegion type layout := by
+  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,failed⟩ := attempted.exhausted_prefix
+  exact failed.allocation
+
+/-- No allocation success is assumed. The positive request supplies all static
+premises, and the physical alternative constructs the actual executable step. -/
+theorem Step.evaluate_allocation_progress {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {lexical : Local} {value next : Code} {layout : Layout}
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .run context (.evaluate lexical value next))
+    (request : AllocationRequest program.declarations before.world context.region (context.local lexical).type layout) :
+    ∃ event after, Step program host before event after ∧ Typing.WorldTyped program after.world := by
+  rcases request.success_or_exhausted (.localSlot context.activation context.scope) (context.local lexical).mutable with
+    ⟨address,allocated,allocation⟩ | exhausted
+  · exact ⟨_,_,Or.inl (.evaluate task rfl allocation),allocation.worldTyped typed⟩
+  · exact ⟨_,_,Or.inl (.evaluateExhausted task rfl exhausted),typed⟩
+
+theorem Step.bind_allocation_progress {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {lexical : Local} {atom : Atom} {next : Code} {layout : Layout}
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .run context (.bind lexical atom next))
+    (request : AllocationRequest program.declarations before.world context.region (context.local lexical).type layout) :
+    ∃ event after, Step program host before event after ∧ Typing.WorldTyped program after.world := by
+  rcases request.success_or_exhausted (.localSlot context.activation context.scope) (context.local lexical).mutable with
+    ⟨address,allocated,allocation⟩ | exhausted
+  · exact ⟨_,_,Or.inl (.bind task rfl allocation),allocation.worldTyped typed⟩
+  · exact ⟨_,_,Or.inl (.bindExhausted task rfl exhausted),typed⟩
+
+theorem Step.invoke_allocation_progress {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {lexical : Local} {call : Invocation} {next : Code} {layout : Layout}
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .run context (.invoke lexical call next))
+    (request : AllocationRequest program.declarations before.world context.region (context.local lexical).type layout) :
+    ∃ event after, Step program host before event after ∧ Typing.WorldTyped program after.world := by
+  rcases request.success_or_exhausted (.localSlot context.activation context.scope) (context.local lexical).mutable with
+    ⟨address,allocated,allocation⟩ | exhausted
+  · exact ⟨_,_,Or.inl (.invoke task rfl allocation),allocation.worldTyped typed⟩
+  · exact ⟨_,_,Or.inl (.invokeExhausted task rfl exhausted),typed⟩
+
+/-- Resource exhaustion is a real terminal event. It neither starts cleanup
+nor restores a pre-preparation world, even at a mandatory-tail entry. -/
+theorem Step.enter_exhausted {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {caller callee : Context} {function : Function} {source : EntrySource}
+    {tail : Bool} {after : World}
+    (task : before.task = .enter caller function source tail)
+    (attempted : EnterWorldAttempt program before caller function source callee after .exhausted) :
+    Step program host before (some (.fatal .resource))
+      { before with
+        world := after, task := .fatal .resource,
+        nextActivation := before.nextActivation+1, nextBrand := before.nextBrand+1 } :=
+  Or.inl (.enterExhausted task attempted)
+
+end Execution
+end Glorious.Language

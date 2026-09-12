@@ -147,15 +147,15 @@ inductive PrimitiveCalculation (target : TargetProfile) : Primitive → List Ter
 
 def StoresScalar (program : Kernel.Program) (before : World) (destination : Address) (scalar : ScalarValue) (after : World) : Prop :=
   scalar.Valid program.declarations.input.target ∧ DestinationType before destination (.scalar scalar.type) ∧
-  NewValue program.declarations before destination (.scalar scalar.type) (.scalar scalar) [] after
+  NewValue program before destination (.scalar scalar.type) (.scalar scalar) [] after
 
 def StoresUnit (program : Kernel.Program) (before : World) (destination : Address) (after : World) : Prop :=
-  DestinationType before destination .unit ∧ NewValue program.declarations before destination .unit .unit [] after
+  DestinationType before destination .unit ∧ NewValue program before destination .unit .unit [] after
 
 def StoresPointer (program : Kernel.Program) (before : World) (destination : Address)
     (mode : Mutability) (type : Term) (pointer : RawPointer) (after : World) : Prop :=
   DestinationType before destination (.rawPointer mode type) ∧
-  NewValue program.declarations before destination (.rawPointer mode type) (.pointer pointer) [] after
+  NewValue program before destination (.rawPointer mode type) (.pointer pointer) [] after
 
 inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → State → Prop where
   | scalar {before context destination binding arguments operands next primitive values result after} :
@@ -167,44 +167,56 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       before.task = .primitive context destination binding arguments operands next → binding.primitive = some primitive →
       ScalarValues before.world operands values → PrimitiveCalculation program.declarations.input.target primitive arguments values (.error reason) →
       PrimitiveStep program before (some (.fatal reason)) { before with task := .fatal reason }
-  | allocate {before context destination binding element countAddress next count domain base pointer allocated after} :
+  | allocate {before context destination binding element countAddress next count domain base pointer allocation allocated after} :
       before.task = .primitive context destination binding [element] [countAddress] next → binding.primitive = some .allocate →
       binding.domain = some domain → ScalarAt before.world countAddress (.integer false .pointer count) → 0 ≤ count →
-      AllocatesBuffer program.declarations before.world domain element count.toNat base pointer allocated →
+      AllocatesBuffer program.declarations (.activation context.activation)
+        before.world domain element count.toNat base pointer allocation allocated →
       StoresPointer program allocated destination .unique element pointer after →
       PrimitiveStep program before (some (.allocate ⟨before.world.nextRoot,0,[]⟩))
-        { before with world := after, task := .run context next }
-  | release {before context destination binding pointerAddress next pointer domain released after} :
+        { before with world := after, task := .run (context.bindResource before.world.nextLoan allocation) next }
+  | release {before context destination binding pointerAddress next pointer allocation domain released after} :
       before.task = .primitive context destination binding [] [pointerAddress] next → binding.primitive = some .release →
       binding.domain = some domain → PointerAt before.world pointerAddress pointer →
-      ReleasesBuffer program.declarations before.world pointer domain released → StoresUnit program released destination after →
+      ResolvesResource before.world context.environment (.activation context.activation) allocation →
+      ReleasesBuffer program.declarations before.world allocation pointer domain released → StoresUnit program released destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
-  | reallocate {before context destination binding element pointerAddress countAddress next old count domain base pointer allocated after} :
+  | reallocate {before context destination binding element pointerAddress countAddress next old oldAllocation count domain base
+      pointer allocation allocated after} :
       before.task = .primitive context destination binding [element] [pointerAddress,countAddress] next → binding.primitive = some .reallocate →
       binding.domain = some domain → PointerAt before.world pointerAddress old →
+      ResolvesResource before.world context.environment (.activation context.activation) oldAllocation →
       ScalarAt before.world countAddress (.integer false .pointer count) → 0 ≤ count →
-      ReallocatesBuffer program.declarations before.world old domain element count.toNat base pointer allocated →
+      ReallocatesBuffer program (.activation context.activation)
+        before.world oldAllocation old domain element count.toNat base pointer allocation allocated →
       StoresPointer program allocated destination .unique element pointer after →
-      PrimitiveStep program before none { before with world := after, task := .run context next }
-  | rawRead {before context destination binding type pointerAddress next pointer after} :
+      PrimitiveStep program before none
+        { before with world := after, task := .run (context.bindResource before.world.nextLoan allocation) next }
+  | rawRead {before context destination binding type pointerAddress next pointer source after} :
       before.task = .primitive context destination binding [type] [pointerAddress] next → binding.primitive = some .rawRead →
-      PointerAt before.world pointerAddress pointer → RawRead program.declarations before.world pointer type false destination after →
+      PointerAt before.world pointerAddress pointer →
+      ResolvesResource before.world context.environment (.activation context.activation) source →
+      RawRead program before.world source pointer type false destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
-  | rawCopy {before context destination binding type pointerAddress next pointer after} :
+  | rawCopy {before context destination binding type pointerAddress next pointer source after} :
       before.task = .primitive context destination binding [type] [pointerAddress] next → binding.primitive = some .rawCopy →
-      PointerAt before.world pointerAddress pointer → RawRead program.declarations before.world pointer type true destination after →
+      PointerAt before.world pointerAddress pointer →
+      ResolvesResource before.world context.environment (.activation context.activation) source →
+      RawRead program before.world source pointer type true destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
-  | rawWrite {before context destination binding type source pointerAddress next pointer written after} :
+  | rawWrite {before context destination binding type source pointerAddress next pointer target written after} :
       before.task = .primitive context destination binding [type] [source,pointerAddress] next → binding.primitive = some .rawWrite →
       PointerAt before.world pointerAddress pointer →
-      RawWrite program.declarations before.world source.authority source.address pointer type written →
+      ResolvesResource before.world context.environment (.activation context.activation) target →
+      RawWrite program before.world source target pointer type written →
       StoresUnit program written destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
-  | rawBorrow {before context destination binding type pointerAddress next pointer mode after} :
+  | rawBorrow {before context destination binding type pointerAddress next pointer source mode after} :
       before.task = .primitive context destination binding [.reference mode (.runtimeRegion context.region) type] [pointerAddress] next →
       binding.primitive = some .rawBorrow → PointerAt before.world pointerAddress pointer →
-      RawBorrow program.declarations before.world pointer type mode context.region destination after →
-      PrimitiveStep program before (some (.borrow ⟨pointer.allocation.getD 0,pointer.generation,[]⟩ before.world.nextLoan))
+      ResolvesResource before.world context.environment (.activation context.activation) source →
+      RawBorrow program before.world source pointer type mode context.region destination after →
+      PrimitiveStep program before (some (.borrow source.address before.world.nextLoan))
         { before with world := after, task := .run context next }
   | pointerOffset {before context destination binding type pointerAddress offsetAddress next pointer offset result after mode} :
       before.task = .primitive context destination binding [type] [pointerAddress,offsetAddress] next → binding.primitive = some .pointerOffset →

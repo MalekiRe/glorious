@@ -44,7 +44,7 @@ theorem Value.replace_shell {before after : Value} {path : List Nat} {replacemen
   | nil => exact False.elim (nonempty rfl)
   | cons index path =>
       rcases Value.replace_cons_shape written with ⟨_,_,⟨_,rfl⟩ | ⟨_,_,_,_,rfl⟩⟩ <;>
-        simp [Value.shell,Value.withFields,Value.owner,Value.type,Value.head,Value.shellLive,Value.fields]
+        simp [Value.shell,Value.withFields,Value.owner,Value.type,Value.head,Value.shellLive,Value.fields,Value.resources]
 
 /-- A write cannot change an ancestor's constructor or any sibling subtree.
 The excluded case is exactly an observation inside the replaced subtree. -/
@@ -138,6 +138,18 @@ theorem World.Vacant.no_located_descendant {world : World} {ancestor descendant 
     (vacant : world.Vacant ancestor) (located : world.Located descendant) : ¬ ancestor.ProperPrefix descendant :=
   fun included => vacant.not_stored (located.ancestor_stored included)
 
+theorem Retires.read {before after : World} {id : Identity} (retired : Retires before id after)
+    (address : Address) : after.read address = before.read address := by
+  cases retired with
+  | @vacant root selected live empty _ =>
+      by_cases same : address.root = id
+      · by_cases generation : root.generation = address.generation <;>
+          simp [World.read,World.root,same,Table.get_set,selected,live,empty,generation]
+      · simp only [World.read,World.root,Table.get_set_other _ _ _ _ same]
+
+theorem Address.Overlaps.symm {left right : Address} (overlap : left.Overlaps right) : right.Overlaps left :=
+  ⟨overlap.1.symm,overlap.2.1.symm,overlap.2.2.symm⟩
+
 theorem World.root_found {world : World} {address : Address} {root : Root}
     (selected : world.root address = some root) :
     world.roots.get address.root = some root ∧ root.live = true ∧ root.generation = address.generation := by
@@ -226,8 +238,6 @@ theorem World.write_value_update {before after : World} {address : Address} {val
                 simp only [replaced] at written
                 dsimp at written
                 exact ⟨root,some changed,found,(Option.some.inj written).symm⟩
-
-def Root.location (root : Root) : Root := { root with value := none }
 
 theorem RawPointer.Origin.transport {pointer : RawPointer} {before after : World}
     (origin : pointer.Origin before)
@@ -339,6 +349,7 @@ theorem Permitted.parentLoan {world : World} {authority : Authority} {requested 
       obtain ⟨_,loan,found,live,root,generation,path,mode,_⟩ := permitted
       exact ⟨loan,found,live,⟨root,generation,path⟩,mode⟩
   | shared backing ih => exact ih permitted.2.2 selected
+  | guarded backing carrier ih => exact ih permitted.2.1 selected
 
 /-- A consumption authorized by the actual loan graph cannot remove a proper
 ancestor of a live loan. This derives the source framing condition rather than
@@ -347,12 +358,14 @@ theorem Permitted.owned_no_loan_descendant {world : World} {authority : Authorit
     (parents : world.LoanParents) (permitted : Permitted world authority .owned address)
     {id : Identity} {loan : Loan} (found : world.loans.get id = some loan) (live : loan.live = true) :
     ¬ address.ProperPrefix loan.referent := by
-  rintro ⟨included,longer⟩
-  cases authority with
-  | owner => exact permitted.2 id loan found live included.overlaps (Or.inl (by decide))
+  induction authority with
+  | owner =>
+      rintro ⟨included,_⟩
+      exact permitted.2 id loan found live included.overlaps (Or.inl (by decide))
   | shared backing => cases permitted.2.1
   | loan activeId =>
-      obtain ⟨_,active,selected,_,root,generation,path,_,conflicts⟩ := permitted
+      rintro ⟨included,longer⟩
+      obtain ⟨_,active,selected,_,root,generation,path,_,conflicts,_,_⟩ := permitted
       have activeContains : active.referent.Prefix address := ⟨root,generation,path⟩
       by_cases same : id = activeId
       · subst id
@@ -363,12 +376,13 @@ theorem Permitted.owned_no_loan_descendant {world : World} {authority : Authorit
       · have ancestor := conflicts id loan found live same included.overlaps (Or.inl (by decide))
         have bound := ((ancestor.containment parents found selected).trans activeContains).length_le
         omega
+  | guarded backing carrier ih => exact ih permitted.2.1
 
-theorem FormsLoan.loanParents {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+theorem FormsLoan.loanParents {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World} {authority mode region referent destination}
     (valid : before.WellFormed) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.LoanParents := by
   cases borrowed with
-  | borrow _ _ _ _ _ permitted _ _ parentEq _ =>
+  | borrow _ _ _ _ _ _ permitted _ _ parentEq _ =>
       intro id loan parent found selected
       by_cases fresh : id = before.nextLoan
       · subst id
@@ -388,10 +402,10 @@ theorem FormsLoan.loanParents {purpose : LoanPurpose} {program : Program} {befor
         refine ⟨ancestor,?_,bound,included,parentMode,parentLive⟩
         simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid parentFound))] using parentFound
 
-theorem EndsLoan.loanParents {before after : World} {id : Identity}
-    (valid : before.WellFormed) (ended : EndsLoan before id after) : after.LoanParents := by
+theorem EndsLoan.loanParents {program : RuntimeProgram} {before after : World} {id : Identity}
+    (valid : before.WellFormed) (ended : EndsLoan program before id after) : after.LoanParents := by
   cases ended with
-  | restored selected _ _ _ children =>
+  | restored selected _ _ _ _ _ _ children =>
       intro child loan parent found link
       by_cases changed : child = id
       · subst child
@@ -411,16 +425,16 @@ theorem EndsLoan.loanParents {before after : World} {id : Identity}
           subst ancestor
           refine ⟨_,Table.get_set _ _ _,bound,included,parentMode,?_⟩
           have identity := World.loanIdentity valid oldFound
-          have dead := children loan (by simpa [← identity] using oldFound) link
+          have dead := children loan (by simpa [← identity] using oldFound) (Or.inl link)
           intro live
           simp [live] at dead
         · exact ⟨ancestor,by simpa only [Table.get_set_other _ _ _ _ parentChanged] using parentFound,
             bound,included,parentMode,parentLive⟩
 
-theorem EndsLoan.liveLoanLocations {before after : World} {id : Identity}
-    (locations : before.LiveLoanLocations) (ended : EndsLoan before id after) : after.LiveLoanLocations := by
+theorem EndsLoan.liveLoanLocations {program : RuntimeProgram} {before after : World} {id : Identity}
+    (locations : before.LiveLoanLocations) (ended : EndsLoan program before id after) : after.LiveLoanLocations := by
   cases ended with
-  | restored _ _ _ _ _ =>
+  | restored _ _ _ _ _ _ _ _ =>
       intro child loan found live
       by_cases changed : child = id
       · subst child
@@ -508,11 +522,11 @@ theorem World.write_located {before after : World} {mutation address : Address} 
     (located : before.Located address) : after.Located address :=
   located.transport (World.write_locations written) (fun _ => World.write_read_shell written) outside
 
-theorem FormsLoan.liveLoanLocations {purpose : LoanPurpose} {program : Program} {before after : World} {authority mode region referent destination}
+theorem FormsLoan.liveLoanLocations {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World} {authority mode region referent destination}
     (locations : before.LiveLoanLocations) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
     after.LiveLoanLocations := by
   cases borrowed with
-  | borrow stored _ _ _ _ _ vacant _ _ written =>
+  | borrow stored _ _ _ _ _ _ vacant _ _ written =>
       intro id loan found live
       by_cases fresh : id = before.nextLoan
       · subst id
@@ -527,29 +541,29 @@ theorem FormsLoan.liveLoanLocations {purpose : LoanPurpose} {program : Program} 
         have result := World.write_located written (vacant.no_located_descendant located) located
         exact result
 
-theorem Transfers.locations {program : Program} {before after : World} {authority source destination}
+theorem Transfers.locations {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) (id : Identity) :
     (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install =>
+  | move _ _ _ _ _ _ _ clear install =>
       exact (World.write_locations install id).trans (World.write_locations clear id)
 
-theorem Transfers.loans {program : Program} {before after : World} {authority source destination}
+theorem Transfers.loans {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) : after.loans = before.loans := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install =>
+  | move _ _ _ _ _ _ _ clear install =>
       exact (World.write_loans install).trans (World.write_loans clear)
 
-theorem Transfers.loanParents {program : Program} {before after : World} {authority source destination}
+theorem Transfers.loanParents {program : RuntimeProgram} {before after : World} {authority source destination}
     (parents : before.LoanParents) (transfer : Transfers program before authority source destination after) :
     after.LoanParents := by simpa [World.LoanParents,transfer.loans] using parents
 
-theorem Transfers.liveLoanLocations {program : Program} {before after : World} {authority source destination}
+theorem Transfers.liveLoanLocations {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (transfer : Transfers program before authority source destination after) :
     after.LiveLoanLocations := by
   have loans := transfer.loans
   cases transfer with
-  | move _ _ permission vacant _ _ clear install =>
+  | move _ _ _ permission vacant _ _ clear install =>
       intro id loan found live
       have oldFound : before.loans.get id = some loan := by simpa [loans] using found
       have located := World.liveLoanLocations valid id loan oldFound live
@@ -557,31 +571,31 @@ theorem Transfers.liveLoanLocations {program : Program} {before after : World} {
       have destinationOutside := vacant.no_located_descendant located
       exact World.write_located install destinationOutside (World.write_located clear sourceOutside located)
 
-theorem Transfers.destination_vacant {program : Program} {before after : World} {authority source destination}
+theorem Transfers.destination_vacant {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) : before.Vacant destination := by
   cases transfer
   assumption
 
-theorem Transfers.destination_type {program : Program} {before after : World} {authority source destination value}
+theorem Transfers.destination_type {program : RuntimeProgram} {before after : World} {authority source destination value}
     (transfer : Transfers program before authority source destination after) (stored : before.Stores source value) :
-    AddressType program before destination value.type := by
+    AddressType program.declarations before destination value.type := by
   cases transfer with
-  | move found _ _ _ _ typed _ _ =>
+  | move found _ _ _ _ _ typed _ _ =>
       have same := Option.some.inj (stored.symm.trans found)
       subst same
       exact typed
 
-theorem Copies.destination_type {program : Program} {before after : World} {authority source destination value}
+theorem Copies.destination_type {program : RuntimeProgram} {before after : World} {authority source destination value}
     (copy : Copies program before authority source destination after) (stored : before.Stores source value) :
-    AddressType program before destination value.type := by
+    AddressType program.declarations before destination value.type := by
   cases copy with
-  | copy found _ _ _ typed _ _ =>
+  | copy found _ _ _ _ typed _ _ =>
       have same := Option.some.inj (stored.symm.trans found)
       subst same
       exact typed
 
-theorem NewValue.destination_type {program : Program} {before after : World} {destination type head sources}
-    (constructed : NewValue program before destination type head sources after) : AddressType program before destination type := by
+theorem NewValue.destination_type {program : RuntimeProgram} {before after : World} {destination type head sources}
+    (constructed : NewValue program before destination type head sources after) : AddressType program.declarations before destination type := by
   cases constructed
   assumption
 
@@ -611,9 +625,9 @@ theorem AddressType.root_transport {program : Program} {before after : World} {a
   have residentType : resident.type = root.type := by simpa [Root.location] using congrArg Root.type same
   exact (AddressType.root_iff whole).mpr ⟨resident,found,residentType.trans typeEq⟩
 
-theorem Transfers.root_types {program : Program} {before after : World} {authority source destination}
+theorem Transfers.root_types {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) {address : Address} {type : Term}
-    (whole : address.fields = []) : AddressType program before address type ↔ AddressType program after address type := by
+    (whole : address.fields = []) : AddressType program.declarations before address type ↔ AddressType program.declarations after address type := by
   constructor
   · exact AddressType.root_transport transfer.locations whole
   · exact AddressType.root_transport (fun id => (transfer.locations id).symm) whole
@@ -639,6 +653,24 @@ theorem FieldOffset.transport {program : Program} {before after : World}
           have sameHead := congrArg Value.head same
           simp only [Value.shell,Value.withFields,Value.head] at sameHead
           exact .nominal constructor id instantiated substituted selected layout found (sameHead.trans head) offset
+
+theorem AddressOffset.retained {program : Program} {before after : World}
+    {address : Address} {type : Term} {offset : Nat}
+    (typed : AddressOffset program before address type offset)
+    (roots : ∀ root, before.roots.get address.root = some root → after.roots.get address.root = some root)
+    (reads : ∀ observed, after.read observed = before.read observed) :
+    AddressOffset program after address type offset := by
+  induction typed with
+  | root found live => exact .root (roots _ found) live
+  | child _ field ih => exact .child (ih roots) (field.transport (by rw [reads]))
+
+theorem AddressType.retained {program : Program} {before after : World} {address : Address} {type : Term}
+    (typed : AddressType program before address type)
+    (roots : ∀ root, before.roots.get address.root = some root → after.roots.get address.root = some root)
+    (reads : ∀ observed, after.read observed = before.read observed) :
+    AddressType program after address type := by
+  obtain ⟨offset,typed⟩ := typed
+  exact ⟨offset,typed.retained roots reads⟩
 
 /-- The shared address/layout derivation survives a write except beneath a
 replaced proper ancestor. The address being written may itself become vacant. -/
@@ -681,12 +713,12 @@ theorem World.write_address_types {program : Program} {before after : World} {mu
     AddressType program before address type ↔ AddressType program after address type := by
   exact exists_congr (fun _ => World.write_address_offsets written outside)
 
-theorem Transfers.address_types {program : Program} {before after : World} {authority source destination}
+theorem Transfers.address_types {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) {address : Address} {type : Term}
     (sourceOutside : ¬ source.ProperPrefix address) (destinationOutside : ¬ destination.ProperPrefix address) :
-    AddressType program before address type ↔ AddressType program after address type := by
+    AddressType program.declarations before address type ↔ AddressType program.declarations after address type := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install =>
+  | move _ _ _ _ _ _ _ clear install =>
       exact (World.write_address_types clear sourceOutside).trans (World.write_address_types install destinationOutside)
 
 /-- A retained reference remains typed across a transfer outside its proper
@@ -694,7 +726,7 @@ ancestors. Deriving that side condition for every live loan is a separate
 world-invariant obligation; initialization and loan ending remain separate. -/
 theorem Transfers.reference_typed {program : Kernel.Program} {before after : World}
     {authority source destination owner mode region type id loan live}
-    (transfer : Transfers program.declarations before authority source destination after)
+    (transfer : Transfers program before authority source destination after)
     (found : before.loans.get id = some loan)
     (sourceOutside : ¬ source.ProperPrefix loan.referent) (destinationOutside : ¬ destination.ProperPrefix loan.referent)
     (typed : Typing.ValueTyped program before
@@ -711,7 +743,7 @@ theorem Transfers.reference_typed {program : Kernel.Program} {before after : Wor
 
 theorem Transfers.reference_root_typed {program : Kernel.Program} {before after : World}
     {authority source destination owner mode region type id loan live}
-    (transfer : Transfers program.declarations before authority source destination after)
+    (transfer : Transfers program before authority source destination after)
     (found : before.loans.get id = some loan) (whole : loan.referent.fields = [])
     (typed : Typing.ValueTyped program before
       (.resident owner (.reference mode region type) (.reference id) live [])) :
@@ -723,7 +755,7 @@ theorem Transfers.reference_root_typed {program : Kernel.Program} {before after 
 ancestor cases follow from the pre-state's actual live-loan invariant. -/
 theorem Transfers.reference_preserved {program : Kernel.Program} {before after : World}
     {authority source destination owner mode region type id live}
-    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
+    (valid : before.WellFormed) (transfer : Transfers program before authority source destination after)
     (typed : Typing.ValueTyped program before
       (.resident owner (.reference mode region type) (.reference id) live [])) :
     Typing.ValueTyped program after (.resident owner (.reference mode region type) (.reference id) live []) := by
@@ -737,13 +769,77 @@ theorem Transfers.reference_preserved {program : Kernel.Program} {before after :
       exact .reference (by simpa [transfer.loans] using selected) active modeEq regionEq
         ((transfer.address_types sourceOutside destinationOutside).mp located)
 
-theorem Transfers.availability {program : Program} {before after : World} {authority source destination}
+theorem Transfers.availability {program : RuntimeProgram} {before after : World} {authority source destination}
     (transfer : Transfers program before authority source destination after) : after.availability = before.availability := by
   cases transfer with
-  | move _ _ _ _ _ _ clear install =>
+  | move _ _ _ _ _ _ _ clear install =>
       rcases World.write_value_update clear with ⟨_,_,_,middle⟩
       rcases World.write_value_update install with ⟨_,_,_,finish⟩
       simp [finish,middle]
+
+/-- One structural typing transport carries the actual observed resident
+predicate through fields. Ordinary framing uses True; cleanup uses actual
+world residency. Administrative availability and loan changes retain only
+the representation facts that the typing constructors really consume. -/
+theorem Typing.ValueTyped.transport_observed {program : Kernel.Program} {before after : World} {value : Value}
+    (typed : Typing.ValueTyped program before value)
+    (observed : Value → Prop)
+    (descendants : ∀ resident child, observed resident → some child ∈ resident.fields → observed child)
+    (present : observed value)
+    (references : ∀ resident id loan, observed resident → resident.head = .reference id →
+      before.loans.get id = some loan → loan.live = true →
+      ∃ current, after.loans.get id = some current ∧ current.live = true ∧
+        current.mode = loan.mode ∧ current.region = loan.region ∧
+        ∀ type, AddressType program.declarations before loan.referent type →
+          AddressType program.declarations after current.referent type)
+    (proofs : ∀ id original, before.availability.get id = some original →
+      ∃ current, after.availability.get id = some current ∧ current.brand = original.brand ∧
+        current.region = original.region ∧ current.residents = original.residents)
+    (pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after) :
+    Typing.ValueTyped program after value := by
+  refine Typing.ValueTyped.rec
+    (motive_1 := fun value _ => observed value → Typing.ValueTyped program after value)
+    (motive_2 := fun fields types _ =>
+      (∀ value, some value ∈ fields → observed value) → Typing.FieldsTyped program after fields types)
+    ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ typed present
+  · exact fun {_ _} _ => .unit
+  · exact fun {_ _ _} checked _ => .scalar checked
+  · intro owner type head live fields types resources shape _ ih present
+    exact .aggregate shape (ih (fun _ member => descendants _ _ present member))
+  · intro owner mode region type id loan live found active modeEq regionEq located present
+    obtain ⟨current,selected,active,sameMode,sameRegion,types⟩ := references _ id loan present rfl found active
+    exact .reference selected active (sameMode.trans modeEq)
+      (regionEq.trans (congrArg Term.runtimeRegion sameRegion.symm)) (types type located)
+  · exact fun {_ _ _ _ _} bound origin _ => .pointer bound (pointers _ origin)
+  · intro owner id arguments live fields function selected _ ih present
+    exact .callable selected (ih (fun _ member => descendants _ _ present member))
+  · exact fun {_ _ _ _ _ _} selected _ => .operation selected
+  · exact fun {_ _ _ _ _} _ => .label
+  · exact fun {_ _ _ _} type _ => .continuation type
+  · intro owner brand region residents id live available found brandEq idEq regionEq residentsEq _
+    obtain ⟨current,selected,sameBrand,sameRegion,sameResidents⟩ := proofs id available found
+    exact .available selected (sameBrand.trans brandEq) idEq
+      (regionEq.trans (congrArg Term.runtimeRegion sameRegion.symm)) (residentsEq.trans sameResidents.symm)
+  · intro owner brand region live fields types pack _ brand region length distinct ih present
+    exact .bindings (ih (fun _ member => descendants _ _ present member)) brand region length distinct
+  · exact fun _ => .nil
+  · exact fun {_ _ _} _ ih present => .hole (ih (fun _ member => present _ (List.mem_cons_of_mem _ member)))
+  · intro value fields type types _ same _ ih tail present
+    exact .resident (ih (present _ (by simp))) same (tail (fun _ member => present _ (List.mem_cons_of_mem _ member)))
+
+theorem Typing.ValueTyped.transport_references {program : Kernel.Program} {before after : World} {value : Value}
+    (typed : Typing.ValueTyped program before value)
+    (references : ∀ id loan, before.loans.get id = some loan → loan.live = true →
+      ∃ current, after.loans.get id = some current ∧ current.live = true ∧
+        current.mode = loan.mode ∧ current.region = loan.region ∧
+        ∀ type, AddressType program.declarations before loan.referent type →
+          AddressType program.declarations after current.referent type)
+    (proofs : after.availability = before.availability)
+    (pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after) :
+    Typing.ValueTyped program after value := by
+  exact typed.transport_observed (fun _ => True) (fun _ _ _ _ => trivial) trivial
+    (fun _ identity loan _ _ => references identity loan)
+    (fun identity original found => ⟨original,by simpa only [proofs] using found,rfl,rfl,rfl⟩) pointers
 
 theorem Typing.ValueTyped.transport {program : Kernel.Program} {before after : World} {value : Value}
     (typed : Typing.ValueTyped program before value)
@@ -753,31 +849,14 @@ theorem Typing.ValueTyped.transport {program : Kernel.Program} {before after : W
     (proofs : after.availability = before.availability)
     (pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after) :
     Typing.ValueTyped program after value := by
-  refine Typing.ValueTyped.rec
-    (motive_1 := fun value _ => Typing.ValueTyped program after value)
-    (motive_2 := fun fields types _ => Typing.FieldsTyped program after fields types)
-    ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ typed
-  · exact fun {_ _} => .unit
-  · exact fun {_ _ _} checked => .scalar checked
-  · exact fun {_ _ _ _ _ _} head _ fields => .aggregate head fields
-  · intro owner mode region type id loan live found active modeEq regionEq located
-    obtain ⟨selected,types⟩ := references id loan found active
-    exact .reference selected active modeEq regionEq (types type located)
-  · exact fun {_ _ _ _ _} bound origin => .pointer bound (pointers _ origin)
-  · exact fun {_ _ _ _ _ _} selected _ fields => .callable selected fields
-  · exact fun {_ _ _ _ _ _} selected => .operation selected
-  · exact fun {_ _ _ _ _} => .label
-  · exact fun {_ _ _ _} type => .continuation type
-  · intro owner brand region residents id live available found brandEq idEq regionEq residentsEq
-    exact .available (by simpa [proofs] using found) brandEq idEq regionEq residentsEq
-  · exact fun {_ _ _ _ _ _ _} _ brand region length distinct fields => .bindings fields brand region length distinct
-  · exact .nil
-  · exact fun {_ _ _} _ fields => .hole fields
-  · exact fun {_ _ _ _} _ type _ value fields => .resident value type fields
+  apply typed.transport_references ?_ proofs pointers
+  intro identity loan selected active
+  obtain ⟨found,types⟩ := references identity loan selected active
+  exact ⟨loan,found,active,rfl,rfl,types⟩
 
 theorem Typing.ValueTyped.transfer {program : Kernel.Program} {before after : World}
     {authority source destination value}
-    (valid : before.WellFormed) (transfer : Transfers program.declarations before authority source destination after)
+    (valid : before.WellFormed) (transfer : Transfers program before authority source destination after)
     (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
   apply typed.transport ?_ transfer.availability (fun _ origin => origin.transport transfer.locations)
   intro id loan found active
@@ -1027,12 +1106,12 @@ clear and install, so no typed intermediate state is assumed. -/
 theorem Transfers.typed_residents {program : Kernel.Program} {before after : World} {authority source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (transfer : Transfers program.declarations before authority source destination after) :
+    (transfer : Transfers program before authority source destination after) :
     (∀ address value, after.Resident address value → Typing.ValueTyped program after value) ∧
     (∀ id root value, after.roots.get id = some root → root.live = true → root.value = some value → value.type = root.type) := by
   have moved := transfer
   cases transfer with
-  | move stored _ _ _ separate located clear install =>
+  | move stored _ _ _ _ separate located clear install =>
       obtain ⟨offset,located⟩ := located
       have destinationOutside : ¬ source.ProperPrefix destination := fun included => separate included.1.overlaps
       have framed := (World.write_address_offsets clear destinationOutside).mp located
@@ -1041,5 +1120,31 @@ theorem Transfers.typed_residents {program : Kernel.Program} {before after : Wor
       refine ⟨?_,fun id root value found live resident => (roots id root value found live resident).2⟩
       intro address value resident
       exact (World.stores_typed roots (World.resident_iff_stores.mp resident)).transfer typed.1 moved
+
+theorem World.Resident.field {world : World} {address : Address} {value child : Value}
+    (resident : world.Resident address value) (member : some child ∈ value.fields) :
+    ∃ nested, world.Resident nested child := by
+  obtain ⟨index,bound,found⟩ := List.mem_iff_getElem.mp member
+  refine ⟨address.child index,World.resident_iff_stores.mpr ?_⟩
+  change world.read { address with fields := address.fields ++ [index] } = some child
+  rw [World.read_append,World.resident_iff_stores.mp resident]
+  simp [Value.atPath,List.getElem?_eq_getElem bound,found]
+
+/-- Cleanup observes references in the actual resident tree. This is a
+specialization of the sole typing transport, not another structural walker. -/
+theorem Typing.ValueTyped.resident_transport {program : Kernel.Program} {before after : World}
+    {value : Value} (typed : Typing.ValueTyped program before value)
+    (references : ∀ id loan, before.References id → before.loans.get id = some loan → loan.live = true →
+      after.loans.get id = some loan ∧ ∀ type, AddressType program.declarations before loan.referent type →
+        AddressType program.declarations after loan.referent type)
+    (proofs : after.availability = before.availability)
+    (pointers : ∀ pointer : RawPointer, pointer.Origin before → pointer.Origin after)
+    (resident : ∃ address, before.Resident address value) : Typing.ValueTyped program after value := by
+  apply typed.transport_observed (fun value => ∃ address, before.Resident address value)
+    (fun _ _ ⟨_,present⟩ member => present.field member) resident ?_ ?_ pointers
+  · intro value identity loan ⟨address,present⟩ head found active
+    obtain ⟨selected,types⟩ := references identity loan ⟨address,value,present,head⟩ found active
+    exact ⟨loan,selected,active,rfl,rfl,types⟩
+  · exact fun identity original found => ⟨original,by simpa only [proofs] using found,rfl,rfl,rfl⟩
 
 end Glorious.Language

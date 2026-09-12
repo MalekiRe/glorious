@@ -1,104 +1,10 @@
-import GloriousLanguage.BorrowPreservation
+import GloriousLanguage.BorrowConstructionPreservation
+import GloriousLanguage.CopyStructure
 
 /-! Preservation for source Copy. The existing copy traversal supplies fresh
 owner identities and the binding-fact renaming; copies keep referent identity
 and do not acquire ownership of the storage they reference. -/
 namespace Glorious.Language
-
-theorem CopyTree.type_eq {program : Program} {next finish : Nat} {value copied : Value} {origins : Table Identity}
-    (copy : CopyTree program next value finish copied origins) : copied.type = value.type := by
-  cases copy; rfl
-
-theorem CopyFields.length {program : Program} {next finish : Nat}
-    {fields copied : List (Option Value)} {origins : Table Identity}
-    (copy : CopyFields program next fields finish copied origins) : copied.length = fields.length := by
-  refine CopyFields.rec
-    (motive_1 := fun _ _ _ _ _ _ => True)
-    (motive_2 := fun _ fields _ copied _ _ => copied.length = fields.length)
-    ?_ ?_ ?_ copy
-  · intros; trivial
-  · intro; rfl
-  · intro next middle finish value copied rest copies first later _ _ _ ih
-    simpa using congrArg Nat.succ ih
-
-theorem Value.mapFieldOrigins_eq_map (map : Identity → Identity) (fields : List (Option Value)) :
-    Value.mapFieldOrigins map fields = fields.map (Option.map (Value.mapBindingOrigins map)) := by
-  induction fields with
-  | nil => rfl
-  | cons field rest ih => cases field <;> simp [Value.mapFieldOrigins,ih]
-
-theorem Typing.ValueTyped.owner_change {program : Kernel.Program} {world : World}
-    {previous owner : Identity} {type : Term} {head : ValueHead} {live : Bool} {fields : List (Option Value)}
-    (typed : Typing.ValueTyped program world (.resident previous type head live fields)) :
-    Typing.ValueTyped program world (.resident owner type head live fields) := by
-  cases typed with
-  | unit => exact .unit
-  | scalar checked => exact .scalar checked
-  | aggregate shape fields => exact .aggregate shape fields
-  | reference found active mode region located => exact .reference found active mode region located
-  | pointer bound origin => exact .pointer bound origin
-  | callable selected fields => exact .callable selected fields
-  | operation selected => exact .operation selected
-  | label => exact .label
-  | continuation form => exact .continuation form
-  | available found brand id region residents => exact .available found brand id region residents
-  | bindings fields brand region length distinct => exact .bindings fields brand region length distinct
-
-theorem Typing.ValueTyped.mapBindingOrigins {program : Kernel.Program} {world : World} {value : Value}
-    (typed : Typing.ValueTyped program world value) (map : Identity → Identity) :
-    Typing.ValueTyped program world (value.mapBindingOrigins map) := by
-  refine Typing.ValueTyped.rec
-    (motive_1 := fun value _ => Typing.ValueTyped program world (value.mapBindingOrigins map))
-    (motive_2 := fun fields types _ => Typing.FieldsTyped program world (Value.mapFieldOrigins map fields) types)
-    ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ ?_ typed
-  · exact fun {_ _} => .unit
-  · exact fun {_ _ _} checked => .scalar checked
-  · intro owner type head live fields types constructed _ checked
-    cases head <;> try exact .aggregate constructed checked
-    case bindings pack =>
-      rcases constructed with ⟨_,_,impossible⟩ | ⟨_,_,_,_,_,_,impossible,_⟩ | ⟨_,_,_,_,_,_,_,impossible,_⟩ <;>
-        cases impossible
-  · exact fun {_ _ _ _ _ _ _} found active mode region located => .reference found active mode region located
-  · exact fun {_ _ _ _ _} bound origin => .pointer bound origin
-  · exact fun {_ _ _ _ _ _} selected _ fields => .callable selected fields
-  · exact fun {_ _ _ _ _ _} selected => .operation selected
-  · exact fun {_ _ _ _ _} => .label
-  · exact fun {_ _ _ _} form => .continuation form
-  · exact fun {_ _ _ _ _ _ _} found brand id region residents => .available found brand id region residents
-  · intro owner brand region live fields types pack _ brandEq regionEq length distinct checked
-    exact .bindings checked brandEq regionEq
-      (by simpa [Value.mapFieldOrigins_eq_map,BindingPack.mapOrigins] using length) distinct
-  · exact .nil
-  · exact fun {_ _ _} _ fields => .hole fields
-  · intro value fields type types _ same _ checked tail
-    exact .resident checked (by simpa only [Value.mapBindingOrigins_type] using same) tail
-
-theorem CopyTree.typed {program : Kernel.Program} {world : World} {next finish : Nat}
-    {value copied : Value} {origins : Table Identity}
-    (copy : CopyTree program.declarations next value finish copied origins)
-    (typed : Typing.ValueTyped program world value) : Typing.ValueTyped program world copied := by
-  refine CopyTree.rec
-    (motive_1 := fun _ value _ copied _ _ =>
-      Typing.ValueTyped program world value → Typing.ValueTyped program world copied)
-    (motive_2 := fun _ fields _ copied _ _ => ∀ types,
-      Typing.FieldsTyped program world fields types → Typing.FieldsTyped program world copied types)
-    ?_ ?_ ?_ copy typed
-  · intro next owner type head fields copied finish origins _ _ ih typed
-    obtain ⟨types,fieldsTyped,rebuild⟩ := typed.fields_model
-    have rebuilt := rebuild copied (ih types fieldsTyped)
-    exact rebuilt.owner_change
-  · intro next types typed
-    cases typed
-    exact .nil
-  · intro next middle finish value copied rest copies first later tree _ ih tail types typed
-    cases typed with
-    | resident checked same fields => exact .resident (ih checked) (tree.type_eq.trans same) (tail _ fields)
-
-theorem CopyValue.typed {program : Kernel.Program} {world : World} {next finish : Nat} {value copied : Value}
-    (copy : CopyValue program.declarations next value finish copied) (typed : Typing.ValueTyped program world value) :
-    Typing.ValueTyped program world copied := by
-  cases copy with
-  | copy tree _ => exact (tree.typed typed).mapBindingOrigins _
 
 theorem CopyTree.bounds {program : Program} {next finish : Nat} {value copied : Value} {origins : Table Identity}
     (copy : CopyTree program next value finish copied origins) :
@@ -114,7 +20,7 @@ theorem CopyTree.bounds {program : Program} {next finish : Nat} {value copied : 
         ResidentAt child path resident → next ≤ resident.owner ∧ resident.owner < finish) ∧
       (∀ original fresh, (original,fresh) ∈ origins → next ≤ fresh ∧ fresh < finish))
     ?_ ?_ ?_ copy
-  · intro next owner type head fields copied finish origins _ _ ih
+  · intro next owner type head fields resources copied finish origins _ _ _ ih
     have bound : next < finish := by omega
     refine ⟨bound,?_,?_⟩
     · intro path resident inside
@@ -189,7 +95,7 @@ theorem CopyTree.owner_unique {program : Program} {next finish : Nat} {value cop
         copied[first]? = some (some x) → copied[second]? = some (some y) →
         ResidentAt x left a → ResidentAt y right b → a.owner = b.owner → first :: left = second :: right)
     ?_ ?_ ?_ copy
-  · intro next owner type head fields copied finish origins _ tree ih left right x y first second same
+  · intro next owner type head fields resources copied finish origins _ _ tree ih left right x y first second same
     cases first with
     | root =>
         cases second with
@@ -243,68 +149,12 @@ theorem CopyTree.resident_origin {program : Program} {next finish : Nat} {value 
     (copy : CopyTree program next value finish copied origins) :
     ∀ path resident, ResidentAt copied path resident → ∃ original,
       ResidentAt value path original ∧ resident.head = original.head ∧ resident.fields.length = original.fields.length := by
-  refine CopyTree.rec
-    (motive_1 := fun _ value _ copied _ _ => ∀ path resident, ResidentAt copied path resident → ∃ original,
-      ResidentAt value path original ∧ resident.head = original.head ∧ resident.fields.length = original.fields.length)
-    (motive_2 := fun _ fields _ copied _ _ => ∀ (index : Nat) resident, copied[index]? = some (some resident) → ∃ original,
-      fields[index]? = some (some original) ∧ ∀ path nested, ResidentAt resident path nested → ∃ old,
-        ResidentAt original path old ∧ nested.head = old.head ∧ nested.fields.length = old.fields.length)
-    ?_ ?_ ?_ copy
-  · intro next owner type head fields copied finish origins _ tree ih path resident inside
-    cases inside with
-    | root => exact ⟨_,.root,rfl,tree.length⟩
-    | field selected nested =>
-        obtain ⟨original,found,origin⟩ := ih _ _ selected
-        obtain ⟨old,located,head,arity⟩ := origin _ _ nested
-        exact ⟨old,.field found located,head,arity⟩
-  · intro next index resident found
-    simp at found
-  · intro next middle finish value copied rest copies first later _ _ ih tail index resident found
-    cases index with
-    | zero =>
-        have same := Option.some.inj (Option.some.inj found)
-        subst resident
-        exact ⟨value,rfl,ih⟩
-    | succ index =>
-        obtain ⟨original,selected,origin⟩ := tail index resident found
-        exact ⟨original,selected,origin⟩
-
-theorem Value.mapBindingOrigins_owner (value : Value) (map : Identity → Identity) :
-    (value.mapBindingOrigins map).owner = value.owner := by cases value; rfl
-
-theorem Value.mapBindingOrigins_head (value : Value) (map : Identity → Identity) :
-    (value.mapBindingOrigins map).head =
-      (match value.head with | .bindings pack => .bindings (pack.mapOrigins map) | head => head) := by
-  cases value; rfl
-
-theorem Value.mapBindingOrigins_length (value : Value) (map : Identity → Identity) :
-    (value.mapBindingOrigins map).fields.length = value.fields.length := by
-  cases value
-  simp [Value.mapBindingOrigins,Value.fields,Value.mapFieldOrigins_eq_map]
-
-theorem Value.mapBindingOrigins_atPath (value : Value) (map : Identity → Identity) (path : List Nat) :
-    (value.mapBindingOrigins map).atPath path = (value.atPath path).map (Value.mapBindingOrigins map) := by
-  induction path generalizing value with
-  | nil => rfl
-  | cons index path ih =>
-      cases value with
-      | resident owner type head live fields =>
-          simp only [Value.atPath,Value.mapBindingOrigins,Value.fields,Value.mapFieldOrigins_eq_map,List.getElem?_map]
-          cases selected : fields[index]? with
-          | none => rfl
-          | some field => cases field with
-            | none => rfl
-            | some child => exact ih child
-
-theorem ResidentAt.mapBindingOrigins_iff {value resident : Value} {path : List Nat} {map : Identity → Identity} :
-    ResidentAt (value.mapBindingOrigins map) path resident ↔
-      ∃ original, ResidentAt value path original ∧ resident = original.mapBindingOrigins map := by
-  rw [ResidentAt.iff_atPath,Value.mapBindingOrigins_atPath,Option.map_eq_some_iff]
-  constructor
-  · rintro ⟨original,found,same⟩
-    exact ⟨original,ResidentAt.iff_atPath.mpr found,same.symm⟩
-  · rintro ⟨original,found,same⟩
-    exact ⟨original,ResidentAt.iff_atPath.mp found,same.symm⟩
+  intro path resident inside
+  obtain ⟨original,first,last,names,located,subtree⟩ := copy.resident_copy path resident inside
+  refine ⟨original,located,?_,?_⟩
+  · cases subtree; rfl
+  · cases subtree with
+    | resident _ _ fields => exact fields.length
 
 theorem CopyValue.bounds {program : Program} {next finish : Nat} {value copied : Value}
     (copy : CopyValue program next value finish copied) :
@@ -337,7 +187,8 @@ theorem CopyValue.resident_origin {program : Program} {next finish : Nat} {value
       obtain ⟨rawResident,rawInside,rfl⟩ := ResidentAt.mapBindingOrigins_iff.mp inside
       obtain ⟨original,oldInside,head,length⟩ := tree.resident_origin _ _ rawInside
       refine ⟨original,(fun id => (origins.get id).getD id),oldInside,?_,?_,?_⟩
-      · simp only [Value.mapBindingOrigins_head,head]
+      · rw [Value.mapBindingOrigins_head,head]
+        rfl
       · simpa only [Value.mapBindingOrigins_length] using length
       · intro old bound
         cases found : origins.get old with
@@ -389,8 +240,8 @@ theorem World.install_wellFormedWithOrigins {before middle : World} {destination
   have locations := World.write_locations written
   have rootsUnique := World.write_unique_roots valid.1 written
   rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,oldPacks,oldOwners,oldUnique,roots,regions,bases,ranges,
-    loans,oldReferences,overlaps,parents,located⟩
-  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+    loans,oldReferences,overlaps,parents,located,guards⟩
+  refine ⟨rootsUnique,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
   · simpa only [loansEq] using loansUnique
   · simpa only [proofEq] using proofsUnique
   · simpa only [regionsEq] using regionsUnique
@@ -488,6 +339,7 @@ theorem World.install_wellFormedWithOrigins {before middle : World} {destination
     have retained := World.write_located written (vacant.no_located_descendant (located id loan oldFound live))
       (located id loan oldFound live)
     exact retained
+  · simpa only [World.LoanGuards,loansEq] using guards
 
 theorem World.install_wellFormed {before middle : World} {destination : Address} {inserted : Value} {next : Nat}
     (valid : before.WellFormed) (vacant : before.Vacant destination) (monotone : before.nextOwner ≤ next)
@@ -512,10 +364,10 @@ theorem World.Stores.residentAt {world : World} {address : Address} {whole value
   rw [World.read_append,stored]
   exact ResidentAt.iff_atPath.mp inside
 
-theorem Copies.wellFormed {program : Program} {before after : World} {authority source destination}
+theorem Copies.wellFormed {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (copied : Copies program before authority source destination after) : after.WellFormed := by
   cases copied with
-  | copy stored _ _ vacant _ copy written =>
+  | copy stored _ _ _ vacant _ copy written =>
     apply World.install_wellFormed valid vacant (Nat.le_of_lt copy.bounds.1)
       (fun path value inside => (copy.bounds.2 path value inside).2) copy.owner_unique ?_ ?_ ?_ written
     · intro path value inside address original resident same
@@ -542,20 +394,20 @@ theorem Copies.wellFormed {program : Program} {before after : World} {authority 
         cases selected : original.head <;> simp_all
       exact valid.2.2.2.2.2.2.2.2.2.2.2.2.2.1 _ original id (stored.residentAt oldInside) selected
 
-theorem Copies.locations {program : Program} {before after : World} {authority source destination}
+theorem Copies.locations {program : RuntimeProgram} {before after : World} {authority source destination}
     (copied : Copies program before authority source destination after) (id : Identity) :
     (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
   cases copied with
-  | copy _ _ _ _ _ _ written => exact World.write_locations written id
+  | copy _ _ _ _ _ _ _ written => exact World.write_locations written id
 
 theorem Typing.ValueTyped.copy {program : Kernel.Program} {before after : World}
     {authority source destination value} (valid : before.WellFormed)
-    (copied : Copies program.declarations before authority source destination after)
+    (copied : Copies program.toRuntimeProgram before authority source destination after)
     (typed : Typing.ValueTyped program before value) : Typing.ValueTyped program after value := by
   apply typed.transport ?_ ?_ (fun _ origin => origin.transport copied.locations)
   · intro id loan found active
     cases copied with
-    | copy _ _ _ vacant _ _ written =>
+    | copy _ _ _ _ vacant _ _ written =>
         refine ⟨?_,?_⟩
         · have same := World.write_loans written
           simpa only [same] using found
@@ -564,19 +416,19 @@ theorem Typing.ValueTyped.copy {program : Kernel.Program} {before after : World}
             (World.liveLoanLocations valid _ _ found active))).mp located).retained
               (fun _ selected => selected) (fun _ => rfl)
   · cases copied with
-    | copy _ _ _ _ _ _ written =>
+    | copy _ _ _ _ _ _ _ written =>
         have same := congrArg World.availability (World.write_rest written)
         exact same
 
 theorem Copies.worldTyped {program : Kernel.Program} {before after : World} {authority source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (copied : Copies program.declarations before authority source destination after) : Typing.WorldTyped program after := by
+    (copied : Copies program.toRuntimeProgram before authority source destination after) : Typing.WorldTyped program after := by
   have well := copied.wellFormed typed.1
   have retained : ∀ value, Typing.ValueTyped program before value → Typing.ValueTyped program after value :=
     fun _ value => value.copy typed.1 copied
   cases copied with
-  | copy stored _ _ _ destinationType copy written =>
+  | copy stored _ _ _ _ destinationType copy written =>
     obtain ⟨offset,destinationType⟩ := destinationType
     have roots := World.write_typed_roots valid inventory typed.roots destinationType written
       (fun resident same => by
@@ -598,7 +450,7 @@ theorem Copies.worldTyped {program : Kernel.Program} {before after : World} {aut
 theorem Acquires.worldTyped {program : Kernel.Program} {before after : World} {authority force source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (acquired : Acquires program.declarations before authority force source destination after) : Typing.WorldTyped program after := by
+    (acquired : Acquires program.toRuntimeProgram before authority force source destination after) : Typing.WorldTyped program after := by
   cases acquired with
   | explicitMove moved => exact moved.worldTyped valid inventory typed
   | copy copied => exact copied.worldTyped valid inventory typed
