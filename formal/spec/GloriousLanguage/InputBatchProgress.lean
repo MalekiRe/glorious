@@ -3488,6 +3488,55 @@ theorem Value.replace_fields_none {before after : Value} {index : Nat} {path : L
       (by rw [atSlot]; simp)
 
 
+/-- The single real world operation that empties one captured slot: a clear at
+`address.child index` leaves the receiver root storing the same shell with that
+slot a hole and every other slot, its head, owner, type, liveness flag and
+resource list untouched. This is the binding's own transfer effect, so a capture
+slot's emptiness is produced here rather than assumed. -/
+theorem Kernel.Stores.write_child_none {before after : World} {address : Address} {index : Nat}
+    {shell : Value} (whole : address.fields = [])
+    (stored : before.Stores address shell)
+    (written : before.write (address.child index) none = some after) :
+    ∃ changed, after.Stores address changed ∧ changed.head = shell.head ∧
+      changed.owner = shell.owner ∧ changed.type = shell.type ∧
+      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+      changed.fields[index]? = some none ∧
+      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
+  obtain ⟨parent,slot,storedParent,slotFound,rewritten⟩ := World.write_child_shape written
+  have same : parent = shell := (Option.some.inj (stored.symm.trans storedParent)).symm
+  subst parent
+  have bound : index < (shell.fields).length := (List.getElem?_eq_some_iff.mp slotFound).1
+  refine ⟨shell.withFields ((shell.fields).set index none),?_,rfl,rfl,rfl,rfl,rfl,?_,?_⟩
+  · have located : before.Located address := .inl ⟨shell,stored⟩
+    obtain ⟨root,rootSelected⟩ := (World.Located.root_iff whole).mp located
+    obtain ⟨_,liveTrue,genEq⟩ := World.root_found rootSelected
+    have shape := rewritten
+    unfold World.write at shape
+    rw [rootSelected] at shape
+    dsimp at shape
+    simp only [whole,List.isEmpty_nil,↓reduceIte] at shape
+    let marked : Root := { root with value := some (shell.withFields ((shell.fields).set index none)) }
+    have afterEq : after = { before with roots := before.roots.set address.root marked } :=
+      (Option.some.inj shape).symm
+    have rootAfter : after.root address = some marked := by
+      rw [afterEq]
+      unfold World.root
+      rw [Table.get_set]
+      dsimp
+      simp only [marked,liveTrue,genEq]
+      simp
+    have readAfter : after.read address = some (shell.withFields (shell.fields.set index none)) := by
+      unfold World.read
+      rw [rootAfter]
+      dsimp [marked]
+      simp only [whole,Value.atPath]
+    exact readAfter
+  · show (shell.fields.set index none)[index]? = some none
+    exact List.getElem?_set_self bound
+  · intro other different
+    show (shell.fields.set index none)[other]? = shell.fields[other]?
+    exact List.getElem?_set_ne (Ne.symm different)
+
 /-- SUPERSEDED framing: this structure states the receiver shell as already
 emptied (every field a hole, no resources), which is a RESULT of binding the
 captures, not a prestate fact, so it must not be instantiated before those
