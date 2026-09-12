@@ -172,13 +172,16 @@ value's type to the caller's translated label type by `DefinitionallyEqual`
 (the definitional theory over the runtime image), so no requested address type,
 runtime equality or post-erasure `Subtype` is invented, and
 `ObservationAt.label_caller_step` extends the same real run with the caller
-event. The runtime closing law `Typing.SourceConversionClosed` is a stated
-premise, not a derived theorem: only its definitional fragment (structural
-steps, rows and alias expansion, including
-`ScopeInstantiation.definitionalStep_alias`) is proved, the general
-`Equal`-to-runtime-image derivation and the projection transport
-`Typing.ProjectionStepConversion` remain recorded obligations, and the bridge
-consumes the law without weakening it. `GloriousLanguage.ScopedAtomTransport`
+event. The consumer's premise is the source interpretation of the place
+(`Typing.SourceInterpreted`); the runtime closing law
+`Typing.SourceConversionClosed` is derived from it
+(`SourceInterpreted.sourceConversionClosed`) rather than assumed. Only the
+law's definitional fragment (structural steps, rows and alias expansion,
+including `ScopeInstantiation.definitionalStep_alias`) is proved, while the
+general `Equal`-to-runtime-image derivation and the projection transport
+`Typing.ProjectionStepConversion` remain recorded obligations, and the
+`TargetRepresentation` alias-to-physical-field gap is recorded for the
+physical-realization lane. `GloriousLanguage.ScopedAtomTransport`
 carries the scoped-atom homomorphism transport
 (`ScopeInstantiation.map_kinding`, `.substituted_values`,
 `.rowEquivalent_term`), `SourceInterpretation` records the interpretation

@@ -145,6 +145,14 @@ theorem map_kinding {program : Program} (scope : ScopeInstantiation)
       · exact .runtimeBrand
   | _ => exact True.intro
 
+/-- A declared alias body is scope-closed, so the runtime decoding fixes it. -/
+theorem aliasValue_fixed {program : Program} (valid : ProgramWellFormed program)
+    {scope : ScopeInstantiation} {id : DeclId} {declaration : AliasDefinition}
+    (found : program.alias id = some declaration) : scope.term declaration.value = declaration.value :=
+  term_fixed scope declaration.value (valid.scopeClosed
+    (List.mem_of_find?_eq_some (Program.alias_lookup found)) declaration.value (by
+      simp only [Definition.terms,List.mem_cons_self]))
+
 theorem atomsFixed (scope : ScopeInstantiation) (term : Term) : term.AtomsFixed scope.term := by
   intro atom occurs
   cases atom <;> try exact True.intro

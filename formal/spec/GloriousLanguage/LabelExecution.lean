@@ -98,7 +98,7 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     (label : Typing.InstalledLabelTyped program before.world target brand region type)
     {placeSource : Typing.Context} {place : Kernel.Place} {writable : Bool}
     (bindings : Typing.ContextBindingsTyped program before.world placeSource caller)
-    (conversion : Typing.SourceConversionClosed program.declarations placeSource.static caller)
+    (interpreted : Typing.SourceInterpreted program.declarations caller placeSource.static)
     (representation : Typing.TargetRepresentation program before.world caller)
     (argumentTyped : Typing.PlaceType program.declarations placeSource place actual writable)
     (resolved : Kernel.ResolvesPlace before.world caller.environment place argument.address argument.authority)
@@ -115,6 +115,8 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
       Cancelable program after.world roots := by
   cases step <;> try { simp_all only [reduceCtorEq] }
   case leave actualPending actualRoute handoff selected allowed =>
+    have conversion : Typing.SourceConversionClosed program.declarations placeSource.static caller :=
+      interpreted.sourceConversionClosed
     obtain ⟨rfl,rfl,rfl⟩ := Task.leave.inj (actualPending.symm.trans pending)
     obtain ⟨rfl,rfl,rfl,rfl,rfl⟩ := actualRoute.functional route
     have original := handoff
@@ -171,7 +173,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     (route : LabelRoute state.frames brand inner target region type outer)
     (label : Typing.InstalledLabelTyped program state.world target brand region type)
     (sourceTyped : Typing.ContextBindingsTyped program state.world source caller)
-    (conversion : Typing.SourceConversionClosed program.declarations source.static caller)
+    (interpreted : Typing.SourceInterpreted program.declarations caller source.static)
     (representation : Typing.TargetRepresentation program state.world caller)
     (argumentTyped : Typing.PlaceType program.declarations source place actual writable)
     (subtype : Subtype program.declarations source.static actual expected)
@@ -210,7 +212,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
   · right
     obtain ⟨kept,value,roots,targetSource,result,frames,task,original,stored,initialized,valueTyped,valueType,
       resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩ :=
-      step.leave_source_result valid inventory typed pending route label sourceTyped conversion
+      step.leave_source_result valid inventory typed pending route label sourceTyped interpreted
         representation argumentTyped resolved
     exact ⟨kept,value,roots,targetSource,result,rfl,frames,task,resolved,original,stored,initialized,valueTyped,valueType,
       subtype,selectedType.trans closed.symm,resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩

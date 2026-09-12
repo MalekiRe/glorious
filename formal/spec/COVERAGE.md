@@ -254,15 +254,19 @@ payload `AddressType`: the located declared type is derived from the source
 place (`PlaceType` plus its actual `ResolvesPlace` resolution), the caller's
 `ContextBindingsTyped` and the world `TargetRepresentation`, and the value type
 is related to the caller's translated label type by `DefinitionallyEqual`
-rather than syntactic identity. Two semantic premises are stated, not derived:
-`Typing.SourceConversionClosed`, whose definitional fragment (structural steps,
-rows and alias expansion, including
-`ScopeInstantiation.definitionalStep_alias`) is proved while the general
+rather than syntactic identity. The consumer's premise is the source
+interpretation of the place (`Typing.SourceInterpreted`), from which the runtime
+closing law `Typing.SourceConversionClosed` is now derived
+(`SourceInterpreted.sourceConversionClosed`) instead of being assumed: its
+definitional fragment (structural steps, rows and alias expansion, including
+`ScopeInstantiation.definitionalStep_alias`) is proved, while the general
 runtime-image derivation and the projection transport
-`Typing.ProjectionStepConversion` remain recorded obligations, and
-`Typing.TargetRepresentation`, which requires that every located declared type
-is a structural head and that every source field step has its actual physical
-field offset. Neither premise is weakened by the bridge, no declaration of the
+`Typing.ProjectionStepConversion` remain recorded obligations. The other stated
+premise is `Typing.TargetRepresentation`, which requires that every located
+declared type is a structural head and that every source field step has its
+actual physical field offset; the alias-headed `LayoutOf` case without a
+corresponding physical `FieldOffset` derivation is the recorded gap there and is
+being closed by the physical-realization lane. Neither premise is weakened by the bridge, no declaration of the
 previous tree is dropped, and no other module consumes the two changed
 theorems. The composed strict gate including `SourceAddress` and `LabelExecution`
 passes 215 jobs from a fresh source-only tree (213 without the two compatibility

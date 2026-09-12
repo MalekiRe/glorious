@@ -328,6 +328,39 @@ structure Typing.TargetRepresentation (program : Kernel.Program) (world : World)
     FieldType program.declarations runtime.static container index child true →
     ∃ offset, FieldOffset program.declarations world address container index child offset
 
+
+/-- Every typed resident's actual type is structurally headed: resident typing
+only produces tuple, array, nominal and the fixed-head forms, so no unexpanded
+alias, projection or row type is ever a resident's type. -/
+theorem Typing.ValueTyped.type_structural {program : Kernel.Program} {world : World} {value : Value}
+    (typed : Typing.ValueTyped program world value) : value.type.StructuralHead := by
+  cases typed with
+  | unit => trivial
+  | scalar _ => trivial
+  | aggregate constructed _ =>
+    rcases constructed with ⟨same,_,_⟩ | ⟨_,_,_,_,same,_,_,_,_⟩ | ⟨_,_,_,_,_,same,_,_,_,_⟩ <;> rw [same] <;> trivial
+  | reference _ _ _ _ _ => trivial
+  | pointer _ _ => trivial
+  | callable _ _ => trivial
+  | operation _ => trivial
+  | label => trivial
+  | continuation form => obtain ⟨_,_,_,_,same⟩ := form; rw [same]; trivial
+  | available _ _ _ _ _ => trivial
+  | bindings _ _ _ _ _ => trivial
+
+
+/-- The runtime decoding preserves structural heads: it rewrites exactly the
+lexical atoms, which are leaves, and is structural on every other constructor.
+Hence a declared local type that the source projection judgment sees as an
+ordered head is seen as the same head at the runtime image. -/
+theorem ScopeInstantiation.term_structural {scope : ScopeInstantiation} {term : Term}
+    (structural : term.StructuralHead) : (scope.term term).StructuralHead := by
+  cases term <;>
+    simp only [ScopeInstantiation.term,Term.StructuralHead] at *
+  all_goals try trivial
+  case scopedRegion id => cases scope.regions.get id <;> trivial
+  case scopedBrand id => cases scope.brands.get id <;> trivial
+
 /-- A resident reference value whose head names the actual reference identity
 determines the located type of that loan's referent. -/
 theorem Typing.ValueTyped.reference_referent {program : Kernel.Program} {world : World} {value : Value}

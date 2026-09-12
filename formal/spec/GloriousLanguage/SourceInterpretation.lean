@@ -62,6 +62,123 @@ def ProjectionStepConversion (program : Program) (source : Language.Context)
           DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right)))
     ∨ ¬ ∃ (associated : AssociatedDefinition), ∃ trait member owners items, left = .projection trait member owners items associated.kind
 
+
+/-- The runtime image of the definitional steps of a source interpretation: the
+definitional-step reading of the source context at one image context and one
+scope. The alias expansions are derived below from actual declaration closure;
+the projection steps are the recorded obligation. -/
+def StepImage (program : Language.Program) (context : Language.Context)
+    (scope : ScopeInstantiation) : Prop :=
+  ∀ {source : Language.Context} {left right : Term}, DefinitionalStep program source left right →
+    DefinitionallyEqual program context (scope.term left) (scope.term right)
+
+/-- Definitional conversion transports to the runtime image once its steps do.
+The recursion is the actual elimination of the conversion judgment, including
+its row duplicates; it introduces no equality and no normalization. -/
+theorem definitional_image {program : Language.Program} {context : Language.Context}
+    {scope : ScopeInstantiation} (image : StepImage program context scope) :
+    ∀ {source : Language.Context} {left right : Term}, DefinitionallyEqual program source left right →
+      DefinitionallyEqual program context (scope.term left) (scope.term right) := by
+  intro source _left _right converted
+  apply DefinitionallyEqual.rec
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
+    (motive_8 := fun _ _ _ => True)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
+    (motive_11 := fun _ left right _ =>
+      DefinitionallyEqual program context (scope.term left) (scope.term right))
+    (motive_12 := fun _ _ _ _ => True)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
+  all_goals intros
+  all_goals try exact True.intro
+  all_goals try assumption
+  case refl => exact DefinitionallyEqual.refl
+  case symm _ _ _ _ ih => exact ih.symm
+  case trans _ _ _ _ _ _ first second => exact first.trans second
+  case step _ _ _ derived _ => exact image derived
+  case row _ _ _ equivalent =>
+    exact DefinitionallyEqual.row (equivalent.map_scoped_atoms scope.term
+      (ScopeInstantiation.scopedHomomorphism scope))
+  case congrChildren _ _ _ same children ih =>
+    exact (ScopeInstantiation.scopedHomomorphism scope).congr_relation
+      (fun _ => DefinitionallyEqual.refl)
+      (fun same children => DefinitionallyEqual.congr same children) same
+      (ListRel.of_at same.children_length (fun index first second leftAt rightAt =>
+        ih index first second leftAt rightAt))
+
+/-- The meaningful source interpretation at one runtime context: the actual
+rationale the closing law consumes. Its `steps` field is the definitional-step
+reading (alias expansions are derived in `ScopeInstantiation.stepImage_alias`);
+its `entailed` and `assumed` fields are the source logical evidence actually
+read at the runtime image - the declared constraint equalities and the
+entailment judgment - which are never erased into runtime equality. -/
+structure SourceInterpreted (program : Language.Program) (runtime : Execution.Context)
+    (source : Language.Context) : Prop where
+  steps : StepImage program runtime.static runtime.instantiation
+  entailed : ∀ {left right : Term}, Entails program source (.equal left right) →
+    DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right)
+  assumed : ∀ {left right : Term}, Constraint.equal left right ∈ source.assumptions →
+    DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right)
+
+/-- The closing law of a source context, derived from its own interpretation by
+the actual elimination of `Equal`. Every assumption, entailment and lexical
+duplicate is discharged by the interpretation it belongs to; none is replaced
+by runtime equality. -/
+theorem SourceInterpreted.sourceConversionClosed {program : Language.Program}
+    {runtime : Execution.Context} :
+    ∀ {source : Language.Context}, SourceInterpreted program runtime source →
+      Typing.SourceConversionClosed program source runtime := by
+  intro source interpreted left right equal
+  apply Equal.rec (program := program)
+    (motive_1 := fun _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ => True)
+    (motive_3 := fun context left right _ => SourceInterpreted program runtime context →
+      DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right))
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ => True)
+    (motive_8 := fun _ _ _ => True)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ => True)
+    (motive_11 := fun _ _ _ _ => True)
+    (motive_12 := fun _ _ _ _ => True)
+    (motive_13 := fun _ _ _ _ _ => True)
+    (motive_14 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_15 := fun _ _ _ _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ _ _ => True)
+  all_goals try { intros; exact True.intro }
+  case refl => intro context term interpretation; exact DefinitionallyEqual.refl
+  case symm => intro context left right equality ih interpretation; exact (ih interpretation).symm
+  case trans => intro context left middle right first second firstIh secondIh interpretation; exact (firstIh interpretation).trans (secondIh interpretation)
+  case congrChildren => intro context left right head _ ih interpretation; exact (ScopeInstantiation.scopedHomomorphism runtime.instantiation).congr_relation (fun _ => DefinitionallyEqual.refl) (fun same children => DefinitionallyEqual.congr same children) head (ListRel.of_at head.children_length (fun index first second leftAt rightAt => ih index first second leftAt rightAt interpretation))
+  case assumed => intro context left right member interpretation; exact interpretation.assumed member
+  case entailed => intro context left right held _ interpretation; exact interpretation.entailed held
+  case definitional => intro context left right converted _ interpretation; exact definitional_image interpretation.steps converted
+  case rowDuplicate => intro context rowLeft rowRight rest tails held ih interpretation; simp only [Execution.Context.term,ScopeInstantiation.term]; exact DefinitionallyEqual.rowDuplicate (ih interpretation)
+  case tailDuplicate => intro context instances rowLeft rowRight tails held ih interpretation; simp only [Execution.Context.term,ScopeInstantiation.term]; exact DefinitionallyEqual.tailDuplicate (ih interpretation)
+
+  case t => exact equal
+  case a => exact interpreted
+
+/-- The runtime closing law, derived: an assumption-free source equality is
+definitional conversion (`Equal.closed_definitional`), and conversion is read
+at the runtime image once its definitional steps are. -/
+theorem sourceConversionClosed {program : Language.Program} {runtime : Execution.Context}
+    {source : Language.Context} (assumptions : source.assumptions = [])
+    (image : StepImage program runtime.static runtime.instantiation) :
+    Typing.SourceConversionClosed program source runtime :=
+  fun _left _right equal => definitional_image image (equal.closed_definitional assumptions)
+
 end Typing
 
 namespace ScopeInstantiation
@@ -92,6 +209,45 @@ theorem definitionalStep_alias {program : Program} {scope : ScopeInstantiation}
     obtain ⟨original,present,rfl⟩ := List.mem_map.mp member'
     exact (term_kind scope original) ▸ map_kinding scope (kinded original present))
     (substitute_values scope substitution declaration.value value graph fixed)
+
+/-- Alias expansion transports to an image context: the declared body is fixed
+by `ProgramWellFormed`, and the actual instantiation and substitution edges
+survive decoding. The only input beyond actual declaration closure is the
+kinding of the decoded arguments at the image context. -/
+theorem ScopeInstantiation.stepImage_alias {program : Language.Program} (valid : ProgramWellFormed program)
+    {context : Language.Context} {scope : ScopeInstantiation}
+    {id : DeclId} {declaration : AliasDefinition} {arguments : List Term}
+    {substitution : Substitution} {value : Term}
+    (found : program.alias id = some declaration)
+    (instantiated : Instantiates declaration.generics arguments substitution)
+    (graph : Substitutes substitution declaration.value value)
+    (imageKinding : ∀ argument ∈ arguments.map scope.term,
+      Kinding program context argument argument.kind) :
+    DefinitionallyEqual program context (scope.term (.alias id arguments)) (scope.term value) :=
+  by
+    simpa only [ScopeInstantiation.term,Term.mapChildren] using
+      (DefinitionallyEqual.step (.alias found
+        (instantiated.map_values scope.term (fun argument _ => ScopeInstantiation.term_kind scope argument))
+        imageKinding
+        (substitute_values scope substitution declaration.value value graph
+          (ScopeInstantiation.aliasValue_fixed valid found))))
+
+
+/-- The recorded projection obligation is exactly the projection-shaped
+instance of the step image: a projection-headed definitional step is either an
+actual runtime step or already a runtime conversion, and either way its two
+images convert. -/
+theorem ProjectionStepConversion.step {program : Language.Program} {source : Language.Context}
+    {runtime : Execution.Context} (obligation : Typing.ProjectionStepConversion program source runtime)
+    {left right : Term} (derived : DefinitionalStep program source left right)
+    (shape : ∃ (associated : AssociatedDefinition), ∃ trait member owners items,
+      left = .projection trait member owners items associated.kind) :
+    DefinitionallyEqual program runtime.static (runtime.term left) (runtime.term right) := by
+  rcases obligation left right derived with ⟨associated,trait,member,owners,items,_same,converted⟩ | absent
+  · rcases converted with stepped | equal
+    · exact DefinitionallyEqual.step stepped
+    · exact equal
+  · exact False.elim (absent shape)
 
 end ScopeInstantiation
 end Glorious.Language
