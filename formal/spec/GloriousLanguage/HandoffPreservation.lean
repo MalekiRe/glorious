@@ -283,3 +283,17 @@ theorem ProtectsFor.resident_snapshot {program : Kernel.Program} {context : Cont
 
 end Execution
 end Glorious.Language
+
+/-- Replacing one child slot keeps the value's other slots and its length: the
+replacement lands in that one position of the fields list, whether it clears the
+slot or changes what it holds. -/
+theorem Value.replace_cons_siblings {before after : Glorious.Language.Value} {index : Nat}
+    {replacement : Option Glorious.Language.Value}
+    (replaced : before.replace [index] replacement = some after) :
+    after.fields.length = before.fields.length ∧
+    ∀ other, other ≠ index → after.fields[other]? = before.fields[other]? := by
+  obtain ⟨field,_,empty | ⟨child,changed,_,_,same⟩⟩ := Glorious.Language.Value.replace_cons_shape replaced
+  · rw [empty.2]
+    exact ⟨List.length_set, fun other different => List.getElem?_set_ne (Ne.symm different)⟩
+  · rw [same]
+    exact ⟨List.length_set, fun other different => List.getElem?_set_ne (Ne.symm different)⟩
