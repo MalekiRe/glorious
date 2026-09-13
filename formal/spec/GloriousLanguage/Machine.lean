@@ -573,16 +573,16 @@ def EntrySource.Ready (program : Kernel.Program) (world : World) (function : Fun
 callee lifetime. Resident captures project the newly lent receiver authority;
 contextual inputs keep the actual frozen reservation product and obtain their
 own child loans when the common input binder consumes them. -/
-inductive PreparesEntry (program : Kernel.Program) (callee : Context) (function : Function) :
-    World → EntrySource → List InvocationInput → World → Prop where
-  | supplied {world inputs} : PreparesEntry program callee function world (.supplied inputs) inputs world
+inductive PreparesEntryAttempt (program : Kernel.Program) (callee : Context) (function : Function) :
+    World → EntrySource → List InvocationInput → World → PreparationOutcome → Prop where
+  | supplied {world inputs} : PreparesEntryAttempt program callee function world (.supplied inputs) inputs world .complete
   | resident {before receiver access arguments id instanceArguments lease authority lent captures after} :
       CallableReceiver program before receiver.address receiver.authority access id instanceArguments →
       Instance program id instanceArguments function →
       LendsReceiver program callee before receiver.address receiver.authority access lease authority lent →
       CaptureInputs lent receiver.address authority access function.captures captures →
       ConsumesReceiver lent receiver.address authority access after →
-      PreparesEntry program callee function before (.resident receiver access arguments) (captures ++ arguments) after
+      PreparesEntryAttempt program callee function before (.resident receiver access arguments) (captures ++ arguments) after .complete
   | contextual {before receiver receiverAccess witness witnessAccess captures arguments id instanceArguments
       available receiverLease receiverAuthority middle witnessLease witnessAuthority lent consumed after} :
       CallableReceiver program before receiver.address receiver.authority receiverAccess id instanceArguments →
@@ -594,8 +594,63 @@ inductive PreparesEntry (program : Kernel.Program) (callee : Context) (function 
       ReservationInputs lent available witnessAccess function.captures captures →
       ConsumesReceiver lent receiver.address receiverAuthority receiverAccess consumed →
       ConsumesAvailability consumed witness.address witnessAuthority available.identity witnessAccess after →
-      PreparesEntry program callee function before
-        (.contextual receiver receiverAccess witness witnessAccess (captures ++ arguments)) (captures ++ arguments) after
+      PreparesEntryAttempt program callee function before
+        (.contextual receiver receiverAccess witness witnessAccess (captures ++ arguments)) (captures ++ arguments) after .complete
+  | residentExhausted {before receiver access arguments id instanceArguments} :
+      CallableReceiver program before receiver.address receiver.authority access id instanceArguments →
+      Instance program id instanceArguments function →
+      LendsResidentExhausted program callee.region before receiver.address receiver.authority access →
+      PreparesEntryAttempt program callee function before (.resident receiver access arguments) [] before .exhausted
+  | contextualReceiverExhausted {before receiver receiverAccess witness witnessAccess captures arguments id instanceArguments available} :
+      CallableReceiver program before receiver.address receiver.authority receiverAccess id instanceArguments →
+      Instance program id instanceArguments function →
+      ContextualWitness before witness witnessAccess available →
+      ReservationInputs before available witnessAccess function.captures captures →
+      LendsResidentExhausted program callee.region before receiver.address receiver.authority receiverAccess →
+      PreparesEntryAttempt program callee function before
+        (.contextual receiver receiverAccess witness witnessAccess (captures ++ arguments)) [] before .exhausted
+  | contextualWitnessExhausted {before receiver receiverAccess witness witnessAccess captures arguments id instanceArguments
+      available receiverLease receiverAuthority middle} :
+      CallableReceiver program before receiver.address receiver.authority receiverAccess id instanceArguments →
+      Instance program id instanceArguments function →
+      ContextualWitness before witness witnessAccess available →
+      ReservationInputs before available witnessAccess function.captures captures →
+      LendsReceiver program callee before receiver.address receiver.authority receiverAccess receiverLease receiverAuthority middle →
+      LendsResidentExhausted program callee.region middle witness.address witness.authority witnessAccess →
+      PreparesEntryAttempt program callee function before
+        (.contextual receiver receiverAccess witness witnessAccess (captures ++ arguments)) [] middle .exhausted
+
+/-- Completed preparation is the successful specialization of the same attempt. -/
+abbrev PreparesEntry (program : Kernel.Program) (callee : Context) (function : Function)
+    (before : World) (source : EntrySource) (inputs : List InvocationInput) (after : World) : Prop :=
+  PreparesEntryAttempt program callee function before source inputs after .complete
+
+/-- Both successful preparation and its real exhausted prefix depend on the
+callee's fresh lifetime, not on the environment the input fold later builds. -/
+theorem PreparesEntryAttempt.callee_context {program : Kernel.Program} {first second : Context}
+    {function : Function} {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    {outcome : PreparationOutcome}
+    (prepared : PreparesEntryAttempt program first function before source inputs after outcome)
+    (activation : first.activation = second.activation) (scope : first.scope = second.scope)
+    (region : first.region = second.region) :
+    PreparesEntryAttempt program second function before source inputs after outcome := by
+  cases prepared with
+  | supplied => exact .supplied
+  | resident callable instanceArguments lent captures consumed =>
+    exact .resident callable instanceArguments
+      (by simpa only [LendsReceiver,activation,scope,region] using lent) captures consumed
+  | contextual callable instanceArguments witnessed reserved receiver witness captured consumed finished =>
+    exact .contextual callable instanceArguments witnessed reserved
+      (by simpa only [LendsReceiver,activation,scope,region] using receiver)
+      (by simpa only [LendsReceiver,activation,scope,region] using witness) captured consumed finished
+  | residentExhausted callable instanced failed =>
+    exact .residentExhausted callable instanced (by simpa only [region] using failed)
+  | contextualReceiverExhausted callable instanced witnessed reserved failed =>
+    exact .contextualReceiverExhausted callable instanced witnessed reserved (by simpa only [region] using failed)
+  | contextualWitnessExhausted callable instanced witnessed reserved lent failed =>
+    exact .contextualWitnessExhausted callable instanced witnessed reserved
+      (by simpa only [LendsReceiver,activation,scope,region] using lent) (by simpa only [region] using failed)
+
 
 /-- Owned invocation consumes the callable shell exactly once, after the
 common binder has transferred its captures. The receiver is not an implicit
@@ -616,30 +671,71 @@ inductive FinishesEntry : World → EntrySource → World → Prop where
   | contextual {before receiver access witness witnessAccess inputs after} : FinishesReceiver before receiver access after →
       FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after
 
-/-- Ordinary entry and exhaustion share the same fresh lifetime, selected
-function, receiver preparation and ordered input binder. Only a completed
-binder proceeds to consume the receiver shell. -/
-def EnterWorldAttempt (program : Kernel.Program) (before : State) (caller : Context)
-    (function : Function) (source : EntrySource) (context : Context) (after : World)
-    (outcome : PreparationOutcome) : Prop :=
-  ∃ withRegion prepared inputs environment declaration bound,
-    program.declarations.function function.declaration = some declaration ∧
-    FreshRegion before.world before.world.nextRegion withRegion ∧
-    PreparesEntry program context function withRegion source inputs prepared ∧
-    IncomingResources program function prepared inputs ∧
-    BindsInputsAttemptFor program (.activation before.nextActivation)
-      before.nextActivation before.world.nextRegion before.world.nextRegion
-      (inputs.flatMap InvocationInput.clearedStorage) prepared inputs environment bound outcome ∧
-    (match outcome with
-      | .complete => FinishesEntry bound source after
-      | .exhausted => after = bound) ∧
-    context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
-      function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,environment⟩]⟩ ∧
-    (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
+/-- Entry retains the actual phase of failure. Preparation exhaustion keeps
+its completed lease prefix; input exhaustion keeps its completed binding prefix.
+Only a completed input binder may consume the receiver shell. -/
+inductive EnterWorldAttempt (program : Kernel.Program) (before : State) (caller : Context)
+    (function : Function) (source : EntrySource) (context : Context) : World → PreparationOutcome → Prop where
+  | inputs {withRegion prepared inputs environment declaration bound after outcome} :
+      program.declarations.function function.declaration = some declaration →
+      FreshRegion before.world before.world.nextRegion withRegion →
+      PreparesEntry program context function withRegion source inputs prepared →
+      IncomingResources program function prepared inputs →
+      BindsInputsAttemptFor program (.activation before.nextActivation)
+        before.nextActivation before.world.nextRegion before.world.nextRegion
+        (inputs.flatMap InvocationInput.clearedStorage) prepared inputs environment bound outcome →
+      (match outcome with
+        | .complete => FinishesEntry bound source after
+        | .exhausted => after = bound) →
+      context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
+        function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,environment⟩]⟩ →
+      (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) →
+      EnterWorldAttempt program before caller function source context after outcome
+  | preparationExhausted {withRegion after declaration} :
+      program.declarations.function function.declaration = some declaration →
+      FreshRegion before.world before.world.nextRegion withRegion →
+      PreparesEntryAttempt program context function withRegion source [] after .exhausted →
+      context = ⟨[],declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
+        function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,[]⟩]⟩ →
+      (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) →
+      EnterWorldAttempt program before caller function source context after .exhausted
+
+theorem EnterWorldAttempt.fresh_context {program : Kernel.Program} {before : State} {after : World}
+    {caller callee : Context} {function : Function} {source : EntrySource} {outcome : PreparationOutcome}
+    (attempted : EnterWorldAttempt program before caller function source callee after outcome) :
+    callee.activation = before.nextActivation ∧ callee.scope = before.world.nextRegion ∧
+      callee.region = before.world.nextRegion := by
+  cases attempted with
+  | inputs _ _ _ _ _ _ contextEq _ | preparationExhausted _ _ _ contextEq _ =>
+    subst callee
+    exact ⟨rfl,rfl,rfl⟩
+
 
 abbrev EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
     (function : Function) (source : EntrySource) (context : Context) (after : World) : Prop :=
   EnterWorldAttempt program before caller function source context after .complete
+
+/-- Complete entry necessarily crossed preparation and binding successfully.
+The phase-indexed constructor, not an extra certificate, excludes earlier failure. -/
+theorem EnterWorld.prepared {program : Kernel.Program} {before : State} {caller : Context}
+    {function : Function} {source : EntrySource} {context : Context} {after : World}
+    (entered : EnterWorld program before caller function source context after) :
+    ∃ withRegion prepared inputs environment declaration bound,
+      program.declarations.function function.declaration = some declaration ∧
+      FreshRegion before.world before.world.nextRegion withRegion ∧
+      PreparesEntry program context function withRegion source inputs prepared ∧
+      IncomingResources program function prepared inputs ∧
+      BindsInputsAttemptFor program (.activation before.nextActivation)
+        before.nextActivation before.world.nextRegion before.world.nextRegion
+        (inputs.flatMap InvocationInput.clearedStorage) prepared inputs environment bound .complete ∧
+      FinishesEntry bound source after ∧
+      context = ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
+        function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,environment⟩]⟩ ∧
+      (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) := by
+  cases entered with
+  | inputs selected fresh prepared incoming bound finished contextEq unsafeOk =>
+    exact ⟨_,_,_,_,_,_,selected,fresh,prepared,incoming,bound,finished,contextEq,unsafeOk⟩
+
 
 def FreshNamedFrame (function : Function) (caller : Context) (brand region : Identity) : List Frame :=
   match function.namedExit with

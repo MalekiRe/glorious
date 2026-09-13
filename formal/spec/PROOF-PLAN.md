@@ -203,10 +203,11 @@ and `.conversionClosed` derive the full logical and definitional readings
 consumed by both source address bridges and both label handoff consumers.
 The superseded interpretation-certificate path is removed.
 
-The integrated 198-job gate combines `InputBatchProgress`,
+The integrated 220-job gate combines `InputBatchProgress`,
 `SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
-`RuntimeWorldEquivariance`, `SnapshotReplayPreservation` and the repaired
-`FunctionEntryContextTyping`. Axiom audits of
+`RuntimeWorldEquivariance`, `SnapshotReplayPreservation`, the repaired
+`FunctionEntryContextTyping`, `AllocationExecution`, `PrivateStorage`,
+`ActivationStorageOrigin` and `ControlAuthorityStorage`. Axiom audits of
 the general transport, entry producer, context preservation, source and label
 consumers, and whole-run/public-world preservation report only `propext`,
 `Classical.choice` and `Quot.sound`. The entry repair replaces its false
@@ -215,10 +216,23 @@ Proper-tail success retains `ReleaseCustodyLoans`, cleanup and inherited
 resource contracts; resident, contextual and foreign callback recipes all
 consume this same outcome, with source-formal alignment derived from the real
 resident/resource input projection. Entry and all three caller axiom audits
-report only the standard three axioms. The next dependency is receiver/witness
-preparation success or physical exhaustion and constructive entry from original
-admission. General resource progress remains open; the repaired entry consumer
-does not claim source-wide progress or conformance.
+report only the standard three axioms.
+
+Preparation itself now has actual receiver/witness exhaustion constructors.
+`EnterWorldAttempt` distinguishes that prefix from a prepared input batch;
+the second contextual lease can fail without erasing the first lease. Both
+phases preserve world typing, suspension storage, activation provenance and
+private slots, and expose positive physical allocation exhaustion. Real entry
+exclusivity reports fatal failure instead of fabricating an acquired loan.
+The privacy theorem uses original source support for erased ports; the
+authority theorem uses original recipe provenance for guarded authorities.
+Neither introduces a post-world admission callback. Their axiom audits report
+only the standard three axioms.
+
+The next dependency is constructive receiver/witness preparation and whole
+entry from original admission, followed by the still-stale higher task/frame
+consumers. General resource progress remains open; this gate does not claim
+source-wide progress or full-tree conformance.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

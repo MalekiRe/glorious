@@ -7,12 +7,6 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
-theorem ConsumesReceiver.private_slot {before after : World} {address authority access}
-    {id : Identity} {root : Root} (consumed : ConsumesReceiver before address authority access after)
-    (slot : before.PrivateSlot id root) : after.PrivateSlot id root := by
-  cases consumed with
-  | lent _ => exact slot
-  | owned stored _ _ _ written => exact slot.write written (slot.stored_outside stored)
 
 theorem Captures.private_slot {program : Kernel.Program} {context : Context} {before after : World}
     {captures : List Capture} {addresses : List Address} {id : Identity} {root : Root}
@@ -65,7 +59,7 @@ theorem LocalStep.private_slot {program : Kernel.Program} {before after : State}
   case result kept | activationReturn kept _ _ | scopeReturn kept _ _ => exact (kept.private_slot well slot).1
   case transfer moved => exact moved.private_slot slot (Ne.symm taskOutside.2.1)
   case call consumed => exact consumed.private_slot slot
-  case enter entered | enterTail entered _ _ _ _ => exact (entered.private_slot well slot).1
+  case enter entered | enterTail entered _ _ _ _ => exact (entered.private_slot well slot taskOutside.2).1
   case bindReturn moved => exact moved.private_slot slot (bindingOutside _ _ _ _ rfl)
   case scope fresh _ => exact FreshRegion.private_slot fresh slot
   case patternBind bound => exact (bound.private_slot well slot).1

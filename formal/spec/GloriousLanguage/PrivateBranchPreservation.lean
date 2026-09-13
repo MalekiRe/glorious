@@ -5,19 +5,6 @@ slot. Freshness comes from actual allocation; reservation exclusion comes
 from the authoritative resolved operands and current availability ledger. -/
 namespace Glorious.Language
 
-theorem World.PrivateSlot.availability_set {world : World} {id key : Identity} {root : Root}
-    {available : Availability} (slot : world.PrivateSlot id root)
-    (outside : available.active = true → ∀ place ∈ available.reserved, place.address.root ≠ id) :
-    ({ world with availability := world.availability.set key available } : World).PrivateSlot id root := by
-  refine ⟨slot.found,slot.vacant,⟨slot.safe.1,?_,slot.safe.2.2⟩,slot.internalHome⟩
-  intro actual entry found active place member
-  by_cases same : actual = key
-  · subst actual
-    have equal := Option.some.inj (found.symm.trans (Table.get_set _ _ _))
-    subst entry
-    exact outside active place member
-  · exact slot.safe.2.1 actual entry
-      (by simpa only [Table.get_set_other _ _ _ _ same] using found) active place member
 
 namespace Execution
 open Kernel
@@ -68,12 +55,6 @@ theorem TestResult.private_slot {program : Kernel.Program} {context : Context} {
     exact constructed.private_slot
       (fields.choose_spec.2.2.2.2.private_slot packedBound (packed.private_slot copiedBound middle)) outside
 
-theorem ConsumesAvailability.private_slot {before after : World} {address : Address} {key : Identity} {access : Access}
-    {id : Identity} {root : Root} (consumed : ConsumesAvailability before address key access after)
-    (slot : before.PrivateSlot id root) (outside : address.root ≠ id) : after.PrivateSlot id root := by
-  cases consumed with
-  | lent _ => exact slot
-  | owned _ written => exact (slot.write written outside).availability_set (by simp)
 
 theorem ControlStep.private_slot {program : Kernel.Program} {before after : State} {event : Option Event}
     {id owner : Identity} {returning : Bool} {root : Root}

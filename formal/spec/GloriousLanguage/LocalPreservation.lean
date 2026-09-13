@@ -39,11 +39,12 @@ theorem ProtectsFor.worldTyped {footprint : List Address} {program : Kernel.Prog
     Typing.WorldTyped program after :=
   ProtectsAttemptFor.worldTyped valid inventory typed kept
 
-theorem PreparesEntry.worldTyped {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+theorem PreparesEntryAttempt.worldTyped {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
     {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput}
+    {outcome : Kernel.PreparationOutcome}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (prepared : PreparesEntry program callee function before source inputs after) :
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome) :
     Typing.WorldTyped program after := by
   cases prepared with
   | supplied => exact typed
@@ -52,6 +53,8 @@ theorem PreparesEntry.worldTyped {program : Kernel.Program} {callee : Context} {
   | contextual _ _ _ _ receiver witness _ consumed availability =>
       exact availability.worldTyped (consumed.worldTyped
         (witness.worldTyped valid inventory (receiver.worldTyped valid inventory typed)))
+  | residentExhausted | contextualReceiverExhausted => exact typed
+  | contextualWitnessExhausted _ _ _ _ lent _ => exact lent.worldTyped valid inventory typed
 
 theorem EnterWorldAttempt.worldTyped {program : Kernel.Program} {before : State} {after : World}
     {caller context : Context} {function : Kernel.Function} {source : EntrySource}
@@ -60,11 +63,14 @@ theorem EnterWorldAttempt.worldTyped {program : Kernel.Program} {before : State}
     (typed : Typing.WorldTyped program before.world)
     (entered : EnterWorldAttempt program before caller function source context after outcome) :
     Typing.WorldTyped program after := by
-  obtain ⟨_,_,_,_,_,_,_,fresh,prepared,_,bound,finished,_,_⟩ := entered
-  have boundTyped := bound.worldTyped valid inventory (prepared.worldTyped valid inventory (fresh.worldTyped typed))
-  cases outcome with
-  | complete => exact finished.worldTyped boundTyped
-  | exhausted => exact finished ▸ boundTyped
+  cases entered with
+  | inputs _ fresh prepared _ bound finished _ _ =>
+    have boundTyped := bound.worldTyped valid inventory (prepared.worldTyped valid inventory (fresh.worldTyped typed))
+    cases outcome with
+    | complete => exact finished.worldTyped boundTyped
+    | exhausted => exact finished ▸ boundTyped
+  | preparationExhausted _ fresh prepared _ _ =>
+    exact prepared.worldTyped valid inventory (fresh.worldTyped typed)
 
 theorem EnterWorld.worldTyped {program : Kernel.Program} {before : State} {after : World}
     {caller context : Context} {function : Kernel.Function} {source : EntrySource}

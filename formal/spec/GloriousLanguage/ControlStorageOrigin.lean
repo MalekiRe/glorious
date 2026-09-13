@@ -252,7 +252,7 @@ theorem ReturnsResources.counter {program : Kernel.Program} {source receiver : C
   cases returned with
   | localReturn same => exact Nat.le_refl _
   | invocationReturn activationNe outputs outgoing bound relinquished =>
-    exact Nat.le_trans (Kernel.BindsInputs.suspensionExtension bound).counter relinquished.counter
+    exact Nat.le_trans (Kernel.BindsInputsAttemptFor.suspensionExtension bound).counter relinquished.counter
 
 theorem ArgumentInputs.root_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
@@ -311,9 +311,9 @@ theorem ConsumesAvailability.wellFormed {before after : World} {address : Addres
       (World.clear_wellFormed (valid := well) (permission := permitted) (written := written))
       (by simpa only [congrArg World.availability (World.write_rest written)] using available)
 
-theorem PreparesEntry.wellFormed {program : Kernel.Program} {callee : Context} {function : Function}
-    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
-    (prepared : PreparesEntry program callee function before source inputs after)
+theorem PreparesEntryAttempt.wellFormed {program : Kernel.Program} {callee : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput} {outcome : PreparationOutcome}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
     (well : before.WellFormed) : after.WellFormed := by
   cases prepared with
   | supplied => exact well
@@ -323,13 +323,15 @@ theorem PreparesEntry.wellFormed {program : Kernel.Program} {callee : Context} {
     exact ConsumesAvailability.wellFormed consumesAvailability
       (ConsumesReceiver.wellFormed consumes
         (LendsResident.wellFormed witnessLends (LendsResident.wellFormed receiverLends well)))
+  | residentExhausted | contextualReceiverExhausted => exact well
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact lends.wellFormed well
 
 theorem EnterWorld.context_root_support {program : Kernel.Program} {before : State} {caller context : Context}
     {function : Function} {source : EntrySource} {after : World}
     (well : before.world.WellFormed) (entered : EnterWorld program before caller function source context after) :
     RootSupport.Below context.rootSupport after.nextRoot := by
   obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,functionAt,region,prepares,
-    incoming,binds,finish,contextEq,unsafeOk⟩ := entered
+    incoming,binds,finish,contextEq,unsafeOk⟩ := entered.prepared
   have boundAt := BindsInputsFor.bindings_root_bound binds
     (prepares.wellFormed (region.wellFormed well))
   have frontier : bound.nextRoot ≤ after.nextRoot := finish.suspensionExtension.counter

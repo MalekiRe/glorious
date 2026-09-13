@@ -144,8 +144,8 @@ theorem LocalStep.private_control {program : Kernel.Program} {before after : Sta
         And.intro frameRoots.1 taskRoots.2
 
   case enter callContext function source context world task entered =>
-    have fresh : context.activation ≠ owner := by rw [entered.activation]; exact (Nat.ne_of_lt ownerBound).symm
-    have contextOutside := (entered.private_slot well slot).2
+    have fresh : context.activation ≠ owner := by rw [entered.fresh_context.1]; exact (Nat.ne_of_lt ownerBound).symm
+    have contextOutside := (entered.private_slot well slot taskRoots.2).2
     have namedOutside := FreshNamedFrame.avoids_root (function := function) (brand := before.nextBrand)
       (region := context.region) contextOutside
     refine Or.inl ⟨FreshNamedFrame function context before.nextBrand context.region ++
@@ -155,8 +155,8 @@ theorem LocalStep.private_control {program : Kernel.Program} {before after : Sta
         And.intro namedOutside (And.intro taskRoots.1 frameRoots)
     · exact PrivateFrames.fresh_named fresh ⟨⟨fresh,Or.inr taskOwner⟩,frameOwners⟩
   case enterTail callContext function source context world boundCaller regions rest roots task entered route selected _ _ =>
-    have fresh : context.activation ≠ owner := by rw [entered.activation]; exact (Nat.ne_of_lt ownerBound).symm
-    have contextOutside := (entered.private_slot well slot).2
+    have fresh : context.activation ≠ owner := by rw [entered.fresh_context.1]; exact (Nat.ne_of_lt ownerBound).symm
+    have contextOutside := (entered.private_slot well slot taskRoots.2).2
     have namedOutside := FreshNamedFrame.avoids_root (function := function) (brand := before.nextBrand)
       (region := context.region) contextOutside
     obtain ⟨remaining,tail,callerOutside,remainingOutside,callerOwner,remainingOwners⟩ :=

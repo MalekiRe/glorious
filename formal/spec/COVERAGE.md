@@ -312,10 +312,11 @@ place and label execution without an independent reading callback. The
 superseded certificate lane has been removed. General source-admitted
 progress and full specification conformance remain separate obligations.
 
-The integrated strict gate passes 198 jobs for `InputBatchProgress`,
+The integrated strict gate passes 220 jobs for `InputBatchProgress`,
 `SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
-`RuntimeWorldEquivariance`, `SnapshotReplayPreservation` and the repaired
-`FunctionEntryContextTyping`. General logical
+`RuntimeWorldEquivariance`, `SnapshotReplayPreservation`, the repaired
+`FunctionEntryContextTyping`, `AllocationExecution`, `PrivateStorage`,
+`ActivationStorageOrigin` and `ControlAuthorityStorage`. General logical
 transport, actual instance/entry admission, context preservation, source
 conversion, both address bridges, both label consumers, whole `Step`/`Run`
 and public reachable-world axiom audits report only `propext`,
@@ -325,9 +326,24 @@ and inherited contracts before proper-tail cleanup, and the exact partial
 world/fresh-counter consumption on exhaustion. Ordinary, contextual and foreign
 callback recipes share that result; erased resource inputs do not fabricate
 source-local formals. The entry and all three caller axiom audits report only
-the same standard axioms. Receiver/witness preparation failure and constructive
-entry progress from original admission remain open. No full-tree success is
-claimed; preserved example modules were not run.
+the same standard axioms.
+
+Receiver/witness preparation failure is now represented by the authoritative
+`PreparesEntryAttempt` and consumed by `EnterWorldAttempt`. A first-lease
+failure retains the input world; a contextual second-lease failure retains
+the actual receiver lease. General world typing, suspension retention,
+activation bounds, private-slot preservation and positive allocation-exhaustion
+proofs cover both preparation and input-binding failure. Exclusivity no longer
+asserts that allocation failure acquired a loan.
+
+The private-slot proof transports the original source footprint through
+`PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
+residents. Entry control-authority provenance transports the original recipe
+records, including guarded carriers, through actual preparation, binding and
+receiver finishing. These general theorem axiom audits also report only the
+standard axioms. Constructive preparation/entry progress from original
+admission and higher task/frame integration remain open. No full-tree success
+is claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

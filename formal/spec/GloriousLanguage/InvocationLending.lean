@@ -36,9 +36,9 @@ theorem Kernel.retained_through_entry {program : Kernel.Program} {after bound : 
   obtain ⟨current,atBound,shape⟩ := Kernel.BindsInputsAttemptFor.loan_retained valid chained found
   exact ⟨current,by rw [← loansAfter]; exact atBound,shape⟩
 
-/-- Every admitted ordinary entry retains the whole-receiver loan after
-binding all captured and explicit inputs. This includes proper-tail entry and
-the exhausted prefix of a failed one. -/
+/-- Entry either exhausts or establishes the whole-receiver exclusion. A
+failure before acquiring the lease does not invent an unavailable parent;
+the input-binding phase still retains every lease it actually acquired. -/
 theorem EnterWorldAttempt.resident_exclusive {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {receiver : ResolvedPlace}
     {access : Access} {arguments : List InvocationInput} {requested : Access}
@@ -47,23 +47,25 @@ theorem EnterWorldAttempt.resident_exclusive {program : Kernel.Program} {before 
     (typed : Typing.WorldTyped program before.world)
     (attempt : EnterWorldAttempt program before caller function (.resident receiver access arguments) callee after outcome)
     (borrowed : access ≠ .owned) (conflict : requested ≠ .shared ∨ access = .unique) :
-    ¬ Permitted after receiver.authority requested receiver.address := by
-  have attemptKept := attempt
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := attempt
-  have regionTyped := fresh.worldTyped typed
-  have preparedTyped := preparation.worldTyped valid inventory regionTyped
-  have afterTyped := EnterWorldAttempt.worldTyped valid inventory typed attemptKept
-  have loansAfter : bound.loans = after.loans := by
-    cases outcome with
-    | complete => exact (finished.loans).symm
-    | exhausted => cases finished; rfl
-  cases preparation with
-  | resident callable instanced lent capturesProof consumedProof =>
-    refine Kernel.LendsResident.excludes_parent_retained (valid := regionTyped.1) (future := afterTyped.1)
-      lent borrowed conflict ?_
-    intro id loan found
-    have atPrepared : prepared.loans.get id = some loan := by rw [consumedProof.loans]; exact found
-    exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
+    outcome = .exhausted ∨ ¬ Permitted after receiver.authority requested receiver.address := by
+  have afterTyped := attempt.worldTyped valid inventory typed
+  cases attempt
+  case preparationExhausted => exact Or.inl rfl
+  case inputs withRegion prepared inputs environment declaration bound selected fresh preparation incoming contextEq unsafeAllowed chained finished =>
+    right
+    have regionTyped := fresh.worldTyped typed
+    have preparedTyped := preparation.worldTyped valid inventory regionTyped
+    have loansAfter : bound.loans = after.loans := by
+      cases outcome with
+      | complete => exact (finished.loans).symm
+      | exhausted => cases finished; rfl
+    cases preparation with
+    | resident callable instanced lent capturesProof consumedProof =>
+      refine Kernel.LendsResident.excludes_parent_retained (valid := regionTyped.1) (future := afterTyped.1)
+        lent borrowed conflict ?_
+      intro id loan found
+      have atPrepared : prepared.loans.get id = some loan := by rw [consumedProof.loans]; exact found
+      exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
 
 /-- The contextual witness is locked by a real callee-owned loan, even when
 the reservation has no captured fields. Its original authority cannot re-enter
@@ -77,26 +79,28 @@ theorem EnterWorldAttempt.contextual_witness_exclusive {program : Kernel.Program
     (attempt : EnterWorldAttempt program before caller function
       (.contextual receiver receiverAccess witness witnessAccess inputs) callee after outcome)
     (borrowed : witnessAccess ≠ .owned) (conflict : requested ≠ .shared ∨ witnessAccess = .unique) :
-    ¬ Permitted after witness.authority requested witness.address := by
-  have attemptKept := attempt
-  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := attempt
-  have regionTyped := fresh.worldTyped typed
-  have preparedTyped := preparation.worldTyped valid inventory regionTyped
-  have afterTyped := EnterWorldAttempt.worldTyped valid inventory typed attemptKept
-  have loansAfter : bound.loans = after.loans := by
-    cases outcome with
-    | complete => exact (finished.loans).symm
-    | exhausted => cases finished; rfl
-  cases preparation with
-  | contextual callable instanced witnessEvidence reservations receiverLent witnessLent capturesProof consumedReceiver consumedAvailability =>
-    refine Kernel.LendsResident.excludes_parent_retained
-      (valid := (receiverLent.worldTyped valid inventory regionTyped).1) (future := afterTyped.1)
-      witnessLent borrowed conflict ?_
-    intro id loan found
-    have atPrepared : prepared.loans.get id = some loan := by
-      rw [consumedAvailability.loans, consumedReceiver.loans]
-      exact found
-    exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
+    outcome = .exhausted ∨ ¬ Permitted after witness.authority requested witness.address := by
+  have afterTyped := attempt.worldTyped valid inventory typed
+  cases attempt
+  case preparationExhausted => exact Or.inl rfl
+  case inputs withRegion prepared inputs' environment declaration bound selected fresh preparation incoming contextEq unsafeAllowed chained finished =>
+    right
+    have regionTyped := fresh.worldTyped typed
+    have preparedTyped := preparation.worldTyped valid inventory regionTyped
+    have loansAfter : bound.loans = after.loans := by
+      cases outcome with
+      | complete => exact (finished.loans).symm
+      | exhausted => cases finished; rfl
+    cases preparation with
+    | contextual callable instanced witnessEvidence reservations receiverLent witnessLent capturesProof consumedReceiver consumedAvailability =>
+      refine Kernel.LendsResident.excludes_parent_retained
+        (valid := (receiverLent.worldTyped valid inventory regionTyped).1) (future := afterTyped.1)
+        witnessLent borrowed conflict ?_
+      intro id loan found
+      have atPrepared : prepared.loans.get id = some loan := by
+        rw [consumedAvailability.loans,consumedReceiver.loans]
+        exact found
+      exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
 
 theorem EnterWorldAttempt.contextual_receiver_exclusive {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {receiver witness : ResolvedPlace}
@@ -107,27 +111,29 @@ theorem EnterWorldAttempt.contextual_receiver_exclusive {program : Kernel.Progra
     (attempt : EnterWorldAttempt program before caller function
       (.contextual receiver receiverAccess witness witnessAccess inputs) callee after outcome)
     (borrowed : receiverAccess ≠ .owned) (conflict : requested ≠ .shared ∨ receiverAccess = .unique) :
-    ¬ Permitted after receiver.authority requested receiver.address := by
-  have attemptKept := attempt
-  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := attempt
-  have regionTyped := fresh.worldTyped typed
-  have preparedTyped := preparation.worldTyped valid inventory regionTyped
-  have afterTyped := EnterWorldAttempt.worldTyped valid inventory typed attemptKept
-  have loansAfter : bound.loans = after.loans := by
-    cases outcome with
-    | complete => exact (finished.loans).symm
-    | exhausted => cases finished; rfl
-  cases preparation with
-  | contextual callable instanced witnessEvidence reservations receiverLent witnessLent capturesProof consumedReceiver consumedAvailability =>
-    have priorTyped := (receiverLent.worldTyped valid inventory regionTyped).1
-    refine Kernel.LendsResident.excludes_parent_retained (valid := regionTyped.1) (future := afterTyped.1)
-      receiverLent borrowed conflict ?_
-    intro id loan found
-    have atLent : _ := witnessLent.loan_retained priorTyped found
-    have atPrepared : prepared.loans.get id = some loan := by
-      rw [consumedAvailability.loans, consumedReceiver.loans]
-      exact atLent
-    exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
+    outcome = .exhausted ∨ ¬ Permitted after receiver.authority requested receiver.address := by
+  have afterTyped := attempt.worldTyped valid inventory typed
+  cases attempt
+  case preparationExhausted => exact Or.inl rfl
+  case inputs withRegion prepared inputs' environment declaration bound selected fresh preparation incoming contextEq unsafeAllowed chained finished =>
+    right
+    have regionTyped := fresh.worldTyped typed
+    have preparedTyped := preparation.worldTyped valid inventory regionTyped
+    have loansAfter : bound.loans = after.loans := by
+      cases outcome with
+      | complete => exact (finished.loans).symm
+      | exhausted => cases finished; rfl
+    cases preparation with
+    | contextual callable instanced witnessEvidence reservations receiverLent witnessLent capturesProof consumedReceiver consumedAvailability =>
+      have priorTyped := (receiverLent.worldTyped valid inventory regionTyped).1
+      refine Kernel.LendsResident.excludes_parent_retained (valid := regionTyped.1) (future := afterTyped.1)
+        receiverLent borrowed conflict ?_
+      intro id loan found
+      have atLent : _ := witnessLent.loan_retained priorTyped found
+      have atPrepared : prepared.loans.get id = some loan := by
+        rw [consumedAvailability.loans,consumedReceiver.loans]
+        exact atLent
+      exact Kernel.retained_through_entry preparedTyped.1 chained loansAfter id loan atPrepared
 
 theorem EnterWorld.supplied_exclusive {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {inputs : List InvocationInput}
@@ -138,7 +144,7 @@ theorem EnterWorld.supplied_exclusive {program : Kernel.Program} {before : State
     (member : input ∈ inputs) (borrowed : input.access ≠ .owned)
     (conflict : requested ≠ .shared ∨ input.access = .unique) :
     ¬ Permitted after input.authority requested input.storage := by
-  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered
+  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered.prepared
   have preparedTyped := preparation.worldTyped valid inventory (fresh.worldTyped typed)
   cases preparation with
   | supplied =>
@@ -157,7 +163,7 @@ theorem EnterWorld.contextual_inputs_exclusive {program : Kernel.Program} {befor
     (conflict : requested ≠ .shared ∨ input.access = .unique) :
     ¬ Permitted after input.authority requested input.storage := by
   have enteredKept := entered
-  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered
+  obtain ⟨withRegion,prepared,inputs',environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered.prepared
   have preparedTyped := preparation.worldTyped valid inventory (fresh.worldTyped typed)
   have afterTyped := EnterWorld.worldTyped valid inventory typed enteredKept
   cases preparation with
@@ -183,7 +189,8 @@ theorem EnterWorld.resident_exclusive {program : Kernel.Program} {before : State
     (entered : EnterWorld program before caller function (.resident receiver access arguments) callee after)
     (borrowed : access ≠ .owned) (conflict : requested ≠ .shared ∨ access = .unique) :
     ¬ Permitted after receiver.authority requested receiver.address :=
-  EnterWorldAttempt.resident_exclusive valid inventory typed entered borrowed conflict
+  (EnterWorldAttempt.resident_exclusive valid inventory typed entered borrowed conflict).resolve_left
+    (by intro impossible; cases impossible)
 
 theorem EnterWorld.contextual_witness_exclusive {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {receiver witness : ResolvedPlace}
@@ -194,7 +201,8 @@ theorem EnterWorld.contextual_witness_exclusive {program : Kernel.Program} {befo
       (.contextual receiver receiverAccess witness witnessAccess inputs) callee after)
     (borrowed : witnessAccess ≠ .owned) (conflict : requested ≠ .shared ∨ witnessAccess = .unique) :
     ¬ Permitted after witness.authority requested witness.address :=
-  EnterWorldAttempt.contextual_witness_exclusive valid inventory typed entered borrowed conflict
+  (EnterWorldAttempt.contextual_witness_exclusive valid inventory typed entered borrowed conflict).resolve_left
+    (by intro impossible; cases impossible)
 
 theorem EnterWorld.contextual_receiver_exclusive {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {receiver witness : ResolvedPlace}
@@ -205,14 +213,9 @@ theorem EnterWorld.contextual_receiver_exclusive {program : Kernel.Program} {bef
       (.contextual receiver receiverAccess witness witnessAccess inputs) callee after)
     (borrowed : receiverAccess ≠ .owned) (conflict : requested ≠ .shared ∨ receiverAccess = .unique) :
     ¬ Permitted after receiver.authority requested receiver.address :=
-  EnterWorldAttempt.contextual_receiver_exclusive valid inventory typed entered borrowed conflict
+  (EnterWorldAttempt.contextual_receiver_exclusive valid inventory typed entered borrowed conflict).resolve_left
+    (by intro impossible; cases impossible)
 
-theorem EnterWorld.fresh_context {program : Kernel.Program} {before : State} {after : World}
-    {caller callee : Context} {function : Function} {source : EntrySource}
-    (entered : EnterWorld program before caller function source callee after) :
-    callee.activation = before.nextActivation ∧ callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered
-  simp [contextEq]
 
 theorem EnterWorld.resident_lease_owned {program : Kernel.Program} {before : State} {after : World}
     {caller callee : Context} {function : Function} {receiver : ResolvedPlace}
@@ -223,7 +226,7 @@ theorem EnterWorld.resident_lease_owned {program : Kernel.Program} {before : Sta
     (borrowed : access ≠ .owned) :
     ∃ handle root, after.root handle = some root ∧ root.home = .temporary before.nextActivation before.world.nextRegion ∧
       root.region = before.world.nextRegion := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,selected,fresh,preparation,incoming,chained,finished,contextEq,unsafeAllowed⟩ := entered.prepared
   have regionTyped := fresh.worldTyped typed
   have preparedTyped := preparation.worldTyped valid inventory regionTyped
   cases preparation with
@@ -295,7 +298,8 @@ theorem LocalStep.enter_world {program : Kernel.Program} {before after : State} 
     (task : before.task = .enter caller function source tail)
     (step : LocalStep program before event after) :
     ∃ callee entered outcome, EnterWorldAttempt program before caller function source callee entered outcome ∧
-      (after.world = entered ∨ ∃ custody, RelinquishesCustody entered custody after.world) := by
+      (after.world = entered ∨ ∃ custody, RelinquishesCustody entered custody after.world) ∧
+      (outcome = .exhausted → after.task = .fatal .resource) := by
   cases step with
   | evaluateExhausted => simp_all
   | bindExhausted => simp_all
@@ -303,7 +307,7 @@ theorem LocalStep.enter_world {program : Kernel.Program} {before after : State} 
   | enterExhausted stepTask attempt =>
     rw [task] at stepTask
     cases stepTask
-    exact ⟨_,_,.exhausted,attempt,Or.inl rfl⟩
+    exact ⟨_,_,.exhausted,attempt,Or.inl rfl,fun _ => rfl⟩
   | resultExhausted => simp_all
   | activationReturnExhausted => simp_all
   | scopeReturnExhausted => simp_all
@@ -319,11 +323,11 @@ theorem LocalStep.enter_world {program : Kernel.Program} {before after : State} 
   | enter stepTask entered =>
     rw [task] at stepTask
     cases stepTask
-    exact ⟨_,_,.complete,entered,Or.inl rfl⟩
+    exact ⟨_,_,.complete,entered,Or.inl rfl,by intro impossible; cases impossible⟩
   | enterTail stepTask entered relinquished _ _ _ _ =>
     rw [task] at stepTask
     cases stepTask
-    exact ⟨_,_,.complete,entered,Or.inr ⟨_,relinquished⟩⟩
+    exact ⟨_,_,.complete,entered,Or.inr ⟨_,relinquished⟩,by intro impossible; cases impossible⟩
   | bindReturn => simp_all
   | activationReturn => simp_all
   | topReturn => simp_all
@@ -363,8 +367,8 @@ theorem LocalStep.enter_world {program : Kernel.Program} {before after : State} 
   | endLoan => simp_all
   | abort => simp_all
 
-/-- Exclusivity is a property of the actual transition, not just a prepared
-input list. Both ordinary and proper-tail entries use the same proof. -/
+/-- A continuing entry excludes the original authority. Preparation failure
+is exposed as a fatal task, not misclassified as acquisition of a loan. -/
 theorem LocalStep.resident_entry_exclusive {program : Kernel.Program} {before after : State} {event : Option Event}
     {caller : Context} {function : Function} {receiver : ResolvedPlace} {access : Access}
     {arguments : List InvocationInput} {tail : Bool} {requested : Access}
@@ -373,14 +377,14 @@ theorem LocalStep.resident_entry_exclusive {program : Kernel.Program} {before af
     (task : before.task = .enter caller function (.resident receiver access arguments) tail)
     (step : LocalStep program before event after)
     (borrowed : access ≠ .owned) (conflict : requested ≠ .shared ∨ access = .unique) :
-    ¬ Permitted after.world receiver.authority requested receiver.address := by
-  obtain ⟨callee,entered,outcome,attempt,finish⟩ := step.enter_world task
-  have negated := EnterWorldAttempt.resident_exclusive valid inventory typed attempt borrowed conflict
-  rcases finish with same | ⟨custody,relinquished⟩
-  · intro allowed
-    exact negated (same ▸ allowed)
-  · intro allowed
-    exact negated (relinquished.permitted_reflected allowed)
+    after.task = .fatal .resource ∨ ¬ Permitted after.world receiver.authority requested receiver.address := by
+  obtain ⟨callee,entered,outcome,attempt,finish,failed⟩ := step.enter_world task
+  rcases attempt.resident_exclusive valid inventory typed borrowed conflict with exhausted | negated
+  · exact Or.inl (failed exhausted)
+  · right
+    rcases finish with same | ⟨custody,relinquished⟩
+    · intro allowed; exact negated (same ▸ allowed)
+    · intro allowed; exact negated (relinquished.permitted_reflected allowed)
 
 theorem LocalStep.contextual_entry_exclusive {program : Kernel.Program} {before after : State} {event : Option Event}
     {caller : Context} {function : Function} {receiver witness : ResolvedPlace}
@@ -390,14 +394,14 @@ theorem LocalStep.contextual_entry_exclusive {program : Kernel.Program} {before 
     (task : before.task = .enter caller function (.contextual receiver receiverAccess witness witnessAccess inputs) tail)
     (step : LocalStep program before event after)
     (borrowed : witnessAccess ≠ .owned) (conflict : requested ≠ .shared ∨ witnessAccess = .unique) :
-    ¬ Permitted after.world witness.authority requested witness.address := by
-  obtain ⟨callee,entered,outcome,attempt,finish⟩ := step.enter_world task
-  have negated := EnterWorldAttempt.contextual_witness_exclusive valid inventory typed attempt borrowed conflict
-  rcases finish with same | ⟨custody,relinquished⟩
-  · intro allowed
-    exact negated (same ▸ allowed)
-  · intro allowed
-    exact negated (relinquished.permitted_reflected allowed)
+    after.task = .fatal .resource ∨ ¬ Permitted after.world witness.authority requested witness.address := by
+  obtain ⟨callee,entered,outcome,attempt,finish,failed⟩ := step.enter_world task
+  rcases attempt.contextual_witness_exclusive valid inventory typed borrowed conflict with exhausted | negated
+  · exact Or.inl (failed exhausted)
+  · right
+    rcases finish with same | ⟨custody,relinquished⟩
+    · intro allowed; exact negated (same ▸ allowed)
+    · intro allowed; exact negated (relinquished.permitted_reflected allowed)
 
 end Execution
 end Glorious.Language

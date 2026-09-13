@@ -396,17 +396,19 @@ inventory rather than accepting a separately supplied unrelated AST.
 
 ## Checking
 
-The integrated physical and logical admission checkpoint passes this proof gate:
+The integrated physical, logical and entry-preparation checkpoint passes this proof gate:
 
 ```sh
 lake build GloriousLanguage.InputBatchProgress \
   GloriousLanguage.SemanticPreservation GloriousLanguage.SourceAddress \
   GloriousLanguage.LabelExecution GloriousLanguage.AllocationLayout \
   GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.SnapshotReplayPreservation \
-  GloriousLanguage.FunctionEntryContextTyping
+  GloriousLanguage.FunctionEntryContextTyping GloriousLanguage.AllocationExecution \
+  GloriousLanguage.PrivateStorage GloriousLanguage.ActivationStorageOrigin \
+  GloriousLanguage.ControlAuthorityStorage
 ```
 
-The strict gate passes 198 jobs. Axiom audits of general scoped logical
+The strict gate passes 220 jobs. Axiom audits of general scoped logical
 transport, actual instance/entry admission, lexical context preservation,
 source conversion, both source address bridges, both label consumers, whole
 `Step`/`Run` preservation and public reachable-world typing report only
@@ -420,10 +422,26 @@ prefix and inherited contracts on proper-tail success, or the exact exhausted
 world and consumed fresh identities on resource failure. Resident, contextual
 and foreign callback consumers share this result, including nonempty erased
 resource inputs. Their axiom audits also report only the standard three axioms.
+`PreparesEntryAttempt` now represents receiver-lease exhaustion and contextual
+witness-lease exhaustion, retaining the first successful lease when the second
+fails. `EnterWorldAttempt` consumes either that actual failure or successful
+preparation followed by the ordered input fold. Both phases preserve world
+typing, suspension state, activation bounds and private storage. Exhaustion
+derives a positive physical allocation failure in the retained world. Entry
+exclusivity distinguishes fatal preparation failure from acquiring a real loan.
+
+Privacy uses the original recipe footprint: an erased port may name vacant
+storage, so vacancy alone cannot establish input exclusion. Authority provenance
+likewise comes from the original recipe, including guard carriers, and survives
+the actual preparation, binding and receiver-finishing phases. It is not inferred
+from an erased loan port's parent identity alone. The general entry-invariant
+axiom audits report only the standard three axioms.
+
 The preserved `Checks` were not run. This is general proof checking, not example
-evidence, a whole-library success or source-wide progress. Receiver/witness
-preparation exhaustion and entry progress from original input admission remain
-on the same dependency chain.
+evidence, a whole-library success or source-wide progress. Higher task/frame
+consumers are still being migrated and are not included in this gate. Constructing
+receiver/witness preparation and whole entry steps from original source admission
+remains on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:
 

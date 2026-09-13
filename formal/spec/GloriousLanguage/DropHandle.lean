@@ -41,8 +41,8 @@ theorem LocalStep.hook_entry_private {program : Kernel.Program} {before entering
     cases entry <;> try contradiction
     case enter caller actual source callee final task entered =>
       cases task
-      have moved := entered.owned_handle_private afterTyped rfl whole found privateRoot
+      have moved := entered.owned_handle_private afterTyped trivial rfl whole found privateRoot
       exact ⟨context,callee,function,authority,handle,loan,next,{ root with value := none },beforeTask,rfl,rfl,rfl,
-        entered.activation,moved.1,live,rfl,home,whole,fresh,freshLoan,moved.2.1,moved.2.2⟩
+        entered.fresh_context.1,moved.1,live,rfl,home,whole,fresh,freshLoan,moved.2.1,moved.2.2⟩
 
 end Glorious.Language.Execution

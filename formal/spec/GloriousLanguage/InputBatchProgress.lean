@@ -3306,38 +3306,6 @@ theorem Kernel.BatchPrepared.of_compatible {program : RuntimeProgram} {footprint
   · intro place member
     cases member
 
-/-- Receiver lending transports along the entry lifetime. -/
-theorem Execution.lendsReceiver_callee {program : Kernel.Program}
-    {first second : Execution.Context} {before after : World} {address : Address}
-    {authority permission : Authority} {access : Access} {lease : Option InvocationLease}
-    (activation : first.activation = second.activation) (scope : first.scope = second.scope)
-    (region : first.region = second.region)
-    (lent : Execution.LendsReceiver program first before address authority access lease permission after) :
-    Execution.LendsReceiver program second before address authority access lease permission after := by
-  rw [Execution.LendsReceiver] at lent ⊢
-  rw [activation,scope,region] at lent
-  exact lent
-
-/-- Invocation preparation transports along the entry lifetime: its only use of
-the callee context is the receiver lending. -/
-theorem Execution.preparesEntry_callee_context {program : Kernel.Program}
-    {first second : Execution.Context} {function : Kernel.Function} {before after : World}
-    {source : Execution.EntrySource} {inputs : List Kernel.InvocationInput}
-    (activation : first.activation = second.activation) (scope : first.scope = second.scope)
-    (region : first.region = second.region)
-    (prepared : Execution.PreparesEntry program first function before source inputs after) :
-    Execution.PreparesEntry program second function before source inputs after := by
-  cases prepared with
-  | supplied => exact .supplied
-  | resident callable instanceArguments lent captures consumedReceiver =>
-      exact .resident callable instanceArguments
-        (Execution.lendsReceiver_callee activation scope region lent) captures consumedReceiver
-  | contextual callable instanceArguments witnessed reserved lentReceiver lentWitness reservedLent
-      consumedReceiver consumedAvailability =>
-      exact .contextual callable instanceArguments witnessed reserved
-        (Execution.lendsReceiver_callee activation scope region lentReceiver)
-        (Execution.lendsReceiver_callee activation scope region lentWitness)
-        reservedLent consumedReceiver consumedAvailability
 
 /-- The actual successor of a consumed receiver shell: the marked shell the
 preparation installed is stored at the receiver port, so the retirement is a
@@ -4006,16 +3974,16 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
       before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
       [⟨function.declaration,environment⟩]⟩
   have transported : Execution.PreparesEntry program context function withRegion source inputs prepared :=
-    Execution.preparesEntry_callee_context calleeLifetime.1 calleeLifetime.2.1 calleeLifetime.2.2 prepares
+    prepares.callee_context calleeLifetime.1 calleeLifetime.2.1 calleeLifetime.2.2
   cases outcome with
   | complete =>
       obtain ⟨consumed,finished⟩ := attempt.finishesEntry valid inventory typed ready fresh prepares
         (fun input member => (facts input member).1) receiverCompatible
-      exact ⟨context,consumed,.complete,withRegion,prepared,inputs,environment,declaration,bound,
-        declared,fresh,transported,incoming,attempt,finished,rfl,callerUnsafe⟩
+      exact ⟨context,consumed,.complete,
+        .inputs declared fresh transported incoming attempt finished rfl callerUnsafe⟩
   | exhausted =>
-      exact ⟨context,bound,.exhausted,withRegion,prepared,inputs,environment,declaration,bound,
-        declared,fresh,transported,incoming,attempt,rfl,rfl,callerUnsafe⟩
+      exact ⟨context,bound,.exhausted,
+        .inputs declared fresh transported incoming attempt rfl rfl callerUnsafe⟩
 
 end Glorious.Language
 

@@ -273,15 +273,15 @@ theorem Kernel.BindsInputAt.suspensionExtension {program : RuntimeProgram} {reci
   | guardedAllocation _ _ _ _ _ claimed => exact claimed.suspensionExtension
   | loan _ _ _ _ transferred => exact transferred.suspensionExtension
 
-theorem Kernel.BindsInputs.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
-    {before after : World} {_inputs : List InvocationInput} {_bindings : Environment}
-    (bound : BindsInputs program activation scope region before _inputs _bindings after) :
-    before.SuspensionExtension after :=
-  BindsInputsFor.inductionOn
-    (motive := fun before _ _ after _ => before.SuspensionExtension after)
-    (nil := fun world => .refl world)
-    (cons := fun _ head _ ih => head.suspensionExtension.trans ih)
-    (footprint := _inputs.flatMap InvocationInput.clearedStorage) bound
+theorem Kernel.BindsInputsAttemptFor.suspensionExtension {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    (bound : BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome) :
+    before.SuspensionExtension after := by
+  induction bound with
+  | nil => exact .refl _
+  | cons _ head _ ih => exact head.suspensionExtension.trans ih
+  | exhausted _ _ => exact .refl _
 
 theorem Kernel.BindsPattern.suspensionExtension {program : RuntimeProgram} {activation scope region : Identity}
     {before after : World} {localSlot : Local} {source : Address} {authority : Authority} {access : Access} {binding : Binding}
@@ -308,9 +308,9 @@ theorem Execution.ConsumesAvailability.suspensionExtension {before after : World
     exact (World.write_suspensionExtension written).trans
       (.of_roots (Nat.le_refl _) rfl (fun _ recorded => recorded))
 
-theorem Execution.PreparesEntry.suspensionExtension {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
-    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
-    (prepared : PreparesEntry program callee function before source inputs after) : before.SuspensionExtension after := by
+theorem Execution.PreparesEntryAttempt.suspensionExtension {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput} {outcome : PreparationOutcome}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome) : before.SuspensionExtension after := by
   cases prepared with
   | supplied => exact .refl _
   | resident _ _ lent _ consumed => exact lent.suspensionExtension.trans consumed.suspensionExtension
@@ -320,6 +320,8 @@ theorem Execution.PreparesEntry.suspensionExtension {program : Kernel.Program} {
     have step3 := consumed.suspensionExtension
     have step4 := finished.suspensionExtension
     exact ((step1.trans step2).trans step3).trans step4
+  | residentExhausted | contextualReceiverExhausted => exact .refl _
+  | contextualWitnessExhausted _ _ _ _ lent _ => exact lent.suspensionExtension
 
 theorem Execution.FinishesReceiver.suspensionExtension {before after : World} {receiver : ResolvedPlace}
     {access : Access} (finished : FinishesReceiver before receiver access after) :
@@ -335,13 +337,18 @@ theorem Execution.FinishesEntry.suspensionExtension {before after : World} {sour
   | resident inner => exact inner.suspensionExtension
   | contextual inner => exact inner.suspensionExtension
 
-theorem Execution.EnterWorld.suspensionExtension {program : Kernel.Program} {before : State} {after : World}
-    {caller context : Context} {function : Kernel.Function} {source : EntrySource}
-    (entered : EnterWorld program before caller function source context after) : before.world.SuspensionExtension after := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,
-    functionAt,fresh,entryPrep,resources,attempt,finished,contextEq,unsafeOk⟩ := entered
-  exact fresh.suspensionExtension.trans (entryPrep.suspensionExtension.trans
-    ((Kernel.BindsInputs.suspensionExtension attempt).trans finished.suspensionExtension))
+theorem Execution.EnterWorldAttempt.suspensionExtension {program : Kernel.Program} {before : State} {after : World}
+    {caller context : Context} {function : Kernel.Function} {source : EntrySource} {outcome : PreparationOutcome}
+    (attempted : EnterWorldAttempt program before caller function source context after outcome) :
+    before.world.SuspensionExtension after := by
+  cases attempted with
+  | inputs _ fresh entryPrep _ attempt finished _ _ =>
+    have chain := fresh.suspensionExtension.trans (entryPrep.suspensionExtension.trans attempt.suspensionExtension)
+    cases outcome with
+    | complete => exact chain.trans finished.suspensionExtension
+    | exhausted => rw [finished]; exact chain
+  | preparationExhausted _ fresh preparation _ _ =>
+    exact fresh.suspensionExtension.trans preparation.suspensionExtension
 
 theorem Execution.Captures.suspensionExtension {program : Kernel.Program} {context : Context}
     {before after : World} {captures : List Capture} {addresses : List Address}

@@ -15,7 +15,7 @@ theorem EnterWorld.bodyTyped {program : Kernel.Program} {before : State} {caller
     (entered : EnterWorld program before caller function source callee after) :
     Typing.CodeType program (Typing.FunctionContext function callee.module) function.body function.signature.result := by
   obtain ⟨declaration,found,_,_,_,_,_,body⟩ := typed
-  obtain ⟨_,_,_,_,selected,_,present,_,_,_,_,_,rfl,_⟩ := entered
+  obtain ⟨_,_,_,_,selected,_,present,_,_,_,_,_,rfl,_⟩ := entered.prepared
   have same : declaration = selected := Option.some.inj (found.symm.trans present)
   subst selected
   exact body

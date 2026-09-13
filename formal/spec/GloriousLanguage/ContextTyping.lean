@@ -642,7 +642,7 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
     (formals : source.HasFormals function)
     (entered : Execution.EnterWorld program before caller function source runtime after) :
     Typing.ContextBindingsTyped program after (Typing.FunctionContext function runtime.module) runtime := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,boundWorld,_,fresh,prepares,_,bound,finished,rfl,_⟩ := entered
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,boundWorld,_,fresh,prepares,_,bound,finished,rfl,_⟩ := entered.prepared
   have aligned := prepares.formals formals
   have preparedTyped := prepares.worldTyped valid inventory (fresh.worldTyped worldTyped)
   have checked : ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧

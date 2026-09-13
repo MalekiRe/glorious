@@ -57,28 +57,6 @@ theorem ProtectsAttemptFor.suspensionExtension {program : Kernel.Program} {conte
   | cons _ head _ ih => exact head.suspensionExtension.trans ih
   | exhausted _ _ => exact .refl _
 
-theorem Kernel.BindsInputsAttemptFor.suspensionExtension {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {footprint : List Address} {before after : World}
-    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
-    (bound : BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome) :
-    before.SuspensionExtension after := by
-  induction bound with
-  | nil => exact .refl _
-  | cons _ head _ ih => exact head.suspensionExtension.trans ih
-  | exhausted _ _ => exact .refl _
-
-theorem EnterWorldAttempt.suspensionExtension {program : Kernel.Program} {before : State} {after : World}
-    {caller context : Context} {function : Kernel.Function} {source : EntrySource}
-    {outcome : PreparationOutcome}
-    (attempted : EnterWorldAttempt program before caller function source context after outcome) :
-    before.world.SuspensionExtension after := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,
-    functionAt,fresh,entryPrep,resources,attempt,finished,contextEq,unsafeOk⟩ := attempted
-  have chain := fresh.suspensionExtension.trans (entryPrep.suspensionExtension.trans
-    (Kernel.BindsInputsAttemptFor.suspensionExtension attempt))
-  cases outcome with
-  | complete => exact chain.trans finished.suspensionExtension
-  | exhausted => rw [finished]; exact chain
 
 theorem LocalStep.suspensionExtension {program : Kernel.Program} {before after : State} {event : Option Event}
     (step : LocalStep program before event after) : before.world.SuspensionExtension after.world := by
@@ -94,7 +72,7 @@ theorem LocalStep.suspensionExtension {program : Kernel.Program} {before after :
   case releaseStorageReturned _ _ returned =>
     exact _root_.Glorious.Language.Execution.ReturnsStorageLoan.suspensionExtension returned
   case enterTail _ entered handed _ _ _ _ =>
-    exact (EnterWorld.suspensionExtension entered).trans
+    exact (EnterWorldAttempt.suspensionExtension entered).trans
       (RelinquishesCustody.suspensionExtension handed)
   case bindReturn _ _ transfer returned =>
     exact (transfer.suspensionExtension).trans (ReturnsResources.suspensionExtension returned)

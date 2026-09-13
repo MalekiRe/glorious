@@ -21,101 +21,119 @@ theorem Typing.WorldTyped.reference_recorded {program : Kernel.Program} {world :
 
 theorem ReferenceView.recorded {world : World} {handle : Address} {authority : Authority}
     {id : Identity} {mode : Mutability} {permission : Authority} {access : Access} {loan : Loan}
+    (well : world.WellFormed) (recorded : authority.Recorded world.loans)
     (view : ReferenceView world handle authority id mode permission access)
     (found : world.loans.get id = some loan) : permission.Recorded world.loans := by
-  rcases view with ⟨_,rfl,_⟩ | ⟨_,_,rfl,_⟩ | ⟨_,_,rfl,_⟩ <;> exact ⟨loan,found⟩
+  rcases view with ⟨_,rfl,_⟩ | ⟨_,_,rfl,_⟩ | ⟨_,_,rfl,_⟩ <;>
+    exact recorded.referenceView well found _
 
 namespace Kernel
 
 theorem ResolvesProjections.recorded {world : World} {environment : Environment}
     {base result : Address} {authority permission : Authority} {projections : List Projection}
     (resolved : ResolvesProjections world environment base authority projections result permission)
+    (well : world.WellFormed)
     (recorded : authority.Recorded world.loans) : permission.Recorded world.loans := by
   induction resolved with
   | nil => exact recorded
   | field _ _ _ ih | index _ _ _ _ _ _ _ ih => exact ih recorded
   | vacantField => exact recorded
-  | dereference _ _ _ _ found _ view _ ih => exact ih (view.recorded found)
+  | dereference _ _ _ _ found _ view _ ih => exact ih (view.recorded well recorded found)
 
 theorem ResolvesPlace.recorded {world : World} {environment : Environment}
     {place : Place} {address : Address} {authority : Authority}
     (resolved : ResolvesPlace world environment place address authority)
+    (well : world.WellFormed)
     (recorded : ∀ binding ∈ environment, binding.authority.Recorded world.loans) : authority.Recorded world.loans := by
   cases resolved with
-  | localSlot selected projections => exact projections.recorded (recorded _ selected.1)
+  | localSlot selected projections => exact projections.recorded well (recorded _ selected.1)
 
-theorem LendsResident.authority_recorded {program : Language.Program} {before after : World}
+theorem LendsResident.authority_recorded {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
     (lent : LendsResident program activation scope region before address authority access lease permission after)
     (recorded : authority.Recorded before.loans) : permission.Recorded after.loans := by
-  by_cases owned : access = .owned
-  · cases lent with
-    | owned => exact recorded
-    | lent modes _ _ _ => rcases modes with ⟨same,_⟩ | ⟨same,_⟩ <;> cases same.symm.trans owned
-  · obtain ⟨witness,_,_,_,_,_,rfl,_,_,_,_,_,found⟩ := lent.lease_origin owned
+  cases lent with
+  | owned => exact recorded
+  | lent _ _ _ _ formed =>
+    obtain ⟨_,_,found⟩ := formed.created_handle
     exact ⟨_,found⟩
 
-theorem LendsResident.lease_authority_recorded {program : Language.Program} {before after : World}
+theorem LendsResident.lease_authority_recorded {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
     (lent : LendsResident program activation scope region before address authority access lease permission after) :
     AuthoritySupport.Recorded (lease.toList.map (fun lease => .loan lease.loan)) after.loans := by
   cases lent with
   | owned => simp
-  | lent _ _ _ formed =>
+  | lent _ _ _ _ formed =>
     obtain ⟨_,_,found⟩ := formed.created_handle
     simp only [Option.toList_some,List.map_cons,List.map_nil,AuthoritySupport.recorded_cons,
       AuthoritySupport.recorded_nil,and_true]
     exact ⟨_,found⟩
 
-theorem BindsInput.authority_recorded {program : Language.Program} {before after : World}
+theorem BindsInputAt.authority_recorded {program : RuntimeProgram} {recipient : ClaimCustody} {before after : World}
     {activation scope region input binding}
-    (bound : BindsInput program activation scope region before input binding after) : binding.authority.Recorded after.loans := by
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (recorded : input.authority.Recorded before.loans) : binding.authority.Recorded after.loans := by
   cases bound with
-  | lent _ _ _ _ permitted lent => exact lent.authority_recorded permitted.recorded
+  | lent _ _ _ _ _ _ _ lent => exact lent.authority_recorded recorded
   | owned => trivial
+  | storage _ _ _ claimed =>
+    cases claimed
+    simp only [ClaimedAuthority]
+    split <;> exact ⟨_,Table.get_set _ _ _⟩
+  | allocation _ _ _ _ moved => exact moved.suspensionExtension.recorded _ recorded
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; exact ⟨_,Table.get_set _ _ _⟩
+  | loan _ _ _ _ moved => exact moved.suspensionExtension.recorded _ recorded
 
-theorem BindsInputs.authority_recorded {program : Language.Program} {before after : World}
-    {activation scope region inputs bindings}
-    (bound : BindsInputs program activation scope region before inputs bindings after) :
+theorem BindsInputsAttemptFor.authority_recorded {program : RuntimeProgram} {recipient : ClaimCustody}
+    {footprint : List Address} {before after : World} {activation scope region inputs bindings}
+    {outcome : PreparationOutcome}
+    (bound : BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (recorded : ∀ input ∈ inputs, input.authority.Recorded before.loans) :
     ∀ binding ∈ bindings, binding.authority.Recorded after.loans := by
   induction bound with
-  | nil => simp
-  | cons first rest ih =>
+  | nil | exhausted => simp
+  | cons _ first rest ih =>
+    have firstRecorded := first.authority_recorded (recorded _ (List.mem_cons_self))
+    have restRecorded := ih (fun input member => first.suspensionExtension.recorded _
+      (recorded input (List.mem_cons_of_mem _ member)))
     intro binding member
     rcases List.mem_cons.mp member with rfl | member
-    · exact rest.suspensionExtension.recorded _ first.authority_recorded
-    · exact ih binding member
+    · exact rest.suspensionExtension.recorded _ firstRecorded
+    · exact restRecorded binding member
 
-theorem BindsPattern.authority_recorded {program : Language.Program} {before after : World}
+theorem BindsPattern.authority_recorded {program : RuntimeProgram} {before after : World}
     {activation scope region localSlot source authority access binding}
-    (bound : BindsPattern program activation scope region before localSlot source authority access binding after) :
-    binding.authority.Recorded after.loans := by
+    (bound : BindsPattern program activation scope region before localSlot source authority access binding after)
+    (recorded : authority.Recorded before.loans) : binding.authority.Recorded after.loans := by
   cases bound with
-  | owned bound => exact bound.authority_recorded
+  | owned bound => exact bound.authority_recorded recorded
   | borrowed => trivial
 
 end Kernel
 
 namespace Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem Context.bind_authority_support {context : Context} {localSlot : Local} {address : Address}
     {authority : Authority} {loans : Table Loan}
     (recorded : AuthoritySupport.Recorded context.authoritySupport loans) (fresh : authority.Recorded loans) :
     AuthoritySupport.Recorded (context.bind localSlot address authority).authoritySupport loans := by
-  simp only [Context.authoritySupport,AuthoritySupport.recorded_map] at recorded ⊢
+  simp only [Context.authoritySupport,AuthoritySupport.recorded_append,AuthoritySupport.recorded_map] at recorded ⊢
+  refine ⟨?_,recorded.2⟩
   intro binding member
   simp only [Context.bind,List.mem_cons,List.mem_filter] at member
   rcases member with rfl | ⟨member,_⟩
   · exact fresh
-  · exact recorded binding member
+  · exact recorded.1 binding member
 
 theorem Context.resolves_recorded {context : Context} {world : World} {place : Place}
     {address : Address} {authority : Authority}
+    (well : world.WellFormed)
     (recorded : AuthoritySupport.Recorded context.authoritySupport world.loans)
     (resolved : ResolvesPlace world context.environment place address authority) : authority.Recorded world.loans :=
-  resolved.recorded (AuthoritySupport.recorded_map.mp recorded)
+  resolved.recorded well (AuthoritySupport.recorded_map.mp (AuthoritySupport.recorded_append.mp recorded).1)
 
 theorem ResolvedOperands.authority_support {world : World} {environment : Environment}
     {places : List Place} {operands : List ResolvedPlace}
@@ -132,6 +150,7 @@ theorem ResolvedOperands.authority_support {world : World} {environment : Enviro
 
 theorem ArgumentInputs.authority_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
+    (well : world.WellFormed)
     (recorded : AuthoritySupport.Recorded context.authoritySupport world.loans)
     (prepared : ArgumentInputs world context index formals places inputs) :
     AuthoritySupport.Recorded (inputs.map InvocationInput.authority) world.loans := by
@@ -139,11 +158,12 @@ theorem ArgumentInputs.authority_support {world : World} {context : Context} {in
   | nil => simp
   | cons resolved _ _ ih =>
     simp only [List.map_cons,AuthoritySupport.recorded_cons]
-    exact ⟨Context.resolves_recorded recorded resolved,ih⟩
+    exact ⟨Context.resolves_recorded well recorded resolved,ih⟩
 
 theorem _root_.Glorious.Language.Kernel.PatternPlan.authority_support {program : Language.Program} {world : World}
     {address : Address} {authority : Authority} {access : Access} {pattern : Pattern}
     {actions : PatternActions} (planned : PatternPlan program world address authority access pattern actions)
+    (well : world.WellFormed)
     (recorded : authority.Recorded world.loans) :
     AuthoritySupport.Recorded ((ScheduledPattern actions).flatMap PatternAction.authoritySupport) world.loans := by
   refine PatternPlan.rec
@@ -161,16 +181,42 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.authority_support {program :
       AuthoritySupport.recorded_append,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_nil,and_true]
   case refine_9 =>
     rename_i found _ _ _ _ view _ ih recorded
-    have nested := ih (view.recorded found)
+    have nested := ih (view.recorded well (recorded.lend _) found)
     split <;> simp_all only [List.flatMap_cons,List.flatMap_nil,PatternAction.authoritySupport,
       AuthoritySupport.recorded_append,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_nil,and_true]
 
+theorem PreparesEntry.authority_inputs {program : Kernel.Program} {callee : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    (prepared : PreparesEntry program callee function before source inputs after)
+    (recorded : AuthoritySupport.Recorded source.authoritySupport before.loans) :
+    ∀ input ∈ inputs, input.authority.Recorded after.loans := by
+  cases prepared with
+  | supplied => exact AuthoritySupport.recorded_map.mp recorded
+  | resident _ _ lent captures consumed =>
+    simp only [EntrySource.authoritySupport,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_map] at recorded
+    intro input member
+    rcases List.mem_append.mp member with captured | argument
+    · exact consumed.suspensionExtension.recorded _ (captures.2 input captured).2.recorded
+    · exact (lent.suspensionExtension.trans consumed.suspensionExtension).recorded _ (recorded.2 input argument)
+  | contextual _ _ _ _ receiver witness _ consumed finished =>
+    simp only [EntrySource.authoritySupport,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_map] at recorded
+    exact fun input member =>
+      (((receiver.suspensionExtension.trans witness.suspensionExtension).trans consumed.suspensionExtension).trans
+        finished.suspensionExtension).recorded _ (recorded.2.2 input member)
+
 theorem EnterWorld.context_authority_support {program : Kernel.Program} {before : State} {caller context : Context}
     {function : Function} {source : EntrySource} {after : World}
-    (entered : EnterWorld program before caller function source context after) :
+    (entered : EnterWorld program before caller function source context after)
+    (recorded : AuthoritySupport.Recorded source.authoritySupport before.world.loans) :
     AuthoritySupport.Recorded context.authoritySupport after.loans := by
-  obtain ⟨withRegion,prepared,inputs,environment,declaration,_,region,prepares,bound,rfl,_⟩ := entered
-  exact AuthoritySupport.recorded_map.mpr bound.authority_recorded
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,selected,region,prepares,incoming,binds,finish,contextEq,unsafeOk⟩ := entered.prepared
+  have inputsRecorded := prepares.authority_inputs (recorded.mono region.suspensionExtension.recorded)
+  have bindingsRecorded := binds.authority_recorded inputsRecorded
+  have finalRecorded : AuthoritySupport.Recorded (environment.map StorageBinding.authority) after.loans :=
+    (AuthoritySupport.recorded_map.mpr bindingsRecorded).mono finish.suspensionExtension.recorded
+  simp only [contextEq,Context.authoritySupport,List.flatMap_cons,List.flatMap_nil,List.append_nil,
+    AuthoritySupport.recorded_append]
+  exact ⟨finalRecorded,finalRecorded⟩
 
 @[simp] theorem CloseRegions.authority_support (regions : List Identity) (next : Task) :
     (CloseRegions regions next).authoritySupport = next.authoritySupport := by

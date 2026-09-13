@@ -7,15 +7,31 @@ exhaustion retains its successful preparation prefix and partial world. -/
 namespace Glorious.Language
 open Kernel
 
+theorem Kernel.LendsResidentExhausted.allocation {program : RuntimeProgram} {region : Identity}
+    {before : World} {address : Address} {authority : Authority} {access : Access}
+    (failed : LendsResidentExhausted program region before address authority access) :
+    ∃ type layout, AllocationExhausted program.declarations before region type layout := by
+  cases failed with
+  | lent _ _ _ _ _ _ exhausted => exact ⟨_,_,exhausted⟩
+
 theorem Kernel.BindsInputExhausted.allocation {program : RuntimeProgram} {region : Identity}
     {before : World} {input : InvocationInput} (failed : BindsInputExhausted program region before input) :
     ∃ type layout, AllocationExhausted program.declarations before region type layout := by
   cases failed with
   | owned _ _ _ exhausted => exact ⟨_,_,exhausted⟩
-  | lent _ _ exhausted => cases exhausted with
-    | lent _ _ _ _ _ _ exhausted => exact ⟨_,_,exhausted⟩
+  | lent _ _ exhausted => exact exhausted.allocation
 
 namespace Execution
+
+theorem PreparesEntryAttempt.exhausted_allocation {program : Kernel.Program} {callee : Context}
+    {function : Function} {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    (attempted : PreparesEntryAttempt program callee function before source inputs after .exhausted) :
+    ∃ type layout, AllocationExhausted program.declarations after callee.region type layout := by
+  cases attempted with
+  | residentExhausted _ _ failed => exact failed.allocation
+  | contextualReceiverExhausted _ _ _ _ failed => exact failed.allocation
+  | contextualWitnessExhausted _ _ _ _ _ failed => exact failed.allocation
+
 
 /-- Fatal states have no executable suffix at all, including cleanup,
 completion clauses, foreign callbacks and source-level cancellation. -/
@@ -39,13 +55,15 @@ theorem Run.fatal_refl {program : Kernel.Program} {host : Foreign.Model}
   | refl => exact ⟨rfl,rfl⟩
   | silent step _ | visible step _ => exact False.elim (Step.fatal_no_step fatal step)
 
-/-- The original whole pending batch, the completed prefix and the remaining
-batch all come from the one actual entry derivation. This does not admit an
-arbitrary prefix whose unexecuted suffix was never ready. -/
+/-- The failed entry identifies its actual phase: a preparation lease prefix,
+or the original whole input batch with its completed binding prefix and still
+ready failing suffix. Neither alternative invents a successful preparation. -/
 theorem EnterWorldAttempt.exhausted_prefix {program : Kernel.Program} {before : State}
     {caller callee : Context} {function : Function} {source : EntrySource} {after : World}
     (attempted : EnterWorldAttempt program before caller function source callee after .exhausted) :
-    ∃ withRegion prepared inputs front input rest bindings,
+    (∃ withRegion, FreshRegion before.world before.world.nextRegion withRegion ∧
+      PreparesEntryAttempt program callee function withRegion source [] after .exhausted) ∨
+    (∃ withRegion prepared inputs front input rest bindings,
       FreshRegion before.world before.world.nextRegion withRegion ∧
       PreparesEntry program callee function withRegion source inputs prepared ∧
       IncomingResources program function prepared inputs ∧
@@ -55,20 +73,25 @@ theorem EnterWorldAttempt.exhausted_prefix {program : Kernel.Program} {before : 
         before.nextActivation before.world.nextRegion before.world.nextRegion
         (inputs.flatMap InvocationInput.clearedStorage) prepared front bindings after ∧
       InvocationInputsReadyFor program after (inputs.flatMap InvocationInput.clearedStorage) (input :: rest) ∧
-      BindsInputExhausted program before.world.nextRegion after input := by
-  obtain ⟨withRegion,prepared,inputs,bindings,_,bound,_,fresh,entry,incoming,binding,ending,_,_⟩ := attempted
-  dsimp at ending
-  subst after
-  obtain ⟨front,input,rest,equation,beginning,remaining,failed⟩ := binding.exhausted_prefix
-  exact ⟨withRegion,prepared,inputs,front,input,rest,bindings,
-    fresh,entry,incoming,binding.ready,equation,beginning,remaining,failed⟩
+      BindsInputExhausted program before.world.nextRegion after input) := by
+  cases attempted
+  case preparationExhausted freshWorld declaration selected fresh contextEq unsafeOk prepared =>
+    exact Or.inl ⟨_,fresh,prepared⟩
+  case inputs withRegion prepared inputs bindings declaration bound selected fresh entry incoming contextEq unsafeOk binding ending =>
+    change after = bound at ending
+    subst after
+    obtain ⟨front,input,rest,equation,beginning,remaining,failed⟩ := binding.exhausted_prefix
+    exact Or.inr ⟨withRegion,prepared,inputs,front,input,rest,bindings,
+      fresh,entry,incoming,binding.ready,equation,beginning,remaining,failed⟩
 
 theorem EnterWorldAttempt.exhausted_allocation {program : Kernel.Program} {before : State}
     {caller callee : Context} {function : Function} {source : EntrySource} {after : World}
     (attempted : EnterWorldAttempt program before caller function source callee after .exhausted) :
     ∃ type layout, AllocationExhausted program.declarations after before.world.nextRegion type layout := by
-  obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,failed⟩ := attempted.exhausted_prefix
-  exact failed.allocation
+  have region := attempted.fresh_context.2.2
+  rcases attempted.exhausted_prefix with ⟨_,_,failed⟩ | ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,failed⟩
+  · simpa only [region] using failed.exhausted_allocation
+  · exact failed.allocation
 
 /-- No allocation success is assumed. The positive request supplies all static
 premises, and the physical alternative constructs the actual executable step. -/
