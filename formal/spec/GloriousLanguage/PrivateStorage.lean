@@ -455,7 +455,7 @@ theorem EnterWorldAttempt.private_slot {program : Kernel.Program} {before : Stat
     cases outcome with
     | complete => exact finish.private_slot boundSlot
     | exhausted => rw [finish]; exact boundSlot
-  | preparationExhausted _ fresh prepares contextEq _ =>
+  | preparationExhausted _ fresh prepares _ contextEq _ =>
     exact ⟨prepares.private_slot (fresh.wellFormed well) (FreshRegion.private_slot fresh slot),
       by simp [contextEq,Context.rootSupport]⟩
 

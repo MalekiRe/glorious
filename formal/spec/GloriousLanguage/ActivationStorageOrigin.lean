@@ -236,7 +236,7 @@ theorem EnterWorldAttempt.activationsBelow {program : Kernel.Program} {before : 
     cases outcome with
     | complete => exact finished.activationsBelow retained
     | exhausted => rw [finished]; exact retained
-  | preparationExhausted _ region prepared _ _ =>
+  | preparationExhausted _ region prepared _ _ _ =>
     exact prepared.activationsBelow (region.activationsBelow (bounded.mono (Nat.le_succ _))) owner
 
 theorem EnterWorld.activation_lt {program : Kernel.Program} {before : State} {caller context : Context}

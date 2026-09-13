@@ -475,12 +475,21 @@ allocation or raw-loan handoff. The obsolete separate owned-permission channel
 and its helper are removed. The general all-source, resident-product and
 ordered-binder axiom audits report only the standard three axioms.
 
+Input-resource preconditions now belong to the original invocation boundary.
+Both `EnterWorldAttempt` constructors require `IncomingResources` in
+`before.world` over `source.originalInputs`; preparation exhaustion cannot
+bypass that check. An arbitrary unsafe input predicate is not transported
+through receiver/witness mutation. The entry producer derives prepared key
+uniqueness from the actual coordinate theorem and original admission, removing
+its separate prepared-input `Nodup` premise. The phase-preservation consumers,
+strict 220-job gate and general entry/exhaustion/preparation axiom audits pass.
+
 The preserved `Checks` were not run. This is general proof checking, not example
 evidence, a whole-library success or source-wide progress. Higher task/frame
 consumers are still being migrated and are not included in this gate. Deriving
-the concrete preparation conditions from source admission and composing actual
-entry remain open. The entry endpoint still requires prepared incoming-resource
-agreement and receiver fresh-row compatibility; neither has been assumed away.
+the concrete preparation conditions and original resource preconditions from
+source admission, transporting fresh-lifetime requests, and deriving receiver
+fresh-row compatibility for actual entry remain on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:
 

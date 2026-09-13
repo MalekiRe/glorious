@@ -69,7 +69,7 @@ theorem EnterWorldAttempt.worldTyped {program : Kernel.Program} {before : State}
     cases outcome with
     | complete => exact finished.worldTyped boundTyped
     | exhausted => exact finished ▸ boundTyped
-  | preparationExhausted _ fresh prepared _ _ =>
+  | preparationExhausted _ fresh prepared _ _ _ =>
     exact prepared.worldTyped valid inventory (fresh.worldTyped typed)
 
 theorem EnterWorld.worldTyped {program : Kernel.Program} {before : State} {after : World}

@@ -4064,10 +4064,9 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
     (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
     (prepares : Execution.PreparesEntry program callee function withRegion source inputs prepared)
     (fresh : FreshRegion before.world before.world.nextRegion withRegion)
-    (incoming : IncomingResources program function prepared inputs)
+    (incoming : IncomingResources program function before.world (source.originalInputs function))
     (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
       before.world.nextRegion prepared inputs)
-    (nodup : inputs.Nodup)
     (receiverCompatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ inputs,
       input.PermissionCompatible prepared receiver.authority .owned receiver.address)
     (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
@@ -4076,6 +4075,11 @@ theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before :
   obtain ⟨declaration,declared⟩ := declared
   have preparedTyped := prepares.worldTyped valid inventory (fresh.worldTyped typed)
   have facts := product.inputFramed preparedTyped.1
+  have keys : (inputs.map (fun input => input.formal.key)).Nodup := by
+    rw [prepares.map_inputs (fun input => input.formal.key) (by intros; rfl)]
+    exact incoming.1
+  have nodup : inputs.Nodup := (List.pairwise_map.mp keys).imp
+    (fun different same => different (congrArg (fun input => input.formal.key) same))
   obtain ⟨environment,bound,outcome,attempt,_⟩ :=
     Kernel.BatchPrepared.attemptFor (recipient := .activation before.nextActivation)
       (activation := before.nextActivation) (scope := before.world.nextRegion)

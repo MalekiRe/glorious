@@ -347,7 +347,7 @@ theorem Execution.EnterWorldAttempt.suspensionExtension {program : Kernel.Progra
     cases outcome with
     | complete => exact chain.trans finished.suspensionExtension
     | exhausted => rw [finished]; exact chain
-  | preparationExhausted _ fresh preparation _ _ =>
+  | preparationExhausted _ fresh preparation _ _ _ =>
     exact fresh.suspensionExtension.trans preparation.suspensionExtension
 
 theorem Execution.Captures.suspensionExtension {program : Kernel.Program} {context : Context}

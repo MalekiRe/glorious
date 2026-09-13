@@ -256,10 +256,18 @@ preflight. Raw allocation/loan handoff no longer observes fictitious pointee
 permissions; the separate owned-permission observer and its helper are removed.
 The strict 220-job gate and general all-source/resident/binder axiom audits pass.
 
-Next: compose actual entry, including incoming-resource agreement and receiver
-fresh-row compatibility, and derive the concrete original-world conditions from
-source admission. Higher task/frame consumers and general resource progress
-remain open; no source-wide or full-tree conformance is claimed.
+Input-resource preconditions now use the original invocation world and original
+inputs in both `EnterWorldAttempt` constructors. Preparation exhaustion cannot
+bypass them; an arbitrary unsafe predicate is no longer transported across
+internal mutation. Actual preparation coordinates and original contract keys
+derive prepared input uniqueness. The separate prepared `Nodup` premise is
+removed, and all affected phase-preservation consumers are migrated. The strict
+220-job gate and general entry/original-contract/exhaustion/preparation axiom
+audits pass with standard axioms only.
+
+Next: compose original semantic admission, fresh-lifetime request transport and
+receiver fresh-row compatibility into actual entry. Higher task/frame consumers
+and general resource progress remain open; no full-tree conformance is claimed.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -323,8 +331,9 @@ Next on this dependency chain: derive original source readiness and concrete
 preparation conditions from source admission, and compose ordered binding with
 receiver finishing. All preparation outcomes and their successful original-to-
 prepared input products are now constructed, including capture re-authoring.
-The prepared incoming-resource and receiver-compatibility premises at the entry
-endpoint remain real integration obligations, not future-world certificates.
+Incoming resources are now checked at the original invocation, not its mutated
+prepared world, and prepared uniqueness is derived. Fresh-lifetime requests,
+receiver compatibility and original semantic admission remain real obligations.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains

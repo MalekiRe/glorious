@@ -243,7 +243,7 @@ producer axiom audit passed too.
 
 This closes ordered **prepared-input batch preentry progress**, not general
 source-derived execution progress. Original source readiness, actual
-receiver/witness preparation, incoming-resource agreement, prepared-state
+receiver/witness preparation, original-world incoming-resource agreement, prepared-state
 batch compatibility and receiver fresh-row compatibility remain explicit
 admission premises of that endpoint; separate batch framing is now derived.
 General preparation construction and all-source original-input transport are
@@ -374,15 +374,24 @@ to T. The separate owned-permission observer and its unused helper are removed.
 The strict 220-job gate and all-source, resident-product and ordered-binder
 axiom audits pass with only the standard three axioms.
 
+The incoming-resource boundary is corrected in both actual entry outcomes:
+`EnterWorldAttempt` checks the original world and `source.originalInputs`,
+including preparation exhaustion. No arbitrary unsafe predicate is asserted
+stable through internal preparation. `EnterWorldAttempt.incomingResources`
+exposes that common original admission; the success/prepared and exhaustion
+consumers use it. Prepared key uniqueness is derived from original contract
+keys and the actual preparation coordinate theorem. The separate prepared
+`Nodup` premise is removed. The strict 220-job gate and general entry, original-
+contract, exhaustion and preparation axiom audits pass with standard axioms only.
+
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. Source-derived preparation conditions, whole-entry composition
-including incoming-resource agreement and receiver fresh-row compatibility, and
-higher task/frame integration remain open. No full-tree success is claimed;
-preserved example modules were not run.
+standard axioms. Original semantic admission, fresh-lifetime request transport,
+receiver fresh-row compatibility and whole-entry/task/frame integration remain
+open. No full-tree success is claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

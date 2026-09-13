@@ -66,7 +66,7 @@ theorem EnterWorldAttempt.exhausted_prefix {program : Kernel.Program} {before : 
     (∃ withRegion prepared inputs front input rest bindings,
       FreshRegion before.world before.world.nextRegion withRegion ∧
       PreparesEntry program callee function withRegion source inputs prepared ∧
-      IncomingResources program function prepared inputs ∧
+      IncomingResources program function before.world (source.originalInputs function) ∧
       InvocationInputsReadyFor program prepared (inputs.flatMap InvocationInput.clearedStorage) inputs ∧
       inputs = front ++ input :: rest ∧
       BindsInputsFor program (.activation before.nextActivation)
@@ -75,7 +75,7 @@ theorem EnterWorldAttempt.exhausted_prefix {program : Kernel.Program} {before : 
       InvocationInputsReadyFor program after (inputs.flatMap InvocationInput.clearedStorage) (input :: rest) ∧
       BindsInputExhausted program before.world.nextRegion after input) := by
   cases attempted
-  case preparationExhausted freshWorld declaration selected fresh contextEq unsafeOk prepared =>
+  case preparationExhausted freshWorld declaration selected fresh incoming contextEq unsafeOk prepared =>
     exact Or.inl ⟨_,fresh,prepared⟩
   case inputs withRegion prepared inputs bindings declaration bound selected fresh entry incoming contextEq unsafeOk binding ending =>
     change after = bound at ending

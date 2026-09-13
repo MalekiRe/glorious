@@ -671,16 +671,16 @@ inductive FinishesEntry : World → EntrySource → World → Prop where
   | contextual {before receiver access witness witnessAccess inputs after} : FinishesReceiver before receiver access after →
       FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after
 
-/-- Entry retains the actual phase of failure. Preparation exhaustion keeps
-its completed lease prefix; input exhaustion keeps its completed binding prefix.
-Only a completed input binder may consume the receiver shell. -/
+/-- Input contracts observe the original invocation, before fresh-region
+creation or receiver/witness mutation. Both physical failure phases require
+that same admission and retain their actual successful prefix. -/
 inductive EnterWorldAttempt (program : Kernel.Program) (before : State) (caller : Context)
     (function : Function) (source : EntrySource) (context : Context) : World → PreparationOutcome → Prop where
   | inputs {withRegion prepared inputs environment declaration bound after outcome} :
       program.declarations.function function.declaration = some declaration →
       FreshRegion before.world before.world.nextRegion withRegion →
       PreparesEntry program context function withRegion source inputs prepared →
-      IncomingResources program function prepared inputs →
+      IncomingResources program function before.world (source.originalInputs function) →
       BindsInputsAttemptFor program (.activation before.nextActivation)
         before.nextActivation before.world.nextRegion before.world.nextRegion
         (inputs.flatMap InvocationInput.clearedStorage) prepared inputs environment bound outcome →
@@ -695,6 +695,7 @@ inductive EnterWorldAttempt (program : Kernel.Program) (before : State) (caller 
       program.declarations.function function.declaration = some declaration →
       FreshRegion before.world before.world.nextRegion withRegion →
       PreparesEntryAttempt program context function withRegion source [] after .exhausted →
+      IncomingResources program function before.world (source.originalInputs function) →
       context = ⟨[],declaration.header.module,before.nextActivation,before.world.nextRegion,before.world.nextRegion,
         function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,[]⟩]⟩ →
       (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) →
@@ -706,9 +707,18 @@ theorem EnterWorldAttempt.fresh_context {program : Kernel.Program} {before : Sta
     callee.activation = before.nextActivation ∧ callee.scope = before.world.nextRegion ∧
       callee.region = before.world.nextRegion := by
   cases attempted with
-  | inputs _ _ _ _ _ _ contextEq _ | preparationExhausted _ _ _ contextEq _ =>
+  | inputs _ _ _ _ _ _ contextEq _ | preparationExhausted _ _ _ _ contextEq _ =>
     subst callee
     exact ⟨rfl,rfl,rfl⟩
+
+/-- Resource preconditions belong to the original call on every entry outcome,
+including exhaustion before any ordinary input was bound. -/
+theorem EnterWorldAttempt.incomingResources {program : Kernel.Program} {before : State} {after : World}
+    {caller callee : Context} {function : Function} {source : EntrySource} {outcome : PreparationOutcome}
+    (attempted : EnterWorldAttempt program before caller function source callee after outcome) :
+    IncomingResources program function before.world (source.originalInputs function) := by
+  cases attempted with
+  | inputs _ _ _ incoming _ _ _ _ | preparationExhausted _ _ _ incoming _ _ => exact incoming
 
 
 abbrev EnterWorld (program : Kernel.Program) (before : State) (caller : Context)
@@ -724,7 +734,7 @@ theorem EnterWorld.prepared {program : Kernel.Program} {before : State} {caller 
       program.declarations.function function.declaration = some declaration ∧
       FreshRegion before.world before.world.nextRegion withRegion ∧
       PreparesEntry program context function withRegion source inputs prepared ∧
-      IncomingResources program function prepared inputs ∧
+      IncomingResources program function before.world (source.originalInputs function) ∧
       BindsInputsAttemptFor program (.activation before.nextActivation)
         before.nextActivation before.world.nextRegion before.world.nextRegion
         (inputs.flatMap InvocationInput.clearedStorage) prepared inputs environment bound .complete ∧

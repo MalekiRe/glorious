@@ -534,6 +534,9 @@ inductive ResourceInputs (program : Language.Program) (world : World) (environme
       ResourceInputs program world environment custody
         (⟨.obligation identity,.loan identity type,place.address,place.authority,.owned⟩ :: inputs)
 
+/-- Resource preconditions and key uniqueness are checked on the original
+invocation world and its original ordered inputs, before any preparation.
+An arbitrary unsafe predicate is never transported across internal mutation. -/
 def IncomingResources (program : Program) (function : Function) (world : World)
     (inputs : List InvocationInput) : Prop :=
   (inputs.map (fun input => input.formal.key)).Nodup ∧
