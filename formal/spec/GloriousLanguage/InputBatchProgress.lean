@@ -6,6 +6,7 @@ import GloriousLanguage.LoanResourceRows
 import GloriousLanguage.StorageWrites
 import GloriousLanguage.BindingPersistence
 import GloriousLanguage.ResidentMutationPreservation
+import GloriousLanguage.InvocationInputs
 
 /-! The one authoritative pre-state product for an ordered batch of ordinary
 invocation inputs, and the ordered binder that consumes it.
@@ -107,15 +108,22 @@ theorem Value.HandoffReady.observedPermitted {program : RuntimeProgram} {world :
 
 namespace Kernel
 
+/-- The top-level permission read by the actual formal. Ordinary allocation
+and raw-loan handoffs do not consume T through their token; only a guarded
+allocation opening reads owned access. -/
+def InvocationInput.ReadsAccess (input : InvocationInput) (requested : Access) : Prop :=
+  match input.formal with
+  | .resident _ | .storage _ _ => requested = input.access
+  | .allocation _ _ => requested = .owned ∧ ∃ backing carrier, input.authority = .guarded backing carrier
+  | .loan _ _ => False
+
 /-- A permission the pending input's own readiness actually reads: its own
 authority view, and, for a resident, the whole reachable graph of the value
 stored at its storage. -/
 def InvocationInput.ReadsPermission (world : World) (input : InvocationInput)
     (authority : Authority) (access : Access) (address : Address) : Prop :=
-  (authority = input.authority ∧ address = input.storage ∧
-    ((access = input.access ∧ Permitted world input.authority input.access input.storage) ∨
-      ((∃ identity type, input.formal = .allocation identity type) ∧ access = Access.owned ∧
-        Permitted world input.authority Access.owned input.storage))) ∨
+  (authority = input.authority ∧ address = input.storage ∧ input.ReadsAccess access ∧
+    Permitted world input.authority access input.storage) ∨
   (∃ localSlot value, input.formal = .resident localSlot ∧ world.Stores input.storage value ∧
     value.ObservedViews world input.access authority access address)
 
@@ -617,13 +625,9 @@ structure StepObservation (program : RuntimeProgram) (footprint : List Address) 
   located : before.Located other.storage → middle.Located other.storage
   type : ∀ term, AddressType program.declarations before other.storage term →
     AddressType program.declarations middle other.storage term
-  permitted : Permitted before other.authority other.access other.storage →
-    Permitted middle other.authority other.access other.storage
-  /-- Owned-access handoff is only observed for an erased allocation port, which
-  is the one formal whose readiness reads an owned permission. -/
-  permittedOwned : (∃ identity type, other.formal = .allocation identity type) →
-    Permitted before other.authority .owned other.storage →
-      Permitted middle other.authority .owned other.storage
+  permitted : ∀ requested, other.ReadsAccess requested →
+    Permitted before other.authority requested other.storage →
+      Permitted middle other.authority requested other.storage
   claim : AllocationClaim before other.authority other.storage →
     AllocationClaim middle other.authority other.storage
   loans : ∀ identity loan, before.loans.get identity = some loan →
@@ -663,17 +667,17 @@ theorem InvocationInput.readyFor_of_observation {program : RuntimeProgram} {foot
         handoff.frame_input valid (observation.value localSlot value rfl stored).1
           (observation.value localSlot value rfl stored).2
           (observation.framePermitted localSlot value rfl stored),
-        observation.permitted permission⟩
+        observation.permitted access rfl permission⟩
     | storage identity type =>
       obtain ⟨locatedType,located,permission⟩ := ready
-      exact ⟨observation.type type locatedType,observation.located located,observation.permitted permission⟩
+      exact ⟨observation.type type locatedType,observation.located located,observation.permitted access rfl permission⟩
     | allocation identity type =>
       obtain ⟨owned,locatedType,claim,authorityForm⟩ := ready
       refine ⟨owned,observation.type type locatedType,observation.claim claim,?_⟩
       rcases authorityForm with ⟨loan,loanAt⟩ | ⟨backing,guard,guarded,permission⟩
       · exact Or.inl ⟨loan,loanAt⟩
       · exact Or.inr ⟨backing,guard,guarded,
-          observation.permittedOwned ⟨identity,type,rfl⟩ permission⟩
+          observation.permitted .owned ⟨rfl,backing,guard,guarded⟩ permission⟩
     | loan identity type =>
       obtain ⟨owned,locatedType,key,row,found,live,kind,referent,authorityForm⟩ := ready
       obtain ⟨changed,selected,shape⟩ := observation.loans key row found
@@ -1009,19 +1013,6 @@ theorem World.Stores.write_other {before after : World} {mutation address : Addr
   rw [World.write_disjoint written apart]
   exact stored
 
-/-- The owned-access half of a ready allocation port. -/
-theorem Kernel.InvocationInput.ReadyFor.allocation_access {program : RuntimeProgram} {world : World}
-    {footprint : List Address} {input : InvocationInput} {identity : Identity} {type : Term}
-    (ready : input.ReadyFor program world footprint) (formal : input.formal = .allocation identity type) :
-    input.access = .owned := by
-  cases input with
-  | mk origin actual storage authority access =>
-    cases actual with
-    | allocation identity' type' => simpa using ready.1
-    | resident localSlot => exact absurd formal (by simp)
-    | storage identity' type' => exact absurd formal (by simp)
-    | loan identity' type' => exact absurd formal (by simp)
-
 /-- A resident formal is exactly a local slot. -/
 theorem Kernel.InputFormal.exists_resident_of_isResident {formal : InputFormal} (resident : formal.IsResident) :
     ∃ localSlot, formal = .resident localSlot := by
@@ -1092,7 +1083,6 @@ theorem StepObservation.of_loans {program : RuntimeProgram} {footprint : List Ad
       ∃ current, middle.loans.get identity = some current ∧ current.permissionState = loan.permissionState)
     (regionRows : ∀ identity loan, before.loans.get identity = some loan →
       ∃ current, middle.loans.get identity = some current ∧ current.region = loan.region)
-    (ownedAccess : (∃ identity type, other.formal = .allocation identity type) → other.access = .owned)
     (permitted : ∀ authority access address, other.ReadsPermission before authority access address →
       Permitted before authority access address → Permitted middle authority access address)
     (claim : ∀ authority address, other.ReadsClaim before authority address →
@@ -1109,10 +1099,7 @@ theorem StepObservation.of_loans {program : RuntimeProgram} {footprint : List Ad
   nextRootBound := nextRootBound
   located := World.Located.of_roots roots
   type := fun _ located => AddressType.roots_congr roots located
-  permitted := fun permission => permitted _ _ _ (Or.inl ⟨rfl,rfl,Or.inl ⟨rfl,permission⟩⟩) permission
-  permittedOwned := fun guard permission => by
-    have same : other.access = .owned := ownedAccess guard
-    exact permitted _ _ _ (Or.inl ⟨rfl,rfl,Or.inl ⟨same.symm,by rw [same]; exact permission⟩⟩) permission
+  permitted := fun requested observed permission => permitted _ requested _ (Or.inl ⟨rfl,rfl,observed,permission⟩) permission
   claim := fun held => claim _ _ (Or.inl ⟨rfl,rfl,held⟩) held
   loans := permissionRows
   loanRegion := regionRows
@@ -1902,18 +1889,10 @@ theorem InvocationInput.ReadsPermission.backward {program : RuntimeProgram} {foo
     {authority : Authority} {access : Access} {address : Address}
     (reads : other.ReadsPermission middle authority access address) :
     other.ReadsPermission before authority access address := by
-  rcases reads with ⟨authorityEq,addressEq,first⟩ | ⟨localSlot,value,formal,stored,views⟩
-  · rcases first with ⟨accessEq,permission⟩ | ⟨allocationFormal,accessEq,permission⟩
-    · subst authority
-      subst address
-      subst access
-      exact Or.inl ⟨rfl,rfl,Or.inl ⟨rfl,
-        Permitted.of_frame valid middleValid frame recorded bound permission⟩⟩
-    · subst authority
-      subst address
-      subst access
-      exact Or.inl ⟨rfl,rfl,Or.inr ⟨allocationFormal,rfl,
-        Permitted.of_frame valid middleValid frame recorded bound permission⟩⟩
+  rcases reads with ⟨authorityEq,addressEq,observed,permission⟩ | ⟨localSlot,value,formal,stored,views⟩
+  · subst authority
+    subst address
+    exact Or.inl ⟨rfl,rfl,observed,Permitted.of_frame valid middleValid frame recorded bound permission⟩
   · have storedBefore := observation.storesBack (by rw [formal]; trivial) value stored
     obtain ⟨batch,framed⟩ := observation.value localSlot value formal storedBefore
     exact Or.inr ⟨localSlot,value,formal,storedBefore,
@@ -2195,7 +2174,6 @@ theorem StepObservation.of_storageClaim {program : RuntimeProgram} {recipient : 
     (formal : input.formal = .storage identity type)
     (claimed : ClaimsStorage recipient before input.authority input.access input.storage created after)
     (independent : input.IndependentOf program footprint before other)
-    (otherReady : other.ReadyFor program before footprint)
     (otherAccessible : ∀ (localSlot : Local) (value : Value), other.formal = .resident localSlot →
       before.Stores other.storage value → value.ResourcesAccessible program before other.access) :
     StepObservation program footprint region before after other := by
@@ -2256,9 +2234,6 @@ theorem StepObservation.of_storageClaim {program : RuntimeProgram} {recipient : 
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
         ⟨current,selected,(Loan.permissionState_eq_iff.mp shape).2.2.2.2.1⟩)
-      (fun ⟨id,ty,equals⟩ =>
-        Glorious.Language.Kernel.InvocationInput.ReadyFor.allocation_access
-          otherReady equals)
       permittedChannel claimChannel compatibleChannel
       (fun _ _ _ _ => Value.SupportFramed.of_roots rfl) framePermittedChannel
 
@@ -2289,7 +2264,6 @@ theorem StepObservation.of_guardedClaim {program : RuntimeProgram} {recipient : 
     (guarded : ∃ backing carrier, input.authority = .guarded backing carrier)
     (claimed : ClaimsAllocation recipient before input.authority input.storage created after)
     (independent : input.IndependentOf program footprint before other)
-    (otherReady : other.ReadyFor program before footprint)
     (otherAccessible : ∀ (localSlot : Local) (value : Value), other.formal = .resident localSlot →
       before.Stores other.storage value → value.ResourcesAccessible program before other.access) :
     StepObservation program footprint region before after other := by
@@ -2368,9 +2342,6 @@ theorem StepObservation.of_guardedClaim {program : RuntimeProgram} {recipient : 
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
         ⟨current,selected,(Loan.permissionState_eq_iff.mp shape).2.2.2.2.1⟩)
-      (fun ⟨id,ty,equals⟩ =>
-        Glorious.Language.Kernel.InvocationInput.ReadyFor.allocation_access
-          otherReady equals)
       permittedChannel claimChannel compatibleChannel
       (fun _ _ _ _ => Value.SupportFramed.of_roots rfl) framePermittedChannel
 
@@ -2383,7 +2354,6 @@ theorem StepObservation.of_allocationTransfer {program : RuntimeProgram} {recipi
     (formal : input.formal = .allocation identity type) (_owned : input.access = .owned)
     (transferred : TransfersAllocation recipient before ⟨input.storage,input.authority⟩ after)
     (independent : input.IndependentOf program footprint before other)
-    (otherReady : other.ReadyFor program before footprint)
     (otherAccessible : ∀ (localSlot : Local) (value : Value), other.formal = .resident localSlot →
       before.Stores other.storage value → value.ResourcesAccessible program before other.access) :
     StepObservation program footprint region before after other := by
@@ -2460,9 +2430,6 @@ theorem StepObservation.of_allocationTransfer {program : RuntimeProgram} {recipi
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
         ⟨current,selected,(Loan.permissionState_eq_iff.mp shape).2.2.2.2.1⟩)
-      (fun ⟨id,ty,equals⟩ =>
-        Glorious.Language.Kernel.InvocationInput.ReadyFor.allocation_access
-          otherReady equals)
       (fun authority access address reads permission => forward authority access address reads permission)
       claimChannel compatibleChannel
       (fun _ _ _ _ => Value.SupportFramed.of_roots rfl) framePermittedChannel
@@ -2476,7 +2443,6 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
     (formal : input.formal = .loan identity type) (_owned : input.access = .owned)
     (transferred : TransfersStorageLoan recipient before ⟨input.storage,input.authority⟩ after)
     (independent : input.IndependentOf program footprint before other)
-    (otherReady : other.ReadyFor program before footprint)
     (_otherAccessible : ∀ (localSlot : Local) (value : Value), other.formal = .resident localSlot →
       before.Stores other.storage value → value.ResourcesAccessible program before other.access) :
     StepObservation program footprint region before after other := by
@@ -2544,9 +2510,6 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
         ⟨current,selected,(Loan.permissionState_eq_iff.mp shape).2.2.2.2.1⟩)
-      (fun ⟨id,ty,equals⟩ =>
-        Glorious.Language.Kernel.InvocationInput.ReadyFor.allocation_access
-          otherReady equals)
       (fun authority access address reads permission => forward authority access address reads permission)
       claimChannel compatibleChannel
       (fun _ _ _ _ => Value.SupportFramed.of_roots rfl) framePermittedChannel
@@ -2555,9 +2518,6 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
       (Nat.le_refl _) ⟨rfl,rfl⟩
       (fun _ _ found => ⟨_,found,rfl⟩)
       (fun _ _ found => ⟨_,found,rfl⟩)
-      (fun ⟨id,ty,equals⟩ =>
-        Glorious.Language.Kernel.InvocationInput.ReadyFor.allocation_access
-          otherReady equals)
       (fun authority access address _ permission => permission)
       (fun _ _ _ held => held)
       (fun _ _ _ _ =>
@@ -2741,12 +2701,12 @@ theorem Authority.LoanCompatible.no_conflict {world : World} {authority : Author
 be an inherited guard of a second original authority: those identities were
 already below the original loan frontier. -/
 theorem LendsResident.borrowerCompatible {program : RuntimeProgram} {activation scope region : Identity}
-    {before after : World} {source observed : Address} {authority result : Authority} {access : Access}
+    {before after : World} {source address observed : Address} {authority result : Authority} {access requested : Access}
     {lease : Option InvocationLease} {mode : Mutability} {guards : List Identity}
     (lent : LendsResident program activation scope region before source authority access lease result after)
-    (compatible : authority.LoanCompatible before access source observed mode guards)
+    (compatible : authority.LoanCompatible before requested address observed mode guards)
     (bounds : ∀ identity ∈ guards, identity < before.nextLoan) :
-    result.LoanCompatible after access source observed mode guards := by
+    result.LoanCompatible after requested address observed mode guards := by
   cases lent with
   | owned => exact compatible
   | lent _ _ _ allocated _ =>
@@ -2773,7 +2733,7 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
     cases lent with
     | owned =>
       exact ⟨fun _ _ stored => stored,fun _ _ stored => stored,Nat.le_refl _,fun located => located,fun _ typed => typed,
-        fun permission => permission,fun _ permission => permission,fun claim => claim,
+        fun _ _ permission => permission,fun claim => claim,
         fun _ loan found => ⟨loan,found,rfl⟩,fun _ loan found => ⟨loan,found,rfl⟩,fun _ _ region => region,⟨rfl,rfl⟩,
         fun _ _ _ _ => ⟨⟨fun _ _ _ _ => rfl,fun _ _ found => by rw [found]; rfl,fun _ _ _ _ _ _ held => held⟩,
           fun _ _ => ⟨rfl,rfl⟩⟩,fun _ _ _ _ _ _ _ _ held => held⟩
@@ -2871,7 +2831,7 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
             (FormsLoan.permitted_iff allocatedValid formed' held).mpr
               (guardsEq.symm ▸ Authority.LoanCompatible.loans_congr allocatedLoans
                 (by simpa only [modeEq] using compatible borrowed authority' access address reads))
-        refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+        refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
         · intro _ value' stored'
           rw [World.Stores] at stored' ⊢
           rw [readWhole]
@@ -2899,14 +2859,10 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
             ((World.write_address_types (program := program.declarations) written
               (Address.not_properPrefix_of_root_ne handleRootNe)).mp
               (Allocates.addressType valid allocProof located))
-        · intro permitted'
-          exact formedPermitted other.authority other.access other.storage
-            (Or.inl ⟨rfl,rfl,Or.inl ⟨rfl,permitted'⟩⟩)
-            (afterPermitted other.authority other.access other.storage permitted')
-        · intro allocationFormal permitted'
-          exact formedPermitted other.authority .owned other.storage
-            (Or.inl ⟨rfl,rfl,Or.inr ⟨allocationFormal,rfl,permitted'⟩⟩)
-            (afterPermitted other.authority .owned other.storage permitted')
+        · intro requested observed permitted'
+          exact formedPermitted other.authority requested other.storage
+            (Or.inl ⟨rfl,rfl,observed,permitted'⟩)
+            (afterPermitted other.authority requested other.storage permitted')
         · intro held
           obtain ⟨anchor,claimLoan,claimRoot,claimDomain,atAnchor,claimFound,claimLive,claimKind,
             claimReferent,claimWhole,claimSelected,claimHome,claimLatest⟩ := held
@@ -3009,7 +2965,7 @@ theorem StepObservation.of_ownedTransfer {program : RuntimeProgram} {activation 
       fun authority' access observed held =>
         Permitted.of_rows (before := allocated) (after := after)
           (World.RowRelation.of_eq stepLoans) rootPresent held
-    refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
+    refine ⟨?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_,?_⟩
     · intro _ value' stored'
       exact (World.Stores.write_disjoint_iff installEq destinationApart).mp
         ((World.Stores.write_disjoint_iff clearedEq sourceApart).mp
@@ -3028,12 +2984,9 @@ theorem StepObservation.of_ownedTransfer {program : RuntimeProgram} {activation 
       exact (World.write_address_types (program := program.declarations) installEq destinationNotPrefix).mp
         ((World.write_address_types (program := program.declarations) clearedEq sourceNotPrefix).mp
           (Allocates.addressType valid allocation located))
-    · intro permitted'
-      exact movedPermitted other.authority other.access other.storage
-        (afterPermitted other.authority other.access other.storage permitted')
-    · intro allocationFormal permitted'
-      exact movedPermitted other.authority .owned other.storage
-        (afterPermitted other.authority .owned other.storage permitted')
+    · intro requested _ permitted'
+      exact movedPermitted other.authority requested other.storage
+        (afterPermitted other.authority requested other.storage permitted')
     · intro held
       have allocatedHeld : AllocationClaim allocated other.authority other.storage :=
         AllocationClaim.of_rows (World.RowRelation.of_eq allocatedLoans)
@@ -3109,17 +3062,17 @@ theorem BindsInputAt.stepObservation {program : RuntimeProgram} {recipient : Cla
       exact StepObservation.of_ownedTransfer valid frame owning resident allocated transferred
         independent otherReady otherBound licensed otherAccessible
   | storage ready formal locatedType claimed =>
-      exact StepObservation.of_storageClaim valid frame formal claimed independent otherReady
+      exact StepObservation.of_storageClaim valid frame formal claimed independent
         otherAccessible
   | allocation ready formal owning locatedType transferred =>
       exact StepObservation.of_allocationTransfer valid frame formal owning transferred independent
-        otherReady otherAccessible
+        otherAccessible
   | guardedAllocation ready formal owning guarded locatedType claimed =>
       exact StepObservation.of_guardedClaim valid frame formal owning ⟨_,_,guarded⟩ claimed independent
-        otherReady otherAccessible
+        otherAccessible
   | loan ready formal owning locatedType transferred =>
       exact StepObservation.of_storageLoanTransfer valid frame formal owning transferred independent
-        otherReady otherAccessible
+        otherAccessible
 
 
 /-- The facts one already-emitted binding keeps as the batch advances: its key,
@@ -4368,11 +4321,21 @@ part of this admission. -/
 def EntrySource.PreparationConditions (program : Kernel.Program) (world : World) (region : Identity)
     (function : Function) : EntrySource → Prop
   | .supplied _ => True
-  | .resident receiver access _ =>
+  | .resident receiver access arguments =>
       CaptureInputs world receiver.address receiver.authority access function.captures
         (ResidentCaptureInputs receiver.address receiver.authority access function.captures) ∧
-      ∀ value, world.Stores receiver.address value →
-        Kernel.LendsResident.Request program world region receiver.address receiver.authority access value.type
+      (∀ value, world.Stores receiver.address value →
+        Kernel.LendsResident.Request program world region receiver.address receiver.authority access value.type) ∧
+      (access ≠ .owned → ∀ input ∈ ResidentCaptureInputs receiver.address receiver.authority access function.captures,
+        ∀ value, world.Stores input.storage value → value.ViewsLoanCompatible world access receiver.address
+          (if access = .shared then .shared else .unique) (receiver.authority.guardLoans world)) ∧
+      (access ≠ .owned → ∀ input ∈ arguments, ∀ query requested observed,
+        input.ReadsPermission world query requested observed → query.LoanCompatible world requested observed receiver.address
+          (if access = .shared then .shared else .unique) (receiver.authority.guardLoans world)) ∧
+      (access = .owned → ∀ input ∈ ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments,
+        input.formal.IsResident → ¬ input.storage.Prefix receiver.address) ∧
+      (access = .owned → ∀ input ∈ ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments,
+        ∀ observed, input.RetainsSupport world observed → ¬ observed.Prefix receiver.address)
   | .contextual receiver receiverAccess witness witnessAccess inputs =>
       (¬ receiver.address.Overlaps witness.address) ∧
       (∀ value, world.Stores receiver.address value →
@@ -4392,7 +4355,12 @@ def EntrySource.PreparationConditions (program : Kernel.Program) (world : World)
           (if receiverAccess = .shared then .shared else .unique) (receiver.authority.guardLoans world)) ∧
       (witnessAccess ≠ .owned → ∀ input ∈ inputs, ∀ query requested observed,
         input.ReadsPermission world query requested observed → query.LoanCompatible world requested observed witness.address
-          (if witnessAccess = .shared then .shared else .unique) (witness.authority.guardLoans world))
+          (if witnessAccess = .shared then .shared else .unique) (witness.authority.guardLoans world)) ∧
+      (receiverAccess = .owned → ∀ input ∈ inputs, input.formal.IsResident → ¬ input.storage.Prefix receiver.address) ∧
+      (receiverAccess = .owned → ∀ input ∈ inputs, ∀ observed, input.RetainsSupport world observed → ¬ observed.Prefix receiver.address) ∧
+      (witnessAccess = .owned → ∀ input ∈ inputs, ¬ witness.address.ProperPrefix input.storage) ∧
+      (witnessAccess = .owned → ∀ input ∈ inputs, input.formal.IsResident → ¬ witness.address.Overlaps input.storage) ∧
+      (witnessAccess = .owned → ∀ input ∈ inputs, ∀ observed, input.RetainsSupport world observed → ¬ witness.address.Overlaps observed)
 
 theorem ReservationInputs.access {world : World} {available : Availability} {access : Access}
     {formals : List Local} {inputs : List InvocationInput}
@@ -4406,8 +4374,14 @@ theorem ReservationInputs.readsPermission {world : World} {available : Availabil
     {formals : List Local} {inputs : List InvocationInput}
     (reserved : ReservationInputs world available access formals inputs)
     {input : InvocationInput} (member : input ∈ inputs) :
-    input.ReadsPermission world input.authority input.access input.storage :=
-  Or.inl ⟨rfl,rfl,Or.inl ⟨rfl,by rw [reserved.access member]; exact (reserved.2.2.2 input member).1⟩⟩
+    input.ReadsPermission world input.authority input.access input.storage := by
+  have permission : Permitted world input.authority input.access input.storage := by
+    rw [reserved.access member]
+    exact (reserved.2.2.2 input member).1
+  refine Or.inl ⟨rfl,rfl,?_,permission⟩
+  rw [reserved.2.2.1] at member
+  obtain ⟨⟨entry,index⟩,_,rfl⟩ := List.mem_map.mp member
+  rfl
 
 /-- Every actual entry recipe has a preparation outcome under its original
 physical and alias obligations. The constructed outcome includes owned,
@@ -4421,11 +4395,11 @@ theorem EntrySource.prepare {program : Kernel.Program} {callee : Context} {funct
   | supplied inputs => exact ⟨inputs,before,.complete,.supplied⟩
   | resident receiver access arguments =>
     obtain ⟨identity,instanceArguments,callable,selected⟩ := ready
-    exact PreparesEntryAttempt.resident_progress valid callable selected conditions.1 conditions.2
+    exact PreparesEntryAttempt.resident_progress valid callable selected conditions.1 conditions.2.1
   | contextual receiver receiverAccess witness witnessAccess inputs =>
     obtain ⟨identity,instanceArguments,available,captures,arguments,callable,selected,witnessReady,reserved,rfl,_⟩ := ready
     obtain ⟨apart,receiverRequest,witnessRequest,witnessResources,witnessCompatible,receiverCompatible,
-      witnessViews,receiverInputs,witnessInputs⟩ := conditions
+      witnessViews,receiverInputs,witnessInputs,_⟩ := conditions
     apply PreparesEntryAttempt.contextual_progress valid callable selected witnessReady reserved apart
       receiverRequest witnessRequest witnessResources witnessCompatible receiverCompatible witnessViews
     · intro borrowed input member
@@ -4468,7 +4442,7 @@ theorem Kernel.StepObservation.of_storage_frame {program : RuntimeProgram} {foot
   have permitted : ∀ query requested address, Permitted before query requested address → Permitted after query requested address :=
     fun _ _ _ permission => permission.locationExtension extension loans
   refine ⟨fun resident _ stored => (read resident).trans stored,fun resident _ stored => (read resident).symm.trans stored,nextRoot,located,typed,
-    permitted _ _ _,fun _ => permitted _ _ _,AllocationClaim.frame extension loans,
+    (fun requested _ => permitted _ requested _),AllocationClaim.frame extension loans,
     fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩,
     fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩,
     fun _ _ borrowed => borrowed.transport extension (fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩),
@@ -4679,16 +4653,7 @@ theorem Execution.PreparesEntry.contextual_inputsCompatible {program : Kernel.Pr
       (.contextual receiver receiverAccess witness witnessAccess originalInputs) inputs after)
     (product : InvocationInputsCompatible program footprint callee.region before originalInputs)
     (conditions : Execution.EntrySource.PreparationConditions program before callee.region function
-      (.contextual receiver receiverAccess witness witnessAccess originalInputs))
-    (receiverSeparated : receiverAccess = .owned → ∀ input ∈ originalInputs,
-      input.formal.IsResident → ¬ input.storage.Prefix receiver.address)
-    (receiverSupported : receiverAccess = .owned → ∀ input ∈ originalInputs, ∀ observed,
-      input.RetainsSupport before observed → ¬ observed.Prefix receiver.address)
-    (witnessPhysical : witnessAccess = .owned → ∀ input ∈ originalInputs, ¬ witness.address.ProperPrefix input.storage)
-    (witnessSeparated : witnessAccess = .owned → ∀ input ∈ originalInputs,
-      input.formal.IsResident → ¬ witness.address.Overlaps input.storage)
-    (witnessSupported : witnessAccess = .owned → ∀ input ∈ originalInputs, ∀ observed,
-      input.RetainsSupport before observed → ¬ witness.address.Overlaps observed) :
+      (.contextual receiver receiverAccess witness witnessAccess originalInputs)) :
     InvocationInputsCompatible program footprint callee.region after inputs := by
   cases prepared with
   | contextual callable selected witnessReady original first second reserved consumeReceiver consumeWitness =>
@@ -4698,7 +4663,7 @@ theorem Execution.PreparesEntry.contextual_inputsCompatible {program : Kernel.Pr
     obtain ⟨witnessValue,witnessId,witnessStored,witnessInitialized,witnessHead,ledger,availableId,active,
       liveRegion,witnessType,witnessPermission⟩ := witnessReady
     obtain ⟨apart,receiverRequest,witnessRequest,witnessResources,witnessCompatible,receiverCompatible,
-      witnessViews,receiverInputs,witnessInputs⟩ := conditions
+      witnessViews,receiverInputs,witnessInputs,receiverSeparated,receiverSupported,witnessPhysical,witnessSeparated,witnessSupported⟩ := conditions
     have middleWell := first.wellFormed valid
     have lentWell := second.wellFormed middleWell
     have middleProduct := first.inputsCompatible valid receiverPermission product receiverInputs
@@ -4723,6 +4688,425 @@ theorem Execution.PreparesEntry.contextual_inputsCompatible {program : Kernel.Pr
     have prior := Kernel.InvocationInput.RetainsSupport.backward lentWell frame observation
       (fun localSlot value formal stored => (facts.2.2 localSlot value formal stored).resourcesRecorded) support
     exact witnessSupported owned input member observed (supportBefore input member observed prior)
+
+
+theorem Authority.BorrowRegion.eq_of_same_root {world : World} {authority : Authority}
+    {first last : Address} {firstRegion lastRegion : Identity}
+    (firstBorrow : authority.BorrowRegion world first firstRegion)
+    (lastBorrow : authority.BorrowRegion world last lastRegion) (sameRoot : first.root = last.root) :
+    firstRegion = lastRegion := by
+  induction authority with
+  | owner =>
+    obtain ⟨firstRoot,firstFound,firstAt⟩ := firstBorrow
+    obtain ⟨lastRoot,lastFound,lastAt⟩ := lastBorrow
+    have same := Option.some.inj (firstFound.symm.trans (sameRoot ▸ lastFound))
+    exact firstAt.symm.trans ((congrArg Root.region same).trans lastAt)
+  | loan identity =>
+    obtain ⟨firstLoan,firstFound,firstAt⟩ := firstBorrow
+    obtain ⟨lastLoan,lastFound,lastAt⟩ := lastBorrow
+    have same := Option.some.inj (firstFound.symm.trans lastFound)
+    exact firstAt.symm.trans ((congrArg Loan.region same).trans lastAt)
+  | shared backing ih | guarded backing carrier ih => exact ih firstBorrow lastBorrow
+
+/-- A real receiver loan retains the source-region choice of every captured
+projection. It does not infer a new lifetime from the temporary handle. -/
+theorem Kernel.LendsResident.borrower_region {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {source observed : Address} {authority result : Authority} {access : Access}
+    {lease : Option InvocationLease} {sourceRegion : Identity}
+    (lent : LendsResident program activation scope region before source authority access lease result after)
+    (borrowed : authority.BorrowRegion before observed sourceRegion) (sameRoot : observed.root = source.root) :
+    result.BorrowRegion after observed sourceRegion := by
+  cases lent with
+  | owned => exact borrowed
+  | lent modes stored original allocated formed =>
+    have same := borrowed.eq_of_same_root original sameRoot
+    cases formed with
+    | borrow _ _ _ _ _ _ _ _ _ _ written =>
+      exact ⟨_,Table.get_set _ _ _,same.symm⟩
+
+theorem Kernel.LendsResident.borrower_guards {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {source : Address} {authority result : Authority} {access : Access}
+    {lease : Option InvocationLease}
+    (lent : LendsResident program activation scope region before source authority access lease result after) :
+    result.guardLoans after = authority.guardLoans before := by
+  cases lent with
+  | owned => rfl
+  | lent _ _ _ allocated formed =>
+    cases formed with
+    | borrow _ _ _ _ _ _ _ _ _ _ written =>
+      simpa only [Authority.guardLoans,Table.get_set,Option.map_some,Option.getD_some]
+        using Authority.guardLoans.loans_congr allocated.loans authority
+
+/-- A capture changes only its top authority. Its resident graph is framed by
+the common actual lender, while top access comes from the new borrower child. -/
+theorem Kernel.LendsResident.captureReadyFor {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {receiver : Address} {authority result : Authority} {access : Access}
+    {lease : Option InvocationLease} {index : Nat} {localSlot : Local} {footprint : List Address}
+    (valid : before.WellFormed)
+    (lent : LendsResident program activation scope region before receiver authority access lease result after)
+    (permission : Permitted before authority access receiver)
+    (original : InvocationInput.ReadyFor program before footprint
+      ⟨.capture index,.resident localSlot,receiver.child index,authority,access⟩)
+    (compatible : access ≠ .owned → ∀ value, before.Stores (receiver.child index) value →
+      value.ViewsLoanCompatible before access receiver (if access = .shared then .shared else .unique) (authority.guardLoans before)) :
+    InvocationInput.ReadyFor program after footprint
+      ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ := by
+  obtain ⟨value,stored,initialized,type,handoff,originalPermission⟩ := original
+  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission handoff.1
+  refine ⟨value,lent.stores stored (Nat.ne_of_lt (stored.rooted_bound valid)).symm,initialized,type,
+    handoff.frame_input valid batch framed ?_,(lent.borrower_permitted valid permission).child index⟩
+  exact fun query requested observed views held =>
+    lent.permitted valid held (fun borrowed => compatible borrowed value stored query requested observed views)
+
+/-- The capture's physical request follows its actual re-authored source view;
+no prepared-world layout or borrow-region admission is supplied. -/
+theorem Kernel.LendsResident.captureStorageRequest {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {receiver : Address} {authority result : Authority} {access : Access}
+    {lease : Option InvocationLease} {index : Nat} {localSlot : Local}
+    (valid : before.WellFormed)
+    (lent : LendsResident program activation scope region before receiver authority access lease result after)
+    (request : InvocationInput.StorageRequest program before region
+      ⟨.capture index,.resident localSlot,receiver.child index,authority,access⟩) :
+    InvocationInput.StorageRequest program after region
+      ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ := by
+  have rule := lent
+  cases lent with
+  | owned => exact request
+  | lent modes stored original allocated formed =>
+    have borrowed : access ≠ .owned := by rcases modes with ⟨rfl,_⟩ | ⟨rfl,_⟩ <;> simp
+    simp only [InvocationInput.StorageRequest,if_neg borrowed] at request ⊢
+    obtain ⟨sourceRegion,layout,borrowedRegion,sourceType,request⟩ := request
+    exact ⟨sourceRegion,layout,rule.borrower_region borrowedRegion rfl,rule.addressType valid sourceType,
+      request.same_regions rule.region_state.1 rule.region_state.2⟩
+
+
+/-- Re-authoring captures preserves the same ordered input product. Captured
+resident graphs and unchanged arguments use the actual lender frame; only
+capture top authorities change. All alias conditions are original-world reads. -/
+theorem Execution.LendsReceiver.residentInputsCompatible {program : Kernel.Program} {callee : Execution.Context}
+    {before after : World} {receiver : Address} {authority result : Authority} {access : Access}
+    {lease : Option InvocationLease} {formals : List Local} {arguments : List InvocationInput} {footprint : List Address}
+    (valid : before.WellFormed)
+    (lent : Execution.LendsReceiver program callee before receiver authority access lease result after)
+    (permission : Permitted before authority access receiver)
+    (product : InvocationInputsCompatible program footprint callee.region before
+      (Execution.ResidentCaptureInputs receiver authority access formals ++ arguments))
+    (nodup : (Execution.ResidentCaptureInputs receiver authority access formals ++ arguments).Nodup)
+    (captureViews : access ≠ .owned → ∀ input ∈ Execution.ResidentCaptureInputs receiver authority access formals,
+      ∀ value, before.Stores input.storage value → value.ViewsLoanCompatible before access receiver
+        (if access = .shared then .shared else .unique) (authority.guardLoans before))
+    (argumentViews : access ≠ .owned → ∀ input ∈ arguments, ∀ query requested observed,
+      input.ReadsPermission before query requested observed → query.LoanCompatible before requested observed receiver
+        (if access = .shared then .shared else .unique) (authority.guardLoans before)) :
+    InvocationInputsCompatible program footprint callee.region after
+      (Execution.ResidentCaptureInputs receiver result access formals ++ arguments) := by
+  classical
+  let captures := Execution.ResidentCaptureInputs receiver authority access formals
+  let reauthor (input : InvocationInput) := if input ∈ captures then { input with authority := result } else input
+  have argumentApart : ∀ input ∈ arguments, input ∉ captures := by
+    intro input member captured
+    exact (List.nodup_append.mp nodup).2.2 input captured input member rfl
+  have storage : ∀ input, (reauthor input).storage = input.storage := by
+    intro input; dsimp only [reauthor]; split <;> rfl
+  have formal : ∀ input, (reauthor input).formal = input.formal := by
+    intro input; dsimp only [reauthor]; split <;> rfl
+  have mode : ∀ input, (reauthor input).access = input.access := by
+    intro input; dsimp only [reauthor]; split <;> rfl
+  have clears : ∀ input, (reauthor input).clearedStorage = input.clearedStorage := by
+    intro input; dsimp only [reauthor]; split <;> rfl
+  have capturesMap : captures.map reauthor = Execution.ResidentCaptureInputs receiver result access formals := by
+    unfold captures Execution.ResidentCaptureInputs
+    rw [List.map_map]
+    apply List.map_congr_left
+    rintro ⟨localSlot,index⟩ member
+    exact if_pos (List.mem_map.mpr ⟨(localSlot,index),member,rfl⟩)
+  have argumentsMap : arguments.map reauthor = arguments := by
+    calc
+      arguments.map reauthor = arguments.map id := List.map_congr_left (fun input member => if_neg (argumentApart input member))
+      _ = arguments := List.map_id arguments
+  have inputsMap : Execution.ResidentCaptureInputs receiver result access formals ++ arguments =
+      (captures ++ arguments).map reauthor := by rw [List.map_append,capturesMap,argumentsMap]
+  have facts := product.inputFramed valid
+  have afterWell := lent.wellFormed valid
+  have frame := lent.stepFrame valid
+  have observation : ∀ input ∈ arguments, StepObservation program footprint callee.region before after input := by
+    intro input member
+    have original := List.mem_append_right captures member
+    exact Kernel.StepObservation.of_lendsResident valid permission lent
+      (fun borrowed => argumentViews borrowed input member) (product.ready.2.2 input original).1 (facts input original).2.1
+  have ready : ∀ input ∈ captures ++ arguments, (reauthor input).ReadyFor program after footprint := by
+    intro input member
+    by_cases captured : input ∈ captures
+    · have original := (product.ready.2.2 input member).1
+      have views := fun borrowed value stored => captureViews borrowed input captured value stored
+      obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+      rw [show reauthor _ = ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ from
+        if_pos (List.mem_map.mpr ⟨(localSlot,index),paired,rfl⟩)]
+      exact lent.captureReadyFor valid permission original views
+    · have argument := (List.mem_append.mp member).resolve_left captured
+      rw [show reauthor input = input from if_neg captured]
+      exact Kernel.InvocationInput.readyFor_of_observation valid (observation input argument) (product.ready.2.2 input member).1
+  have reads : ∀ input ∈ captures ++ arguments, after.read input.storage = before.read input.storage := by
+    intro input member
+    unfold World.read World.root
+    rw [lent.old_roots (facts input member).2.1]
+  have graphs : ∀ input ∈ captures ++ arguments, ∀ localSlot value, input.formal = .resident localSlot →
+      before.Stores input.storage value → value.BatchCompatible before after ∧ value.SupportFramed before after :=
+    fun input member localSlot value atFormal stored => lent.batchFrame valid permission ((facts input member).2.2 localSlot value atFormal stored)
+  rw [inputsMap]
+  refine ⟨⟨?_,?_,?_⟩,?_,?_,?_⟩
+  · simpa only [List.flatMap_map,clears] using product.ready.1
+  · simpa only [List.flatMap_map,clears] using product.ready.2.1
+  · intro target targetMember
+    obtain ⟨original,member,rfl⟩ := List.mem_map.mp targetMember
+    refine ⟨ready original member,?_⟩
+    simpa only [formal,mode,storage] using (product.ready.2.2 original member).2
+  · intro target targetMember
+    obtain ⟨original,member,rfl⟩ := List.mem_map.mp targetMember
+    by_cases captured : original ∈ captures
+    · have request := product.requests original member
+      obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+      rw [show reauthor _ = ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ from
+        if_pos (List.mem_map.mpr ⟨(localSlot,index),paired,rfl⟩)]
+      exact lent.captureStorageRequest valid request
+    · have argument := (List.mem_append.mp member).resolve_left captured
+      rw [show reauthor original = original from if_neg captured]
+      exact Kernel.InvocationInput.storageRequest_of_observation (observation original argument) (product.requests original member)
+  · intro target targetMember
+    obtain ⟨original,member,rfl⟩ := List.mem_map.mp targetMember
+    by_cases captured : original ∈ captures
+    · rw [show reauthor original = { original with authority := result } from if_pos captured]
+      exact (lent.borrower_permitted valid permission).recorded
+    · rw [show reauthor original = original from if_neg captured]
+      exact (facts original member).1.transport (fun _ loan found => ⟨loan,lent.loan_retained valid found⟩)
+  · intro resultHead resultHeadMember resultOther resultOtherMember different
+    obtain ⟨head,headMember,rfl⟩ := List.mem_map.mp resultHeadMember
+    obtain ⟨other,otherMember,rfl⟩ := List.mem_map.mp resultOtherMember
+    have original := product.independent headMember otherMember (fun same => different (congrArg reauthor same))
+    have freshRows : ∀ referent rowMode guards kind, (reauthor head).FreshRow after referent rowMode guards kind →
+        head.FreshRow before referent rowMode guards kind := by
+      intro referent rowMode guards kind fresh
+      by_cases captured : head ∈ captures
+      · obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+        rw [show reauthor _ = ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ from
+          if_pos (List.mem_map.mpr ⟨(localSlot,index),paired,rfl⟩)] at fresh
+        exact ⟨fresh.1,fresh.2.1,fresh.2.2.1,fresh.2.2.2.1,fresh.2.2.2.2.trans lent.borrower_guards⟩
+      · rw [show reauthor head = head from if_neg captured] at fresh
+        exact Kernel.InvocationInput.FreshRow.frame valid frame (facts head headMember).1 fresh
+    have freshOwning : ∀ parent, (reauthor head).FreshOwning parent → head.FreshOwning parent := by
+      intro parent fresh
+      by_cases captured : head ∈ captures
+      · obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+        obtain ⟨⟨identity,type,backing,carrier,atFormal,_,_⟩,_⟩ := fresh
+        rw [formal] at atFormal
+        cases atFormal
+      · simpa only [reauthor,if_neg captured] using fresh
+    have custodyMoved : ∀ identity, (reauthor head).CustodyMoved after identity → head.CustodyMoved before identity := by
+      intro identity moved
+      by_cases captured : head ∈ captures
+      · obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+        rcases moved with ⟨obligation,type,atFormal,_⟩ | ⟨obligation,type,atFormal,_⟩ <;>
+          rw [formal] at atFormal <;> cases atFormal
+      · rw [show reauthor head = head from if_neg captured] at moved
+        exact Kernel.InvocationInput.CustodyMoved.frame valid frame (facts head headMember).1 moved
+    have residentRecorded : ∀ localSlot value, other.formal = .resident localSlot →
+        before.Stores other.storage value → value.ResourcesRecorded before :=
+      fun localSlot value atFormal stored => ((facts other otherMember).2.2 localSlot value atFormal stored).resourcesRecorded
+    refine ⟨?_,?_,?_,?_,?_⟩
+    · intro referent rowMode guards kind fresh query requested observed read
+      have beforeFresh := freshRows referent rowMode guards kind fresh
+      rcases read with ⟨atAuthority,atAddress,requestedAccess,held⟩ | ⟨localSlot,value,atFormal,stored,views⟩
+      · by_cases captured : other ∈ captures
+        · have oldReady := (product.ready.2.2 other otherMember).1
+          obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+          have changed : reauthor _ = ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ :=
+            if_pos (List.mem_map.mpr ⟨(localSlot,index),paired,rfl⟩)
+          rw [changed] at atAuthority atAddress requestedAccess
+          change requested = access at requestedAccess
+          subst query; subst observed; subst requested
+          obtain ⟨value,stored,initialized,type,handoff,oldPermission⟩ := oldReady
+          apply lent.borrowerCompatible (original.permission referent rowMode guards kind beforeFresh
+            authority access (receiver.child index) (Or.inl ⟨rfl,rfl,rfl,oldPermission⟩))
+          intro identity member
+          have guardsEq : guards = head.authority.guardLoans before := by
+            cases headFormal : head.formal <;> simp only [InvocationInput.FreshRow,headFormal] at beforeFresh
+            · exact beforeFresh.2.2.2.2
+            · exact beforeFresh.2.2.2
+            · exact beforeFresh.2.2.2.2
+          obtain ⟨loan,found⟩ := (facts head headMember).1.guardLoans valid identity (guardsEq ▸ member)
+          exact World.loanBounds valid found
+        · have argument := (List.mem_append.mp otherMember).resolve_left captured
+          have beforeRead := Kernel.InvocationInput.ReadsPermission.backward valid afterWell frame (observation other argument)
+            (facts other otherMember).1 (facts other otherMember).2.1 residentRecorded
+            (by
+              rw [show reauthor other = other from if_neg captured] at atAuthority atAddress requestedAccess held
+              exact Or.inl ⟨atAuthority,atAddress,requestedAccess,held⟩)
+          exact Kernel.Authority.LoanCompatible.frame valid frame
+            (Kernel.InvocationInput.ReadsPermission.recorded valid (facts other otherMember).1 residentRecorded beforeRead)
+            (original.permission referent rowMode guards kind beforeFresh query requested observed beforeRead)
+      · rw [formal] at atFormal
+        rw [storage] at stored
+        rw [mode] at views
+        have oldStored : before.Stores other.storage value := (reads other otherMember).symm.trans stored
+        obtain ⟨batch,framed⟩ := graphs other otherMember localSlot value atFormal oldStored
+        have beforeRead : other.ReadsPermission before query requested observed := Or.inr ⟨localSlot,value,atFormal,oldStored,
+          Kernel.Value.ObservedViews.backward valid batch framed (residentRecorded localSlot value atFormal oldStored) views⟩
+        exact Kernel.Authority.LoanCompatible.frame valid frame
+          (Kernel.InvocationInput.ReadsPermission.recorded valid (facts other otherMember).1 residentRecorded beforeRead)
+          (original.permission referent rowMode guards kind beforeFresh query requested observed beforeRead)
+    · intro parent fresh query observed read held anchor atAnchor
+      have beforeFresh := freshOwning parent fresh
+      have beforeRead : other.ReadsClaim before query observed := by
+        rcases read with ⟨atAuthority,atAddress,claim⟩ | ⟨localSlot,value,atFormal,stored,claims⟩
+        · by_cases captured : other ∈ captures
+          · obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+            rw [storage] at atAddress
+            obtain ⟨_,_,_,_,_,_,_,_,_,whole,_⟩ := claim
+            rw [atAddress] at whole
+            simp [Address.child] at whole
+          · have argument := (List.mem_append.mp otherMember).resolve_left captured
+            exact Kernel.InvocationInput.ReadsClaim.backward valid afterWell frame (observation other argument)
+              (facts other otherMember).1 (facts other otherMember).2.1 residentRecorded
+              (by
+                rw [show reauthor other = other from if_neg captured] at atAuthority atAddress
+                exact Or.inl ⟨atAuthority,atAddress,claim⟩)
+        · rw [formal] at atFormal
+          rw [storage] at stored
+          have oldStored : before.Stores other.storage value := (reads other otherMember).symm.trans stored
+          obtain ⟨batch,framed⟩ := graphs other otherMember localSlot value atFormal oldStored
+          obtain ⟨resident,current,incoming,reached,binding,member,atQuery,atStorage⟩ := claims
+          exact Or.inr ⟨localSlot,value,atFormal,oldStored,resident,current,incoming,
+            (Value.ReachableResident.frame_batch (authority := .owner) valid
+              (residentRecorded localSlot value atFormal oldStored) trivial batch framed).mpr reached,
+            binding,member,atQuery,atStorage⟩
+      have recorded := Kernel.InvocationInput.ReadsClaim.recorded (facts other otherMember).1 residentRecorded beforeRead
+      have bound : observed.root < before.nextRoot := by
+        obtain ⟨identity,loan,root,domain,atIdentity,found,live,owning,referent,whole,selected,home,latest⟩ := held
+        exact frame.anchored observed.root root (World.root_found selected).1
+          (home.elim (fun same => Or.inl ⟨domain,same⟩) (fun same => Or.inr ⟨domain,same⟩))
+      have oldClaim := AllocationClaim.of_frame valid frame bound (fun identity atIdentity =>
+        let ⟨loan,found⟩ := recorded.parentLoan atIdentity; World.loanBounds valid found) held
+      obtain ⟨loan,found⟩ := (facts head headMember).1.parentLoan beforeFresh.2
+      exact Kernel.StepFrame.claimProtected afterWell frame (World.loanBounds valid found)
+        (original.claim parent beforeFresh query observed beforeRead oldClaim anchor atAnchor)
+    · intro identity moved query read
+      have beforeMoved := custodyMoved identity moved
+      rcases read with atAuthority | ⟨localSlot,value,atFormal,stored,custody⟩
+      · by_cases captured : other ∈ captures
+        · have originalKept := original.custody identity beforeMoved other.authority (Or.inl rfl)
+          rw [show reauthor other = { other with authority := result } from if_pos captured] at atAuthority
+          subst query
+          obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp captured
+          have movedBound : identity < before.nextLoan := by
+            have parent : head.authority.parentLoan = some identity := by
+              rcases beforeMoved with ⟨obligation,type,atFormal,atLoan⟩ | ⟨obligation,type,atFormal,atLoan,_⟩ <;> rw [atLoan] <;> rfl
+            obtain ⟨loan,found⟩ := (facts head headMember).1.parentLoan parent
+            exact World.loanBounds valid found
+          cases lent with
+          | owned => exact originalKept
+          | lent _ _ _ allocated _ =>
+            intro same
+            have equal := Option.some.inj same
+            rw [Allocates.nextLoan allocated] at equal
+            exact (Nat.ne_of_lt movedBound) equal.symm
+        · rw [show reauthor other = other from if_neg captured] at atAuthority
+          exact original.custody identity beforeMoved query (Or.inl atAuthority)
+      · rw [formal] at atFormal
+        rw [storage] at stored
+        have oldStored : before.Stores other.storage value := (reads other otherMember).symm.trans stored
+        obtain ⟨batch,framed⟩ := graphs other otherMember localSlot value atFormal oldStored
+        obtain ⟨resident,current,incoming,reached,binding,member,atQuery⟩ := custody
+        exact original.custody identity beforeMoved query (Or.inr ⟨localSlot,value,atFormal,oldStored,resident,current,incoming,
+          (Value.ReachableResident.frame_batch (authority := .owner) valid
+            (residentRecorded localSlot value atFormal oldStored) trivial batch framed).mpr reached,
+          binding,member,atQuery⟩)
+    · intro address member
+      rw [clears] at member
+      rw [storage]
+      exact original.clear address member
+    · intro address retained
+      obtain ⟨localSlot,value,atFormal,stored,support⟩ := retained
+      have resources := (Kernel.InvocationInput.ReadyFor.resident (ready other otherMember)
+        (by rw [atFormal]; trivial) stored).2.2.1.1
+      obtain ⟨root,found⟩ := resources.support_root support
+      have bound := World.root_bound afterWell (World.root_found found).1
+      intro overlap
+      exact (Nat.ne_of_lt bound) overlap.1.symm
+
+
+/-- Resident preparation composes re-authored captures with the actual shell
+write. The original coordinate theorem pulls every exclusion back to the
+original input product, including support reached through captured values. -/
+theorem Execution.PreparesEntry.resident_inputsCompatible {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before after : World} {receiver : ResolvedPlace} {access : Access}
+    {arguments inputs : List InvocationInput} {footprint : List Address} (valid : before.WellFormed)
+    (prepared : Execution.PreparesEntry program callee function before (.resident receiver access arguments) inputs after)
+    (product : InvocationInputsCompatible program footprint callee.region before
+      (Execution.ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments))
+    (nodup : (Execution.ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments).Nodup)
+    (conditions : Execution.EntrySource.PreparationConditions program before callee.region function (.resident receiver access arguments)) :
+    InvocationInputsCompatible program footprint callee.region after inputs := by
+  have originalInput : ∀ input ∈ inputs, ∃ original ∈
+      Execution.ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments,
+      original.formal = input.formal ∧ original.storage = input.storage := by
+    intro input member
+    have projected : (input.formal,input.storage) ∈ inputs.map (fun input => (input.formal,input.storage)) :=
+      List.mem_map.mpr ⟨input,member,rfl⟩
+    rw [prepared.map_inputs (fun input => (input.formal,input.storage)) (by intros; rfl)] at projected
+    obtain ⟨original,member,same⟩ := List.mem_map.mp projected
+    exact ⟨original,member,Prod.mk.inj same⟩
+  cases prepared with
+  | resident callable selected lend captures consume =>
+    rename_i identity instanceArguments lease result lent captureInputs
+    obtain ⟨rfl,captureAccess⟩ := captures
+    obtain ⟨value,stored,initialized,head,resources,permission⟩ := callable
+    obtain ⟨originalCaptures,request,captureViews,argumentViews,separated,supported⟩ := conditions
+    have lentProduct := Execution.LendsReceiver.residentInputsCompatible valid lend permission product nodup captureViews argumentViews
+    apply consume.inputsCompatible (lend.wellFormed valid) lentProduct
+    · intro owned input member resident
+      obtain ⟨original,member,atFormal,atStorage⟩ := originalInput input member
+      rw [← atStorage]
+      exact separated owned original member (by rw [atFormal]; exact resident)
+    · intro owned input member observed support
+      obtain ⟨original,member,atFormal,atStorage⟩ := originalInput input member
+      obtain ⟨localSlot,value,formal,stored,support⟩ := support
+      have oldInputSupport : original.RetainsSupport lent observed :=
+        ⟨localSlot,value,atFormal.trans formal,by rw [atStorage]; exact stored,support⟩
+      exact supported owned original member observed
+        (lend.retainsSupport valid permission (product.ready.2.2 original member).1 oldInputSupport)
+
+/-- Every successful actual source recipe obtains its prepared input product
+from the original one. Preparation never admits its own successor readiness. -/
+theorem Execution.PreparesEntry.inputsCompatible {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before after : World} {source : Execution.EntrySource}
+    {inputs : List InvocationInput} {footprint : List Address} (valid : before.WellFormed)
+    (prepared : Execution.PreparesEntry program callee function before source inputs after)
+    (product : InvocationInputsCompatible program footprint callee.region before (source.originalInputs function))
+    (nodup : (source.originalInputs function).Nodup)
+    (conditions : source.PreparationConditions program before callee.region function) :
+    InvocationInputsCompatible program footprint callee.region after inputs := by
+  cases source with
+  | supplied original => cases prepared; exact product
+  | resident receiver access arguments => exact prepared.resident_inputsCompatible valid product nodup conditions
+  | contextual receiver receiverAccess witness witnessAccess original =>
+    exact prepared.contextual_inputsCompatible valid product conditions
+
+/-- Constructive preparation and original-input transport share the same
+preflight contract and actual attempt. Physical failure retains its exact
+prefix; completion publishes the whole input product consumed by binding. -/
+theorem Execution.EntrySource.prepareInputs {program : Kernel.Program} {callee : Execution.Context} {function : Function}
+    {before : World} {source : Execution.EntrySource} {footprint : List Address} (valid : before.WellFormed)
+    (ready : source.Ready program before function)
+    (conditions : source.PreparationConditions program before callee.region function)
+    (product : InvocationInputsCompatible program footprint callee.region before (source.originalInputs function))
+    (nodup : (source.originalInputs function).Nodup) :
+    ∃ inputs after outcome, Execution.PreparesEntryAttempt program callee function before source inputs after outcome ∧
+      (outcome = .complete → InvocationInputsCompatible program footprint callee.region after inputs) := by
+  obtain ⟨inputs,after,outcome,prepared⟩ := source.prepare valid ready conditions
+  refine ⟨inputs,after,outcome,prepared,?_⟩
+  intro complete
+  subst outcome
+  exact Execution.PreparesEntry.inputsCompatible valid prepared product nodup conditions
 
 
 end Glorious.Language

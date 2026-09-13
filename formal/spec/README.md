@@ -219,10 +219,10 @@ or a dependency of this project.
   original source readiness, prepared-state input compatibility and fresh-row
   compatibility with the owned receiver. `EntrySource.prepare` now constructs
   preparation success/exhaustion from original recipe readiness, positive
-  requests and observed-graph compatibility. Complete contextual preparation
-  now transports original input admission through both loans and consumption
-  writes. Resident capture re-authoring and whole-entry composition remain open.
-  The integrated strict 220-job gate and general theorem axiom audits pass.
+  requests and observed-graph compatibility. `EntrySource.prepareInputs` now
+  constructs all preparation outcomes and derives every completed recipe
+  input product, including resident capture re-authoring, from the original
+  world. Whole-entry composition remains open. The strict 220-job gate passes.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -463,12 +463,24 @@ from the authoritative input product rather than separately admitted by entry.
 The contextual, physical-transport and entry axiom audits use only the standard
 three axioms; the integrated 220-job gate passes.
 
+`PreparesEntry.inputsCompatible` now closes original-to-prepared input transport
+for all three recipes. Resident captures use the actual borrower authority,
+source region and inherited guards; their readiness, physical requests and all
+five pairwise interference channels are derived before composing the receiver
+write. `EntrySource.prepareInputs` constructs the actual outcome and publishes
+that product on completion under the same original-world `PreparationConditions`.
+The permission observer follows actual formal reads: resident/storage access,
+guarded allocation opening, and no fictitious pointee access for ordinary
+allocation or raw-loan handoff. The obsolete separate owned-permission channel
+and its helper are removed. The general all-source, resident-product and
+ordered-binder axiom audits report only the standard three axioms.
+
 The preserved `Checks` were not run. This is general proof checking, not example
 evidence, a whole-library success or source-wide progress. Higher task/frame
 consumers are still being migrated and are not included in this gate. Deriving
-the concrete preparation conditions from source admission, transporting resident
-captures through their changed authority, and composing whole entry steps remain
-on the same dependency chain.
+the concrete preparation conditions from source admission and composing actual
+entry remain open. The entry endpoint still requires prepared incoming-resource
+agreement and receiver fresh-row compatibility; neither has been assumed away.
 
 Earlier recovery checkpoints used this target set:
 

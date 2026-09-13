@@ -246,10 +246,20 @@ slots at every projection depth. Original input compatibility supplies the
 framing facts previously admitted separately by the entry endpoint. The strict
 220-job gate and general contextual/physical/entry axiom audits pass.
 
-The next dependency is resident capture re-authoring and original-to-prepared
-whole-entry composition, together with deriving the concrete original-world
-conditions from source admission. Higher task/frame consumers and general
-resource progress remain open; no source-wide or full-tree conformance is claimed.
+All-source original-input transport is now closed by
+`PreparesEntry.inputsCompatible`. Resident capture re-authoring derives its
+actual borrower permission, source region, guards, physical request and five
+pairwise interference channels, then composes receiver consumption using the
+same input-coordinate producer. `EntrySource.prepareInputs` constructs every
+actual outcome and its successful input product under the unified original
+preflight. Raw allocation/loan handoff no longer observes fictitious pointee
+permissions; the separate owned-permission observer and its helper are removed.
+The strict 220-job gate and general all-source/resident/binder axiom audits pass.
+
+Next: compose actual entry, including incoming-resource agreement and receiver
+fresh-row compatibility, and derive the concrete original-world conditions from
+source admission. Higher task/frame consumers and general resource progress
+remain open; no source-wide or full-tree conformance is claimed.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -310,11 +320,11 @@ arbitrary future world. The strict 73-job dependency gate passed and the
 endpoint uses only the standard Lean logical axioms.
 
 Next on this dependency chain: derive original source readiness and concrete
-preparation conditions from source admission, transport resident captures
-through their changed authority, and compose ordered binding with receiver
-finishing. All preparation outcomes are constructed; original contextual input
-admission now survives the complete actual preparation. The remaining
-original-to-prepared obligation is not replaced by a future-world certificate.
+preparation conditions from source admission, and compose ordered binding with
+receiver finishing. All preparation outcomes and their successful original-to-
+prepared input products are now constructed, including capture re-authoring.
+The prepared incoming-resource and receiver-compatibility premises at the entry
+endpoint remain real integration obligations, not future-world certificates.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains

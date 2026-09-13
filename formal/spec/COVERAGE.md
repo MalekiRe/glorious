@@ -246,9 +246,9 @@ source-derived execution progress. Original source readiness, actual
 receiver/witness preparation, incoming-resource agreement, prepared-state
 batch compatibility and receiver fresh-row compatibility remain explicit
 admission premises of that endpoint; separate batch framing is now derived.
-General preparation construction and contextual original-input transport are
-proved below. Source-derived conditions, resident capture re-authoring,
-proper-tail cleanup and whole-machine progress remain open.
+General preparation construction and all-source original-input transport are
+proved below. Source-derived conditions, whole-entry composition, proper-tail
+cleanup and whole-machine progress remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
 lane workspace. They are level moves plus one disclosed redesign: the
@@ -361,13 +361,26 @@ port. The same product derives `InputFramed` for the real entry endpoint. The
 integrated strict 220-job gate and general composition/transport/entry axiom
 audits pass with only the standard three axioms.
 
+`PreparesEntry.inputsCompatible` closes this original-input boundary for every
+recipe, including authority-changing resident captures. Their top permission,
+borrow region and guards come from the actual receiver loan. The same value
+graph transports readiness and all five pairwise interference channels, then
+actual receiver consumption uses the authoritative input-coordinate theorem.
+`EntrySource.prepareInputs` constructs success/exhaustion and the complete
+success product under one original-world `PreparationConditions` contract.
+Top-level permission reads now match resident/storage and guarded-allocation
+rules; ordinary allocation and raw-loan handoff impose no fictitious access
+to T. The separate owned-permission observer and its unused helper are removed.
+The strict 220-job gate and all-source, resident-product and ordered-binder
+axiom audits pass with only the standard three axioms.
+
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. Source derivation of concrete preparation conditions, resident
-capture re-authoring from original input admission, whole-entry progress and
+standard axioms. Source-derived preparation conditions, whole-entry composition
+including incoming-resource agreement and receiver fresh-row compatibility, and
 higher task/frame integration remain open. No full-tree success is claimed;
 preserved example modules were not run.
 
