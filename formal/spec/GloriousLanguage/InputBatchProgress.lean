@@ -3176,6 +3176,8 @@ theorem BindsInputAt.outputFramed {program : RuntimeProgram} {recipient : ClaimC
       exact OutputFramed.of_storageLoanTransfer valid formal owning ready transferred
 
 
+end Kernel
+
 /-- The ordered batch invariant: what is still pending is ready, requested and
 framed, the pending heads are pairwise independent, and every binding already
 emitted is still framed in the current world. -/
@@ -3337,102 +3339,6 @@ theorem Execution.preparesEntry_callee_context {program : Kernel.Program}
         (Execution.lendsReceiver_callee activation scope region lentWitness)
         reservedLent consumedReceiver consumedAvailability
 
-/-- The ordinary entry endpoint. The source admission states the invocation
-preparation directly at the entry context the caller will select, for whatever
-environment the ordered binder produces; the binder then either completes every
-input or stops at the first physically exhausted one, the receiver shell is
-consumed from the world the binder produced, and the result is the real
-Execution.EnterWorldAttempt. -/
-theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before : Execution.State}
-    {caller : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
-    {withRegion prepared : World} {inputs : List InvocationInput}
-    (consumed : World → World)
-    (callee : Execution.Context)
-    (calleeLifetime : callee.activation = before.nextActivation ∧
-      callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion)
-    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
-    (prepares : Execution.PreparesEntry program callee function withRegion source inputs prepared)
-    (fresh : FreshRegion before.world before.world.nextRegion withRegion)
-    (preparedValid : prepared.WellFormed)
-    (incoming : IncomingResources program function prepared inputs)
-    (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
-      before.world.nextRegion prepared inputs)
-    (facts : ∀ input ∈ inputs, InputFramed program prepared input)
-    (nodup : inputs.Nodup)
-    (finishes : ∀ bound, Execution.FinishesEntry bound source (consumed bound))
-    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
-    ∃ context after outcome,
-      Execution.EnterWorldAttempt program before caller function source context after outcome := by
-  obtain ⟨declaration,declared⟩ := declared
-  obtain ⟨environment,bound,outcome,attempt,framed⟩ :=
-    Kernel.BatchPrepared.attemptFor (recipient := .activation before.nextActivation)
-      (activation := before.nextActivation) (scope := before.world.nextRegion)
-      (region := before.world.nextRegion) prepared inputs [] preparedValid
-      (Kernel.BatchPrepared.of_compatible product facts nodup)
-  have transported : Execution.PreparesEntry program
-      ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
-        before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
-        [⟨function.declaration,environment⟩]⟩ function withRegion source inputs prepared :=
-    Execution.preparesEntry_callee_context calleeLifetime.1 calleeLifetime.2.1 calleeLifetime.2.2
-      prepares
-  refine ⟨⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
-      before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
-      [⟨function.declaration,environment⟩]⟩,
-    (match outcome with | .complete => consumed bound | .exhausted => bound), outcome,
-    withRegion,prepared,inputs,environment,declaration,bound,
-    declared,fresh,transported,incoming,attempt,?_,rfl,callerUnsafe⟩
-  cases outcome
-  · exact finishes bound
-  · rfl
-
-
-/-- The supplied-source entry endpoint with no finishing assumptions at all: the
-binder's own world is the entry's after-world, because a supplied entry owns no
-receiver shell to retire. -/
-theorem Kernel.EntryBatch.enterWorldAttempt.supplied {program : Kernel.Program}
-    {before : Execution.State} {caller : Execution.Context} {function : Kernel.Function}
-    {supplied : List InvocationInput} {withRegion prepared : World}
-    {inputs : List InvocationInput} (callee : Execution.Context)
-    (calleeLifetime : callee.activation = before.nextActivation ∧
-      callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion)
-    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
-    (prepares : Execution.PreparesEntry program callee function withRegion (.supplied supplied) inputs prepared)
-    (fresh : FreshRegion before.world before.world.nextRegion withRegion)
-    (preparedValid : prepared.WellFormed)
-    (incoming : IncomingResources program function prepared inputs)
-    (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
-      before.world.nextRegion prepared inputs)
-    (facts : ∀ input ∈ inputs, InputFramed program prepared input)
-    (nodup : inputs.Nodup)
-    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
-    ∃ context after outcome,
-      Execution.EnterWorldAttempt program before caller function (.supplied supplied) context after outcome :=
-  Kernel.EntryBatch.enterWorldAttempt (consumed := fun bound => bound)
-    (finishes := fun _ => Execution.FinishesEntry.supplied) callee calleeLifetime declared
-    prepares fresh preparedValid incoming product facts nodup callerUnsafe
-
-/-- A supplied entry finishes at the very world the binder produced: it owns no
-receiver shell to retire, so the endpoint's supplied branch needs no write. -/
-theorem Execution.FinishesEntry.supplied {world : World} {inputs : List Kernel.InvocationInput} :
-    Execution.FinishesEntry world (.supplied inputs) world :=
-  .supplied
-
-/-- The receiver-shell consumption producers: the exact source-level evidence a
-caller has after the ordered binder produced its world. -/
-theorem Execution.FinishesEntry.of_resident {before after : World}
-    {receiver : ResolvedPlace} {access : Access}
-    {arguments : List Kernel.InvocationInput}
-    (finished : Execution.FinishesReceiver before receiver access after) :
-    Execution.FinishesEntry before (.resident receiver access arguments) after :=
-  .resident finished
-
-theorem Execution.FinishesEntry.of_contextual {before after : World}
-    {receiver witness : ResolvedPlace} {access witnessAccess : Access}
-    {inputs : List Kernel.InvocationInput}
-    (finished : Execution.FinishesReceiver before receiver access after) :
-    Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) after :=
-  .contextual finished
-
 /-- The actual successor of a consumed receiver shell: the marked shell the
 preparation installed is stored at the receiver port, so the retirement is a
 real world write at that exact address - no successor is assumed. -/
@@ -3446,179 +3352,12 @@ theorem Execution.FinishesReceiver.owned_of_stored {world : World} {receiver : R
   obtain ⟨after,cleared⟩ := stored.write_exists none
   exact ⟨after,.owned stored marked callable holes resources permitted cleared⟩
 
-/-- A lent receiver needs no poststate evidence at all: the admitted lending
-access itself finishes the entry at the very world the binder produced. -/
-theorem Execution.FinishesEntry.lent_resident {before : World} {receiver : ResolvedPlace}
-    {access : Access} {arguments : List Kernel.InvocationInput} (lentAccess : access ≠ .owned) :
-    Execution.FinishesEntry before (.resident receiver access arguments) before :=
-  .resident (.lent lentAccess)
-
-theorem Execution.FinishesEntry.lent_contextual {before : World} {receiver witness : ResolvedPlace}
-    {access witnessAccess : Access} {inputs : List Kernel.InvocationInput}
-    (lentAccess : access ≠ .owned) :
-    Execution.FinishesEntry before (.contextual receiver access witness witnessAccess inputs) before :=
-  .contextual (.lent lentAccess)
-
-
-
-
 /-- Address overlap is symmetric, so an apartness obligation can be read from
 either side. -/
 theorem Address.not_overlaps_symm {first second : Address} (apart : ¬ first.Overlaps second) :
     ¬ second.Overlaps first :=
   fun overlap => apart ⟨overlap.1.symm,overlap.2.1.symm,
     overlap.2.2.elim (fun same => Or.inr same) (fun same => Or.inl same)⟩
-
-/-- The caller's receiver port lies outside every pending binding's write and
-referent set, and below the prepared storage frontier. This is the structural
-prestate admission that lets the receiver shell and its owner permission be
-framed across the ordered fold. -/
-structure Kernel.ReceiverApart (receiver : Address) (world : World)
-    (inputs : List InvocationInput) : Prop where
-  storage : ∀ input ∈ inputs, ¬ input.storage.Overlaps receiver
-  frontier : receiver.root < world.nextRoot
-
-
-
-/-- Setting one entry to a hole keeps a list of holes all holes. -/
-theorem List.allNone_set {α : Type} {list : List (Option α)}
-    (all : ∀ value ∈ list, value = none) (index : Nat) :
-    ∀ value ∈ list.set index none, value = none := by
-  induction list generalizing index with
-  | nil => intro value member; simp at member
-  | cons head tail ih =>
-      have headNone : head = none := all head List.mem_cons_self
-      cases index with
-      | zero =>
-          intro value member
-          simp only [List.set_cons_zero,List.mem_cons] at member
-          rcases member with same | later
-          · simp [same]
-          · exact all value (List.mem_cons_of_mem head later)
-      | succ index =>
-          intro value member
-          simp only [List.set_cons_succ,List.mem_cons] at member
-          rcases member with same | later
-          · simp [same,headNone]
-          · exact ih (fun value member => all value (List.mem_cons_of_mem head member)) index value later
-
-/-- A clearing write inside a value all of whose fields are holes leaves every
-field of the result a hole: this is the projection the receiver shell needs
-when a pending capture's storage lies under the receiver. -/
-theorem Value.replace_fields_none {before after : Value} {index : Nat} {path : List Nat}
-    (written : before.replace (index :: path) none = some after)
-    (noneBefore : ∀ field ∈ before.fields, field = none) :
-    ∀ field ∈ after.fields, field = none := by
-  rcases Value.replace_cons_shape written with
-    ⟨slot,found,⟨_,rfl⟩ | ⟨child,changed,atSlot,_,rfl⟩⟩
-  · intro field member
-    have member' : field ∈ List.set before.fields index none := by
-      simpa only [Value.fields,Value.withFields] using member
-    exact List.allNone_set noneBefore index field member'
-  · exact absurd (noneBefore slot (List.mem_of_getElem? found))
-      (by rw [atSlot]; simp)
-
-
-/-- The single real world operation that empties one captured slot: a clear at
-`address.child index` leaves the receiver root storing the same shell with that
-slot a hole and every other slot, its head, owner, type, liveness flag and
-resource list untouched. This is the binding's own transfer effect, so a capture
-slot's emptiness is produced here rather than assumed. -/
-theorem Kernel.Stores.write_child_none {before after : World} {address : Address} {index : Nat}
-    {shell : Value} (whole : address.fields = [])
-    (stored : before.Stores address shell)
-    (written : before.write (address.child index) none = some after) :
-    ∃ changed, after.Stores address changed ∧ changed.head = shell.head ∧
-      changed.owner = shell.owner ∧ changed.type = shell.type ∧
-      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
-      changed.fields[index]? = some none ∧
-      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
-  obtain ⟨parent,slot,storedParent,slotFound,rewritten⟩ := World.write_child_shape written
-  have same : parent = shell := (Option.some.inj (stored.symm.trans storedParent)).symm
-  subst parent
-  have bound : index < (shell.fields).length := (List.getElem?_eq_some_iff.mp slotFound).1
-  refine ⟨shell.withFields ((shell.fields).set index none),?_,rfl,rfl,rfl,rfl,rfl,?_,?_⟩
-  · have located : before.Located address := .inl ⟨shell,stored⟩
-    obtain ⟨root,rootSelected⟩ := (World.Located.root_iff whole).mp located
-    obtain ⟨_,liveTrue,genEq⟩ := World.root_found rootSelected
-    have shape := rewritten
-    unfold World.write at shape
-    rw [rootSelected] at shape
-    dsimp at shape
-    simp only [whole,List.isEmpty_nil,↓reduceIte] at shape
-    let marked : Root := { root with value := some (shell.withFields ((shell.fields).set index none)) }
-    have afterEq : after = { before with roots := before.roots.set address.root marked } :=
-      (Option.some.inj shape).symm
-    have rootAfter : after.root address = some marked := by
-      rw [afterEq]
-      unfold World.root
-      rw [Table.get_set]
-      dsimp
-      simp only [marked,liveTrue,genEq]
-      simp
-    have readAfter : after.read address = some (shell.withFields (shell.fields.set index none)) := by
-      unfold World.read
-      rw [rootAfter]
-      dsimp [marked]
-      simp only [whole,Value.atPath]
-    exact readAfter
-  · show (shell.fields.set index none)[index]? = some none
-    exact List.getElem?_set_self bound
-  · intro other different
-    show (shell.fields.set index none)[other]? = shell.fields[other]?
-    exact List.getElem?_set_ne (Ne.symm different)
-
-/-- The owned capture transfer is what empties the receiver's capture slot: the
-transfer's own clear at the capture's storage (the receiver's child slot) makes
-that slot a hole, and its install at the fresh destination root, which is apart
-from the receiver, leaves the receiver's row otherwise exactly as it was. This
-is the binding execution producing the emptiness, so nothing is admitted. -/
-theorem Kernel.Transfers.slot_hole {program : RuntimeProgram} {before after : World}
-    {authority : Authority} {source destination : Address}
-    (transfer : Transfers program before authority source destination after)
-    {receiver : Address} {index : Nat} {value : Value} (whole : receiver.fields = [])
-    (storageIs : source = receiver.child index)
-    (stored : before.Stores receiver value)
-    (apart : ¬ destination.Overlaps receiver) :
-    ∃ changed, after.Stores receiver changed ∧ changed.head = value.head ∧
-      changed.owner = value.owner ∧ changed.type = value.type ∧
-      changed.shellLive = value.shellLive ∧ changed.resources = value.resources ∧
-      changed.fields[index]? = some none ∧
-      ∀ other, other ≠ index → changed.fields[other]? = value.fields[other]? := by
-  cases transfer with
-  | move storedSource initialized ready permitted vacant separated type clear install =>
-      have clearAt := clear
-      rw [storageIs] at clearAt
-      obtain ⟨changed,clearedStores,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩ :=
-        Kernel.Stores.write_child_none whole stored clearAt
-      refine ⟨changed,?_,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩
-      exact clearedStores.write_other install apart
-
-/-- The owned binding of a capture is the operation that empties the capture's
-slot: the rule allocates the fresh destination (whose root is the allocation
-world's nextRoot, hence apart from the receiver's root), transfers the resident
-capture out of the receiver's child slot, and so leaves the receiver storing the
-same shell with that slot a hole. The apartness premise is the freshness the
-allocation presupposes, stated in root form. -/
-theorem Kernel.BindsInputAt.owned_slot {program : RuntimeProgram}
-    {activation scope region : Identity} {before allocated after : World}
-    {input : InvocationInput} {address : Address} {layout : Layout}
-    (allocatedRule : Allocates program.declarations before (.localSlot activation scope) region
-      input.formal.type layout input.formal.mutable address allocated)
-    (transfer : Transfers program allocated input.authority input.storage address after)
-    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
-    (storageIs : input.storage = receiver.child index)
-    (stored : allocated.Stores receiver shell)
-    (freshApart : before.nextRoot ≠ receiver.root) :
-    ∃ changed, after.Stores receiver changed ∧ changed.head = shell.head ∧
-      changed.owner = shell.owner ∧ changed.type = shell.type ∧
-      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
-      changed.fields[index]? = some none ∧
-      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
-  obtain ⟨freshRoot,_⟩ := Allocates.fresh_root allocatedRule
-  have apart : ¬ address.Overlaps receiver :=
-    World.not_overlaps_of_root_ne (by rw [freshRoot]; exact freshApart)
-  exact Kernel.Transfers.slot_hole transfer whole storageIs stored apart
 
 /-- The two whole-allocation handoffs leave the roots table alone, so the
 receiver's stored shell crosses them unchanged: the congruence that lets the
@@ -3635,34 +3374,6 @@ theorem Kernel.TransfersStorageLoan.stores {recipient : ClaimCustody} {before af
     {address : Address} {value : Value} (stored : before.Stores address value) :
     after.Stores address value :=
   World.Stores.of_roots (TransfersStorageLoan.roots_eq moved) stored
-
-/-- The two claim relations write only the loan table's bookkeeping, so they
-leave the roots table alone and the receiver's stored shell crosses them
-unchanged. These are the congruences the storage and guarded-allocation bindings
-need to keep every shell slot exactly as the binding found it. -/
-theorem Kernel.ClaimsStorage.roots_eq {custody : ClaimCustody} {before after : World}
-    {authority : Authority} {access : Access} {address : Address} {created : Identity}
-    (claimed : ClaimsStorage custody before authority access address created after) :
-    after.roots = before.roots := by cases claimed; rfl
-
-theorem Kernel.ClaimsStorage.stores {custody : ClaimCustody} {before after : World}
-    {authority : Authority} {access : Access} {address : Address} {created : Identity}
-    (claimed : ClaimsStorage custody before authority access address created after)
-    {observed : Address} {value : Value} (stored : before.Stores observed value) :
-    after.Stores observed value :=
-  World.Stores.of_roots (Kernel.ClaimsStorage.roots_eq claimed) stored
-
-theorem Kernel.ClaimsAllocation.roots_eq {recipient : ClaimCustody} {before after : World}
-    {authority : Authority} {address : Address} {created : Identity}
-    (claimed : ClaimsAllocation recipient before authority address created after) :
-    after.roots = before.roots := by cases claimed; rfl
-
-theorem Kernel.ClaimsAllocation.stores {recipient : ClaimCustody} {before after : World}
-    {authority : Authority} {address : Address} {created : Identity}
-    (claimed : ClaimsAllocation recipient before authority address created after)
-    {observed : Address} {value : Value} (stored : before.Stores observed value) :
-    after.Stores observed value :=
-  World.Stores.of_roots (Kernel.ClaimsAllocation.roots_eq claimed) stored
 
 /-- An allocation writes one fresh root into the roots table, so every other
 address's row is untouched: the transport that carries the receiver's shell
@@ -3715,453 +3426,6 @@ theorem Kernel.LendsResident.stores {program : RuntimeProgram} {activation scope
       exact Kernel.FormsLoan.stores_other formed allocStored
         (World.not_overlaps_of_root_ne (by rw [freshRoot]; exact different))
 
-/-- The fold's per-step obligation for the receiver's captured shell, in the
-disjunctive form the rules actually have: every binding leaves the receiver
-storing its shell unchanged, except the owned binding of the capture at that
-slot, whose own transfer produces the hole and preserves everything else. This
-is the step that carries the cleared-slot set through the batch. -/
-theorem Kernel.BindsInputAt.shell_step {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {before : World} {input : InvocationInput}
-    {binding : Binding} {after : World}
-    (step : BindsInputAt program recipient activation scope region before input binding after)
-    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
-    (storageIs : input.storage = receiver.child index)
-    (stored : before.Stores receiver shell)
-    (freshApart : before.nextRoot ≠ receiver.root) :
-    ∃ changed, after.Stores receiver changed ∧
-      (changed = shell ∨ (changed.head = shell.head ∧ changed.owner = shell.owner ∧
-        changed.type = shell.type ∧ changed.shellLive = shell.shellLive ∧
-        changed.resources = shell.resources ∧ changed.fields[index]? = some none ∧
-        ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]?)) := by
-  cases step with
-  | lent _ _ _ _ _ _ _ lends =>
-      exact ⟨shell,Kernel.LendsResident.stores lends stored freshApart,Or.inl rfl⟩
-  | owned _ _ _ _ _ allocates transfers =>
-      have freshRoot := (Allocates.fresh_root allocates).1
-      have allocatedStored := Kernel.Allocates.stores_other allocates stored
-        (by rw [freshRoot]; exact freshApart)
-      obtain ⟨changed,stored',head',owner',type',live',resources',hole,others⟩ :=
-        Kernel.BindsInputAt.owned_slot allocates transfers whole storageIs allocatedStored freshApart
-      exact ⟨changed,stored',Or.inr ⟨head',owner',type',live',resources',hole,others⟩⟩
-  | storage _ _ _ claims =>
-      exact ⟨shell,Kernel.ClaimsStorage.stores claims stored,Or.inl rfl⟩
-  | allocation _ _ _ _ transfers =>
-      exact ⟨shell,Kernel.TransfersAllocation.stores transfers stored,Or.inl rfl⟩
-  | guardedAllocation _ _ _ _ _ claims =>
-      exact ⟨shell,Kernel.ClaimsAllocation.stores claims stored,Or.inl rfl⟩
-  | loan _ _ _ _ transfers =>
-      exact ⟨shell,Kernel.TransfersStorageLoan.stores transfers stored,Or.inl rfl⟩
-
-/-- A pending capture of an owned entry is bound by the owned rule, so its slot
-is emptied: an owned access rules out lending, and a resident formal rules out
-the storage, allocation and loan claims, leaving the rule whose own transfer
-clears the receiver's child slot. -/
-theorem Kernel.BindsInputAt.owned_capture_step {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {before : World} {input : InvocationInput}
-    {binding : Binding} {after : World}
-    (step : BindsInputAt program recipient activation scope region before input binding after)
-    (ownedAccess : input.access = .owned) (resident : input.formal.IsResident)
-    {receiver : Address} {index : Nat} {shell : Value} (whole : receiver.fields = [])
-    (storageIs : input.storage = receiver.child index)
-    (stored : before.Stores receiver shell)
-    (frontier : receiver.root < before.nextRoot) :
-    ∃ changed, after.Stores receiver changed ∧ changed.head = shell.head ∧
-      changed.owner = shell.owner ∧ changed.type = shell.type ∧
-      changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
-      changed.fields[index]? = some none ∧
-      ∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]? := by
-  cases step with
-  | lent _ notOwned _ _ _ _ _ _ => exact absurd ownedAccess notOwned
-  | owned _ _ _ _ _ allocates transfers =>
-      have freshRoot := (Allocates.fresh_root allocates).1
-      have apart : before.nextRoot ≠ receiver.root := Ne.symm (Nat.ne_of_lt frontier)
-      have allocatedStored := Kernel.Allocates.stores_other allocates stored
-        (by rw [freshRoot]; exact apart)
-      exact Kernel.BindsInputAt.owned_slot allocates transfers whole storageIs allocatedStored apart
-  | storage _ formalEq _ _ => rw [formalEq] at resident; exact resident.elim
-  | allocation _ formalEq _ _ _ => rw [formalEq] at resident; exact resident.elim
-  | guardedAllocation _ formalEq _ _ _ _ => rw [formalEq] at resident; exact resident.elim
-  | loan _ formalEq _ _ _ => rw [formalEq] at resident; exact resident.elim
-
-/-- Every admitted capture of a receiver sits at its own index: the capture
-projection builds each input with origin `.capture index` and storage the
-receiver's child at that same index, so the slot a binding empties is exactly the
-capture's index. -/
-theorem Kernel.Execution.ResidentCaptureInputs.slot {receiver : Address} {authority : Authority}
-    {access : Access} {formals : List Local} {input : InvocationInput}
-    (member : input ∈ Execution.ResidentCaptureInputs receiver authority access formals) :
-    ∃ index, input.origin = .capture index ∧ input.storage = receiver.child index := by
-  simp only [Execution.ResidentCaptureInputs,List.mem_map] at member
-  obtain ⟨⟨formal,index⟩, _, same⟩ := member
-  exact ⟨index, by rw [← same], by rw [← same]⟩
-
-theorem Kernel.Execution.CaptureInputs.slot {world : World} {receiver : Address} {authority : Authority}
-    {access : Access} {formals : List Local} {inputs : List InvocationInput}
-    (selected : Execution.CaptureInputs world receiver authority access formals inputs)
-    {input : InvocationInput} (member : input ∈ inputs) :
-    ∃ index, input.origin = .capture index ∧ input.storage = receiver.child index :=
-  Kernel.Execution.ResidentCaptureInputs.slot (by rw [← selected.1]; exact member)
-
-/-- The bridge from the fold's per-slot holes to an all-holes shell: if every
-slot of the admitted shell is in the cleared list and the shell's length is
-unchanged, then every field of the resulting shell is a hole. This is what turns
-`attemptFor_shell`'s cleared-slot invariant into the emptiness the finishing
-consumes, with the slot coverage supplied by the admitted receiver. -/
-theorem Kernel.Cleared.fields_all_none {shell changed : Value} {cleared : List Nat}
-    (lengths : changed.fields.length = shell.fields.length)
-    (holes : ∀ slot ∈ cleared, changed.fields[slot]? = some none)
-    (covers : ∀ slot, slot < shell.fields.length → slot ∈ cleared) :
-    ∀ field ∈ changed.fields, field = none := by
-  intro field member
-  obtain ⟨index, found⟩ := List.mem_iff_getElem?.mp member
-  have bound : index < changed.fields.length := (List.getElem?_eq_some_iff.mp found).1
-  have indexBound : index < shell.fields.length := by rw [← lengths]; exact bound
-  have atCleared := holes index (covers index indexBound)
-  rw [atCleared] at found
-  exact (Option.some.inj found).symm
-
-/-- The capture projection numbers its inputs exactly by their position: every
-admitted capture's index is below the capture count, so the slots the ordering
-clears are precisely the capture positions. -/
-theorem Kernel.Execution.ResidentCaptureInputs.index_bound {receiver : Address}
-    {authority : Authority} {access : Access} {formals : List Local} {input : InvocationInput}
-    (member : input ∈ Execution.ResidentCaptureInputs receiver authority access formals) :
-    ∃ index, input.origin = .capture index ∧ index < formals.length ∧
-      input.storage = receiver.child index := by
-  simp only [Execution.ResidentCaptureInputs,List.mem_map] at member
-  obtain ⟨⟨formal,index⟩, pairMember, same⟩ := member
-  have shaped := List.mem_zipIdx pairMember
-  exact ⟨index, by rw [← same], by simpa using shaped.2.1, by rw [← same]⟩
-
-/-- The converse of the numbering: every position below the capture count is the
-index of an admitted capture whose storage is the receiver's child at that
-position. This is the slot coverage the all-holes bridge needs. -/
-theorem Kernel.Execution.ResidentCaptureInputs.covers {receiver : Address} {authority : Authority}
-    {access : Access} {formals : List Local} {slot : Nat} (bound : slot < formals.length) :
-    ∃ input ∈ Execution.ResidentCaptureInputs receiver authority access formals,
-      input.origin = .capture slot ∧ input.storage = receiver.child slot := by
-  refine ⟨⟨.capture slot,formals[slot],receiver.child slot,authority,access⟩,?_,rfl,rfl⟩
-  simp only [Execution.ResidentCaptureInputs,List.mem_map]
-  refine ⟨(formals[slot],slot),?_,rfl⟩
-  rw [List.mem_iff_getElem]
-  exact ⟨slot,by simpa using bound,
-    by simp [List.getElem_zipIdx]⟩
-
-/-- SUPERSEDED framing: this structure states the receiver shell as already
-emptied (every field a hole, no resources), which is a RESULT of binding the
-captures, not a prestate fact, so it must not be instantiated before those
-bindings run. The correct invariant is relative to the shell's admitted value
-and to the set of capture slots the fold has actually cleared, i.e.
-`∃ value, world.Stores receiver value ∧ value.head = initial.head ∧
- value.shellLive = false ∧ value.resources = initial.resources ∧
- (∀ index ∈ cleared, value.fields[index]? = some none) ∧
- (∀ index ∉ cleared, value.fields[index]? = initial.fields[index]?)`, with the
-per-slot step supplied by a binding lemma (`BindsInputAt.shell_shape` plus the
-owned-capture hole from `Transfers.move`'s clear) and the ending emptiness
-produced only when every admitted capture has been bound. Kept here only so the
-surrounding development still builds; the endpoint must not use it as an
-emptiness admission. -/
-def Kernel.ReceiverFramed (world : World) (receiver : Address) (authority : Authority)
-    (head : ValueHead) : Prop :=
-  (∃ value, world.Stores receiver value ∧ value.head = head ∧ value.shellLive = false ∧
-    (∀ field ∈ value.fields, field = none) ∧ value.resources = []) ∧
-  Permitted world authority .owned receiver
-
-
-
-/-- The carrier identities a borrowed authority opens through, outermost first:
-the recursion-friendly view of the authority data that the formed row's guard
-list must miss. -/
-def Kernel.authorityCarriers : Authority → List Identity
-  | .owner => []
-  | .loan _ => []
-  | .shared backing => Kernel.authorityCarriers backing
-  | .guarded backing carrier => carrier :: Kernel.authorityCarriers backing
-
-/-- A receiver owner permission survives a formed fresh row. The three
-pre-state facts about the forming authority are: the authority's own parent
-identity is absent from the formed row's guard list, every carrier identity of
-the authority is absent from it, and every carrier's live referent is apart from
-the formed row's referent. These are properties of the authority data that forms
-the row (the same data FormsLoan's own compatibility input speaks about), not
-poststate callbacks. -/
-theorem Kernel.Permitted.owner_compatible {world : World} {authority : Authority}
-    {receiver referent : Address} {mode : Mutability} {guards : List Identity}
-    (permitted : Permitted world authority .owned receiver)
-    (apart : ¬ receiver.Overlaps referent)
-    (parentAbsent : ∀ identity, authority.parentLoan = some identity → identity ∉ guards)
-    (absent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority → carrier ∉ guards)
-    (referentApart : ∀ carrier loan, world.loans.get carrier = some loan →
-      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps referent) :
-    authority.LoanCompatible world .owned receiver referent mode guards := by
-  revert permitted apart parentAbsent absent referentApart
-  induction authority with
-  | owner =>
-      intro permitted apart parentAbsent absent referentApart
-      exact fun overlap => False.elim (apart overlap)
-  | loan identity =>
-      intro permitted apart parentAbsent absent referentApart
-      refine ⟨fun overlap => False.elim (apart overlap),
-        fun member => False.elim (absurd member (parentAbsent identity rfl))⟩
-  | shared backing _ =>
-      intro permitted apart parentAbsent absent referentApart
-      exact absurd permitted.2.1 (by simp)
-  | guarded backing carrier ih =>
-      intro permitted apart parentAbsent absent referentApart
-      refine ⟨ih permitted.2.1 apart (fun identity same => parentAbsent identity same)
-        (fun carrier' member => absent carrier' (List.mem_cons_of_mem carrier member))
-        (fun carrier' loan found member =>
-          referentApart carrier' loan found (List.mem_cons_of_mem carrier member)),?_⟩
-      · intro loan found
-        exact ⟨fun overlap => False.elim (referentApart carrier loan found List.mem_cons_self overlap),
-          fun member => False.elim (absurd member (absent carrier List.mem_cons_self))⟩
-
-
-
-
-
-
-/-- The lent-resident binding step leaves the receiver shell and its owner
-permission alone: its only value write is at the fresh lending handle, which the
-frontier bound puts above the receiver. -/
-theorem Kernel.ReceiverFramed.lent_step {program : RuntimeProgram} {activation scope region : Identity}
-    {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead} {lease : Option InvocationLease} {lentAuthority : Authority}
-    (valid : before.WellFormed) (borrowed : input.access ≠ .owned)
-    (lent : LendsResident program activation scope region before input.storage input.authority input.access
-      lease lentAuthority after)
-    (apart : ¬ input.storage.Overlaps receiver) (frontier : receiver.root < before.nextRoot)
-    (parentAbsent : ∀ identity, authority.parentLoan = some identity →
-      identity ∉ input.authority.guardLoans before)
-    (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
-      carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
-      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  cases input with
-  | mk origin inputFormal inputStorage inputAuthority inputAccess =>
-  have missing : ¬ receiver.Overlaps inputStorage := Address.not_overlaps_symm apart
-  cases lent with
-  | owned => exact absurd rfl borrowed
-  | lent modes sourceStored borrowRegion allocProof formed =>
-      rename_i lentMode lentValue lentHandle lentAllocated lentLayout lentRegion
-      have formedCopy := formed
-      cases formed with
-      | borrow fsValue fsType fsInitialized fsLive fsAdmitted fsAccessible fsPermitted fsVacant
-          fsDestType parentEq written =>
-          cases parentEq
-          have handleRoot : lentHandle.root = before.nextRoot := (Allocates.fresh_root allocProof).1
-          have apartRoot : receiver.root ≠ lentHandle.root := by
-            rw [handleRoot]
-            exact Nat.ne_of_lt frontier
-          have allocatedStored : lentAllocated.Stores receiver value :=
-            (Allocates.stores_iff valid allocProof).mp stored
-          have allocatedPermitted : Permitted lentAllocated authority .owned receiver := by
-            obtain ⟨root,rootFound⟩ := permitted.root
-            exact Permitted.of_same_loans (Allocates.loans allocProof)
-              ⟨root,Allocates.root valid allocProof rootFound⟩ permitted
-          have allocatedValid : lentAllocated.WellFormed := Allocates.wellFormed valid allocProof
-          have compatible : authority.LoanCompatible lentAllocated .owned receiver inputStorage
-              lentMode (inputAuthority.guardLoans lentAllocated) :=
-            (Authority.guardLoans_congr (Allocates.loans allocProof) inputAuthority).symm ▸
-              (Authority.LoanCompatible.loans_congr (Allocates.loans allocProof)
-                (Kernel.Permitted.owner_compatible permitted missing parentAbsent carriersAbsent
-                  (fun carrier loan found member => referentsApart carrier loan found member)))
-          exact ⟨⟨value,(World.Stores.root_other written apartRoot).mp allocatedStored,
-            headAt,live,fields,resources⟩,
-            FormsLoan.permitted allocatedValid formedCopy allocatedPermitted compatible⟩
-
-
-/-- The owned-resident binding step leaves the receiver shell and its owner
-permission alone: the clear is at the head's own storage (apart from the
-receiver) and the install is at the fresh destination root, which the frontier
-bound puts above the receiver. No row is inserted, so the permission is read
-through the two-sided permissionState frame. -/
-theorem Kernel.ReceiverFramed.owned_step {program : RuntimeProgram} {activation scope region : Identity}
-    {before after allocated : World} {input : InvocationInput} {receiver : Address}
-    {authority : Authority} {head : ValueHead} {layout : Layout} {address : Address}
-    (valid : before.WellFormed) (_owning : input.access = .owned)
-    (allocation : Allocates program.declarations before (.localSlot activation scope) region
-      input.formal.type layout input.formal.mutable address allocated)
-    (transferred : Transfers program allocated input.authority input.storage address after)
-    (apart : ¬ input.storage.Overlaps receiver) (frontier : receiver.root < before.nextRoot)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  cases transferred with
-  | move _ _ _ _ _ _ _ clearWrite installWrite =>
-      have destinationRoot : address.root = before.nextRoot := (Allocates.fresh_root allocation).1
-      have destinationApart : receiver.root ≠ address.root := by
-        rw [destinationRoot]
-        exact Nat.ne_of_lt frontier
-      have allocatedStored : allocated.Stores receiver value :=
-        (Allocates.stores_iff valid allocation).mp stored
-      have allocatedPermitted : Permitted allocated authority .owned receiver := by
-        obtain ⟨root,rootFound⟩ := permitted.root
-        exact Permitted.of_same_loans (Allocates.loans allocation)
-          ⟨root,Allocates.root valid allocation rootFound⟩ permitted
-      have movedPermitted : Permitted after authority .owned receiver :=
-        Permitted.of_rows
-          (World.RowRelation.of_eq ((World.write_loans installWrite).trans
-            (World.write_loans clearWrite)))
-          (fun observed root found => by
-            obtain ⟨changed,selected,_⟩ :=
-              World.root_transport (fun id => (World.write_locations installWrite id).trans
-                (World.write_locations clearWrite id)) found
-            exact ⟨changed,selected⟩)
-          allocatedPermitted
-      exact ⟨⟨value,
-        (World.Stores.root_other installWrite destinationApart).mp
-          ((World.Stores.write_disjoint_iff clearWrite apart).mp allocatedStored),
-        headAt,live,fields,resources⟩,movedPermitted⟩
-
-/-- The whole-allocation custody handoff leaves the receiver shell and its owner
-permission alone: no value is written and the one rewritten row keeps its
-permission projection. -/
-theorem Kernel.ReceiverFramed.allocation_step {recipient : ClaimCustody}
-    {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead}
-    (_valid : before.WellFormed)
-    (transferred : TransfersAllocation recipient before ⟨input.storage,input.authority⟩ after)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  refine ⟨⟨value,
-    World.Stores.of_roots (before := before) (after := after)
-      (TransfersAllocation.roots_eq transferred) stored,
-    headAt,live,fields,resources⟩,?_⟩
-  exact Permitted.of_rows (Glorious.Language.TransfersAllocation.row_relation transferred)
-    (fun observed root found => ⟨root,by simpa only [World.root,TransfersAllocation.roots_eq transferred] using found⟩)
-    permitted
-
-/-- The erased storage-loan handoff leaves the receiver shell and its owner
-permission alone, by the same argument. -/
-theorem Kernel.ReceiverFramed.loan_step {recipient : ClaimCustody}
-    {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead}
-    (_valid : before.WellFormed)
-    (transferred : TransfersStorageLoan recipient before ⟨input.storage,input.authority⟩ after)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  refine ⟨⟨value,
-    World.Stores.of_roots (before := before) (after := after)
-      (TransfersStorageLoan.roots_eq transferred) stored,
-    headAt,live,fields,resources⟩,?_⟩
-  exact Permitted.of_rows (Glorious.Language.TransfersStorageLoan.row_relation transferred)
-    (fun observed root found => ⟨root,by simpa only [World.root,TransfersStorageLoan.roots_eq transferred] using found⟩)
-    permitted
-
-
-
-/-- The storage-claim binding step leaves the receiver shell and its owner
-permission alone: the loan table gains one storage-borrow row at the frontier,
-no value is written, and the fresh row is compatible with the receiver's owner
-permission through the pre-state authority data. -/
-theorem Kernel.ReceiverFramed.storage_step {recipient : ClaimCustody}
-    {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead} {identity : Identity} {type : Term} {created : Identity}
-    (valid : before.WellFormed) (_formal : input.formal = .storage identity type)
-    (claimed : ClaimsStorage recipient before input.authority input.access input.storage created after)
-    (apart : ¬ input.storage.Overlaps receiver)
-    (parentAbsent : ∀ key, authority.parentLoan = some key →
-      key ∉ input.authority.guardLoans before)
-    (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
-      carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
-      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  cases claimed with
-  | claim rowLocated rowPermitted rowPermittedInput =>
-      rename_i claimRoot
-      change ReceiverFramed (storageClaimWorld before input claimRoot recipient) receiver authority head
-      have loans : (storageClaimWorld before input claimRoot recipient).loans =
-          before.loans.set before.nextLoan (storageClaimRow before input claimRoot recipient) := rfl
-      have compat : authority.LoanCompatible before .owned receiver input.storage
-          (if input.access = .shared then .shared else .unique) (input.authority.guardLoans before) :=
-        Kernel.Permitted.owner_compatible permitted (Address.not_overlaps_symm apart)
-          parentAbsent carriersAbsent (fun carrier loan found member => referentsApart carrier loan found member)
-      refine ⟨⟨value,World.Stores.of_roots rfl stored,headAt,live,fields,resources⟩,?_⟩
-      exact Permitted.fresh_loan valid
-        (locations := World.LocationExtension.of_roots
-          (before := before) (after := storageClaimWorld before input claimRoot recipient) rfl)
-        (loans := loans) permitted (fun _ => compat)
-
-
-/-- The guarded-allocation claim leaves the receiver shell and its owner
-permission alone by the same argument, with the fresh row being an owning claim
-at the frontier and no value written. -/
-theorem Kernel.ReceiverFramed.guarded_step {recipient : ClaimCustody}
-    {before after : World} {input : InvocationInput} {receiver : Address} {authority : Authority}
-    {head : ValueHead} {created : Identity}
-    (valid : before.WellFormed)
-    (claimed : ClaimsAllocation recipient before input.authority input.storage created after)
-    (apart : ¬ input.storage.Overlaps receiver)
-    (parentAbsent : ∀ key, authority.parentLoan = some key →
-      key ∉ input.authority.guardLoans before)
-    (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
-      carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
-      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  obtain ⟨⟨value,stored,headAt,live,fields,resources⟩,permitted⟩ := framed
-  cases claimed with
-  | claim claimBody claimPermitted rootFound =>
-      rename_i claimRoot
-      change ReceiverFramed (guardedClaimWorld before input claimRoot recipient) receiver authority head
-      have loans : (guardedClaimWorld before input claimRoot recipient).loans =
-          before.loans.set before.nextLoan (guardedClaimRow before input claimRoot recipient) := rfl
-      have compat : authority.LoanCompatible before .owned receiver input.storage
-          .unique (input.authority.guardLoans before) :=
-        Kernel.Permitted.owner_compatible permitted (Address.not_overlaps_symm apart)
-          parentAbsent carriersAbsent (fun carrier loan found member => referentsApart carrier loan found member)
-      refine ⟨⟨value,World.Stores.of_roots rfl stored,headAt,live,fields,resources⟩,?_⟩
-      exact Permitted.fresh_loan valid
-        (locations := World.LocationExtension.of_roots
-          (before := before) (after := guardedClaimWorld before input claimRoot recipient) rfl)
-        (loans := loans) permitted (fun _ => compat)
-
-
-/-- Every actual binding rule leaves the receiver shell and its owner permission
-framed: the six rule-specific branches composed under one dispatcher. -/
-theorem Kernel.ReceiverFramed.step {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {before after : World} {input : InvocationInput}
-    {binding : Binding} {receiver : Address} {authority : Authority} {head : ValueHead}
-    (valid : before.WellFormed)
-    (bound : BindsInputAt program recipient activation scope region before input binding after)
-    (apart : ¬ input.storage.Overlaps receiver)
-    (frontier : receiver.root < before.nextRoot)
-    (parentAbsent : ∀ identity, authority.parentLoan = some identity →
-      identity ∉ input.authority.guardLoans before)
-    (carriersAbsent : ∀ carrier, carrier ∈ Kernel.authorityCarriers authority →
-      carrier ∉ input.authority.guardLoans before)
-    (referentsApart : ∀ carrier loan, before.loans.get carrier = some loan →
-      carrier ∈ Kernel.authorityCarriers authority → ¬ loan.referent.Overlaps input.storage)
-    (framed : ReceiverFramed before receiver authority head) :
-    ReceiverFramed after receiver authority head := by
-  cases bound with
-  | lent ready borrowed resident stored initialized type permission lent =>
-      exact Kernel.ReceiverFramed.lent_step valid borrowed lent apart frontier parentAbsent
-        carriersAbsent referentsApart framed
-  | owned ready owning resident stored type allocation transferred =>
-      exact Kernel.ReceiverFramed.owned_step valid owning allocation transferred apart frontier framed
-  | storage ready formal locatedType claimed =>
-      exact Kernel.ReceiverFramed.storage_step valid formal claimed apart parentAbsent carriersAbsent
-        referentsApart framed
-  | allocation ready formal owning locatedType transferred =>
-      exact Kernel.ReceiverFramed.allocation_step valid transferred framed
-  | guardedAllocation ready formal owning authorityEq locatedType claimed =>
-      exact Kernel.ReceiverFramed.guarded_step valid claimed apart parentAbsent carriersAbsent
-        referentsApart framed
-  | loan ready formal owning locatedType transferred =>
-      exact Kernel.ReceiverFramed.loan_step valid transferred framed
-
-
 /-- Every actual binding rule advances the storage frontier by at most the fresh
 root a resident allocation consumes. -/
 theorem Kernel.BindsInputAt.nextRoot_le {program : RuntimeProgram} {recipient : ClaimCustody}
@@ -4190,192 +3454,568 @@ theorem Kernel.BindsInputAt.nextRoot_le {program : RuntimeProgram} {recipient : 
   | loan ready formal owning locatedType transferred =>
       exact Nat.le_of_eq (TransfersStorageLoan.nextRoot transferred).symm
 
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+private theorem initialized_not_prefix_marked {world : World} {source receiver : Address}
+    {value shell : Value} (sourceStored : world.Stores source value)
+    (initialized : value.Initialized) (stored : world.Stores receiver shell)
+    (marked : shell.shellLive = false) : ¬ source.Prefix receiver := by
+  intro included
+  obtain ⟨suffix,rfl⟩ := Address.prefix_extension included
+  change world.read _ = some shell at stored
+  rw [World.read_append,sourceStored] at stored
+  have inside : value.atPath suffix = some shell := stored
+  have live := (initialized suffix shell (ResidentAt.iff_atPath.mpr inside)).1
+  rw [marked] at live
+  cases live
+
+/-- An input can clear a captured child, but cannot clear an ancestor of the
+already-consumed receiver: its actual source must still be initialized. Fresh
+installs cannot overwrite the receiver either. This works at arbitrary depth. -/
+theorem Kernel.BindsInputAt.marked_shell {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {receiver : Address} {shell : Value}
+    (valid : before.WellFormed)
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (stored : before.Stores receiver shell) (marked : shell.shellLive = false) :
+    ∃ changed, after.Stores receiver changed ∧ changed.shell = shell.shell := by
+  have frontier : receiver.root < before.nextRoot := by
+    obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
+    exact World.root_bound valid (World.root_found found).1
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent =>
+      exact ⟨shell,Kernel.LendsResident.stores lent stored (Ne.symm (Nat.ne_of_lt frontier)),rfl⟩
+  | owned ready owning resident sourceStored sourceType allocated transferred =>
+      rename_i destination allocatedWorld layout value
+      have allocatedStored := (allocated.read valid receiver).trans stored
+      have fresh : ¬ destination.Overlaps receiver := by
+        exact World.not_overlaps_of_root_ne
+          (by rw [allocated.fresh_root.1]; exact Ne.symm (Nat.ne_of_lt frontier))
+      cases transferred with
+      | move source initialized _ _ _ _ _ clear install =>
+          have unchanged := World.write_read_shell clear
+            (initialized_not_prefix_marked source initialized allocatedStored marked)
+          rw [allocatedStored] at unchanged
+          simp only [Option.map_some] at unchanged
+          rw [← World.write_disjoint install fresh] at unchanged
+          exact Option.map_eq_some_iff.mp unchanged
+  | storage _ _ _ claimed =>
+      cases claimed
+      exact ⟨shell,stored,rfl⟩
+  | allocation _ _ _ _ transferred =>
+      exact ⟨shell,Kernel.TransfersAllocation.stores transferred stored,rfl⟩
+  | guardedAllocation _ _ _ _ _ claimed =>
+      cases claimed
+      exact ⟨shell,stored,rfl⟩
+  | loan _ _ _ _ transferred =>
+      exact ⟨shell,Kernel.TransfersStorageLoan.stores transferred stored,rfl⟩
+
+/-- Binding never refills an old absent address. Owned inputs only clear old
+storage; all resident installs occur at the fresh root. -/
+theorem Kernel.BindsInputAt.read_none {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {address : Address} (valid : before.WellFormed)
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (frontier : address.root < before.nextRoot) (absent : before.read address = none) :
+    after.read address = none := by
+  cases bound with
+  | lent _ notOwned _ _ _ _ _ lent =>
+      cases input with
+      | mk origin formal storage authority access =>
+      cases lent with
+      | owned => exact absurd rfl notOwned
+      | lent modes sourceStored borrowRegion allocated formed =>
+          rename_i mode value destination allocatedWorld layout sourceRegion
+          have missing := (allocated.read valid address).trans absent
+          have fresh : ¬ destination.Overlaps address := by
+            exact World.not_overlaps_of_root_ne
+              (by rw [allocated.fresh_root.1]; exact Ne.symm (Nat.ne_of_lt frontier))
+          cases formed with
+          | borrow _ _ _ _ _ _ _ _ _ _ written =>
+              exact (World.write_disjoint written fresh).trans missing
+  | owned ready owning resident sourceStored sourceType allocated transferred =>
+      rename_i destination allocatedWorld layout value
+      have missing := (allocated.read valid address).trans absent
+      have fresh : ¬ destination.Overlaps address := by
+        exact World.not_overlaps_of_root_ne
+          (by rw [allocated.fresh_root.1]; exact Ne.symm (Nat.ne_of_lt frontier))
+      cases transferred with
+      | move _ _ _ _ _ _ _ clear install =>
+          exact (World.write_disjoint install fresh).trans (World.clear_absent clear missing)
+  | storage _ _ _ claimed => cases claimed; exact absent
+  | allocation _ _ _ _ transferred =>
+      simpa only [World.read,World.root,Glorious.Language.TransfersAllocation.roots_eq transferred] using absent
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; exact absent
+  | loan _ _ _ _ transferred =>
+      simpa only [World.read,World.root,Glorious.Language.TransfersStorageLoan.roots_eq transferred] using absent
+
+/-- The actual owned resident binding empties its source. -/
+theorem Kernel.BindsInputAt.owned_cleared {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding}
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (owned : input.access = .owned) (resident : input.formal.IsResident) :
+    after.read input.storage = none := by
+  cases bound with
+  | lent _ notOwned _ _ _ _ _ _ => exact absurd owned notOwned
+  | owned _ _ _ _ _ _ transferred =>
+      cases transferred with
+      | move _ _ _ _ _ apart _ clear install =>
+          have empty := World.write_read_inside clear []
+          simp only [List.append_nil] at empty
+          exact (World.write_disjoint install (Address.not_overlaps_symm apart)).trans empty
+  | storage _ formal _ _ => rw [formal] at resident; exact resident.elim
+  | allocation _ formal _ _ _ => rw [formal] at resident; exact resident.elim
+  | guardedAllocation _ formal _ _ _ _ => rw [formal] at resident; exact resident.elim
+  | loan _ formal _ _ _ => rw [formal] at resident; exact resident.elim
+
+end Glorious.Language
+
+namespace Glorious.Language
+
+open Kernel
+
+theorem Kernel.BindsInputsAttemptFor.read_none {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {address : Address} (valid : before.WellFormed)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome)
+    (frontier : address.root < before.nextRoot) (absent : before.read address = none) :
+    after.read address = none := by
+  induction attempt with
+  | nil => exact absent
+  | cons _ first _ ih =>
+      exact ih (first.wellFormed valid) (Nat.lt_of_lt_of_le frontier first.nextRoot_le)
+        (first.read_none valid frontier absent)
+  | exhausted => exact absent
+
+theorem Kernel.BindsInputsAttemptFor.marked_shell {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {receiver : Address} {shell : Value} (valid : before.WellFormed)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome)
+    (stored : before.Stores receiver shell) (marked : shell.shellLive = false) :
+    ∃ changed, after.Stores receiver changed ∧ changed.shell = shell.shell := by
+  induction attempt generalizing shell with
+  | nil => exact ⟨shell,stored,rfl⟩
+  | cons _ first _ ih =>
+      obtain ⟨middle,middleStored,same⟩ := first.marked_shell valid stored marked
+      have middleMarked : middle.shellLive = false := by
+        have live := congrArg Value.shellLive same
+        simpa only [Value.shell,Value.withFields,Value.shellLive] using live.trans marked
+      obtain ⟨changed,found,last⟩ := ih (first.wellFormed valid) middleStored middleMarked
+      exact ⟨changed,found,last.trans same⟩
+  | exhausted => exact ⟨shell,stored,rfl⟩
+
+/-- Every owned resident source in a completed batch is absent afterwards,
+including sources bound before arbitrary ordinary or erased-resource inputs. -/
+theorem Kernel.BindsInputsAttemptFor.owned_cleared {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {input : InvocationInput} (valid : before.WellFormed)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome) (complete : outcome = .complete)
+    (frontier : input.storage.root < before.nextRoot) (member : input ∈ inputs)
+    (owned : input.access = .owned) (resident : input.formal.IsResident) :
+    after.read input.storage = none := by
+  induction attempt with
+  | nil => cases member
+  | cons _ first rest ih =>
+      rcases List.mem_cons.mp member with rfl | later
+      · exact rest.read_none (first.wellFormed valid)
+          (Nat.lt_of_lt_of_le frontier first.nextRoot_le) (first.owned_cleared owned resident)
+      · exact ih (first.wellFormed valid) complete
+          (Nat.lt_of_lt_of_le frontier first.nextRoot_le) later
+  | exhausted => cases complete
+
+end Glorious.Language
 
 
-/-- The retained-row law of a step needs only the non-equality with the fresh
-identity, which is what the frontier cases supply. -/
-theorem Kernel.StepFrame.row_of_middle_ne {before middle : World} (frame : StepFrame before middle)
-    {id : Identity} {loan : Loan} (apart : id ≠ before.nextLoan)
-    (found : middle.loans.get id = some loan) :
-    ∃ source, before.loans.get id = some source ∧ source.permissionState = loan.permissionState := by
-  have same := (frame.retained id apart).symm
-  simp only [found,Option.map_some] at same
-  exact Option.map_eq_some_iff.mp same
+namespace Glorious.Language
 
-/-- Every carrier identity a recorded authority opens through is a live recorded
-row below the loan frontier. -/
-theorem Kernel.Authority.carriers_lt {world : World} (valid : world.WellFormed)
-    {authority : Authority} (recorded : authority.Recorded world.loans) :
-    ∀ carrier ∈ Kernel.authorityCarriers authority, carrier < world.nextLoan := by
-  induction authority with
-  | owner => intro carrier member; simp [Kernel.authorityCarriers] at member
-  | loan identity => intro carrier member; simp [Kernel.authorityCarriers] at member
-  | shared backing ih =>
-      intro carrier member
-      exact ih recorded carrier member
-  | guarded backing carrier ih =>
-      intro carrier' member
-      rcases List.mem_cons.mp member with same | later
-      · rw [same]
-        obtain ⟨loan,found⟩ := recorded.2
-        exact World.loanBounds valid found
-      · exact ih recorded.1 carrier' later
+open Kernel
+
+/-- The batch's existing fresh-row observation, specialized to one retained
+permission. It refers only to the current source geometry, loan modes and guards. -/
+def Kernel.InvocationInput.PermissionCompatible (world : World) (input : InvocationInput)
+    (authority : Authority) (access : Access) (address : Address) : Prop :=
+  ∀ referent mode guards kind, input.FreshRow world referent mode guards kind →
+    authority.LoanCompatible world access address referent mode guards
 
 
-/-- The ordered fold of the receiver's captured shell: every pending capture is
-an owned resident input at a receiver slot, so each binding empties its own slot,
-and every slot that was already empty stays empty. This is the cleared-slot
-invariant the finishing consumes, stated with the accumulated clear list so it
-composes without any distinctness side condition. -/
-theorem Kernel.BatchPrepared.attemptFor_shell {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {footprint : List Address} {receiver : Address} :
-    ∀ (world : World) (pending : List InvocationInput) (outputs : List (Binding × InvocationInput))
-      (shell : Value) (cleared : List Nat),
-      world.WellFormed →
-      BatchPrepared program footprint region world pending outputs →
-      world.Stores receiver shell → receiver.fields = [] → receiver.root < world.nextRoot →
-      (∀ slot ∈ cleared, shell.fields[slot]? = some none) →
-      (∀ input ∈ pending, input.access = .owned ∧ input.formal.IsResident ∧
-        ∃ index, input.storage = receiver.child index) →
-      ∃ environment after outcome changed,
-        BindsInputsAttemptFor program recipient activation scope region footprint world pending
-          environment after outcome ∧ after.Stores receiver changed ∧
-        changed.head = shell.head ∧ changed.owner = shell.owner ∧ changed.type = shell.type ∧
-        changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
-        (∀ slot ∈ cleared, changed.fields[slot]? = some none) := by
-  intro world pending
-  induction pending generalizing world with
-  | nil =>
-      intro outputs shell cleared valid prepared stored whole frontier prior captures
-      exact ⟨[],world,.complete,shell,.nil,stored,rfl,rfl,rfl,rfl,rfl,prior⟩
-  | cons input rest ih =>
-      intro outputs shell cleared valid prepared stored whole frontier prior captures
-      have headReady : input.Ready program world := prepared.ready.member List.mem_cons_self
-      rcases BindsInputAt.success_or_exhausted valid headReady
-        (prepared.requests input List.mem_cons_self) with ⟨binding,middle,bound⟩ | exhausted
-      · have middleValid : middle.WellFormed :=
-          BindsInputAt.wellFormed (recipient := recipient) (activation := activation)
-            (scope := scope) bound valid
-        have headCapture := captures input List.mem_cons_self
-        have middleFrontier : receiver.root < middle.nextRoot :=
-          Nat.lt_of_lt_of_le frontier (BindsInputAt.nextRoot_le bound)
-        obtain ⟨index,storageAt⟩ := headCapture.2.2
-        obtain ⟨changed,middleStored,headEq,ownerEq,typeEq,liveEq,resourcesEq,hole,others⟩ :=
-          BindsInputAt.owned_capture_step bound headCapture.1 headCapture.2.1 whole
-            storageAt stored frontier
-        have middlePrior : ∀ slot ∈ index :: cleared, changed.fields[slot]? = some none := by
-          intro slot member
-          rcases List.mem_cons.mp member with same | later
-          · rw [same]; exact hole
-          · by_cases sameIndex : slot = index
-            · rw [sameIndex]; exact hole
-            · rw [others slot sameIndex]; exact prior slot later
-        have restCaptures : ∀ other ∈ rest, other.access = .owned ∧ other.formal.IsResident ∧
-            ∃ index, other.storage = receiver.child index :=
-          fun other member => captures other (List.mem_cons_of_mem input member)
-        obtain ⟨environment,after,outcome,refolded,attempt,afterStored,afterHead,afterOwner,
-          afterType,afterLive,afterResources,afterCleared⟩ :=
-          ih middle (⟨binding,input⟩ :: outputs) changed (index :: cleared) middleValid
-            (prepared.step valid middleValid bound) middleStored whole middleFrontier
-            middlePrior restCaptures
-        refine ⟨binding :: environment,after,outcome,refolded,
-          .cons prepared.ready bound attempt,afterStored,?_,?_,?_,?_,?_,?_⟩
-        · rw [afterHead,headEq]
-        · rw [afterOwner,ownerEq]
-        · rw [afterType,typeEq]
-        · rw [afterLive,liveEq]
-        · rw [afterResources,resourcesEq]
-        · intro slot member
-          exact afterCleared slot (List.mem_cons_of_mem index member)
-      · exact ⟨[],world,.exhausted,shell,.exhausted prepared.ready exhausted,stored,
-          rfl,rfl,rfl,rfl,rfl,prior⟩
+theorem Kernel.InvocationInput.PermissionCompatible.frame {before after : World}
+    {input : InvocationInput} {authority : Authority} {access : Access} {address : Address}
+    (valid : before.WellFormed) (frame : StepFrame before after)
+    (inputRecorded : input.authority.Recorded before.loans)
+    (recorded : authority.Recorded before.loans)
+    (compatible : input.PermissionCompatible before authority access address) :
+    input.PermissionCompatible after authority access address := by
+  intro referent mode guards kind fresh
+  exact Kernel.Authority.LoanCompatible.frame valid frame recorded
+    (compatible referent mode guards kind (InvocationInput.FreshRow.frame valid frame inputRecorded fresh))
 
-/-- The ordered fold also returns the receiver shell and its owner permission
-for the world it stopped at: the receiver framing is threaded through the
-induction with the per-step premises (address apartness, frontier bound and the
-authority-data facts) carried alongside. -/
-theorem Kernel.BatchPrepared.attemptFor_framed {program : RuntimeProgram} {recipient : ClaimCustody}
-    {activation scope region : Identity} {footprint : List Address}
-    {receiver : Address} {receiverAuthority : Authority} {receiverHead : ValueHead} :
-    ∀ (world : World) (pending : List InvocationInput) (outputs : List (Binding × InvocationInput)),
-      world.WellFormed →
-      BatchPrepared program footprint region world pending outputs →
-      receiverAuthority.Recorded world.loans →
-      (∀ input ∈ pending, ¬ input.storage.Overlaps receiver) →
-      receiver.root < world.nextRoot →
-      ReceiverFramed world receiver receiverAuthority receiverHead →
-      (∀ input ∈ pending,
-        (∀ identity, receiverAuthority.parentLoan = some identity →
-          identity ∉ input.authority.guardLoans world) ∧
-        (∀ carrier, carrier ∈ Kernel.authorityCarriers receiverAuthority →
-          carrier ∉ input.authority.guardLoans world) ∧
-        (∀ carrier loan, world.loans.get carrier = some loan →
-          carrier ∈ Kernel.authorityCarriers receiverAuthority →
-          ¬ loan.referent.Overlaps input.storage)) →
-      ∃ environment after outcome,
-        BindsInputsAttemptFor program recipient activation scope region footprint world pending
-          environment after outcome ∧
-        (∀ place ∈ outputs, OutputFramed program after place.2 place.1) ∧
-        ReceiverFramed after receiver receiverAuthority receiverHead := by
-  intro world pending
-  induction pending generalizing world with
-  | nil =>
-      intro outputs valid prepared recorded apart frontier shell guardData
-      exact ⟨[],world,.complete,.nil,prepared.outputs,shell⟩
-  | cons input rest ih =>
-      intro outputs valid prepared recorded apart frontier shell guardData
-      have headReady : input.Ready program world := prepared.ready.member List.mem_cons_self
-      rcases BindsInputAt.success_or_exhausted valid headReady
-        (prepared.requests input List.mem_cons_self) with ⟨binding,middle,bound⟩ | exhausted
-      · have middleValid : middle.WellFormed :=
-          BindsInputAt.wellFormed (recipient := recipient) (activation := activation)
-            (scope := scope) bound valid
-        have frame : StepFrame world middle := BindsInputAt.stepFrame valid bound
-        have middleRecorded : receiverAuthority.Recorded middle.loans :=
-          recorded.transport (fun id loan found =>
-            let ⟨current,selected,_⟩ := BindsInputAt.loan_retained valid bound found
-            ⟨current,selected⟩)
-        have headGuard := guardData input List.mem_cons_self
-        have middleShell : ReceiverFramed middle receiver receiverAuthority receiverHead :=
-          Kernel.ReceiverFramed.step valid bound (apart input List.mem_cons_self) frontier
-            headGuard.1 headGuard.2.1 headGuard.2.2 shell
-        have middleApart : ∀ other ∈ rest, ¬ other.storage.Overlaps receiver :=
-          fun other member => apart other (List.mem_cons_of_mem input member)
-        have middleGuard : ∀ other ∈ rest,
-            (∀ identity, receiverAuthority.parentLoan = some identity →
-              identity ∉ other.authority.guardLoans middle) ∧
-            (∀ carrier, carrier ∈ Kernel.authorityCarriers receiverAuthority →
-              carrier ∉ other.authority.guardLoans middle) ∧
-            (∀ carrier loan, middle.loans.get carrier = some loan →
-              carrier ∈ Kernel.authorityCarriers receiverAuthority →
-              ¬ loan.referent.Overlaps other.storage) := by
-          intro other member
-          have otherFact := prepared.facts other (List.mem_cons_of_mem input member)
-          have guardEq := StepFrame.guards valid frame otherFact.1
-          have old := guardData other (List.mem_cons_of_mem input member)
-          refine ⟨?_,?_,?_⟩
-          · intro identity same
-            rw [guardEq]
-            exact old.1 identity same
-          · intro carrier member'
-            rw [guardEq]
-            exact old.2.1 carrier member'
-          · intro carrier loan found member'
-            have freshNe : carrier ≠ world.nextLoan :=
-              fun same =>
-                Nat.ne_of_lt (Authority.carriers_lt valid recorded carrier member') same
-            obtain ⟨source,sourceFound,shape⟩ := StepFrame.row_of_middle_ne frame freshNe found
-            have referentEq := (Loan.permissionState_eq_iff.mp shape).2.2.1
-            have apartSource := old.2.2 carrier source sourceFound member'
-            rw [← referentEq]
-            exact apartSource
-        obtain ⟨environment,after,outcome,attempt,framed,shellAfter⟩ :=
-          ih middle (⟨binding,input⟩ :: outputs) middleValid (prepared.step valid middleValid bound)
-            middleRecorded middleApart (Nat.lt_of_lt_of_le frontier (BindsInputAt.nextRoot_le bound))
-            middleShell middleGuard
-        exact ⟨binding :: environment,after,outcome,.cons prepared.ready bound attempt,
-          (fun place member => framed place (List.mem_cons_of_mem _ member)),shellAfter⟩
-      · exact ⟨[],world,.exhausted,.exhausted prepared.ready exhausted,prepared.outputs,shell⟩
+/-- Exact source-state fresh-row compatibility preserves the receiver's
+permission through every resident and erased-resource binding constructor. -/
+theorem Kernel.BindsInputAt.permitted {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {authority : Authority} {access : Access} {address : Address}
+    (valid : before.WellFormed)
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (permission : Permitted before authority access address)
+    (compatible : input.PermissionCompatible before authority access address) :
+    Permitted after authority access address := by
+  cases bound with
+  | lent ready borrowed resident stored initialized type allowed lent =>
+      cases input with
+      | mk origin formal storage inputAuthority inputAccess =>
+      cases lent with
+      | owned => exact absurd rfl borrowed
+      | lent modes sourceStored borrowRegion allocated formed =>
+          rename_i mode value destination allocatedWorld layout sourceRegion
+          have fresh : InvocationInput.FreshRow before ⟨origin,formal,storage,inputAuthority,inputAccess⟩
+              storage mode (inputAuthority.guardLoans before) .restoring := by
+            cases formal <;> simp only [InputFormal.IsResident] at resident
+            all_goals try contradiction
+            rcases modes with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;>
+              simp [InvocationInput.FreshRow]
+          have prior := permission.locationExtension (allocated.locationExtension valid) allocated.loans
+          apply formed.permitted (allocated.wellFormed valid) prior
+          rw [Kernel.Authority.guardLoans_congr allocated.loans]
+          exact Authority.LoanCompatible.loans_congr allocated.loans
+            (compatible storage mode (inputAuthority.guardLoans before) .restoring fresh)
+  | owned _ _ _ _ _ allocated transferred =>
+      exact (permission.locationExtension (allocated.locationExtension valid) allocated.loans).locationExtension
+        (.of_locations transferred.locations) transferred.loans
+  | storage _ formal _ claimed =>
+      apply claimed.permitted valid permission
+      exact compatible _ _ _ .storageBorrow (by simp [InvocationInput.FreshRow,formal])
+  | allocation _ _ _ _ transferred =>
+      exact Permitted.of_rows (Glorious.Language.TransfersAllocation.row_relation transferred)
+        (fun observed root found => ⟨root,by
+          simpa only [World.root,Glorious.Language.TransfersAllocation.roots_eq transferred] using found⟩)
+        permission
+  | guardedAllocation _ formal _ authorityEq _ claimed =>
+      apply claimed.permitted valid permission
+      apply compatible _ _ _ .owning
+      simp only [InvocationInput.FreshRow,formal]
+      exact ⟨⟨_,_,authorityEq⟩,by trivial⟩
+  | loan _ _ _ _ transferred =>
+      exact Permitted.of_rows (Glorious.Language.TransfersStorageLoan.row_relation transferred)
+        (fun observed root found => ⟨root,by
+          simpa only [World.root,Glorious.Language.TransfersStorageLoan.roots_eq transferred] using found⟩)
+        permission
+
+/-- One source-state compatibility check covers the complete ordered batch;
+there is no future-world permission callback. -/
+theorem Kernel.BindsInputsAttemptFor.permitted {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {authority : Authority} {access : Access} {address : Address} (valid : before.WellFormed)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome)
+    (permission : Permitted before authority access address)
+    (recorded : ∀ input ∈ inputs, input.authority.Recorded before.loans)
+    (compatible : ∀ input ∈ inputs, input.PermissionCompatible before authority access address) :
+    Permitted after authority access address := by
+  induction attempt with
+  | nil => exact permission
+  | cons _ first _ ih =>
+      have frame := first.stepFrame valid
+      apply ih (first.wellFormed valid)
+        (first.permitted valid permission (compatible _ List.mem_cons_self))
+      · intro input member
+        exact (recorded input (List.mem_cons_of_mem _ member)).transport
+          (fun id loan found => let ⟨current,selected,_⟩ := StepFrame.row_of_before valid frame found; ⟨current,selected⟩)
+      · intro input member
+        exact (compatible input (List.mem_cons_of_mem _ member)).frame valid frame
+          (recorded input (List.mem_cons_of_mem _ member)) permission.recorded
+  | exhausted => exact permission
+
+end Glorious.Language
 
 
-end Kernel
+namespace Glorious.Language
+
+open Kernel
+
+/-- The actual call publishes the resident recipe, including zero captures. -/
+theorem Execution.LocalStep.call_ready {program : Kernel.Program} {before after : Execution.State}
+    {declaration : DeclId} {inputs : List InvocationInput} {caller : Execution.Context}
+    {function : Function} {source : Execution.EntrySource} {tail : Bool}
+    (called : Execution.LocalStep program before (some (.call declaration inputs)) after)
+    (entry : after.task = .enter caller function source tail) :
+    source.Ready program after.world function := by
+  cases called with
+  | call _ _ _ receiver selected _ _ _ _ =>
+      rcases Execution.Task.enter.inj entry with ⟨rfl,rfl,rfl,rfl⟩
+      exact ⟨_,_,receiver,selected⟩
+
+/-- Preparation publishes the marked shell and its complete resident capture
+inventory. Fields remain occupied here; their holes must be produced by binding. -/
+def Execution.ReceiverPrepared (world : World) (receiver : ResolvedPlace)
+    (inputs : List InvocationInput) : Prop :=
+  ∃ shell, world.Stores receiver.address shell ∧ shell.shellLive = false ∧
+    (∃ id arguments, shell.head = .callable id arguments) ∧ shell.resources = [] ∧
+    Permitted world receiver.authority .owned receiver.address ∧
+    ∀ index, index < shell.fields.length → ∃ input ∈ inputs,
+      input.storage = receiver.address.child index ∧ input.access = .owned ∧ input.formal.IsResident
+
+/-- A completed actual binder retires its prepared receiver. The stored shell,
+all capture holes, owning permission and final write are derived here. -/
+theorem Kernel.BindsInputsAttemptFor.finishesReceiver {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {receiver : ResolvedPlace} (valid : before.WellFormed)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome) (complete : outcome = .complete)
+    (prepared : Execution.ReceiverPrepared before receiver inputs)
+    (recorded : ∀ input ∈ inputs, input.authority.Recorded before.loans)
+    (compatible : ∀ input ∈ inputs,
+      input.PermissionCompatible before receiver.authority .owned receiver.address) :
+    ∃ consumed, Execution.FinishesReceiver after receiver .owned consumed := by
+  obtain ⟨shell,stored,marked,head,resources,permission,covers⟩ := prepared
+  obtain ⟨changed,found,same⟩ := attempt.marked_shell valid stored marked
+  have live : changed.shellLive = false := by
+    have projected := congrArg Value.shellLive same
+    simpa only [Value.shell,Value.withFields,Value.shellLive] using projected.trans marked
+  have changedHead : changed.head = shell.head := by
+    simpa only [Value.shell,Value.withFields,Value.head] using congrArg Value.head same
+  have emptyResources : changed.resources = [] := by
+    have projected := congrArg Value.resources same
+    simpa only [Value.shell,Value.withFields,Value.resources] using projected.trans resources
+  have length : changed.fields.length = shell.fields.length := by
+    simpa only [Value.shell,Value.withFields,Value.fields,List.length_replicate] using
+      congrArg (fun value => value.fields.length) same
+  have holes : ∀ field ∈ changed.fields, field = none := by
+    intro field member
+    cases field with
+    | none => rfl
+    | some value =>
+        obtain ⟨index,atField⟩ := List.mem_iff_getElem?.mp member
+        have indexBound : index < shell.fields.length := by
+          rw [← length]
+          exact (List.getElem?_eq_some_iff.mp atField).1
+        obtain ⟨input,member,atStorage,owned,resident⟩ := covers index indexBound
+        have frontier : input.storage.root < before.nextRoot := by
+          rw [atStorage]
+          obtain ⟨root,rootFound,_⟩ := Option.bind_eq_some_iff.mp stored
+          exact World.root_bound valid (World.root_found rootFound).1
+        have cleared := attempt.owned_cleared valid complete frontier member owned resident
+        rw [atStorage] at cleared
+        have child : after.read (receiver.address.child index) = some value := by
+          simp [Address.child,World.read_append,
+            (show after.read receiver.address = some changed from found),Value.atPath,atField]
+        have impossible := child.symm.trans cleared
+        cases impossible
+  exact Execution.FinishesReceiver.owned_of_stored found live
+    (by simpa only [changedHead] using head) holes emptyResources
+    (attempt.permitted valid permission recorded compatible)
+
+end Glorious.Language
+
+
+namespace Glorious.Language
+open Kernel
+
+theorem Execution.ConsumesReceiver.owned_stores {before after : World} {address : Address}
+    {authority : Authority} {value : Value} (consumed : Execution.ConsumesReceiver before address authority .owned after)
+    (stored : before.Stores address value) :
+    ∃ shell, after.Stores address shell ∧ shell.shellLive = false ∧ shell.head = value.head ∧
+      shell.fields = value.fields ∧ shell.resources = value.resources ∧ Permitted after authority .owned address := by
+  cases consumed with
+  | lent impossible => exact False.elim (impossible rfl)
+  | owned found _ _ permission written =>
+      cases Option.some.inj (found.symm.trans stored)
+      refine ⟨.resident value.owner value.type value.head false value.fields value.resources,?_,rfl,rfl,rfl,rfl,?_⟩
+      · have reading := World.write_read_inside written []
+        simp only [List.append_nil] at reading
+        exact reading
+      · exact permission.locationExtension (.of_locations (World.write_locations written)) (World.write_loans written)
+
+theorem Execution.ConsumesAvailability.marked_shell {before after : World} {address receiver : Address}
+    {authority : Authority} {id : Identity} {access : Access} {shell : Value}
+    (consumed : Execution.ConsumesAvailability before address authority id access after)
+    (stored : before.Stores receiver shell) (marked : shell.shellLive = false) :
+    ∃ changed, after.Stores receiver changed ∧ changed.shell = shell.shell := by
+  cases consumed with
+  | lent => exact ⟨shell,stored,rfl⟩
+  | owned sourceStored initialized _ _ _ _ written =>
+      have preserved := World.write_read_shell written
+        (initialized_not_prefix_marked sourceStored initialized stored marked)
+      rw [show before.read receiver = some shell from stored] at preserved
+      obtain ⟨changed,found,same⟩ := Option.map_eq_some_iff.mp preserved
+      exact ⟨changed,found,same⟩
+
+theorem Execution.ResidentCaptureInputs.covers {receiver : Address} {authority : Authority}
+    {formals : List Local} {index : Nat} (bounded : index < formals.length) :
+    ∃ input ∈ Execution.ResidentCaptureInputs receiver authority .owned formals,
+      input.storage = receiver.child index ∧ input.access = .owned ∧ input.formal.IsResident := by
+  refine ⟨⟨.capture index,.resident formals[index],receiver.child index,authority,.owned⟩,?_,rfl,rfl,True.intro⟩
+  apply List.mem_map.mpr
+  refine ⟨(formals[index],index),?_,rfl⟩
+  apply List.mem_iff_getElem?.mpr
+  exact ⟨index,by simp only [List.getElem?_zipIdx,List.getElem?_eq_getElem bounded,Option.map_some,Nat.zero_add]⟩
+
+/-- Actual resident preparation retains the full indexed capture inventory. -/
+theorem Execution.PreparesEntry.resident_receiver {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before after : World} {receiver : ResolvedPlace}
+    {arguments inputs : List InvocationInput} (typed : Typing.WorldTyped program before)
+    (prepares : Execution.PreparesEntry program callee function before (.resident receiver .owned arguments) inputs after) :
+    Execution.ReceiverPrepared after receiver inputs := by
+  cases prepares with
+  | resident callable selected lent captures consumed =>
+      cases lent with
+      | lent modes => rcases modes with ⟨impossible,_⟩ | ⟨impossible,_⟩ <;> cases impossible
+      | owned =>
+          obtain ⟨value,stored,_,head,_,_⟩ := callable
+          have shape := (typed.2.1 _ _ (World.resident_iff_stores.mpr stored)).callable_shape head selected
+          obtain ⟨shell,found,marked,sameHead,fields,resources,permission⟩ := consumed.owned_stores stored
+          refine ⟨shell,found,marked,⟨_,_,sameHead.trans head⟩,resources.trans shape.2.1,permission,?_⟩
+          intro index bounded
+          rw [fields,shape.2.2] at bounded
+          obtain ⟨input,member,storage,owned,resident⟩ := Execution.ResidentCaptureInputs.covers
+            (receiver := receiver.address) (authority := receiver.authority) bounded
+          exact ⟨input,List.mem_append_left _ (captures.1.symm ▸ member),storage,owned,resident⟩
+
+/-- Contextual preparation preserves its actual code-only receiver, including
+when witness consumption clears storage after the receiver was marked. -/
+theorem Execution.PreparesEntry.contextual_receiver {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before after : World} {receiver witness : ResolvedPlace} {witnessAccess : Access}
+    {sourceInputs inputs : List InvocationInput} (typed : Typing.WorldTyped program before)
+    (empty : ∃ value, before.Stores receiver.address value ∧ value.fields = [])
+    (prepares : Execution.PreparesEntry program callee function before
+      (.contextual receiver .owned witness witnessAccess sourceInputs) inputs after) :
+    Execution.ReceiverPrepared after receiver inputs := by
+  cases prepares with
+  | contextual callable selected _ _ lentReceiver lentWitness _ consumedReceiver consumedAvailability =>
+      cases lentReceiver with
+      | lent modes => rcases modes with ⟨impossible,_⟩ | ⟨impossible,_⟩ <;> cases impossible
+      | owned =>
+          obtain ⟨value,stored,_,head,_,_⟩ := callable
+          obtain ⟨other,otherStored,empty⟩ := empty
+          cases Option.some.inj (stored.symm.trans otherStored)
+          have shape := (typed.2.1 _ _ (World.resident_iff_stores.mpr stored)).callable_shape head selected
+          have frontier : receiver.address.root < before.nextRoot := by
+            obtain ⟨root,rootFound,_⟩ := Option.bind_eq_some_iff.mp stored
+            exact World.root_bound typed.1 (World.root_found rootFound).1
+          have lentStored := Kernel.LendsResident.stores lentWitness stored (Nat.ne_of_lt frontier).symm
+          obtain ⟨shell,found,marked,sameHead,fields,resources,permission⟩ := consumedReceiver.owned_stores lentStored
+          obtain ⟨changed,changedStored,same⟩ := consumedAvailability.marked_shell found marked
+          have length : changed.fields.length = shell.fields.length := by
+            simpa only [Value.shell,Value.withFields,Value.fields,List.length_replicate] using
+              congrArg (fun value => value.fields.length) same
+          refine ⟨changed,changedStored,?_,?_,?_,?_,?_⟩
+          · simpa only [Value.shell,Value.withFields,Value.shellLive] using (congrArg Value.shellLive same).trans marked
+          · exact ⟨_,_,by simpa only [Value.shell,Value.withFields,Value.head] using
+              (congrArg Value.head same).trans (sameHead.trans head)⟩
+          · simpa only [Value.shell,Value.withFields,Value.resources] using
+              (congrArg Value.resources same).trans (resources.trans shape.2.1)
+          · exact permission.locationExtension (.of_locations consumedAvailability.locations) consumedAvailability.loans
+          · intro index bounded
+            rw [length,fields,empty] at bounded
+            exact False.elim (Nat.not_lt_zero index bounded)
+
+end Glorious.Language
+
+
+namespace Glorious.Language
+open Kernel
+
+/-- The receiver-finishing consumer of the same actual ordered binder. Admission
+mentions only original source readiness and fresh-row compatibility at the
+prepared world; no completed-world fact is supplied by the caller. -/
+theorem Kernel.BindsInputsAttemptFor.finishesEntry {program : Kernel.Program} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {original withRegion prepared bound : World}
+    {callee : Execution.Context} {function : Function} {source : Execution.EntrySource}
+    {inputs : List InvocationInput} {bindings : Environment}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program original) (ready : source.Ready program original function)
+    (fresh : FreshRegion original original.nextRegion withRegion)
+    (prepares : Execution.PreparesEntry program callee function withRegion source inputs prepared)
+    (attempt : BindsInputsAttemptFor program recipient activation scope region footprint
+      prepared inputs bindings bound .complete)
+    (recorded : ∀ input ∈ inputs, input.authority.Recorded prepared.loans)
+    (compatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ inputs,
+      input.PermissionCompatible prepared receiver.authority .owned receiver.address) :
+    ∃ consumed, Execution.FinishesEntry bound source consumed := by
+  have regionTyped := fresh.worldTyped typed
+  have preparedTyped := prepares.worldTyped valid inventory regionTyped
+  cases source with
+  | supplied => exact ⟨bound,.supplied⟩
+  | resident receiver access arguments =>
+      by_cases owned : access = .owned
+      · subst access
+        obtain ⟨consumed,finished⟩ := attempt.finishesReceiver preparedTyped.1 rfl
+          (prepares.resident_receiver regionTyped) recorded
+          (compatible receiver (by simp only [Execution.EntrySource.ownedReceiver,ite_true]))
+        exact ⟨consumed,.resident finished⟩
+      · exact ⟨bound,.resident (.lent owned)⟩
+  | contextual receiver access witness witnessAccess sourceInputs =>
+      by_cases owned : access = .owned
+      · subst access
+        obtain ⟨_,_,_,_,_,_,_,_,_,_,value,stored,empty⟩ := ready
+        have regionEmpty : ∃ value, withRegion.Stores receiver.address value ∧ value.fields = [] := by
+          rw [fresh.2]
+          exact ⟨value,stored,empty⟩
+        obtain ⟨consumed,finished⟩ := attempt.finishesReceiver preparedTyped.1 rfl
+          (prepares.contextual_receiver regionTyped regionEmpty) recorded
+          (compatible receiver (by simp only [Execution.EntrySource.ownedReceiver,ite_true]))
+        exact ⟨consumed,.contextual finished⟩
+      · exact ⟨bound,.contextual (.lent owned)⟩
+
+/-- Ordinary input-batch preentry progress. The authoritative ordered fold
+produces either the first physical exhaustion or a complete batch whose receiver
+is actually retired. All receiver shape, capture holes, permission and successor
+storage are derived from typing, preparation and the real binding transitions. -/
+theorem Kernel.EntryBatch.enterWorldAttempt {program : Kernel.Program} {before : Execution.State}
+    {caller : Execution.Context} {function : Function} {source : Execution.EntrySource}
+    {withRegion prepared : World} {inputs : List InvocationInput}
+    (callee : Execution.Context)
+    (calleeLifetime : callee.activation = before.nextActivation ∧
+      callee.scope = before.world.nextRegion ∧ callee.region = before.world.nextRegion)
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world) (ready : source.Ready program before.world function)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
+    (prepares : Execution.PreparesEntry program callee function withRegion source inputs prepared)
+    (fresh : FreshRegion before.world before.world.nextRegion withRegion)
+    (incoming : IncomingResources program function prepared inputs)
+    (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
+      before.world.nextRegion prepared inputs)
+    (facts : ∀ input ∈ inputs, InputFramed program prepared input)
+    (nodup : inputs.Nodup)
+    (receiverCompatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ inputs,
+      input.PermissionCompatible prepared receiver.authority .owned receiver.address)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ context after outcome,
+      Execution.EnterWorldAttempt program before caller function source context after outcome := by
+  obtain ⟨declaration,declared⟩ := declared
+  have preparedTyped := prepares.worldTyped valid inventory (fresh.worldTyped typed)
+  obtain ⟨environment,bound,outcome,attempt,_⟩ :=
+    Kernel.BatchPrepared.attemptFor (recipient := .activation before.nextActivation)
+      (activation := before.nextActivation) (scope := before.world.nextRegion)
+      (region := before.world.nextRegion) prepared inputs [] preparedTyped.1
+      (Kernel.BatchPrepared.of_compatible product facts nodup)
+  let context : Execution.Context :=
+    ⟨environment,declaration.header.module,before.nextActivation,before.world.nextRegion,
+      before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,
+      [⟨function.declaration,environment⟩]⟩
+  have transported : Execution.PreparesEntry program context function withRegion source inputs prepared :=
+    Execution.preparesEntry_callee_context calleeLifetime.1 calleeLifetime.2.1 calleeLifetime.2.2 prepares
+  cases outcome with
+  | complete =>
+      obtain ⟨consumed,finished⟩ := attempt.finishesEntry valid inventory typed ready fresh prepares
+        (fun input member => (facts input member).1) receiverCompatible
+      exact ⟨context,consumed,.complete,withRegion,prepared,inputs,environment,declaration,bound,
+        declared,fresh,transported,incoming,attempt,finished,rfl,callerUnsafe⟩
+  | exhausted =>
+      exact ⟨context,bound,.exhausted,withRegion,prepared,inputs,environment,declaration,bound,
+        declared,fresh,transported,incoming,attempt,rfl,rfl,callerUnsafe⟩
+
+end Glorious.Language
+

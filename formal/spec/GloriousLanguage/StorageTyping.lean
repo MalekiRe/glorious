@@ -9,6 +9,18 @@ theorem Instantiates.functional {binders : List Binder} {arguments : List Term}
     {left right : Substitution} (a : Instantiates binders arguments left)
     (b : Instantiates binders arguments right) : left = right := a.2.2.trans b.2.2.symm
 
+/-- A selected declaration and its actual arguments determine one body instance. -/
+theorem Kernel.Instance.functional {program : Kernel.Program} {id : DeclId}
+    {arguments : List Term} {first second : Kernel.Function}
+    (left : Kernel.Instance program id arguments first)
+    (right : Kernel.Instance program id arguments second) : first = second := by
+  obtain ⟨template,declaration,substitution,found,_,_,instantiated,_,_,rfl⟩ := left
+  obtain ⟨other,otherDeclaration,otherSubstitution,otherFound,_,_,otherInstantiated,_,_,rfl⟩ := right
+  have same := Option.some.inj (found.symm.trans otherFound)
+  subst other
+  cases instantiated.functional otherInstantiated
+  rfl
+
 theorem ListRel.substitutes_eq_map {substitution : Substitution} {before after : List Term}
     (related : ListRel (Substitutes substitution) before after) :
     after = before.map (Term.substitute substitution) := by
@@ -78,6 +90,25 @@ theorem Typing.FieldsTyped.length {program : Kernel.Program} {world : World}
       cases typed with
       | hole rest => simpa using congrArg Nat.succ (ih rest)
       | resident _ _ rest => simpa using congrArg Nat.succ (ih rest)
+
+/-- Callable shells have exactly the selected resident capture slots. Erased
+resources belong to the captured nominal residents, not to a second shell ledger. -/
+theorem Typing.ValueTyped.callable_shape {program : Kernel.Program} {world : World}
+    {value : Value} {id : DeclId} {arguments : List Term} {function : Kernel.Function}
+    (typed : Typing.ValueTyped program world value) (head : value.head = .callable id arguments)
+    (selected : Kernel.Instance program id arguments function) :
+    value.type = .callable id arguments ∧ value.resources = [] ∧
+      value.fields.length = function.captures.length := by
+  cases typed
+  case aggregate constructor fields =>
+    rcases constructor with ⟨_,_,shape⟩ | ⟨_,_,_,_,_,_,shape,_,_⟩ | ⟨_,_,_,_,_,_,_,shape,_⟩ <;>
+      simp_all [Value.head]
+  case callable body fields =>
+    simp only [Value.head,ValueHead.callable.injEq] at head
+    rcases head with ⟨rfl,rfl⟩
+    cases body.functional selected
+    exact ⟨rfl,rfl,by simpa only [Value.fields,List.length_map] using fields.length⟩
+  all_goals cases head
 
 theorem Typing.FieldsTyped.get {program : Kernel.Program} {world : World}
     {fields : List (Option Value)} {types : List Term} {index : Nat} {value : Value}

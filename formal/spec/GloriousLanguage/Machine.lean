@@ -153,6 +153,12 @@ def EntrySource.lentStorage : EntrySource → List Address
       (if receiverAccess = .owned then [] else [receiver.address]) ++
       (if witnessAccess = .owned then [] else [witness.address]) ++ inputs.flatMap InvocationInput.lentStorage
 
+/-- The shell retired after binding belongs to the actual owned receiver. -/
+def EntrySource.ownedReceiver : EntrySource → Option ResolvedPlace
+  | .supplied _ => none
+  | .resident receiver access _ | .contextual receiver access _ _ _ =>
+      if access = .owned then some receiver else none
+
 inductive Task where
   | run (context : Context) (code : Code)
   | atom (context : Context) (destination : Address) (atom : Atom) (next : Code)
@@ -560,7 +566,8 @@ def EntrySource.Ready (program : Kernel.Program) (world : World) (function : Fun
       ∃ identity arguments available captures parameters,
         CallableReceiver program world receiver.address receiver.authority access identity arguments ∧
         Instance program identity arguments function ∧ ContextualWitness world witness witnessAccess available ∧
-        ReservationInputs world available witnessAccess function.captures captures ∧ inputs = captures ++ parameters
+        ReservationInputs world available witnessAccess function.captures captures ∧ inputs = captures ++ parameters ∧
+        ∃ shell, world.Stores receiver.address shell ∧ shell.fields = []
 
 /-- Every real source of invocation inputs is prepared under the same fresh
 callee lifetime. Resident captures project the newly lent receiver authority;

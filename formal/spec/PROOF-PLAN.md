@@ -240,11 +240,19 @@ resident allocation; erased ports require no invented layout, and raw claims and
 custody transfers retain their actual identities. The composed source-only
 strict gate over these two modules plus the recovered targets passes 208 jobs.
 
-This is not general batch or pre-entry progress. Compatibility with previously
-bound outputs, pending custody and owning-claim invalidation, the ordered
-whole-input/pre-entry theorem and the source pre-entry derivation remain the
-next milestone, and no accumulation of small permission lemmas substitutes for
-it.
+The ordered prepared-input milestone is now checked in `InputBatchProgress`.
+`Kernel.BatchPrepared.attemptFor` constructs the complete-or-exhausted actual
+binder, retaining the pending and emitted input products. The real entry
+endpoint derives receiver capture holes, shell-resource emptiness, retained
+ownership and the final physical write; it no longer assumes finishing in an
+arbitrary future world. The strict 73-job dependency gate passed and the
+endpoint uses only the standard Lean logical axioms.
+
+Next on this dependency chain: derive original source readiness and the
+prepared-world resource, layout and compatibility obligations from source
+admission; construct receiver/witness preparation with its real exhaustion
+outcomes. These remain separate from the now-proved ordered binding and
+receiver-finishing consumer.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains
@@ -890,23 +898,20 @@ append itself only works because `destroy_shell` now binds its middle state as a
 variable and reports its world and task as equalities — a record literal that
 prints identically does not unify.
 
-The input endpoint's remaining two prerequisites are recorded here because its
-owner stopped with the map complete: the endpoint (Kernel.EntryBatch's
-enterWorldAttempt) must drop `consumed`/`finishes` and choose its existential's
-successor per source shape, which needs (1) the receiver-slot/capture-index
-correspondence out of ResidentCaptureInputs and CaptureInputs.formals — each
-capture's storage is the receiver's child at its own index, so `attemptFor_shell`'s
-cleared-slot holes become `owned_of_stored`'s all-fields-holes requirement — and
-(2) a producer for the receiver's emptied resource list, which nothing in the tree
-yet supplies: the resource-erasing bindings have congruences but no lemma that the
-receiver's list ends empty, and the batch product already relates the inputs to the
-receiver's resources, so a small resource-conjunct companion of
-`attemptFor_shell` (a claimed-resource accumulator mirroring its cleared-slot one)
-is the cheaper route. With those, the owned branch takes its successor from
-`World.Stores.write_exists` on the stored marked shell and closes with
-`Execution.FinishesReceiver.owned_of_stored` plus `FinishesEntry.of_resident`
-(or `of_contextual`), and the lent branch closes with `lent_resident` at the fold's
-world.
+The former input-endpoint handoff is resolved. Its suggested resource-erasing
+accumulator was unnecessary: the authoritative callable typing constructor
+already has an empty resource list. `Typing.ValueTyped.callable_shape` exposes
+that fact and the selected instance's capture arity. Actual resident preparation
+produces the full indexed capture inventory, and the actual completed binder
+produces its holes while preserving the marked shell at arbitrary projection
+depth. Ordinary and raw inputs are not excluded. Contextual preparation retains
+the code-only receiver fact from the actual control call. Pre-binding fresh-row
+compatibility produces the receiver's final permission; its stored shell
+produces the retirement write. `Kernel.EntryBatch.enterWorldAttempt` consumes
+this chain and constructs the real complete or exhausted entry attempt.
+The `consumed`/`finishes` parameters and superseded root-only/empty-receiver
+folds are removed. Source-derived admission and receiver/witness preparation
+progress remain the next obligations, not premises claimed to be proved here.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered

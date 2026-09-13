@@ -201,19 +201,23 @@ or a dependency of this project.
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.
   The source-admitted copy construction is now `CopyProgress` below.
-- `LoanCompatibility`, `InputBindingProgress`: `Authority.LoanCompatible` is the
-  pre-state compatibility relation for one newly formed live loan (owning,
-  loan, shared and guarded carriers observe the actual pre-world rows and
-  guards), and `LoanCompatibility` characterizes exactly when an existing
-  `Permitted` survives a fresh loan, a storage claim or an allocation claim as
-  `Permitted after ↔ Permitted before ∧ pre-state compatibility`.
-  `InputBindingProgress` constructs the actual binder for all six real input
-  cases (`BindsInputAt.success_or_exhausted`) from positive
-  `InvocationInput.StorageRequest` and `input.Ready` pre-state facts, with
-  exhaustion available only for resident allocation. This is not general batch
-  or pre-entry progress: compatibility with previously bound outputs, pending
-  custody and owning-claim invalidation, the ordered whole-input theorem and
-  the source pre-entry derivation all remain open.
+- `LoanCompatibility`, `InputBindingProgress`: exact pre-state compatibility
+  characterizes permission survival under fresh loans and claims. The real
+  six-case input binder constructs success or physical exhaustion from positive
+  readiness and storage requests; erased ports require no invented allocation.
+- `InputBatchProgress`: `Kernel.BatchPrepared.attemptFor` constructs the
+  ordered complete-or-exhausted binder while retaining pending inputs and
+  earlier outputs through actual loan, claim, custody and storage changes.
+  `Kernel.EntryBatch.enterWorldAttempt` constructs the real entry attempt and,
+  on completion, derives receiver retirement from the actual capture transfers.
+  Receiver addresses may be projected; ordinary and raw inputs share the fold.
+  Callable typing supplies capture arity and the empty shell-resource list.
+  No future-world finishing callback, pre-emptied captures or assumed successor
+  remains. The theorem requires actual receiver/witness preparation, original
+  source readiness, prepared-state input compatibility and fresh-row
+  compatibility with the owned receiver. Deriving that admission from source
+  typing, including preparation success/exhaustion, remains open. The strict
+  73-job dependency gate and theorem axiom audit passed.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

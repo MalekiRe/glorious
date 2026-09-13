@@ -240,9 +240,9 @@ theorem ControlStep.call_ready {program : Kernel.Program} {before after : State}
     (called : ControlStep program before (some (.call declaration inputs)) after)
     (entry : after.task = .enter caller function source tail) : source.Ready program after.world function := by
   cases called with
-  | contextualCall _ _ _ _ _ _ receiver selected _ _ _ witness _ captures _ _ =>
+  | contextualCall _ _ _ stored _ empty receiver selected _ _ _ witness _ captures _ _ =>
       rcases Task.enter.inj entry with ⟨rfl,rfl,rfl,rfl⟩
-      exact ⟨_,_,_,_,_,receiver,selected,witness,captures,List.append_assoc ..⟩
+      exact ⟨_,_,_,_,_,receiver,selected,witness,captures,List.append_assoc ..,_,stored,empty⟩
 
 theorem Run.append {program : Kernel.Program} {host : Foreign.Model}
     {before middle after : State} {first last : List Event}

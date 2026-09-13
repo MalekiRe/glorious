@@ -44,6 +44,7 @@ import GloriousLanguage.PayloadHandoff
 import GloriousLanguage.PatternPlanTransport
 import GloriousLanguage.InputLending
 import GloriousLanguage.InputBindingProgress
+import GloriousLanguage.InputBatchProgress
 import GloriousLanguage.ControlPreservation
 import GloriousLanguage.TestPreservation
 import GloriousLanguage.EffectPreservation

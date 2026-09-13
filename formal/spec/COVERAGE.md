@@ -193,13 +193,13 @@ obligations are closed stays a separate unsafe-invariant duty and is not
 assumed here.
 
 The recovered checkpoint gate over the targets listed above passes 205 jobs;
-adding `InputBindingProgress` and `LoanCompatibility` passes 208. The current
-gate adds the repaired consumers `PublicValues` and `RuntimeWorldEquivariance`,
+adding `InputBindingProgress` and `LoanCompatibility` passes 208.
+The then-current gate added the repaired consumers `PublicValues` and `RuntimeWorldEquivariance`,
 the promoted `LoanResourceRows`, `ReferenceTransferPreservation`,
 `SnapshotResourcePreservation`, `AllocationFraming` and
-`CopyResourcePreservation`, and passes 212 jobs, or 210 without the two
-compatibility modules. It closes narrow
-boundaries, not a batch or pre-entry theorem. `Authority.LoanCompatible` is the
+`CopyResourcePreservation`, and passed 212 jobs, or 210 without the two
+compatibility modules. That checkpoint closed the single-input and permission
+boundaries. `Authority.LoanCompatible` is the
 pre-state compatibility relation for one newly formed live loan: owning, loan,
 shared and guarded authorities observe the actual pre-world loan rows and the
 pre-world guards, so shared access may overlap a shared loan and a carrier
@@ -213,11 +213,41 @@ six real input cases from a positive `InvocationInput.StorageRequest` plus the
 input's `Ready` pre-state facts; only resident allocation may exhaust, and lack
 of semantic evidence is never reclassified as a resource fault.
 
-Open at this boundary: compatibility with already bound outputs, pending
-custody and owning-claim invalidation, the ordered whole-input/pre-entry
-theorem, and the source pre-entry derivation. This is a single-input producer
-plus a permission-only compatibility foundation; it is not general batch
-progress and must not be reported as such.
+The earlier single-input/permission boundary is now consumed by
+`InputBatchProgress`. `Kernel.BatchPrepared.attemptFor` folds the real
+six-case binder, retaining pending readiness/requests, observed resources,
+claims/custody and already emitted bindings through every successful prefix.
+It constructs completion or the first physical input-allocation exhaustion.
+
+`Kernel.EntryBatch.enterWorldAttempt` now constructs the actual
+`Execution.EnterWorldAttempt` without `consumed : World → World` or a
+`finishes` callback. On completion, the actual preparation publishes a marked
+receiver and its indexed capture inventory. The actual binder clears every
+owned capture; later inputs cannot refill old holes or clear the marked receiver
+or an ancestor containing it. This supports projected receivers and mixed
+ordinary/raw inputs, rather than a root-only all-captures fold.
+`Typing.ValueTyped.callable_shape` derives the shell's empty resource list and
+capture count from the existing callable typing rule and selected instance.
+There is no resource-erasing accumulator. Contextual call readiness retains
+the code-only receiver shape already required by its real control transition.
+Fresh-row compatibility at the prepared world derives the final owning
+permission, and the stored receiver produces its actual retiring write.
+
+The strict 73-job `InputBatchProgress` dependency gate passed after removing the
+superseded `ReceiverFramed`, root-only shell folds and duplicated capture
+helpers. The endpoint's axiom audit reports only `propext`, `Classical.choice`
+and `Quot.sound`; no `sorryAx` or new semantic axiom is used.
+The combined gate with `ControlContextTyping`, `InvocationLifecyclePreservation`
+and `RuntimeWorldEquivariance` passed 120 jobs; joint imports and the preparation
+producer axiom audit passed too.
+
+This closes ordered **prepared-input batch preentry progress**, not general
+source-derived execution progress. Original source readiness, actual
+receiver/witness preparation, incoming-resource agreement, prepared-state
+batch framing/compatibility and receiver fresh-row compatibility remain explicit
+admission premises. Deriving those premises from source typing, constructing
+preparation success/exhaustion, proper-tail cleanup and whole-machine progress
+remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
 lane workspace. They are level moves plus one disclosed redesign: the
