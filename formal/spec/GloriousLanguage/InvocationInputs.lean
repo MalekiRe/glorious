@@ -43,6 +43,14 @@ theorem CaptureInputs.formals {world : World} {receiver : Address} {authority : 
   rw [selected.1]
   exact ResidentCaptureInputs.formals receiver authority access formals
 
+/-- Erased resource ports never introduce source-local formals. The actual
+input producer establishes this projection for every resource handoff. -/
+theorem _root_.Glorious.Language.Kernel.ResourceInputs.formals {program : Language.Program}
+    {world : World} {environment : Environment} {custody : ClaimCustody} {inputs : List InvocationInput}
+    (selected : ResourceInputs program world environment custody inputs) :
+    inputs.filterMap (fun input => input.formal.resident?) = [] := by
+  induction selected <;> simp_all only [List.filterMap_cons,List.filterMap_nil,InputFormal.resident?]
+
 /-- Every authority-independent view is unchanged by the actual preparation
 derivation. This compares real recipes and their prepared inputs; it asserts
 neither a replacement execution state nor permission under the old authority. -/

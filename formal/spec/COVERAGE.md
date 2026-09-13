@@ -312,15 +312,22 @@ place and label execution without an independent reading callback. The
 superseded certificate lane has been removed. General source-admitted
 progress and full specification conformance remain separate obligations.
 
-The integrated strict gate passes 197 jobs for `InputBatchProgress`,
+The integrated strict gate passes 198 jobs for `InputBatchProgress`,
 `SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
-`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. General logical
+`RuntimeWorldEquivariance`, `SnapshotReplayPreservation` and the repaired
+`FunctionEntryContextTyping`. General logical
 transport, actual instance/entry admission, context preservation, source
 conversion, both address bridges, both label consumers, whole `Step`/`Run`
 and public reachable-world axiom audits report only `propext`,
-`Classical.choice` and `Quot.sound`. The known stale entry/control consumers
-in `FunctionEntryContextTyping` remain outside this green gate and were not
-rerun. No full-tree success is claimed; preserved example modules were not run.
+`Classical.choice` and `Quot.sound`. The repaired actual entry result includes
+body typing and admitted local/logical context on success, real custody release
+and inherited contracts before proper-tail cleanup, and the exact partial
+world/fresh-counter consumption on exhaustion. Ordinary, contextual and foreign
+callback recipes share that result; erased resource inputs do not fabricate
+source-local formals. The entry and all three caller axiom audits report only
+the same standard axioms. Receiver/witness preparation failure and constructive
+entry progress from original admission remain open. No full-tree success is
+claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

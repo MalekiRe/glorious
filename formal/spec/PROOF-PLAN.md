@@ -203,15 +203,22 @@ and `.conversionClosed` derive the full logical and definitional readings
 consumed by both source address bridges and both label handoff consumers.
 The superseded interpretation-certificate path is removed.
 
-The integrated 197-job gate combines `InputBatchProgress`,
+The integrated 198-job gate combines `InputBatchProgress`,
 `SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
-`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. Axiom audits of
+`RuntimeWorldEquivariance`, `SnapshotReplayPreservation` and the repaired
+`FunctionEntryContextTyping`. Axiom audits of
 the general transport, entry producer, context preservation, source and label
 consumers, and whole-run/public-world preservation report only `propext`,
-`Classical.choice` and `Quot.sound`. The known stale
-`FunctionEntryContextTyping` module is not in this gate and was not rerun.
-General progress from meaningful source admission remains a separate
-obligation; this result does not claim source-wide progress or conformance.
+`Classical.choice` and `Quot.sound`. The entry repair replaces its false
+unconditional-success result with actual typed success or the exhausted prefix.
+Proper-tail success retains `ReleaseCustodyLoans`, cleanup and inherited
+resource contracts; resident, contextual and foreign callback recipes all
+consume this same outcome, with source-formal alignment derived from the real
+resident/resource input projection. Entry and all three caller axiom audits
+report only the standard three axioms. The next dependency is receiver/witness
+preparation success or physical exhaustion and constructive entry from original
+admission. General resource progress remains open; the repaired entry consumer
+does not claim source-wide progress or conformance.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

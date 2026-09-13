@@ -402,10 +402,11 @@ The integrated physical and logical admission checkpoint passes this proof gate:
 lake build GloriousLanguage.InputBatchProgress \
   GloriousLanguage.SemanticPreservation GloriousLanguage.SourceAddress \
   GloriousLanguage.LabelExecution GloriousLanguage.AllocationLayout \
-  GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.SnapshotReplayPreservation
+  GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.SnapshotReplayPreservation \
+  GloriousLanguage.FunctionEntryContextTyping
 ```
 
-The strict gate passes 197 jobs. Axiom audits of general scoped logical
+The strict gate passes 198 jobs. Axiom audits of general scoped logical
 transport, actual instance/entry admission, lexical context preservation,
 source conversion, both source address bridges, both label consumers, whole
 `Step`/`Run` preservation and public reachable-world typing report only
@@ -413,10 +414,16 @@ source conversion, both source address bridges, both label consumers, whole
 physical realization from `WorldTyped` and logical interpretation from the
 entry-produced `ContextBindingsTyped`, without a separate reading callback.
 
-The known stale entry/control consumers in `FunctionEntryContextTyping`
-remain outside this green gate; they were not rerun to confirm the recorded
-failure. The preserved `Checks` were not run. This is general proof checking,
-not example evidence, a whole-library success or source-wide progress.
+`FunctionEntryContextTyping` is now repaired and included. Its actual entry
+result preserves the source body context on success, the caller custody-release
+prefix and inherited contracts on proper-tail success, or the exact exhausted
+world and consumed fresh identities on resource failure. Resident, contextual
+and foreign callback consumers share this result, including nonempty erased
+resource inputs. Their axiom audits also report only the standard three axioms.
+The preserved `Checks` were not run. This is general proof checking, not example
+evidence, a whole-library success or source-wide progress. Receiver/witness
+preparation exhaustion and entry progress from original input admission remain
+on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:
 

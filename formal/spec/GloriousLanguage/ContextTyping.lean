@@ -264,6 +264,14 @@ theorem ReturnsStorageLoan.contextBindingsTyped {program : Kernel.Program} {befo
     Typing.ContextBindingsTyped program after source runtime :=
   typed.world (fun _ _ binding => returned.bindingStorageTyped binding)
 
+theorem RelinquishesCustody.contextBindingsTyped {program : Kernel.Program} {before after : World}
+    {custody : ClaimCustody} (relinquished : RelinquishesCustody before custody after)
+    {source : Typing.Context} {runtime : Execution.Context}
+    (typed : Typing.ContextBindingsTyped program before source runtime) :
+    Typing.ContextBindingsTyped program after source runtime :=
+  typed.world (fun _ _ binding => binding.roots_retained (by cases relinquished; rfl)
+    (fun _ _ found => relinquished.retained found))
+
 /-- Every actual close/release transition preserves retained contexts. The
 proof consumes their resident invocation guards and the existing EndsLoan
 admission, not an externally supplied inequality between loan identities. -/
