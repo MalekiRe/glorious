@@ -296,20 +296,31 @@ payload type, then relates it to the translated source type by
 existing resident/layout derivations; no extra count normalization or
 requested address type is assumed.
 
-The checked physical boundary is conditional on the logical `ScopeReading`.
-That reading produces the source conversion closure, but its producer from
-meaningful source admission remains the next task. This checkpoint does not
-claim source-wide progress or full specification conformance.
+Logical admission is now produced along the actual entry path.
+`Kernel.Instance.predicates` consumes the selected instance
+`ConstraintsHold` evidence, and `EnterWorld.contextBindingsTyped` records
+discharged decoded assumptions, completed generics and the source universe
+level in the existing context invariant. Its actual local, fresh-region,
+fresh-brand, capture, handler and label transitions preserve these facts.
+`Entails.decode_scope` proves transport of all sixteen mutual static
+judgments, including quantified predicates, associated projections and
+recursive capability evidence with non-injective scope images. Arbitrary
+predicate templates are mapped with substitution values; only actual
+declared requirements are fixed by program closure. The resulting
+`ContextBindingsTyped.conversionClosed` is consumed by source projection,
+place and label execution without an independent reading callback. The
+superseded certificate lane has been removed. General source-admitted
+progress and full specification conformance remain separate obligations.
 
-The integrated strict gate passes 196 jobs for `InputBatchProgress`,
+The integrated strict gate passes 197 jobs for `InputBatchProgress`,
 `SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
-`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. The allocator,
-world representation, source projection/place, label consumer, whole
-`Step`/`Run` and public reachable-world theorem axiom audits report only
-`propext`, `Classical.choice` and `Quot.sound`. A broader attempt including
-`FunctionEntryContextTyping` still fails on its stale entry/control constructor
-consumers; no full-tree success is claimed. The preserved example modules
-were not run.
+`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. General logical
+transport, actual instance/entry admission, context preservation, source
+conversion, both address bridges, both label consumers, whole `Step`/`Run`
+and public reachable-world axiom audits report only `propext`,
+`Classical.choice` and `Quot.sound`. The known stale entry/control consumers
+in `FunctionEntryContextTyping` remain outside this green gate and were not
+rerun. No full-tree success is claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
@@ -383,9 +394,11 @@ owner: `FieldOffset.transport`, `Relocation.old_fieldOffset`,
 constructor) and `ConstructorHead.field_type`. The same release replaced the
 unprovable world law `TargetRepresentation.structural` with the derived
 `AddressType.structural_of_stored` (an occupied address is read at its resident's
-own type), added `Typing.StructuralExpansion`,
-`DefinitionallyEqual.runtime_context` and the assumption-free interpretation
-producer `SourceInterpreted.of_assumption_free`. The then-open producer for
+own type) and added `Typing.StructuralExpansion`. That checkpoint also included
+physical-to-runtime metadata transport in
+`DefinitionallyEqual.runtime_context` and an assumption-free interpretation
+fragment. The latter has been superseded by actual entry predicate admission,
+not retained as a separate certificate path. The then-open producer for
 `TargetRepresentation.offsets` is now `World.representation`, derived from the
 authoritative layout-bearing `WorldTyped` invariant described above.
 

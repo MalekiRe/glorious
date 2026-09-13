@@ -2,10 +2,12 @@ import GloriousLanguage.BindingPersistence
 import GloriousLanguage.PredicateScope
 import GloriousLanguage.InvocationInputs
 import GloriousLanguage.BindingDomain
+import GloriousLanguage.ScopedInterpretation
 
-/-! The source body's one local environment is related to the actual runtime
-environment. Entry constructs this relation from input recipes, fresh scope
-installation and sequential binding; no typed output context is assumed. -/
+/-! The source body has one runtime context invariant for local storage,
+scope coverage and discharged logical assumptions. Actual entry constructs
+it from admitted instantiation, input recipes, fresh scope installation and
+sequential binding; no typed output context or logical reading is assumed. -/
 namespace Glorious.Language
 
 theorem Typing.CodeType.result_scoped {program : Kernel.Program} {context : Typing.Context}
@@ -58,6 +60,35 @@ theorem Kernel.Instance.locals_scopeClosed {program : Kernel.Program} (valid : P
   · apply closed.1
     rw [← parameters]
     exact List.mem_map.mpr ⟨localSlot,parameter,rfl⟩
+
+
+/-- Actual instantiation removes the declaration's generic binder domain. -/
+theorem Kernel.Instance.generics_closed {program : Kernel.Program} {id : DeclId} {arguments : List Term}
+    {function : Kernel.Function} (selected : Kernel.Instance program id arguments function) :
+    function.signature.generics = [] := by
+  obtain ⟨_,_,_,_,_,_,_,_,_,rfl⟩ := selected
+  rfl
+
+/-- The actual instance's ConstraintsHold evidence discharges precisely the
+entered signature predicates. Their admitted terms are scope-closed, so lexical
+entry decoding fixes them; no interpretation certificate is an input. -/
+theorem Kernel.Instance.predicates {program : Kernel.Program} {id : DeclId} {arguments : List Term}
+    {function : Kernel.Function} (selected : Kernel.Instance program id arguments function)
+    (typed : Typing.FunctionType program function) (runtime : Execution.Context) :
+    ∀ requirement ∈ function.signature.constraints,
+      Entails program.declarations runtime.static (requirement.mapTerms runtime.term) := by
+  intro requirement member
+  obtain ⟨_,_,_,_,_,_,admitted,_⟩ := typed
+  have fixed : requirement.mapTerms runtime.term = requirement := requirement.mapTerms_eq_self (fun term present => by
+    have nested : term ∈ function.signature.constraints.flatMap Constraint.terms :=
+      List.mem_flatMap.mpr ⟨requirement,member,present⟩
+    exact ScopeInstantiation.term_fixed runtime.instantiation term (admitted term (by
+      simp only [Signature.terms,List.mem_append,List.mem_cons,nested,true_or,or_true])))
+  rw [fixed]
+  obtain ⟨template,declaration,substitution,_,_,_,_,requirements,_,rfl⟩ := selected
+  change requirement ∈ template.signature.constraints.map (Constraint.substitute substitution) at member
+  obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+  exact (requirements.actual_result present).cut_same_domain rfl rfl rfl (by intro constraint member; cases member)
 
 namespace Execution
 
@@ -121,6 +152,65 @@ structure ContextBindingsTyped (program : Kernel.Program) (world : World)
   bindings : ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧
     BindingStorageTyped program.declarations world binding.address (runtime.term localSlot.type)) source.locals runtime.environment.locals
   assumptions : source.static.AssumptionsScoped
+  genericsClosed : source.static.binders = []
+  levelZero : source.static.universeLevel = 0
+  predicates : ∀ requirement ∈ source.static.assumptions,
+    Entails program.declarations runtime.static (requirement.mapTerms runtime.term)
+
+/-- The runtime kinding domain is derived from the actual scope coverage and
+completed generic instantiation, rather than assumed as a semantic callback. -/
+theorem ContextBindingsTyped.decode_kinding {program : Kernel.Program} {world : World}
+    {source : Context} {runtime : Execution.Context}
+    (typed : ContextBindingsTyped program world source runtime) {term : Term} {kind : Kind}
+    (kinded : Kinding program.declarations source.static term kind) :
+    Kinding program.declarations runtime.static (runtime.term term) kind := by
+  apply kinded.map_scoped_atoms runtime.instantiation.term (runtime.instantiation.scopedHomomorphism)
+  intro atom occurs
+  cases atom <;> try trivial
+  case parameter id parameterKind =>
+    obtain ⟨binder,member,_,_⟩ := kinded.parameter_occurs occurs
+    rw [typed.genericsClosed] at member
+    cases member
+  case rigid id rigidKind level =>
+    rw [runtime.instantiation.rigid_fixed]
+    exact .rigid (by simpa only [Execution.Context.static,typed.levelZero] using kinded.rigid_level occurs)
+  case «variable» id variableKind level =>
+    rw [runtime.instantiation.variable_fixed]
+    exact .variable (by simpa only [Execution.Context.static,typed.levelZero] using kinded.variable_level occurs)
+  case runtimeRegion id => rw [runtime.instantiation.runtimeRegion_fixed]; exact .runtimeRegion
+  case scopedRegion id =>
+    obtain ⟨selected,found⟩ := typed.covers.1 id (kinded.scoped.1 id occurs)
+    simp only [ScopeInstantiation.term,found,Option.map,Option.getD]
+    exact .runtimeRegion
+  case scopedBrand id =>
+    obtain ⟨selected,found⟩ := typed.covers.2 id (kinded.scoped.2 id occurs)
+    simp only [ScopeInstantiation.term,found,Option.map,Option.getD]
+    exact .runtimeBrand
+
+theorem _root_.Glorious.Language.Execution.Context.kinding_pullback (runtime : Execution.Context)
+    {program : Program} {source : Language.Context} {term : Term} {kind : Kind}
+    (kinded : Kinding program runtime.static term kind) :
+    Kinding program source term kind ∧ runtime.term term = term := by
+  refine ⟨?_,ScopeInstantiation.term_fixed runtime.instantiation term kinded.scoped⟩
+  apply kinded.context_transport
+  · intro id parameterKind occurs
+    obtain ⟨binder,member,_,_⟩ := kinded.parameter_occurs occurs
+    cases member
+  · exact Nat.zero_le _
+  · intro id member; cases member
+  · intro id member; cases member
+
+/-- The complete source entailment interpretation is a consequence of the
+entry-produced context invariant and the general logical transport proof. -/
+theorem ContextBindingsTyped.entails {program : Kernel.Program} {world : World}
+    {source : Context} {runtime : Execution.Context}
+    (valid : ProgramWellFormed program.declarations) (typed : ContextBindingsTyped program world source runtime)
+    {constraint : Constraint} (held : Entails program.declarations source.static constraint) :
+    Entails program.declarations runtime.static (constraint.mapTerms runtime.term) :=
+  held.decode_scope valid runtime.instantiation
+    (fun _ _ kinded => typed.decode_kinding kinded)
+    (fun _ _ kinded => runtime.kinding_pullback kinded) typed.predicates
+
 
 end Typing
 
@@ -151,7 +241,8 @@ theorem Typing.ContextBindingsTyped.world {program : Kernel.Program} {before aft
       Typing.BindingStorageTyped program.declarations after address type) :
     Typing.ContextBindingsTyped program after source runtime := by
   exact ⟨typed.moduleEq,typed.unsafeEq,typed.covers,typed.distinct,typed.admitted,
-    typed.bindings.imp (fun _ _ pair => ⟨pair.1,preserved _ _ pair.2⟩),typed.assumptions⟩
+    typed.bindings.imp (fun _ _ pair => ⟨pair.1,preserved _ _ pair.2⟩),typed.assumptions,
+    typed.genericsClosed,typed.levelZero,typed.predicates⟩
 
 /-- Retiring a moved/discarded owner does not remove its lexical declaration
 or pretend that the retired address remains readable. -/
@@ -231,7 +322,8 @@ theorem Typing.ContextBindingsTyped.bind {program : Kernel.Program} {world : Wor
     (located : Typing.BindingStorageTyped program.declarations world address (runtime.term localSlot.type)) :
     Typing.ContextBindingsTyped program world (source.bind localSlot)
       (runtime.bind (runtime.local localSlot) address authority) := by
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,?_,typed.assumptions⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,?_,typed.assumptions,
+    typed.genericsClosed,typed.levelZero,typed.predicates⟩
   · change (localSlot.id :: (source.locals.filter (fun previous => previous.id != localSlot.id)).map (·.id)).Nodup
     refine List.nodup_cons.mpr ⟨?_,?_⟩
     · intro member
@@ -260,7 +352,7 @@ theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world 
     {lexical : Identity} (fresh : lexical ∉ source.static.scope.brands) (brand : RuntimeBrand) :
     Typing.ContextBindingsTyped program world (source.bindBrand lexical) (runtime.bindBrand lexical brand) := by
   refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindBrand lexical brand,typed.distinct,?_,?_,
-    typed.assumptions.bindBrand lexical⟩
+    typed.assumptions.bindBrand lexical,typed.genericsClosed,typed.levelZero,?_⟩
   · intro localSlot member
     exact (typed.admitted localSlot member).mono (fun _ member => member)
       (fun _ member => List.mem_cons_of_mem _ member)
@@ -278,6 +370,11 @@ theorem Typing.ContextBindingsTyped.bindBrand {program : Kernel.Program} {world 
       · rw [runtime.bindBrand_term fresh (admitted localSlot List.mem_cons_self)]
         exact first.2
       · exact ih (fun localSlot member => admitted localSlot (List.mem_cons_of_mem _ member))
+  · intro requirement member
+    change Entails program.declarations runtime.static (requirement.mapTerms (runtime.bindBrand lexical brand).term)
+    rw [requirement.mapTerms_congr _ runtime.term (fun term present =>
+      runtime.bindBrand_term fresh (typed.assumptions requirement member term present))]
+    exact typed.predicates requirement member
 
 theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
@@ -286,7 +383,7 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
     Typing.ContextBindingsTyped program world (source.bindRegion lexical)
       { runtime.bindRegion lexical region with scope := region, region := region } := by
   refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers.bindRegion lexical region,typed.distinct,?_,?_,
-    typed.assumptions.bindRegion lexical⟩
+    typed.assumptions.bindRegion lexical,typed.genericsClosed,typed.levelZero,?_⟩
   · intro localSlot member
     exact (typed.admitted localSlot member).mono (fun _ member => List.mem_cons_of_mem _ member)
       (fun _ member => member)
@@ -305,6 +402,11 @@ theorem Typing.ContextBindingsTyped.bindRegion {program : Kernel.Program} {world
         rw [runtime.bindRegion_term fresh (admitted localSlot List.mem_cons_self)]
         exact first.2
       · exact ih (fun localSlot member => admitted localSlot (List.mem_cons_of_mem _ member))
+  · intro requirement member
+    change Entails program.declarations runtime.static (requirement.mapTerms (runtime.bindRegion lexical region).term)
+    rw [requirement.mapTerms_congr _ runtime.term (fun term present =>
+      runtime.bindRegion_term fresh (typed.assumptions requirement member term present))]
+    exact typed.predicates requirement member
 
 /-- Both local-bind and suspended evaluation frames use this actual
 allocation producer, including its fresh vacant destination. -/
@@ -381,7 +483,8 @@ theorem Execution.Installs.computation_contextBindingsTyped {program : Kernel.Pr
     Typing.ContextBindingsTyped program after source handler.computation := by
   have retained := installed.preserves_contextBindingsTyped valid inventory worldTyped typed
   obtain ⟨_,_,_,_,_,_,_,_,_,_,_,_,_,_,_,rfl⟩ := installed
-  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,retained.assumptions⟩
+  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,
+    retained.assumptions,retained.genericsClosed,retained.levelZero,retained.predicates⟩
 
 /-- The handler's retained environment is produced by the same sequential
 input binding used at function entry. Source captures are closed exactly once
@@ -427,7 +530,8 @@ theorem Execution.Installs.environment_contextBindingsTyped {program : Kernel.Pr
       cases related with
       | cons head tail => exact .cons head (ih _ tail)
   have declared := transport syntaxNode.captures bindings.locals (captureMap ▸ declared)
-  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared,typed.assumptions⟩
+  refine ⟨typed.moduleEq,typed.unsafeEq,typed.covers,?_,?_,declared,typed.assumptions,
+    typed.genericsClosed,typed.levelZero,typed.predicates⟩
   · cases handlerTyped with
     | attached captureTyped _ _ _ =>
       simpa only [Execution.CaptureLocals,Kernel.Handler.captures,List.map_map,Function.comp_def] using captureTyped.2
@@ -455,7 +559,8 @@ theorem Execution.StartsClause.contextBindingsTyped {program : Kernel.Program} {
     Typing.ContextBindingsTyped program after source runtime := by
   have retained := started.preserves_contextBindingsTyped typed
   obtain ⟨_,rfl⟩ := started
-  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,retained.assumptions⟩
+  exact ⟨retained.moduleEq,retained.unsafeEq,retained.covers,retained.distinct,retained.admitted,retained.bindings,
+    retained.assumptions,retained.genericsClosed,retained.levelZero,retained.predicates⟩
 
 theorem Execution.StartsResumptionClause.preserves_contextBindingsTyped {program : Kernel.Program} {before : Execution.State}
     {handler : Execution.InstalledHandler} {lexical : Kernel.Local} {context : Execution.Context} {localSlot : Kernel.Local} {after : World}
@@ -487,7 +592,8 @@ theorem Typing.ContextBindingsTyped.label {program : Kernel.Program} {world : Wo
       { source.bindBrand lexical with labels := (lexical,.scopedRegion region,result) :: source.labels }
       (runtime.bindBrand lexical (.label brand)) := by
   have bound := typed.bindBrand fresh (.label brand)
-  exact ⟨bound.moduleEq,bound.unsafeEq,bound.covers,bound.distinct,bound.admitted,bound.bindings,bound.assumptions⟩
+  exact ⟨bound.moduleEq,bound.unsafeEq,bound.covers,bound.distinct,bound.admitted,bound.bindings,bound.assumptions,
+    bound.genericsClosed,bound.levelZero,bound.predicates⟩
 
 /-- The label frame and its source-visible label value close through the same
 lexical lookup. The surrounding allocation/cleanup region may be different,
@@ -538,7 +644,8 @@ theorem Execution.EnterWorld.contextBindingsTyped {program : Kernel.Program} {be
     (fun _ _ pair => ⟨pair.1,finished.bindingStorageTyped (bound.worldTyped valid inventory preparedTyped).1 pair.2⟩)
   rw [aligned] at checked
   have closed := selected.locals_scopeClosed valid inventory functionTyped
-  refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_,functionTyped.assumptions_scoped _⟩
+  refine ⟨rfl,rfl,function.entryScope_covers _ _,functionTyped.locals_nodup,?_,?_,functionTyped.assumptions_scoped _,
+    selected.generics_closed,rfl,selected.predicates functionTyped _⟩
   · intro localSlot member
     exact (closed localSlot member).scoped _
   · change ListRel (fun localSlot binding => binding.key = .localSlot localSlot.id ∧

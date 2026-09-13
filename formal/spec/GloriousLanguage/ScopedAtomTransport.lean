@@ -219,4 +219,74 @@ theorem rowEquivalent_term (scope : ScopeInstantiation) {left right : Term} (equ
   equal.map_scoped_atoms scope.term (scopedHomomorphism scope)
 
 end ScopeInstantiation
+
+/-- Decoding preserves ordered constructor heads and children. -/
+theorem ScopeInstantiation.head (scope : ScopeInstantiation) (term : Term) :
+    (scope.term term).mapChildren (fun _ => .unit) = scope.term (term.mapChildren (fun _ => .unit)) := by
+  cases term <;> simp only [Term.mapChildren,ScopeInstantiation.term]
+  case scopedRegion id => cases h : scope.regions.get id <;> simp only [Option.map,Option.getD] <;> try rfl
+  case scopedBrand id => cases h : scope.brands.get id <;> simp only [Option.map,Option.getD] <;> try rfl
+  all_goals (try simp only [ScopeInstantiation.term,List.map_map,Function.comp_def]) <;> try rfl
+
+theorem ScopeInstantiation.children (scope : ScopeInstantiation) (term : Term) :
+    (scope.term term).children = term.children.map scope.term := by
+  cases term <;> simp only [Term.children,ScopeInstantiation.term]
+  case scopedRegion id => cases h : scope.regions.get id <;> simp only [Option.map,Option.getD] <;> try rfl
+  case scopedBrand id => cases h : scope.brands.get id <;> simp only [Option.map,Option.getD] <;> try rfl
+  all_goals (try simp only [List.map_append]) <;> try rfl
+
+theorem SameHead.scopedAtoms {scope : ScopeInstantiation} {left right : Term} (same : SameHead left right) :
+    SameHead (scope.term left) (scope.term right) := by
+  unfold SameHead at same ⊢
+  rw [ScopeInstantiation.head,ScopeInstantiation.head,same]
+
+theorem SameHead.scopedAtoms_right {scope : ScopeInstantiation} {left right child : Term}
+    (same : SameHead left right) (member : child ∈ right.children) : SameHead left (scope.term right) := by
+  unfold SameHead at same ⊢
+  rw [same]
+  cases right <;> simp only [Term.children,List.not_mem_nil] at member
+  all_goals
+    try simp only [ScopeInstantiation.term,Term.mapChildren,List.map_map,Function.comp_def] <;> rfl
+
+theorem ProgramWellFormed.declaration_fixed {program : Program} (valid : ProgramWellFormed program)
+    {scope : ScopeInstantiation} {declaration : Definition} (member : declaration ∈ program.declarations) :
+    ∀ term ∈ declaration.terms, scope.term term = term :=
+  fun term present => ScopeInstantiation.term_fixed scope term (valid.scopeClosed member term present)
+
+theorem ScopeInstantiation.parameter_origin (scope : ScopeInstantiation) {term : Term} {id : Identity} {kind : Kind}
+    (same : scope.term term = .parameter id kind) : term = .parameter id kind := by
+  cases term <;> simp only [ScopeInstantiation.term] at same
+  all_goals try cases same
+  all_goals try rfl
+  case scopedRegion region => cases h : scope.regions.get region <;> simp [h] at same
+  case scopedBrand brand => cases h : scope.brands.get brand <;> simp [h] at same
+
+theorem ScopeInstantiation.parameter_occurs (scope : ScopeInstantiation) {term : Term} {id : Identity} {kind : Kind}
+    (occurs : Occurs (.parameter id kind) (scope.term term)) : Occurs (.parameter id kind) term := by
+  generalize image : scope.term term = mapped at occurs
+  induction occurs generalizing term with
+  | here => rw [scope.parameter_origin image]; exact .here
+  | child member _ ih =>
+    rw [← image,scope.children] at member
+    obtain ⟨original,present,same⟩ := List.mem_map.mp member
+    exact .child present (ih same)
+
+/-- Both sides of an arbitrary substitution edge are decoded. Fixed declaration
+requirements are a consequence, not an assumption about all templates. -/
+theorem ScopeInstantiation.substitutes (scope : ScopeInstantiation) {substitution : Substitution} {before after : Term}
+    (graph : Substitutes substitution before after) :
+    Substitutes (substitution.map (fun entry => (entry.1,scope.term entry.2))) (scope.term before) (scope.term after) := by
+  refine ⟨by simpa only [ScopeInstantiation.kind] using graph.1,?_,?_⟩
+  · rw [graph.2.1,scope.map_substituted_values before substitution (scope.atomsFixed before)]
+  · intro id kind value occurs found
+    rw [Table.get_map_values] at found
+    obtain ⟨original,selected,rfl⟩ := Option.map_eq_some_iff.mp found
+    exact (scope.kind original).trans (graph.2.2 id kind original (scope.parameter_occurs occurs) selected)
+
+theorem ScopeInstantiation.substitutes_self (scope : ScopeInstantiation) {substitution : Substitution} {term : Term}
+    (graph : Substitutes substitution term (term.substitute substitution)) :
+    Substitutes (substitution.map (fun entry => (entry.1,scope.term entry.2))) (scope.term term)
+      ((scope.term term).substitute (substitution.map (fun entry => (entry.1,scope.term entry.2)))) := by
+  simpa only [scope.map_substituted_values term substitution (scope.atomsFixed term)] using scope.substitutes graph
+
 end Glorious.Language

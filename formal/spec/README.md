@@ -97,7 +97,8 @@ or a dependency of this project.
   type, resources and the real caller event trace. Neither the payload before
   `AddressType` nor an independent layout realization is assumed: both physical
   facts follow from world typing and actual source resolution. Logical
-  `ScopeReading` remains explicit, not a fabricated runtime equality.
+  interpretation follows from entry-produced context admission, not a
+  separate reading certificate or fabricated runtime equality.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
   and whole-run preservation. NOT checked at this revision: the module is
@@ -335,14 +336,20 @@ or a dependency of this project.
   source projection/place proofs and label consumers no longer require an
   independent `World.LayoutRealized` certificate. Actual resident counts and
   nominal/alias layout derivations supply the physical field offsets.
-- `ScopedInterpretation` (logical admission endpoint still open):
-  `ResolvesProjections.addressTyped`, `place_addressTyped`,
-  `leave_source_result` and `source_execution` consume `Typing.ScopeReading`
-  for the actual source context and derive `SourceConversionClosed` from it.
-  The physical world fact is now produced, but the reading itself is still
-  supplied. Its derivation from the in-tree `Kernel.Instance` /
-  `ConstraintsHold` admission is the next task. The existing `of_cut` helper
-  does not establish that general source-admission result.
+- `ScopedInterpretation`, `ContextTyping`, `SourceInterpretation`: logical
+  source admission is integrated. The general `Entails.decode_scope` proof
+  transports all sixteen mutual static judgments, including quantified
+  predicates, hygienic substitution, associated projections and greatest
+  capability evidence for non-injective scope images. Arbitrary predicate
+  templates and substitution values are both mapped; only actual declared
+  requirements are fixed by declaration closure. `Kernel.Instance.predicates`
+  discharges the entered signature from the actual `ConstraintsHold` evidence.
+  `ContextBindingsTyped` records that admission, completed generic
+  instantiation and the source kinding level; actual entry and context
+  transitions produce and preserve these facts. `conversionClosed` derives
+  runtime definitional equality from them. Both source address bridges and
+  both label consumers now require no independent logical-reading premise.
+  The old callback-based interpretation certificates are removed.
 - `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
   is discharged from each input's own readiness (permitted rows, the allocation
   claim's owning row, the erased port's handed chain), with the one shape
@@ -389,7 +396,7 @@ inventory rather than accepting a separately supplied unrelated AST.
 
 ## Checking
 
-The physical-invariant checkpoint passes this integrated proof gate:
+The integrated physical and logical admission checkpoint passes this proof gate:
 
 ```sh
 lake build GloriousLanguage.InputBatchProgress \
@@ -398,17 +405,18 @@ lake build GloriousLanguage.InputBatchProgress \
   GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.SnapshotReplayPreservation
 ```
 
-The strict gate passes 196 jobs. Axiom audits of allocation preservation,
-`World.representation`, both source address bridges,
-`MayTransfer.source_execution`, whole `Step`/`Run` preservation and public
-reachable-world typing report only `propext`, `Classical.choice` and
-`Quot.sound`. The theorem signatures confirm that physical realization is
-derived from `WorldTyped`, while logical `ScopeReading` remains explicit.
+The strict gate passes 197 jobs. Axiom audits of general scoped logical
+transport, actual instance/entry admission, lexical context preservation,
+source conversion, both source address bridges, both label consumers, whole
+`Step`/`Run` preservation and public reachable-world typing report only
+`propext`, `Classical.choice` and `Quot.sound`. The audited signatures derive
+physical realization from `WorldTyped` and logical interpretation from the
+entry-produced `ContextBindingsTyped`, without a separate reading callback.
 
-A broader attempt adding `FunctionEntryContextTyping` failed on its stale
-entry/control constructor consumers. It is not part of the green gate. The
-preserved `Checks` were not run; this is general proof checking, not example
-evidence or a claim that the aggregate is green.
+The known stale entry/control consumers in `FunctionEntryContextTyping`
+remain outside this green gate; they were not rerun to confirm the recorded
+failure. The preserved `Checks` were not run. This is general proof checking,
+not example evidence, a whole-library success or source-wide progress.
 
 Earlier recovery checkpoints used this target set:
 

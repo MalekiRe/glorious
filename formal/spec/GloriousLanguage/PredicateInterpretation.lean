@@ -547,4 +547,56 @@ theorem PredicateAlgebra.holds_quantifiedInstance {α : Type u} (algebra : Predi
   exact held values substitution instantiated kinded requirement member
 
 end PredicateSemantics
+
+/-- Predicate mapping has one shared congruence law, including quantified
+defaults. Runtime renaming and source admission consume this same traversal. -/
+theorem Constraint.mapTerms_id (constraint : Constraint) : constraint.mapTerms id = constraint := by
+  cases constraint <;> simp only [Constraint.mapTerms,id_eq,List.map_id_fun,Option.map_id_fun]
+  all_goals try rfl
+  case quantified binders requirements =>
+    congr 1
+    · exact List.map_eq_self_of _ _ (fun binder _ => by cases binder; rfl)
+    · exact List.map_eq_self_of _ _ (fun requirement _ => requirement.mapTerms_id)
+termination_by constraint
+
+theorem Constraint.mapTerms_comp (first second : Term → Term) (constraint : Constraint) :
+    (constraint.mapTerms first).mapTerms second = constraint.mapTerms (second ∘ first) := by
+  cases constraint <;> simp only [Constraint.mapTerms,List.map_map,Function.comp_def,Option.map_map]
+  all_goals try rfl
+  case quantified binders requirements =>
+    congr 1
+    apply List.map_congr_left
+    intro requirement _
+    exact requirement.mapTerms_comp first second
+termination_by constraint
+
+theorem Constraint.mapTerms_congr (first second : Term → Term) (constraint : Constraint)
+    (agree : ∀ term ∈ constraint.terms, first term = second term) :
+    constraint.mapTerms first = constraint.mapTerms second := by
+  cases constraint <;> simp only [Constraint.mapTerms]
+  all_goals try {
+    congr 1
+    all_goals first
+    | apply agree; simp [Constraint.terms]
+    | apply List.map_congr_left
+      intro term member
+      apply agree
+      simp [Constraint.terms,member] }
+  case quantified binders requirements =>
+    congr 1
+    · apply List.map_congr_left
+      intro binder member
+      congr 1
+      apply Option.map_congr
+      intro term selected
+      apply agree
+      simp only [Constraint.terms,List.mem_append,List.mem_flatMap]
+      exact Or.inl ⟨binder,member,by simpa only [Option.mem_toList] using selected⟩
+    · apply List.map_congr_left
+      intro requirement member
+      exact requirement.mapTerms_congr first second (fun term present => agree term (by
+        simp only [Constraint.terms,List.mem_append,List.mem_flatMap]
+        exact Or.inr ⟨requirement,member,present⟩))
+termination_by constraint
+
 end Glorious.Language

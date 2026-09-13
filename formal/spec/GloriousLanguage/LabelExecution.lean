@@ -99,7 +99,6 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     (label : Typing.InstalledLabelTyped program before.world target brand region type)
     {placeSource : Typing.Context} {place : Kernel.Place} {writable : Bool}
     (bindings : Typing.ContextBindingsTyped program before.world placeSource caller)
-    (reading : Typing.ScopeReading program.declarations placeSource.static caller)
     (argumentTyped : Typing.PlaceType program.declarations placeSource place actual writable)
     (resolved : Kernel.ResolvesPlace before.world caller.environment place argument.address argument.authority)
     (step : ControlStep program before none after) :
@@ -120,7 +119,7 @@ theorem ControlStep.leave_source_result {program : Kernel.Program} {before after
     have original := handoff
     obtain ⟨value,_,stored,_,_⟩ := original
     obtain ⟨source,lexical,sourceRegion,result,body,contextTyped,sourceTyped,closedLabel,_⟩ := label
-    have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed reading
+    have derived := Typing.ContextBindingsTyped.place_addressTyped valid inventory typed
       bindings argumentTyped resolved stored
     have valueAgrees := Typing.AddressTyped.resident_type valid inventory typed derived stored
     have movedTyped := handoff.worldTyped valid inventory typed
@@ -157,10 +156,10 @@ theorem ObservationAt.label_caller_step {program : Kernel.Program} {host : Forei
 
 /-- General source-compatible label consumption. Source PlaceType/Subtype are
 the actual single-argument derivation; physical payload typing follows from
-the source place, actual resolution and world typing. The logical source
-reading remains explicit. This theorem assumes no independent layout
-certificate, successful Protect, typed output, requested address type, or
-runtime Subtype after erasing the source assumptions. -/
+the source place, actual resolution and world typing. Logical source
+interpretation follows from entry-produced context typing. This theorem
+assumes no independent layout or logical certificate, successful Protect,
+typed output, requested address type, or erased-assumption runtime Subtype. -/
 theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} {boundary : InvocationBoundary}
     {caller target : Execution.Context} {brand region : Identity} {argument : ResolvedPlace}
     {inner outer : List Frame} {type actual expected : Term} {source : Typing.Context}
@@ -171,7 +170,6 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
     (route : LabelRoute state.frames brand inner target region type outer)
     (label : Typing.InstalledLabelTyped program state.world target brand region type)
     (sourceTyped : Typing.ContextBindingsTyped program state.world source caller)
-    (reading : Typing.ScopeReading program.declarations source.static caller)
     (argumentTyped : Typing.PlaceType program.declarations source place actual writable)
     (subtype : Subtype program.declarations source.static actual expected)
     (resolved : ResolvesPlace state.world caller.environment place argument.address argument.authority)
@@ -209,7 +207,7 @@ theorem MayTransfer.source_execution {program : Kernel.Program} {state : State} 
   · right
     obtain ⟨kept,value,roots,targetSource,result,frames,task,original,stored,initialized,valueTyped,valueType,
       resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩ :=
-      step.leave_source_result valid inventory typed pending route label sourceTyped reading
+      step.leave_source_result valid inventory typed pending route label sourceTyped
         argumentTyped resolved
     exact ⟨kept,value,roots,targetSource,result,rfl,frames,task,resolved,original,stored,initialized,valueTyped,valueType,
       subtype,selectedType.trans closed.symm,resources,permission,targetTyped,admittedResult,closed,selected,allowed⟩

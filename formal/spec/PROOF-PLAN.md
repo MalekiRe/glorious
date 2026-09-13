@@ -166,7 +166,8 @@ cannot be substituted. `ControlStep.leave_source_result` and
 `MayTransfer.source_execution` no longer assume either the payload before
 `AddressType` or an independent `World.LayoutRealized`. The located declared
 type follows from the source `PlaceType`, actual `ResolvesPlace`, caller
-`ContextBindingsTyped`, authoritative `WorldTyped` and logical `ScopeReading`.
+`ContextBindingsTyped` and authoritative `WorldTyped`; logical interpretation
+is now derived from the former, not supplied as a separate certificate.
 The returned value type is related to the translated label type by
 `DefinitionallyEqual`, not a fabricated runtime equality or post-erasure
 `Subtype`; `ObservationAt.label_caller_step` extends the real caller trace.
@@ -186,13 +187,31 @@ use that derived product; no separate realization premise remains there.
 Actual array count and nominal/alias field layouts come from the existing
 resident typing and layout derivations, not a new normalization assumption.
 
-The logical boundary remains distinct: `ScopeReading` supplies the source
-interpretation and derives `SourceConversionClosed`. Producing that reading
-from meaningful source admission is the next obligation; this physical result
-does not discharge it. `SourceAddress` supplies the checked general bridge
-(`Typing.ResolvesProjections.addressTyped`,
-`Typing.ContextBindingsTyped.place_addressTyped`,
-`Typing.AddressTyped.resident_type`, `Typing.ValueTyped.reference_referent`).
+The logical boundary is now closed through actual admission, not a reading
+callback. `Entails.decode_scope` transports all sixteen mutual static
+judgments. Both arbitrary predicate templates and substitution values are
+mapped; only actual declaration requirements are fixed using
+`ProgramWellFormed.scopeClosed`. Quantified target arguments pull back into
+the source kinding domain, and recursive capabilities use the existing
+greatest-witness image construction even when scope images merge.
+`Kernel.Instance.predicates` consumes the actual `ConstraintsHold` admission
+and the instantiated signature; `EnterWorld.contextBindingsTyped` produces
+that predicate invariant together with completed generic instantiation and
+the source universe level. Existing local, region, brand, capture, handler
+and label context transitions preserve it. `ContextBindingsTyped.entails`
+and `.conversionClosed` derive the full logical and definitional readings
+consumed by both source address bridges and both label handoff consumers.
+The superseded interpretation-certificate path is removed.
+
+The integrated 197-job gate combines `InputBatchProgress`,
+`SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
+`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. Axiom audits of
+the general transport, entry producer, context preservation, source and label
+consumers, and whole-run/public-world preservation report only `propext`,
+`Classical.choice` and `Quot.sound`. The known stale
+`FunctionEntryContextTyping` module is not in this gate and was not rerun.
+General progress from meaningful source admission remains a separate
+obligation; this result does not claim source-wide progress or conformance.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

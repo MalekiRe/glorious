@@ -1,5 +1,4 @@
-import GloriousLanguage.Foundation
-import GloriousLanguage.ScopedInterpretation
+import GloriousLanguage.ScopedAtomTransport
 import GloriousLanguage.TermScope
 import GloriousLanguage.PredicateInterpretation
 
@@ -9,70 +8,10 @@ decoding fixes a declaration's instantiated constraints, so the caller's
 own assumptions. -/
 namespace Glorious.Language
 
-/-- A constraint whose own semantic terms the map fixes is fixed by the
-constraint map; the quantified case recurses over the nested requirements. -/
+/-- Fixed semantic terms fix the complete predicate through shared congruence. -/
 theorem Constraint.mapTerms_eq_self {f : Term → Term} (constraint : Constraint)
-    (terms : ∀ term ∈ constraint.terms, f term = term) : Constraint.mapTerms f constraint = constraint := by
-  cases constraint with
-  | equal a b =>
-      simp only [Constraint.mapTerms]
-      rw [terms a (by simp only [Constraint.terms]; simp),
-        terms b (by simp only [Constraint.terms]; simp)]
-  | outlives a b =>
-      simp only [Constraint.mapTerms]
-      rw [terms a (by simp only [Constraint.terms]; simp),
-        terms b (by simp only [Constraint.terms]; simp)]
-  | typeOutlives a b =>
-      simp only [Constraint.mapTerms]
-      rw [terms a (by simp only [Constraint.terms]; simp),
-        terms b (by simp only [Constraint.terms]; simp)]
-  | rowIncludes a b =>
-      simp only [Constraint.mapTerms]
-      rw [terms a (by simp only [Constraint.terms]; simp),
-        terms b (by simp only [Constraint.terms]; simp)]
-  | implements trait arguments negative =>
-      simp only [Constraint.mapTerms]
-      congr 1
-      exact List.map_eq_self_of _ _ (fun term member =>
-        terms term (by simpa only [Constraint.terms] using member))
-  | use type quantity =>
-      simp only [Constraint.mapTerms]
-      rw [terms type (by simp only [Constraint.terms]; simp)]
-  | callable receiver arguments output effects unsafeAllowed =>
-      simp only [Constraint.mapTerms]
-      rw [terms receiver (by simp only [Constraint.terms]; simp),
-        terms output (by simp only [Constraint.terms]; simp),
-        terms effects (by simp only [Constraint.terms]; simp)]
-      congr 1
-      exact List.map_eq_self_of _ _ (fun term member =>
-        terms term (by simp only [Constraint.terms,List.mem_cons]; exact Or.inr (Or.inr (Or.inr member))))
-  | runsIn receiver access arguments after unsafeAllowed =>
-      simp only [Constraint.mapTerms]
-      rw [terms receiver (by simp only [Constraint.terms]; simp),
-        terms access (by simp only [Constraint.terms]; simp),
-        terms after (by simp only [Constraint.terms]; simp)]
-      congr 1
-      exact List.map_eq_self_of _ _ (fun term member =>
-        terms term (by simp only [Constraint.terms,List.mem_cons]; exact Or.inr (Or.inr (Or.inr member))))
-  | quantified binders requirements =>
-      simp only [Constraint.mapTerms]
-      congr 1
-      · apply List.map_eq_self_of
-        intro binder member
-        cases binder with
-        | mk id name kind defaultValue =>
-          cases defaultValue with
-          | none => rfl
-          | some term =>
-            simp only [Option.map]
-            rw [terms term (by
-              simp only [Constraint.terms,List.mem_append]
-              exact Or.inl (List.mem_flatMap.mpr ⟨_, member, by simp⟩))]
-      · apply List.map_eq_self_of
-        intro requirement member
-        exact Constraint.mapTerms_eq_self requirement (fun term present => terms term (by
-          simp only [Constraint.terms,List.mem_append]
-          exact Or.inr (List.mem_flatMap.mpr ⟨_, member, present⟩)))
+    (terms : ∀ term ∈ constraint.terms, f term = term) : Constraint.mapTerms f constraint = constraint :=
+  (constraint.mapTerms_congr f id terms).trans constraint.mapTerms_id
 
 
 /-- A declaration template that the decoding fixes together with fixed
@@ -313,4 +252,73 @@ decreasing_by
   have smaller := List.nat_le_sum_of_mem
     (List.mem_map_of_mem (f := Constraint.quantifierCount) requirement.property)
   omega
+
+/-- Scoped decoding preserves the checked hygienic predicate substitution,
+including defaults and the substitution mask below every quantifier. -/
+theorem ScopeInstantiation.constraint_admissible (scope : ScopeInstantiation)
+    {substitution : Substitution} {constraint : Constraint}
+    (admissible : constraint.SubstitutionAdmissible substitution) :
+    (constraint.mapTerms scope.term).SubstitutionAdmissible
+      (substitution.map (fun entry => (entry.1,scope.term entry.2))) := by
+  cases constraint <;> simp only [Constraint.mapTerms,Constraint.SubstitutionAdmissible] at admissible ⊢
+  all_goals try exact ⟨scope.substitutes_self admissible.1,scope.substitutes_self admissible.2⟩
+  case use => exact scope.substitutes_self admissible
+  all_goals try
+    intro term member
+    try simp only [← List.map_cons] at member
+    obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    exact scope.substitutes_self (admissible original present)
+  case quantified binders requirements =>
+    have restricted :
+        (substitution.map (fun entry => (entry.1,scope.term entry.2))).filter
+          (fun entry => !(binders.any (fun binder => binder.id == entry.1))) =
+        (substitution.filter (fun entry => !(binders.any (fun binder => binder.id == entry.1)))).map
+          (fun entry => (entry.1,scope.term entry.2)) :=
+      (scope.substitution_filter substitution (fun id => !(binders.any (fun binder => binder.id == id)))).symm
+    simp only [List.any_map,Function.comp_def,restricted]
+    refine ⟨?_,?_⟩
+    · intro index binder member value found
+      simp only [List.getElem?_map] at member
+      obtain ⟨original,present,rfl⟩ := Option.map_eq_some_iff.mp member
+      obtain ⟨oldValue,selected,rfl⟩ := Option.map_eq_some_iff.mp found
+      have mapped := scope.substitutes_self (admissible.1 index original present oldValue selected)
+      rw [scope.substitution_filter substitution
+        (fun id => !((binders.take index).any (fun binder => binder.id == id)))] at mapped
+      simpa only [← List.map_take,List.any_map,Function.comp_def] using mapped
+    · intro requirement member
+      obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+      exact scope.constraint_admissible (admissible.2 original present)
+termination_by constraint
+
+theorem ScopeInstantiation.substitute_constraint (scope : ScopeInstantiation)
+    {substitution : Substitution} {before after : Constraint} (graph : SubstituteConstraint substitution before after) :
+    SubstituteConstraint (substitution.map (fun entry => (entry.1,scope.term entry.2)))
+      (before.mapTerms scope.term) (after.mapTerms scope.term) := by
+  refine ⟨scope.constraint_admissible graph.1,?_⟩
+  rw [graph.2,Constraint.mapTerms_substitute]
+
+/-- Defaults are decoded, but the selected arguments and their binder keys
+are unchanged. This equivalence preserves the quantified argument domain. -/
+theorem ScopeInstantiation.instantiates_binders (scope : ScopeInstantiation)
+    {binders : List Binder} {arguments : List Term} {substitution : Substitution} :
+    Instantiates (binders.map (fun binder => { binder with defaultValue := binder.defaultValue.map scope.term }))
+      arguments substitution ↔ Instantiates binders arguments substitution := by
+  constructor
+  · intro instantiated
+    refine ⟨by simpa only [List.map_map,Function.comp_def] using instantiated.1,?_,
+      by simpa only [List.map_map,Function.comp_def] using instantiated.2.2⟩
+    have related := instantiated.2.1
+    clear instantiated
+    induction binders generalizing arguments with
+    | nil => cases related; exact .nil
+    | cons binder rest ih => cases related with | cons first tail => exact .cons first (ih tail)
+  · intro instantiated
+    refine ⟨by simpa only [List.map_map,Function.comp_def] using instantiated.1,?_,
+      by simpa only [List.map_map,Function.comp_def] using instantiated.2.2⟩
+    have related := instantiated.2.1
+    clear instantiated
+    induction related with
+    | nil => exact .nil
+    | cons first _ ih => exact .cons first ih
+
 end Glorious.Language
