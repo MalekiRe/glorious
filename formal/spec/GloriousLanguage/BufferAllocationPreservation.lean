@@ -71,7 +71,8 @@ theorem World.install_worldTyped {program : Kernel.Program} {before after : Worl
   obtain ⟨offset,located⟩ := located
   have roots := World.write_typed_roots valid inventory typed.roots located written
     (fun value same => by cases Option.some.inj same; exact ⟨checked,rfl⟩)
-  refine ⟨well,?_,?_,?_⟩
+  have realized := typed.2.2.2.2.of_locations (World.write_locations written)
+  refine ⟨well,?_,?_,?_,realized⟩
   · intro address value resident
     exact ((World.stores_typed roots (World.resident_iff_stores.mp resident)).write_vacant typed.1 vacant written).nextOwner next
   · intro id root value found contents
@@ -79,7 +80,7 @@ theorem World.install_worldTyped {program : Kernel.Program} {before after : Worl
     · exact (roots id root value found live contents).2
     · exact typed.2.2.1 id root value (World.write_dead_root written found live) contents
   · have locations := World.write_locations written
-    apply World.root_regions_transport (after := { after with nextOwner := next }) typed.2.2.2 locations
+    apply World.root_regions_transport (after := { after with nextOwner := next }) typed.2.2.2.1 locations
     exact Nat.le_of_eq (congrArg World.nextRegion (World.write_rest written)).symm
 
 theorem World.install_owned_worldTyped {program : Kernel.Program} {before after : World}

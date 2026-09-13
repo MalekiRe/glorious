@@ -163,29 +163,33 @@ successful protection. `LabelReady` retains the actual first matching
 before-world and the actual fatal-resource event. `LabelRoute.functional` fixes
 the selected delimiter so source result evidence for a later same-brand label
 cannot be substituted. `ControlStep.leave_source_result` and
-`MayTransfer.source_execution` no longer assume the payload's before
-`AddressType`. The located declared type is derived from the source
-interpretation — the source place's `PlaceType`, its actual `ResolvesPlace`
-resolution, the caller's `ContextBindingsTyped` and the world
-`TargetRepresentation` obligation — and the conclusion relates the returned
-value's type to the caller's translated label type by `DefinitionallyEqual`
-(the definitional theory over the runtime image), so no requested address type,
-runtime equality or post-erasure `Subtype` is invented, and
-`ObservationAt.label_caller_step` extends the same real run with the caller
-event. The consumer's premise is the source interpretation of the place
-(`Typing.SourceInterpreted`); the runtime closing law
-`Typing.SourceConversionClosed` is derived from it
-(`SourceInterpreted.sourceConversionClosed`) rather than assumed. Only the
-law's definitional fragment (structural steps, rows and alias expansion,
-including `ScopeInstantiation.definitionalStep_alias`) is proved, while the
-general `Equal`-to-runtime-image derivation and the projection transport
-`Typing.ProjectionStepConversion` remain recorded obligations, and the
-`TargetRepresentation` alias-to-physical-field gap is recorded for the
-physical-realization lane. `GloriousLanguage.ScopedAtomTransport`
-carries the scoped-atom homomorphism transport
-(`ScopeInstantiation.map_kinding`, `.substituted_values`,
-`.rowEquivalent_term`), `SourceInterpretation` records the interpretation
-vocabulary, and `SourceAddress` supplies the projection-to-address bridge
+`MayTransfer.source_execution` no longer assume either the payload before
+`AddressType` or an independent `World.LayoutRealized`. The located declared
+type follows from the source `PlaceType`, actual `ResolvesPlace`, caller
+`ContextBindingsTyped`, authoritative `WorldTyped` and logical `ScopeReading`.
+The returned value type is related to the translated label type by
+`DefinitionallyEqual`, not a fabricated runtime equality or post-erasure
+`Subtype`; `ObservationAt.label_caller_step` extends the real caller trace.
+
+The physical boundary is closed in the authoritative world invariant.
+`WorldTypedWithOrigins` requires the admitted layout of every live root,
+including vacant allocations, so initial input admission carries the same
+fact that execution preserves. `Allocates.worldTypedWithOrigins` consumes the
+actual allocator layout proof. Writes retain root locations; retirement,
+rehome, snapshot copying and runtime renaming preserve the layout law through
+their real root transformations. `Execution.Step.worldTyped`,
+`Execution.Run.worldTyped` and `Specification.reachable_worldTyped` therefore
+retain it without any assumed typed post-world. `World.representation` derives
+`TargetRepresentation` from this invariant and the existing physical
+realization proofs. The source projection induction and both label consumers
+use that derived product; no separate realization premise remains there.
+Actual array count and nominal/alias field layouts come from the existing
+resident typing and layout derivations, not a new normalization assumption.
+
+The logical boundary remains distinct: `ScopeReading` supplies the source
+interpretation and derives `SourceConversionClosed`. Producing that reading
+from meaningful source admission is the next obligation; this physical result
+does not discharge it. `SourceAddress` supplies the checked general bridge
 (`Typing.ResolvesProjections.addressTyped`,
 `Typing.ContextBindingsTyped.place_addressTyped`,
 `Typing.AddressTyped.resident_type`, `Typing.ValueTyped.reference_referent`).

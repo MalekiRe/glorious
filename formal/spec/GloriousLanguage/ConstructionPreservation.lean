@@ -371,9 +371,10 @@ theorem NewValue.worldTypedWithOrigins {program : Kernel.Program} {before after 
   have retained : ∀ value, Typing.ValueTyped program before value → Typing.ValueTyped program after value :=
     fun _ value => value.construct typed.1 constructed
   have support : ∀ id root, after.roots.get id = some root → root.type.RuntimeRegionsBelow after.nextRegion := by
-    apply World.root_regions_transport typed.2.2.2 constructed.locations
+    apply World.root_regions_transport typed.2.2.2.1 constructed.locations
     have same := congrArg World.nextRegion constructed.rest
     exact Nat.le_of_eq same.symm
+  have realized := typed.2.2.2.2.of_locations constructed.locations
   cases constructed with
   | construct _ destinationType ready disjoint cleared written =>
     have inputs := ready.1
@@ -385,7 +386,7 @@ theorem NewValue.worldTypedWithOrigins {program : Kernel.Program} {before after 
     obtain ⟨offset,located⟩ := cleared.address_type ⟨offset,destinationType⟩ outside
     have roots := World.write_typed_roots valid inventory (cleared.typed_roots typed.roots) located written
       (fun value same => by cases Option.some.inj same; exact ⟨headTyped _ inputs,rfl⟩)
-    refine ⟨well,?_,?_,support⟩
+    refine ⟨well,?_,?_,support,realized⟩
     · intro address value resident
       exact retained _ (World.stores_typed roots (World.resident_iff_stores.mp resident))
     · intro id root value found contents
@@ -750,14 +751,15 @@ theorem ConstantValue.install_worldTyped {program : Kernel.Program} {context : L
   obtain ⟨offset,located⟩ := located
   have roots := World.write_typed_roots valid inventory typed.roots located written
     (fun resident same => by cases Option.some.inj same; exact ⟨constructed.typed before,rfl⟩)
-  refine ⟨well,?_,?_,?_⟩
+  have realized := typed.2.2.2.2.of_locations (World.write_locations written)
+  refine ⟨well,?_,?_,?_,realized⟩
   · intro address resident stored
     exact retained _ (World.stores_typed roots (World.resident_iff_stores.mp stored))
   · intro id root resident found contents
     by_cases live : root.live = true
     · exact (roots id root resident found live contents).2
     · exact typed.2.2.1 id root resident (World.write_dead_root written found live) contents
-  · apply World.root_regions_transport typed.2.2.2 (World.write_locations written)
+  · apply World.root_regions_transport typed.2.2.2.1 (World.write_locations written)
     have same := congrArg World.nextRegion (World.write_rest written)
     exact Nat.le_of_eq same.symm
 

@@ -233,7 +233,8 @@ theorem FormsLoan.worldTyped {purpose : LoanPurpose} {program : Kernel.Program} 
         exact ⟨.reference (Table.get_set _ _ _) rfl rfl rfl
           (((World.write_address_types written (vacant.no_located_descendant (Or.inl ⟨_,stored⟩))).mp referentType).retained
             (fun _ selected => selected) (fun _ => rfl)),rfl⟩)
-    refine ⟨well,?_,?_,?_⟩
+    have realized := typed.2.2.2.2.of_locations (World.write_locations written)
+    refine ⟨well,?_,?_,?_,realized⟩
     · intro address value resident
       exact World.stores_typed roots (World.resident_iff_stores.mp resident)
     · intro id root value found contents
@@ -244,7 +245,7 @@ theorem FormsLoan.worldTyped {purpose : LoanPurpose} {program : Kernel.Program} 
       obtain ⟨original,oldFound,same⟩ := World.root_origin (World.write_locations written) found
       have bound := congrArg World.nextRegion (World.write_rest written)
       rw [same]
-      simpa only [bound] using typed.2.2.2 id original oldFound
+      simpa only [bound] using typed.2.2.2.1 id original oldFound
 
 namespace Execution
 

@@ -67,7 +67,7 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     exact ⟨found,fun type ⟨offset,location⟩ => ⟨offset,typedLocations _ _ _ location⟩⟩
   rcases typed.1 with ⟨rootUnique,loanUnique,proofUnique,regionUnique,proofs,packs,owners,ownerUnique,
     roots,regions,bases,ranges,loans,references,overlaps,parents,locations,guards⟩
-  refine ⟨⟨?_,loanUnique,proofUnique,regionUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,parents,?_,guards⟩,?_,?_,?_⟩
+  refine ⟨⟨?_,loanUnique,proofUnique,regionUnique,?_,?_,?_,?_,?_,regions,?_,?_,?_,?_,?_,parents,?_,guards⟩,?_,?_,?_,?_⟩
   · simpa only [after,Table.Unique,List.map_map,Function.comp_def] using rootUnique
   · intro id available found
     obtain ⟨identity,bound,brand,active,recorded⟩ := proofs id available found
@@ -117,7 +117,10 @@ theorem World.rehome_worldTyped {program : Kernel.Program} {before : World}
     exact typed.2.2.1 id original value oldFound contents
   · intro id root found
     obtain ⟨original,oldFound,rfl⟩ := origin id root found
-    exact typed.2.2.2 id original oldFound
+    exact typed.2.2.2.1 id original oldFound
+  · intro id root found live
+    obtain ⟨original,oldFound,rfl⟩ := origin id root found
+    exact typed.2.2.2.2 id original oldFound live
 
 namespace Execution
 

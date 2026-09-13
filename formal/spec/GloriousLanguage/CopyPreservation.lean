@@ -434,7 +434,8 @@ theorem Copies.worldTyped {program : Kernel.Program} {before after : World} {aut
       (fun resident same => by
         cases Option.some.inj same
         exact ⟨copy.typed (World.stores_typed typed.roots stored),copy.type_eq⟩)
-    refine ⟨well,?_,?_,?_⟩
+    have realized := typed.2.2.2.2.of_locations (World.write_locations written)
+    refine ⟨well,?_,?_,?_,realized⟩
     · intro address value resident
       exact retained _ (World.stores_typed roots (World.resident_iff_stores.mp resident))
     · intro id root value found contents
@@ -445,7 +446,7 @@ theorem Copies.worldTyped {program : Kernel.Program} {before after : World} {aut
       obtain ⟨original,oldFound,same⟩ := World.root_origin (World.write_locations written) found
       have bound := congrArg World.nextRegion (World.write_rest written)
       rw [same]
-      simpa only [bound] using typed.2.2.2 id original oldFound
+      simpa only [bound] using typed.2.2.2.1 id original oldFound
 
 theorem Acquires.worldTyped {program : Kernel.Program} {before after : World} {authority force source destination}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)

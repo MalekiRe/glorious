@@ -540,7 +540,7 @@ theorem RegionPermutation.worldTyped (permutation : RegionPermutation) {program 
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     {world : World} {originBound : Identity} (typed : Typing.WorldTypedWithOrigins program world originBound) :
     Typing.WorldTypedWithOrigins program (permutation.world world) originBound := by
-  refine ⟨permutation.world_wellFormed typed.1,?_,?_,?_⟩
+  refine ⟨permutation.world_wellFormed typed.1,?_,?_,?_,?_⟩
   · intro address value resident
     obtain ⟨original,oldResident,rfl⟩ := permutation.resident_origin resident
     exact permutation.valueTyped valid inventory (typed.2.1 address original oldResident)
@@ -553,7 +553,11 @@ theorem RegionPermutation.worldTyped (permutation : RegionPermutation) {program 
   · intro id root found
     rw [permutation.world_roots] at found
     obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
-    exact (typed.2.2.2 id original oldFound).rename permutation.rename (fun _ bound => permutation.rename_below_bound bound)
+    exact (typed.2.2.2.1 id original oldFound).rename permutation.rename (fun _ bound => permutation.rename_below_bound bound)
+  · intro id root found live
+    rw [permutation.world_roots] at found
+    obtain ⟨original,oldFound,rfl⟩ := Option.map_eq_some_iff.mp found
+    exact (typed.2.2.2.2 id original oldFound live).permute valid permutation
 
 theorem RegionPermutation.world_read_twice (permutation : RegionPermutation) (world : World) (address : Address) :
     (permutation.world (permutation.world world)).read address = world.read address := by

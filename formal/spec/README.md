@@ -94,9 +94,10 @@ or a dependency of this project.
   `leaveExhausted` with exactly the unchanged before-world. `LabelRoute.functional`
   fixes the selected delimiter, and `MayTransfer.source_execution` composes
   source `PlaceType`/`Subtype` with the actual moved resident, its physical
-  type, resources and the real caller event trace. The explicit before
-  `AddressType` and source-assumption interpretation remain theorem hypotheses,
-  not runtime equality claims.
+  type, resources and the real caller event trace. Neither the payload before
+  `AddressType` nor an independent layout realization is assumed: both physical
+  facts follow from world typing and actual source resolution. Logical
+  `ScopeReading` remains explicit, not a fabricated runtime equality.
 - `ControlOrigin`, `ControlOriginPreservation`: actual current and captured
   control-address and historical authority support, canonical invocation admission
   and whole-run preservation. NOT checked at this revision: the module is
@@ -324,19 +325,24 @@ or a dependency of this project.
   parent/guard lemmas; each `releaseLoan` ending is a kill), then the reversed-index
   loop and `CleanupRun.destroy_tree`, then the composition with
   `cleanup_root_shell_retired`.
-- `ScopedInterpretation` (statement-level, endpoint NOT complete): the consumers
-  `ResolvingPlace`/`addressTyped`, `place_addressTyped`, `leave_source_result`
-  and `source_execution` now take a `Typing.ScopeReading` indexed by the actual
-  source context instead of a supplied `SourceInterpreted`, and
-  `ProjectionStepConversion` is deleted as a false contract. The producer
-  `Typing.ScopeReading.of_cut` is proved but has no call site and is only
-  satisfiable for a decoded source context, so the reading is still assumed at
-  those endpoints and none of the four has a caller. Completion requires the
-  image map `t ↦ instantiation.term (t.substitute outer)` with its entailments
-  read at the image (a general `Entails` transport, or a consumer contract that
-  reads `.entailed`-shaped equalities from the assumptions), driven by the
-  in-tree `Kernel.Instance` / `ConstraintsHold` evidence, plus callsite wiring
-  and the `World.LayoutRealized` threading at those sites.
+- `RealizationLayout`, `SourceAddress`, `AllocationPreservation`: the physical
+  bridge is integrated with world typing. `WorldTypedWithOrigins` requires an
+  admitted layout for every live root, including vacant allocations. Initial
+  input admission carries that invariant; the allocator establishes each new
+  root fact, and actual mutation, retirement, rehome, replay and runtime
+  renaming preserve it through whole-machine `Step`/`Run` and public reachable
+  world typing. `World.representation` derives `TargetRepresentation`; the
+  source projection/place proofs and label consumers no longer require an
+  independent `World.LayoutRealized` certificate. Actual resident counts and
+  nominal/alias layout derivations supply the physical field offsets.
+- `ScopedInterpretation` (logical admission endpoint still open):
+  `ResolvesProjections.addressTyped`, `place_addressTyped`,
+  `leave_source_result` and `source_execution` consume `Typing.ScopeReading`
+  for the actual source context and derive `SourceConversionClosed` from it.
+  The physical world fact is now produced, but the reading itself is still
+  supplied. Its derivation from the in-tree `Kernel.Instance` /
+  `ConstraintsHold` admission is the next task. The existing `of_cut` helper
+  does not establish that general source-admission result.
 - `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
   is discharged from each input's own readiness (permitted rows, the allocation
   claim's owning row, the erased port's handed chain), with the one shape
@@ -383,8 +389,28 @@ inventory rather than accepting a separately supplied unrelated AST.
 
 ## Checking
 
-Use the pinned toolchain to build the changed proof targets by name, for example
-the current recovered checkpoint
+The physical-invariant checkpoint passes this integrated proof gate:
+
+```sh
+lake build GloriousLanguage.InputBatchProgress \
+  GloriousLanguage.SemanticPreservation GloriousLanguage.SourceAddress \
+  GloriousLanguage.LabelExecution GloriousLanguage.AllocationLayout \
+  GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.SnapshotReplayPreservation
+```
+
+The strict gate passes 196 jobs. Axiom audits of allocation preservation,
+`World.representation`, both source address bridges,
+`MayTransfer.source_execution`, whole `Step`/`Run` preservation and public
+reachable-world typing report only `propext`, `Classical.choice` and
+`Quot.sound`. The theorem signatures confirm that physical realization is
+derived from `WorldTyped`, while logical `ScopeReading` remains explicit.
+
+A broader attempt adding `FunctionEntryContextTyping` failed on its stale
+entry/control constructor consumers. It is not part of the green gate. The
+preserved `Checks` were not run; this is general proof checking, not example
+evidence or a claim that the aggregate is green.
+
+Earlier recovery checkpoints used this target set:
 
 `lake build GloriousLanguage.CleanupExecution GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.CustodyDischarge GloriousLanguage.CleanupDestruction GloriousLanguage.InputAuthorityProvenance GloriousLanguage.SuspensionCapture GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 

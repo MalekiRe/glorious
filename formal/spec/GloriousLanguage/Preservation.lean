@@ -281,6 +281,25 @@ theorem World.write_locations {before after : World} {address : Address} {value 
     rfl
   · rw [Table.get_set_other _ _ _ _ same]
 
+/-- The shared location projection retains declared types, layouts and liveness.
+Every value-only write therefore preserves the actual layout admission. -/
+theorem World.LayoutRealized.of_locations {program : Program} {before after : World}
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program before module unsafeAllowed)
+    (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location) :
+    World.LayoutRealized program after module unsafeAllowed := by
+  apply realized.roots_congr
+  intro id root found live
+  have mapped := locations id
+  rw [found] at mapped
+  simp only [Option.map_some] at mapped
+  obtain ⟨original,selected,same⟩ := Option.map_eq_some_iff.mp mapped.symm
+  refine ⟨original,selected,?_,?_,?_⟩
+  · simpa only [Root.location] using (congrArg Root.live same).trans live
+  · simpa only [Root.location] using congrArg Root.type same
+  · simpa only [Root.location] using congrArg Root.layout same
+
+
 theorem World.write_loans {before after : World} {address : Address} {value : Option Value}
     (written : before.write address value = some after) : after.loans = before.loans := by
   rcases World.write_value_update written with ⟨_,_,_,rfl⟩

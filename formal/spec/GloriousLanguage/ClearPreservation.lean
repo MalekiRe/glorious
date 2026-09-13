@@ -146,7 +146,8 @@ theorem World.clear_worldTypedWithOrigins {program : Kernel.Program} {before aft
   have rest := World.write_rest written
   have loansEq := congrArg World.loans rest
   have proofEq := congrArg World.availability rest
-  refine ⟨World.clear_wellFormedWithOrigins typed.1 permission written,?_,?_,?_⟩
+  refine ⟨World.clear_wellFormedWithOrigins typed.1 permission written,?_,?_,?_,
+    typed.2.2.2.2.of_locations (World.write_locations written)⟩
   · intro observed value resident
     have checked := World.stores_typed roots (World.resident_iff_stores.mp resident)
     apply checked.transport ?_ proofEq (fun _ origin => origin.transport (World.write_locations written))
@@ -157,7 +158,7 @@ theorem World.clear_worldTypedWithOrigins {program : Kernel.Program} {before aft
     by_cases live : root.live = true
     · exact (roots id root value found live contents).2
     · exact typed.2.2.1 id root value (World.write_dead_root written found live) contents
-  · apply World.root_regions_transport typed.2.2.2 (World.write_locations written)
+  · apply World.root_regions_transport typed.2.2.2.1 (World.write_locations written)
     have same := congrArg World.nextRegion rest
     exact Nat.le_of_eq same.symm
 

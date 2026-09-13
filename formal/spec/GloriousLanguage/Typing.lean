@@ -233,10 +233,15 @@ mutual
         FieldsTyped program world fields types → FieldsTyped program world (some value :: fields) (type :: types)
 end
 
+/-- Storage typing includes the admitted physical layout of every live root,
+including vacant allocations. Initial input admission and actual preservation
+therefore share the same layout invariant; source consumers do not supply a
+separate realization certificate. -/
 def WorldTypedWithOrigins (program : Kernel.Program) (world : World) (originBound : Identity) : Prop :=
   world.WellFormedWithOrigins originBound ∧ (∀ address value, world.Resident address value → ValueTyped program world value) ∧
   (∀ id root value, world.roots.get id = some root → root.value = some value → value.type = root.type) ∧
-  (∀ id root, world.roots.get id = some root → root.type.RuntimeRegionsBelow world.nextRegion)
+  (∀ id root, world.roots.get id = some root → root.type.RuntimeRegionsBelow world.nextRegion) ∧
+  World.LayoutRealized program.declarations world default false
 
 def WorldTyped (program : Kernel.Program) (world : World) : Prop :=
   WorldTypedWithOrigins program world world.nextOwner

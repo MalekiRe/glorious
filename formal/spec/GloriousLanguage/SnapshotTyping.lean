@@ -52,8 +52,8 @@ theorem Relocation.root_support {program : Kernel.Program} {world : World} {map 
       root.type.RuntimeRegionsBelow (map.copyWorld world homes).nextRegion := by
   intro id root found
   rcases Relocation.root_origin typed.1.1 found with original | ⟨old,source,selected,_,rfl,rfl⟩
-  · exact (typed.2.2.2 id root original).mono (Nat.le_add_left world.nextRegion map.regionBase)
-  · exact map.term_runtimeRegionsBelow (typed.2.2.2 old source selected)
+  · exact (typed.2.2.2.1 id root original).mono (Nat.le_add_left world.nextRegion map.regionBase)
+  · exact map.term_runtimeRegionsBelow (typed.2.2.2.1 old source selected)
 
 theorem CopiesSnapshot.old_valueTyped {program : Kernel.Program} {before after : State} {suspension : Suspension}
     {map : Relocation} (copied : CopiesSnapshot program before suspension map after) {value : Value}
@@ -189,7 +189,7 @@ theorem Typing.WorldTyped.resident_runtimeRegionsBelow {program : Kernel.Program
   have wholeTyped := typed.2.1 ⟨address.root,root.generation,[]⟩ whole ⟨root,whole,found,live,rfl,contents,.root⟩
   have same := typed.2.2.1 address.root root whole found contents
   exact wholeTyped.resident_runtimeRegionsBelow valid inventory
-    (same ▸ typed.2.2.2 address.root root found) inside
+    (same ▸ typed.2.2.2.1 address.root root found) inside
 
 /-- An alias application's physical expansion stays inside the bound of the
 application itself: the declared body is lexical, so its runtime regions can
@@ -248,7 +248,7 @@ theorem Typing.WorldTyped.address_runtimeRegionsBelow {program : Kernel.Program}
     {address : Address} {type : Term} (located : AddressType program.declarations world address type) :
     type.RuntimeRegionsBelow world.nextRegion := by
   obtain ⟨offset,located⟩ := located
-  exact located.runtimeRegionsBelow valid typed.2.2.2
+  exact located.runtimeRegionsBelow valid typed.2.2.2.1
 
 namespace Execution
 

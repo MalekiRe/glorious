@@ -86,7 +86,8 @@ theorem Retires.wellFormed {before after : World} {id : Identity}
 
 theorem Retires.worldTyped {program : Kernel.Program} {before after : World} {id : Identity}
     (typed : Typing.WorldTyped program before) (retired : Retires before id after) : Typing.WorldTyped program after := by
-  refine ⟨retired.wellFormed typed.1,?_,?_,?_⟩
+  refine ⟨retired.wellFormed typed.1,?_,?_,?_,fun key root found live =>
+    typed.2.2.2.2 key root (retired.live_root found live) live⟩
   · intro address value resident
     have original := retired.resident.mp resident
     apply (typed.2.1 address value original).resident_transport ?_ ?_ (fun _ origin => origin.retire retired) ⟨address,original⟩
@@ -116,9 +117,9 @@ theorem Retires.worldTyped {program : Kernel.Program} {before after : World} {id
         · subst key
           simp only [Table.get_set] at found
           cases found
-          have supported := typed.2.2.2 id _ selected
+          have supported := typed.2.2.2.1 id _ selected
           exact supported
-        · exact typed.2.2.2 key root (by simpa only [Table.get_set_other _ _ _ _ same] using found)
+        · exact typed.2.2.2.1 key root (by simpa only [Table.get_set_other _ _ _ _ same] using found)
 
 theorem EndsLoan.live_origin {program : RuntimeProgram} {before after : World} {id key : Identity} {loan : Loan}
     (ended : EndsLoan program before id after) (found : after.loans.get key = some loan) (live : loan.live = true) :

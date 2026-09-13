@@ -95,7 +95,7 @@ theorem SnapshotMap.copied_addressOffset {program : Kernel.Program} {before : St
   | root found live => exact .root (selected.copied_root typed.1 found included) live
   | child parent field ih =>
       exact .child (ih included) (selected.copied_fieldOffset valid typed.1 included
-        (parent.runtimeRegionsBelow valid typed.2.2.2) field)
+        (parent.runtimeRegionsBelow valid typed.2.2.2.1) field)
 
 theorem SnapshotMap.copied_addressType {program : Kernel.Program} {before : State} {suspension : Suspension} {map : Relocation}
     (valid : ProgramWellFormed program.declarations) (typed : Typing.WorldTyped program before.world)
@@ -258,7 +258,7 @@ theorem CopiesSnapshot.worldTyped {program : Kernel.Program}
     {before after : State} {suspension : Suspension} {map : Relocation}
     (typed : Typing.WorldTyped program before.world) (copied : CopiesSnapshot program before suspension map after) :
     Typing.WorldTyped program after.world := by
-  refine ⟨copied.wellFormed typed.1,?_,?_,copied.root_support typed⟩
+  refine ⟨copied.wellFormed typed.1,?_,?_,copied.root_support typed,?_⟩
   · intro address value resident
     rw [copied.result] at resident ⊢
     rcases Relocation.resident_origin typed.1.1 resident with original | ⟨previous,original,included,stored,rfl,rfl⟩
@@ -271,5 +271,11 @@ theorem CopiesSnapshot.worldTyped {program : Kernel.Program}
     · obtain ⟨previous,oldContents,rfl⟩ := Option.map_eq_some_iff.mp contents
       rw [map.value_type,typed.2.2.1 old original previous selected oldContents]
       rfl
+  · intro id root found live
+    rw [copied.result] at found
+    rcases Relocation.root_origin typed.1.1 found with original | ⟨old,original,selected,_,rfl,rfl⟩
+    · exact typed.2.2.2.2 id root original live
+    · exact copied.relocation.layoutOf valid typed.1 (typed.2.2.2.1 old original selected)
+        (typed.2.2.2.2 old original selected live)
 
 end Glorious.Language.Execution

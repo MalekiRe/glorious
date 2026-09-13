@@ -313,6 +313,27 @@ structure World where
   clock : Nat := 0
   deriving Repr, Inhabited
 
+/-- Every live allocation retains the layout admitted for its declared type.
+Vacant roots are included: physical typing cannot depend on a resident being
+present. This is part of world typing, not an independent source certificate. -/
+def World.LayoutRealized (program : Program) (world : World) (module : ModuleId) (unsafeAllowed : Bool) : Prop :=
+  ∀ id root, world.roots.get id = some root → root.live = true →
+    LayoutOf program ⟨[],[],0,module,unsafeAllowed,{}⟩ root.type root.layout
+
+/-- Value, home and identity changes may preserve the same admitted layout. -/
+theorem World.LayoutRealized.roots_congr {program : Program} {before after : World}
+    {module : ModuleId} {unsafeAllowed : Bool}
+    (realized : World.LayoutRealized program before module unsafeAllowed)
+    (retained : ∀ id root, after.roots.get id = some root → root.live = true →
+      ∃ original, before.roots.get id = some original ∧ original.live = true ∧
+        original.type = root.type ∧ original.layout = root.layout) :
+    World.LayoutRealized program after module unsafeAllowed := by
+  intro id root found live
+  obtain ⟨original,originalFound,originalLive,typeEq,layoutEq⟩ := retained id root found live
+  rw [← typeEq,← layoutEq]
+  exact realized id original originalFound originalLive
+
+
 /-- Existing unsafe input/output obligations are semantic contracts on the
 actual common binding product. They cannot introduce a storage permission. -/
 structure UnsafeResourceContract where

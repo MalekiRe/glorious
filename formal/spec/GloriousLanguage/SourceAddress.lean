@@ -13,10 +13,11 @@ the real source projection judgment; the actual runtime resolves the same
 projection list from the actual environment. This module derives, for an
 arbitrary projection list, the actual declared type at the resolved address and
 its `AddressType` derivation, together with the runtime image of the source
-result type. The field steps consume the physical field-offset product supplied
-by the world interpretation; no requested address type, and no equality between
-the source subtype and the runtime type, is assumed. The runtime conversion law
-`Typing.SourceConversionClosed` is the single source-equality transport used. -/
+result type. The field steps consume physical field offsets derived from
+`WorldTyped`; neither a separate layout certificate nor a requested address
+type is assumed. `ScopeReading` supplies the logical source interpretation,
+from which the single source-equality transport `SourceConversionClosed` is
+derived. Producing that reading from source admission is a separate boundary. -/
 namespace Glorious.Language
 
 /-- The runtime closing context carries no assumptions, so every requirement of
@@ -393,17 +394,15 @@ namespace Typing
 
 /-- Every source projection step lifts to the actual declared storage type at
 the resolved address, and the declared type reads as the runtime image of the
-source result type. The derivation consumes the actual resolution, the world's
-target representation and the runtime closing law; it assumes no address type
-at the projected address. -/
+source result type. The derivation consumes the actual resolution and derives
+the target representation from world typing. The logical source reading is
+still required; no address type at the projected address is assumed. -/
 theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program world)
     (moduleEq : runtime.module = source.static.module)
     (reading : Typing.ScopeReading program.declarations source.static runtime)
-    {module : ModuleId} {unsafeAllowed : Bool}
-    (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     {type : Term} {mutable : Bool} {projections : List Kernel.Projection} {result : Term} {writable : Bool}
     (projected : Typing.Projections program.declarations source type mutable projections result writable)
     {base : Address} {authority : Authority} {address : Address} {permission : Authority}
@@ -411,7 +410,7 @@ theorem ResolvesProjections.addressTyped {program : Kernel.Program} {world : Wor
     (resolved : Kernel.ResolvesProjections world runtime.environment base authority projections address permission) :
     Typing.AddressTyped program world runtime address result := by
   have representation : Typing.TargetRepresentation program world runtime :=
-    World.representation valid inventory worldTyped realized
+    World.representation valid inventory worldTyped
   have closed : Typing.SourceConversionClosed program.declarations source.static runtime :=
     reading.conversionClosed valid
   induction projected generalizing base authority address permission with
@@ -559,15 +558,14 @@ theorem AddressTyped.resident_type {program : Kernel.Program} {world : World}
 
 /-- The full source place bridge: a source `PlaceType` derivation resolves to an
 actual address whose declared storage type is the located reading of the
-source place type. Only the entry-established local location, the world target
-representation and the runtime closing law are consumed. -/
+source place type. It consumes the entry-established local location, world
+typing, the logical source reading and the actual resident. Physical layout
+realization is derived from world typing, not supplied independently. -/
 theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {world : World}
     {source : Typing.Context} {runtime : Execution.Context}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (worldTyped : Typing.WorldTyped program world)
     (reading : Typing.ScopeReading program.declarations source.static runtime)
-    {module : ModuleId} {unsafeAllowed : Bool}
-    (realized : World.LayoutRealized program.declarations world module unsafeAllowed)
     (typed : Typing.ContextBindingsTyped program world source runtime)
     {place : Kernel.Place} {type : Term} {writable : Bool}
     (placeTyped : Typing.PlaceType program.declarations source place type writable)
@@ -584,7 +582,7 @@ theorem ContextBindingsTyped.place_addressTyped {program : Kernel.Program} {worl
     have located := Typing.ContextBindingsTyped.place_location valid inventory worldTyped typed
       member selected' projections stored
     exact Typing.ResolvesProjections.addressTyped valid inventory worldTyped typed.moduleEq reading
-      realized projected located projections
+      projected located projections
 
 end Typing
 end Glorious.Language

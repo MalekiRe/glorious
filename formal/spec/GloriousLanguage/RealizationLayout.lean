@@ -730,9 +730,9 @@ projection only steps through that same structural head, since a source place
 of alias-headed type is first transported to its expansion by `Projections.equal`.
 An alias-headed container therefore has no source field step at all, and its
 physical children are supplied by the alias rule of `FieldOffset` when a
-derivation at it is demanded. This is the target representation obligation of
-the world interpretation - supplied by actual allocation - never an assumption
-about a requested address type. The resident itself is required because a
+derivation at it is demanded. `World.representation` derives this product from
+the authoritative world typing invariant; actual allocation and preservation
+maintain its root layout facts. The resident itself is required because a
 nominal offset is read at the stored constructor and an array's declared length
 is the resident's own constant count. -/
 structure TargetRepresentation (program : Kernel.Program) (world : World)
@@ -745,32 +745,6 @@ structure TargetRepresentation (program : Kernel.Program) (world : World)
     ∃ offset, FieldOffset program.declarations world address container index child offset
 
 end Typing
-
-
-/-- The world's actual layout realization: every live root's declared storage
-type carries the layout it was admitted with, read at the same assumption-free
-physical layout context. Actual allocation supplies the fresh root's evidence
-from its own request (`AllocationRequest.layout_of`); every value-shaped world
-transition retains it, because no transition rewrites a root's declared type or
-layout. This is the layout world law - it is produced, never granted. -/
-def World.LayoutRealized (program : Program) (world : World) (module : ModuleId) (unsafeAllowed : Bool) : Prop :=
-  ∀ id root, world.roots.get id = some root → root.live = true →
-    LayoutOf program ⟨[],[],0,module,unsafeAllowed,{}⟩ root.type root.layout
-
-/-- Realization is retained by every transition that preserves live roots'
-declared types and layouts. Root identities, generations, homes and stored values
-may all change; the admitted layout evidence does not. -/
-theorem World.LayoutRealized.roots_congr {program : Program} {before after : World}
-    {module : ModuleId} {unsafeAllowed : Bool}
-    (realized : World.LayoutRealized program before module unsafeAllowed)
-    (retained : ∀ id root, after.roots.get id = some root → root.live = true →
-      ∃ original, before.roots.get id = some original ∧ original.live = true ∧
-        original.type = root.type ∧ original.layout = root.layout) :
-    World.LayoutRealized program after module unsafeAllowed := by
-  intro id root found live
-  obtain ⟨original,originalFound,originalLive,typeEq,layoutEq⟩ := retained id root found live
-  rw [← typeEq,← layoutEq]
-  exact realized id original originalFound originalLive
 
 /-- The selected child of an actual physical field offset carries its own
 admitted layout, read from the offset's own derivation: the ordered layout row
@@ -829,26 +803,24 @@ theorem AddressOffset.layoutOf {program : Kernel.Program} {world : World}
     {address : Address} {container : Term} {offset : Nat} {module : ModuleId} {unsafeAllowed : Bool}
     (valid : ProgramWellFormed program.declarations)
     (located : AddressOffset program.declarations world address container offset)
-    (realized : World.LayoutRealized program.declarations world module unsafeAllowed) :
+    (typed : Typing.WorldTyped program world) :
     ∃ layout, LayoutOf program.declarations ⟨[],[],0,module,unsafeAllowed,{}⟩ container layout := by
   induction located with
-  | root found live => exact ⟨_, realized _ _ found live⟩
+  | root found live => exact ⟨_,(typed.2.2.2.2 _ _ found live).runtime_context⟩
   | child _ field _ => exact (FieldOffset.child_layout valid field).imp (fun _ derived => derived.runtime_context)
 
-/-- The layout law, the resident typing and the actual resolution produce the
-world's target representation outright: the container's layout is read from the
-address offset itself, and the physical field offset plus the child's layout
-come from the source field step at the resident the address actually holds. -/
+/-- World typing produces the target representation outright: the root layout
+law and resident typing come from the same invariant. The container layout is
+read from its actual address offset, and each physical field offset and child
+layout come from the source field step at the resident actually stored there. -/
 theorem World.representation {program : Kernel.Program} {world : World} {runtime : Execution.Context}
-    {module : ModuleId} {unsafeAllowed : Bool}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program world)
-    (realized : World.LayoutRealized program.declarations world module unsafeAllowed) :
+    (typed : Typing.WorldTyped program world) :
     Typing.TargetRepresentation program world runtime where
   offsets := by
     intro address container index child value located stored fieldType bound
     obtain ⟨offset, atOffset⟩ := located
-    obtain ⟨layout, derived⟩ := AddressOffset.layoutOf valid atOffset realized
+    obtain ⟨layout, derived⟩ := AddressOffset.layoutOf (module := default) (unsafeAllowed := false) valid atOffset typed
     have valueType : value.type = container :=
       atOffset.stored_type valid inventory (Typing.WorldTyped.roots typed) stored
     have structural : container.StructuralHead :=

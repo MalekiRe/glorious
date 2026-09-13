@@ -277,30 +277,39 @@ source-only tree; the same base without this chunk passes the recovered targets
 with the identical whole-library failure set (thirteen modules, unchanged error
 text).
 
-The source-interpretation release adds three modules
-(`ScopedAtomTransport`, `SourceInterpretation`, `SourceAddress`) and migrates
-`LabelExecution`'s label-argument consumer. The migration deletes the assumed
-payload `AddressType`: the located declared type is derived from the source
-place (`PlaceType` plus its actual `ResolvesPlace` resolution), the caller's
-`ContextBindingsTyped` and the world `TargetRepresentation`, and the value type
-is related to the caller's translated label type by `DefinitionallyEqual`
-rather than syntactic identity. The consumer's premise is the source
-interpretation of the place (`Typing.SourceInterpreted`), from which the runtime
-closing law `Typing.SourceConversionClosed` is now derived
-(`SourceInterpreted.sourceConversionClosed`) instead of being assumed: its
-definitional fragment (structural steps, rows and alias expansion, including
-`ScopeInstantiation.definitionalStep_alias`) is proved, while the general
-runtime-image derivation and the projection transport
-`Typing.ProjectionStepConversion` remain recorded obligations. The other stated
-premise is `Typing.TargetRepresentation`, which requires that every located
-declared type is a structural head and that every source field step has its
-actual physical field offset; the alias-headed `LayoutOf` case without a
-corresponding physical `FieldOffset` derivation is the recorded gap there and is
-being closed by the physical-realization lane. Neither premise is weakened by the bridge, no declaration of the
-previous tree is dropped, and no other module consumes the two changed
-theorems. The composed strict gate including `SourceAddress` and `LabelExecution`
-passes 215 jobs from a fresh source-only tree (213 without the two compatibility
-modules).
+The source-to-physical-address boundary is now integrated with authoritative
+world typing. `WorldTypedWithOrigins` includes `World.LayoutRealized` for every
+live allocation, vacant or occupied, so initial input admission requires
+physically admitted storage. The allocator establishes the new root fact from
+its actual `LayoutOf`; ordinary writes preserve root locations, and retirement,
+rehome, snapshot copying and runtime renaming retain the layout law through
+their actual root transformations. Whole `Step`/`Run` storage preservation and
+`Specification.reachable_worldTyped` check with the strengthened invariant.
+
+`World.representation` now derives `TargetRepresentation` from `WorldTyped`,
+without an independent layout certificate. The general source projection
+induction and `ContextBindingsTyped.place_addressTyped` consume this result;
+`ControlStep.leave_source_result` and `MayTransfer.source_execution` likewise
+drop the separate realization premise. The bridge derives the actual physical
+payload type, then relates it to the translated source type by
+`DefinitionallyEqual`. Array counts, nominal fields and aliases use the
+existing resident/layout derivations; no extra count normalization or
+requested address type is assumed.
+
+The checked physical boundary is conditional on the logical `ScopeReading`.
+That reading produces the source conversion closure, but its producer from
+meaningful source admission remains the next task. This checkpoint does not
+claim source-wide progress or full specification conformance.
+
+The integrated strict gate passes 196 jobs for `InputBatchProgress`,
+`SemanticPreservation`, `SourceAddress`, `LabelExecution`, `AllocationLayout`,
+`RuntimeWorldEquivariance` and `SnapshotReplayPreservation`. The allocator,
+world representation, source projection/place, label consumer, whole
+`Step`/`Run` and public reachable-world theorem axiom audits report only
+`propext`, `Classical.choice` and `Quot.sound`. A broader attempt including
+`FunctionEntryContextTyping` still fails on its stale entry/control constructor
+consumers; no full-tree success is claimed. The preserved example modules
+were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
@@ -376,9 +385,9 @@ unprovable world law `TargetRepresentation.structural` with the derived
 `AddressType.structural_of_stored` (an occupied address is read at its resident's
 own type), added `Typing.StructuralExpansion`,
 `DefinitionallyEqual.runtime_context` and the assumption-free interpretation
-producer `SourceInterpreted.of_assumption_free`, and left `TargetRepresentation.offsets`
-without a producer: it needs the allocation/entry layout law that the
-physical-realization lane owns.
+producer `SourceInterpreted.of_assumption_free`. The then-open producer for
+`TargetRepresentation.offsets` is now `World.representation`, derived from the
+authoritative layout-bearing `WorldTyped` invariant described above.
 
 One additive shared-core hunk landed for the suspension boundary:
 `UnsafeInvariantContract` gains `rehomed`, the rehoming counterpart of

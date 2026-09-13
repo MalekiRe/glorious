@@ -346,12 +346,12 @@ theorem Transfers.worldTyped {program : Kernel.Program} {before after : World} {
     (typed : Typing.WorldTyped program before)
     (transfer : Transfers program before authority source destination after) : Typing.WorldTyped program after := by
   obtain ⟨residents,roots⟩ := transfer.typed_residents valid inventory typed
-  refine ⟨transfer.wellFormed typed.1,residents,?_,?_⟩
+  refine ⟨transfer.wellFormed typed.1,residents,?_,?_,typed.2.2.2.2.of_locations transfer.locations⟩
   · intro id root value found contents
     by_cases live : root.live = true
     · exact roots id root value found live contents
     · exact typed.2.2.1 id root value (transfer.dead_root found live) contents
-  · apply World.root_regions_transport typed.2.2.2 transfer.locations
+  · apply World.root_regions_transport typed.2.2.2.1 transfer.locations
     have same := congrArg World.nextRegion transfer.rest
     exact Nat.le_of_eq same.symm
 
