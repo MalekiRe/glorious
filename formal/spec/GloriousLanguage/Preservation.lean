@@ -509,11 +509,11 @@ theorem World.write_read_shell {before after : World} {address observed : Addres
         subst after
         simp [World.read,World.root,Table.get_set_other _ _ _ _ sameRoot]
 
-theorem World.Located.transport {before after : World} {mutation address : Address}
+theorem World.Located.transport {before after : World} {address : Address}
     (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
-    (shells : ∀ observed, ¬ mutation.Prefix observed →
-      (after.read observed).map Value.shell = (before.read observed).map Value.shell)
-    (outside : ¬ mutation.ProperPrefix address) (located : before.Located address) : after.Located address := by
+    (arities : ∀ ancestor, ancestor.ProperPrefix address →
+      (after.read ancestor).map (fun value => value.fields.length) = (before.read ancestor).map (fun value => value.fields.length))
+    (located : before.Located address) : after.Located address := by
   rcases address with ⟨id,generation,fields⟩
   rcases List.eq_nil_or_concat fields with whole | ⟨parent,index,whole⟩
   · subst fields
@@ -524,22 +524,25 @@ theorem World.Located.transport {before after : World} {mutation address : Addre
     subst fields
     change before.Located ((⟨id,generation,parent⟩ : Address).child index) at located
     obtain ⟨container,stored,bound⟩ := World.Located.child_iff.mp located
-    have parentOutside : ¬ mutation.Prefix ⟨id,generation,parent⟩ := fun included => outside (included.child index)
-    have framed := shells ⟨id,generation,parent⟩ parentOutside
+    have framed := arities ⟨id,generation,parent⟩ ((Address.Prefix.refl _).child index)
     rw [stored] at framed
     cases found : after.read ⟨id,generation,parent⟩ with
     | none => simp [found] at framed
     | some resident =>
         rw [found] at framed
-        have same := Option.some.inj framed
-        have arity : resident.fields.length = container.fields.length := by
-          simpa [Value.shell,Value.withFields,Value.fields] using congrArg (fun value => value.fields.length) same
+        have arity : resident.fields.length = container.fields.length := Option.some.inj framed
         exact World.Located.child_iff.mpr ⟨resident,found,by omega⟩
 
 theorem World.write_located {before after : World} {mutation address : Address} {value : Option Value}
     (written : before.write mutation value = some after) (outside : ¬ mutation.ProperPrefix address)
-    (located : before.Located address) : after.Located address :=
-  located.transport (World.write_locations written) (fun _ => World.write_read_shell written) outside
+    (located : before.Located address) : after.Located address := by
+  apply located.transport (World.write_locations written)
+  intro ancestor included
+  have framed := World.write_read_shell written (fun includedBefore => outside
+    ⟨includedBefore.trans included.1,Nat.lt_of_le_of_lt includedBefore.length_le included.2⟩)
+  have project : (fun value : Value => value.fields.length) ∘ Value.shell = (fun value : Value => value.fields.length) := by
+    funext value; cases value; simp [Value.shell,Value.withFields,Value.fields]
+  simpa only [Option.map_map,project] using congrArg (Option.map (fun value : Value => value.fields.length)) framed
 
 theorem FormsLoan.liveLoanLocations {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World} {authority mode region referent destination}
     (locations : before.LiveLoanLocations) (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
@@ -653,7 +656,7 @@ theorem Transfers.root_types {program : RuntimeProgram} {before after : World} {
 
 theorem FieldOffset.transport {program : Program} {before after : World}
     {address : Address} {container type : Term} {index offset : Nat}
-    (shells : (after.read address).map Value.shell = (before.read address).map Value.shell)
+    (heads : (after.read address).map Value.head = (before.read address).map Value.head)
     (field : FieldOffset program before address container index type offset) :
     FieldOffset program after address container index type offset := by
   induction field with
@@ -663,15 +666,12 @@ theorem FieldOffset.transport {program : Program} {before after : World}
   | array nonnegative bound layout => exact .array nonnegative bound layout
   | nominal constructor id instantiated substituted selected layout stored head atOffset =>
       change before.read address = some _ at stored
-      rw [stored] at shells
+      rw [stored] at heads
       cases found : after.read address with
-      | none => simp [found] at shells
+      | none => simp [found] at heads
       | some resident =>
-          rw [found] at shells
-          have same := Option.some.inj shells
-          have sameHead := congrArg Value.head same
-          simp only [Value.shell,Value.withFields,Value.head] at sameHead
-          exact .nominal constructor id instantiated substituted selected layout found (sameHead.trans head) atOffset
+          rw [found] at heads
+          exact .nominal constructor id instantiated substituted selected layout found (Option.some.inj heads |>.trans head) atOffset
   | alias found instantiated graph inner ih => exact .alias found instantiated graph ih
 
 theorem AddressOffset.retained {program : Program} {before after : World}
@@ -692,14 +692,14 @@ theorem AddressType.retained {program : Program} {before after : World} {address
   obtain ⟨offset,typed⟩ := typed
   exact ⟨offset,typed.retained roots reads⟩
 
-/-- The shared address/layout derivation survives a write except beneath a
-replaced proper ancestor. The address being written may itself become vacant. -/
-theorem AddressOffset.transport {program : Program} {before after : World} {mutation address : Address}
+/-- Physical offsets read root locations and the actual heads of their proper
+ancestors. No child layout depends on an ancestor's liveness marker. -/
+theorem AddressOffset.transport {program : Program} {before after : World} {address : Address}
     {type : Term} {offset : Nat}
     (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
-    (shells : ∀ observed, ¬ mutation.Prefix observed →
-      (after.read observed).map Value.shell = (before.read observed).map Value.shell)
-    (outside : ¬ mutation.ProperPrefix address) (typed : AddressOffset program before address type offset) :
+    (heads : ∀ ancestor, ancestor.ProperPrefix address →
+      (after.read ancestor).map Value.head = (before.read ancestor).map Value.head)
+    (typed : AddressOffset program before address type offset) :
     AddressOffset program after address type offset := by
   induction typed with
   | @root id root found live =>
@@ -715,17 +715,24 @@ theorem AddressOffset.transport {program : Program} {before after : World} {muta
           have residentLive : resident.live = true := by simpa [Root.location,live] using congrArg Root.live same
           simpa only [residentType,residentGeneration] using (AddressOffset.root (program := program) changed residentLive)
   | @child parent container parentOffset index type childOffset _ field ih =>
-      have parentOutside : ¬ mutation.Prefix parent := fun included => outside (included.child index)
-      exact .child (ih (fun included => parentOutside included.1)) (field.transport (shells parent parentOutside))
+      exact .child (ih (fun ancestor included => heads ancestor (included.1.child index)))
+        (field.transport (heads parent ((Address.Prefix.refl parent).child index)))
 
 theorem World.write_address_offsets {program : Program} {before after : World} {mutation address : Address}
     {type : Term} {offset : Nat} {value : Option Value}
     (written : before.write mutation value = some after) (outside : ¬ mutation.ProperPrefix address) :
     AddressOffset program before address type offset ↔ AddressOffset program after address type offset := by
+  have project : Value.head ∘ Value.shell = Value.head := by funext value; cases value; rfl
+  have heads : ∀ ancestor, ancestor.ProperPrefix address →
+      (after.read ancestor).map Value.head = (before.read ancestor).map Value.head := by
+    intro ancestor included
+    have framed := World.write_read_shell written (fun includedBefore => outside
+      ⟨includedBefore.trans included.1,Nat.lt_of_le_of_lt includedBefore.length_le included.2⟩)
+    simpa only [Option.map_map,project] using congrArg (Option.map Value.head) framed
   constructor
-  · exact AddressOffset.transport (World.write_locations written) (fun _ => World.write_read_shell written) outside
-  · exact AddressOffset.transport (fun id => (World.write_locations written id).symm)
-      (fun _ separate => (World.write_read_shell written separate).symm) outside
+  · exact fun typed => typed.transport (World.write_locations written) heads
+  · exact fun typed => typed.transport (fun id => (World.write_locations written id).symm)
+      (fun ancestor included => (heads ancestor included).symm)
 
 theorem World.write_address_types {program : Program} {before after : World} {mutation address : Address}
     {type : Term} {value : Option Value}

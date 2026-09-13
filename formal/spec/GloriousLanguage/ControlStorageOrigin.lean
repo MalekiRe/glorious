@@ -291,26 +291,6 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.root_support {program : Lang
     split <;> simp_all only [List.flatMap_cons,List.flatMap_nil,PatternAction.rootSupport,
       RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,and_true]
 
-theorem ConsumesReceiver.wellFormed {before after : World} {address : Address} {authority : Authority}
-    {access : Access} (consumed : ConsumesReceiver before address authority access after)
-    (well : before.WellFormed) : after.WellFormed := by
-  cases consumed with
-  | lent => exact well
-  | owned stored live callable permitted written =>
-    exact World.write_wellFormed_of_origin well permitted written
-      (fun _ _ found => World.write_shell_origin stored written found)
-
-theorem ConsumesAvailability.wellFormed {before after : World} {address : Address}
-    {authority : Authority} {id : Identity} {access : Access}
-    (consumed : ConsumesAvailability before address authority id access after)
-    (well : before.WellFormed) : after.WellFormed := by
-  cases consumed with
-  | lent => exact well
-  | owned stored initialized head available active permitted written =>
-    exact World.deactivateAvailability_wellFormed
-      (World.clear_wellFormed (valid := well) (permission := permitted) (written := written))
-      (by simpa only [congrArg World.availability (World.write_rest written)] using available)
-
 theorem PreparesEntryAttempt.wellFormed {program : Kernel.Program} {callee : Context} {function : Function}
     {before after : World} {source : EntrySource} {inputs : List InvocationInput} {outcome : PreparationOutcome}
     (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)

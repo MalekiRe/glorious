@@ -90,6 +90,27 @@ theorem FinishesEntry.worldTyped {program : Kernel.Program} {before after : Worl
   | supplied => exact typed
   | resident finished | contextual finished => exact finished.worldTyped typed
 
+theorem ConsumesReceiver.wellFormed {before after : World} {address : Address} {authority : Authority}
+    {access : Access} (consumed : ConsumesReceiver before address authority access after)
+    (well : before.WellFormed) : after.WellFormed := by
+  cases consumed with
+  | lent => exact well
+  | owned stored live callable permitted written =>
+    exact World.write_wellFormed_of_origin well permitted written
+      (fun _ _ found => World.write_shell_origin stored written found)
+
+theorem ConsumesAvailability.wellFormed {before after : World} {address : Address}
+    {authority : Authority} {id : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority id access after)
+    (well : before.WellFormed) : after.WellFormed := by
+  cases consumed with
+  | lent => exact well
+  | owned stored initialized head available active permitted written =>
+    exact World.deactivateAvailability_wellFormed
+      (World.clear_wellFormed (valid := well) (permission := permitted) (written := written))
+      (by simpa only [congrArg World.availability (World.write_rest written)] using available)
+
+
 theorem ConsumesReceiver.locations {before after : World} {address authority access}
     (consumed : ConsumesReceiver before address authority access after) :
     ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
@@ -102,6 +123,29 @@ theorem ConsumesReceiver.loans {before after : World} {address authority access}
   cases consumed with
   | lent => rfl
   | owned _ _ _ _ written => exact World.write_loans written
+
+theorem ConsumesReceiver.read {before after : World} {receiver observed : Address}
+    {authority : Authority} {access : Access} (consumed : ConsumesReceiver before receiver authority access after)
+    (outside : access = .owned → ¬ observed.Prefix receiver) : after.read observed = before.read observed := by
+  cases consumed with
+  | lent => rfl
+  | owned stored _ _ _ written => exact World.write_shell_read stored written (outside rfl)
+
+theorem ConsumesReceiver.located {before after : World} {receiver observed : Address}
+    {authority : Authority} {access : Access} (consumed : ConsumesReceiver before receiver authority access after)
+    (located : before.Located observed) : after.Located observed := by
+  cases consumed with
+  | lent => exact located
+  | owned stored _ _ _ written => exact World.write_shell_located stored written located
+
+theorem ConsumesReceiver.addressType {program : Program} {before after : World} {receiver observed : Address}
+    {authority : Authority} {access : Access} {type : Term}
+    (consumed : ConsumesReceiver before receiver authority access after)
+    (typed : AddressType program before observed type) : AddressType program after observed type := by
+  cases consumed with
+  | lent => exact typed
+  | owned stored _ _ _ written => exact (World.write_shell_address_types stored written).mp typed
+
 
 theorem ConsumesReceiver.stores_head {before after : World} {address : Address} {authority : Authority} {access : Access}
     (consumed : ConsumesReceiver before address authority access after)

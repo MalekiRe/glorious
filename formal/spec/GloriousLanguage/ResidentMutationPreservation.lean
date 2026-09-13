@@ -291,6 +291,96 @@ theorem World.write_shell_stores_head {before after : World} {address observed :
     refine ⟨changed,World.resident_iff_stores.mp present,?_⟩
     simpa only [Value.shell,Value.withFields,Value.head] using congrArg Value.head same
 
+/-- A shell-only write changes neither stored heads nor their absence.
+Physical nominal offsets observe this head, not shell liveness. -/
+theorem World.write_shell_heads {before after : World} {address : Address} {resident : Value} {live : Bool}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)
+    (observed : Address) : (after.read observed).map Value.head = (before.read observed).map Value.head := by
+  cases prior : before.read observed with
+  | none =>
+    cases current : after.read observed with
+    | none => rfl
+    | some value =>
+      obtain ⟨original,found,_⟩ := World.write_shell_origin stored written (World.resident_iff_stores.mpr current)
+      have originalStored := World.resident_iff_stores.mp found
+      change before.read observed = some original at originalStored
+      rw [prior] at originalStored
+      cases originalStored
+  | some value =>
+    obtain ⟨changed,found,head⟩ := World.write_shell_stores_head stored written prior
+    change after.read observed = some changed at found
+    simp only [found,Option.map_some,head]
+
+theorem World.write_shell_arities {before after : World} {address : Address} {resident : Value} {live : Bool}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)
+    (observed : Address) :
+    (after.read observed).map (fun value => value.fields.length) = (before.read observed).map (fun value => value.fields.length) := by
+  have heads := World.write_shell_heads stored written observed
+  cases prior : before.read observed with
+  | none =>
+    have absent : after.read observed = none := Option.map_eq_none_iff.mp (by simpa only [prior,Option.map_none] using heads)
+    simp only [absent,Option.map_none]
+  | some value =>
+    cases current : after.read observed with
+    | none => simp only [prior,current,Option.map_none,Option.map_some] at heads; cases heads
+    | some changed =>
+      obtain ⟨original,found,_,_,arity⟩ := World.write_shell_origin stored written (World.resident_iff_stores.mpr current)
+      have originalStored := World.resident_iff_stores.mp found
+      change before.read observed = some original at originalStored
+      have same : original = value := Option.some.inj (originalStored.symm.trans prior)
+      simpa only [same,Option.map_some] using congrArg some arity
+
+/-- A receiver liveness marker preserves every live slot, not merely slots
+outside its fields. The immediate stored parent's arity is unchanged. -/
+theorem World.write_shell_located {before after : World} {address observed : Address} {resident : Value} {live : Bool}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)
+    (located : before.Located observed) : after.Located observed :=
+  located.transport (World.write_locations written) (fun ancestor _ => World.write_shell_arities stored written ancestor)
+
+
+/-- Marking a receiver shell preserves the actual physical offset derivation
+at every projection depth, including vacant ports. -/
+theorem World.write_shell_address_offsets {program : Program} {before after : World}
+    {address observed : Address} {resident : Value} {live : Bool} {type : Term} {offset : Nat}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after) :
+    AddressOffset program before observed type offset ↔ AddressOffset program after observed type offset := by
+  constructor
+  · exact fun typed => typed.transport (World.write_locations written) (fun observed _ => World.write_shell_heads stored written observed)
+  · exact fun typed => typed.transport (fun identity => (World.write_locations written identity).symm)
+      (fun observed _ => (World.write_shell_heads stored written observed).symm)
+
+theorem World.write_shell_address_types {program : Program} {before after : World}
+    {address observed : Address} {resident : Value} {live : Bool} {type : Term}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after) :
+    AddressType program before observed type ↔ AddressType program after observed type :=
+  exists_congr (fun _ => World.write_shell_address_offsets stored written)
+
+/-- Only the marked shell and its containing values change. Its descendants,
+including capture slots, retain their exact stored contents. -/
+theorem World.write_shell_read {before after : World} {address observed : Address} {resident : Value} {live : Bool}
+    (stored : before.Stores address resident)
+    (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)
+    (outside : ¬ observed.Prefix address) : after.read observed = before.read observed := by
+  by_cases inside : address.Prefix observed
+  · obtain ⟨suffix,equal⟩ := Address.prefix_extension inside
+    cases suffix with
+    | nil =>
+      have same : observed = address := by simpa using equal
+      exact False.elim (outside (same ▸ Address.Prefix.refl address))
+    | cons index rest =>
+      rw [equal,World.write_read_inside written (index :: rest),World.read_append,stored]
+      rfl
+  · apply World.write_disjoint written
+    rintro ⟨root,generation,⟨suffix,fields⟩ | ⟨suffix,fields⟩⟩
+    · exact outside ⟨root.symm,generation.symm,suffix,fields⟩
+    · exact inside ⟨root,generation,suffix,fields⟩
+
+
 theorem World.write_shell_references {before after : World} {address : Address} {resident : Value} {live : Bool}
     (stored : before.Stores address resident)
     (written : before.write address (some (.resident resident.owner resident.type resident.head live resident.fields resident.resources)) = some after)

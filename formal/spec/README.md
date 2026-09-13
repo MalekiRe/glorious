@@ -219,9 +219,10 @@ or a dependency of this project.
   original source readiness, prepared-state input compatibility and fresh-row
   compatibility with the owned receiver. `EntrySource.prepare` now constructs
   preparation success/exhaustion from original recipe readiness, positive
-  requests and observed-graph compatibility. Transporting original input
-  admission into the prepared batch remains open. The integrated strict
-  220-job gate and general theorem axiom audits pass.
+  requests and observed-graph compatibility. Complete contextual preparation
+  now transports original input admission through both loans and consumption
+  writes. Resident capture re-authoring and whole-entry composition remain open.
+  The integrated strict 220-job gate and general theorem axiom audits pass.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -450,11 +451,23 @@ Receiver and witness frames use the same actual loan producer as ordinary
 inputs, without invented receiver locals or future-world readiness. These
 general construction and input-observation audits use only the standard axioms.
 
+`PreparesEntry.contextual_inputsCompatible` preserves the whole original
+readiness, physical-request, authority-record and pairwise-interference product
+through both loans, receiver marking, and witness clearing/deactivation. Its
+compatibility and mutation exclusions are all original-world facts. The common
+observer reads resident contents only for resident formals: erased ports at the
+cleared witness slot survive without fictitious unchanged values. Receiver
+marking preserves physical offsets and live slots at arbitrary projection depth
+using actual ancestor heads and field arities. `InputFramed` is now derived
+from the authoritative input product rather than separately admitted by entry.
+The contextual, physical-transport and entry axiom audits use only the standard
+three axioms; the integrated 220-job gate passes.
+
 The preserved `Checks` were not run. This is general proof checking, not example
 evidence, a whole-library success or source-wide progress. Higher task/frame
 consumers are still being migrated and are not included in this gate. Deriving
-the concrete preparation conditions from source admission, transporting original
-pending inputs through preparation, and constructing whole entry steps remain
+the concrete preparation conditions from source admission, transporting resident
+captures through their changed authority, and composing whole entry steps remain
 on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:

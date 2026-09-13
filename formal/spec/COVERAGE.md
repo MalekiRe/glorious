@@ -244,11 +244,11 @@ producer axiom audit passed too.
 This closes ordered **prepared-input batch preentry progress**, not general
 source-derived execution progress. Original source readiness, actual
 receiver/witness preparation, incoming-resource agreement, prepared-state
-batch framing/compatibility and receiver fresh-row compatibility remain explicit
-admission premises of that endpoint. General preparation construction is now
-proved below. Deriving its concrete conditions from source typing, transporting
-original pending inputs into the prepared batch, proper-tail cleanup and
-whole-machine progress remain open.
+batch compatibility and receiver fresh-row compatibility remain explicit
+admission premises of that endpoint; separate batch framing is now derived.
+General preparation construction and contextual original-input transport are
+proved below. Source-derived conditions, resident capture re-authoring,
+proper-tail cleanup and whole-machine progress remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
 lane workspace. They are level moves plus one disclosed redesign: the
@@ -349,15 +349,27 @@ The actual lender's frame is shared by receivers, witnesses and the ordered
 binder. The integrated 220-job gate and all general construction audits pass
 with only `propext`, `Classical.choice` and `Quot.sound`.
 
+`PreparesEntry.contextual_inputsCompatible` now derives the complete prepared
+contextual input product from its original-world product, existing preparation
+conditions, and original storage/support exclusions. Both actual loans, receiver
+marking, and witness clearing/deactivation are composed; no middle-world
+readiness, interference or retained-support premise is supplied. Receiver
+marking preserves live slots and physical offsets at arbitrary depths through
+ancestor arities and heads. Erased ports observe location and loan/custody state,
+not unchanged resident contents; a cleared witness slot can remain an erased
+port. The same product derives `InputFramed` for the real entry endpoint. The
+integrated strict 220-job gate and general composition/transport/entry axiom
+audits pass with only the standard three axioms.
+
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. Source derivation of the concrete preparation conditions,
-transport of original input admission into the prepared batch, whole-entry
-progress and higher task/frame integration remain open. No full-tree success
-is claimed; preserved example modules were not run.
+standard axioms. Source derivation of concrete preparation conditions, resident
+capture re-authoring from original input admission, whole-entry progress and
+higher task/frame integration remain open. No full-tree success is claimed;
+preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

@@ -45,7 +45,7 @@ theorem World.write_wellFormedWithOrigins_of_origin {before after : World} {addr
   have located : after.LiveLoanLocations := by
     intro id loan found live
     have selected : before.loans.get id = some loan := by simpa only [loansEq] using found
-    exact World.Located.transport locations (fun _ => World.write_read_shell written)
+    exact World.write_located written
       (permission.owned_no_loan_descendant (World.loanParents valid) selected live)
       (World.liveLoanLocations valid id loan selected live)
   rcases valid with ⟨_,loansUnique,proofsUnique,regionsUnique,proofs,packs,owners,unique,

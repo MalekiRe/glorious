@@ -237,11 +237,19 @@ constructs both leases and consumption writes, retaining the first lease when
 the witness allocation fails. The integrated strict 220-job gate and general
 construction/ordinary-input axiom audits pass with only the standard axioms.
 
-The next dependency is deriving those concrete conditions from source admission
-and transporting original pending inputs through preparation into the ordered
-batch, followed by whole entry and the still-stale higher task/frame consumers.
-General resource progress remains open; this gate does not claim source-wide
-progress or full-tree conformance.
+Complete contextual preparation now transports the original input product
+through both real loans and both consumption writes. The retained-support
+exclusions are pulled back through the same observed graph, not supplied in a
+future world. Resident-only content observation permits erased ports at the
+cleared witness slot; receiver marking preserves physical offsets and live
+slots at every projection depth. Original input compatibility supplies the
+framing facts previously admitted separately by the entry endpoint. The strict
+220-job gate and general contextual/physical/entry axiom audits pass.
+
+The next dependency is resident capture re-authoring and original-to-prepared
+whole-entry composition, together with deriving the concrete original-world
+conditions from source admission. Higher task/frame consumers and general
+resource progress remain open; no source-wide or full-tree conformance is claimed.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -302,11 +310,11 @@ arbitrary future world. The strict 73-job dependency gate passed and the
 endpoint uses only the standard Lean logical axioms.
 
 Next on this dependency chain: derive original source readiness and concrete
-preparation conditions from source admission, then transport the original input
-resource, layout and compatibility product into the prepared world. Actual
-receiver/witness preparation with its real exhaustion outcomes is now
-constructed; composing it with ordered binding and receiver finishing still
-requires that original-to-prepared admission proof.
+preparation conditions from source admission, transport resident captures
+through their changed authority, and compose ordered binding with receiver
+finishing. All preparation outcomes are constructed; original contextual input
+admission now survives the complete actual preparation. The remaining
+original-to-prepared obligation is not replaced by a future-world certificate.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains
