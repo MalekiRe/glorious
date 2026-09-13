@@ -215,11 +215,13 @@ or a dependency of this project.
   Receiver addresses may be projected; ordinary and raw inputs share the fold.
   Callable typing supplies capture arity and the empty shell-resource list.
   No future-world finishing callback, pre-emptied captures or assumed successor
-  remains. The theorem requires actual receiver/witness preparation, original
-  source readiness, prepared-state input compatibility and fresh-row
-  compatibility with the owned receiver. Deriving that admission from source
-  typing, including preparation success/exhaustion, remains open. The strict
-  73-job dependency gate and theorem axiom audit passed.
+  remains. The theorem still requires actual receiver/witness preparation,
+  original source readiness, prepared-state input compatibility and fresh-row
+  compatibility with the owned receiver. `EntrySource.prepare` now constructs
+  preparation success/exhaustion from original recipe readiness, positive
+  requests and observed-graph compatibility. Transporting original input
+  admission into the prepared batch remains open. The integrated strict
+  220-job gate and general theorem axiom audits pass.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -237,8 +239,9 @@ or a dependency of this project.
   applied to the §7.3 unsafe invariant contracts that determine owner behaviour
   for residents not stored syntactically by value; the normative text does not
   enumerate this clause itself, so it is recorded here as a formal obligation
-  and an interpretation, not added source syntax. Ordered capture/call-entry
-  totality and missing capture-exhaustion outcomes remain open.
+  and an interpretation, not added source syntax. Whole call-entry totality
+  remains open; receiver/witness and ordered-input exhaustion are represented
+  and constructed under their concrete pre-state obligations.
 - `SnapshotResourcePreservation`, `SnapshotReplayPreservation`: one mixed
   copied/external graph proof derives nominal closure and transitive reference
   restoration, retaining old external allocation ownership. Actual copied
@@ -437,11 +440,22 @@ the actual preparation, binding and receiver-finishing phases. It is not inferre
 from an erased loan port's parent identity alone. The general entry-invariant
 axiom audits report only the standard three axioms.
 
+`EntrySource.prepare` constructs every supplied, resident and contextual
+preparation outcome. `FormsLoan.borrower_permitted` derives the new borrower
+authority; capture permissions follow through its real projections. Contextual
+preparation transports witness requests, reachable resources and the frozen
+reservation product through the receiver lease, then constructs both actual
+consumption writes. The two physical failure sites retain their exact prefixes.
+Receiver and witness frames use the same actual loan producer as ordinary
+inputs, without invented receiver locals or future-world readiness. These
+general construction and input-observation audits use only the standard axioms.
+
 The preserved `Checks` were not run. This is general proof checking, not example
 evidence, a whole-library success or source-wide progress. Higher task/frame
-consumers are still being migrated and are not included in this gate. Constructing
-receiver/witness preparation and whole entry steps from original source admission
-remains on the same dependency chain.
+consumers are still being migrated and are not included in this gate. Deriving
+the concrete preparation conditions from source admission, transporting original
+pending inputs through preparation, and constructing whole entry steps remain
+on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:
 

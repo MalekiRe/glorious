@@ -229,10 +229,19 @@ authority theorem uses original recipe provenance for guarded authorities.
 Neither introduces a post-world admission callback. Their axiom audits report
 only the standard three axioms.
 
-The next dependency is constructive receiver/witness preparation and whole
-entry from original admission, followed by the still-stale higher task/frame
-consumers. General resource progress remains open; this gate does not claim
-source-wide progress or full-tree conformance.
+`EntrySource.prepare` now constructs all actual preparation outcomes from
+original recipe readiness and concrete pre-state requests, separation and
+observed-graph compatibility. The actual loan producer derives borrower access
+and frames ordinary inputs, receivers and witnesses. Contextual preparation
+constructs both leases and consumption writes, retaining the first lease when
+the witness allocation fails. The integrated strict 220-job gate and general
+construction/ordinary-input axiom audits pass with only the standard axioms.
+
+The next dependency is deriving those concrete conditions from source admission
+and transporting original pending inputs through preparation into the ordered
+batch, followed by whole entry and the still-stale higher task/frame consumers.
+General resource progress remains open; this gate does not claim source-wide
+progress or full-tree conformance.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -292,11 +301,12 @@ ownership and the final physical write; it no longer assumes finishing in an
 arbitrary future world. The strict 73-job dependency gate passed and the
 endpoint uses only the standard Lean logical axioms.
 
-Next on this dependency chain: derive original source readiness and the
-prepared-world resource, layout and compatibility obligations from source
-admission; construct receiver/witness preparation with its real exhaustion
-outcomes. These remain separate from the now-proved ordered binding and
-receiver-finishing consumer.
+Next on this dependency chain: derive original source readiness and concrete
+preparation conditions from source admission, then transport the original input
+resource, layout and compatibility product into the prepared world. Actual
+receiver/witness preparation with its real exhaustion outcomes is now
+constructed; composing it with ordered binding and receiver finishing still
+requires that original-to-prepared admission proof.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains
@@ -954,8 +964,9 @@ compatibility produces the receiver's final permission; its stored shell
 produces the retirement write. `Kernel.EntryBatch.enterWorldAttempt` consumes
 this chain and constructs the real complete or exhausted entry attempt.
 The `consumed`/`finishes` parameters and superseded root-only/empty-receiver
-folds are removed. Source-derived admission and receiver/witness preparation
-progress remain the next obligations, not premises claimed to be proved here.
+folds are removed. Receiver/witness preparation construction is now proved
+by `EntrySource.prepare`. Source-derived whole-entry admission remains the next
+obligation, not a premise claimed to be proved by this endpoint.
 
 Implementation matching now consumes actual inferred substitutions and positive
 definitional convertibility, including reflexive opaque projections and unordered

@@ -245,9 +245,10 @@ This closes ordered **prepared-input batch preentry progress**, not general
 source-derived execution progress. Original source readiness, actual
 receiver/witness preparation, incoming-resource agreement, prepared-state
 batch framing/compatibility and receiver fresh-row compatibility remain explicit
-admission premises. Deriving those premises from source typing, constructing
-preparation success/exhaustion, proper-tail cleanup and whole-machine progress
-remain open.
+admission premises of that endpoint. General preparation construction is now
+proved below. Deriving its concrete conditions from source typing, transporting
+original pending inputs into the prepared batch, proper-tail cleanup and
+whole-machine progress remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
 lane workspace. They are level moves plus one disclosed redesign: the
@@ -336,13 +337,26 @@ activation bounds, private-slot preservation and positive allocation-exhaustion
 proofs cover both preparation and input-binding failure. Exclusivity no longer
 asserts that allocation failure acquired a loan.
 
+`EntrySource.prepare` now constructs every source recipe's preparation outcome
+from original `EntrySource.Ready` and concrete `PreparationConditions`: real
+physical requests, original receiver/witness access, separation, and the existing
+observed input/value graph. `FormsLoan.borrower_permitted` produces the new
+borrower permission. Capture initialization, contextual witness resources, the
+second request, reservation permissions and both actual consumption writes are
+derived rather than assumed afterward. Owned receiver lending allocates nothing;
+shared/unique lending uses the same positive request producer as ordinary inputs.
+The actual lender's frame is shared by receivers, witnesses and the ordered
+binder. The integrated 220-job gate and all general construction audits pass
+with only `propext`, `Classical.choice` and `Quot.sound`.
+
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. Constructive preparation/entry progress from original
-admission and higher task/frame integration remain open. No full-tree success
+standard axioms. Source derivation of the concrete preparation conditions,
+transport of original input admission into the prepared batch, whole-entry
+progress and higher task/frame integration remain open. No full-tree success
 is claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.

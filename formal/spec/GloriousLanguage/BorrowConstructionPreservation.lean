@@ -37,6 +37,47 @@ theorem FormsLoan.old_loan {purpose : LoanPurpose} {program : RuntimeProgram} {b
   cases borrowed
   simpa only [Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid found))] using found
 
+/-- The new borrower obtains the access the actual borrow admitted. Existing
+conflicts are ancestors of its parent; old and new guard bounds rule out a
+fresh dependent. This constructs permission, rather than assuming it in the
+world produced by reference allocation and the handle write. -/
+theorem FormsLoan.borrower_permitted {program : RuntimeProgram} {purpose : LoanPurpose}
+    {before after : World} {authority : Authority} {mode : Mutability} {region : Identity}
+    {referent destination : Address} (valid : before.WellFormed)
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
+    Permitted after (.loan before.nextLoan) (if mode = .shared then .shared else .unique) referent := by
+  have locations := borrowed.locations
+  have retained : ∀ {identity loan}, before.loans.get identity = some loan → after.loans.get identity = some loan :=
+    borrowed.old_loan valid
+  cases borrowed with
+  | borrow _ _ _ _ _ _ permitted _ _ parentEq _ =>
+    refine ⟨?_,_,Table.get_set _ _ _,rfl,rfl,rfl,⟨[],by simp⟩,?_,?_,?_,?_⟩
+    · obtain ⟨root,found⟩ := permitted.root
+      obtain ⟨current,present,_⟩ := World.root_transport locations found
+      exact ⟨current,present⟩
+    · cases mode <;> simp
+    · intro other loan found live different overlap conflict
+      have original : before.loans.get other = some loan := by
+        simpa only [Table.get_set_other _ _ _ _ different] using found
+      obtain ⟨parent,selected,ancestor⟩ := permitted.conflicting_parent original live overlap conflict
+      exact .parent (Table.get_set _ _ _) (parentEq.trans selected)
+        (ancestor.transport_parents (fun _ loan found => ⟨loan,retained found,rfl⟩))
+    · intro guard member
+      obtain ⟨carrier,found,live⟩ := permitted.guardLoans guard member
+      exact ⟨carrier,retained found,live⟩
+    · intro other loan found _ member
+      by_cases same : other = before.nextLoan
+      · subst other
+        have equal := Option.some.inj (found.symm.trans (Table.get_set _ _ _))
+        subst loan
+        obtain ⟨carrier,selected,_⟩ := permitted.guardLoans before.nextLoan member
+        exact False.elim (Nat.lt_irrefl _ (World.loanBounds valid selected))
+      · have original : before.loans.get other = some loan := by
+          simpa only [Table.get_set_other _ _ _ _ same] using found
+        obtain ⟨_,_,bound,_⟩ := World.loanGuards valid other loan before.nextLoan original member
+        exact False.elim ((Nat.not_lt_of_ge (Nat.le_of_lt (World.loanBounds valid original))) bound)
+
+
 theorem FormsLoan.resident_origin {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World} {authority mode region referent destination}
     (borrowed : FormsLoan program purpose before authority mode region referent destination after)
     {observed : Address} {value : Value} (resident : after.Resident observed value) :

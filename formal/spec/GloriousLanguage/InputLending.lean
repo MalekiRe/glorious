@@ -109,6 +109,20 @@ theorem LendsResident.lent_authority {program : RuntimeProgram} {before after : 
   | owned => exact False.elim (borrowed rfl)
   | lent => exact ⟨_,rfl⟩
 
+/-- Owned entry keeps its actual authority; lent entry obtains the permission
+of its freshly created receiver/reference loan. No post-world access is given. -/
+theorem LendsResident.borrower_permitted {program : RuntimeProgram} {before after : World}
+    {activation scope region : Identity} {address : Address} {authority permission : Authority}
+    {access : Access} {lease : Option InvocationLease}
+    (valid : before.WellFormed)
+    (lent : LendsResident program activation scope region before address authority access lease permission after)
+    (permitted : Permitted before authority access address) : Permitted after permission access address := by
+  cases lent with
+  | owned => exact permitted
+  | lent modes _ _ allocated borrowed =>
+    have received := borrowed.borrower_permitted (allocated.wellFormed valid)
+    rcases modes with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> exact received
+
 theorem BindsInputAt.lent_authority {recipient : ClaimCustody} {program : RuntimeProgram} {before after : World}
     {activation scope region input binding}
     (bound : BindsInputAt program recipient activation scope region before input binding after)

@@ -76,36 +76,47 @@ def InvocationInput.StorageRequest (program : RuntimeProgram) (world : World)
             (.runtimeRegion loanRegion) localSlot.type) layout
   | .storage _ _ | .allocation _ _ | .loan _ _ => True
 
+/-- A receiver or resident input requests the actual temporary reference
+layout only when it lends. Owning a receiver is a no-allocation transition;
+missing loan layout or source-location evidence is not physical exhaustion. -/
+def LendsResident.Request (program : RuntimeProgram) (world : World) (region : Identity)
+    (address : Address) (authority : Authority) (access : Access) (type : Term) : Prop :=
+  access ≠ .owned → ∃ loanRegion layout,
+    authority.BorrowRegion world address loanRegion ∧ AddressType program.declarations world address type ∧
+    AllocationRequest program.declarations world region
+      (.reference (if access = .shared then .shared else .unique) (.runtimeRegion loanRegion) type) layout
+
 theorem LendsResident.success_or_exhausted {program : RuntimeProgram} {before : World}
     {activation scope region : Identity} {address : Address} {authority : Authority}
-    {access : Access} {mode : Mutability} {value : Value} {loanRegion : Identity} {layout : Layout}
-    (valid : before.WellFormed)
-    (modes : access = .shared ∧ mode = .shared ∨ access = .unique ∧ mode = .unique)
-    (stored : before.Stores address value) (initialized : value.Initialized)
-    (sourceType : AddressType program.declarations before address value.type)
-    (ready : value.ResourcesAccessible program before access)
-    (permission : Permitted before authority access address)
-    (borrowRegion : authority.BorrowRegion before address loanRegion)
-    (request : AllocationRequest program.declarations before region
-      (.reference mode (.runtimeRegion loanRegion) value.type) layout) :
+    {access : Access} {value : Value}
+    (valid : before.WellFormed) (stored : before.Stores address value) (initialized : value.Initialized)
+    (ready : value.ResourcesAccessible program before access) (permission : Permitted before authority access address)
+    (request : LendsResident.Request program before region address authority access value.type) :
     (∃ lease permission after,
       LendsResident program activation scope region before address authority access lease permission after) ∨
       LendsResidentExhausted program region before address authority access := by
-  have accessAt : access = if mode = .shared then .shared else .unique := by
-    rcases modes with ⟨rfl,rfl⟩ | ⟨rfl,rfl⟩ <;> rfl
-  rcases request.success_or_exhausted (.temporary activation scope) true with
-    ⟨handle,allocated,allocation⟩ | exhausted
-  · have live := borrowRegion.live valid permission
-    have regionState : allocated.liveRegions = before.liveRegions := by cases allocation; rfl
-    have accessAfter := permission.locationExtension (allocation.locationExtension valid) allocation.loans
-    have readyAfter := (allocation.handoffReady valid
-      (show value.HandoffReady program before access [] from ⟨ready,by simp⟩)).1
-    obtain ⟨after,formed⟩ := FormsLoan.exists ((allocation.read valid address).trans stored)
-      (allocation.addressType valid sourceType) initialized (by simpa only [regionState] using live)
-      (show LoanPurpose.invocation.Admitted program.declarations value.type from trivial)
-      (accessAt ▸ readyAfter) (accessAt ▸ accessAfter) allocation.created_vacant allocation.created_addressType
-    exact Or.inl ⟨_,_,after,.lent modes stored borrowRegion allocation formed⟩
-  · exact Or.inr (.lent modes stored initialized ready permission borrowRegion exhausted)
+  by_cases owned : access = .owned
+  · subst access
+    exact Or.inl ⟨none,authority,before,.owned⟩
+  · obtain ⟨loanRegion,layout,borrowRegion,sourceType,request⟩ := request owned
+    let mode : Mutability := if access = .shared then .shared else .unique
+    have modes : access = .shared ∧ mode = .shared ∨ access = .unique ∧ mode = .unique := by
+      cases access <;> simp_all [mode]
+    have accessAt : access = if mode = .shared then .shared else .unique := by
+      cases access <;> simp_all [mode]
+    rcases request.success_or_exhausted (.temporary activation scope) true with
+      ⟨handle,allocated,allocation⟩ | exhausted
+    · have live := borrowRegion.live valid permission
+      have regionState : allocated.liveRegions = before.liveRegions := by cases allocation; rfl
+      have accessAfter := permission.locationExtension (allocation.locationExtension valid) allocation.loans
+      have readyAfter := (allocation.handoffReady valid
+        (show value.HandoffReady program before access [] from ⟨ready,by simp⟩)).1
+      obtain ⟨after,formed⟩ := FormsLoan.exists ((allocation.read valid address).trans stored)
+        (allocation.addressType valid sourceType) initialized (by simpa only [regionState] using live)
+        (show LoanPurpose.invocation.Admitted program.declarations value.type from trivial)
+        (accessAt ▸ readyAfter) (accessAt ▸ accessAfter) allocation.created_vacant allocation.created_addressType
+      exact Or.inl ⟨_,_,after,.lent modes stored borrowRegion allocation formed⟩
+    · exact Or.inr (.lent modes stored initialized ready permission borrowRegion exhausted)
 
 /-- Every one of the six real input cases is constructed from its pre-state
 logical readiness and positive storage request. Only resident allocation may
@@ -154,12 +165,9 @@ theorem BindsInputAt.success_or_exhausted {program : RuntimeProgram} {before : W
               (.reference (if access = .shared then .shared else .unique) (.runtimeRegion loanRegion) localSlot.type) layout := by
           simpa only [InvocationInput.StorageRequest,owned,if_false] using request
         obtain ⟨loanRegion,layout,borrowRegion,sourceType,request⟩ := request
-        have modes : access = .shared ∧ (if access = .shared then Mutability.shared else .unique) = .shared ∨
-            access = .unique ∧ (if access = .shared then Mutability.shared else .unique) = .unique := by
-          cases access <;> simp_all
-        rcases LendsResident.success_or_exhausted valid modes stored initialized
-          (by simpa only [type] using sourceType) resources.1 permission borrowRegion
-          (by simpa only [type] using request) with ⟨lease,lentAuthority,after,lent⟩ | exhausted
+        rcases LendsResident.success_or_exhausted valid stored initialized resources.1 permission
+          (fun _ => ⟨loanRegion,layout,borrowRegion,by simpa only [type] using sourceType,
+            by simpa only [type] using request⟩) with ⟨lease,lentAuthority,after,lent⟩ | exhausted
         · exact Or.inl ⟨_,after,.lent ⟨value,stored,initialized,type,resources,permission⟩
             owned trivial stored initialized type permission lent⟩
         · exact Or.inr (.lent ⟨value,stored,initialized,type,resources,permission⟩ trivial exhausted)
