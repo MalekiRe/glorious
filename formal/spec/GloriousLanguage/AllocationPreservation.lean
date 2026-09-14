@@ -3,6 +3,13 @@ import GloriousLanguage.LayoutContext
 
 namespace Glorious.Language
 
+theorem Allocates.fresh_root {program : Program} {before after : World}
+    {home region type layout mutable address}
+    (allocated : Allocates program before home region type layout mutable address after) :
+    address.root = before.nextRoot ∧ after.nextRoot = before.nextRoot + 1 := by
+  cases allocated
+  exact ⟨rfl,rfl⟩
+
 theorem Allocates.layoutOf {program : Program} {before after : World}
     {home : Home} {region : Identity} {type : Term} {layout : Layout} {mutable : Bool} {address : Address}
     (allocated : Allocates program before home region type layout mutable address after)

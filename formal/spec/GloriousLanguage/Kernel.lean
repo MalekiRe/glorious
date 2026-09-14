@@ -447,6 +447,14 @@ def InvocationInput.clearedStorage (input : InvocationInput) : List Address :=
   | .resident _ => if input.access = .owned then [input.storage] else []
   | _ => []
 
+theorem InvocationInput.mem_clearedStorage {input : InvocationInput} {address : Address} :
+    address ∈ input.clearedStorage ↔ input.formal.IsResident ∧ input.access = .owned ∧ address = input.storage := by
+  cases input with
+  | mk origin formal storage authority access =>
+      cases formal <;> by_cases owned : access = .owned <;>
+        simp [InvocationInput.clearedStorage,InputFormal.IsResident,owned]
+
+
 /-- Readiness belongs to the actual common input, not to an imagined
 resident for an erased port. Allocation and raw-loan handoffs preserve their
 existing child-reference identities and therefore do not require exclusive

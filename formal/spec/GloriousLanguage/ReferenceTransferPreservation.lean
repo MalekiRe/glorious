@@ -1,4 +1,5 @@
 import GloriousLanguage.HandoffAccess
+import GloriousLanguage.ClearPreservation
 
 /-! A move preserves its actual reference/resource graph and declared closed
 invariants. Support and permissions come from the real pre-state handoff;
@@ -602,6 +603,21 @@ theorem StorageBinding.HeldBy.referent_recorded {world : World} {owner : Identit
   · obtain ⟨identity,loan,parent,found,live,kind,referent,shared⟩ := borrow
     exact ⟨identity,loan,found,live,referent⟩
 
+/-- Closed resources and restored references bound the entire retained
+support, even when a reference view is frozen and cannot currently be used. -/
+theorem Value.Support.root_bound {program : RuntimeProgram} {world : World} {value : Value} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound) (closed : value.ResourcesClosed program world) (restored : value.LoansRestored program world)
+    {address : Address} (supported : value.Support world address) : address.root < world.nextRoot := by
+  obtain ⟨resident,authority,access,reached,edge⟩ := supported
+  rcases edge with ⟨identity,loan,head,found,referent⟩ | ⟨binding,member,referent⟩
+  · obtain ⟨actual,selected,live,_⟩ := restored identity authority access ⟨resident,reached,head⟩
+    have same : loan = actual := Option.some.inj (found.symm.trans selected)
+    subst actual
+    simpa only [referent] using World.live_loan_root_bound valid found live
+  · obtain ⟨identity,loan,found,live,target⟩ := ((closed resident authority access reached).1 binding member).referent_recorded
+    simpa only [target,referent] using World.live_loan_root_bound valid found live
+
+
 
 /-- Closed resources and restored references cannot observe storage with no
 incoming live loans. This support fact is shared by handoff and cleanup. -/
@@ -1150,5 +1166,131 @@ theorem World.ResourcesClosed.private_write {program : RuntimeProgram} {before a
   exact ⟨resources.frame locations (World.write_loans written) framed,
     restored.frame locations (World.write_loans written) framed⟩
 
+
+/-! ## Exact residuals retain the common semantic graph -/
+
+/-- Pruning can remove structural residents, not invent reference or erased
+resource edges. Every surviving structural node keeps its exact residual;
+nodes reached through retained storage are unchanged. -/
+theorem Value.AfterClearing.reachable {world : World} {original current resident : Value}
+    {address : Address} {cleared : List Address} {authority final : Authority} {incoming access : Access}
+    (pruned : original.AfterClearing address cleared current)
+    (reached : current.ReachableResident world authority incoming resident final access) :
+    ∃ prior, original.ReachableResident world authority incoming prior final access ∧ resident.shell = prior.shell ∧
+      (resident = prior ∨ ∃ path, ResidentAt original path prior ∧
+        prior.AfterClearing { address with fields := address.fields ++ path } cleared resident) := by
+  induction reached with
+  | resident located =>
+      obtain ⟨prior,atPrior,shape,residual⟩ := pruned.nested located
+      exact ⟨prior,.resident atPrior,shape,Or.inr ⟨_,atPrior,residual⟩⟩
+  | referent _ head found stored located ih =>
+      obtain ⟨prior,reached,shape,_⟩ := ih
+      have heads := congrArg Value.head shape
+      simp only [Value.shell,Value.withFields,Value.head] at heads
+      exact ⟨_,.referent reached (heads.symm.trans head) found stored located,rfl,Or.inl rfl⟩
+  | resource _ member stored located ih =>
+      obtain ⟨prior,reached,shape,_⟩ := ih
+      have resources := congrArg Value.resources shape
+      change _ = prior.resources at resources
+      exact ⟨_,.resource reached (resources ▸ member) stored located,rfl,Or.inl rfl⟩
+
+theorem Value.AfterClearing.references {world : World} {original current : Value}
+    {address : Address} {cleared : List Address} {authority final : Authority} {incoming access : Access} {identity : Identity}
+    (pruned : original.AfterClearing address cleared current)
+    (reached : current.ReachableReference world authority incoming identity final access) :
+    original.ReachableReference world authority incoming identity final access := by
+  obtain ⟨resident,reached,head⟩ := reached
+  obtain ⟨prior,reached,shape,_⟩ := pruned.reachable reached
+  have heads := congrArg Value.head shape
+  simp only [Value.shell,Value.withFields,Value.head] at heads
+  exact ⟨prior,reached,heads.symm.trans head⟩
+
+theorem Value.AfterClearing.support {world : World} {original current : Value} {address observed : Address}
+    {cleared : List Address} (pruned : original.AfterClearing address cleared current)
+    (supported : current.Support world observed) : original.Support world observed := by
+  obtain ⟨resident,authority,access,reached,edge⟩ := supported
+  obtain ⟨prior,reached,shape,_⟩ := pruned.reachable reached
+  refine ⟨prior,authority,access,reached,?_⟩
+  rcases edge with ⟨identity,loan,head,found,referent⟩ | ⟨binding,member,referent⟩
+  · have heads := congrArg Value.head shape
+    simp only [Value.shell,Value.withFields,Value.head] at heads
+    exact Or.inl ⟨identity,loan,heads.symm.trans head,found,referent⟩
+  · have resources := congrArg Value.resources shape
+    change resident.resources = prior.resources at resources
+    exact Or.inr ⟨binding,resources ▸ member,referent⟩
+
+theorem Value.SupportFramed.afterClearing {before after : World} {original current : Value} {address : Address}
+    {cleared : List Address} (framed : original.SupportFramed before after)
+    (pruned : original.AfterClearing address cleared current) : current.SupportFramed before after :=
+  fun observed supported => framed observed (pruned.support supported)
+
+theorem Value.BatchCompatible.afterClearing {before after : World} {original current : Value} {address : Address}
+    {cleared : List Address} (batch : original.BatchCompatible before after)
+    (pruned : original.AfterClearing address cleared current) : current.BatchCompatible before after := by
+  refine ⟨fun identity authority access reached => batch.rows identity authority access (pruned.references reached),?_⟩
+  intro resident authority access reached binding member held
+  obtain ⟨prior,priorReach,shape,_⟩ := pruned.reachable reached
+  have resources := congrArg Value.resources shape
+  have owners := congrArg Value.owner shape
+  change resident.resources = prior.resources at resources
+  change resident.owner = prior.owner at owners
+  have retained := batch.custody prior authority access priorReach binding (resources ▸ member)
+    (by simpa only [owners] using held)
+  simpa only [owners] using retained
+
+/-- A declared invariant may inspect its resident's remaining fields. Closure
+is therefore checked for the exact original-world residual, not inferred
+from equality of shells or imposed as a new law on unsafe invariants. -/
+theorem Value.ResourcesClosed.afterClearing {program : RuntimeProgram} {world : World} {original current : Value}
+    {address : Address} {cleared : List Address} (closed : original.ResourcesClosed program world)
+    (pruned : original.AfterClearing address cleared current)
+    (residuals : ∀ path prior residual, ResidentAt original path prior →
+      prior.AfterClearing { address with fields := address.fields ++ path } cleared residual → residual.InvariantClosed program world) :
+    current.ResourcesClosed program world := by
+  intro resident authority access reached
+  obtain ⟨prior,priorReach,shape,origin⟩ := pruned.reachable reached
+  obtain ⟨held,invariant⟩ := closed prior authority access priorReach
+  have resources := congrArg Value.resources shape
+  have owners := congrArg Value.owner shape
+  change resident.resources = prior.resources at resources
+  change resident.owner = prior.owner at owners
+  refine ⟨fun binding member => ?_,?_⟩
+  · simpa only [owners] using held binding (resources ▸ member)
+  · rcases origin with rfl | ⟨path,located,residual⟩
+    · exact invariant
+    · exact residuals path prior resident located residual
+
+theorem Value.LoansRestored.afterClearing {program : RuntimeProgram} {world : World} {original current : Value}
+    {address : Address} {cleared : List Address} (restored : original.LoansRestored program world)
+    (pruned : original.AfterClearing address cleared current) : current.LoansRestored program world :=
+  fun identity authority access reached => restored identity authority access (pruned.references reached)
+
+
+theorem Value.SupportFramed.trans_observed {before middle after : World} {value : Value}
+    (rows : value.ReferenceRowsFramed before middle) (first : value.SupportFramed before middle)
+    (last : value.SupportFramed middle after) : value.SupportFramed before after := by
+  intro address supported
+  have current := (Value.Support.frame_observed rows first).mp supported
+  exact ⟨(last address current).1.trans (first address supported).1,
+    (last address current).2.trans (first address supported).2⟩
+
+theorem Value.BatchCompatible.trans {before middle after : World} {value : Value}
+    (first : value.BatchCompatible before middle) (framed : value.SupportFramed before middle)
+    (last : value.BatchCompatible middle after) : value.BatchCompatible before after := by
+  constructor
+  · intro identity authority access reached
+    obtain ⟨resident,prior,head⟩ := reached
+    have current : value.ReachableReference middle .owner .shared identity authority access :=
+      ⟨resident,(Value.ReachableResident.frame_batch first framed).mp prior,head⟩
+    exact (last.rows identity authority access current).trans (first.rows identity authority access ⟨resident,prior,head⟩)
+  · intro resident authority access reached binding member held
+    exact last.custody resident authority access ((Value.ReachableResident.frame_batch first framed).mp reached)
+      binding member (first.custody resident authority access reached binding member held)
+
+
+theorem Value.SupportOutside.frame_batch {before after : World} {value : Value} {written : Address}
+    (outside : value.SupportOutside before written) (batch : value.BatchCompatible before after)
+    (framed : value.SupportFramed before after) : value.SupportOutside after written :=
+  fun observed supported => outside observed ((Value.Support.frame_batch batch framed).mpr supported)
 
 end Glorious.Language

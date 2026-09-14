@@ -184,14 +184,16 @@ theorem Allocates.locationExtension {program : Program} {before after : World}
   rfl
 
 theorem Allocates.supportFramed {program : RuntimeProgram} {before after : World}
-    {home region type layout mutable address} {originBound : Identity} {value : Value} {access : Access}
+    {home region type layout mutable address} {originBound : Identity} {value : Value}
     (valid : before.WellFormedWithOrigins originBound)
     (allocated : Allocates program.declarations before home region type layout mutable address after)
-    (ready : value.ResourcesAccessible program before access) : value.SupportFramed before after := by
+    (closed : value.ResourcesClosed program before) (restored : value.LoansRestored program before) :
+    value.SupportFramed before after := by
   intro observed supported
-  obtain ⟨root,selected⟩ := ready.support_root supported
+  have bounded := Value.Support.root_bound valid closed restored supported
   refine ⟨allocated.read valid observed,?_⟩
-  rw [allocated.roots valid (World.root_found selected).1,(World.root_found selected).1]
+  cases allocated
+  rw [Table.get_set_other _ _ _ _ (Nat.ne_of_lt bounded)]
 
 theorem Allocates.handoffReady {program : RuntimeProgram} {before after : World}
     {home region type layout mutable address} {originBound : Identity}
@@ -200,6 +202,6 @@ theorem Allocates.handoffReady {program : RuntimeProgram} {before after : World}
     (allocated : Allocates program.declarations before home region type layout mutable address after)
     (ready : value.HandoffReady program before access footprint) :
     value.HandoffReady program after access footprint :=
-  ready.frame (allocated.locationExtension valid) allocated.loans (allocated.supportFramed valid ready.1)
+  ready.frame (allocated.locationExtension valid) allocated.loans (allocated.supportFramed valid ready.1.1 ready.1.2.1)
 
 end Glorious.Language

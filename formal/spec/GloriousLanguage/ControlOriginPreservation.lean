@@ -144,14 +144,6 @@ theorem InvocationStart.control {program : Kernel.Program} {host : Foreign.Model
     {inputs : List Kernel.InvocationInput} {state : Execution.State}
     {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state) : state.ControlWellFormed := initial.2.2.1
 
-theorem InvocationStart.caller_activation_bound {program : Kernel.Program} {host : Foreign.Model}
-    {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
-    {caller : Execution.Context}
-    {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary state)
-    (task : state.task = .enter caller function (.supplied inputs) false) : caller.activation < state.nextActivation := by
-  have bounded := initial.control.activations.task
-  simpa only [task,Execution.Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bounded
-
 theorem InvocationStart.run_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {start finish : Execution.State}
     {trace : List Execution.Event}

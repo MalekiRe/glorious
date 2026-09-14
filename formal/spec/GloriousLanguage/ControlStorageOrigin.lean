@@ -334,20 +334,6 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.root_support {program : Lang
     split <;> simp_all only [List.flatMap_cons,List.flatMap_nil,PatternAction.rootSupport,
       RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,and_true]
 
-theorem PreparesEntryAttempt.wellFormed {program : Kernel.Program} {callee : Context} {function : Function}
-    {before after : World} {source : EntrySource} {inputs : List InvocationInput} {outcome : PreparationOutcome}
-    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
-    (well : before.WellFormed) : after.WellFormed := by
-  cases prepared with
-  | supplied => exact well
-  | resident _ _ lends _ consumes =>
-    exact ConsumesReceiver.wellFormed consumes (LendsResident.wellFormed lends well)
-  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
-    exact ConsumesAvailability.wellFormed consumesAvailability
-      (ConsumesReceiver.wellFormed consumes
-        (LendsResident.wellFormed witnessLends (LendsResident.wellFormed receiverLends well)))
-  | residentExhausted | contextualReceiverExhausted => exact well
-  | contextualWitnessExhausted _ _ _ _ lends _ => exact lends.wellFormed well
 
 theorem EnterWorld.context_root_support {program : Kernel.Program} {before : State} {caller context : Context}
     {function : Function} {source : EntrySource} {after : World}

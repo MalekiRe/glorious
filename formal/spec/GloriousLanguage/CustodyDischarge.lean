@@ -1,5 +1,7 @@
 import GloriousLanguage.LifecyclePreservation
 import GloriousLanguage.LoanPreservation
+import GloriousLanguage.LoanResourceRows
+import GloriousLanguage.InputLending
 
 /-! The two admission products the actual post-cancellation cleanup consumes.
 
@@ -125,18 +127,24 @@ def World.CustodyDischarge (world : World) (custody : ClaimCustody) : Prop :=
       loan.kind = .owning → loan.custody = some custody → identity ∈ claims) ∧
     ∀ identity ∈ claims, world.HandedOffClaim identity custody
 
+theorem World.HandedOffClaim.successor {world : World} {identity : Identity} {custody : ClaimCustody} {loan : Loan}
+    (handed : world.HandedOffClaim identity custody) (found : world.loans.get identity = some loan) :
+    ∃ child successor, world.loans.get child = some successor ∧ successor.parent = some identity ∧
+      successor.live = true ∧ successor.kind = .owning ∧ successor.referent = loan.referent ∧
+      ∃ recipient, successor.custody = some recipient ∧ recipient ≠ custody := by
+  obtain ⟨original,child,successor,rowFound,childFound,parent,childLive,childOwning,referent,
+    recipient,custodied,different⟩ := handed
+  have same : original = loan := Option.some.inj (rowFound.symm.trans found)
+  exact ⟨child,successor,childFound,parent,childLive,childOwning,same ▸ referent,recipient,custodied,different⟩
+
+
 /-- A discharge produces the whole-table custody condition the actual
 relinquishment rule consumes. -/
 theorem World.CustodyHandedOff.of_discharge {world : World} {custody : ClaimCustody}
     (discharge : world.CustodyDischarge custody) : world.CustodyHandedOff custody := by
   obtain ⟨claims,complete,handed⟩ := discharge
   intro identity loan found live owning custodied
-  obtain ⟨original,child,successor,rowFound,childFound,parent,childLive,childOwning,referent,
-    recipient,custodiedRow,different⟩ :=
-    handed identity (complete identity loan found live owning custodied)
-  have same : original = loan := Option.some.inj (rowFound.symm.trans found)
-  exact ⟨child,successor,childFound,parent,childLive,childOwning,same ▸ referent,recipient,
-    custodiedRow,different⟩
+  exact (handed identity (complete identity loan found live owning custodied)).successor found
 
 /-- The successor an actual allocation claim creates is exactly the handoff
 witness of the claim's owning row: the entry binder's `ClaimsAllocation` step
@@ -175,6 +183,140 @@ theorem World.HandedOffClaim.retained {before after : World} {identity : Identit
     by rw [rows,Table.get_set_other _ _ _ _ (Ne.symm newIdentity)]; exact found,
     by rw [rows,Table.get_set_other _ _ _ _ (Ne.symm newChild)]; exact childFound,
     parent,childLive,childOwning,referent,recipient,custodied,different⟩
+
+
+/-! ## Caller custody through the actual ordered input binder -/
+
+/-- Every live owning claim of the outgoing custody is either already handed
+off or names an original allocation port still to be bound. This is finite
+input-interface coverage, not a post-entry relinquishment promise. -/
+def World.CustodyCovered (world : World) (custody : ClaimCustody) (inputs : List Kernel.InvocationInput) : Prop :=
+  ∀ id loan, world.loans.get id = some loan → loan.live = true → loan.kind = .owning → loan.custody = some custody →
+    world.HandedOffClaim id custody ∨ ∃ input ∈ inputs, ∃ identity type,
+      input.formal = .allocation identity type ∧ input.authority.parentLoan = some id
+
+theorem Kernel.LendsResident.custodyFrame {program : RuntimeProgram} {activation scope region : Identity}
+    {before after : World} {address : Address} {authority result : Authority} {access : Access}
+    {lease : Option Kernel.InvocationLease} {recipient : ClaimCustody}
+    (lent : Kernel.LendsResident program activation scope region before address authority access lease result after)
+    (valid : before.WellFormed) : before.CustodyTransferFrame after recipient := by
+  cases lent with
+  | owned => exact .of_loans rfl
+  | lent _ _ _ allocated formed =>
+      apply (World.CustodyTransferFrame.of_loans allocated.loans).trans
+      cases formed
+      exact .of_fresh (Allocates.wellFormed valid allocated) rfl (Or.inl rfl)
+
+theorem Kernel.BindsInputAt.custodyFrame {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : Kernel.InvocationInput} {binding : Kernel.Binding}
+    (bound : Kernel.BindsInputAt program recipient activation scope region before input binding after)
+    (valid : before.WellFormed) : before.CustodyTransferFrame after recipient := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent => exact lent.custodyFrame valid
+  | owned _ _ _ _ _ allocated moved => exact .of_loans (moved.loans.trans allocated.loans)
+  | storage _ _ _ claimed => cases claimed; exact .of_fresh valid rfl (Or.inr rfl)
+  | allocation _ _ _ _ moved =>
+      obtain ⟨_,_,row⟩ := moved.rowCustodyTransferred
+      exact row.frame
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; exact .of_fresh valid rfl (Or.inr rfl)
+  | loan _ _ _ _ moved =>
+      rcases moved.rows with same | ⟨_,_,row⟩
+      · exact .of_loans (congrArg World.loans same)
+      · exact row.frame
+
+theorem Kernel.BindsInputsAttemptFor.custodyFrame {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List Kernel.InvocationInput} {bindings : Kernel.Environment} {outcome : Kernel.PreparationOutcome}
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (valid : before.WellFormed) : before.CustodyTransferFrame after recipient := by
+  induction bound with
+  | nil | exhausted => exact .of_loans rfl
+  | cons _ head _ ih => exact (head.custodyFrame valid).trans (ih (head.wellFormed valid))
+
+
+theorem World.HandedOffClaim.custodyFrame {before after : World} {id : Identity} {custody recipient : ClaimCustody}
+    (handed : before.HandedOffClaim id custody) (frame : before.CustodyTransferFrame after recipient)
+    (different : recipient ≠ custody) : after.HandedOffClaim id custody := by
+  obtain ⟨original,child,successor,originalAt,childAt,parent,live,kind,referent,owner,custodied,ownerDifferent⟩ := handed
+  obtain ⟨current,selected,changed⟩ := frame.rows id original originalAt
+  obtain ⟨next,nextAt,nextChanged⟩ := frame.rows child successor childAt
+  have originalShape : current.permissionState = original.permissionState := by rcases changed with rfl | rfl <;> rfl
+  have childShape : next.permissionState = successor.permissionState := by rcases nextChanged with rfl | rfl <;> rfl
+  refine ⟨current,child,next,selected,nextAt,(congrArg Loan.parent childShape).trans parent,
+    (congrArg Loan.live childShape).trans live,(congrArg Loan.kind childShape).trans kind,
+    (congrArg Loan.referent childShape).trans (referent.trans (congrArg Loan.referent originalShape).symm),?_⟩
+  rcases nextChanged with rfl | rfl
+  · exact ⟨owner,custodied,ownerDifferent⟩
+  · exact ⟨recipient,rfl,different⟩
+
+theorem World.CustodyCovered.custodyFrame {before after : World} {custody recipient : ClaimCustody}
+    {inputs : List Kernel.InvocationInput} (covered : before.CustodyCovered custody inputs)
+    (frame : before.CustodyTransferFrame after recipient) (different : recipient ≠ custody) :
+    after.CustodyCovered custody inputs := by
+  intro id loan found live kind held
+  rcases covered id loan (frame.outside id loan custody different found held) live kind held with handed | input
+  · exact Or.inl (handed.custodyFrame frame different)
+  · exact Or.inr input
+
+/-- A real allocation port either moves its owning row to the recipient or
+creates the fresh guarded owning child. Both discharge the old custodian. -/
+theorem Kernel.BindsInputAt.handoff_claim {program : RuntimeProgram} {recipient custody : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : Kernel.InvocationInput} {binding : Kernel.Binding}
+    {identity name : Identity} {type : Term} {loan : Loan}
+    (bound : Kernel.BindsInputAt program recipient activation scope region before input binding after)
+    (valid : before.WellFormed) (different : recipient ≠ custody)
+    (formal : input.formal = .allocation name type) (parent : input.authority.parentLoan = some identity)
+    (found : after.loans.get identity = some loan) (held : loan.custody = some custody) :
+    after.HandedOffClaim identity custody := by
+  cases bound with
+  | lent _ _ resident _ _ _ _ _ | owned _ _ resident _ _ _ _ => simp [formal,Kernel.InputFormal.IsResident] at resident
+  | storage _ selected _ _ | loan _ selected _ _ _ => cases selected.symm.trans formal
+  | allocation _ _ _ _ moved =>
+      cases moved with
+      | @transfer key original authority _ _ =>
+          change input.authority = .loan key at authority
+          have same : key = identity := by simpa only [authority,Authority.parentLoan,Option.some.injEq] using parent
+          subst identity
+          have same : { original with custody := some recipient } = loan := by
+            simpa only [Table.get_set,Option.some.injEq] using found
+          subst loan
+          exact False.elim (different (Option.some.inj held))
+  | guardedAllocation _ _ _ _ _ claimed =>
+      cases claimed with
+      | claim claim permission rooted =>
+          exact World.HandedOffClaim.of_claimsAllocation valid claim parent (.claim claim permission rooted) different
+
+theorem World.CustodyCovered.bindInput {program : RuntimeProgram} {recipient custody : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {head : Kernel.InvocationInput}
+    {rest : List Kernel.InvocationInput} {binding : Kernel.Binding}
+    (covered : before.CustodyCovered custody (head :: rest)) (valid : before.WellFormed)
+    (bound : Kernel.BindsInputAt program recipient activation scope region before head binding after)
+    (different : recipient ≠ custody) : after.CustodyCovered custody rest := by
+  intro id loan found live kind held
+  rcases (covered.custodyFrame (bound.custodyFrame valid) different) id loan found live kind held with handed |
+    ⟨input,member,name,type,formal,parent⟩
+  · exact Or.inl handed
+  · rcases List.mem_cons.mp member with same | remaining
+    · subst input
+      exact Or.inl (bound.handoff_claim valid different formal parent found held)
+    · exact Or.inr ⟨input,remaining,name,type,formal,parent⟩
+
+/-- All pending allocation ports are consumed by the successful real fold.
+The outgoing custody's owning obligations are discharged without assuming a
+successful relinquishment or an invariant of an arbitrary future world. -/
+theorem Kernel.BindsInputsFor.custody_handedOff {program : RuntimeProgram} {recipient custody : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List Kernel.InvocationInput} {bindings : Kernel.Environment}
+    (bound : Kernel.BindsInputsFor program recipient activation scope region footprint before inputs bindings after)
+    (valid : before.WellFormed) (different : recipient ≠ custody) (covered : before.CustodyCovered custody inputs) :
+    after.CustodyHandedOff custody := by
+  induction bound using Kernel.BindsInputsFor.inductionOn with
+  | nil world =>
+      intro id loan found live kind held
+      rcases covered id loan found live kind held with handed | ⟨input,member,_⟩
+      · exact handed.successor found
+      · cases member
+  | cons _ head _ ih => exact ih (head.wellFormed valid) (covered.bindInput valid head different)
 
 
 /-! ## Region readiness from the discharges the cleanup performs -/

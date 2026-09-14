@@ -9,6 +9,14 @@ theorem World.root_bound {world : World} {originBound : Identity}
     (found : world.roots.get id = some root) : id < world.nextRoot :=
   (valid.2.2.2.2.2.2.2.2.1 id root found).1
 
+theorem World.live_loan_root_bound {world : World} {id : Identity} {loan : Loan} {originBound : Identity}
+    (valid : world.WellFormedWithOrigins originBound)
+    (found : world.loans.get id = some loan) (live : loan.live = true) : loan.referent.root < world.nextRoot := by
+  have selected := ((valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.2 live).2
+  obtain ⟨root,present⟩ := Option.isSome_iff_exists.mp selected
+  exact World.root_bound valid (World.root_found present).1
+
+
 theorem LoanPermission.weaken {world : World} {identity : Identity}
     {available requested : Access} {address : Address}
     (permitted : LoanPermission world identity available address)

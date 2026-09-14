@@ -7,6 +7,7 @@ import GloriousLanguage.StorageWrites
 import GloriousLanguage.BindingPersistence
 import GloriousLanguage.ResidentMutationPreservation
 import GloriousLanguage.InvocationInputs
+import GloriousLanguage.CustodyDischarge
 
 /-! The one authoritative pre-state product for an ordered batch of ordinary
 invocation inputs, and the ordered binder that consumes it.
@@ -980,27 +981,6 @@ theorem World.Stores.rooted_bound {world : World} {address : Address} {value : V
   obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
   exact World.rooted_bound valid found
 
-/-- Every support address of a usable value is already rooted in the source
-world: reference support is read through the value's own permitted views and
-resource support through the retained bindings' permissions. -/
-theorem Value.Support.root_bound {program : RuntimeProgram} {world : World} {value : Value} {access : Access}
-    (valid : world.WellFormed) (ready : value.ResourcesAccessible program world access) :
-    ∀ {address}, value.Support world address → address.root < world.nextRoot := by
-  intro address supported
-  obtain ⟨resident,authority,incoming,reached,edge⟩ := supported
-  rcases edge with ⟨identity,loan,head,found,equal⟩ | ⟨binding,member,bindingEq⟩
-  · obtain ⟨next,nextAccess,reference⟩ :=
-      Value.ReachableReference.rebase (⟨resident,reached,head⟩ : Value.ReachableReference world value Authority.owner
-        .shared identity authority incoming) Authority.owner access
-    obtain ⟨loan',found',_,permitted'⟩ := ready.2.2.1 identity next nextAccess reference
-    have same : loan = loan' := Option.some.inj (found.symm.trans found')
-    have target : loan'.referent = address := by rw [← same]; exact equal
-    rw [← target]
-    exact Permitted.rooted_bound valid permitted'
-  · obtain ⟨next,nextAccess,reached'⟩ := reached.rebase Authority.owner access
-    have permitted := ready.2.2.2 resident next nextAccess reached' binding member
-    rw [← bindingEq]
-    exact Permitted.rooted_bound valid permitted
 
 /-- A fresh root cannot be the storage of any ready other input. -/
 theorem Kernel.InvocationInput.ReadyFor.root_bound {program : RuntimeProgram} {world : World}
@@ -1160,10 +1140,6 @@ theorem TransfersAllocation.row_relation {recipient : ClaimCustody} {before afte
     refine World.RowRelation.of_set found rfl ?_
     simp only [Loan.permissionState]
 
-theorem TransfersAllocation.roots_eq {recipient : ClaimCustody} {before after : World}
-    {place : ResolvedPlace} (moved : TransfersAllocation recipient before place after) :
-    after.roots = before.roots := by cases moved; rfl
-
 theorem TransfersAllocation.moved_authority {recipient : ClaimCustody} {before after : World}
     {place : ResolvedPlace} (moved : TransfersAllocation recipient before place after) :
     ∃ identity, place.authority = .loan identity := by
@@ -1179,10 +1155,6 @@ theorem TransfersStorageLoan.row_relation {recipient : ClaimCustody} {before aft
     refine World.RowRelation.of_set found rfl ?_
     simp only [Loan.permissionState]
   | shared backingProof parent found live kind mode referent => exact World.RowRelation.refl before
-
-theorem TransfersStorageLoan.roots_eq {recipient : ClaimCustody} {before after : World}
-    {place : ResolvedPlace} (moved : TransfersStorageLoan recipient before place after) :
-    after.roots = before.roots := by cases moved <;> rfl
 
 theorem TransfersStorageLoan.moved_authority {recipient : ClaimCustody} {before after : World}
     {place : ResolvedPlace} (moved : TransfersStorageLoan recipient before place after) :
@@ -1832,16 +1804,25 @@ theorem InvocationInput.FreshRow.frame {before middle : World} (valid : before.W
       simp only [InvocationInput.FreshRow,formal] at fresh ⊢
 
 /-- A custody write the head performs is one of its own already recorded rows. -/
-theorem InvocationInput.CustodyMoved.frame {before middle : World} (valid : before.WellFormed)
-    (frame : StepFrame before middle) {head : InvocationInput} (recorded : head.authority.Recorded before.loans)
+theorem InvocationInput.CustodyMoved.of_retained {before middle : World} {head : InvocationInput}
+    (retained : ∀ identity loan, before.loans.get identity = some loan →
+      ∃ current, middle.loans.get identity = some current ∧ current.permissionState = loan.permissionState)
+    (recorded : head.authority.Recorded before.loans)
     {identity : Identity} (moved : head.CustodyMoved middle identity) : head.CustodyMoved before identity := by
   rcases moved with ⟨obligation,type,formal,authorityAt⟩ | ⟨obligation,type,formal,authorityAt,loan,found,mode⟩
   · exact Or.inl ⟨obligation,type,formal,authorityAt⟩
-  · obtain ⟨carrierLoan,carrierFound⟩ := recorded.parentLoan (by rw [authorityAt]; rfl)
-    obtain ⟨source,sourceFound,shape⟩ :=
-      StepFrame.row_of_middle frame (World.loanBounds valid carrierFound) found
-    exact Or.inr ⟨obligation,type,formal,authorityAt,source,sourceFound,
-      (Loan.permissionState_eq_iff.mp shape).2.2.2.1.trans mode⟩
+  · obtain ⟨original,originalAt⟩ := recorded.parentLoan (by rw [authorityAt]; rfl)
+    obtain ⟨current,currentAt,shape⟩ := retained identity original originalAt
+    have equal : current = loan := Option.some.inj (currentAt.symm.trans found)
+    have modes := congrArg Loan.mode shape
+    change current.mode = original.mode at modes
+    exact Or.inr ⟨obligation,type,formal,authorityAt,original,originalAt,
+      modes.symm.trans ((congrArg Loan.mode equal).trans mode)⟩
+
+theorem InvocationInput.CustodyMoved.frame {before middle : World} (valid : before.WellFormed)
+    (frame : StepFrame before middle) {head : InvocationInput} (recorded : head.authority.Recorded before.loans)
+    {identity : Identity} (moved : head.CustodyMoved middle identity) : head.CustodyMoved before identity :=
+  moved.of_retained (fun _ _ found => StepFrame.row_of_before valid frame found) recorded
 
 /-- One observed permission view of a value is read back from the source world:
 the reachable graph is an equivalence with identical labels, and the row's
@@ -1894,14 +1875,14 @@ theorem _root_.Glorious.Language.Execution.Temporary.borrowed_handle_ready
         (.reference allocated.nextLoan) true []).ResourcesAccessible program after .owned := by
   obtain ⟨layout,allocation⟩ := temporary
   have fresh := (Allocates.fresh_root allocation).1
-  have frame := allocation.supportFramed valid ready
+  have frame := allocation.supportFramed valid ready.1 ready.2.1
   have batch := Value.BatchCompatible.of_eq (allocation.locationExtension valid) allocation.loans (value := value)
   apply borrowed.handed_off_ready (allocation.wellFormed valid) ((allocation.read valid referent).trans stored)
   · intro overlap
     exact (Nat.ne_of_lt (stored.rooted_bound valid)) (overlap.1.symm.trans fresh)
   · intro observed supported overlap
     have prior := (Value.Support.frame allocation.loans frame).mpr supported
-    exact (Nat.ne_of_lt (Value.Support.root_bound valid ready prior)) (overlap.1.symm.trans fresh)
+    exact (Nat.ne_of_lt (Value.Support.root_bound valid ready.1 ready.2.1 prior)) (overlap.1.symm.trans fresh)
   · intro query requested observed views
     rw [Authority.guardLoans.loans_congr allocation.loans]
     exact Authority.LoanCompatible.loans_congr allocation.loans
@@ -2085,16 +2066,6 @@ theorem InvocationInput.IndependentOf.frame {program : RuntimeProgram} {footprin
 end Kernel
 
 
-/-- Every rule that only inserts or rewrites loan rows leaves the storage
-frontier alone, so a frontend that needs the middle frontier reads it here. -/
-theorem FormsLoan.nextRoot {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World}
-    {authority : Authority} {mode : Mutability} {region : Identity} {referent destination : Address}
-    (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
-    after.nextRoot = before.nextRoot := by
-  cases borrowed with
-  | borrow _ _ _ _ _ _ _ _ _ _ written =>
-      obtain ⟨root,replacement,found,rfl⟩ := World.write_value_update written
-      rfl
 
 theorem ClaimsStorage.nextRoot {custody : ClaimCustody} {before after : World}
     {authority : Authority} {access : Access} {address : Address} {created : Identity}
@@ -2603,19 +2574,19 @@ theorem LendsResident.locationExtension {program : RuntimeProgram} {activation s
   | lent _ _ _ allocated formed =>
     exact (allocated.locationExtension valid).trans (.of_locations formed.locations)
 
-/-- The same actual fresh-root and restoring-row producer frames reachable
-values belonging to inputs, whole receivers, and contextual witnesses. -/
+/-- The actual fresh-root and restoring-row producer frames closed graphs,
+including frozen reference views retained for caller cleanup. -/
 theorem LendsResident.batchFrame {program : RuntimeProgram} {activation scope region : Identity}
     {before after : World} {address : Address} {authority result : Authority} {access : Access}
-    {lease : Option InvocationLease} {value : Value} {incoming : Access} (valid : before.WellFormed)
+    {lease : Option InvocationLease} {value : Value} (valid : before.WellFormed)
     (lent : LendsResident program activation scope region before address authority access lease result after)
-    (permission : Permitted before authority access address)
-    (ready : value.ResourcesAccessible program before incoming) :
+    (recorded : authority.Recorded before.loans)
+    (closed : value.ResourcesClosed program before) (restored : value.LoansRestored program before) :
     value.BatchCompatible before after ∧ value.SupportFramed before after := by
   have locations := lent.locationExtension valid
   have framed : value.SupportFramed before after := by
     intro observed supported
-    have roots := lent.old_roots (Value.Support.root_bound valid ready supported)
+    have roots := lent.old_roots (Value.Support.root_bound valid closed restored supported)
     refine ⟨?_,congrArg (Option.map Root.location) roots⟩
     unfold World.read World.root
     rw [roots]
@@ -2631,11 +2602,13 @@ theorem LendsResident.batchFrame {program : RuntimeProgram} {activation scope re
       have guards := Authority.guardLoans.loans_congr rows authority
       refine Value.BatchCompatible.of_fresh_loan (fresh :=
         ⟨before.nextLoan,authority.parentLoan,address,mode,sourceRegion,true,.restoring,
-          authority.guardLoans before,false,none⟩) valid locations ?_ ready.2.1 ?_ ?_
+          authority.guardLoans before,false,none⟩) valid locations ?_ restored ?_ ?_
       · change _ = before.loans.set before.nextLoan _
         rw [rows,Allocates.nextLoan allocated,guards]
         rfl
-      · exact fun identity selected => Permitted.parentLoan_bound valid permission identity selected
+      · intro identity selected
+        obtain ⟨loan,found⟩ := recorded.parentLoan selected
+        exact World.loanBounds valid found
       · exact fun _ _ _ _ _ _ => Or.inl (fun same => by cases same)
 
 /-- Old access survives lending exactly when it is compatible with the real
@@ -2669,7 +2642,7 @@ theorem LendsResident.resourcesAccessible {program : RuntimeProgram} {activation
     (compatible : access ≠ .owned → value.ViewsLoanCompatible before incoming source
       (if access = .shared then .shared else .unique) (authority.guardLoans before)) :
     value.ResourcesAccessible program after incoming := by
-  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission ready
+  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission.recorded ready.1 ready.2.1
   exact ready.frame_input batch framed (fun query requested observed views held =>
     lent.permitted valid held (fun borrowed => compatible borrowed query requested observed views))
 
@@ -2908,8 +2881,8 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
           · exact (FormsLoan.region_state formed').1.trans (Allocates.region_state allocProof).1
           · exact (FormsLoan.region_state formed').2.trans (Allocates.region_state allocProof).2
         · intro localSlot value' formal' stored'
-          exact (LendsResident.lent modes sourceStored borrowRegion allocProof formed').batchFrame valid permission
-            (InvocationInput.ReadyFor.resident otherReady (by rw [formal']; trivial) stored').2.2.1.1
+          have resources := (InvocationInput.ReadyFor.resident otherReady (by rw [formal']; trivial) stored').2.2.1.1
+          exact (LendsResident.lent modes sourceStored borrowRegion allocProof formed').batchFrame valid permission.recorded resources.1 resources.2.1
         · intro localSlot value' formal' stored' authority' requested address views permitted'
           exact formedPermitted authority' requested address
             (Or.inr ⟨localSlot,value',formal',stored',views⟩)
@@ -3037,7 +3010,7 @@ theorem StepObservation.of_ownedTransfer {program : RuntimeProgram} {activation 
       have handoffAllocated : value'.HandoffReady program allocated other.access footprint :=
         Allocates.handoffReady valid allocation handoffBefore
       have framedAllocated : value'.SupportFramed before allocated :=
-        Allocates.supportFramed valid allocation handoffBefore.1
+        Allocates.supportFramed valid allocation handoffBefore.1.1 handoffBefore.1.2.1
       have framedAfter : value'.SupportFramed allocated after :=
         Value.SupportFramed.of_two_writes clearedEq installEq (World.write_loans clearedEq)
           (fun observed supported =>
@@ -3045,7 +3018,7 @@ theorem StepObservation.of_ownedTransfer {program : RuntimeProgram} {activation 
           (fun observed supported =>
             World.not_overlaps_of_root_ne (by
               rw [destinationRoot]
-              exact (Nat.ne_of_lt (Value.Support.root_bound valid handoffBefore.1
+              exact (Nat.ne_of_lt (Value.Support.root_bound valid handoffBefore.1.1 handoffBefore.1.2.1
                 ((Value.Support.frame allocatedLoans framedAllocated).mpr supported))).symm))
       exact ⟨Value.BatchCompatible.of_eq locationsWhole loansWhole,
         framedAllocated.trans allocatedLoans framedAfter⟩
@@ -4613,7 +4586,7 @@ theorem Kernel.LendsResident.retainsSupport {program : RuntimeProgram} {activati
   obtain ⟨localSlot,value,formal,stored,support⟩ := supported
   have originalStored : before.Stores input.storage value := read.symm.trans stored
   have resources := (InvocationInput.ReadyFor.resident ready (by rw [formal]; trivial) originalStored).2.2.1.1
-  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission resources
+  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission.recorded resources.1 resources.2.1
   exact ⟨localSlot,value,formal,originalStored,(Value.Support.frame_batch batch framed).mpr support⟩
 
 /-- Clearing a witness retains erased ports at that exact slot. Only resident
@@ -4776,7 +4749,7 @@ theorem Kernel.LendsResident.captureReadyFor {program : RuntimeProgram} {activat
     InvocationInput.ReadyFor program after footprint
       ⟨.capture index,.resident localSlot,receiver.child index,result,access⟩ := by
   obtain ⟨value,stored,initialized,type,handoff,originalPermission⟩ := original
-  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission handoff.1
+  obtain ⟨batch,framed⟩ := lent.batchFrame valid permission.recorded handoff.1.1 handoff.1.2.1
   refine ⟨value,lent.stores stored (Nat.ne_of_lt (stored.rooted_bound valid)).symm,initialized,type,
     handoff.frame_input batch framed ?_,(lent.borrower_permitted valid permission).child index⟩
   exact fun query requested observed views held =>
@@ -4876,7 +4849,9 @@ theorem Execution.LendsReceiver.residentInputsCompatible {program : Kernel.Progr
     rw [lent.old_roots (facts input member).2.1]
   have graphs : ∀ input ∈ captures ++ arguments, ∀ localSlot value, input.formal = .resident localSlot →
       before.Stores input.storage value → value.BatchCompatible before after ∧ value.SupportFramed before after :=
-    fun input member localSlot value atFormal stored => lent.batchFrame valid permission ((facts input member).2.2 localSlot value atFormal stored)
+    fun input member localSlot value atFormal stored =>
+      let resources := (facts input member).2.2 localSlot value atFormal stored
+      lent.batchFrame valid permission.recorded resources.1 resources.2.1
   rw [inputsMap]
   refine ⟨⟨?_,?_,?_⟩,?_,?_,?_⟩
   · simpa only [List.flatMap_map,clears] using product.ready.1
@@ -5514,5 +5489,795 @@ theorem Execution.EntrySource.Admitted.enterStep {program : Kernel.Program} {bef
   | exhausted => exact ⟨some (.fatal .resource),_,.enterExhausted task entered⟩
 
 
-end Glorious.Language
+theorem Execution.PreparesEntryAttempt.custodyFrame {program : Kernel.Program} {callee : Execution.Context}
+    {function : Kernel.Function} {before after : World} {source : Execution.EntrySource}
+    {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome} {recipient : ClaimCustody}
+    (prepared : Execution.PreparesEntryAttempt program callee function before source inputs after outcome)
+    (valid : before.WellFormed) : before.CustodyTransferFrame after recipient := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => exact .of_loans rfl
+  | resident _ _ lends _ consumes =>
+      exact (Kernel.LendsResident.custodyFrame lends valid).trans (.of_loans consumes.loans)
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      exact (Kernel.LendsResident.custodyFrame receiverLends valid).trans
+        ((Kernel.LendsResident.custodyFrame witnessLends (Kernel.LendsResident.wellFormed receiverLends valid)).trans
+          (.of_loans (consumesAvailability.loans.trans consumes.loans)))
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact Kernel.LendsResident.custodyFrame lends valid
 
+theorem FreshRegion.custodyFrame {before after : World} {region : Identity} {recipient : ClaimCustody}
+    (fresh : FreshRegion before region after) : before.CustodyTransferFrame after recipient := by
+  obtain ⟨rfl,rfl⟩ := fresh
+  exact .of_loans rfl
+
+/-- Entry's exact custody frame includes both kinds of physical failure. It
+composes the same preparation, binder and finishing products as success. -/
+theorem Execution.EnterWorldAttempt.custodyFrame {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    {outcome : Kernel.PreparationOutcome}
+    (entered : Execution.EnterWorldAttempt program before caller function source context after outcome)
+    (valid : before.world.WellFormed) : before.world.CustodyTransferFrame after (.activation before.nextActivation) := by
+  cases entered with
+  | inputs _ fresh prepares _ bound finished _ _ =>
+      have formed := fresh.custodyFrame.trans ((prepares.custodyFrame (fresh.wellFormed valid)).trans
+        (bound.custodyFrame (prepares.wellFormed (fresh.wellFormed valid))))
+      cases outcome with
+      | complete => exact formed.trans (.of_loans finished.loans)
+      | exhausted => rw [finished]; exact formed
+  | preparationExhausted _ fresh prepares _ _ _ =>
+      exact fresh.custodyFrame.trans (prepares.custodyFrame (fresh.wellFormed valid))
+
+/-- Original input-interface coverage discharges an outgoing custody through
+actual fresh preparation, the complete common binder and receiver finishing.
+No custody fact about an arbitrary entered world is an admission premise. -/
+theorem Execution.EnterWorld.custody_handedOff {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource} {custody : ClaimCustody}
+    (entered : Execution.EnterWorld program before caller function source context after)
+    (valid : before.world.WellFormed) (different : ClaimCustody.activation before.nextActivation ≠ custody)
+    (covered : before.world.CustodyCovered custody (source.originalInputs function)) : after.CustodyHandedOff custody := by
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,_,fresh,prepares,_,binds,finish,_,_⟩ := entered.prepared
+  have frame : before.world.CustodyTransferFrame prepared (.activation before.nextActivation) :=
+    fresh.custodyFrame.trans (prepares.custodyFrame (fresh.wellFormed valid))
+  have preparedCoverage : prepared.CustodyCovered custody inputs := by
+    intro id loan found live kind held
+    rcases (covered.custodyFrame frame different) id loan found live kind held with handed |
+      ⟨input,member,name,type,formal,parent⟩
+    · exact Or.inl handed
+    · exact Or.inr ⟨input,(prepares.erased_inputs (by rw [formal]; exact fun h => h)).mpr member,name,type,formal,parent⟩
+  have handed := Kernel.BindsInputsFor.custody_handedOff binds
+    (prepares.wellFormed (fresh.wellFormed valid)) different preparedCoverage
+  simpa only [World.CustodyHandedOff,finish.loans] using handed
+
+
+/-- Old storage outside the actual source clears retains its exact shell.
+Ancestors may lose fields; the finite residual relation records those holes. -/
+theorem Kernel.BindsInputAt.read_shell {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {observed : Address} (valid : before.WellFormed)
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (frontier : observed.root < before.nextRoot)
+    (outside : ∀ written ∈ input.clearedStorage, ¬ written.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent => exact congrArg (Option.map Value.shell) (lent.read valid frontier)
+  | owned _ owned resident _ _ allocated transferred =>
+      have selected : input.storage ∈ input.clearedStorage := InvocationInput.mem_clearedStorage.mpr ⟨resident,owned,rfl⟩
+      cases transferred with
+      | move _ _ _ _ _ _ _ clear install =>
+          refine (congrArg (Option.map Value.shell) (World.write_disjoint install ?_)).trans
+            ((World.write_read_shell clear (outside input.storage selected)).trans
+              (congrArg (Option.map Value.shell) (allocated.read valid observed)))
+          intro overlap
+          exact (Nat.ne_of_lt frontier) (overlap.1.symm.trans allocated.fresh_root.1)
+  | storage _ _ _ claimed => cases claimed; rfl
+  | allocation _ _ _ _ transferred =>
+      simp only [World.read,World.root,Glorious.Language.TransfersAllocation.roots_eq transferred]
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; rfl
+  | loan _ _ _ _ transferred =>
+      simp only [World.read,World.root,Glorious.Language.TransfersStorageLoan.roots_eq transferred]
+
+theorem Kernel.BindsInputsAttemptFor.read_shell {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome} {observed : Address}
+    (valid : before.WellFormed)
+    (bound : BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (frontier : observed.root < before.nextRoot)
+    (outside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, ¬ written.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  induction bound with
+  | nil | exhausted => rfl
+  | cons _ first _ ih =>
+      exact (ih (first.wellFormed valid) (Nat.lt_of_lt_of_le frontier first.nextRoot_le)
+        (fun input member => outside input (List.mem_cons_of_mem _ member))).trans
+        (first.read_shell valid frontier (outside _ (List.mem_cons_self)))
+
+
+theorem Execution.PreparesEntryAttempt.read_shell {program : Kernel.Program} {callee : Execution.Context}
+    {function : Kernel.Function} {before after : World} {source : Execution.EntrySource}
+    {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome} {observed : Address}
+    (prepared : Execution.PreparesEntryAttempt program callee function before source inputs after outcome)
+    (valid : before.WellFormed) (frontier : observed.root < before.nextRoot)
+    (outside : ∀ written ∈ source.clearedStorage function, ¬ written.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => rfl
+  | resident _ _ lends _ consumes =>
+      exact (consumes.read_shell (fun owned => outside _ (by
+        simp [Execution.EntrySource.clearedStorage,Execution.EntrySource.ownedReceiver,owned]))).trans
+        (congrArg (Option.map Value.shell) (Kernel.LendsResident.read lends valid frontier))
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      have middleWell := Kernel.LendsResident.wellFormed receiverLends valid
+      have middleBound := Nat.lt_of_lt_of_le frontier (Kernel.LendsResident.nextRoot_le receiverLends)
+      exact ((consumesAvailability.read_shell (fun owned => outside _ (by
+        simp [Execution.EntrySource.clearedStorage,owned]))).trans
+        ((consumes.read_shell (fun owned => outside _ (by
+          simp [Execution.EntrySource.clearedStorage,Execution.EntrySource.ownedReceiver,owned]))).trans
+          (congrArg (Option.map Value.shell) (Kernel.LendsResident.read witnessLends middleWell middleBound)))).trans
+        (congrArg (Option.map Value.shell) (Kernel.LendsResident.read receiverLends valid frontier))
+  | contextualWitnessExhausted _ _ _ _ lends _ =>
+      exact congrArg (Option.map Value.shell) (Kernel.LendsResident.read lends valid frontier)
+
+theorem Execution.PreparesEntry.contextual_witness_cleared {program : Kernel.Program} {callee : Execution.Context}
+    {function : Kernel.Function} {before after : World} {receiver witness : ResolvedPlace} {access : Access}
+    {inputs preparedInputs : List Kernel.InvocationInput}
+    (prepared : Execution.PreparesEntry program callee function before
+      (.contextual receiver access witness .owned inputs) preparedInputs after) : after.read witness.address = none := by
+  cases prepared with
+  | contextual _ _ _ _ _ _ _ _ consumed => exact consumed.owned_cleared
+
+theorem Execution.FinishesEntry.read_shell {before after : World} {source : Execution.EntrySource} {observed : Address}
+    (finished : Execution.FinishesEntry before source after)
+    (outside : ∀ receiver, source.ownedReceiver = some receiver → ¬ receiver.address.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases finished with
+  | supplied => rfl
+  | resident finished | contextual finished =>
+      exact finished.read_shell (fun owned => outside _ (by simp [Execution.EntrySource.ownedReceiver,owned]))
+
+theorem Execution.FinishesEntry.owned_cleared {before after : World} {source : Execution.EntrySource} {receiver : ResolvedPlace}
+    (finished : Execution.FinishesEntry before source after) (selected : source.ownedReceiver = some receiver) :
+    after.read receiver.address = none := by
+  cases finished with
+  | supplied => cases selected
+  | resident finished | contextual finished =>
+      simp only [Execution.EntrySource.ownedReceiver] at selected
+      split at selected
+      · rename_i owned
+        have same := Option.some.inj selected
+        cases owned
+        cases same
+        exact finished.owned_cleared
+      · cases selected
+
+/-- Outside its finite original erasures, a completed entry cannot invent or
+alter an old resident shell. The proof includes both receiver loans, the
+witness deletion, every common input and receiver finishing. -/
+theorem Execution.EnterWorld.read_shell {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource} {observed : Address}
+    (entered : Execution.EnterWorld program before caller function source context after) (valid : before.world.WellFormed)
+    (frontier : observed.root < before.world.nextRoot)
+    (outside : ∀ written ∈ source.clearedStorage function, ¬ written.Prefix observed) :
+    (after.read observed).map Value.shell = (before.world.read observed).map Value.shell := by
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,_,fresh,prepares,_,binds,finish,_,_⟩ := entered.prepared
+  have regionFrontier : withRegion.nextRoot = before.world.nextRoot := by obtain ⟨_,rfl⟩ := fresh; rfl
+  have regionRead : withRegion.read observed = before.world.read observed := by obtain ⟨_,rfl⟩ := fresh; rfl
+  have middleBound : observed.root < withRegion.nextRoot := by simpa only [regionFrontier] using frontier
+  have preparedBound := Nat.lt_of_lt_of_le middleBound prepares.nextRoot_le
+  have preparedWell := prepares.wellFormed (fresh.wellFormed valid)
+  have inputsOutside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, ¬ written.Prefix observed := by
+    intro input member written erased
+    have included : written ∈ inputs.flatMap Kernel.InvocationInput.clearedStorage := List.mem_flatMap.mpr ⟨input,member,erased⟩
+    rw [prepares.clearedStorage] at included
+    exact outside written (by simp only [Execution.EntrySource.clearedStorage,List.mem_append]; exact Or.inl (Or.inr included))
+  exact ((finish.read_shell (fun receiver selected => outside receiver.address (by
+    simp [Execution.EntrySource.clearedStorage,selected]))).trans
+    ((binds.read_shell preparedWell preparedBound inputsOutside).trans
+      (prepares.read_shell (fresh.wellFormed valid) middleBound outside))).trans
+    (congrArg (Option.map Value.shell) regionRead)
+
+/-- All original erasures really occur on success. This is not asserted for
+exhaustion: the exhausted outcome retains its actual shorter physical prefix. -/
+theorem Execution.EnterWorld.clearedStorage {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    (entered : Execution.EnterWorld program before caller function source context after) (valid : before.world.WellFormed)
+    (bounded : ∀ written ∈ source.clearedStorage function, written.root < before.world.nextRoot) :
+    ∀ written ∈ source.clearedStorage function, after.read written = none := by
+  obtain ⟨withRegion,prepared,inputs,environment,declaration,bound,_,fresh,prepares,_,binds,finish,_,_⟩ := entered.prepared
+  have regionFrontier : withRegion.nextRoot = before.world.nextRoot := by obtain ⟨_,rfl⟩ := fresh; rfl
+  have preparedWell := prepares.wellFormed (fresh.wellFormed valid)
+  intro written member
+  have preparedBound : written.root < prepared.nextRoot := Nat.lt_of_lt_of_le
+    (by simpa only [regionFrontier] using bounded written member) prepares.nextRoot_le
+  simp only [Execution.EntrySource.clearedStorage,List.mem_append] at member
+  rcases member with (witness | input) | receiver
+  · have absent : prepared.read written = none := by
+      cases source with
+      | supplied | resident => cases witness
+      | contextual receiver receiverAccess witnessPlace witnessAccess originalInputs =>
+          cases witnessAccess with
+          | shared | unique => cases witness
+          | owned =>
+              have same := List.mem_singleton.mp witness
+              subst written
+              exact Execution.PreparesEntry.contextual_witness_cleared prepares
+    exact finish.read_none (binds.read_none preparedWell preparedBound absent)
+  · have included : written ∈ inputs.flatMap Kernel.InvocationInput.clearedStorage := by rw [prepares.clearedStorage]; exact input
+    obtain ⟨input,member,erased⟩ := List.mem_flatMap.mp included
+    obtain ⟨resident,owned,same⟩ := Kernel.InvocationInput.mem_clearedStorage.mp erased
+    subst written
+    exact finish.read_none (binds.owned_cleared preparedWell rfl preparedBound member owned resident)
+  · obtain ⟨receiver,selected,same⟩ := List.mem_map.mp receiver
+    have selected : source.ownedReceiver = some receiver := by simpa using selected
+    rw [← same]
+    exact finish.owned_cleared selected
+
+/-- Every surviving old resident is exactly the residual of an original
+resident under the original source footprint. Declared invariants may inspect
+fields, so cleanup must use this residual, not assume unchanged whole values. -/
+theorem Execution.EnterWorld.resident_residual {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    {address : Address} {value : Value}
+    (entered : Execution.EnterWorld program before caller function source context after) (valid : before.world.WellFormed)
+    (bounded : ∀ written ∈ source.clearedStorage function, written.root < before.world.nextRoot)
+    (frontier : address.root < before.world.nextRoot) (resident : after.Resident address value) :
+    ∃ original, before.world.Resident address original ∧ original.AfterClearing address (source.clearedStorage function) value :=
+  World.afterClearing_resident (entered.clearedStorage valid bounded)
+    (fun _ bound => entered.read_shell valid bound) frontier resident
+
+
+/-- The actual common binder frames a passive closed graph. Unlike input
+handoff, cleanup observation does not require every retained reference view
+to be currently usable. Claim, custody and support exclusions are read only
+from the original graph and the actual input's finite effects. -/
+theorem Kernel.BindsInputAt.passiveFrame {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : Kernel.InvocationInput} {binding : Kernel.Binding}
+    {value : Value} (bound : Kernel.BindsInputAt program recipient activation scope region before input binding after)
+    (valid : before.WellFormed) (closed : value.ResourcesClosed program before) (restored : value.LoansRestored program before)
+    (protection : ∀ identity, input.FreshOwning identity → value.ViewsClaimProtected before .owning (some identity))
+    (kept : ∀ identity, input.CustodyMoved before identity → value.ViewsCustodyKept before identity)
+    (outside : ∀ written ∈ input.clearedStorage, value.SupportOutside before written) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  cases bound with
+  | lent _ _ _ _ _ _ permission lent => exact lent.batchFrame valid permission.recorded closed restored
+  | owned _ owned resident _ _ allocated moved =>
+      refine ⟨Value.BatchCompatible.of_eq
+        ((allocated.locationExtension valid).trans (.of_locations moved.locations))
+        (moved.loans.trans allocated.loans),?_⟩
+      have initial := allocated.supportFramed valid closed restored
+      cases moved with
+      | move _ _ _ _ _ _ _ clear install =>
+          apply initial.trans allocated.loans
+          refine Value.SupportFramed.of_two_writes clear install (World.write_loans clear) ?_ ?_
+          · intro observed supported
+            exact outside input.storage (Kernel.InvocationInput.mem_clearedStorage.mpr ⟨resident,owned,rfl⟩)
+              observed ((Value.Support.frame allocated.loans initial).mpr supported)
+          · intro observed supported overlap
+            exact (Nat.ne_of_lt (Value.Support.root_bound valid closed restored
+              ((Value.Support.frame allocated.loans initial).mpr supported)))
+              (overlap.1.symm.trans allocated.fresh_root.1)
+  | storage _ _ _ claimed =>
+      cases claimed with
+      | claim _ _ permission =>
+          refine ⟨Value.BatchCompatible.of_fresh_loan valid (.of_locations (fun _ => rfl)) rfl restored
+            (Permitted.parentLoan_bound valid permission) ?_,Value.SupportFramed.of_roots rfl⟩
+          exact fun _ _ _ _ _ _ => Or.inl (fun same => by cases same)
+  | guardedAllocation _ formal owned authorityEq _ claimed =>
+      cases claimed with
+      | claim claim permission _ =>
+          obtain ⟨identity,_,_,_,parent,_⟩ := claim
+          have fresh : input.FreshOwning identity := ⟨⟨_,_,_,_,formal,owned,authorityEq⟩,parent⟩
+          refine ⟨Value.BatchCompatible.of_fresh_loan valid (.of_locations (fun _ => rfl)) rfl restored
+            (Permitted.parentLoan_bound valid permission) ?_,Value.SupportFramed.of_roots rfl⟩
+          intro authority address observed claimed anchor anchored
+          simpa only [parent] using protection identity fresh authority address observed claimed anchor anchored
+  | allocation _ formal _ _ moved =>
+      cases moved with
+      | @transfer identity original authority _ found =>
+          change input.authority = .loan identity at authority
+          have transferred : input.CustodyMoved before identity := Or.inl ⟨_,_,formal,authority⟩
+          refine ⟨Value.BatchCompatible.of_custody_update (requested := original.returnRequested)
+            (.of_locations (fun _ => rfl)) found rfl (Or.inr (Or.inr ?_)),Value.SupportFramed.of_roots rfl⟩
+          intro resident authority access reached binding member
+          exact kept identity transferred binding.authority ⟨resident,authority,access,reached,binding,member,rfl⟩
+  | loan _ formal _ _ moved =>
+      cases moved with
+      | @unique identity original authority found _ _ mode _ =>
+          change input.authority = .loan identity at authority
+          have transferred : input.CustodyMoved before identity := Or.inr ⟨_,_,formal,authority,original,found,mode⟩
+          refine ⟨Value.BatchCompatible.of_custody_update (requested := original.returnRequested)
+            (.of_locations (fun _ => rfl)) found rfl (Or.inr (Or.inr ?_)),Value.SupportFramed.of_roots rfl⟩
+          intro resident authority access reached binding member
+          exact kept identity transferred binding.authority ⟨resident,authority,access,reached,binding,member,rfl⟩
+      | shared => exact ⟨Value.BatchCompatible.of_eq (.refl before) rfl,Value.SupportFramed.of_roots rfl⟩
+
+
+theorem Value.ViewsClaimProtected.frame {program : RuntimeProgram} {before middle : World} {value : Value} {parent : Identity}
+    {recipient : ClaimCustody} (valid : before.WellFormed) (frame : before.CustodyTransferFrame middle recipient)
+    (batch : value.BatchCompatible before middle) (framed : value.SupportFramed before middle)
+    (closed : value.ResourcesClosed program before) (known : ∃ loan, before.loans.get parent = some loan)
+    (protection : value.ViewsClaimProtected before .owning (some parent)) :
+    value.ViewsClaimProtected middle .owning (some parent) := by
+  intro authority address observed claimed anchor anchored
+  obtain ⟨resident,current,access,reached,binding,member,rfl,rfl⟩ := observed
+  have prior := (Value.ReachableResident.frame_batch batch framed).mpr reached
+  have held := (closed resident current access prior).1 binding member
+  have priorClaim : AllocationClaim before binding.authority binding.address := by
+    rcases held.2 with ⟨claim,_⟩ | ⟨identity,loan,parentAt,found,live,borrowKind,_⟩
+    · exact claim
+    · obtain ⟨claimedId,claimedLoan,_,_,claimedParent,claimedAt,_,claimedKind,_⟩ := claimed
+      have same : identity = claimedId := Option.some.inj (parentAt.symm.trans claimedParent)
+      subst claimedId
+      obtain ⟨current,currentAt,shape⟩ := frame.retained found
+      have equal : current = claimedLoan := Option.some.inj (currentAt.symm.trans claimedAt)
+      have kinds := congrArg Loan.kind shape
+      change current.kind = loan.kind at kinds
+      have currentKind := (congrArg Loan.kind equal).trans claimedKind
+      have conflict : LoanKind.owning = .storageBorrow := currentKind.symm.trans (kinds.trans borrowKind)
+      cases conflict
+  rcases protection binding.authority binding.address ⟨resident,current,access,prior,binding,member,rfl,rfl⟩ priorClaim anchor anchored with
+    impossible | separated
+  · exact False.elim (impossible rfl)
+  · refine Or.inr (fun other selected related => ?_)
+    have same : parent = other := Option.some.inj selected
+    subst other
+    exact separated parent rfl (frame.ancestor_before (World.loanParents valid) known related)
+
+theorem Value.ViewsCustodyKept.frame {before middle : World} {value : Value} {identity : Identity}
+    (batch : value.BatchCompatible before middle) (framed : value.SupportFramed before middle)
+    (kept : value.ViewsCustodyKept before identity) : value.ViewsCustodyKept middle identity := by
+  rintro authority ⟨resident,current,access,reached,binding,member,equal⟩
+  exact kept authority ⟨resident,current,access,(Value.ReachableResident.frame_batch batch framed).mpr reached,binding,member,equal⟩
+
+/-- The finite original exclusions of a passive caller graph survive every
+real binding, including a physically exhausted prefix. The induction carries
+those original observations, not a callback asserting a future cleanup state. -/
+theorem Kernel.BindsInputsAttemptFor.passiveFrame {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List Kernel.InvocationInput} {bindings : Kernel.Environment} {outcome : Kernel.PreparationOutcome} {value : Value}
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (valid : before.WellFormed) (closed : value.ResourcesClosed program before) (restored : value.LoansRestored program before)
+    (recorded : ∀ input ∈ inputs, input.authority.Recorded before.loans)
+    (protection : ∀ input ∈ inputs, ∀ identity, input.FreshOwning identity → value.ViewsClaimProtected before .owning (some identity))
+    (kept : ∀ input ∈ inputs, ∀ identity, input.CustodyMoved before identity → value.ViewsCustodyKept before identity)
+    (outside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, value.SupportOutside before written) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  induction bound with
+  | nil | exhausted => exact ⟨Value.BatchCompatible.of_eq (.refl _) rfl,Value.SupportFramed.of_roots rfl⟩
+  | cons _ first _ ih =>
+      have middleValid := first.wellFormed valid
+      have frame := first.stepFrame valid
+      obtain ⟨initial,initialFramed⟩ := first.passiveFrame valid closed restored
+        (protection _ List.mem_cons_self) (kept _ List.mem_cons_self) (outside _ List.mem_cons_self)
+      have middleClosed := Value.ResourcesClosed.frame_batch initial initialFramed closed
+      have middleRestored := Value.LoansRestored.frame_batch initial initialFramed restored
+      have remaining := ih middleValid middleClosed middleRestored
+        (fun input member => (recorded input (List.mem_cons_of_mem _ member)).transport (fun id loan found =>
+          let ⟨current,selected,_⟩ := StepFrame.row_of_before valid frame found
+          ⟨current,selected⟩))
+        (fun input member identity fresh =>
+          let ⟨loan,found⟩ := (recorded input (List.mem_cons_of_mem _ member)).parentLoan fresh.2
+          Value.ViewsClaimProtected.frame valid (first.custodyFrame valid) initial initialFramed closed
+            ⟨loan,found⟩ (protection input (List.mem_cons_of_mem _ member) identity fresh))
+        (fun input member identity moved => Value.ViewsCustodyKept.frame initial initialFramed
+          (kept input (List.mem_cons_of_mem _ member) identity
+            (Kernel.InvocationInput.CustodyMoved.frame valid frame (recorded input (List.mem_cons_of_mem _ member)) moved)))
+        (fun input member written erased observed supported => outside input (List.mem_cons_of_mem _ member) written erased
+          observed ((Value.Support.frame_batch initial initialFramed).mpr supported))
+      exact ⟨initial.trans initialFramed remaining.1,
+        Value.SupportFramed.trans_observed initial.rows initialFramed remaining.2⟩
+
+
+theorem Execution.ConsumesReceiver.passiveFrame {before after : World} {address : Address}
+    {authority : Authority} {access : Access} {value : Value}
+    (consumed : Execution.ConsumesReceiver before address authority access after)
+    (outside : access = .owned → value.SupportOutside before address) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  refine ⟨.of_eq (.of_locations consumed.locations) consumed.loans,?_⟩
+  cases consumed with
+  | lent => exact fun _ _ => ⟨rfl,rfl⟩
+  | owned _ _ _ _ written =>
+      exact .of_write written (outside rfl) (fun observed _ => World.write_locations written observed.root)
+
+theorem Execution.ConsumesAvailability.passiveFrame {before after : World} {address : Address}
+    {authority : Authority} {identity : Identity} {access : Access} {value : Value}
+    (consumed : Execution.ConsumesAvailability before address authority identity access after)
+    (outside : access = .owned → value.SupportOutside before address) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  refine ⟨.of_eq (.of_locations consumed.locations) consumed.loans,?_⟩
+  cases consumed with
+  | lent => exact fun _ _ => ⟨rfl,rfl⟩
+  | owned _ _ _ _ _ _ written =>
+      have framed := Value.SupportFramed.of_write written (outside rfl)
+        (fun observed _ => World.write_locations written observed.root)
+      exact framed
+
+theorem Execution.FinishesReceiver.passiveFrame {before after : World} {receiver : ResolvedPlace}
+    {access : Access} {value : Value} (finished : Execution.FinishesReceiver before receiver access after)
+    (outside : access = .owned → value.SupportOutside before receiver.address) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  refine ⟨.of_eq (.of_locations finished.locations) finished.loans,?_⟩
+  cases finished with
+  | lent => exact fun _ _ => ⟨rfl,rfl⟩
+  | owned _ _ _ _ _ _ written =>
+      exact .of_write written (outside rfl) (fun observed _ => World.write_locations written observed.root)
+
+theorem Execution.FinishesEntry.passiveFrame {before after : World} {source : Execution.EntrySource} {value : Value}
+    (finished : Execution.FinishesEntry before source after)
+    (outside : ∀ receiver, source.ownedReceiver = some receiver → value.SupportOutside before receiver.address) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  cases finished with
+  | supplied => exact ⟨.of_eq (.refl _) rfl,fun _ _ => ⟨rfl,rfl⟩⟩
+  | resident finished | contextual finished =>
+      exact finished.passiveFrame (fun owned => outside _ (by simp [Execution.EntrySource.ownedReceiver,owned]))
+
+theorem Execution.PreparesEntry.inputs_recorded {program : Kernel.Program} {callee : Execution.Context}
+    {function : Kernel.Function} {before after : World} {source : Execution.EntrySource} {inputs : List Kernel.InvocationInput}
+    (prepared : Execution.PreparesEntry program callee function before source inputs after)
+    (valid : before.WellFormed)
+    (recorded : ∀ input ∈ source.originalInputs function, input.authority.Recorded before.loans) :
+    ∀ input ∈ inputs, input.authority.Recorded after.loans := by
+  have frame := prepared.custodyFrame (recipient := .activation callee.activation) valid
+  cases prepared with
+  | supplied | contextual => exact fun input member => frame.recorded (recorded input member)
+  | resident receiver _ lends captures consumes =>
+      intro input member
+      rcases List.mem_append.mp member with capture | argument
+      · rw [captures.1] at capture
+        obtain ⟨⟨localSlot,index⟩,_,rfl⟩ := List.mem_map.mp capture
+        obtain ⟨_,_,_,_,_,permission⟩ := receiver
+        exact (Kernel.LendsResident.result_recorded lends permission.recorded).transport
+          (fun identity loan found => ⟨loan,by rw [consumes.loans]; exact found⟩)
+      · exact frame.recorded (recorded input (List.mem_append.mpr (Or.inr argument)))
+
+
+
+/-- Closed cleanup observations are preserved by real preparation, including
+its exhausted prefixes. Admission concerns only original support and rows;
+it does not require permission for frozen reference views. -/
+theorem Execution.PreparesEntryAttempt.passiveFrame {program : Kernel.Program} {callee : Execution.Context}
+    {function : Kernel.Function} {before after : World} {source : Execution.EntrySource}
+    {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome} {value : Value}
+    (prepared : Execution.PreparesEntryAttempt program callee function before source inputs after outcome)
+    (valid : before.WellFormed) (closed : value.ResourcesClosed program before) (restored : value.LoansRestored program before)
+    (outside : ∀ written ∈ source.clearedStorage function, value.SupportOutside before written) :
+    value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted =>
+      exact ⟨.of_eq (.refl _) rfl,fun _ _ => ⟨rfl,rfl⟩⟩
+  | resident receiver _ lends _ consumes =>
+      obtain ⟨_,_,_,_,_,permission⟩ := receiver
+      obtain ⟨initial,initialFramed⟩ := Kernel.LendsResident.batchFrame valid lends permission.recorded closed restored
+      obtain ⟨last,lastFramed⟩ := consumes.passiveFrame (fun owned =>
+        (outside _ (by simp [Execution.EntrySource.clearedStorage,Execution.EntrySource.ownedReceiver,owned])).frame_batch initial initialFramed)
+      exact ⟨initial.trans initialFramed last,Value.SupportFramed.trans_observed initial.rows initialFramed lastFramed⟩
+  | contextual receiver _ witness _ receiverLends witnessLends _ consumes consumesAvailability =>
+      obtain ⟨_,_,_,_,_,permission⟩ := receiver
+      obtain ⟨_,_,_,_,_,_,_,_,_,_,witnessPermission⟩ := witness
+      obtain ⟨first,firstFramed⟩ := Kernel.LendsResident.batchFrame valid receiverLends permission.recorded closed restored
+      have middleValid := Kernel.LendsResident.wellFormed receiverLends valid
+      have witnessRecorded := (Kernel.LendsResident.custodyFrame receiverLends (recipient := .activation callee.activation) valid).recorded
+        witnessPermission.recorded
+      obtain ⟨second,secondFramed⟩ := Kernel.LendsResident.batchFrame middleValid witnessLends witnessRecorded
+        (closed.frame_batch first firstFramed) (restored.frame_batch first firstFramed)
+      have initial := first.trans firstFramed second
+      have initialFramed := Value.SupportFramed.trans_observed first.rows firstFramed secondFramed
+      obtain ⟨third,thirdFramed⟩ := consumes.passiveFrame (fun owned =>
+        (outside _ (by simp [Execution.EntrySource.clearedStorage,Execution.EntrySource.ownedReceiver,owned])).frame_batch initial initialFramed)
+      have consumed := initial.trans initialFramed third
+      have consumedFramed := Value.SupportFramed.trans_observed initial.rows initialFramed thirdFramed
+      obtain ⟨last,lastFramed⟩ := consumesAvailability.passiveFrame (fun owned =>
+        (outside _ (by simp [Execution.EntrySource.clearedStorage,owned])).frame_batch consumed consumedFramed)
+      exact ⟨consumed.trans consumedFramed last,Value.SupportFramed.trans_observed consumed.rows consumedFramed lastFramed⟩
+  | contextualWitnessExhausted receiver _ _ _ lends _ =>
+      obtain ⟨_,_,_,_,_,permission⟩ := receiver
+      exact Kernel.LendsResident.batchFrame valid lends permission.recorded closed restored
+
+
+theorem FreshRegion.passiveFrame {before after : World} {region : Identity} {value : Value}
+    (fresh : FreshRegion before region after) : value.BatchCompatible before after ∧ value.SupportFramed before after := by
+  obtain ⟨_,rfl⟩ := fresh
+  exact ⟨.of_eq (.of_locations (fun _ => rfl)) rfl,fun _ _ => ⟨rfl,rfl⟩⟩
+
+/-- Finite exclusions for one retained cleanup observation, inspected only in
+the original world. A removed field contributes no surviving observation. -/
+structure Execution.EntrySource.PassiveCompatible (world : World) (function : Kernel.Function)
+    (source : Execution.EntrySource) (value : Value) : Prop where
+  claims : ∀ input ∈ source.originalInputs function, ∀ identity, input.FreshOwning identity →
+    value.ViewsClaimProtected world .owning (some identity)
+  custody : ∀ input ∈ source.originalInputs function, ∀ identity, input.CustodyMoved world identity →
+    value.ViewsCustodyKept world identity
+  support : ∀ written ∈ source.clearedStorage function, value.SupportOutside world written
+
+
+/-- Every actual entry outcome preserves passive observations admitted in the
+original world. Raw-port exclusions are finite properties of the original
+input list; capture lending, custody transfer and each physical prefix are
+transported by their authoritative producers. -/
+theorem Execution.EnterWorldAttempt.passiveFrame {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    {outcome : Kernel.PreparationOutcome} {value : Value}
+    (entered : Execution.EnterWorldAttempt program before caller function source context after outcome)
+    (valid : before.world.WellFormed) (closed : value.ResourcesClosed program before.world)
+    (restored : value.LoansRestored program before.world)
+    (recorded : ∀ input ∈ source.originalInputs function, input.authority.Recorded before.world.loans)
+    (compatible : source.PassiveCompatible before.world function value) :
+    value.BatchCompatible before.world after ∧ value.SupportFramed before.world after := by
+  obtain ⟨protection,kept,outside⟩ := compatible
+  cases entered with
+  | @inputs withRegion prepared inputs environment declaration boundWorld after outcome _ fresh prepares _ bound finished _ _ =>
+      obtain ⟨first,firstFramed⟩ := fresh.passiveFrame (value := value)
+      have regionValid := fresh.wellFormed valid
+      obtain ⟨second,secondFramed⟩ := prepares.passiveFrame regionValid
+        (closed.frame_batch first firstFramed) (restored.frame_batch first firstFramed)
+        (fun written member => (outside written member).frame_batch first firstFramed)
+      have initial := first.trans firstFramed second
+      have initialFramed := Value.SupportFramed.trans_observed first.rows firstFramed secondFramed
+      have rows := (fresh.custodyFrame (recipient := .activation before.nextActivation)).trans (prepares.custodyFrame regionValid)
+      have preparedRecorded := prepares.inputs_recorded regionValid (fun input member =>
+        (fresh.custodyFrame (recipient := .activation before.nextActivation)).recorded (recorded input member))
+      have guarded : ∀ input ∈ inputs, ∀ identity, input.FreshOwning identity →
+          value.ViewsClaimProtected prepared .owning (some identity) := by
+        intro input member identity freshOwning
+        obtain ⟨name,type,backing,carrier,formal,_⟩ := freshOwning.1
+        have originalMember := (prepares.erased_inputs (by rw [formal]; exact fun h => h)).mp member
+        have known := (recorded input originalMember).parentLoan freshOwning.2
+        exact Value.ViewsClaimProtected.frame valid rows initial initialFramed closed known
+          (protection input originalMember identity freshOwning)
+      have custodyKept : ∀ input ∈ inputs, ∀ identity, input.CustodyMoved prepared identity → value.ViewsCustodyKept prepared identity := by
+        intro input member identity moved
+        have erased : ¬ input.formal.IsResident := by
+          rcases moved with ⟨_,_,formal,_⟩ | ⟨_,_,formal,_⟩ <;> rw [formal] <;> exact fun h => h
+        have originalMember := (prepares.erased_inputs erased).mp member
+        have prior := Kernel.InvocationInput.CustodyMoved.of_retained (fun _ _ found => rows.retained found)
+          (recorded input originalMember) moved
+        exact Value.ViewsCustodyKept.frame initial initialFramed (kept input originalMember identity prior)
+      have writesOutside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, value.SupportOutside prepared written := by
+        intro input member written erased
+        have included : written ∈ inputs.flatMap Kernel.InvocationInput.clearedStorage := List.mem_flatMap.mpr ⟨input,member,erased⟩
+        rw [prepares.clearedStorage] at included
+        exact (outside written (by
+          simp only [Execution.EntrySource.clearedStorage,List.mem_append]
+          exact Or.inl (Or.inr included))).frame_batch initial initialFramed
+      obtain ⟨third,thirdFramed⟩ := bound.passiveFrame (prepares.wellFormed regionValid)
+        (closed.frame_batch initial initialFramed) (restored.frame_batch initial initialFramed)
+        preparedRecorded guarded custodyKept writesOutside
+      have boundFrame := initial.trans initialFramed third
+      have boundFramed := Value.SupportFramed.trans_observed initial.rows initialFramed thirdFramed
+      cases outcome with
+      | exhausted => rw [finished]; exact ⟨boundFrame,boundFramed⟩
+      | complete =>
+          obtain ⟨last,lastFramed⟩ := finished.passiveFrame (fun receiver selected =>
+            (outside receiver.address (by simp [Execution.EntrySource.clearedStorage,selected])).frame_batch boundFrame boundFramed)
+          exact ⟨boundFrame.trans boundFramed last,Value.SupportFramed.trans_observed boundFrame.rows boundFramed lastFramed⟩
+  | preparationExhausted _ fresh prepares _ _ _ =>
+      obtain ⟨first,firstFramed⟩ := fresh.passiveFrame (value := value)
+      obtain ⟨last,lastFramed⟩ := prepares.passiveFrame (fresh.wellFormed valid)
+        (closed.frame_batch first firstFramed) (restored.frame_batch first firstFramed)
+        (fun written member => (outside written member).frame_batch first firstFramed)
+      exact ⟨first.trans firstFramed last,Value.SupportFramed.trans_observed first.rows firstFramed lastFramed⟩
+
+
+theorem Execution.EntrySource.Admitted.clearedStorage_bound {program : Kernel.Program} {world : World}
+    {region : Identity} {function : Kernel.Function} {source : Execution.EntrySource}
+    (admitted : source.Admitted program world region function) (valid : world.WellFormed) :
+    ∀ address ∈ source.clearedStorage function, address.root < world.nextRoot := by
+  intro address member
+  simp only [Execution.EntrySource.clearedStorage,List.mem_append] at member
+  rcases member with (witnessMember | inputMember) | receiverMember
+  · cases source with
+    | supplied | resident => simp at witnessMember
+    | contextual receiver access witness witnessAccess inputs =>
+        cases witnessAccess with
+        | shared | unique => simp at witnessMember
+        | owned =>
+            have same : address = witness.address := by simpa using witnessMember
+            subst address
+            obtain ⟨_,_,_,_,_,_,_,witnessReady,_⟩ := admitted.ready
+            obtain ⟨_,_,stored,_⟩ := witnessReady
+            exact stored.rooted_bound valid
+  · obtain ⟨input,member,cleared⟩ := List.mem_flatMap.mp inputMember
+    obtain ⟨_,_,rfl⟩ := Kernel.InvocationInput.mem_clearedStorage.mp cleared
+    exact (admitted.inputs.inputFramed valid input member).2.1
+  · cases source with
+    | supplied => simp [Execution.EntrySource.ownedReceiver] at receiverMember
+    | resident receiver access arguments =>
+        cases access with
+        | shared | unique => simp [Execution.EntrySource.ownedReceiver] at receiverMember
+        | owned =>
+            have same : address = receiver.address := by simpa [Execution.EntrySource.ownedReceiver] using receiverMember
+            subst address
+            obtain ⟨_,_,⟨_,stored,_⟩,_⟩ := admitted.ready
+            exact stored.rooted_bound valid
+    | contextual receiver access witness witnessAccess inputs =>
+        cases access with
+        | shared | unique => simp [Execution.EntrySource.ownedReceiver] at receiverMember
+        | owned =>
+            have same : address = receiver.address := by simpa [Execution.EntrySource.ownedReceiver] using receiverMember
+            subst address
+            obtain ⟨_,_,_,_,_,⟨_,stored,_⟩,_⟩ := admitted.ready
+            exact stored.rooted_bound valid
+
+
+theorem Kernel.BindsInputAt.read_outside {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput}
+    {binding : Binding} {observed : Address} (valid : before.WellFormed)
+    (bound : Kernel.BindsInputAt program recipient activation scope region before input binding after)
+    (frontier : observed.root < before.nextRoot)
+    (outside : ∀ written ∈ input.clearedStorage, ¬ written.Overlaps observed) : after.read observed = before.read observed := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent => exact lent.read valid frontier
+  | owned _ owned resident _ _ allocated transferred =>
+      have selected : input.storage ∈ input.clearedStorage := InvocationInput.mem_clearedStorage.mpr ⟨resident,owned,rfl⟩
+      cases transferred with
+      | move _ _ _ _ _ _ _ clear install =>
+          refine (World.write_disjoint install ?_).trans
+            ((World.write_disjoint clear (outside input.storage selected)).trans (allocated.read valid observed))
+          intro overlap
+          exact (Nat.ne_of_lt frontier) (overlap.1.symm.trans allocated.fresh_root.1)
+  | storage _ _ _ claimed => cases claimed; rfl
+  | allocation _ _ _ _ transferred =>
+      simp only [World.read,World.root,Glorious.Language.TransfersAllocation.roots_eq transferred]
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; rfl
+  | loan _ _ _ _ transferred =>
+      simp only [World.read,World.root,Glorious.Language.TransfersStorageLoan.roots_eq transferred]
+
+theorem Kernel.BindsInputsAttemptFor.read_outside {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome} {observed : Address}
+    (valid : before.WellFormed)
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (frontier : observed.root < before.nextRoot)
+    (outside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, ¬ written.Overlaps observed) :
+    after.read observed = before.read observed := by
+  induction bound with
+  | nil | exhausted => rfl
+  | cons _ first _ ih =>
+      exact (ih (first.wellFormed valid) (Nat.lt_of_lt_of_le frontier first.nextRoot_le)
+        (fun input member => outside input (List.mem_cons_of_mem _ member))).trans
+        (first.read_outside valid frontier (outside _ List.mem_cons_self))
+
+
+theorem Execution.EnterWorldAttempt.read_outside {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    {outcome : Kernel.PreparationOutcome} {observed : Address}
+    (entered : Execution.EnterWorldAttempt program before caller function source context after outcome)
+    (valid : before.world.WellFormed) (frontier : observed.root < before.world.nextRoot)
+    (outside : ∀ written ∈ source.clearedStorage function, ¬ written.Overlaps observed) :
+    after.read observed = before.world.read observed := by
+  cases entered with
+  | @inputs withRegion prepared inputs environment declaration boundWorld after outcome _ fresh prepares _ binds finish _ _ =>
+      have regionFrontier : withRegion.nextRoot = before.world.nextRoot := by obtain ⟨_,rfl⟩ := fresh; rfl
+      have regionRead : withRegion.read observed = before.world.read observed := by obtain ⟨_,rfl⟩ := fresh; rfl
+      have middleBound : observed.root < withRegion.nextRoot := by simpa only [regionFrontier] using frontier
+      have preparedBound := Nat.lt_of_lt_of_le middleBound prepares.nextRoot_le
+      have preparedWell := prepares.wellFormed (fresh.wellFormed valid)
+      have inputsOutside : ∀ input ∈ inputs, ∀ written ∈ input.clearedStorage, ¬ written.Overlaps observed := by
+        intro input member written erased
+        have included : written ∈ inputs.flatMap Kernel.InvocationInput.clearedStorage := List.mem_flatMap.mpr ⟨input,member,erased⟩
+        rw [prepares.clearedStorage] at included
+        exact outside written (by
+          simp only [Execution.EntrySource.clearedStorage,List.mem_append]
+          exact Or.inl (Or.inr included))
+      have boundRead := (binds.read_outside preparedWell preparedBound inputsOutside).trans
+        ((prepares.read_outside (fresh.wellFormed valid) middleBound outside).trans regionRead)
+      cases outcome with
+      | exhausted => rw [finish]; exact boundRead
+      | complete =>
+          exact (finish.read_outside (fun receiver selected => outside receiver.address (by
+            simp [Execution.EntrySource.clearedStorage,selected]))).trans boundRead
+  | preparationExhausted _ fresh prepares _ _ _ =>
+      have bound := frontier
+      have initial : _ := prepares.read_outside (fresh.wellFormed valid)
+        (by obtain ⟨_,rfl⟩ := fresh; exact bound) outside
+      obtain ⟨_,rfl⟩ := fresh
+      exact initial
+
+
+theorem Kernel.BindsInputAt.restoring_origin {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {before after : World} {input : InvocationInput} {binding : Binding}
+    {identity : Identity} {loan : Loan}
+    (bound : Kernel.BindsInputAt program recipient activation scope region before input binding after)
+    (found : after.loans.get identity = some loan) (kind : loan.kind = .restoring ∨ loan.kind = .destructor) :
+    (∃ original, before.loans.get identity = some original ∧ loan.permissionState = original.permissionState) ∨
+      (input.access ≠ .owned ∧ loan.referent.root = input.storage.root) := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent =>
+      rcases lent.loan_origin found with original | ⟨borrowed,referent⟩
+      · exact Or.inl ⟨loan,original,rfl⟩
+      · exact Or.inr ⟨borrowed,congrArg Address.root referent⟩
+  | owned _ _ _ _ _ allocated moved =>
+      exact Or.inl ⟨loan,by rw [moved.loans,allocated.loans] at found; exact found,rfl⟩
+  | allocation _ _ _ _ moved => exact Or.inl ((Glorious.Language.TransfersAllocation.row_relation moved).backward identity loan found)
+  | loan _ _ _ _ moved => exact Or.inl ((Glorious.Language.TransfersStorageLoan.row_relation moved).backward identity loan found)
+  | storage _ _ _ claimed =>
+      cases claimed
+      by_cases same : identity = before.nextLoan
+      · subst identity
+        simp only [Table.get_set,Option.some.injEq] at found
+        subst loan
+        rcases kind with kind | kind <;> cases kind
+      · exact Or.inl ⟨loan,by simpa only [Table.get_set_other _ _ _ _ same] using found,rfl⟩
+  | guardedAllocation _ _ _ _ _ claimed =>
+      cases claimed
+      by_cases same : identity = before.nextLoan
+      · subst identity
+        simp only [Table.get_set,Option.some.injEq] at found
+        subst loan
+        rcases kind with kind | kind <;> cases kind
+      · exact Or.inl ⟨loan,by simpa only [Table.get_set_other _ _ _ _ same] using found,rfl⟩
+
+theorem Kernel.BindsInputsAttemptFor.restoring_origin {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    {identity : Identity} {loan : Loan}
+    (bound : Kernel.BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (found : after.loans.get identity = some loan) (kind : loan.kind = .restoring ∨ loan.kind = .destructor) :
+    (∃ original, before.loans.get identity = some original ∧ loan.permissionState = original.permissionState) ∨
+      ∃ input ∈ inputs, input.access ≠ .owned ∧ loan.referent.root = input.storage.root := by
+  induction bound generalizing loan with
+  | nil | exhausted => exact Or.inl ⟨loan,found,rfl⟩
+  | cons _ first _ ih =>
+      rcases ih found kind with ⟨middle,middleAt,shape⟩ | ⟨input,member,borrowed,referent⟩
+      · have kinds := congrArg Loan.kind shape
+        change loan.kind = middle.kind at kinds
+        rcases first.restoring_origin middleAt (by rw [← kinds]; exact kind) with
+          ⟨original,originalAt,prior⟩ | ⟨borrowed,referent⟩
+        · exact Or.inl ⟨original,originalAt,shape.trans prior⟩
+        · have same := congrArg Loan.referent shape
+          change loan.referent = middle.referent at same
+          exact Or.inr ⟨_,List.mem_cons_self,borrowed,(congrArg Address.root same).trans referent⟩
+      · exact Or.inr ⟨input,List.mem_cons_of_mem _ member,borrowed,referent⟩
+
+
+theorem Execution.EnterWorldAttempt.restoring_origin {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource}
+    {outcome : Kernel.PreparationOutcome} {identity : Identity} {loan : Loan}
+    (entered : Execution.EnterWorldAttempt program before caller function source context after outcome)
+    (found : after.loans.get identity = some loan) (kind : loan.kind = .restoring ∨ loan.kind = .destructor) :
+    (∃ original, before.world.loans.get identity = some original ∧ loan.permissionState = original.permissionState) ∨
+      ∃ address ∈ source.lentStorage, loan.referent.root = address.root := by
+  cases entered with
+  | @inputs withRegion prepared inputs environment declaration boundWorld after outcome _ fresh prepares _ binds finish _ _ =>
+      have atBound : boundWorld.loans.get identity = some loan := by
+        cases outcome with
+        | exhausted => simpa only [finish] using found
+        | complete => simpa only [finish.loans] using found
+      rcases binds.restoring_origin atBound kind with ⟨middle,middleAt,shape⟩ | ⟨input,member,borrowed,referent⟩
+      · rcases prepares.loan_origin middleAt with original | ⟨address,member,referent⟩
+        · refine Or.inl ⟨middle,?_,shape⟩
+          obtain ⟨_,rfl⟩ := fresh
+          exact original
+        · have same := congrArg Loan.referent shape
+          change loan.referent = middle.referent at same
+          exact Or.inr ⟨address,member,(congrArg Address.root same).trans referent⟩
+      · obtain ⟨address,selected,same⟩ := prepares.lent_root member borrowed
+        exact Or.inr ⟨address,selected,referent.trans same⟩
+  | preparationExhausted _ fresh prepares _ _ _ =>
+      rcases prepares.loan_origin found with original | freshSource
+      · refine Or.inl ⟨loan,?_,rfl⟩
+        obtain ⟨_,rfl⟩ := fresh
+        exact original
+      · exact Or.inr freshSource
+
+
+theorem Execution.EnterWorldAttempt.activationRoots {program : Kernel.Program} {before : Execution.State} {after : World}
+    {caller context : Execution.Context} {function : Kernel.Function} {source : Execution.EntrySource} {outcome : PreparationOutcome}
+    {owner : Identity} {kept roots : List Identity}
+    (entered : Execution.EnterWorldAttempt program before caller function source context after outcome)
+    (valid : before.world.WellFormed) (selected : ActivationRoots before.world owner kept roots) (different : before.nextActivation ≠ owner) :
+    ActivationRoots after owner kept roots := by
+  have contextDifferent : context.activation ≠ owner := by rw [entered.fresh_context.1]; exact different
+  cases entered with
+  | inputs _ fresh prepares _ binds finish _ _ =>
+      have initial := fresh.activationRoots selected
+      have regionValid := fresh.wellFormed valid
+      have middle := prepares.activationRoots regionValid initial contextDifferent
+      have boundRoots := binds.activationRoots (prepares.wellFormed regionValid) middle different
+      cases outcome with
+      | exhausted => rw [finish]; exact boundRoots
+      | complete => exact boundRoots.of_locations finish.locations
+  | preparationExhausted _ fresh prepares _ _ _ =>
+      have initial := fresh.activationRoots selected
+      exact prepares.activationRoots (fresh.wellFormed valid) initial contextDifferent
+
+
+end Glorious.Language

@@ -7,12 +7,6 @@ The declared invariant relocation law is consumed at copied nominal nodes;
 ordinary support framing handles the unchanged external nodes. -/
 namespace Glorious.Language
 
-theorem World.Resident.nested {world : World} {address : Address} {value child : Value}
-    {path : List Nat} (resident : world.Resident address value) (located : ResidentAt value path child) :
-    world.Resident { address with fields := address.fields ++ path } child := by
-  obtain ⟨root,whole,found,live,generation,contents,inside⟩ := resident
-  exact ⟨root,whole,found,live,generation,contents,inside.append located⟩
-
 theorem StorageBinding.HeldBy.root {world : World} {binding : StorageBinding} {owner : Identity}
     (valid : world.WellFormed) (held : binding.HeldBy world owner) :
     ∃ root, world.root binding.address = some root := by

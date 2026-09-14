@@ -304,4 +304,30 @@ theorem Temporary.worldTyped {program : Kernel.Program} {context : Context} {typ
 
 end Execution
 
+/-- Reference formation writes its existing destination and inserts a loan
+row; neither changes the storage frontier. -/
+theorem FormsLoan.nextRoot {purpose : LoanPurpose} {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {mode : Mutability} {region : Identity} {referent destination : Address}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after) :
+    after.nextRoot = before.nextRoot := by
+  cases borrowed with
+  | borrow _ _ _ _ _ _ _ _ _ _ written =>
+      obtain ⟨root,replacement,found,rfl⟩ := World.write_value_update written
+      rfl
+
+
+theorem FormsLoan.loan_origin {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
+    {authority mode region referent destination} {id : Identity} {loan : Loan}
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after)
+    (found : after.loans.get id = some loan) :
+    before.loans.get id = some loan ∨ loan.referent = referent := by
+  cases borrowed
+  by_cases same : id = before.nextLoan
+  · subst id
+    simp only [Table.get_set,Option.some.injEq] at found
+    subst loan
+    exact Or.inr rfl
+  · exact Or.inl (by simpa only [Table.get_set_other _ _ _ _ same] using found)
+
+
 end Glorious.Language

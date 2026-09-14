@@ -1178,6 +1178,13 @@ theorem Value.ReachableReference.worldReference {world : World} {address : Addre
   exact ⟨observed,resident,located,head⟩
 
 
+theorem World.Resident.nested {world : World} {address : Address} {value child : Value}
+    {path : List Nat} (resident : world.Resident address value) (located : ResidentAt value path child) :
+    world.Resident { address with fields := address.fields ++ path } child := by
+  obtain ⟨root,whole,found,live,generation,contents,inside⟩ := resident
+  exact ⟨root,whole,found,live,generation,contents,inside.append located⟩
+
+
 theorem World.Resident.field {world : World} {address : Address} {value child : Value}
     (resident : world.Resident address value) (member : some child ∈ value.fields) :
     ∃ nested, world.Resident nested child := by

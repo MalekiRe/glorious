@@ -278,10 +278,10 @@ retirement or exact-prefix exhaustion. Owned preparation's real loan/storage
 frame derives receiver compatibility; no prepared-world condition is assumed.
 `Admitted.enterStep` consumes the result in the actual non-tail machine step.
 The strict 220-job gate and general entry/step/receiver/exhaustion axiom audits
-pass with standard axioms only. Next: migrate `InvocationStart` and its real
-producers to this finite admission and derive proper-tail custody and safe
-caller cleanup. General source resource progress and task/frame consumers
-remain open; no full-tree conformance is claimed.
+pass with standard axioms only. `InvocationStart` and its real producers now
+consume this finite admission, with original proper-tail custody and cleanup
+admission as described below. General source resource progress and task/frame
+consumers remain open; no full-tree conformance is claimed.
 
 The unsafe caller-contract metadata boundary is now checked by the shared
 `BodyInventory`: attached contracts must name actual unsafe declarations, as
@@ -290,7 +290,7 @@ case; it does not discard predicates. The canonical declaration-selection
 proof is promoted to `Kernel` and reused. Destructor-handle privacy now consumes
 the actual `.destructor` loan purpose, and its real hook-entry consumer checks.
 The integrated `DropHandle` gate passes 221 jobs, with standard-axiom-only
-metadata and privacy audits. Original invocation admission still needs migration.
+metadata and privacy audits. Original invocation admission is now migrated below.
 
 Reference readiness exposed an actual modeling error: in the old producer, a
 general Lean derivation showed that a live parent loan with one inherited
@@ -335,12 +335,12 @@ the full finite entry product, including typed singleton readiness, the common
 resident coordinate filter, the actual positive storage request and the safe
 selected declaration's original caller contract.
 
-`InvocationStart` now carries `EntrySource.Admitted` for its actual recipe.
-The product also owns selected-declaration existence, so
-`InvocationStart.ordinary_step` derives a machine successor without an added
-entry/declaration/progress hypothesis. Isolated construction uses the same
-product and the existing ready-input root-bound theorem; the artificial
-headed-authority restriction and its module are removed.
+`InvocationStart` carries `EntrySource.Admitted` for its actual recipe and
+original cleanup admission for proper-tail tasks. The product owns selected-
+declaration existence, and `InvocationStart.step` derives either entry
+successor without an added entry/declaration/progress hypothesis. Isolated
+construction uses the same product and ready-input root-bound theorem; the
+artificial headed-authority restriction and its module are removed.
 The authority consumer chain is checked through ordinary/raw invocation,
 proper-tail caller-contract retention, real return binding, guarded relocation
 and dependent/custody release queues. Historical recording is separated from
@@ -447,10 +447,35 @@ by forbidding pending returns or assuming reflexive relinquishment.
 
 The ten-target cleanup/replay/content/freezing/input/pattern/Drop-dispatch/
 external-home/private/Drop-suspension gate passes 256 jobs. Twelve general
-audits use only standard Lean axioms. Next: produce returned-state custody,
-retry and private-root facts from source/task invariants; derive original
-entry and proper-tail admission, then close general task progress on that
-same dependency chain.
+audits use only standard Lean axioms. Original entry and proper-tail progress
+are now constructed below. Next: produce returned-state custody, retry and
+private-root facts and the original admission predicates from source/task
+invariants, then close general task progress on that dependency chain.
+
+The original proper-tail entry boundary is now closed. The finite erasure
+footprint and canonical `Value.AfterClearing` relation describe actual surviving
+values, including ancestor shells with moved-out fields. Admission checks only
+those residuals' original-world unsafe invariants and remaining observations;
+it does not require retaining custody for fields already moved into the callee.
+Passive graph framing needs original closure/restoration rather than permission
+for frozen references. Actual lending, raw handoff, clearing and finishing
+supply the composed frame, exact read preservation and restoration-loan origins
+for complete and physically exhausted entries.
+
+Original allocation-port coverage now derives actual caller custody discharge.
+Exact caller root selection survives fresh callee allocation and every value
+write. `CleanupAdmitted.enter_suspensible` derives residual and restoration
+target closure; the actual `World.RequestReturns` operation preserves it.
+`Admitted.tailStep` constructs the real proper-tail transition, including the
+scheduled custody/roots/region cleanup and inherited contracts, or exact physical
+exhaustion. `InvocationStart.step` covers every admitted entry, with cleanup
+requirements guarded by its original tail flag; isolated and Drop-hook
+producers are migrated. The 257-job integration gate and sixteen general axiom
+audits pass. Next: derive original entry/tail and returned-cleanup admission
+from source/task invariants and consume these constructors in general progress.
+Cancellation, remaining raw primitives and full semantic conformance are still
+open; no example suite or arbitrary after-world certificate is used.
+
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -510,14 +535,14 @@ ownership and the final physical write; it no longer assumes finishing in an
 arbitrary future world. The strict 73-job dependency gate passed and the
 endpoint uses only the standard Lean logical axioms.
 
-Next on this dependency chain: derive the finite original entry contract from
-source admission, migrate the actual `InvocationStart` producers, and establish
-proper-tail custody/suspension-safe cleanup. Fresh preparation, capture re-
-authoring, binding and receiver finishing now compose from caller-world facts
-in `EntrySource.Admitted.enterWorldAttempt`; `Admitted.enterStep` consumes this
-in the actual non-tail transition. Incoming resources remain checked at the
-original invocation, not its mutated prepared world, and all prepared input
-uniqueness and receiver compatibility are derived.
+Next on this dependency chain: derive the finite original entry and cleanup
+contracts from source/task invariants. Actual `InvocationStart` producers and
+proper-tail custody/suspension-safe cleanup are now integrated above. Fresh
+preparation, capture re-authoring, binding and receiver finishing compose from
+caller-world facts in `EntrySource.Admitted.enterWorldAttempt`; ordinary and
+proper-tail constructors consume that result. Incoming resources remain
+checked at the original invocation, not its mutated prepared world, and all
+prepared input uniqueness and receiver compatibility are derived.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains

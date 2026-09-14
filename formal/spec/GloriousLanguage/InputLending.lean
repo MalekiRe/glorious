@@ -1,5 +1,7 @@
 import GloriousLanguage.BorrowPreservation
 import GloriousLanguage.ReferencePersistence
+import GloriousLanguage.RootSelection
+import GloriousLanguage.LoanResourceRows
 
 /-! The common input binder's actual storage, permission and lease witnesses.
 Erased resources retain their real loan records through custody transfer; a
@@ -72,6 +74,30 @@ theorem LendsResident.wellFormed {program : RuntimeProgram} {before after : Worl
   cases lent with
   | owned => exact valid
   | lent _ _ _ allocated borrowed => exact borrowed.wellFormed (allocated.wellFormed valid)
+
+theorem LendsResident.loan_origin {program : RuntimeProgram} {before after : World}
+    {activation scope region address authority access lease result} {identity : Identity} {loan : Loan}
+    (lent : LendsResident program activation scope region before address authority access lease result after)
+    (found : after.loans.get identity = some loan) :
+    before.loans.get identity = some loan ∨ (access ≠ .owned ∧ loan.referent = address) := by
+  cases lent with
+  | owned => exact Or.inl found
+  | lent modes _ _ allocated formed =>
+      rcases formed.loan_origin found with original | referent
+      · exact Or.inl (by rw [allocated.loans] at original; exact original)
+      · refine Or.inr ⟨?_,referent⟩
+        rcases modes with ⟨rfl,_⟩ | ⟨rfl,_⟩ <;> simp
+
+
+theorem LendsResident.result_recorded {program : RuntimeProgram} {before after : World}
+    {activation scope region address authority access lease result}
+    (lent : LendsResident program activation scope region before address authority access lease result after)
+    (recorded : authority.Recorded before.loans) : result.Recorded after.loans := by
+  cases lent with
+  | owned => exact recorded
+  | lent _ _ _ _ formed =>
+      cases formed
+      exact ⟨_,Table.get_set _ _ _⟩
 
 theorem BindsInputAt.wellFormed {recipient : ClaimCustody} {program : RuntimeProgram} {before after : World}
     {activation scope region input binding}
@@ -286,6 +312,31 @@ theorem BindsInputsFor.lent_parent_exclusive_retained {recipient : ClaimCustody}
       exact ⟨current,atLater,shape2.trans shape1⟩
     · exact ih middleValid member retained
 
+theorem LendsResident.read {program : RuntimeProgram} {before after : World}
+    {activation scope region address authority access lease permission} {observed : Address}
+    (lent : LendsResident program activation scope region before address authority access lease permission after)
+    (valid : before.WellFormed) (frontier : observed.root < before.nextRoot) : after.read observed = before.read observed := by
+  cases lent with
+  | owned => rfl
+  | lent _ _ _ allocated formed =>
+      cases formed with
+      | borrow _ _ _ _ _ _ _ _ _ _ written =>
+          refine (World.write_disjoint written ?_).trans (allocated.read valid observed)
+          intro overlap
+          exact (Nat.ne_of_lt frontier) (overlap.1.symm.trans allocated.fresh_root.1)
+
+
+theorem LendsResident.nextRoot_le {program : RuntimeProgram} {before after : World}
+    {activation scope region address authority access lease permission}
+    (lent : LendsResident program activation scope region before address authority access lease permission after) :
+    before.nextRoot ≤ after.nextRoot := by
+  cases lent with
+  | owned => exact Nat.le_refl _
+  | lent _ _ _ allocated formed =>
+      rw [Glorious.Language.FormsLoan.nextRoot formed,allocated.fresh_root.2]
+      exact Nat.le_succ _
+
+
 theorem LendsResident.root_retained {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
     (valid : before.WellFormed)
@@ -465,6 +516,41 @@ theorem LendsResident.lease_owned {program : RuntimeProgram} {before after : Wor
       root.home = .temporary activation scope ∧ root.region = region ∧ witness.handle.fields = [] := by
   obtain ⟨witness,root,_,_,_,_,selected,_,whole,found,home,atRegion,_,_,_⟩ := lent.lease_origin borrowed
   exact ⟨witness,root,selected,found,home,atRegion,whole⟩
+
+theorem LendsResident.activationRoots {program : RuntimeProgram} {before after : World}
+    {activation scope region address authority access lease result} {owner : Identity} {kept roots : List Identity}
+    (lent : LendsResident program activation scope region before address authority access lease result after)
+    (valid : before.WellFormed) (selected : ActivationRoots before owner kept roots) (different : activation ≠ owner) :
+    ActivationRoots after owner kept roots := by
+  cases lent with
+  | owned => exact selected
+  | lent _ _ _ allocated formed =>
+      exact (allocated.activationRoots valid selected (by simp [HomeOwnedByActivation,different])).of_locations formed.locations
+
+theorem BindsInputAt.activationRoots {program : RuntimeProgram} {recipient : ClaimCustody} {before after : World}
+    {activation scope region : Identity} {input : InvocationInput} {binding : Binding} {owner : Identity} {kept roots : List Identity}
+    (bound : BindsInputAt program recipient activation scope region before input binding after)
+    (valid : before.WellFormed) (selected : ActivationRoots before owner kept roots) (different : activation ≠ owner) :
+    ActivationRoots after owner kept roots := by
+  cases bound with
+  | lent _ _ _ _ _ _ _ lent => exact lent.activationRoots valid selected different
+  | owned _ _ _ _ _ allocated moved =>
+      exact (allocated.activationRoots valid selected (by simp [HomeOwnedByActivation,different])).of_locations moved.locations
+  | storage _ _ _ claimed => cases claimed; exact selected
+  | guardedAllocation _ _ _ _ _ claimed => cases claimed; exact selected
+  | allocation _ _ _ _ moved => exact selected.of_locations (fun _ => by rw [Glorious.Language.TransfersAllocation.roots_eq moved])
+  | loan _ _ _ _ moved => exact selected.of_locations (fun _ => by rw [Glorious.Language.TransfersStorageLoan.roots_eq moved])
+
+theorem BindsInputsAttemptFor.activationRoots {program : RuntimeProgram} {recipient : ClaimCustody} {before after : World}
+    {activation scope region : Identity} {footprint : List Address} {inputs : List InvocationInput} {bindings : Environment}
+    {outcome : PreparationOutcome} {owner : Identity} {kept roots : List Identity}
+    (bound : BindsInputsAttemptFor program recipient activation scope region footprint before inputs bindings after outcome)
+    (valid : before.WellFormed) (selected : ActivationRoots before owner kept roots) (different : activation ≠ owner) :
+    ActivationRoots after owner kept roots := by
+  induction bound with
+  | nil | exhausted => exact selected
+  | cons _ first _ ih => exact ih (first.wellFormed valid) (first.activationRoots valid selected different)
+
 
 end Kernel
 

@@ -115,19 +115,6 @@ theorem FormsLoan.recorded {program : RuntimeProgram} {purpose : LoanPurpose} {b
   cases borrowed
   exact recorded.set _ _
 
-theorem FormsLoan.loan_origin {program : RuntimeProgram} {purpose : LoanPurpose} {before after : World}
-    {authority mode region referent destination} {id : Identity} {loan : Loan}
-    (borrowed : FormsLoan program purpose before authority mode region referent destination after)
-    (found : after.loans.get id = some loan) :
-    before.loans.get id = some loan ∨ loan.referent = referent := by
-  cases borrowed
-  by_cases same : id = before.nextLoan
-  · subst id
-    simp only [Table.get_set,Option.some.injEq] at found
-    subst loan
-    exact Or.inr rfl
-  · exact Or.inl (by simpa only [Table.get_set_other _ _ _ _ same] using found)
-
 theorem EndsLoan.homeExtension {program : RuntimeProgram} {before after : World} {id : Identity}
     (ended : EndsLoan program before id after) : before.HomeExtension after := by
   cases ended

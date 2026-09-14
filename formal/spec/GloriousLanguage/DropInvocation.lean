@@ -38,7 +38,7 @@ theorem LocalStep.hook_invocation_start {program : Kernel.Program} {host : Forei
   refine ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,enterTask,frames,
     ⟨inputsTyped,formals,afterControl,afterRegistry,afterCallbacks,
       { caller with unsafeAllowed := false },.supplied _,false,enterTask,rfl,Or.inl ⟨rfl,rfl,rfl⟩,
-      request.region_live,?_,admitted⟩⟩
+      request.region_live,?_,admitted,by intro impossible; cases impossible⟩⟩
   intro needsUnsafe
   have safe := selected.2.2.1.2.2.2
   cases safe.symm.trans needsUnsafe

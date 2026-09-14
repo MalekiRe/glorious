@@ -1548,16 +1548,21 @@ def World.CustodyHandedOff (world : World) (custody : ClaimCustody) : Prop :=
       successor.kind = .owning ∧ successor.referent = loan.referent ∧
       ∃ recipient, successor.custody = some recipient ∧ recipient ≠ custody
 
+/-- Relinquishment schedules the storage borrows of this custody for return;
+all other loan fields and every physical storage root remain unchanged. -/
+def World.RequestReturns (world : World) (custody : ClaimCustody) : World :=
+  { world with loans := world.loans.map fun entry =>
+      (entry.1,if entry.2.custody = some custody ∧ entry.2.kind = .storageBorrow then
+        { entry.2 with returnRequested := true } else entry.2) }
+
+
 /-- This is the resource analogue of scheduling ordinary input cleanup.
 It records actual relinquishment of this invocation's lent storage inputs.
 Dependent references can postpone loan completion, but owning obligations
 must already have been transferred or physically released. -/
 inductive RelinquishesCustody : World → ClaimCustody → World → Prop where
   | relinquish {before custody} : before.CustodyHandedOff custody →
-      RelinquishesCustody before custody
-        { before with loans := before.loans.map fun (identity,loan) =>
-          (identity,if loan.custody = some custody ∧ loan.kind = .storageBorrow then
-            { loan with returnRequested := true } else loan) }
+      RelinquishesCustody before custody (before.RequestReturns custody)
 
 /-- The actual resource handoff requests return when it relinquishes a lent
 input. A dependent outgoing reference can delay completion of that request. -/

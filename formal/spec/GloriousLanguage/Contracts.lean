@@ -3,7 +3,7 @@ import GloriousLanguage.ControlOrigin
 import GloriousLanguage.InvocationInputs
 import GloriousLanguage.LabelBoundary
 import GloriousLanguage.ForeignRuntimeSupport
-import GloriousLanguage.InputBatchProgress
+import GloriousLanguage.TailEntryProgress
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
 The meaning below is intentionally semantic; it does not claim that an
@@ -102,7 +102,8 @@ def InvocationStart (program : Kernel.Program) (host : Foreign.Model) (function 
     source.originalInputs function = inputs ∧ boundary.Entry state caller source inputs tail ∧
     caller.region ∈ state.world.liveRegions ∧
     (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) ∧
-    source.Admitted program state.world caller.region function
+    source.Admitted program state.world caller.region function ∧
+    (tail = true → ∃ roots, source.CleanupAdmitted program state.world function caller.activation roots)
 
 /-- Whole-program invocation is the isolated specialization of the same
 admission relation. It retains the original supplied-input entry convention. -/
@@ -119,26 +120,41 @@ theorem InvocationStart.isolated {program : Kernel.Program} {host : Foreign.Mode
     (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
     (admitted : (EntrySource.supplied inputs).Admitted program state.world caller.region function) :
     InitialInvocation program host function inputs state := by
-  refine ⟨typed,formals,control,registry,?_,caller,.supplied inputs,false,task,rfl,⟨rfl,frames,rfl⟩,region,allowed,admitted⟩
+  refine ⟨typed,formals,control,registry,?_,caller,.supplied inputs,false,task,rfl,⟨rfl,frames,rfl⟩,region,allowed,admitted,by intro impossible; cases impossible⟩
   constructor
   · simp only [State.CallbackControl,task,frames,Task.CallbackCovers,FramesCallbackCovers,and_self]
   · intro runtime member
     simp only [State.callbackRuntimes,task,frames,Task.callbackRuntimes,
       Foreign.AmbientRuntimes.nil,List.nil_append,List.not_mem_nil] at member
 
-/-- The actual non-tail invocation task has a machine successor from its
-finite original admission. Physical exhaustion is a real fatal transition,
-not a missing-layout fallback or an assumed successful entry. -/
-theorem InvocationStart.ordinary_step {program : Kernel.Program} {host : Foreign.Model}
-    {function : Function} {inputs : List InvocationInput} {boundary : InvocationBoundary}
-    {state : State} {caller : Execution.Context} {source : EntrySource}
-    (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
+theorem InvocationStart.caller_activation_bound {program : Kernel.Program} {host : Foreign.Model}
+    {function : Function} {inputs : List InvocationInput} {state : State} {caller : Execution.Context}
+    {source : EntrySource} {tail : Bool} {boundary : InvocationBoundary}
     (initial : InvocationStart program host function inputs boundary state)
-    (task : state.task = .enter caller function source false) :
+    (task : state.task = .enter caller function source tail) : caller.activation < state.nextActivation := by
+  have bounded := initial.2.2.1.activations.task
+  simpa only [task,Execution.Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bounded
+
+/-- Every admitted invocation task has an actual machine successor. Ordinary
+and proper-tail entry use the same original input admission, and either kind
+of physical exhaustion preserves the actual successful preparation prefix. -/
+theorem InvocationStart.step {program : Kernel.Program} {host : Foreign.Model}
+    {function : Function} {inputs : List InvocationInput} {boundary : InvocationBoundary} {state : State}
+    (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
+    (initial : InvocationStart program host function inputs boundary state) :
     ∃ event after, LocalStep program state event after := by
-  obtain ⟨actualCaller,actualSource,tail,entry,_,_,_,unsafeOk,admitted⟩ := initial.2.2.2.2.2
-  cases entry.symm.trans task
-  exact admitted.enterStep valid inventory initial.1.1 task unsafeOk
+  obtain ⟨caller,source,tail,task,_,entry,_,unsafeOk,admitted,tailCleanup⟩ := initial.2.2.2.2.2
+  cases tail with
+  | false => exact admitted.enterStep valid inventory initial.1.1 task unsafeOk
+  | true =>
+      obtain ⟨roots,cleanup⟩ := tailCleanup rfl
+      have different := (Nat.ne_of_lt (initial.caller_activation_bound task)).symm
+      cases boundary with
+      | isolated => cases entry.1
+      | caller outer ambient =>
+          rcases entry with ⟨impossible,_⟩ | ⟨_,regions,frames⟩
+          · cases impossible
+          · exact admitted.tailStep valid inventory initial.1.1 cleanup task unsafeOk different frames
 
 
 /-- The real prepared input binder consumes the same ordered formal/origin

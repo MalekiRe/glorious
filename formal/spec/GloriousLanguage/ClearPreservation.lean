@@ -169,4 +169,70 @@ theorem World.clear_worldTyped {program : Kernel.Program} {before after : World}
   have checked := World.clear_worldTypedWithOrigins typed permission written
   simpa only [Typing.WorldTyped,congrArg World.nextOwner (World.write_rest written)] using checked
 
+/-- The exact residual resident after a finite original clearing footprint.
+Every observation uses the canonical path lookup and shell; no second tree
+interpreter or post-entry world is part of this original-value relation. -/
+def Value.AfterClearing (original : Value) (address : Address) (cleared : List Address) (current : Value) : Prop :=
+  ∀ path,
+    ((∃ written ∈ cleared, written.Prefix { address with fields := address.fields ++ path }) → current.atPath path = none) ∧
+    ((∀ written ∈ cleared, ¬ written.Prefix { address with fields := address.fields ++ path }) →
+      (current.atPath path).map Value.shell = (original.atPath path).map Value.shell)
+
+/-- Actual erasures and unchanged outside shells produce the original-value
+residual consumed by cleanup admission, including partially cleared ancestors. -/
+theorem World.afterClearing_resident {before after : World} {cleared : List Address} {frontier : Identity}
+    {address : Address} {value : Value}
+    (absent : ∀ written ∈ cleared, after.read written = none)
+    (framed : ∀ observed, observed.root < frontier → (∀ written ∈ cleared, ¬ written.Prefix observed) →
+      (after.read observed).map Value.shell = (before.read observed).map Value.shell)
+    (bounded : address.root < frontier) (resident : after.Resident address value) :
+    ∃ original, before.Resident address original ∧ original.AfterClearing address cleared value := by
+  have stored := World.resident_iff_stores.mp resident
+  change after.read address = some value at stored
+  have clearedRead : ∀ observed, (∃ written ∈ cleared, written.Prefix observed) → after.read observed = none := by
+    rintro observed ⟨written,member,included⟩
+    obtain ⟨suffix,rfl⟩ := Address.prefix_extension included
+    simp [World.read_append,absent written member]
+  have outside : ∀ written ∈ cleared, ¬ written.Prefix address := by
+    intro written member included
+    have missing := clearedRead address ⟨written,member,included⟩
+    rw [stored] at missing
+    cases missing
+  have shape := framed address bounded outside
+  rw [stored] at shape
+  obtain ⟨original,source,_⟩ := Option.map_eq_some_iff.mp shape.symm
+  refine ⟨original,World.resident_iff_stores.mpr source,?_⟩
+  intro path
+  constructor
+  · intro touched
+    simpa [World.read_append,stored] using clearedRead _ touched
+  · intro untouched
+    simpa [World.read_append,stored,source] using
+      framed { address with fields := address.fields ++ path } bounded untouched
+
+
+theorem Value.AfterClearing.nested {original current resident : Value} {address : Address} {cleared : List Address}
+    {path : List Nat} (pruned : original.AfterClearing address cleared current) (located : ResidentAt current path resident) :
+    ∃ prior, ResidentAt original path prior ∧ resident.shell = prior.shell ∧
+      prior.AfterClearing { address with fields := address.fields ++ path } cleared resident := by
+  have currentAt := ResidentAt.iff_atPath.mp located
+  have outside : ∀ written ∈ cleared, ¬ written.Prefix { address with fields := address.fields ++ path } := by
+    intro written member included
+    have absent := (pruned path).1 ⟨written,member,included⟩
+    rw [currentAt] at absent
+    cases absent
+  have shape := (pruned path).2 outside
+  rw [currentAt] at shape
+  obtain ⟨prior,priorAt,same⟩ := Option.map_eq_some_iff.mp shape.symm
+  refine ⟨prior,ResidentAt.iff_atPath.mpr priorAt,same.symm,?_⟩
+  intro suffix
+  constructor
+  · intro touched
+    have absent := (pruned (path ++ suffix)).1 (by simpa only [List.append_assoc] using touched)
+    simpa [Value.atPath_append,currentAt] using absent
+  · intro untouched
+    have shape := (pruned (path ++ suffix)).2 (by simpa only [List.append_assoc] using untouched)
+    simpa [Value.atPath_append,currentAt,priorAt] using shape
+
+
 end Glorious.Language

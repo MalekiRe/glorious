@@ -1,5 +1,6 @@
 import GloriousLanguage.BorrowPreservation
 import GloriousLanguage.ResidentMutationPreservation
+import GloriousLanguage.InputLending
 
 /-! The common receiver loan boundary. Every lent invocation obtains child
 loan authority; returning consumes the handle before restoring its parent. -/
@@ -235,5 +236,203 @@ theorem FinishesEntry.references {before after : World} {source : EntrySource}
   cases finished with
   | supplied => exact referenced
   | resident finished | contextual finished => exact finished.references referenced
+
+theorem PreparesEntryAttempt.wellFormed {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
+    (well : before.WellFormed) : after.WellFormed := by
+  cases prepared with
+  | supplied => exact well
+  | resident _ _ lends _ consumes =>
+    exact ConsumesReceiver.wellFormed consumes (Kernel.LendsResident.wellFormed lends well)
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+    exact ConsumesAvailability.wellFormed consumesAvailability
+      (ConsumesReceiver.wellFormed consumes
+        (Kernel.LendsResident.wellFormed witnessLends (Kernel.LendsResident.wellFormed receiverLends well)))
+  | residentExhausted | contextualReceiverExhausted => exact well
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact lends.wellFormed well
+
+
+theorem ConsumesReceiver.nextRoot {before after : World} {address : Address} {authority : Authority} {access : Access}
+    (consumed : ConsumesReceiver before address authority access after) : after.nextRoot = before.nextRoot := by
+  cases consumed with
+  | lent => rfl
+  | owned _ _ _ _ written =>
+      have same := congrArg World.nextRoot (World.write_rest written)
+      exact same
+
+theorem ConsumesAvailability.nextRoot {before after : World} {address : Address} {authority : Authority}
+    {identity : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority identity access after) : after.nextRoot = before.nextRoot := by
+  cases consumed with
+  | lent => rfl
+  | owned _ _ _ _ _ _ written =>
+      have same := congrArg World.nextRoot (World.write_rest written)
+      exact same
+
+theorem PreparesEntryAttempt.nextRoot_le {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome) :
+    before.nextRoot ≤ after.nextRoot := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => exact Nat.le_refl _
+  | resident _ _ lends _ consumes => simpa only [consumes.nextRoot] using Kernel.LendsResident.nextRoot_le lends
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      simpa only [consumesAvailability.nextRoot,consumes.nextRoot] using
+        Nat.le_trans (Kernel.LendsResident.nextRoot_le receiverLends) (Kernel.LendsResident.nextRoot_le witnessLends)
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact lends.nextRoot_le
+
+theorem ConsumesReceiver.read_shell {before after : World} {receiver observed : Address}
+    {authority : Authority} {access : Access} (consumed : ConsumesReceiver before receiver authority access after)
+    (outside : access = .owned → ¬ receiver.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases consumed with
+  | lent => rfl
+  | owned _ _ _ _ written => exact World.write_read_shell written (outside rfl)
+
+theorem ConsumesAvailability.read_shell {before after : World} {address observed : Address} {authority : Authority}
+    {identity : Identity} {access : Access} (consumed : ConsumesAvailability before address authority identity access after)
+    (outside : access = .owned → ¬ address.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases consumed with
+  | lent => rfl
+  | owned _ _ _ _ _ _ written =>
+      have framed := World.write_read_shell written (outside rfl)
+      exact framed
+
+theorem ConsumesAvailability.owned_cleared {before after : World} {address : Address} {authority : Authority}
+    {identity : Identity} (consumed : ConsumesAvailability before address authority identity .owned after) :
+    after.read address = none := by
+  cases consumed with
+  | lent different => exact False.elim (different rfl)
+  | owned _ _ _ _ _ _ written =>
+      have erased := World.write_read_inside written []
+      simpa [World.read,World.root] using erased
+
+theorem FinishesReceiver.read_shell {before after : World} {receiver : ResolvedPlace} {access : Access} {observed : Address}
+    (finished : FinishesReceiver before receiver access after) (outside : access = .owned → ¬ receiver.address.Prefix observed) :
+    (after.read observed).map Value.shell = (before.read observed).map Value.shell := by
+  cases finished with
+  | lent => rfl
+  | owned _ _ _ _ _ _ written => exact World.write_read_shell written (outside rfl)
+
+theorem FinishesReceiver.read_none {before after : World} {receiver : ResolvedPlace} {access : Access} {observed : Address}
+    (finished : FinishesReceiver before receiver access after) (absent : before.read observed = none) : after.read observed = none := by
+  cases finished with
+  | lent => exact absent
+  | owned _ _ _ _ _ _ written => exact World.clear_absent written absent
+
+theorem FinishesReceiver.owned_cleared {before after : World} {receiver : ResolvedPlace}
+    (finished : FinishesReceiver before receiver .owned after) : after.read receiver.address = none := by
+  cases finished with
+  | lent different => exact False.elim (different rfl)
+  | owned _ _ _ _ _ _ written =>
+      have erased := World.write_read_inside written []
+      simpa using erased
+
+theorem FinishesEntry.read_none {before after : World} {source : EntrySource} {observed : Address}
+    (finished : FinishesEntry before source after) (absent : before.read observed = none) : after.read observed = none := by
+  cases finished with
+  | supplied => exact absent
+  | resident finished | contextual finished => exact finished.read_none absent
+
+
+theorem ConsumesAvailability.read_outside {before after : World} {address observed : Address}
+    {authority : Authority} {identity : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority identity access after)
+    (outside : access = .owned → ¬ address.Overlaps observed) : after.read observed = before.read observed := by
+  cases consumed with
+  | lent => rfl
+  | owned _ _ _ _ _ _ written =>
+      have same := World.write_disjoint written (outside rfl)
+      exact same
+
+theorem FinishesReceiver.read_outside {before after : World} {receiver : ResolvedPlace}
+    {access : Access} {observed : Address} (finished : FinishesReceiver before receiver access after)
+    (outside : access = .owned → ¬ receiver.address.Overlaps observed) : after.read observed = before.read observed := by
+  cases finished with
+  | lent => rfl
+  | owned _ _ _ _ _ _ written => exact World.write_disjoint written (outside rfl)
+
+theorem FinishesEntry.read_outside {before after : World} {source : EntrySource} {observed : Address}
+    (finished : FinishesEntry before source after)
+    (outside : ∀ receiver, source.ownedReceiver = some receiver → ¬ receiver.address.Overlaps observed) :
+    after.read observed = before.read observed := by
+  cases finished with
+  | supplied => rfl
+  | resident finished | contextual finished =>
+      exact finished.read_outside (fun owned => outside _ (by simp [EntrySource.ownedReceiver,owned]))
+
+theorem PreparesEntryAttempt.read_outside {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput}
+    {outcome : Kernel.PreparationOutcome} {observed : Address}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
+    (valid : before.WellFormed) (frontier : observed.root < before.nextRoot)
+    (outside : ∀ written ∈ source.clearedStorage function, ¬ written.Overlaps observed) :
+    after.read observed = before.read observed := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => rfl
+  | resident _ _ lends _ consumes =>
+      exact (consumes.read (fun owned contains => outside _ (by
+        simp [EntrySource.clearedStorage,EntrySource.ownedReceiver,owned]) contains.overlaps.symm)).trans
+        (Kernel.LendsResident.read lends valid frontier)
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      have middleWell := Kernel.LendsResident.wellFormed receiverLends valid
+      have middleBound := Nat.lt_of_lt_of_le frontier (Kernel.LendsResident.nextRoot_le receiverLends)
+      exact ((consumesAvailability.read_outside (fun owned => outside _ (by
+        simp [EntrySource.clearedStorage,owned]))).trans
+        ((consumes.read (fun owned contains => outside _ (by
+          simp [EntrySource.clearedStorage,EntrySource.ownedReceiver,owned]) contains.overlaps.symm)).trans
+          (Kernel.LendsResident.read witnessLends middleWell middleBound))).trans
+        (Kernel.LendsResident.read receiverLends valid frontier)
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact Kernel.LendsResident.read lends valid frontier
+
+
+theorem PreparesEntryAttempt.loan_origin {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome}
+    {identity : Identity} {loan : Loan}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
+    (found : after.loans.get identity = some loan) :
+    before.loans.get identity = some loan ∨ ∃ address ∈ source.lentStorage, loan.referent.root = address.root := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => exact Or.inl found
+  | resident _ _ lends _ consumes =>
+      rw [consumes.loans] at found
+      rcases Kernel.LendsResident.loan_origin lends found with original | ⟨borrowed,referent⟩
+      · exact Or.inl original
+      · refine Or.inr ⟨_,?_,congrArg Address.root referent⟩
+        simp [EntrySource.lentStorage,borrowed]
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      rw [consumesAvailability.loans,consumes.loans] at found
+      rcases Kernel.LendsResident.loan_origin witnessLends found with middle | ⟨borrowed,referent⟩
+      · rcases Kernel.LendsResident.loan_origin receiverLends middle with original | ⟨borrowed,referent⟩
+        · exact Or.inl original
+        · refine Or.inr ⟨_,?_,congrArg Address.root referent⟩
+          simp [EntrySource.lentStorage,borrowed]
+      · refine Or.inr ⟨_,?_,congrArg Address.root referent⟩
+        simp [EntrySource.lentStorage,borrowed]
+  | contextualWitnessExhausted _ _ _ _ lends _ =>
+      rcases Kernel.LendsResident.loan_origin lends found with original | ⟨borrowed,referent⟩
+      · exact Or.inl original
+      · refine Or.inr ⟨_,?_,congrArg Address.root referent⟩
+        simp [EntrySource.lentStorage,borrowed]
+
+
+theorem PreparesEntryAttempt.activationRoots {program : Kernel.Program} {callee : Context} {function : Kernel.Function}
+    {before after : World} {source : EntrySource} {inputs : List Kernel.InvocationInput} {outcome : Kernel.PreparationOutcome}
+    {owner : Identity} {kept roots : List Identity}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome)
+    (valid : before.WellFormed) (selected : Kernel.ActivationRoots before owner kept roots) (different : callee.activation ≠ owner) :
+    Kernel.ActivationRoots after owner kept roots := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => exact selected
+  | resident _ _ lends _ consumes =>
+      exact (Kernel.LendsResident.activationRoots lends valid selected different).of_locations consumes.locations
+  | contextual _ _ _ _ receiverLends witnessLends _ consumes consumesAvailability =>
+      have initial := Kernel.LendsResident.activationRoots receiverLends valid selected different
+      have middle := Kernel.LendsResident.activationRoots witnessLends (Kernel.LendsResident.wellFormed receiverLends valid) initial different
+      exact (middle.of_locations consumes.locations).of_locations consumesAvailability.locations
+  | contextualWitnessExhausted _ _ _ _ lends _ => exact Kernel.LendsResident.activationRoots lends valid selected different
+
 
 end Glorious.Language.Execution

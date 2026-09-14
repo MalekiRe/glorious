@@ -553,6 +553,18 @@ def EntrySource.originalInputs (function : Function) : EntrySource → List Invo
   | .resident receiver access arguments =>
       ResidentCaptureInputs receiver.address receiver.authority access function.captures ++ arguments
 
+/-- Original storage actually erased by a completed entry: the owned
+contextual witness, common owned resident inputs, then the owned receiver.
+Parent and child entries may coexist; canonical prefix lookup determines the
+surviving residual rather than a second source-tree traversal. -/
+def EntrySource.clearedStorage (function : Function) (source : EntrySource) : List Address :=
+  (match source with
+    | .contextual _ _ witness .owned _ => [witness.address]
+    | _ => []) ++
+  (source.originalInputs function).flatMap InvocationInput.clearedStorage ++
+  source.ownedReceiver.toList.map (·.address)
+
+
 def CallableReceiver (program : Kernel.Program) (world : World) (address : Address) (authority : Authority) (access : Access)
     (id : DeclId) (arguments : List Term) : Prop :=
   ∃ value, world.Stores address value ∧ value.Initialized ∧ value.head = .callable id arguments ∧

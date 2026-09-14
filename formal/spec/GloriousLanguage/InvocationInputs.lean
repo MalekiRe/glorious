@@ -102,4 +102,51 @@ theorem PreparesEntry.formals {program : Kernel.Program} {context : Context} {fu
   simp only [List.filterMap_map,Function.comp_def] at preserved
   exact preserved.trans ((source.originalInputs_formals function).mpr formals)
 
+theorem PreparesEntry.clearedStorage {program : Kernel.Program} {context : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    (prepared : PreparesEntry program context function before source inputs after) :
+    inputs.flatMap InvocationInput.clearedStorage =
+      (source.originalInputs function).flatMap InvocationInput.clearedStorage := by
+  exact congrArg List.flatten (prepared.map_inputs InvocationInput.clearedStorage (by intros; rfl))
+
+
+/-- Preparation changes only resident capture authorities. Every erased port
+retains its complete original value, in both directions. -/
+theorem PreparesEntry.erased_inputs {program : Kernel.Program} {context : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput} {input : InvocationInput}
+    (prepared : PreparesEntry program context function before source inputs after)
+    (erased : ¬ input.formal.IsResident) : input ∈ inputs ↔ input ∈ source.originalInputs function := by
+  have absent (address : Address) (authority : Authority) (access : Access) :
+      ¬ input ∈ ResidentCaptureInputs address authority access function.captures := by
+    intro member
+    obtain ⟨⟨localSlot,index⟩,_,same⟩ := List.mem_map.mp member
+    subst input
+    exact erased trivial
+  cases prepared with
+  | supplied | contextual => rfl
+  | resident _ _ _ captures _ =>
+      rw [captures.1]
+      simp only [EntrySource.originalInputs,List.mem_append,absent,false_or]
+
+
+theorem PreparesEntry.lent_root {program : Kernel.Program} {context : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput} {input : InvocationInput}
+    (prepared : PreparesEntry program context function before source inputs after)
+    (member : input ∈ inputs) (borrowed : input.access ≠ .owned) :
+    ∃ address ∈ source.lentStorage, input.storage.root = address.root := by
+  cases prepared with
+  | supplied =>
+      exact ⟨input.storage,List.mem_flatMap.mpr ⟨input,member,by simp [InvocationInput.lentStorage,borrowed]⟩,rfl⟩
+  | contextual =>
+      refine ⟨input.storage,List.mem_append.mpr (Or.inr ?_),rfl⟩
+      exact List.mem_flatMap.mpr ⟨input,member,by simp [InvocationInput.lentStorage,borrowed]⟩
+  | @resident receiver access arguments id instanceArguments lease authority lent captures after _ _ _ capturesProof _ =>
+      rcases List.mem_append.mp member with capture | argument
+      · rw [capturesProof.1] at capture
+        obtain ⟨⟨localSlot,index⟩,_,rfl⟩ := List.mem_map.mp capture
+        exact ⟨receiver.address,by simp [EntrySource.lentStorage,borrowed],rfl⟩
+      · refine ⟨input.storage,List.mem_append.mpr (Or.inr ?_),rfl⟩
+        exact List.mem_flatMap.mpr ⟨input,argument,by simp [InvocationInput.lentStorage,borrowed]⟩
+
+
 end Glorious.Language.Execution

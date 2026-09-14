@@ -1096,4 +1096,40 @@ theorem World.ResourcesClosed.relinquished {program : RuntimeProgram} {before af
   exact ⟨resources.frame_batch batch framed,restored.frame_batch batch framed⟩
 
 
+theorem Suspensible.relinquished {program : RuntimeProgram} {before after : World}
+    {custody : ClaimCustody} {roots : List Identity} (ready : Suspensible program before roots)
+    (relinquished : RelinquishesCustody before custody after) : Suspensible program after roots := by
+  have reads : ∀ address, after.read address = before.read address := by cases relinquished; intro; rfl
+  have residents : ∀ address value, after.Resident address value ↔ before.Resident address value := by
+    cases relinquished
+    intro address value
+    rfl
+  constructor
+  · intro identity loan found live kind relevant
+    obtain ⟨original,originalAt,shape⟩ := relinquished.reflected found
+    have referent := congrArg Loan.referent shape
+    have alive := congrArg Loan.live shape
+    have kinds := congrArg Loan.kind shape
+    change loan.referent = original.referent at referent
+    change loan.live = original.live at alive
+    change loan.kind = original.kind at kinds
+    have originalRelevant : original.referent.root ∈ roots ∨
+        ∃ address value, address.root ∈ roots ∧ before.Resident address value ∧ value.head = .reference identity := by
+      rcases relevant with included | ⟨address,value,included,resident,head⟩
+      · exact Or.inl (by rw [← referent]; exact included)
+      · exact Or.inr ⟨address,value,included,(residents address value).mp resident,head⟩
+    have prior := ready.1 identity original originalAt (alive ▸ live) (kinds ▸ kind) originalRelevant
+    rw [referent]
+    obtain ⟨value,stored,initialized⟩ := prior.1
+    exact ⟨⟨value,(reads _).trans stored,initialized⟩,World.ResourcesClosed.relinquished relinquished prior.2⟩
+  · intro address value included resident
+    have original := (residents address value).mp resident
+    have closed : before.ResourcesClosed program address := by
+      intro current stored
+      have same : current = value := Option.some.inj (stored.symm.trans (World.resident_iff_stores.mp original))
+      subst current
+      exact ready.2 address value included original
+    exact World.ResourcesClosed.relinquished relinquished closed value (World.resident_iff_stores.mp resident)
+
+
 end Glorious.Language

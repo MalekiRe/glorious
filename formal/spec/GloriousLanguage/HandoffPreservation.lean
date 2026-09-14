@@ -1,5 +1,6 @@
 import GloriousLanguage.AllocationFraming
 import GloriousLanguage.OrderedHandoff
+import GloriousLanguage.AllocationPreservation
 
 /-! Ordered handoff preservation follows the actual temporary allocation and
 clear/install producer. The original footprint protects earlier outputs through
@@ -8,11 +9,8 @@ namespace Glorious.Language
 
 theorem Value.SupportFramed.trans {before middle after : World} {value : Value}
     (loans : middle.loans = before.loans) (first : value.SupportFramed before middle)
-    (last : value.SupportFramed middle after) : value.SupportFramed before after := by
-  intro address supported
-  have middle := (Value.Support.frame loans first).mp supported
-  exact ⟨(last address middle).1.trans (first address supported).1,
-    (last address middle).2.trans (first address supported).2⟩
+    (last : value.SupportFramed middle after) : value.SupportFramed before after :=
+  Value.SupportFramed.trans_observed (fun _ _ _ _ => by rw [loans]) first last
 
 theorem Transfers.supportFramed_of_outside {program : RuntimeProgram} {before after : World}
     {authority : Authority} {source destination : Address} {value : Value}
@@ -36,12 +34,6 @@ theorem Transfers.nextRoot {program : RuntimeProgram} {before after : World}
       obtain ⟨_,_,_,rfl⟩ := World.write_value_update install
       rfl
 
-theorem Allocates.fresh_root {program : Program} {before after : World}
-    {home region type layout mutable address}
-    (allocated : Allocates program before home region type layout mutable address after) :
-    address.root = before.nextRoot ∧ after.nextRoot = before.nextRoot + 1 := by
-  cases allocated
-  exact ⟨rfl,rfl⟩
 
 theorem Allocates.owner_permitted {program : Program} {before after : World}
     {home region type layout mutable address}
@@ -93,7 +85,7 @@ theorem Protect.supportFramed {program : Kernel.Program} {context : Context} {be
     (ready : value.ResourcesAccessible program before access)
     (outside : value.SupportOutside before source) : value.SupportFramed before after := by
   obtain ⟨_,allocatedWorld,_,⟨_,allocated⟩,moved⟩ := kept
-  have framed := allocated.supportFramed valid ready
+  have framed := allocated.supportFramed valid ready.1 ready.2.1
   have fresh := ready.supportOutside_fresh valid (Nat.le_of_eq allocated.fresh_root.1.symm)
   have sourceFrame : value.SupportOutside allocatedWorld source := by
     intro address supported

@@ -188,4 +188,112 @@ theorem TransfersStorageLoan.rows {recipient : ClaimCustody} {before after : Wor
   | @shared backing identity loan atPlace parent found live kind mode referent =>
       exact Or.inl rfl
 
+/-- The custody effect of an invocation input: original rows remain exact
+except for transfer to its recipient. A different custody receives no new
+rows and no rewritten row. This composes the real row producers below. -/
+structure World.CustodyTransferFrame (before after : World) (recipient : ClaimCustody) : Prop where
+  rows : ∀ id loan, before.loans.get id = some loan →
+    ∃ current, after.loans.get id = some current ∧ (current = loan ∨ current = { loan with custody := some recipient })
+  outside : ∀ id loan custody, recipient ≠ custody → after.loans.get id = some loan →
+    loan.custody = some custody → before.loans.get id = some loan
+
+theorem World.CustodyTransferFrame.of_loans {before after : World} {recipient : ClaimCustody}
+    (loans : after.loans = before.loans) : before.CustodyTransferFrame after recipient :=
+  ⟨fun _ loan found => ⟨loan,by simpa only [loans] using found,Or.inl rfl⟩,
+    fun _ _ _ _ found _ => by simpa only [loans] using found⟩
+
+theorem World.CustodyTransferFrame.trans {before middle after : World} {recipient : ClaimCustody}
+    (first : before.CustodyTransferFrame middle recipient) (last : middle.CustodyTransferFrame after recipient) :
+    before.CustodyTransferFrame after recipient := by
+  refine ⟨?_,fun id loan custody different found held =>
+    first.outside id loan custody different (last.outside id loan custody different found held) held⟩
+  intro id loan found
+  obtain ⟨current,selected,change⟩ := first.rows id loan found
+  obtain ⟨final,atFinal,ending⟩ := last.rows id current selected
+  refine ⟨final,atFinal,?_⟩
+  rcases change with rfl | rfl <;> rcases ending with rfl | rfl
+  · exact Or.inl rfl
+  all_goals exact Or.inr rfl
+
+/-- Reference formation has no raw custodian; fresh raw claims belong only to
+the actual recipient. The original frontier proves that neither replaces a row. -/
+theorem World.CustodyTransferFrame.of_fresh {before after : World} {recipient : ClaimCustody} {inserted : Loan}
+    (valid : before.WellFormed) (rows : after.loans = before.loans.set before.nextLoan inserted)
+    (custody : inserted.custody = none ∨ inserted.custody = some recipient) :
+    before.CustodyTransferFrame after recipient := by
+  refine ⟨?_,?_⟩
+  · intro id loan found
+    exact ⟨loan,by rw [rows,Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid found))]; exact found,Or.inl rfl⟩
+  · intro id loan other different found held
+    by_cases same : id = before.nextLoan
+    · subst id
+      have equal : inserted = loan := by simpa only [rows,Table.get_set,Option.some.injEq] using found
+      subst loan
+      rcases custody with absent | received
+      · rw [absent] at held; cases held
+      · exact False.elim (different (Option.some.inj (received.symm.trans held)))
+    · simpa only [rows,Table.get_set_other _ _ _ _ same] using found
+
+theorem CustodyTransferRow.frame {before after : World} {identity : Identity} {recipient : ClaimCustody} {original : Loan}
+    (transfer : CustodyTransferRow before after identity recipient original) : before.CustodyTransferFrame after recipient := by
+  refine ⟨?_,?_⟩
+  · intro id loan found
+    by_cases same : id = identity
+    · subst id
+      have equal : loan = original := Option.some.inj (found.symm.trans transfer.found)
+      subst loan
+      exact ⟨_,by rw [transfer.rows]; exact Table.get_set _ _ _,Or.inr rfl⟩
+    · exact ⟨loan,by rw [transfer.rows,Table.get_set_other _ _ _ _ same]; exact found,Or.inl rfl⟩
+  · intro id loan other different found held
+    by_cases same : id = identity
+    · subst id
+      have equal : { original with custody := some recipient } = loan := by
+        simpa only [transfer.rows,Table.get_set,Option.some.injEq] using found
+      subst loan
+      exact False.elim (different (Option.some.inj held))
+    · simpa only [transfer.rows,Table.get_set_other _ _ _ _ same] using found
+
+
+theorem World.CustodyTransferFrame.retained {before after : World} {recipient : ClaimCustody} {identity : Identity} {loan : Loan}
+    (frame : before.CustodyTransferFrame after recipient) (found : before.loans.get identity = some loan) :
+    ∃ current, after.loans.get identity = some current ∧ current.permissionState = loan.permissionState := by
+  obtain ⟨current,selected,change⟩ := frame.rows identity loan found
+  refine ⟨current,selected,?_⟩
+  rcases change with rfl | rfl <;> rfl
+
+/-- An original recorded parent chain cannot gain an ancestor when entry adds
+fresh descendants or transfers custody. The source parent graph supplies the
+recursive row witnesses; no arbitrary post-world ancestry is trusted. -/
+theorem World.CustodyTransferFrame.ancestor_before {before after : World} {recipient : ClaimCustody}
+    {ancestor descendant : Identity} (frame : before.CustodyTransferFrame after recipient)
+    (parents : before.LoanParents) (known : ∃ loan, before.loans.get descendant = some loan)
+    (related : AncestorLoan after ancestor descendant) : AncestorLoan before ancestor descendant := by
+  induction related with
+  | refl => exact .refl
+  | @parent parent child loan found assigned _ ih =>
+      obtain ⟨original,selected⟩ := known
+      obtain ⟨current,currentAt,shape⟩ := frame.retained selected
+      have equal : current = loan := Option.some.inj (currentAt.symm.trans found)
+      have parentEq := congrArg Loan.parent shape
+      change current.parent = original.parent at parentEq
+      have originalParent : original.parent = some parent := parentEq.symm.trans ((congrArg Loan.parent equal).trans assigned)
+      obtain ⟨parentLoan,parentAt,_⟩ := parents child original parent selected originalParent
+      exact .parent selected originalParent (ih ⟨parentLoan,parentAt⟩)
+
+
+theorem World.CustodyTransferFrame.recorded {before after : World} {recipient : ClaimCustody} {authority : Authority}
+    (frame : before.CustodyTransferFrame after recipient) (recorded : authority.Recorded before.loans) :
+    authority.Recorded after.loans :=
+  recorded.transport (fun identity loan found =>
+    let ⟨current,selected,_⟩ := frame.rows identity loan found
+    ⟨current,selected⟩)
+
+theorem TransfersAllocation.roots_eq {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (moved : TransfersAllocation recipient before place after) :
+    after.roots = before.roots := by cases moved; rfl
+
+theorem TransfersStorageLoan.roots_eq {recipient : ClaimCustody} {before after : World}
+    {place : ResolvedPlace} (moved : TransfersStorageLoan recipient before place after) :
+    after.roots = before.roots := by cases moved <;> rfl
+
 end Glorious.Language

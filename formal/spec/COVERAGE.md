@@ -246,8 +246,8 @@ source-derived execution progress. Original source readiness, actual
 receiver/witness preparation, original-world incoming-resource agreement, prepared-state
 batch compatibility and receiver fresh-row compatibility remain explicit
 admission premises of that endpoint; separate batch framing is now derived.
-Whole preparation and ordinary entry composition from finite original-world
-admission are proved below. Source-derived admission, proper-tail cleanup and
+Whole preparation, ordinary entry and proper-tail composition from finite
+original-world admission are proved below. Source-derived admission and
 whole-machine progress remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
@@ -412,10 +412,10 @@ The private-slot proof transports the original source footprint through
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. The existing `InvocationStart` admission still needs the
-finite original entry contract; proper-tail custody/suspension-safe cleanup,
-general source admission and task/frame integration remain open. No full-tree
-success is claimed; preserved example modules were not run.
+standard axioms. `InvocationStart` now consumes the finite original entry and
+proper-tail cleanup contracts below. General source admission and task/frame
+integration remain open. No full-tree success is claimed; preserved example
+modules were not run.
 
 The shared `BodyInventory` now checks `RuntimeProgram.UnsafeContractsValid`:
 unsafe caller contracts belong to actual unsafe function declarations (§15.1).
@@ -456,10 +456,11 @@ formation, temporary and actual-step theorem audits use standard axioms only.
 Original source readiness and prospective-row view compatibility are explicit
 finite pre-state requirements. The actual hook product now also constructs
 typed/common formal coordinates, its real positive allocation request and
-original safe caller contract. `InvocationStart` carries this same finite
-`EntrySource.Admitted`; `ordinary_step` produces the real successor without
-an extra declaration or intermediate-world admission premise. The isolated
-producer uses its original input records and the canonical root-bound theorem.
+original safe caller contract. `InvocationStart` carries this finite
+`EntrySource.Admitted` and original proper-tail cleanup admission; `step`
+produces the real successor without an extra declaration or intermediate-world
+admission premise. The isolated producer uses original input records and the
+canonical root-bound theorem.
 
 Control authority preservation is migrated across ordinary entry, proper-tail
 caller-contract retention, raw return bindings, guarded relocation and actual
@@ -504,8 +505,8 @@ The Drop theorem factors arbitrary ambient runs up to the first normal return
 while preserving the private prefix. Handoff, copy, effect, host, invocation
 and Drop audits use only standard axioms. Finite original handoff evidence and
 selected Drop admission remain required; this is not a proof of body progress
-or termination from world typing. Original source-fact production, proper-tail
-progress and whole-task progress remain open.
+or termination from world typing. Original source-fact production and
+whole-task progress remain open.
 
 External cleanup separation now follows the same terminal-aware contract.
 Capture cannot create an exterior home; restoration reads the actual saved
@@ -549,8 +550,36 @@ resident carriers are preserved; no arbitrary ended-loan permission or whole
 loan-table equality is assumed. The combined ten-target cleanup/replay/input/
 pattern/private/Drop gate passes 256 jobs, with twelve general audits using
 only standard axioms. Producing returned-state private-root and custody/retry
-admission from source/task invariants remains open, as do proper-tail replay
-and whole-task progress.
+admission from source/task invariants remains open, as do cancellation and
+whole-task progress.
+
+Proper-tail entry now has original-world admission and a constructed machine
+successor. `EntrySource.clearedStorage` records the actual receiver, witness and
+owned-input erasures; `Value.AfterClearing` observes exact residual shells and
+field holes through canonical path lookup. Actual entry proves that every
+surviving old resident is such a residual. Its remaining graph is a subgraph of
+the original one; a fully moved field contributes no surviving obligation.
+`EntrySource.CleanupAdmitted` checks residual unsafe invariants and finite
+claim/custody/support compatibility in the original world. It also checks the
+original caller root selection, custody-port coverage, relevant restoration
+targets and lent-storage separation. No future-world readiness, field-insensitive
+invariant law or permission for a frozen reference is assumed.
+
+The real common binder transfers every covered owning obligation, including
+guarded child claims. Preparation preserves complete erased inputs and creates
+only its actual receiver/capture authorities. The composed entry frame covers
+both physical failure kinds; restoration-loan origins, exact protected reads
+and ordered root selection come from the actual producers. Surviving residents
+and caller-relevant referents are closed after entry; real custody relinquishment
+retains that `Suspensible` result. `EntrySource.Admitted.tailStep` constructs
+`LocalStep.enterTail` or the exhausted prefix. `InvocationStart.step` replaces
+the non-tail-only consumer, with original cleanup admission guarded by the real
+tail flag. Isolated and Drop-hook producers are migrated. The integrated
+invocation/cleanup/replay/content/private gate passes 257 jobs; sixteen general
+axiom audits report only standard Lean axioms. General source production of
+these original admission predicates, cancellation and whole-task progress
+remain open; this does not claim complete specification conformance.
+
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

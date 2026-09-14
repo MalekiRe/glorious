@@ -95,11 +95,6 @@ theorem AncestorLoan.unique_ancestor {world : World} {ancestor descendant : Iden
       obtain ⟨middle,located,_,_,mode,_⟩ := parents child loan parent found selected
       exact ih located (mode unique)
 
-theorem World.live_loan_root_bound {world : World} {id : Identity} {loan : Loan} (valid : world.WellFormed)
-    (found : world.loans.get id = some loan) (live : loan.live = true) : loan.referent.root < world.nextRoot := by
-  have selected := ((valid.2.2.2.2.2.2.2.2.2.2.2.2.1 id loan found).2.2 live).2
-  obtain ⟨root,present⟩ := Option.isSome_iff_exists.mp selected
-  exact World.root_bound valid (World.root_found present).1
 
 namespace Execution
 

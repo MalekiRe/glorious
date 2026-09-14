@@ -223,8 +223,8 @@ or a dependency of this project.
   composed; no intermediate-world admission is supplied.
   `EntrySource.Admitted.enterStep` consumes the same finite admission in the
   actual non-tail machine step, including exact-prefix physical exhaustion.
-  General `InvocationStart` admission and proper-tail custody/cleanup remain
-  open. The strict 220-job gate and general theorem axiom audits pass.
+  Proper-tail caller cleanup and the general `InvocationStart` consumer are
+  now constructed below from original-world admission.
 - `BodyInventory` also validates unsafe caller-contract declaration ownership
   (§15.1): an attached contract must name an unsafe function declaration.
   `Instance.unsafe_contract_none` derives absence for safe selected bodies;
@@ -249,12 +249,13 @@ or a dependency of this project.
   allocation request and the safe selected declaration's caller contract.
   Source readiness and prospective-row view compatibility remain finite
   original-world requirements, not assumed after-world readiness.
-- `InvocationStart` now carries the actual recipe's `EntrySource.Admitted`,
-  including its selected declaration. `InvocationStart.ordinary_step` derives
-  an actual machine successor, including physical exhaustion, directly from
-  that admission. The isolated producer consumes the same product and canonical
-  input root bounds; the headed-authority side condition and its module are
-  removed. Current/saved authority preservation now covers guarded relocation,
+- `InvocationStart` carries the actual recipe's `EntrySource.Admitted`, its
+  selected declaration and original caller cleanup admission for proper-tail
+  tasks. `InvocationStart.step` derives an actual ordinary or proper-tail
+  successor, including physical exhaustion. The isolated producer consumes
+  the same product and canonical input root bounds; the headed-authority side
+  condition and its module are removed. Current/saved authority preservation
+  now covers guarded relocation,
   carried caller contracts, raw return bindings, cleanup queues, and actual
   host transaction outputs rather than endpoint-derived fresh exposure.
   `EffectStep.recorded` and `Step.recorded` retain historical rows even at the
@@ -289,8 +290,7 @@ or a dependency of this project.
   theorems retain this guarantee without assuming complete fatal after-control;
   their audits use only standard axioms. Original source handoff evidence and
   selected Drop admission remain hypotheses, not consequences of arbitrary
-  world typing. Source-fact production, proper-tail progress and whole-task
-  progress remain open.
+  world typing. Source-fact production and whole-task progress remain open.
   External cleanup separation is now integrated as well: `ExternalHomePreservation`,
   `DropPrivate`, `DropSuspension` and `SuspensionContent` pass 199 jobs together.
   External/allocation homes and active saved-root exclusion survive actual
@@ -306,8 +306,8 @@ or a dependency of this project.
   callbacks. Live shared-row selection itself preserves every original
   permission through copying. Rehome graph and permission producers are shared
   with input, pattern and Drop dispatch consumers; the combined gate passes
-  244 jobs, and twelve general audits use only standard axioms. This is not
-  proper-tail or whole-task progress.
+  244 jobs, and twelve general audits use only standard axioms. This replay
+  result does not establish whole-task progress.
 - Returned Drop cleanup now consumes original `CustodyDischarge` and
   `CustodyReleaseReady`, performs the real relinquished shell write and drains
   its pending loans before retiring the unit and saved handle. The retry
@@ -319,6 +319,21 @@ or a dependency of this project.
   replay, input, pattern and private/Drop gate passes 256 jobs; twelve general
   audits use only standard axioms. Source/task production of the returned-state
   inventories and private-root evidence remains open.
+- `TailEntryProgress` closes proper-tail entry from original caller admission.
+  `EntrySource.CleanupAdmitted` checks exact surviving residual invariants,
+  finite raw-claim/custody/support exclusions, original custody coverage,
+  caller-relevant restoration targets and lent-root separation. Moved-out
+  fields impose no surviving custody checks; frozen reference observations
+  require closure, not permission. Actual preparation and binding produce the
+  custody discharge, exact caller root list and residual resource closure.
+  `Suspensible` survives the real custody-return scheduling operation.
+  `EntrySource.Admitted.tailStep` constructs the actual tail transition or
+  physical-exhaustion prefix; `InvocationStart.step` covers both ordinary and
+  proper-tail entry. Isolated and Drop-hook admission use the same contract.
+  The integrated invocation/cleanup/replay gate passes 257 jobs; sixteen
+  general theorem audits use only standard Lean axioms. Producing original
+  admission from source/task invariants and whole-task progress remain open.
+
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
