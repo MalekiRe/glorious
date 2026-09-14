@@ -44,6 +44,25 @@ theorem World.write_vacant_references {before after : World} {address : Address}
   obtain ⟨retained,stored,head⟩ := World.write_keeps_reference written outside resident head
   exact ⟨observed,retained,stored,head⟩
 
+/-- Every stored descendant of an empty-field shell is the shell itself.
+Both resident-reference and erased-resource cleanup use this physical origin. -/
+theorem World.Stores.empty_fields_prefix {world : World} {address observed : Address} {value descendant : Value}
+    (stored : world.Stores address value) (fields : ∀ field ∈ value.fields, field = none)
+    (nested : world.Stores observed descendant) (included : address.Prefix observed) : value = descendant := by
+  obtain ⟨suffix,equal⟩ := Address.prefix_extension included
+  change world.read observed = some descendant at nested
+  rw [equal,World.read_append,stored] at nested
+  cases suffix with
+  | nil => exact Option.some.inj nested
+  | cons index rest =>
+      change value.atPath (index :: rest) = some descendant at nested
+      obtain ⟨child,selected,_⟩ := Option.bind_eq_some_iff.mp nested
+      have slot : value.fields[index]? = some (some child) := by
+        cases found : value.fields[index]? <;> simp_all
+      have empty := fields (some child) (List.mem_of_getElem? slot)
+      cases empty
+
+
 /-- Replacing a non-reference shell whose fields have all been consumed
 cannot destroy any reference guard. The actual field premises matter even
 when the retained representation has nonzero arity. -/
@@ -56,21 +75,8 @@ theorem World.write_nonreference_shell_references {before after : World} {addres
   obtain ⟨observed,reference,resident,head⟩ := referenced
   have outside : ¬ address.Prefix observed := by
     intro included
-    obtain ⟨suffix,equal⟩ := Address.prefix_extension included
-    have nested := World.resident_iff_stores.mp resident
-    change before.read observed = some reference at nested
-    rw [equal,World.read_append,stored] at nested
-    cases suffix with
-    | nil =>
-      have same : value = reference := Option.some.inj nested
-      exact notReference id (same ▸ head)
-    | cons index rest =>
-      change value.atPath (index :: rest) = some reference at nested
-      obtain ⟨child,selected,_⟩ := Option.bind_eq_some_iff.mp nested
-      have slot : value.fields[index]? = some (some child) := by
-        cases found : value.fields[index]? <;> simp_all
-      have empty := fields (some child) (List.mem_of_getElem? slot)
-      cases empty
+    have same := stored.empty_fields_prefix fields (World.resident_iff_stores.mp resident) included
+    exact notReference id (same ▸ head)
   obtain ⟨retained,present,head⟩ := World.write_keeps_reference written outside resident head
   exact ⟨observed,retained,present,head⟩
 
@@ -81,6 +87,25 @@ theorem World.write_nonreference_leaf_references {before after : World} {address
     (written : before.write address replacement = some after)
     {id : Identity} (referenced : before.References id) : after.References id :=
   World.write_nonreference_shell_references stored (by simp [fields]) notReference written referenced
+
+/-- Consuming an empty shell with no erased resources does not erase a
+resource carrier stored elsewhere, including in an enclosing resident shell. -/
+theorem World.write_empty_resources_shell_resourceReferences {before after : World} {address : Address}
+    {value : Value} {replacement : Option Value}
+    (stored : before.Stores address value) (fields : ∀ field ∈ value.fields, field = none)
+    (resources : value.resources = []) (written : before.write address replacement = some after)
+    {id : Identity} (referenced : before.ResourceReferences id) : after.ResourceReferences id := by
+  obtain ⟨observed,resident,binding,present,member,parent⟩ := referenced
+  have outside : ¬ address.Prefix observed := by
+    intro included
+    have same := stored.empty_fields_prefix fields (World.resident_iff_stores.mp present) included
+    rw [← same,resources] at member
+    cases member
+  obtain ⟨retained,present,shell⟩ := World.write_retains_shell written outside present
+  have same : retained.resources = resident.resources := by
+    simpa only [Value.shell,Value.withFields,Value.resources] using congrArg Value.resources shell
+  exact ⟨observed,retained,binding,present,same.symm ▸ member,parent⟩
+
 
 theorem Allocates.references {program : Program} {before after : World}
     {home region type layout mutable address originBound} (valid : before.WellFormedWithOrigins originBound)

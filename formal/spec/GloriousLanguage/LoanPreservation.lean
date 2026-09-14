@@ -358,6 +358,19 @@ theorem RelinquishesCustody.reflected {before after : World} {custody : ClaimCus
     (map := fun loan => if loan.custody = some custody ∧ loan.kind = .storageBorrow then { loan with returnRequested := true } else loan)
     (fun loan => by split <;> rfl) identity loan selected
 
+theorem RelinquishesCustody.canEndStorage {before after : World} {custody : ClaimCustody} {id : Identity}
+    (relinquished : RelinquishesCustody before custody after) (safe : CanEndStorage before id) : CanEndStorage after id := by
+  refine ⟨?_,?_⟩
+  · intro key loan found live
+    obtain ⟨original,present,same⟩ := relinquished.reflected found
+    have originalLive : original.live = true := (congrArg Loan.live same).symm.trans live
+    have referent : loan.referent.root = original.referent.root := congrArg (fun loan => loan.referent.root) same
+    rw [referent]
+    exact safe.1 key original present originalLive
+  · cases relinquished
+    exact safe.2
+
+
 theorem RelinquishesCustody.wellFormed {before after : World} {custody : ClaimCustody}
     (valid : before.WellFormed) (relinquished : RelinquishesCustody before custody after) : after.WellFormed := by
   cases relinquished
@@ -935,5 +948,152 @@ theorem EndsLoan.worldTyped {program : Kernel.Program} {before after : World} {i
     Typing.WorldTyped program after := by
   cases ended with
   | restored found _ _ _ _ unreferenced _ children => exact before.set_loan_dead_worldTyped typed found unreferenced children
+
+
+/-- Ending a different row removes an exclusion; it cannot supersede the
+latest live owning claim. Parent links survive the actual dead-row update. -/
+theorem AllocationClaim.end_loan {before : World} {id : Identity} {ended : Loan}
+    {authority : Authority} {address : Address}
+    (found : before.loans.get id = some ended) (outside : authority.parentLoan ≠ some id)
+    (claim : AllocationClaim before authority address) :
+    AllocationClaim { before with loans := before.loans.set id { ended with live := false } } authority address := by
+  obtain ⟨identity,loan,root,domain,parent,selected,live,kind,referent,whole,rootAt,home,latest⟩ := claim
+  have different : identity ≠ id := fun same => outside (parent.trans (congrArg some same))
+  refine ⟨identity,loan,root,domain,parent,?_,live,kind,referent,whole,rootAt,home,?_⟩
+  · rw [Table.get_set_other _ _ _ _ different]
+    exact selected
+  · intro child successor childAt childLive childKind related
+    have prior : AncestorLoan before identity child := by
+      apply related.transport_parents
+      intro key current currentAt
+      by_cases same : key = id
+      · subst key
+        have equal : current = { ended with live := false } :=
+          Option.some.inj (currentAt.symm.trans (Table.get_set _ _ _))
+        exact ⟨ended,found,by rw [equal]⟩
+      · exact ⟨current,by simpa only [Table.get_set_other _ _ _ _ same] using currentAt,rfl⟩
+    by_cases same : child = id
+    · subst child
+      have equal : successor = { ended with live := false } :=
+        Option.some.inj (childAt.symm.trans (Table.get_set _ _ _))
+      rw [equal] at childLive
+      cases childLive
+    · exact latest child successor (by simpa only [Table.get_set_other _ _ _ _ same] using childAt)
+        childLive childKind prior
+
+theorem StorageBinding.HeldBy.end_loan {before : World} {id : Identity} {ended : Loan}
+    {binding : StorageBinding} {owner : Identity}
+    (found : before.loans.get id = some ended) (outside : binding.authority.parentLoan ≠ some id)
+    (held : binding.HeldBy before owner) :
+    binding.HeldBy { before with loans := before.loans.set id { ended with live := false } } owner := by
+  refine ⟨Authority.Custodied.of_row_change rfl (fun same => False.elim (outside same)) held.1,?_⟩
+  rcases held.2 with ⟨claim,readOnly⟩ | ⟨identity,loan,parent,selected,live,kind,referent,shared⟩
+  · exact Or.inl ⟨claim.end_loan found outside,readOnly⟩
+  · have different : identity ≠ id := fun same => outside (parent.trans (congrArg some same))
+    exact Or.inr ⟨identity,loan,parent,by rw [Table.get_set_other _ _ _ _ different]; exact selected,
+      live,kind,referent,shared⟩
+
+/-- The real ending guards exclude its identity from every stored handoff
+resource graph. The existing batch product, not a second reachability walk,
+therefore retains the graph's reference rows and held resources. -/
+theorem Value.BatchCompatible.end_loan {before : World} {address : Address} {value : Value}
+    {id : Identity} {ended : Loan} (source : before.Stores address value)
+    (found : before.loans.get id = some ended)
+    (references : ¬ before.References id) (resources : ¬ before.ResourceReferences id) :
+    value.BatchCompatible before { before with loans := before.loans.set id { ended with live := false } } := by
+  constructor
+  · intro identity current access reached
+    have different : identity ≠ id := fun same => references (same ▸ reached.worldReference source)
+    rw [Table.get_set_other _ _ _ _ different]
+  · intro resident authority access reached binding member held
+    obtain ⟨observed,located⟩ := reached.worldResident source
+    have outside : binding.authority.parentLoan ≠ some id :=
+      fun parent => resources ⟨observed,resident,binding,located,member,parent⟩
+    exact held.end_loan found outside
+
+/-- Source restoration remains true through an actual loan ending. Stored
+referents and invariant support do not move; the ending's global reference
+and resource guards provide the canonical batch frame for every stored value. -/
+theorem World.ResourcesClosed.end_loan {program : RuntimeProgram} {before : World}
+    {address : Address} {id : Identity} {ended : Loan}
+    (found : before.loans.get id = some ended)
+    (references : ¬ before.References id) (resources : ¬ before.ResourceReferences id)
+    (closed : before.ResourcesClosed program address) :
+    World.ResourcesClosed program { before with loans := before.loans.set id { ended with live := false } } address := by
+  intro value stored
+  have source : before.Stores address value := stored
+  obtain ⟨valueClosed,restored⟩ := closed value source
+  have batch := Value.BatchCompatible.end_loan source found references resources
+  have framed : value.SupportFramed before { before with loans := before.loans.set id { ended with live := false } } :=
+    fun _ _ => ⟨rfl,rfl⟩
+  exact ⟨valueClosed.frame_batch batch framed,restored.frame_batch batch framed⟩
+
+
+
+/-- A real row map retaining permission geometry and custody also retains
+allocation claims. This is the common resource product for pending-return
+administration, not an assumed unchanged loan table. -/
+theorem World.map_loans_resourceRows {world : World} {map : Loan → Loan}
+    (shape : ∀ loan, (map loan).permissionState = loan.permissionState)
+    (custody : ∀ loan, (map loan).custody = loan.custody) :
+    world.ResourceRowsRetained { world with loans := world.loans.map fun (key,loan) => (key,map loan) } := by
+  let after : World := { world with loans := world.loans.map fun (key,loan) => (key,map loan) }
+  have atRow : ∀ id loan, world.loans.get id = some loan → after.loans.get id = some (map loan) := by
+    intro id loan found
+    exact (Table.get_map_values world.loans map id).trans (by rw [found]; rfl)
+  have origin : ∀ id current, after.loans.get id = some current →
+      ∃ loan, world.loans.get id = some loan ∧ current = map loan := by
+    intro id current found
+    obtain ⟨loan,selected,same⟩ := Option.map_eq_some_iff.mp
+      ((Table.get_map_values world.loans map id).symm.trans found)
+    exact ⟨loan,selected,same.symm⟩
+  refine ⟨world.map_loans_retained shape,?_,?_⟩
+  · intro authority address claim
+    obtain ⟨id,loan,root,domain,parent,found,live,kind,referent,whole,rootAt,home,latest⟩ := claim
+    obtain ⟨_,_,sameReferent,_,_,sameLive,sameKind,_⟩ := Loan.permissionState_eq_iff.mp (shape loan)
+    refine ⟨id,map loan,root,domain,parent,atRow id loan found,sameLive.trans live,sameKind.trans kind,
+      sameReferent.trans referent,whole,rootAt,home,?_⟩
+    intro child current currentAt currentLive currentKind related
+    obtain ⟨original,originalAt,rfl⟩ := origin child current currentAt
+    obtain ⟨_,_,_,_,_,liveEq,kindEq,_⟩ := Loan.permissionState_eq_iff.mp (shape original)
+    apply latest child original originalAt (liveEq.symm.trans currentLive) (kindEq.symm.trans currentKind)
+    apply related.transport_parents
+    intro key current found
+    obtain ⟨original,selected,rfl⟩ := origin key current found
+    exact ⟨original,selected,(Loan.permissionState_eq_iff.mp (shape original)).2.1.symm⟩
+  · intro authority owner held
+    induction authority with
+    | owner => trivial
+    | loan id =>
+        obtain ⟨loan,found,allowed⟩ := held
+        have kind := (Loan.permissionState_eq_iff.mp (shape loan)).2.2.2.2.2.2.1
+        exact ⟨map loan,atRow id loan found,by simpa only [kind,custody] using allowed⟩
+    | shared backing => exact held.transport (fun id loan found => ⟨map loan,atRow id loan found⟩)
+    | guarded backing carrier ih => exact ih held
+
+theorem RelinquishesCustody.resourceRows {before after : World} {custody : ClaimCustody}
+    (relinquished : RelinquishesCustody before custody after) : before.ResourceRowsRetained after := by
+  cases relinquished
+  exact World.map_loans_resourceRows
+    (map := fun loan => if loan.custody = some custody ∧ loan.kind = .storageBorrow then
+      { loan with returnRequested := true } else loan)
+    (fun _ => by split <;> rfl) (fun _ => by split <;> rfl)
+
+theorem World.ResourcesClosed.relinquished {program : RuntimeProgram} {before after : World}
+    {custody : ClaimCustody} {address : Address}
+    (relinquished : RelinquishesCustody before custody after) (closed : before.ResourcesClosed program address) :
+    after.ResourcesClosed program address := by
+  have reads : ∀ address, after.read address = before.read address := by cases relinquished; intro; rfl
+  intro value stored
+  have original : before.Stores address value := (reads address).symm.trans stored
+  obtain ⟨resources,restored⟩ := closed value original
+  have batch : value.BatchCompatible before after := by
+    apply Value.BatchCompatible.of_rows relinquished.resourceRows
+    intro identity current access reached
+    obtain ⟨loan,found,_⟩ := restored identity current access reached
+    exact ⟨loan,found⟩
+  have framed : value.SupportFramed before after := by cases relinquished; exact fun _ _ => ⟨rfl,rfl⟩
+  exact ⟨resources.frame_batch batch framed,restored.frame_batch batch framed⟩
+
 
 end Glorious.Language

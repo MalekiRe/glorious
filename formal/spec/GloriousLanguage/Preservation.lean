@@ -1148,6 +1148,36 @@ theorem Transfers.typed_residents {program : Kernel.Program} {before after : Wor
       intro address value resident
       exact (World.stores_typed roots (World.resident_iff_stores.mp resident)).transfer typed.1 moved
 
+theorem World.Stores.residentAt {world : World} {address : Address} {whole value : Value} {path : List Nat}
+    (stored : world.Stores address whole) (inside : ResidentAt whole path value) :
+    world.Resident { address with fields := address.fields ++ path } value := by
+  apply World.resident_iff_stores.mpr
+  change world.read { address with fields := address.fields ++ path } = some value
+  rw [World.read_append,stored]
+  exact ResidentAt.iff_atPath.mp inside
+
+/-- A node of the canonical graph starting at actual storage is itself an
+actual world resident, including nodes reached through reference/resource edges. -/
+theorem Value.ReachableResident.worldResident {world : World} {address : Address} {value resident : Value}
+    {authority current : Authority} {incoming access : Access}
+    (source : world.Stores address value)
+    (reached : value.ReachableResident world authority incoming resident current access) :
+    ∃ observed, world.Resident observed resident := by
+  cases reached with
+  | resident inside => exact ⟨_,source.residentAt inside⟩
+  | referent _ _ _ stored inside => exact ⟨_,stored.residentAt inside⟩
+  | resource _ _ stored inside => exact ⟨_,stored.residentAt inside⟩
+
+theorem Value.ReachableReference.worldReference {world : World} {address : Address} {value : Value}
+    {authority current : Authority} {incoming access : Access} {identity : Identity}
+    (source : world.Stores address value)
+    (reached : value.ReachableReference world authority incoming identity current access) :
+    world.References identity := by
+  obtain ⟨resident,reached,head⟩ := reached
+  obtain ⟨observed,located⟩ := reached.worldResident source
+  exact ⟨observed,resident,located,head⟩
+
+
 theorem World.Resident.field {world : World} {address : Address} {value child : Value}
     (resident : world.Resident address value) (member : some child ∈ value.fields) :
     ∃ nested, world.Resident nested child := by

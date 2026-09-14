@@ -307,10 +307,18 @@ or a dependency of this project.
   permission through copying. Rehome graph and permission producers are shared
   with input, pattern and Drop dispatch consumers; the combined gate passes
   244 jobs, and twelve general audits use only standard axioms. This is not
-  proper-tail or whole-task progress. `DropReturn` remains a recorded failing
-  consumer, outside that gate: its fixed three-event suffix omits mandatory
-  unit-custody relinquishment and pending-loan draining. Original custody
-  admission and the real drain must replace that obsolete cleanup claim.
+  proper-tail or whole-task progress.
+- Returned Drop cleanup now consumes original `CustodyDischarge` and
+  `CustodyReleaseReady`, performs the real relinquished shell write and drains
+  its pending loans before retiring the unit and saved handle. The retry
+  closure admits ordinary/destructor restoration as well as raw storage loans;
+  no global raw-only kind restriction or future-world callback is used. The
+  result preserves the actual frame stack and ended destructor row. Permissions
+  backed by retained resident carriers survive; arbitrary ended-loan permissions
+  and an unchanged whole loan table are not claimed. The combined cleanup,
+  replay, input, pattern and private/Drop gate passes 256 jobs; twelve general
+  audits use only standard axioms. Source/task production of the returned-state
+  inventories and private-root evidence remains open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -354,18 +362,22 @@ or a dependency of this project.
   both the retirement's endability and the destructor's owning permission, its
   loan clause follows from the endings that discharged a root, and
   `RegionCanEnd.of_discharged` derives a region's readiness from the
-  retirements and endings performed. The destructor recursion over nested
-  stored residents, the pending-return-list drain to retirement, and arbitrary
-  drop-hook body execution remain open.
+  retirements and endings performed. Full recursive destructor assembly
+  remains open; arbitrary source Drop hooks are not claimed terminating.
 - `CleanupDrain`: the general destructor continuation. `CleanupRun.release_queue`
   executes the pending-return list `shellDone` schedules to its task with the
   machine's own `releaseLoan` rules, including the parent/guard retry: a silent
   rule consumes its head, an ending rule ends the loan and re-inserts the
   recorded dependencies, and the well-founded measure is the pair (live loans,
   queue length) — silent steps shorten the queue, ending steps strictly reduce
-  the live-loan count (`World.ReleaseReady` is the world invariant the rules
-  read, and `Table.liveCount_set_dead` is the decrease). `release_custody_returns`
-  applies it to the real `ReleaseCustodyLoans` list, and
+  the live-loan count. `World.ReleaseReady` is scoped to the actual seeds and
+  recorded parent/guard retry closure, retaining original ordinary/Drop
+  initialization and resource restoration through each ending.
+  `World.CustodyReleaseReady.requested` and `World.ReleaseReady.write_empty_shell` derive that
+  admission through the actual relinquishment and clear. `release_custody_returns`
+  reports the exact resulting world with all other state fields unchanged and
+  the stronger `LoanReleaseFrame`: rows and metadata remain, liveness can only
+  turn off, and dead bookkeeping is retained.
   `CleanupRun.cleanup_root_shell_retired` composes the captured shell's
   destruction, the relinquishment, the drain and the root's actual retirement
   into one run, transporting the retirement's endability through the drain's

@@ -356,14 +356,6 @@ theorem World.install_wellFormed {before middle : World} {destination : Address}
     ({ middle with nextOwner := next } : World).WellFormed :=
   World.install_wellFormedWithOrigins (valid.mono monotone) vacant monotone owners unique separate packs references written
 
-theorem World.Stores.residentAt {world : World} {address : Address} {whole value : Value} {path : List Nat}
-    (stored : world.Stores address whole) (inside : ResidentAt whole path value) :
-    world.Resident { address with fields := address.fields ++ path } value := by
-  apply World.resident_iff_stores.mpr
-  change world.read { address with fields := address.fields ++ path } = some value
-  rw [World.read_append,stored]
-  exact ResidentAt.iff_atPath.mp inside
-
 theorem Copies.wellFormed {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (copied : Copies program before authority source destination after) : after.WellFormed := by
   cases copied with

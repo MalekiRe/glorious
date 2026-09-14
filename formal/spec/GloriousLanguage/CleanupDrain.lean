@@ -14,16 +14,17 @@ loans that asked for their storage back. Each `releaseLoan` step either consumes
 its head silently or ends that loan and *retries* the recorded dependencies
 (the parent and the invariant carriers) in front of the remaining queue. The
 drain below runs exactly those `LocalStep` rules to the fixpoint, under the
-world invariant the rules actually read: every live loan is an owning claim or
-a storage borrow, every queue entry has a row, and the parent/guard rows exist.
+original admission of the actual retry closure: every reached identity has a
+row or a stored reference, and reached ordinary/Drop loans are restored.
 The measure is the pair (live loans, queue length): a silent step shortens the
 queue and an ending step strictly reduces the live-loan count, so the retry
 fixpoint cannot grow forever.
 
 Nothing here re-implements a release algorithm: `LocalStep.releaseReferenced`,
 `releaseResourceHeld`, `releaseBorrowed`, `releaseOwnedClaim`,
-`releaseStorageRetained`, `releaseStorageReturned` and `releaseAlreadyEnded` are
-selected, not replaced, and the world each of them produces is the one reported. -/
+`releaseStorageRetained`, `releaseStorageReturned`, `releaseRoot`,
+`releaseChild` and `releaseAlreadyEnded` are selected, not replaced. Each
+successor world and the unchanged non-task state fields are reported exactly. -/
 namespace Glorious.Language
 
 open Kernel
@@ -122,116 +123,217 @@ theorem World.liveCount_set_dead {world : World} {id : Identity} {loan : Loan}
   Table.liveCount_set_dead found live
 
 
-/-- The world invariant the machine's own `releaseLoan` rules read. Every queue
-entry names an existing row (or is already a plain reference/resource handle),
-every live loan is an owning claim or a storage borrow, and the parent/guard
-rows a retry re-inserts exist. All three are preserved by an ending step. -/
-structure World.ReleaseReady (world : World) (identities : List Identity) : Prop where
-  rows : ∀ id ∈ identities, world.loans.get id ≠ none ∨
+/-- The dependency closure the actual release queue retries: only its seeds
+and the recorded parent/guard links, not an independent cleanup inventory. -/
+inductive World.ReleaseReachable (world : World) (seeds : List Identity) : Identity → Prop where
+  | seed {id} : id ∈ seeds → world.ReleaseReachable seeds id
+  | retry {id loan dependency} : world.ReleaseReachable seeds id → world.loans.get id = some loan →
+      dependency ∈ loan.parent.toList ++ loan.guards → world.ReleaseReachable seeds dependency
+
+theorem World.ReleaseReachable.rebase {world : World} {seeds targets : List Identity} {id : Identity}
+    (roots : ∀ identity ∈ seeds, world.ReleaseReachable targets identity)
+    (reached : world.ReleaseReachable seeds id) : world.ReleaseReachable targets id := by
+  induction reached with
+  | seed member => exact roots _ member
+  | retry _ found member ih => exact .retry ih found member
+
+theorem World.ReleaseReachable.transport {before after : World} {seeds : List Identity} {id : Identity}
+    (reached : before.ReleaseReachable seeds id)
+    (rows : ∀ key loan, before.loans.get key = some loan →
+      ∃ current, after.loans.get key = some current ∧ current.parent = loan.parent ∧ current.guards = loan.guards) :
+    after.ReleaseReachable seeds id := by
+  induction reached with
+  | seed member => exact .seed member
+  | retry _ found member ih =>
+      obtain ⟨current,selected,parent,guards⟩ := rows _ _ found
+      exact .retry ih selected (by simpa only [parent,guards] using member)
+
+
+theorem World.ReleaseReachable.of_end_loan {world : World} {seeds : List Identity} {id ended : Identity} {loan : Loan}
+    (found : world.loans.get ended = some loan)
+    (reached : ({ world with loans := world.loans.set ended { loan with live := false } } : World).ReleaseReachable seeds id) :
+    world.ReleaseReachable seeds id := by
+  induction reached with
+  | seed member => exact .seed member
+  | @retry parent current dependency _ currentAt member ih =>
+      by_cases same : parent = ended
+      · subst parent
+        have equal : current = { loan with live := false } :=
+          Option.some.inj (currentAt.symm.trans (Table.get_set _ _ _))
+        exact .retry ih found (by simpa only [equal] using member)
+      · exact .retry ih (by simpa only [Table.get_set_other _ _ _ _ same] using currentAt) member
+
+/-- Original admission for exactly the queue's retry closure. Ordinary and
+Drop loans retain their real restoration obligations; unrelated live loans
+need not be restorable and are not restricted to raw storage kinds. -/
+structure World.ReleaseReady (program : RuntimeProgram) (world : World) (identities : List Identity) : Prop where
+  rows : ∀ id, world.ReleaseReachable identities id → world.loans.get id ≠ none ∨
     world.References id ∨ world.ResourceReferences id
-  kinds : ∀ id loan, world.loans.get id = some loan → loan.live = true →
-    loan.kind = .owning ∨ loan.kind = .storageBorrow
-  ancestry : ∀ id loan, world.loans.get id = some loan →
-    (∀ parent, loan.parent = some parent → world.loans.get parent ≠ none) ∧
-    (∀ guard ∈ loan.guards, world.loans.get guard ≠ none)
+  restored : ∀ id, world.ReleaseReachable identities id → ∀ loan,
+    world.loans.get id = some loan → loan.live = true →
+    (loan.kind = .restoring ∨ loan.kind = .destructor) →
+    world.Initialized loan.referent ∧ (loan.kind = .restoring → world.ResourcesClosed program loan.referent)
 
-theorem World.ReleaseReady.tail {world : World} {id : Identity} {rest : List Identity}
-    (ready : world.ReleaseReady (id :: rest)) : world.ReleaseReady rest where
-  rows := fun other member => ready.rows other (List.mem_cons_of_mem _ member)
-  kinds := ready.kinds
-  ancestry := ready.ancestry
+theorem World.ReleaseReady.rebase {program : RuntimeProgram} {world : World} {seeds targets : List Identity}
+    (ready : world.ReleaseReady program seeds)
+    (roots : ∀ id ∈ targets, world.ReleaseReachable seeds id) : world.ReleaseReady program targets where
+  rows := fun id reached => ready.rows id (reached.rebase roots)
+  restored := fun id reached => ready.restored id (reached.rebase roots)
 
-/-- An ending step keeps the row (dead) and leaves every other row's parent and
-guard fields untouched, so the retry list stays inside the loan table. -/
-theorem World.ReleaseReady.afterEnd {world : World} {id : Identity} {loan : Loan} {identities : List Identity}
-    (ready : world.ReleaseReady identities) (found : world.loans.get id = some loan) :
-    ({ world with loans := world.loans.set id { loan with live := false } }).ReleaseReady identities where
+theorem World.ReleaseReady.tail {program : RuntimeProgram} {world : World} {id : Identity} {rest : List Identity}
+    (ready : world.ReleaseReady program (id :: rest)) : world.ReleaseReady program rest :=
+  ready.rebase (fun _ member => .seed (List.mem_cons_of_mem _ member))
+
+/-- The ending guards, rather than a future restoration premise, retain every
+original restoration fact while the actual dead-row update keeps retry links. -/
+theorem World.ReleaseReady.afterEnd {program : RuntimeProgram} {world : World} {id : Identity}
+    {loan : Loan} {identities : List Identity} (ready : world.ReleaseReady program identities)
+    (found : world.loans.get id = some loan) (references : ¬ world.References id)
+    (resources : ¬ world.ResourceReferences id) :
+    ({ world with loans := world.loans.set id { loan with live := false } }).ReleaseReady program identities where
   rows := by
-    intro other member
-    rcases ready.rows other member with held | fallback
+    intro other reached
+    rcases ready.rows other (reached.of_end_loan found) with held | fallback
     · refine Or.inl ?_
       by_cases same : other = id
       · subst other; exact fun missing => by simp [Table.get_set] at missing
       · simpa only [Table.get_set_other _ _ _ _ same] using held
-    · rcases fallback with referenced | resourced
-      · exact Or.inr (Or.inl referenced)
-      · exact Or.inr (Or.inr resourced)
-  kinds := by
-    intro other row selected live
+    · exact Or.inr fallback
+  restored := by
+    intro other reached current selected live kind
     by_cases same : other = id
     · subst other
-      have equal : ({ loan with live := false } : Loan) = row :=
-        Option.some.inj ((Table.get_set _ _ _).symm.trans selected)
-      exact absurd (equal ▸ rfl : row.live = false) (by simp [live])
-    · have rowEq : world.loans.get other = some row := by
+      have equal : current = { loan with live := false } :=
+        Option.some.inj (selected.symm.trans (Table.get_set _ _ _))
+      rw [equal] at live
+      cases live
+    · have previous : world.loans.get other = some current := by
         simpa only [Table.get_set_other _ _ _ _ same] using selected
-      exact ready.kinds other row rowEq live
-  ancestry := by
-    intro other row selected
-    by_cases same : other = id
-    · subst other
-      have equal : ({ loan with live := false } : Loan) = row :=
-        Option.some.inj ((Table.get_set _ _ _).symm.trans selected)
-      subst equal
-      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
-      · rcases (ready.ancestry id loan found).1 parent link with missing
-        by_cases parentIs : parent = id
-        · subst parent; exact fun gone => by simp [Table.get_set] at gone
-        · simpa only [Table.get_set_other _ _ _ _ parentIs] using missing
-      · rcases (ready.ancestry id loan found).2 guard member with missing
-        by_cases guardIs : guard = id
-        · subst guard; exact fun gone => by simp [Table.get_set] at gone
-        · simpa only [Table.get_set_other _ _ _ _ guardIs] using missing
-    · have rowEq : world.loans.get other = some row := by
-        simpa only [Table.get_set_other _ _ _ _ same] using selected
-      refine ⟨fun parent link => ?_,fun guard member => ?_⟩
-      · rcases (ready.ancestry other row rowEq).1 parent link with missing
-        by_cases parentIs : parent = id
-        · subst parent; exact fun gone => by simp [Table.get_set] at gone
-        · simpa only [Table.get_set_other _ _ _ _ parentIs] using missing
-      · rcases (ready.ancestry other row rowEq).2 guard member with missing
-        by_cases guardIs : guard = id
-        · subst guard; exact fun gone => by simp [Table.get_set] at gone
-        · simpa only [Table.get_set_other _ _ _ _ guardIs] using missing
+      obtain ⟨initialized,closed⟩ := ready.restored other (reached.of_end_loan found) current previous live kind
+      exact ⟨initialized,fun restoring => (closed restoring).end_loan found references resources⟩
 
-
-/-- The retry list a storage-return step re-inserts: its parent and guard rows
-exist, so the successor world's queue is still inside the loan table. -/
-theorem World.ReleaseReady.retry {world : World} {id : Identity} {loan : Loan} {identities : List Identity}
-    (ready : world.ReleaseReady identities) (found : world.loans.get id = some loan) :
-    ({ world with loans := world.loans.set id { loan with live := false } }).ReleaseReady
-      (loan.parent.toList ++ loan.guards).eraseDups where
+/-- Raw-storage destructor admissions are one source producer of the general
+retry contract. Their kind restriction is not imposed on ordinary call worlds. -/
+theorem World.ReleaseReady.of_storage {program : RuntimeProgram} {world : World} {identities : List Identity}
+    (rows : ∀ id ∈ identities, world.loans.get id ≠ none ∨ world.References id ∨ world.ResourceReferences id)
+    (kinds : ∀ id loan, world.loans.get id = some loan → loan.live = true →
+      loan.kind = .owning ∨ loan.kind = .storageBorrow)
+    (ancestry : ∀ id loan, world.loans.get id = some loan →
+      (∀ parent, loan.parent = some parent → world.loans.get parent ≠ none) ∧
+      (∀ guard ∈ loan.guards, world.loans.get guard ≠ none)) : world.ReleaseReady program identities where
   rows := by
-    intro other member
-    have member' := List.mem_eraseDups.mp member
-    have held : world.loans.get other ≠ none := by
-      rcases List.mem_append.mp member' with inParent | inGuards
-      · cases parent : loan.parent with
-        | none => simp [parent] at inParent
-        | some value =>
-          have equal : other = value := by simpa [parent] using inParent
-          subst other
-          exact (ready.ancestry id loan found).1 value parent
-      · exact (ready.ancestry id loan found).2 other inGuards
-    refine Or.inl ?_
-    by_cases same : other = id
-    · subst other; exact fun missing => by simp [Table.get_set] at missing
-    · simpa only [Table.get_set_other _ _ _ _ same] using held
-  kinds := (ready.afterEnd (id := id) (loan := loan) found).kinds
-  ancestry := (ready.afterEnd (id := id) (loan := loan) found).ancestry
+    intro id reached
+    cases reached with
+    | seed member => exact rows id member
+    | @retry parent loan _ _ found member =>
+        refine Or.inl ?_
+        rcases List.mem_append.mp member with parented | guarded
+        · cases link : loan.parent with
+          | none => simp [link] at parented
+          | some parent =>
+              have same : id = parent := by simpa [link] using parented
+              subst id
+              exact (ancestry _ loan found).1 parent link
+        · exact (ancestry _ loan found).2 id guarded
+  restored := by
+    intro id _ loan found live ordinary
+    rcases kinds id loan found live with kind | kind <;>
+      rcases ordinary with ordinary | ordinary <;> rw [kind] at ordinary <;> cases ordinary
 
 
-/-- One ending step only turns a live row into a dead one. -/
-theorem World.loanReleaseFrame_set_dead {world : World} {id : Identity} {loan : Loan}
-    (_found : world.loans.get id = some loan) :
-    world.LoanReleaseFrame { world with loans := world.loans.set id { loan with live := false } } := by
-  refine ⟨rfl,fun other row selected live => ?_⟩
-  by_cases same : other = id
-  · subst other
-    have equal : ({ loan with live := false } : Loan) = row :=
-      Option.some.inj ((Table.get_set _ _ _).symm.trans selected)
-    exact absurd (equal ▸ rfl : row.live = false) (by simp [live])
-  · simpa only [Table.get_set_other _ _ _ _ same] using selected
+/-- The original custody inventory anticipates pending-return marking, not a
+future world's restoration: all restoration obligations remain on this world. -/
+def World.CustodyReleaseReady (program : RuntimeProgram) (world : World) (custody : ClaimCustody) : Prop :=
+  world.ReleaseReady program (world.loans.filterMap fun (identity,loan) =>
+    if loan.live && loan.kind == .storageBorrow && loan.custody == some custody then some identity else none)
+
+theorem World.ReleaseReady.relinquished {program : RuntimeProgram} {before after : World}
+    {identities : List Identity} {custody : ClaimCustody}
+    (ready : before.ReleaseReady program identities) (relinquished : RelinquishesCustody before custody after) :
+    after.ReleaseReady program identities := by
+  have original : ∀ id, after.ReleaseReachable identities id → before.ReleaseReachable identities id := by
+    intro id reached
+    apply reached.transport
+    intro key current selected
+    obtain ⟨loan,found,same⟩ := relinquished.reflected selected
+    obtain ⟨_,parent,_,_,_,_,_,guards⟩ := Loan.permissionState_eq_iff.mp same
+    exact ⟨loan,found,parent.symm,guards.symm⟩
+  refine ⟨?_,?_⟩
+  · intro id reached
+    rcases ready.rows id (original id reached) with present | fallback
+    · refine Or.inl ?_
+      cases found : before.loans.get id with
+      | none => exact absurd found present
+      | some loan =>
+          obtain ⟨current,selected,_⟩ := relinquished.retained found
+          exact fun missing => by rw [selected] at missing; cases missing
+    · cases relinquished; exact Or.inr fallback
+  · intro id reached current selected live ordinary
+    obtain ⟨loan,found,same⟩ := relinquished.reflected selected
+    obtain ⟨_,_,referent,_,_,alive,kind,_⟩ := Loan.permissionState_eq_iff.mp same
+    obtain ⟨initialized,closed⟩ := ready.restored id (original id reached) loan found
+      (alive.symm.trans live) (by simpa only [kind] using ordinary)
+    rw [referent]
+    exact ⟨by cases relinquished; exact initialized,
+      fun restoring => (closed (kind.symm.trans restoring)).relinquished relinquished⟩
+
+/-- The source custody inventory produces admission of the exact queue emitted
+by relinquishment, including returns that were not previously requested. -/
+theorem World.CustodyReleaseReady.requested {program : RuntimeProgram} {world : World} {custody : ClaimCustody}
+    (ready : world.CustodyReleaseReady program custody) (handed : world.CustodyHandedOff custody) :
+    (world.RequestReturns custody).ReleaseReady program ((world.RequestReturns custody).loans.filterMap fun (identity,loan) =>
+      if loan.live && loan.kind == .storageBorrow && loan.returnRequested && loan.custody == some custody then
+        some identity else none) := by
+  apply (World.ReleaseReady.relinquished ready (RelinquishesCustody.of_handedOff handed)).rebase
+  intro id member
+  apply World.ReleaseReachable.seed
+  obtain ⟨entry,present,selected⟩ := List.mem_filterMap.mp member
+  rw [World.RequestReturns.loans_eq] at present
+  obtain ⟨⟨key,loan⟩,source,mapped⟩ := List.mem_map.mp present
+  subst entry
+  change (if (World.restamp custody loan).live && (World.restamp custody loan).kind == .storageBorrow &&
+    (World.restamp custody loan).returnRequested && (World.restamp custody loan).custody == some custody then
+      some key else none) = some id at selected
+  by_cases chosen : (World.restamp custody loan).live && (World.restamp custody loan).kind == .storageBorrow &&
+      (World.restamp custody loan).returnRequested && (World.restamp custody loan).custody == some custody
+  · have same : key = id := by simpa only [chosen,if_true,Option.some.injEq] using selected
+    subst id
+    have sourceChosen : loan.live && loan.kind == .storageBorrow && loan.custody == some custody := by
+      simp only [World.restamp_live,World.restamp_kind,World.restamp_custody,Bool.and_eq_true] at chosen ⊢
+      exact ⟨⟨chosen.1.1.1,chosen.1.1.2⟩,chosen.2⟩
+    exact List.mem_filterMap.mpr ⟨(key,loan),source,by simp only [sourceChosen,if_true]⟩
+  · have impossible : (Option.none : Option Identity) = some id := by
+      simpa only [chosen,Bool.false_eq_true,if_false] using selected
+    exact absurd impossible (by simp)
+
+/-- Consuming a private empty shell preserves the original retry closure.
+Actual resident/resource persistence handles even the queue's rowless skips. -/
+theorem World.ReleaseReady.write_empty_shell {program : RuntimeProgram} {before after : World}
+    {identities : List Identity} {address : Address} {value : Value} {replacement : Option Value}
+    (ready : before.ReleaseReady program identities) (safe : CanEndStorage before address.root)
+    (stored : before.Stores address value) (fields : ∀ field ∈ value.fields, field = none)
+    (notReference : ∀ id, value.head ≠ .reference id) (resources : value.resources = [])
+    (written : before.write address replacement = some after) : after.ReleaseReady program identities := by
+  have loans := World.write_loans written
+  have original : ∀ id, after.ReleaseReachable identities id → before.ReleaseReachable identities id := by
+    intro id reached
+    exact reached.transport (fun key loan selected =>
+      ⟨loan,by simpa only [loans] using selected,rfl,rfl⟩)
+  refine ⟨?_,?_⟩
+  · intro id reached
+    rcases ready.rows id (original id reached) with present | reference | resource
+    · exact Or.inl (by simpa only [loans] using present)
+    · exact Or.inr (Or.inl (World.write_nonreference_shell_references stored fields notReference written reference))
+    · exact Or.inr (Or.inr (World.write_empty_resources_shell_resourceReferences stored fields resources written resource))
+  · intro id reached loan selected live ordinary
+    have found : before.loans.get id = some loan := by simpa only [loans] using selected
+    obtain ⟨initialized,closed⟩ := ready.restored id (original id reached) loan found live ordinary
+    have outside : ¬ address.Overlaps loan.referent := fun overlap => safe.1 id loan found live overlap.1.symm
+    exact ⟨by simpa only [World.Initialized,World.Stores,World.write_disjoint written outside] using initialized,
+      fun restoring => (closed restoring).private_write safe outside written⟩
+
+
+
 
 
 /-- A table entry for an identity makes that identity readable. -/
@@ -240,6 +342,33 @@ theorem Table.get_isSome_of_mem {α : Type} {table : Table α} {id : Identity} {
   have found : (table.find? (fun entry => entry.1 == id)).isSome = true :=
     List.find?_isSome.mpr ⟨(id,value),member,by simp⟩
   simpa [Table.get] using found
+
+/-- The existing raw-storage destruction facts admit the actual filtered
+custody queue and every recorded retry; ordinary worlds use ReleaseReady directly. -/
+theorem World.ReleaseReady.custody_of_storage {program : RuntimeProgram} {world : World} {custody : ClaimCustody}
+    (kinds : ∀ id loan, world.loans.get id = some loan → loan.live = true →
+      loan.kind = .owning ∨ loan.kind = .storageBorrow)
+    (ancestry : ∀ id loan, world.loans.get id = some loan →
+      (∀ parent, loan.parent = some parent → world.loans.get parent ≠ none) ∧
+      (∀ guard ∈ loan.guards, world.loans.get guard ≠ none)) :
+    world.ReleaseReady program (world.loans.filterMap fun (identity,loan) =>
+      if loan.live && loan.kind == .storageBorrow && loan.returnRequested && loan.custody == some custody then
+        some identity else none) := by
+  apply World.ReleaseReady.of_storage (kinds := kinds) (ancestry := ancestry)
+  intro id member
+  refine Or.inl ?_
+  obtain ⟨entry,present,selected⟩ := List.mem_filterMap.mp member
+  rcases entry with ⟨key,loan⟩
+  by_cases condition : loan.live && loan.kind == .storageBorrow && loan.returnRequested && loan.custody == some custody
+  · simp only [condition,if_true,Option.some.injEq] at selected
+    subst selected
+    exact fun missing => by
+      have readable := Table.get_isSome_of_mem present
+      simp [missing] at readable
+  · have impossible : (Option.none : Option Identity) = some id := by
+      simpa only [condition,Bool.false_eq_true,if_false] using selected
+    exact absurd impossible (by simp)
+
 
 end Glorious.Language
 
@@ -290,35 +419,35 @@ queue, ending steps strictly reduce the live-loan count, so the retry fixpoint
 is well founded and every dependency actually gets its second chance. -/
 theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Model} (bound : Nat) :
     ∀ (next : Task) (before : State) (identities : List Identity),
-      before.world.liveCount ≤ bound →
-      before.task = ReleaseQueue identities next →
-      before.world.ReleaseReady identities →
-      ∃ (after : State) (trace : List Event),
-        CleanupRun program host before trace after ∧ after.task = next ∧
-          after.world.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after.world := by
+      before.world.liveCount ≤ bound → before.task = ReleaseQueue identities next →
+      before.world.ReleaseReady program identities →
+      ∃ (after : World) (trace : List Event),
+        CleanupRun program host before trace { before with world := after, task := next } ∧
+          after.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after := by
   induction bound using Nat.strongRecOn with
   | ind bound ih =>
     intro next before identities boundLe task ready
     induction identities generalizing before next with
     | nil =>
-      exact ⟨before,[],CleanupRun.refl,by simpa [ReleaseQueue] using task,Nat.le_refl _,World.LoanReleaseFrame.refl _⟩
+      have same : { before with world := before.world, task := next } = before := by
+        have current : before.task = next := by simpa [ReleaseQueue] using task
+        simp [← current]
+      exact ⟨before.world,[],by rw [same]; exact .refl,Nat.le_refl _,World.LoanReleaseFrame.refl _⟩
     | cons id rest listIh =>
       have head : before.task = Task.releaseLoan id (ReleaseQueue rest next) :=
         task.trans (ReleaseQueue_cons id rest next)
       have cleanup : before.task.Cleanup := by simp [Task.Cleanup,head]
-      have tailReady := ready.tail (id := id)
       have silent (step : LocalStep program before none { before with task := ReleaseQueue rest next }) :
-          ∃ (after : State) (trace : List Event),
-            CleanupRun program host before trace after ∧ after.task = next ∧
-              after.world.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after.world := by
-        obtain ⟨after,trace,run,goal,counted,frame⟩ :=
-          listIh (before := { before with task := ReleaseQueue rest next }) (next := next) boundLe rfl tailReady
-        exact ⟨after,trace,CleanupRun.silent (before := before) (by simp [Task.Cleanup,head]) (Or.inl step) run,
-          goal,counted,frame⟩
+          ∃ (after : World) (trace : List Event),
+            CleanupRun program host before trace { before with world := after, task := next } ∧
+              after.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after := by
+        obtain ⟨after,trace,run,counted,frame⟩ :=
+          listIh (before := { before with task := ReleaseQueue rest next }) (next := next) boundLe rfl ready.tail
+        exact ⟨after,trace,.silent cleanup (Or.inl step) run,counted,frame⟩
       cases found : before.world.loans.get id with
       | none =>
         have fallback : before.world.References id ∨ before.world.ResourceReferences id := by
-          rcases ready.rows id (by simp) with missing | later
+          rcases ready.rows id (.seed (by simp)) with missing | later
           · exact absurd found missing
           · exact later
         rcases fallback with referenced | resourced
@@ -326,60 +455,77 @@ theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Mode
         · exact silent (.releaseResourceHeld head resourced)
       | some loan =>
         by_cases live : loan.live = true
-        · rcases ready.kinds id loan found live with owning | borrowed
-          · exact silent (.releaseOwnedClaim head found owning)
-          · by_cases referenced : before.world.References id
-            · exact silent (.releaseReferenced head referenced)
-            · by_cases resourced : before.world.ResourceReferences id
-              · exact silent (.releaseResourceHeld head resourced)
-              · by_cases dependent : ∃ child, before.world.loans.get child.identity = some child ∧
-                    (child.parent = some id ∨ id ∈ child.guards) ∧ child.live = true
-                · obtain ⟨child,selected,related,active⟩ := dependent
-                  exact silent (.releaseBorrowed head referenced selected related active)
-                · have children : ∀ child, before.world.loans.get child.identity = some child →
-                      (child.parent = some id ∨ id ∈ child.guards) → child.live = false := by
-                    intro child selected related
-                    cases active : child.live with
-                    | false => rfl
-                    | true => exact absurd ⟨child,selected,related,active⟩ dependent
-                  by_cases requested : loan.returnRequested = true
-                  · have free := World.referenceFree_iff.mpr ⟨referenced,resourced⟩
-                    let afterWorld : World := { before.world with loans := before.world.loans.set id { loan with live := false } }
-                    let pushed : List Identity := loan.parent.toList ++ loan.guards
-                    let afterState : State := { before with world := afterWorld, task := ReleaseLoans pushed (ReleaseQueue rest next) }
-                    have returned := ReturnsStorageLoan.of_referenceFree found live borrowed requested free children
-                    have step : LocalStep program before (some (.loanEnd id)) afterState :=
-                      .releaseStorageReturned head found returned
-                    have decreased : afterWorld.liveCount < before.world.liveCount :=
-                      World.liveCount_set_dead found live
-                    have taskEq : afterState.task = ReleaseQueue (pushed.eraseDups ++ rest) next :=
-                      (ReleaseLoans_eq_queue pushed (ReleaseQueue rest next)).trans
-                        (ReleaseQueue_append pushed.eraseDups rest next)
-                    have afterReady : afterWorld.ReleaseReady (pushed.eraseDups ++ rest) :=
-                      { rows := by
-                          intro other member
-                          rcases List.mem_append.mp member with inPushed | inRest
-                          · exact (ready.retry (id := id) (loan := loan) found).rows other inPushed
-                          · exact (ready.afterEnd (id := id) (loan := loan) found).tail.rows other inRest
-                        kinds := (ready.afterEnd (id := id) (loan := loan) found).kinds
-                        ancestry := (ready.afterEnd (id := id) (loan := loan) found).ancestry }
-                    obtain ⟨after,trace,run,goal,counted,frame⟩ :=
-                      ih afterWorld.liveCount (Nat.lt_of_lt_of_le decreased boundLe) next afterState
-                        (pushed.eraseDups ++ rest) (Nat.le_refl _) taskEq afterReady
-                    exact ⟨after,.loanEnd id :: trace,
-                      CleanupRun.visible (before := before) cleanup (Or.inl step) run,goal,
-                      Nat.le_trans counted (Nat.le_of_lt decreased),
-                      (World.loanReleaseFrame_set_dead found).trans frame⟩
-                  · have retained : loan.returnRequested = false := by
-                      cases held : loan.returnRequested with
-                      | false => rfl
-                      | true => exact absurd held requested
-                    exact silent (.releaseStorageRetained head found borrowed retained)
+        · by_cases referenced : before.world.References id
+          · exact silent (.releaseReferenced head referenced)
+          · by_cases resourced : before.world.ResourceReferences id
+            · exact silent (.releaseResourceHeld head resourced)
+            · by_cases dependent : ∃ child, before.world.loans.get child.identity = some child ∧
+                  (child.parent = some id ∨ id ∈ child.guards) ∧ child.live = true
+              · obtain ⟨child,selected,related,active⟩ := dependent
+                exact silent (.releaseBorrowed head referenced selected related active)
+              · have children : ∀ child, before.world.loans.get child.identity = some child →
+                    (child.parent = some id ∨ id ∈ child.guards) → child.live = false := by
+                  intro child selected related
+                  cases active : child.live with
+                  | false => rfl
+                  | true => exact absurd ⟨child,selected,related,active⟩ dependent
+                let ended : World := { before.world with loans := before.world.loans.set id { loan with live := false } }
+                let pushed := loan.parent.toList ++ loan.guards
+                have finish (step : LocalStep program before (some (.loanEnd id))
+                    { before with world := ended, task := ReleaseLoans pushed (ReleaseQueue rest next) }) :
+                    ∃ (after : World) (trace : List Event),
+                      CleanupRun program host before trace { before with world := after, task := next } ∧
+                        after.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after := by
+                  have decreased : ended.liveCount < before.world.liveCount := World.liveCount_set_dead found live
+                  have afterReady : ended.ReleaseReady program (pushed.eraseDups ++ rest) := by
+                    apply (ready.afterEnd found referenced resourced).rebase
+                    intro other member
+                    rcases List.mem_append.mp member with retry | remaining
+                    · exact .retry (.seed (by simp)) (Table.get_set _ _ _) (List.mem_eraseDups.mp retry)
+                    · exact .seed (List.mem_cons_of_mem _ remaining)
+                  obtain ⟨after,trace,run,counted,frame⟩ :=
+                    ih ended.liveCount (Nat.lt_of_lt_of_le decreased boundLe) next
+                      { before with world := ended, task := ReleaseLoans pushed (ReleaseQueue rest next) }
+                      (pushed.eraseDups ++ rest) (Nat.le_refl _)
+                      ((ReleaseLoans_eq_queue pushed (ReleaseQueue rest next)).trans
+                        (ReleaseQueue_append pushed.eraseDups rest next)) afterReady
+                  exact ⟨after,.loanEnd id :: trace,.visible cleanup (Or.inl step) run,
+                    Nat.le_trans counted (Nat.le_of_lt decreased),(World.loanReleaseFrame_set_dead found).trans frame⟩
+                have ordinary (kind : loan.kind = .restoring ∨ loan.kind = .destructor) :
+                    ∃ (after : World) (trace : List Event),
+                      CleanupRun program host before trace { before with world := after, task := next } ∧
+                        after.liveCount ≤ before.world.liveCount ∧ before.world.LoanReleaseFrame after := by
+                  obtain ⟨initialized,closed⟩ := ready.restored id (.seed (by simp)) loan found live kind
+                  have ending : EndsLoan program before.world id ended :=
+                    .restored found live kind initialized closed referenced resourced children
+                  cases parent : loan.parent with
+                  | none =>
+                      apply finish
+                      simpa only [pushed,parent,Option.toList_none,List.nil_append] using
+                        (LocalStep.releaseRoot head found parent ending)
+                  | some parentId =>
+                      apply finish
+                      simpa only [pushed,parent,Option.toList_some,List.singleton_append] using
+                        (LocalStep.releaseChild head found parent ending)
+                cases kind : loan.kind with
+                | owning => exact silent (.releaseOwnedClaim head found kind)
+                | restoring => exact ordinary (Or.inl kind)
+                | destructor => exact ordinary (Or.inr kind)
+                | storageBorrow =>
+                    by_cases requested : loan.returnRequested = true
+                    · exact finish (.releaseStorageReturned head found
+                        (.returned found live kind requested referenced resourced children))
+                    · have retained : loan.returnRequested = false := by
+                        cases held : loan.returnRequested with
+                        | false => rfl
+                        | true => exact absurd held requested
+                      exact silent (.releaseStorageRetained head found kind retained)
         · have dead : loan.live = false := by
             cases active : loan.live with
             | false => rfl
             | true => exact absurd active live
           exact silent (.releaseAlreadyEnded head found dead)
+
 
 end Glorious.Language.Execution
 
@@ -391,38 +537,20 @@ entry names a row, and the parent/guard retries stay inside the table. -/
 theorem CleanupRun.release_custody_returns {program : Kernel.Program} {host : Foreign.Model}
     {before : State} {custody : ClaimCustody} {next : Task}
     (task : before.task = ReleaseCustodyLoans before.world custody next)
-    (kinds : ∀ id loan, before.world.loans.get id = some loan → loan.live = true →
-      loan.kind = .owning ∨ loan.kind = .storageBorrow)
-    (ancestry : ∀ id loan, before.world.loans.get id = some loan →
-      (∀ parent, loan.parent = some parent → before.world.loans.get parent ≠ none) ∧
-      (∀ guard ∈ loan.guards, before.world.loans.get guard ≠ none)) :
-    ∃ (after : State) (trace : List Event),
-      CleanupRun program host before trace after ∧ after.task = next ∧
-        before.world.LoanReleaseFrame after.world := by
+    (ready : before.world.ReleaseReady program (before.world.loans.filterMap fun (identity,loan) =>
+      if loan.live && loan.kind == .storageBorrow && loan.returnRequested && loan.custody == some custody then
+        some identity else none)) :
+    ∃ (after : World) (trace : List Event),
+      CleanupRun program host before trace { before with world := after, task := next } ∧
+        before.world.LoanReleaseFrame after := by
   let identities := before.world.loans.filterMap fun (identity,loan) =>
     if loan.live && loan.kind == .storageBorrow && loan.returnRequested && loan.custody == some custody then
       some identity else none
-  obtain ⟨after,trace,run,goal,_,frame⟩ :=
+  obtain ⟨after,trace,run,_,frame⟩ :=
     CleanupRun.release_queue (program := program) (host := host) before.world.liveCount next before identities.eraseDups
       (Nat.le_refl _) (task.trans (ReleaseLoans_eq_queue identities next))
-      { rows := by
-          intro id member
-          refine Or.inl ?_
-          obtain ⟨entry,present,selected⟩ := List.mem_filterMap.mp (List.mem_eraseDups.mp member)
-          rcases entry with ⟨key,loan⟩
-          by_cases condition : loan.live && loan.kind == .storageBorrow && loan.returnRequested &&
-              loan.custody == some custody
-          · simp only [condition,if_true,Option.some.injEq] at selected
-            subst selected
-            exact fun missing => by
-              have readable := Table.get_isSome_of_mem present
-              simp [missing] at readable
-          · have impossible : (Option.none : Option Identity) = some id := by
-              simpa only [condition,Bool.false_eq_true,if_false] using selected
-            exact absurd impossible (by simp)
-        kinds := kinds
-        ancestry := ancestry }
-  exact ⟨after,trace,run,goal,frame⟩
+      (ready.rebase (fun _ member => .seed (List.mem_eraseDups.mp member)))
+  exact ⟨after,trace,run,frame⟩
 
 end Glorious.Language.Execution
 
@@ -461,12 +589,14 @@ theorem CleanupRun.cleanup_root_shell_retired {program : Kernel.Program} {host :
         (∃ retired, after.world.roots.get id = some retired ∧ retired.live = false) := by
   have shellRun := CleanupRun.cleanup_root_shell (host := host) task found live stored disposable shell
     noContinuation noReference noAvailable holes clear handed written
-  obtain ⟨released,trace,drained,goal,frame⟩ :=
+  obtain ⟨releasedWorld,trace,drained,frame⟩ :=
     CleanupRun.release_custody_returns
       (before := { before with world := cleared, task := ReleaseCustodyLoans cleared (.resident value.owner) (.retire id (.cleanup context roots next)) })
-      rfl kinds ancestry
+      rfl (World.ReleaseReady.custody_of_storage kinds ancestry)
+  let released : State := { before with world := releasedWorld, task := .retire id (.cleanup context roots next) }
+  have goal : released.task = .retire id (.cleanup context roots next) := rfl
   have releasedRoot : released.world.roots.get id = some { root with value := none } := by
-    rw [congrArg World.roots frame.1]
+    rw [congrArg World.roots frame.rest]
     exact clearedRoot
   have safe : CanEndStorage released.world id :=
     frame.canEndStorage ((clear.of_requestReturns (custody := .resident value.owner)).of_write written).canEndStorage
@@ -478,7 +608,7 @@ theorem CleanupRun.cleanup_root_shell_retired {program : Kernel.Program} {host :
       { released with world := retiredWorld, task := .cleanup context roots next } := .retire goal retired
   refine ⟨{ released with world := retiredWorld, task := .cleanup context roots next },
     [.destroy ⟨id,root.generation,[]⟩ value.owner] ++ (trace ++ [.retire id]), ?_, rfl, ?_⟩
-  · exact shellRun.append (drained.append (.visible (by simp [Task.Cleanup,goal]) (Or.inl step) .refl))
+  · exact shellRun.append (drained.append (.visible (by simp [Task.Cleanup]) (Or.inl step) .refl))
   · exact ⟨{ root with value := none, live := false, generation := root.generation + 1 },
       Table.get_set released.world.roots id { root with value := none, live := false, generation := root.generation + 1 }, rfl⟩
 
@@ -612,50 +742,6 @@ namespace Glorious.Language
 
 open Kernel
 
-/-- The restamping one row receives when its custody relinquishes pending
-returns: `returnRequested` is set exactly for the storage borrows of that custody
-and every other field is untouched. -/
-def World.restamp (custody : ClaimCustody) (loan : Loan) : Loan :=
-  if loan.custody = some custody ∧ loan.kind = .storageBorrow then
-    { loan with returnRequested := true } else loan
-
-theorem World.RequestReturns.loans_eq (world : World) (custody : ClaimCustody) :
-    (world.RequestReturns custody).loans = world.loans.map (fun entry => (entry.1,World.restamp custody entry.2)) :=
-  rfl
-
-theorem World.RequestReturns.get_eq (world : World) (custody : ClaimCustody) (key : Identity) :
-    (world.RequestReturns custody).loans.get key = (world.loans.get key).map (World.restamp custody) := by
-  rw [World.RequestReturns.loans_eq,Table.get_map_values]
-
-theorem World.restamp_live (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).live = loan.live := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
-
-theorem World.restamp_kind (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).kind = loan.kind := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
-
-theorem World.restamp_referent (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).referent = loan.referent := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
-
-theorem World.restamp_mode (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).mode = loan.mode := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
-
-theorem World.restamp_parent (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).parent = loan.parent := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
-
-theorem World.restamp_guards (custody : ClaimCustody) (loan : Loan) :
-    (World.restamp custody loan).guards = loan.guards := by
-  unfold World.restamp
-  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
 
 /-- Ending one row cannot turn the relinquished table's entry at another
 identity into a row: the restamping map preserves `none`. -/
@@ -1143,12 +1229,6 @@ namespace Glorious.Language.Execution
 
 open Glorious.Language.Kernel
 
-/-- The drain touches only the loan table, so a stored value stays stored. -/
-theorem World.Stores.loanReleaseFrame {before after : World} {address : Address} {value : Value}
-    (stored : before.Stores address value) (frame : before.LoanReleaseFrame after) :
-    after.Stores address value := by
-  rw [frame.1]
-  exact stored
 
 /-- One scheduled child of the nested field loop is fully destroyed: its own
 shell with every write derived, then the pending returns its custody scheduled, so
@@ -1220,17 +1300,19 @@ theorem CleanupRun.destroy_child {program : Kernel.Program} {host : Foreign.Mode
     have midLoans : mid.world.loans = (before.world.RequestReturns (.resident shell.owner)).loans := by
       rw [midWorld]
       rw [World.write_rest written]
-    obtain ⟨drained, trace, drainedRun, drainedTask, frame⟩ :=
+    obtain ⟨drained,trace,drainedRun,frame⟩ :=
       CleanupRun.release_custody_returns (program := program) (host := host) (before := mid)
         (custody := .resident shell.owner) (next := .destroyFields context address authority rest next)
         drainTask
-        (by intro id loan found live; rw [midLoans] at found; exact kindsShifted id loan found live)
-        (by intro id loan found; rw [midLoans] at found; rw [midLoans]; exact ancestryShifted id loan found)
+        (World.ReleaseReady.custody_of_storage
+          (by intro id loan found live; rw [midLoans] at found; exact kindsShifted id loan found live)
+          (by intro id loan found; rw [midLoans] at found; rw [midLoans]; exact ancestryShifted id loan found))
     obtain ⟨changed,changedStored,head,owner,type,live,resources,slotHole,others⟩ := World.Stores.write_child_none parentShifted written
     have changedAtMid : mid.world.Stores address changed := by
       rw [midWorld]
       exact changedStored
-    exact ⟨_,drained,changed,run.append drainedRun,drainedTask,World.Stores.loanReleaseFrame changedAtMid frame,
+    exact ⟨_,{ mid with world := drained, task := .destroyFields context address authority rest next },changed,
+      run.append drainedRun,rfl,World.Stores.loanReleaseFrame changedAtMid frame,
       head,owner,type,live,resources,slotHole,others⟩
 
 end Glorious.Language.Execution
@@ -1294,22 +1376,6 @@ theorem World.Destroys.ancestry_set_dead {world : World} {id : Identity} {loan :
 
 end Glorious.Language.Execution
 
-namespace Glorious.Language.Execution
-
-open Glorious.Language.Kernel
-
-/-- The ownership permission survives the destructor's endings: they only remove
-liveness from rows, so every live row of the produced world is a live row of the
-admitted one, and the permission's root existence is re-read at the produced
-world. -/
-theorem Permitted.of_loanReleaseFrame {world after : World} {requested : Access} {address : Address}
-    (permission : Permitted world .owner requested address)
-    (frame : world.LoanReleaseFrame after) (existence : ∃ root, after.root address = some root) :
-    Permitted after .owner requested address :=
-  ⟨existence,fun id loan found live overlap conflict =>
-    permission.2 id loan (frame.2 id loan found live) live overlap conflict⟩
-
-end Glorious.Language.Execution
 
 namespace Glorious.Language.Execution
 
@@ -1511,10 +1577,12 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
       have held := restampAncestry id loan bridged
       rw [afterWrite]
       exact held
-    obtain ⟨drained, trace, drainedRun, drainedTask', frame⟩ :=
+    obtain ⟨drained,trace,drainedRun,_⟩ :=
       CleanupRun.release_custody_returns (program := program) (host := host) (before := released)
-        (custody := .resident midParent.owner) (next := next) drainTask clearedKinds clearedAncestry
-    exact ⟨_, drained, (.silent (by simp [Task.Cleanup,task]) structural (fieldsRun.append finishRun |>.append drainedRun)), drainedTask'⟩
+        (custody := .resident midParent.owner) (next := next) drainTask
+        (World.ReleaseReady.custody_of_storage clearedKinds clearedAncestry)
+    exact ⟨_,{ released with world := drained, task := next },
+      (.silent (by simp [Task.Cleanup,task]) structural (fieldsRun.append finishRun |>.append drainedRun)),rfl⟩
 
 end Glorious.Language.Execution
 

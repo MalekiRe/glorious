@@ -263,18 +263,8 @@ theorem ReturnsStorageLoan.private_slot {before after : World} {loan id : Identi
 
 theorem RelinquishesCustody.private_slot {before after : World} {custody : ClaimCustody}
     {id : Identity} {root : Root} (relinquished : RelinquishesCustody before custody after)
-    (slot : before.PrivateSlot id root) : after.PrivateSlot id root := by
-  apply slot.transport (by cases relinquished; rfl)
-  refine ⟨?_,?_⟩
-  · intro key loan found live
-    obtain ⟨original,present,same⟩ := relinquished.reflected found
-    have originalLive : original.live = true := (congrArg Loan.live same).symm.trans live
-    have referent : loan.referent.root = original.referent.root :=
-      congrArg (fun loan => loan.referent.root) same
-    rw [referent]
-    exact slot.safe.1 key original present originalLive
-  · cases relinquished
-    exact slot.safe.2
+    (slot : before.PrivateSlot id root) : after.PrivateSlot id root :=
+  slot.transport (by cases relinquished; rfl) (relinquished.canEndStorage slot.safe)
 
 
 /-- Moving an entire source root to distinct storage retains the source's
@@ -570,14 +560,7 @@ theorem Value.ResourcesAccessible.private_handoff {program : RuntimeProgram} {wo
   intro source member observed supported overlap
   have same := List.mem_singleton.mp member
   subst source
-  obtain ⟨resident,current,requested,reached,edge⟩ := supported
-  rcases edge with ⟨identity,loan,head,found,rfl⟩ | ⟨binding,member,rfl⟩
-  · obtain ⟨active,selected,live,_⟩ := ready.2.1 identity current requested ⟨resident,reached,head⟩
-    have same := Option.some.inj (selected.symm.trans found)
-    exact privateRoot.1 identity loan found (same ▸ live) overlap.1.symm
-  · obtain ⟨identity,loan,found,live,referent⟩ :=
-      StorageBinding.HeldBy.referent_recorded ((ready.1 resident current requested reached).1 binding member)
-    exact privateRoot.1 identity loan found live ((congrArg Address.root referent).trans overlap.1.symm)
+  exact supported.avoids_private ready.1 ready.2.1 privateRoot overlap
 
 
 /-- The actual ordinary supplied entry consumes the single owned hook input.

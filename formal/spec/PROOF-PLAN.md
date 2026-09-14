@@ -423,18 +423,34 @@ nonfatality for the ownership consumer. The replay/content/freezing, input,
 pattern, Drop dispatch, external-home and private/Drop suspension gate passes
 244 jobs, and twelve general audits use only standard axioms.
 
-The migration exposes a still-failing `DropReturn` consumer, not a passed cleanup
-gate. Its old unit-shell suffix skips `RelinquishesCustody` and
-`ReleaseCustodyLoans`; private roots and structural typing do not establish
-the unit owner's owning-claim discharge or an unchanged loan table. Do not
-add a reflexive relinquishment oracle or restrict away pending returns to
-preserve that obsolete fixed-trace proof. Carry original custody admission
-through the real relinquished write and loan drain, preserving receiver
-permissions via the existing permission-state frame.
+The previously failing `DropReturn` boundary is now repaired through the actual
+machine path. `World.ReleaseReady` no longer restricts every live loan to raw
+kinds: its original restoration facts cover exactly `ReleaseReachable`, the
+declarative seed/parent/guard closure retried by the machine. The real ending
+guards preserve resource restoration, and the finite drain retains every
+non-task state field. Its single `LoanReleaseFrame` now retains all row
+metadata and dead bookkeeping while allowing only liveness removal. Resident
+carrier evidence and the produced world's invariant justify surviving loan
+permissions; arbitrary loan-backed authority is not assumed to survive.
 
-Next: close that actual returned-unit custody/drain boundary, derive original
-source facts and proper-tail entry from meaningful task admission, then close
-general task progress on the same dependency chain.
+`World.CustodyReleaseReady.requested` derives the actual pending-return queue
+from the original custody inventory, including newly requested returns. Shared
+resource-row and private-support producers carry restoration through the
+relinquishment and empty-shell clear. `hookReturned_administrative` and
+`DropContract.normal_return_cleanup` consume original finite custody discharge,
+that retry admission, private-root evidence and the actual destructor loan
+kind. They construct the real variable drain trace and both retirements,
+retain current Self and its already-ended destructor row, and provide exactly
+the permissions backed by retained resident carriers. The obsolete fixed
+three-event suffix and unchanged-loan-table claim are removed, not recovered
+by forbidding pending returns or assuming reflexive relinquishment.
+
+The ten-target cleanup/replay/content/freezing/input/pattern/Drop-dispatch/
+external-home/private/Drop-suspension gate passes 256 jobs. Twelve general
+audits use only standard Lean axioms. Next: produce returned-state custody,
+retry and private-root facts from source/task invariants; derive original
+entry and proper-tail admission, then close general task progress on that
+same dependency chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -1050,8 +1066,9 @@ derives disposal permission instead of taking it as a premise. Normal hook
 completion requires the original loan ended and the current Self initialized;
 it does not assert that reassignment preserves the original Self owner or that
 arbitrary parent loans survive. `DropReturn` consumes actual normal observations
-and constructs the ordinary unit-result/handle cleanup suffix to the current
-receiver's reverse field cleanup. `DropHandle` derives saved-handle vacancy
+and original returned-state custody/retry/private-root admission, constructs
+the pending-return drain and unit-result/handle retirements, and resumes the
+current receiver's reverse field cleanup. `DropHandle` derives saved-handle vacancy
 and privacy at actual function entry. Preserving that private caller state
 through arbitrary hook bodies remains open, and so does assembling the recursive
 destructor run: the nested field loop itself is now real

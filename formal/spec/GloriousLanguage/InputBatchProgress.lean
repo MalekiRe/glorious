@@ -580,17 +580,6 @@ theorem Authority.Custodied.of_row_update_kept {before after : World} {identity 
 
 /-! ## 5. The actual binding step, observed by the rest of the batch -/
 
-/-- A write-framing helper: a value's support survives one world write that
-misses both the written address and the fresh root frontier. -/
-theorem Value.SupportFramed.of_write {before after : World} {address : Address} {replacement : Option Value}
-    {value : Value}
-    (written : before.write address replacement = some after)
-    (outside : ∀ observed, value.Support before observed → ¬ address.Overlaps observed)
-    (root : ∀ observed, value.Support before observed → (after.roots.get observed.root).map Root.location =
-      (before.roots.get observed.root).map Root.location) :
-    value.SupportFramed before after :=
-  fun observed supported =>
-    ⟨World.write_disjoint written (outside observed supported),root observed supported⟩
 
 /-- Two world writes, each outside the retained support, retain the graph. -/
 theorem Value.SupportFramed.of_two_writes {before middle after : World} {first second : Address}

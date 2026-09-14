@@ -36,6 +36,56 @@ theorem RelinquishesCustody.of_handedOff {world : World} {custody : ClaimCustody
     RelinquishesCustody world custody (world.RequestReturns custody) :=
   .relinquish handed
 
+/-- The restamping one row receives when its custody relinquishes pending
+returns: `returnRequested` is set exactly for the storage borrows of that custody
+and every other field is untouched. -/
+def World.restamp (custody : ClaimCustody) (loan : Loan) : Loan :=
+  if loan.custody = some custody ∧ loan.kind = .storageBorrow then
+    { loan with returnRequested := true } else loan
+
+theorem World.RequestReturns.loans_eq (world : World) (custody : ClaimCustody) :
+    (world.RequestReturns custody).loans = world.loans.map (fun entry => (entry.1,World.restamp custody entry.2)) :=
+  rfl
+
+theorem World.RequestReturns.get_eq (world : World) (custody : ClaimCustody) (key : Identity) :
+    (world.RequestReturns custody).loans.get key = (world.loans.get key).map (World.restamp custody) := by
+  rw [World.RequestReturns.loans_eq,Table.get_map_values]
+
+theorem World.restamp_live (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).live = loan.live := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_kind (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).kind = loan.kind := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_referent (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).referent = loan.referent := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_mode (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).mode = loan.mode := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_parent (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).parent = loan.parent := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_guards (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).guards = loan.guards := by
+  unfold World.restamp
+  by_cases chosen : loan.custody = some custody ∧ loan.kind = .storageBorrow <;> simp [chosen]
+
+theorem World.restamp_custody (custody : ClaimCustody) (loan : Loan) :
+    (World.restamp custody loan).custody = loan.custody := by
+  unfold World.restamp
+  split <;> rfl
+
 /-- The three obligations that actually make a root retirable, read from the
 real tables rather than assumed as `CanEndStorage`. -/
 structure World.RootClear (world : World) (rootId : Identity) : Prop where

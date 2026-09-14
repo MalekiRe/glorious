@@ -603,6 +603,35 @@ theorem StorageBinding.HeldBy.referent_recorded {world : World} {owner : Identit
     exact ⟨identity,loan,found,live,referent⟩
 
 
+/-- Closed resources and restored references cannot observe storage with no
+incoming live loans. This support fact is shared by handoff and cleanup. -/
+theorem Value.Support.avoids_private {program : RuntimeProgram} {world : World}
+    {value : Value} {address observed : Address}
+    (closed : value.ResourcesClosed program world) (restored : value.LoansRestored program world)
+    (privateRoot : CanEndStorage world address.root) (supported : value.Support world observed) :
+    ¬ address.Overlaps observed := by
+  intro overlap
+  obtain ⟨resident,current,requested,reached,edge⟩ := supported
+  rcases edge with ⟨identity,loan,head,found,rfl⟩ | ⟨binding,member,rfl⟩
+  · obtain ⟨active,selected,live,_⟩ := restored identity current requested ⟨resident,reached,head⟩
+    have same := Option.some.inj (selected.symm.trans found)
+    exact privateRoot.1 identity loan found (same ▸ live) overlap.1.symm
+  · obtain ⟨identity,loan,found,live,referent⟩ :=
+      StorageBinding.HeldBy.referent_recorded ((closed resident current requested reached).1 binding member)
+    exact privateRoot.1 identity loan found live ((congrArg Address.root referent).trans overlap.1.symm)
+
+/-- A write outside the original support retains its actual reachable graph. -/
+theorem Value.SupportFramed.of_write {before after : World} {address : Address} {replacement : Option Value}
+    {value : Value}
+    (written : before.write address replacement = some after)
+    (outside : ∀ observed, value.Support before observed → ¬ address.Overlaps observed)
+    (root : ∀ observed, value.Support before observed → (after.roots.get observed.root).map Root.location =
+      (before.roots.get observed.root).map Root.location) :
+    value.SupportFramed before after :=
+  fun observed supported =>
+    ⟨World.write_disjoint written (outside observed supported),root observed supported⟩
+
+
 theorem StorageBinding.HeldBy.frame {before after : World} {binding : StorageBinding} {owner : Identity}
     (locations : before.LocationExtension after)
     (loans : after.loans = before.loans) (held : binding.HeldBy before owner) : binding.HeldBy after owner := by
@@ -1103,5 +1132,23 @@ theorem Transfers.handed_off_ready {program : RuntimeProgram} {before after : Wo
       simp only [List.append_nil] at installed
       change after.Stores destination value at installed
       exact ⟨installed,initialized,preserved⟩
+
+
+/-- Clearing private storage preserves restoration at every disjoint referent;
+closed resources and restored references supply the required support exclusion. -/
+theorem World.ResourcesClosed.private_write {program : RuntimeProgram} {before after : World}
+    {address mutation : Address} {replacement : Option Value}
+    (closed : before.ResourcesClosed program address) (safe : CanEndStorage before mutation.root)
+    (outside : ¬ mutation.Overlaps address) (written : before.write mutation replacement = some after) :
+    after.ResourcesClosed program address := by
+  intro value stored
+  obtain ⟨resources,restored⟩ := closed value ((World.write_disjoint written outside).symm.trans stored)
+  have framed : value.SupportFramed before after := Value.SupportFramed.of_write written
+    (fun _ supported => supported.avoids_private resources restored safe)
+    (fun observed _ => World.write_locations written observed.root)
+  have locations := World.LocationExtension.of_locations (World.write_locations written)
+  exact ⟨resources.frame locations (World.write_loans written) framed,
+    restored.frame locations (World.write_loans written) framed⟩
+
 
 end Glorious.Language

@@ -534,11 +534,23 @@ the actual next replay instead of requiring a separate run certificate.
 The shared permission/rehome migration also checks the original-input, pattern
 and actual destructor-purpose Drop dispatch consumers. The combined nine-target
 gate passes 244 jobs; twelve general audits use only standard axioms.
-`DropReturn` is explicitly excluded: its unit-shell proof still lacks actual
-custody relinquishment and `ReleaseCustodyLoans`. Its fixed trace and unchanged
-loan table are not established by structural typing or private root provenance.
-The original custody producer and real draining consumer remain to be integrated;
-neither proper-tail replay nor whole-task progress is claimed here.
+
+The returned-unit custody boundary is now integrated rather than excluded.
+`World.CustodyReleaseReady` supplies original restoration for the actual
+custody inventory's parent/guard retry closure; its producer transports those
+facts through real relinquishment and private empty-shell consumption. The
+general drain admits ordinary/destructor loans without a global raw-only kind
+restriction, retains exact non-task state and reports row-preserving
+`LoanReleaseFrame`. `DropReturn` consumes finite original custody discharge,
+that retry admission and the actual destructor loan kind. It constructs the
+variable drain trace, both root retirements, current Self retention and the
+unchanged already-ended destructor row. Only permissions justified by retained
+resident carriers are preserved; no arbitrary ended-loan permission or whole
+loan-table equality is assumed. The combined ten-target cleanup/replay/input/
+pattern/private/Drop gate passes 256 jobs, with twelve general audits using
+only standard axioms. Producing returned-state private-root and custody/retry
+admission from source/task invariants remains open, as do proper-tail replay
+and whole-task progress.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
