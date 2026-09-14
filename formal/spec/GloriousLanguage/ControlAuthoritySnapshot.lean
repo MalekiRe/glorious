@@ -5,7 +5,7 @@ uses the same finite relocation that produces the copied loan table; old
 unrelocated controls retain their historical records as well. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem Routes.authority_support {program : Kernel.Program} {before : State}
     {operation : DeclId} {arguments : List Term} {payload : List ResolvedPlace}
@@ -51,24 +51,34 @@ theorem SnapshotMap.authority_recorded {program : Kernel.Program} {before : Stat
     (well : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
     (recorded : authority.Recorded before.world.loans) :
     (map.authority authority).Recorded (map.copyWorld before.world homes).loans := by
-  induction authority with
-  | owner => trivial
-  | loan id =>
+  have loanRecorded : ∀ id, (Authority.loan id).Recorded before.world.loans →
+      (map.authority (.loan id)).Recorded (map.copyWorld before.world homes).loans := by
+    intro id recorded
     obtain ⟨loan,found⟩ := recorded
     by_cases included : id ∈ map.loans
     · exact ⟨_,selected.copied_loan well found included⟩
     · simpa only [Relocation.authority,Authority.Recorded,Relocation.loan,relocateId,included,↓reduceIte]
         using (show ∃ loan, (map.copyWorld before.world homes).loans.get id = some loan from ⟨loan,Relocation.old_loan found⟩)
+  induction authority with
+  | owner => trivial
+  | loan id => exact loanRecorded id recorded
   | shared backing ih => exact ih recorded
+  | guarded backing carrier ih => exact ⟨ih recorded.1,loanRecorded carrier recorded.2⟩
 
 theorem Relocation.context_authority_support {map : Relocation} {context : Context} {before after : Table Loan}
     (mapped : ∀ (authority : Authority), authority.Recorded before → (map.authority authority).Recorded after)
     (recorded : AuthoritySupport.Recorded context.authoritySupport before) :
     AuthoritySupport.Recorded (map.context context).authoritySupport after := by
-  simp only [Context.authoritySupport,Relocation.context,List.map_map,Function.comp_def,
-    AuthoritySupport.recorded_map] at recorded ⊢
-  intro binding member
-  exact mapped _ (recorded binding member)
+  have parts := AuthoritySupport.recorded_append.mp recorded
+  simp only [Context.authoritySupport,Relocation.context,List.map_map,List.flatMap_map,Function.comp_def,
+    Relocation.binding,AuthoritySupport.recorded_append]
+  constructor
+  · exact AuthoritySupport.recorded_map.mpr (fun binding member =>
+      mapped _ (AuthoritySupport.recorded_map.mp parts.1 binding member))
+  · apply AuthoritySupport.recorded_flatMap.mpr
+    intro contract member
+    exact AuthoritySupport.recorded_map.mpr (fun binding inside =>
+      mapped _ (AuthoritySupport.recorded_map.mp (AuthoritySupport.recorded_flatMap.mp parts.2 contract member) binding inside))
 
 theorem Relocation.installed_authority_support {map : Relocation} {handler : InstalledHandler} {before after : Table Loan}
     (mapped : ∀ (authority : Authority), authority.Recorded before → (map.authority authority).Recorded after)
@@ -130,7 +140,7 @@ theorem Step.saved_authority_origin {program : Kernel.Program} {host : Foreign.M
     (step : Step program host before event after) :
     ∀ id suspension, after.resumptions.get id = some suspension →
       AuthoritySupport.Recorded suspension.controlAuthoritySupport after.world.loans := by
-  have retained := (step.suspension_storage valid inventory lawful typed suspensions).2
+  have retained := step.recorded valid inventory lawful typed suspensions
   apply step.resumption_change.saved_property (fun _ _ _ _ recorded => recorded)
     (fun id suspension found => (saved id suspension found).mono retained)
   intro id equal

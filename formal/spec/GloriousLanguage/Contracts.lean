@@ -3,6 +3,7 @@ import GloriousLanguage.ControlOrigin
 import GloriousLanguage.InvocationInputs
 import GloriousLanguage.LabelBoundary
 import GloriousLanguage.ForeignRuntimeSupport
+import GloriousLanguage.InputBatchProgress
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
 The meaning below is intentionally semantic; it does not claim that an
@@ -64,6 +65,31 @@ def FunctionInputs (function : Function) (inputs : List InvocationInput) : Prop 
   (∀ coordinate ∈ coordinates, ¬ coordinate.1.IsResident →
     ∃ identity, coordinate.2.1 = .obligation identity ∧ coordinate.1.key = .resourceInput identity)
 
+/-- A capture-free unary body consumes the same resident coordinate filter
+as every invocation, with no invented raw obligation port. -/
+theorem FunctionInputs.argument {function : Function} {formal : Local} {address : Address}
+    {authority : Authority} (captures : function.captures = []) (parameters : function.parameters = [formal]) :
+    FunctionInputs function [⟨.argument 0,formal,address,authority,.owned⟩] := by
+  change [InputFormal.resident formal] = (function.captures ++ function.parameters).map InputFormal.resident ∧
+    (∀ index input origin access,
+      [(InputFormal.resident formal,InvocationOrigin.argument 0,Access.owned)][index]? = some (input,origin,access) →
+      (index < function.captures.length ∧ origin = .capture index) ∨
+        (function.captures.length ≤ index ∧ origin = .argument (index-function.captures.length) ∧ access = .owned)) ∧
+    (∀ coordinate ∈ [(InputFormal.resident formal,InvocationOrigin.argument 0,Access.owned)],
+      ¬ coordinate.1.IsResident → ∃ identity, coordinate.2.1 = .obligation identity ∧ coordinate.1.key = .resourceInput identity)
+  refine ⟨by rw [captures,parameters]; rfl,?_,?_⟩
+  · intro index input origin access found
+    cases index with
+    | zero =>
+      cases Option.some.inj found
+      exact Or.inr ⟨by simp [captures],by simp [captures],rfl⟩
+    | succ index => simp only [List.getElem?_cons_succ,List.getElem?_nil,reduceCtorEq] at found
+  · intro coordinate member erased
+    have same := List.mem_singleton.mp member
+    subst coordinate
+    exact False.elim (erased trivial)
+
+
 /-- Admission is at the actual `enter` task, before fresh-region creation,
 receiver lending and ordinary input binding. Original storage/access coordinates
 come from the same capture projection used by that preparation, not a fabricated
@@ -75,7 +101,8 @@ def InvocationStart (program : Kernel.Program) (host : Foreign.Model) (function 
   ∃ caller source tail, state.task = .enter caller function source tail ∧
     source.originalInputs function = inputs ∧ boundary.Entry state caller source inputs tail ∧
     caller.region ∈ state.world.liveRegions ∧
-    (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
+    (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) ∧
+    source.Admitted program state.world caller.region function
 
 /-- Whole-program invocation is the isolated specialization of the same
 admission relation. It retains the original supplied-input entry convention. -/
@@ -89,14 +116,30 @@ theorem InvocationStart.isolated {program : Kernel.Program} {host : Foreign.Mode
     (control : state.ControlWellFormed) (registry : host.AuthoritiesRecorded state.world state.hostState)
     (task : state.task = .enter caller function (.supplied inputs) false) (frames : state.frames = [])
     (region : caller.region ∈ state.world.liveRegions)
-    (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true)
+    (admitted : (EntrySource.supplied inputs).Admitted program state.world caller.region function) :
     InitialInvocation program host function inputs state := by
-  refine ⟨typed,formals,control,registry,?_,caller,.supplied inputs,false,task,rfl,⟨rfl,frames,rfl⟩,region,allowed⟩
+  refine ⟨typed,formals,control,registry,?_,caller,.supplied inputs,false,task,rfl,⟨rfl,frames,rfl⟩,region,allowed,admitted⟩
   constructor
   · simp only [State.CallbackControl,task,frames,Task.CallbackCovers,FramesCallbackCovers,and_self]
   · intro runtime member
     simp only [State.callbackRuntimes,task,frames,Task.callbackRuntimes,
       Foreign.AmbientRuntimes.nil,List.nil_append,List.not_mem_nil] at member
+
+/-- The actual non-tail invocation task has a machine successor from its
+finite original admission. Physical exhaustion is a real fatal transition,
+not a missing-layout fallback or an assumed successful entry. -/
+theorem InvocationStart.ordinary_step {program : Kernel.Program} {host : Foreign.Model}
+    {function : Function} {inputs : List InvocationInput} {boundary : InvocationBoundary}
+    {state : State} {caller : Execution.Context} {source : EntrySource}
+    (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
+    (initial : InvocationStart program host function inputs boundary state)
+    (task : state.task = .enter caller function source false) :
+    ∃ event after, LocalStep program state event after := by
+  obtain ⟨actualCaller,actualSource,tail,entry,_,_,_,unsafeOk,admitted⟩ := initial.2.2.2.2.2
+  cases entry.symm.trans task
+  exact admitted.enterStep valid inventory initial.1.1 task unsafeOk
+
 
 /-- The real prepared input binder consumes the same ordered formal/origin
 contract as admission, even when receiver lending changes its authorities. -/

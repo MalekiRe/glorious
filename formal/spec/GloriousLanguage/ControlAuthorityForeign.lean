@@ -5,7 +5,7 @@ Fresh host exposure is owner authority; callback inputs and hidden leases
 are supplied by the ordinary permission and lending producers. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem PrimitiveStep.authority_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (taskRecorded : AuthoritySupport.Recorded before.task.authoritySupport before.world.loans)
@@ -16,7 +16,10 @@ theorem PrimitiveStep.authority_support {program : Kernel.Program} {before after
   have retained := step.suspensionExtension.recorded
   have taskAfter := taskRecorded.mono retained
   have framesAfter := frameRecorded.mono retained
-  cases step <;> simp_all only [Task.authoritySupport,AuthoritySupport.recorded_append,AuthoritySupport.recorded_nil,true_and]
+  cases step <;> simp_all only [Task.authoritySupport,AuthoritySupport.recorded_append,AuthoritySupport.recorded_nil,and_true]
+  case allocate allocated stored | reallocate allocated stored =>
+    exact Context.bindResource_authority_support taskAfter.1
+      (stored.2.authorityStable.recorded _ allocated.authority_recorded)
 
 theorem CaptureInputs.authority_support {world : World} {receiver : Address} {authority : Authority} {access : Access}
     {formals : List Local} {inputs : List InvocationInput}
@@ -46,7 +49,7 @@ end Glorious.Language.Execution
 
 namespace Glorious.Language.Foreign
 
-open Kernel Execution
+open _root_.Glorious.Language.Kernel Execution
 
 theorem CallbackInputs.authority_support {world : World} {formals : List Local}
     {arguments : List ResolvedPlace} {inputs : List InvocationInput}
@@ -72,24 +75,22 @@ theorem AmbientExposed.authority_support {frames : List Frame} {loans : Table Lo
     exact AuthoritySupport.recorded_append.mpr
       ⟨ForeignSession.known_authority_support (AuthoritySupport.recorded_append.mp recorded.1).1,ih recorded.2⟩
 
-theorem FreshExposed.authority_support {before after : World} {loans : Table Loan} :
-    AuthoritySupport.Recorded ((FreshExposed before after).map ResolvedPlace.authority) loans := by
-  rw [AuthoritySupport.recorded_map]
-  intro place exposed
-  obtain ⟨⟨id,root⟩,member,selected⟩ := List.mem_filterMap.mp exposed
-  dsimp only at selected
-  split at selected
-  · cases selected
-    trivial
-  · cases selected
-
 theorem _root_.Glorious.Language.Execution.ForeignSession.advance_authority_support
-    {session : ForeignSession} {before after : World} {state : List Nat} {loans : Table Loan}
-    (recorded : AuthoritySupport.Recorded session.authoritySupport loans) :
-    AuthoritySupport.Recorded (session.advance before after state).authoritySupport loans := by
+    {session : ForeignSession} {produced : List ProducedResource} {state : List Nat} {loans : Table Loan}
+    (recorded : AuthoritySupport.Recorded session.authoritySupport loans)
+    (outputs : ∀ resource ∈ produced, resource.place.authority.Recorded loans) :
+    AuthoritySupport.Recorded (session.advance produced state).authoritySupport loans := by
   simp only [ForeignSession.authoritySupport,AuthoritySupport.recorded_append] at recorded
   simp only [ForeignSession.advance,ForeignSession.authoritySupport,List.map_append,AuthoritySupport.recorded_append]
-  exact ⟨recorded.1,recorded.2,FreshExposed.authority_support⟩
+  refine ⟨recorded.1,recorded.2,?_⟩
+  apply AuthoritySupport.recorded_map.mpr
+  intro place member
+  obtain ⟨resource,present,selected⟩ := List.mem_filterMap.mp member
+  split at selected
+  · cases selected
+    exact outputs resource present
+  · cases selected
+
 
 theorem CallbackReturnTask.authority_support {session : ForeignSession} {registration : CallbackEntry} {result : Address}
     {lease : Option ReceiverLease} {next : Code} {loans : Table Loan}
@@ -115,19 +116,19 @@ theorem Step.authority_support {program : Kernel.Program} {model : Model} {befor
   have framesAfter := frameRecorded.mono retained
   cases step
   all_goals simp_all only [Task.authoritySupport,Frame.authoritySupport,EntrySource.authoritySupport,
-    List.flatMap_cons,List.map_append,AuthoritySupport.recorded_append,
+    List.flatMap_cons,AuthoritySupport.recorded_append,AuthoritySupport.recorded_cons,
     AuthoritySupport.recorded_nil,and_true]
   case enter kept _ _ _ => exact AuthoritySupport.recorded_append.mpr ⟨taskAfter.1,AmbientExposed.authority_support framesAfter⟩
-  case host => exact ForeignSession.advance_authority_support taskAfter
+  case host selected active transition =>
+    have changed := (lawful.step _ _ _ _ _ _ _ _ _ selected well active transition).1
+    exact ForeignSession.advance_authority_support taskAfter (fun resource member => changed.published_recorded member)
   case result => exact (AuthoritySupport.recorded_append.mp taskAfter).1
-  case callback selected active transition _ lent captures inputs consumed =>
-    have hostRetained := (lawful.host_suspensionExtension well selected active transition).recorded
-    have hostToFinal := (lent.suspensionExtension.trans consumed.suspensionExtension).recorded
+  case callback selected active transition admitted inputs =>
+    have changed := (lawful.step _ _ _ _ _ _ _ _ _ selected well active transition).1
     have contextRecorded := (AuthoritySupport.recorded_append.mp taskAfter).1
-    refine ⟨⟨contextRecorded,captures.authority_support.mono consumed.suspensionExtension.recorded,
-      inputs.authority_support.mono consumed.suspensionExtension.recorded⟩,?_,
-      lent.lease_authority_recorded.mono consumed.suspensionExtension.recorded⟩
-    exact (ForeignSession.advance_authority_support (taskRecorded.mono hostRetained)).mono hostToFinal
+    obtain ⟨_,_,_,_,_,permission⟩ := admitted.receiver
+    exact ⟨⟨contextRecorded,permission.recorded,inputs.authority_support⟩,
+      ForeignSession.advance_authority_support taskAfter (fun resource member => changed.published_recorded member),by simp⟩
   case callbackResult => exact CallbackReturnTask.authority_support framesAfter.1.1
   case callbackReturned => exact ForeignSession.returned_authority_support taskRecorded
 

@@ -26,6 +26,24 @@ theorem Step.suspension_storage {program : Kernel.Program} {host : Foreign.Model
   · exact ⟨primitive.suspensions typed.1 suspensions,primitive.suspensionExtension.recorded⟩
   · exact ⟨foreign.suspensions lawful typed.1 suspensions,(foreign.suspensionExtension lawful typed.1).recorded⟩
 
+/-- Historical authority recording survives every actual step, including
+physical exhaustion. It does not assert completed suspension ownership at a
+fatal partial-copy endpoint. -/
+theorem Step.recorded {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed) (step : Step program host before event after) :
+    ∀ authority : Authority, authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
+  rcases step with localStep | atom | effect | control | primitive | foreign
+  · exact localStep.suspensionExtension.recorded
+  · exact atom.suspensionExtension.recorded
+  · exact effect.recorded valid inventory suspensions typed
+  · exact control.suspensionExtension.recorded
+  · exact primitive.suspensionExtension.recorded
+  · exact (foreign.suspensionExtension lawful typed.1).recorded
+
+
 theorem Step.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)

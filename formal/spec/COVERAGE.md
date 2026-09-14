@@ -448,14 +448,33 @@ retained-resource access, not merely direct dereference permission.
 `FormsLoan.handed_off_ready` and `Temporary.borrowed_handle_ready` frame the
 original source and discharge actual fresh-slot separation. Private storage
 excludes every reachable live-loan/resource support edge from the slot being
-cleared, so `LocalStep.hook_handle_ready` constructs the actual destructor
+cleared, so `LocalStep.hook_inputs_admitted` constructs the actual destructor
 argument's initialized singleton `HandoffReady`. The retained-resource loan
 witness is promoted from suspension-only scope and shared, not duplicated.
 The `DropHandle`/`SuspensionContent` gate passes 166 jobs; graph, reference,
 formation, temporary and actual-step theorem audits use standard axioms only.
 Original source readiness and prospective-row view compatibility are explicit
-finite pre-state requirements. Their production from general task admission,
-full `InvocationStart` integration and proper-tail progress remain open.
+finite pre-state requirements. The actual hook product now also constructs
+typed/common formal coordinates, its real positive allocation request and
+original safe caller contract. `InvocationStart` carries this same finite
+`EntrySource.Admitted`; `ordinary_step` produces the real successor without
+an extra declaration or intermediate-world admission premise. The isolated
+producer uses its original input records and the canonical root-bound theorem.
+
+Control authority preservation is migrated across ordinary entry, proper-tail
+caller-contract retention, raw return bindings, guarded relocation and actual
+dependent/custody release queues. `EffectStep.recorded` and `Step.recorded`
+retain historical records through every fatal physical prefix without asserting
+completed suspension ownership. Primitive buffer claims and host exposure share
+the actual allocation producers; `Mutations.published_recorded` follows the
+ordered action transaction, replacing obsolete endpoint `FreshExposed` reasoning.
+The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
+gate passes 163 jobs. Ordinary invocation, actual hook-input, historical/saved
+recording and transaction-output audits report standard axioms only.
+`DropInvocation`/`DropPrivate` are source-migrated but their higher control and
+activation dependencies, including non-resource-fatal suspension premises, are
+not yet checked. Producing original source facts from meaningful task admission,
+proper-tail progress and general task progress remain open.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
@@ -604,16 +623,12 @@ body remains the whole-machine control obligation recorded by
 `CleanupPreservation`, while that path's entry and return outcomes are now
 reported here.
 
-Also landed: input authority provenance is derived rather than admitted.
-`InputAuthorityProvenance` discharges the recorded-authority condition of
-`InputsTyped` from the readiness that admitted each input
-(`InvocationInput.ReadyFor.recorded`, over `Permitted.recorded`, the allocation
-claim's owning row, and the erased port's handed chain). The one shape readiness
-cannot name — a storage port handed over through a share of a guard — is stated
-exactly as a headed-share condition (`Authority.SharedHeaded`, the shape
-`ClaimsStorage`/`TransfersStorageLoan` actually pass), and
-`InitialInvocation.of_empty_resumptions` now takes that condition in place of a
-blanket "every input's authority is recorded" hypothesis.
+The isolated invocation now shares the actual finite original-input product.
+It consumes that product's authority records and the canonical ready-input
+root bound, instead of imposing a headed-share shape or repeating formal
+analysis. The superseded `InputAuthorityProvenance` module and umbrella import
+are removed; raw-input recording is preserved through actual resource
+resolution and the common binder.
 
 The replay/reconstruction release adds five modules and exactly three new
 `EffectStep` constructors, all fatal-resource steps, so a failed replay does not

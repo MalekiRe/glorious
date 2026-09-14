@@ -6,7 +6,7 @@ Saved authorities are consumed from actual historical control, not assumed
 valid only after replay has already executed. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem StartsClause.authority_support {before : State} {handler : InstalledHandler} {context : Context}
     {after : World} {loans : Table Loan} (started : StartsClause before handler context after)
@@ -40,9 +40,14 @@ theorem Installs.authority_support {program : Kernel.Program} {before : State} {
     AuthoritySupport.Recorded handler.authoritySupport after.loans := by
   have outerRecorded := recorded.mono installed.suspensionExtension.recorded
   obtain ⟨first,second,sources,captures,captured,bindings,bound,disposed,one,two,_,capturedValues,boundValues,retired,rfl,rfl⟩ := installed
-  have environmentRecorded := AuthoritySupport.recorded_map.mpr boundValues.authority_recorded
+  have environmentRecorded := AuthoritySupport.recorded_map.mpr (boundValues.authority_recorded (by
+    intro input member
+    obtain ⟨⟨formal,address⟩,_,rfl⟩ := List.mem_map.mp member
+    trivial))
   simp only [InstalledHandler.authoritySupport,AuthoritySupport.recorded_append]
-  exact ⟨⟨environmentRecorded.mono retired.suspensionExtension.recorded,outerRecorded⟩,outerRecorded⟩
+  refine ⟨⟨?_,outerRecorded⟩,outerRecorded⟩
+  simpa only [Context.authoritySupport,List.flatMap_nil,List.append_nil] using
+    environmentRecorded.mono retired.suspensionExtension.recorded
 
 theorem EffectStep.authority_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -54,7 +59,7 @@ theorem EffectStep.authority_support {program : Kernel.Program} {before after : 
     (step : EffectStep program before event after) :
     AuthoritySupport.Recorded after.task.authoritySupport after.world.loans ∧
       AuthoritySupport.Recorded (after.frames.flatMap Frame.authoritySupport) after.world.loans := by
-  have retained := (step.suspension_storage valid inventory suspensions typed).2
+  have retained := step.recorded valid inventory suspensions typed
   have taskAfter := taskRecorded.mono retained
   have framesAfter := frameRecorded.mono retained
   cases step
@@ -90,6 +95,7 @@ theorem EffectStep.authority_support {program : Kernel.Program} {before after : 
     obtain ⟨contextRecorded,handlerRecorded,savedRecorded⟩ := copied.authority_support typed.1 (saved _ _ found)
     have transferred := keptTransfer.suspensionExtension.recorded
     exact ⟨contextRecorded.mono transferred,savedRecorded.mono transferred,handlerRecorded.mono transferred⟩
+  case resumeCopyExhausted copied _ => simpa only [copied.result] using framesAfter
   case completionIdentity started keptTransfer roots _ =>
     have clauseRecorded := started.authority_support framesAfter.1
     exact ⟨clauseRecorded,clauseRecorded⟩

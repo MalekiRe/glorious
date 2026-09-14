@@ -243,15 +243,30 @@ or a dependency of this project.
   handle; `FormsLoan.handed_off_ready` frames the original source across the
   actual write and fresh loan. `Temporary.borrowed_handle_ready` discharges
   fresh-slot separation from the real allocation.
-  `LocalStep.hook_handle_ready` consumes these producers and actual private
-  storage to establish the destructor argument's initialized singleton
-  `HandoffReady`, including exclusion of the slot the binder clears. The
-  source graph readiness and prospective-row view compatibility are finite
-  original-world hypotheses, not assumed after-world readiness. The strict
-  `DropHandle`/`SuspensionContent` gate passes 166 jobs; general theorem audits
-  report standard axioms only. Producing those source facts from task
-  admission and integrating the actual argument into `InvocationStart` remain
-  open; this result does not claim general invocation progress.
+  `LocalStep.hook_inputs_admitted` consumes these producers and actual private
+  storage to construct the complete destructor input product: initialized
+  singleton handoff readiness, real formal coordinates, the actual positive
+  allocation request and the safe selected declaration's caller contract.
+  Source readiness and prospective-row view compatibility remain finite
+  original-world requirements, not assumed after-world readiness.
+- `InvocationStart` now carries the actual recipe's `EntrySource.Admitted`,
+  including its selected declaration. `InvocationStart.ordinary_step` derives
+  an actual machine successor, including physical exhaustion, directly from
+  that admission. The isolated producer consumes the same product and canonical
+  input root bounds; the headed-authority side condition and its module are
+  removed. Current/saved authority preservation now covers guarded relocation,
+  carried caller contracts, raw return bindings, cleanup queues, and actual
+  host transaction outputs rather than endpoint-derived fresh exposure.
+  `EffectStep.recorded` and `Step.recorded` retain historical rows even at the
+  real fatal prefixes; they do not claim completed suspension ownership there.
+  The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
+  gate passes 163 jobs; ordinary entry, actual Drop input, saved/historical
+  recording and published-output axiom audits report standard axioms only.
+  `DropInvocation` and `DropPrivate` source consumers are migrated but not yet
+  proof-checked: their higher control/activation dependencies and non-resource-
+  fatal suspension-premise consumers still require repair. Original source
+  fact production from task admission, proper-tail progress and whole-task
+  progress remain open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
@@ -383,12 +398,11 @@ or a dependency of this project.
   runtime definitional equality from them. Both source address bridges and
   both label consumers now require no independent logical-reading premise.
   The old callback-based interpretation certificates are removed.
-- `InputAuthorityProvenance`: the recorded-authority condition of `InputsTyped`
-  is discharged from each input's own readiness (permitted rows, the allocation
-  claim's owning row, the erased port's handed chain), with the one shape
-  readiness cannot name stated exactly as the headed-share condition the binder
-  passes; `InitialInvocation.of_empty_resumptions` consumes that instead of a
-  blanket recorded-rows hypothesis.
+- `InitialInvocation.of_empty_resumptions` consumes the same finite entry
+  admission as ordinary entry. Authority records come from its actual input
+  product; storage bounds use `InvocationInput.ReadyFor.root_bound`. The old
+  headed-share restriction, duplicate root-bound analysis and superseded
+  `InputAuthorityProvenance` module are removed.
 - `SuspensionCapture`: the suspend-time capture admission produced from the real
   suspend instructions and the actual continuation-handle allocation, with the
   fresh frame's side condition taken from the machine's live-loan law and the
@@ -521,6 +535,9 @@ source admission, transporting fresh-lifetime requests, and deriving receiver
 fresh-row compatibility for actual entry remain on the same dependency chain.
 
 Earlier recovery checkpoints used this target set:
+
+This historical command includes the now-retired `InputAuthorityProvenance`
+target; it is not a current verification command.
 
 `lake build GloriousLanguage.CleanupExecution GloriousLanguage.SnapshotPlacement GloriousLanguage.SnapshotPlacementConstruction GloriousLanguage.SnapshotReplayConstruction GloriousLanguage.SnapshotReplayProgress GloriousLanguage.SnapshotCopyConstruction GloriousLanguage.CleanupPreservation GloriousLanguage.ForeignEvolution GloriousLanguage.InvocationLending GloriousLanguage.ResumptionPreservation GloriousLanguage.SourceAddress GloriousLanguage.LabelExecution GloriousLanguage.InputBindingProgress GloriousLanguage.LoanCompatibility GloriousLanguage.LoanResourceRows GloriousLanguage.CopyProgress GloriousLanguage.RawMutationProgress GloriousLanguage.SemanticPreservation GloriousLanguage.SnapshotReplayPreservation GloriousLanguage.OperationExecution GloriousLanguage.BufferReallocationProgress GloriousLanguage.PublicValues GloriousLanguage.CustodyDischarge GloriousLanguage.CleanupDestruction GloriousLanguage.InputAuthorityProvenance GloriousLanguage.SuspensionCapture GloriousLanguage.RuntimeWorldEquivariance GloriousLanguage.ReferenceTransferPreservation GloriousLanguage.SnapshotResourcePreservation GloriousLanguage.AllocationFraming GloriousLanguage.CopyResourcePreservation`
 

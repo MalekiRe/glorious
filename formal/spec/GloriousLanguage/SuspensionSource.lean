@@ -216,6 +216,33 @@ theorem EffectStep.suspension_storage {program : Kernel.Program} {before after :
   exact ⟨step.ordinary_suspensions valid typed.1 notCapture notReplay notCancel notFatal,
     (step.ordinary_suspensionExtension notCapture notReplay notCancel notFatal).recorded⟩
 
+/-- Physical exhaustion can interrupt suspension ownership establishment,
+but never erases the historical loan rows. Preserve that independent fact
+through the actual payload, freeze, copy and argument-transfer prefixes. -/
+theorem EffectStep.recorded {program : Kernel.Program} {before after : State} {event : Option Event}
+    (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)
+    (step : EffectStep program before event after) :
+    ∀ authority : Authority, authority.Recorded before.world.loans → authority.Recorded after.world.loans := by
+  by_cases failed : event = some (.fatal .resource)
+  · subst event
+    cases step with
+    | terminalPayloadExhausted _ _ _ _ _ started attempted =>
+      exact (started.suspensionExtension.trans attempted.suspensionExtension).recorded
+    | suspendPayloadExhausted _ _ _ _ _ _ _ started attempted =>
+      exact (started.suspensionExtension.trans attempted.suspensionExtension).recorded
+    | suspendTailPayloadExhausted _ _ _ _ _ _ _ _ started attempted =>
+      exact (started.suspensionExtension.trans attempted.suspensionExtension).recorded
+    | suspendContinuationExhausted _ _ _ _ _ _ _ started keptPayload _ _ _ _ =>
+      exact (started.suspensionExtension.trans keptPayload.suspensionExtension).recorded
+    | resumeLastExhausted _ _ _ _ restored _ => rw [restored]; exact fun _ recorded => recorded
+    | resumeCopyExhausted _ _ _ _ copied _ =>
+      rw [copied.result]
+      exact fun _ recorded => recorded.transport (fun _ loan found => ⟨loan,Relocation.old_loan found⟩)
+    | resumeCopyBlocked => exact fun _ recorded => recorded
+  · exact (step.suspension_storage programValid inventory valid typed failed).2
+
+
 theorem EffectStep.suspensions {program : Kernel.Program} {before after : State} {event : Option Event}
     (programValid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (valid : before.SuspensionsWellFormed) (typed : Typing.WorldTyped program before.world)

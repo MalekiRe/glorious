@@ -15,6 +15,10 @@ theorem LocalStep.hook_invocation_start {program : Kernel.Program} {host : Forei
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (registry : host.AuthoritiesRecorded before.world before.hostState)
     (callbacks : host.CallbacksWellFormed before)
+    (source : ∀ caller authority next value, before.task = .destroy caller address authority next →
+      before.world.Stores address value →
+      value.ResourcesAccessible program before.world .unique ∧
+      value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
     (dispatch : LocalStep program before (some (.hookEnter address hook)) entering) :
     ∃ (caller : Context) (function : Function) (authority : Authority)
       (handle : Address) (loan : Identity) (next : Task) (value : Value),
@@ -25,51 +29,19 @@ theorem LocalStep.hook_invocation_start {program : Kernel.Program} {host : Forei
       entering.frames = .hook caller address authority handle loan next :: before.frames ∧
       InvocationStart program host function [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]
         (.caller { caller with unsafeAllowed := false } entering.frames) entering := by
-  have afterTyped := dispatch.worldTyped valid inventory typed
   have afterControl := Step.controlWellFormed valid inventory lawful typed control (Or.inl dispatch)
   have afterRegistry := Step.host_authorities valid inventory lawful typed control registry (Or.inl dispatch)
   have afterCallbacks := Step.callbacks valid inventory lawful typed control.suspensions callbacks (Or.inl dispatch)
-  cases dispatch with
-  | @destroyHook caller _ authority next value _ function allocated handle after loan task stored _ _ selected temporary borrowed loanId =>
-    obtain ⟨formal,parameters,formalType⟩ := selected.2.2.parameter
-    have headFormal : function.parameters.head! = formal := by rw [parameters]; rfl
-    obtain ⟨root,found,_,whole,privateRoot⟩ := temporary.borrowed_handle_private typed.1 stored borrowed
-    obtain ⟨self,handleStored,_⟩ := borrowed.created_handle
-    have handleType := afterTyped.stored_root_type whole handleStored
-      (AddressType.root_transport borrowed.locations whole temporary.addressType)
-    have initialized : (Value.resident allocated.nextOwner (.reference .unique (.runtimeRegion caller.region) self)
-        (.reference allocated.nextLoan) true []).Initialized := by
-      intro path resident residentAt
-      cases residentAt with
-      | root => exact ⟨rfl,by simp [Value.fields]⟩
-      | field field _ => simp [Value.fields] at field
-    have permission : Permitted after .owner .owned handle := by
-      refine ⟨⟨root,found⟩,?_⟩
-      intro id loan found live overlap conflict
-      exact privateRoot.1 id loan found live overlap.1.symm
-    refine ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,rfl,rfl,
-      ⟨?_,?_,afterControl,afterRegistry,afterCallbacks,
-        { caller with unsafeAllowed := false },.supplied _,false,rfl,rfl,Or.inl ⟨rfl,rfl,rfl⟩,borrowed.region_live,
-          by intro needsUnsafe; have safe := selected.2.2.1.2.2.2; cases safe.symm.trans needsUnsafe⟩⟩
-    · refine ⟨afterTyped,by simp,?_,?_⟩
-      · intro input member
-        have same : input = ⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩ := List.mem_singleton.mp member
-        subst input
-        exact ⟨_,handleStored,initialized,by simpa only [headFormal,formalType] using handleType,permission⟩
-      · intro left leftMem right rightMem different overlap
-        exact False.elim (different ((List.mem_singleton.mp leftMem).trans (List.mem_singleton.mp rightMem).symm))
-    · constructor
-      · change [function.parameters.head!] = function.captures ++ function.parameters
-        rw [headFormal,selected.2.2.2.1,parameters]
-        rfl
-      · intro index input inputAt
-        cases index with
-        | zero =>
-          simp only [List.getElem?_cons_zero,Option.some.injEq] at inputAt
-          subst input
-          exact Or.inr ⟨by rw [selected.2.2.2.1]; exact Nat.le_refl 0,
-            by simp only [selected.2.2.2.1,List.length_nil,Nat.sub_zero],rfl⟩
-        | succ index => simp only [List.getElem?_cons_succ,List.getElem?_nil,reduceCtorEq] at inputAt
+  obtain ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,enterTask,frames,inputsTyped,formals,admitted⟩ :=
+    dispatch.hook_inputs_admitted valid inventory typed source
+  obtain ⟨layout,request⟩ := admitted.inputs.requests _ List.mem_cons_self
+  refine ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,enterTask,frames,
+    ⟨inputsTyped,formals,afterControl,afterRegistry,afterCallbacks,
+      { caller with unsafeAllowed := false },.supplied _,false,enterTask,rfl,Or.inl ⟨rfl,rfl,rfl⟩,
+      request.region_live,?_,admitted⟩⟩
+  intro needsUnsafe
+  have safe := selected.2.2.1.2.2.2
+  cases safe.symm.trans needsUnsafe
 
 /-- The selected Drop admission now applies directly to real ambient traces.
 This does not assert that the current Drop event profile is the final adequate
@@ -81,6 +53,10 @@ theorem LocalStep.hook_admitted_interval {program : Kernel.Program} {host : Fore
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (registry : host.AuthoritiesRecorded before.world before.hostState)
     (callbacks : host.CallbacksWellFormed before)
+    (source : ∀ caller authority next value, before.task = .destroy caller address authority next →
+      before.world.Stores address value →
+      value.ResourcesAccessible program before.world .unique ∧
+      value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
     (dispatch : LocalStep program before (some (.hookEnter address hook)) entering) :
     ∃ (caller : Context) (function : Function) (authority : Authority)
       (handle : Address) (loan : Identity) (next : Task) (value : Value),
@@ -95,7 +71,7 @@ theorem LocalStep.hook_admitted_interval {program : Kernel.Program} {host : Fore
         (∀ result, boundary.Normal finish result →
           Observes program host function ⟨inputs,entering.world,events,finish.world,.normal result⟩) := by
   obtain ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,_,frames,initial⟩ :=
-    dispatch.hook_invocation_start valid inventory lawful typed control registry callbacks
+    dispatch.hook_invocation_start valid inventory lawful typed control registry callbacks source
   have contract := admitted.contracts _ _ _ _ selected
   refine ⟨caller,function,authority,handle,loan,next,value,task,stored,frames,initial,contract,?_⟩
   intro events finish run

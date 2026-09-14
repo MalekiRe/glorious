@@ -76,6 +76,10 @@ theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : 
     (admitted : before.ControlWellFormed)
     (registry : host.AuthoritiesRecorded before.world before.hostState)
     (callbacks : host.CallbacksWellFormed before)
+    (source : ∀ caller authority next value, before.task = .destroy caller address authority next →
+      before.world.Stores address value →
+      value.ResourcesAccessible program before.world .unique ∧
+      value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
     (dispatch : LocalStep program before (some (.hookEnter address hook)) entering)
     (entry : LocalStep program entering none body) :
     ∃ (caller : Context) (authority : Authority) (handle : Address) (loan : Identity) (next : Task) (root : Root),
@@ -93,7 +97,7 @@ theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : 
       fresh,freshLoan,slot,outerOutside,privateControl⟩ := dispatch.hook_body_private valid inventory lawful typed admitted entry
   obtain ⟨actualCaller,actualFunction,actualAuthority,actualHandle,actualLoan,actualNext,value,
       _,_,selected,_,actualFrames,initial⟩ :=
-    dispatch.hook_invocation_start valid inventory lawful typed admitted registry callbacks
+    dispatch.hook_invocation_start valid inventory lawful typed admitted registry callbacks source
   have sameGuard := Frame.hook.inj (List.cons.inj (entryFrames.symm.trans actualFrames)).1
   obtain ⟨rfl,_,rfl,rfl,rfl,rfl⟩ := sameGuard
   rw [entryFrames] at initial
@@ -140,6 +144,10 @@ theorem LocalStep.hook_body_private_until_return {program : Kernel.Program} {hos
     (admitted : before.ControlWellFormed)
     (registry : host.AuthoritiesRecorded before.world before.hostState)
     (callbacks : host.CallbacksWellFormed before)
+    (source : ∀ caller authority next value, before.task = .destroy caller address authority next →
+      before.world.Stores address value →
+      value.ResourcesAccessible program before.world .unique ∧
+      value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
     (dispatch : LocalStep program before (some (.hookEnter address hook)) entering)
     (entry : LocalStep program entering none body) (run : Run program host body trace after) :
     ∃ (caller : Context) (authority : Authority) (handle : Address) (loan : Identity) (next : Task) (root : Root),
@@ -154,7 +162,7 @@ theorem LocalStep.hook_body_private_until_return {program : Kernel.Program} {hos
         finish.world.PrivateSlot handle.root root ∧ PrivateControl handle.root caller.activation remaining finish.task ∧
         (finish = after ∨ ∃ result, boundary.Normal finish result) := by
   obtain ⟨caller,authority,handle,loan,next,root,task,live,whole,fresh,freshLoan,home,privatePrefix⟩ :=
-    dispatch.hook_body_admitted_private valid inventory drops lawful typed admitted registry callbacks entry
+    dispatch.hook_body_admitted_private valid inventory drops lawful typed admitted registry callbacks source entry
   refine ⟨caller,authority,handle,loan,next,root,task,live,whole,fresh,freshLoan,home,?_⟩
   dsimp only
   obtain ⟨first,last,finish,events,interval,rest,exit⟩ := invocation_first_exit

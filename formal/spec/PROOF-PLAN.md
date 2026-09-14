@@ -318,7 +318,7 @@ actual live row, stored initialized target, target readiness and permission.
 `FormsLoan.handed_off_ready` constructs that readiness across the real write
 and fresh row using original source support separation and view compatibility.
 `Temporary.borrowed_handle_ready` derives separation from actual allocation
-freshness. `LocalStep.hook_handle_ready` consumes that proof and actual handle
+freshness. `LocalStep.hook_inputs_admitted` consumes that proof and actual handle
 privacy: every reference/resource support edge has a live loan, which private
 storage excludes from the cleared slot. The result is the real destructor
 argument's initialized singleton `HandoffReady`, not an after-state admission
@@ -330,9 +330,33 @@ uses `propext` and `Quot.sound`; actual formation, temporary and hook dispatch
 use only those plus `Classical.choice`. No routine examples/tests were added.
 The original source graph readiness and prospective-row view compatibility
 remain finite explicit pre-state requirements, not consequences proved here
-from `WorldTyped` or Drop selection. Next: integrate the actual handoff product
-into `InvocationStart`, produce source requirements through meaningful task
-admission, and continue ordinary/proper-tail and whole-task progress.
+from `WorldTyped` or Drop selection. The actual hook producer now constructs
+the full finite entry product, including typed singleton readiness, the common
+resident coordinate filter, the actual positive storage request and the safe
+selected declaration's original caller contract.
+
+`InvocationStart` now carries `EntrySource.Admitted` for its actual recipe.
+The product also owns selected-declaration existence, so
+`InvocationStart.ordinary_step` derives a machine successor without an added
+entry/declaration/progress hypothesis. Isolated construction uses the same
+product and the existing ready-input root-bound theorem; the artificial
+headed-authority restriction and its module are removed.
+The authority consumer chain is checked through ordinary/raw invocation,
+proper-tail caller-contract retention, real return binding, guarded relocation
+and dependent/custody release queues. Historical recording is separated from
+non-resource-fatal suspension safety: `EffectStep.recorded` and `Step.recorded`
+cover every actual fatal payload/freeze/replay prefix. Host exposure derives
+from the actual ordered transaction's published resources, sharing created
+buffer authority with primitive binding, not scanning endpoint roots.
+The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
+gate passes 163 jobs. Ordinary-step, actual-hook-input, historical/saved
+recording and transaction-output audits report only standard axioms.
+`DropInvocation` and `DropPrivate` source callers are migrated but not yet
+proof-checked: their higher root/control/activation consumers and the
+non-resource-fatal suspension premise must be repaired next. No claim of
+general control preservation, Drop interval completion, proper-tail progress
+or whole-task progress is made. Continue this same invocation/task dependency
+chain, including production of the original source requirements.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -508,12 +532,11 @@ not assembled), the drain of the pending-return list to the retirement task, and
 the execution of a declared drop hook's arbitrary body, which is the
 whole-machine control obligation recorded by `CleanupPreservation`.
 
-Input authority provenance is derived too: `InputAuthorityProvenance` discharges
-the recorded-authority condition of `InputsTyped` from each input's own
-readiness, with the one shape readiness cannot name (an erased port handed over
-through a share of a guard) stated exactly as the headed-share condition the
-binder actually passes, and `InitialInvocation.of_empty_resumptions` now takes
-that condition instead of a blanket recorded-rows hypothesis.
+The isolated invocation now consumes the actual finite original-input product
+for authority recording and shares `InvocationInput.ReadyFor.root_bound`.
+The headed-share restriction, duplicate root-bound analysis and superseded
+`InputAuthorityProvenance` module are removed. Actual resource resolution,
+binding and return now supply the records used by control consumers.
 
 ## 2. Source and normative adequacy
 

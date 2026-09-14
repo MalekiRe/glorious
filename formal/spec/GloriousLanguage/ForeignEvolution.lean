@@ -552,5 +552,58 @@ theorem Mutations.published_fresh {program : Kernel.Program} {custody : ClaimCus
       · exact first.produced_fresh own
       · exact Nat.le_trans first.homeExtension.counter (ih published)
 
+theorem _root_.Glorious.Language.Memory.AllocatesBuffer.authority_recorded {program : Language.Program}
+    {custody : ClaimCustody} {before after : World} {domain element count base pointer allocation}
+    (allocated : Memory.AllocatesBuffer program custody before domain element count base pointer allocation after) :
+    allocation.authority.Recorded after.loans := by
+  cases allocated
+  exact ⟨_,Table.get_set _ _ _⟩
+
+theorem _root_.Glorious.Language.Memory.ReallocatesBuffer.authority_recorded {program : RuntimeProgram}
+    {custody : ClaimCustody} {before after : World} {oldAllocation : ResolvedPlace} {old : RawPointer}
+    {domain element count base pointer allocation}
+    (reallocated : Memory.ReallocatesBuffer program custody before oldAllocation old domain element count base pointer allocation after) :
+    allocation.authority.Recorded after.loans := by
+  cases reallocated with
+  | grow ready allocated moved released =>
+    exact released.recorded _ (moved.authorityStable.recorded _ allocated.authority_recorded)
+
+
+/-- Published authority belongs to the actual allocating action, including
+fresh exterior and buffer claims. It is not inferred from endpoint roots. -/
+theorem Mutation.produced_recorded {program : Kernel.Program} {policy : AuthorityPolicy}
+    {before after : World} {action : MutationAction} {custody : ClaimCustody}
+    (changed : Mutation program policy before action after) {resource : ProducedResource}
+    (member : resource ∈ action.produced custody) : resource.place.authority.Recorded after.loans := by
+  cases changed <;> simp only [MutationAction.produced,List.mem_singleton,List.not_mem_nil] at member
+  all_goals subst resource
+  case allocate => trivial
+  case allocateExterior allocated => cases allocated; exact ⟨_,Table.get_set _ _ _⟩
+  case allocateBuffer allocated => exact allocated.authority_recorded
+  case reallocateBuffer reallocated => exact reallocated.authority_recorded
+
+/-- Every actual transaction suffix retains the authority produced earlier in
+that same transaction, even if its loan becomes inactive. -/
+theorem Mutations.recorded {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World} {produced actions}
+    (changed : Mutations program custody policy before produced actions after) (authority : Authority)
+    (recorded : authority.Recorded before.loans) : authority.Recorded after.loans := by
+  induction changed with
+  | refl => exact recorded
+  | cons first _ ih => exact ih (first.recorded authority recorded)
+
+theorem Mutations.published_recorded {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World} {produced actions}
+    (changed : Mutations program custody policy before produced actions after) {resource : ProducedResource}
+    (member : resource ∈ TransactionOutputs custody actions) : resource.place.authority.Recorded after.loans := by
+  induction changed with
+  | refl => simp only [TransactionOutputs,List.flatMap_nil,List.not_mem_nil] at member
+  | cons first rest ih =>
+    simp only [TransactionOutputs,List.flatMap_cons,List.mem_append] at member
+    rcases member with own | later
+    · exact rest.recorded _ (first.produced_recorded own)
+    · exact ih later
+
+
 end Foreign
 end Glorious.Language

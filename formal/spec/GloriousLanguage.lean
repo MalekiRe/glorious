@@ -7,7 +7,6 @@ import GloriousLanguage.CleanupExecution
 import GloriousLanguage.CustodyDischarge
 import GloriousLanguage.CleanupDestruction
 import GloriousLanguage.CleanupDrain
-import GloriousLanguage.InputAuthorityProvenance
 import GloriousLanguage.InstantiationEquivariance
 import GloriousLanguage.CopyPreservation
 import GloriousLanguage.CopyResourcePreservation

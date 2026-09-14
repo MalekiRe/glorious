@@ -1,6 +1,5 @@
 import GloriousLanguage.PointerPreservation
 import GloriousLanguage.Contracts
-import GloriousLanguage.InputAuthorityProvenance
 
 /-! The whole-machine resumption budget invariant and trace accounting.
 The transition classification below is derived from the real `Step`, never
@@ -538,6 +537,7 @@ it does not require an execution-safety certificate or a successful run. -/
 theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host : Foreign.Model} {function : Kernel.Function}
     {inputs : List Kernel.InvocationInput} {state : State} {caller : Execution.Context}
     (inputsTyped : InputsTyped program inputs state.world) (functionInputs : FunctionInputs function inputs)
+    (admitted : (EntrySource.supplied inputs).Admitted program state.world caller.region function)
     (registry : host.AuthoritiesRecorded state.world state.hostState)
     (empty : state.resumptions = [])
     (homes : ∀ rootId root id, state.world.roots.get rootId = some root →
@@ -552,20 +552,12 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
       ∀ binding ∈ contract.inputs, binding.address.root < state.world.nextRoot)
     (callerContractAuthorities : ∀ contract ∈ caller.resourceContracts,
       ∀ binding ∈ contract.inputs, binding.authority.Recorded state.world.loans)
-    /- Authority provenance is not a separate admission condition: each input's
-    readiness already names the rows its authority records, because a permitted
-    address names its rows (`Permitted.recorded`), an allocation input names the
-    owning row of its claim, and an erased port's handed share chain is
-    loan-headed. Only that last shape is named here, and it is the actual shape
-    the binder produces (`ClaimsStorage`/`TransfersStorageLoan` pass the
-    caller's own claim). -/
-    (inputHeaded : ∀ input ∈ inputs, input.authority.SharedHeaded)
     (frames : state.frames = []) (region : caller.region ∈ state.world.liveRegions)
     (activation : caller.activation < state.nextActivation)
     (activationHomes : state.world.ActivationsBelow state.nextActivation)
     (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     InitialInvocation program host function inputs state := by
-  apply InvocationStart.isolated inputsTyped functionInputs ?_ registry task frames region allowed
+  apply InvocationStart.isolated inputsTyped functionInputs ?_ registry task frames region allowed admitted
   refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_,?_⟩
   · rw [task]
     apply RootSupport.below_append.mpr
@@ -581,42 +573,8 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
         simpa only [← same] using callerContractBounds contract selected binding present
     · rw [EntrySource.rootSupport,RootSupport.below_flatMap]
       intro input member
-      have ready := (inputsTyped.2.2.2.2 input member).1
-      have bound : input.storage.root < state.world.nextRoot := by
-        cases formal : input.formal with
-        | resident localSlot =>
-          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
-          obtain ⟨_,_,_,_,_,permitted⟩ := ready
-          unfold Permitted at permitted
-          obtain ⟨rooted,_⟩ := permitted
-          obtain ⟨root,found⟩ := rooted
-          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
-        | storage type =>
-          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
-          obtain ⟨_,_,permitted⟩ := ready
-          unfold Permitted at permitted
-          obtain ⟨rooted,_⟩ := permitted
-          obtain ⟨root,found⟩ := rooted
-          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
-        | allocation type =>
-          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
-          obtain ⟨_,_,claim,_⟩ := ready
-          obtain ⟨_,_,_,_,_,_,_,_,_,_,found,_⟩ := claim
-          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
-        | loan type =>
-          simp only [Kernel.InvocationInput.ReadyFor,formal] at ready
-          obtain ⟨_,_,identity,loan,rows,live,_,referent,_⟩ := ready
-          have located : state.world.Located input.storage := by
-            rw [← referent]
-            exact World.liveLoanLocations (valid := inputsTyped.1.1) identity loan rows live
-          obtain ⟨root,found⟩ : ∃ root, state.world.root input.storage = some root := by
-            cases located with
-            | inl packed =>
-              obtain ⟨value,stored⟩ := packed
-              obtain ⟨root,found,rest⟩ := Option.bind_eq_some_iff.mp stored
-              exact ⟨root,found⟩
-            | inr vacant => obtain ⟨root,found,rest⟩ := vacant; exact ⟨root,found⟩
-          exact World.root_bound inputsTyped.1.1 (World.root_found found).1
+      have bound := Kernel.InvocationInput.ReadyFor.root_bound inputsTyped.1.1
+        (inputsTyped.2.2.2.2 input member).1
       simpa only [Kernel.InvocationInput.rootSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bound
   · simp [frames]
   · intros
@@ -633,7 +591,7 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
         exact callerContractAuthorities contract member
     · rw [EntrySource.authoritySupport,AuthoritySupport.recorded_map]
       intro input member
-      exact InvocationInput.ReadyFor.recorded (inputsTyped.2.2.2.2 input member).1 (inputHeaded input member)
+      exact admitted.inputs.recorded input member
   · simp [frames]
   · intros
     simp_all [Table.get]

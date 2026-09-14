@@ -5,7 +5,7 @@ authority provenance as ordinary invocation. Even vacant reserved storage
 must not introduce an unrecorded loan into a scheduled cleanup task. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem LabelRoute.authority_support {frames inner outer : List Frame} {brand region : Identity}
     {context : Context} {type : Term} {loans : Table Loan}
@@ -65,9 +65,11 @@ theorem ControlStep.authority_support {program : Kernel.Program} {before after :
     rw [AuthoritySupport.recorded_map]
     intro place member
     exact World.reserved_authority_recorded well found (List.mem_reverse.mp member)
-  case contextualCall receiver _ _ _ _ witness _ _ _ _ _ captures inputs _ _ =>
-    exact ⟨retained _ receiver.recorded,retained _ witness.recorded,
-      captures.authority_support.mono retained,(inputs.authority_support taskRecorded).mono retained⟩
+  case contextualCall receiver _ _ _ _ _ _ _ witness _ _ captures inputs resources =>
+    exact ⟨Context.resolves_recorded taskRecorded receiver,Context.resolves_recorded taskRecorded witness,
+      ⟨captures.authority_support,inputs.authority_support taskRecorded⟩,
+      resources.authority_support (AuthoritySupport.recorded_map.mp
+        (AuthoritySupport.recorded_append.mp taskRecorded).1)⟩
   case positiveTest allocated tested => exact Context.bind_authority_support taskAfter trivial
   case negativeTest allocated tested => exact Context.bind_authority_support taskAfter trivial
 

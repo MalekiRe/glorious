@@ -228,6 +228,36 @@ def Kernel.InvocationInputsCompatible (program : RuntimeProgram) (footprint : Li
   (∀ input ∈ inputs, input.authority.Recorded world.loans) ∧
   ∀ head ∈ inputs, ∀ other ∈ inputs, head ≠ other → head.IndependentOf program footprint world other
 
+/-- A singleton uses the common six-formal readiness and positive request.
+Its footprint is exactly the write set of that input; there is no distinct
+input whose effects require pairwise framing. -/
+theorem Kernel.InvocationInputsCompatible.singleton {program : RuntimeProgram} {world : World}
+    {region : Identity} {input : InvocationInput} (ready : input.Ready program world)
+    (request : input.StorageRequest program world region) (recorded : input.authority.Recorded world.loans) :
+    InvocationInputsCompatible program ([input].flatMap InvocationInput.clearedStorage) region world [input] := by
+  simp only [List.flatMap_cons,List.flatMap_nil,List.append_nil]
+  refine ⟨⟨?_,?_,?_⟩,?_,?_,?_⟩
+  · intro address member
+    simpa only [List.flatMap_cons,List.flatMap_nil,List.append_nil] using member
+  · cases input with
+    | mk origin formal storage authority access =>
+      cases formal <;> cases access <;> simp [InvocationInput.clearedStorage]
+  · intro selected member
+    have same := List.mem_singleton.mp member
+    subst selected
+    refine ⟨ready,?_⟩
+    intro resident lent source member
+    have empty : input.clearedStorage = [] := by
+      cases formal : input.formal <;> simp [InvocationInput.clearedStorage,formal,lent]
+    simp only [empty,List.not_mem_nil] at member
+  · intro selected member
+    exact List.mem_singleton.mp member ▸ request
+  · intro selected member
+    exact List.mem_singleton.mp member ▸ recorded
+  · intro first firstMember last lastMember different
+    exact False.elim (different ((List.mem_singleton.mp firstMember).trans (List.mem_singleton.mp lastMember).symm))
+
+
 theorem Kernel.InvocationInputsCompatible.ready {program : RuntimeProgram} {footprint : List Address}
     {region : Identity} {world : World} {inputs : List InvocationInput}
     (compatible : InvocationInputsCompatible program footprint region world inputs) :
@@ -5439,6 +5469,20 @@ structure Execution.EntrySource.Admitted (program : Kernel.Program) (world : Wor
   incoming : IncomingResources program function world (source.originalInputs function)
   receiverCompatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ source.originalInputs function,
     input.PermissionCompatible world receiver.authority .owned receiver.address
+  declared : ∃ declaration, program.declarations.function function.declaration = some declaration
+
+
+/-- Supplied inputs use the very same finite batch and original caller
+contract as receiver preparation; no synthetic successful entry is admitted. -/
+theorem Execution.EntrySource.Admitted.supplied {program : Kernel.Program} {world : World}
+    {region : Identity} {function : Function} {inputs : List InvocationInput}
+    (product : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage) region world inputs)
+    (incoming : IncomingResources program function world inputs)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration) :
+    (Execution.EntrySource.supplied inputs).Admitted program world region function := by
+  refine ⟨trivial,trivial,product,incoming,?_,declared⟩
+  intro receiver impossible
+  cases impossible
 
 
 /-- Whole entry from original invocation facts: create the callee lifetime,
@@ -5451,10 +5495,9 @@ theorem Execution.EntrySource.Admitted.enterWorldAttempt {program : Kernel.Progr
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
     (admitted : source.Admitted program before.world caller.region function)
-    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
     (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     ∃ context after outcome, Execution.EnterWorldAttempt program before caller function source context after outcome := by
-  obtain ⟨ready,conditions,product,incoming,receiverCompatible⟩ := admitted
+  obtain ⟨ready,conditions,product,incoming,receiverCompatible,declared⟩ := admitted
   obtain ⟨declaration,declared⟩ := declared
   let callee : Execution.Context := ⟨[],declaration.header.module,before.nextActivation,before.world.nextRegion,
     before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,[]⟩]⟩
@@ -5488,11 +5531,10 @@ theorem Execution.EntrySource.Admitted.enterStep {program : Kernel.Program} {bef
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
     (admitted : source.Admitted program before.world caller.region function)
-    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
     (task : before.task = .enter caller function source false)
     (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     ∃ event after, Execution.LocalStep program before event after := by
-  obtain ⟨context,world,outcome,entered⟩ := admitted.enterWorldAttempt valid inventory typed declared callerUnsafe
+  obtain ⟨context,world,outcome,entered⟩ := admitted.enterWorldAttempt valid inventory typed callerUnsafe
   cases outcome with
   | complete => exact ⟨none,_,.enter task entered⟩
   | exhausted => exact ⟨some (.fatal .resource),_,.enterExhausted task entered⟩
