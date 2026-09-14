@@ -22,7 +22,7 @@ theorem LocalStep.hook_entry_old_suspensions {program : Kernel.Program} {host : 
       root.home = .temporary caller.activation caller.scope ∧ handle.fields = [] ∧
       handle.root = before.world.nextRoot ∧ loan = before.world.nextLoan ∧ CanEndStorage body.world handle.root ∧
       (∀ binding ∈ callee.environment, binding.address.root ≠ handle.root) ∧
-      after.ControlWellFormed ∧
+      (after.ControlWellFormed ∨ after.task = .fatal .resource) ∧
       (∀ id original, before.resumptions.get id = some original →
         ∀ current, after.resumptions.get id = some current →
           handle.root ∉ current.roots ∧ handle.root ∉ current.controlRootSupport ∧
@@ -35,10 +35,10 @@ theorem LocalStep.hook_entry_old_suspensions {program : Kernel.Program} {host : 
   have execution : Run program host before (.hookEnter address hook :: trace) after :=
     .visible (Or.inl dispatch) (.silent (Or.inl entry) run)
   refine ⟨caller,callee,function,authority,handle,loan,next,root,frame,task,found,live,vacant,home,whole,fresh,freshLoan,safe,excluded,
-    execution.controlWellFormed valid inventory lawful typed control,?_,?_⟩
+    execution.controlWellFormed_or_fatal valid inventory lawful typed control,?_,?_⟩
   · intro id original beforeAt current afterAt
     exact ⟨execution.old_inventory_excludes_future_root control.suspensions beforeAt afterAt (Nat.le_of_eq fresh.symm),
-      execution.old_saved_control_excludes_future_root valid inventory lawful typed control beforeAt afterAt (Nat.le_of_eq fresh.symm),
+      execution.old_saved_control_excludes_future_root control beforeAt afterAt (Nat.le_of_eq fresh.symm),
       execution.old_saved_authority_excludes_future_loan typed.1 control beforeAt afterAt (Nat.le_of_eq freshLoan.symm)⟩
   · intro id original beforeAt canceled cancellation
     exact execution.cancel_old_excludes_future_root control.suspensions beforeAt (Nat.le_of_eq fresh.symm) cancellation

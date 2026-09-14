@@ -274,9 +274,15 @@ or a dependency of this project.
   derives safety from its real successors. The blanket “every run is nonfatal”
   assumptions are removed from suspension consumers. Immutable saved control
   still excludes future roots at fatal endpoints.
-  Ambient host/private/Drop consumers remain under migration; this gate does
-  not check their final integration. Original source-fact production,
-  proper-tail progress and whole-task progress remain open.
+  Ambient host registry/callback preservation now covers actual indexed
+  mutation publications and all terminal prefixes without assuming complete
+  after-control. The actual Drop dispatch constructs finite invocation
+  admission in the ambient machine. The combined `DropInvocation` and
+  `DropSuspension` gate passes 181 jobs; registry, callback, dispatch and
+  saved-suspension audits use only standard axioms. External root grants are
+  carrier-free; a missing parent alone does not exclude explicit guard loans.
+  Private-body preservation remains under migration. Original source-fact
+  production, proper-tail progress and whole-task progress remain open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

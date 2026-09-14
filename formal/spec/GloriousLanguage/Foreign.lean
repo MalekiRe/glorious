@@ -156,7 +156,7 @@ def AccessSeed (program : Kernel.Program) (model : Model) (contract : Contract)
     place = registration.place ∧ place.authority.Custodied current (.registration registration.identity) ∧
     ∃ root domain, current.root registration.owner = some root ∧
       (root.home = .allocation domain ∨ root.home = .external domain)) ∨
-  (contract.external current session.call place ∧ place.authority.parentLoan = none ∧
+  (contract.external current session.call place ∧ place.authority.carriers = [] ∧
     ∃ root domain, current.root place.address = some root ∧ root.home = .external domain ∧
       session.call.binding.domain = some domain ∧ domain ∈ program.declarations.input.manifest.allocationDomains)
 

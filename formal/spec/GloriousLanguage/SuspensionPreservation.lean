@@ -89,6 +89,15 @@ theorem Step.fatal_task {program : Kernel.Program} {host : Foreign.Model}
   all_goals split at eventAt <;> simp_all
   all_goals split at eventAt <;> simp_all
 
+/-- A run starting at an actual fatal task cannot execute another step. -/
+theorem Run.after_eq_of_fatal {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} (run : Run program host before trace after)
+    {reason : Fatal} (fatal : before.task = .fatal reason) : after = before := by
+  cases run with
+  | refl => rfl
+  | silent step _ | visible step _ => exact False.elim (step.task_not_fatal fatal)
+
+
 theorem Run.task_not_fatal_of_final {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} (run : Run program host before trace after)
     {reason : Fatal} (final : after.task ≠ .fatal reason) : before.task ≠ .fatal reason := by

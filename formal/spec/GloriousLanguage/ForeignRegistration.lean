@@ -91,12 +91,14 @@ inductive RegistrationGranted (program : Kernel.Program) (model : Model) (before
       (registration.retained = true → contract.retainable prepared
         ⟨⟨context,destination,binding,arguments,signature,addresses⟩,before.hostState,AmbientExposed before.frames,AmbientRuntimes before.frames⟩ registration.owner) →
       RegistrationGranted program model before after registration
-  | host {session next imported contract observation current action state} :
+  | host {session next imported contract observation actions current action state} :
       before.task = .foreign session next →
       Selected program model session.call imported contract → contract.session before.world session →
-      model.step session.call.binding.declaration before.world session observation current action state →
-      after.hostState = state → Accessible program model contract before.world current session registration.place →
-      (registration.retained = true → contract.retainable current session registration.owner) →
+      model.step session.call.binding.declaration before.world session observation actions current action state →
+      after.hostState = state → Accessible program model contract before.world current
+        (session.advance (TransactionOutputs (.host session.call.destination.root) actions) session.state) registration.place →
+      (registration.retained = true → contract.retainable current
+        (session.advance (TransactionOutputs (.host session.call.destination.root) actions) session.state) registration.owner) →
       RegistrationGranted program model before after registration
   | returned {session callback result next imported contract state} :
       before.task = .foreignCallbackReturned session callback result next →
@@ -127,9 +129,9 @@ theorem Step.registrations {program : Kernel.Program} {model : Model} {before af
     · exact Or.inr (.enter task protectedWorld selected precondition started rfl access retention)
   | host task state selected sessionActive changed
   | result task state selected sessionActive changed _ _
-  | callback task state selected sessionActive changed _ _ _ _ _
+  | callback task state selected sessionActive changed _ _
   | fault task state selected sessionActive changed =>
-    have permission := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed).2.2.2.2.2.2.2.2
+    have permission := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed).2.2.2.2.2.2.2.2
     rcases permission.active_authority member active with old | ⟨access,retention⟩
     · exact Or.inl (state ▸ old)
     · exact Or.inr (.host task selected sessionActive changed rfl access retention)
@@ -151,7 +153,7 @@ theorem Step.continue_registrations {program : Kernel.Program} {model : Model} {
   | enter original => cases original.symm.trans task
   | host original state selected sessionActive changed =>
     cases original.symm.trans task
-    have permits := (lawful.step _ _ _ _ _ _ _ _ selected well sessionActive changed).2.2.2.2.2.2.2.2
+    have permits := (lawful.step _ _ _ _ _ _ _ _ _ selected well sessionActive changed).2.2.2.2.2.2.2.2
     rcases permits.active_authority member active with old | granted
     · exact Or.inl (state ▸ old)
     · exact Or.inr (.host task selected sessionActive changed rfl granted.1 granted.2)

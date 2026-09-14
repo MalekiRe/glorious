@@ -6,7 +6,7 @@ calls and callback cleanup. It follows the callback frame and the host-state
 evolution producer, not an assumed post-registry permission predicate. -/
 namespace Glorious.Language
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 namespace Execution
 
@@ -17,7 +17,8 @@ theorem LocalStep.callback_control {program : Kernel.Program} {before after : St
   all_goals simp_all only [State.CallbackControl,State.callbackRuntimes,Task.CallbackCovers,
     Task.callbackRuntimes,FramesCallbackCovers,Frame.CallbackCovers,Frame.callbackRuntimes,
     Foreign.AmbientRuntimes.append,Foreign.AmbientRuntimes.cons,List.nil_append,
-    CloseRegions.callback_covers,CloseRegions.callback_runtimes,FreshNamedFrame.callback_covers,
+    CloseRegions.callback_covers,CloseRegions.callback_runtimes,ReleaseLoans.callback_covers,ReleaseLoans.callback_runtimes,
+    ReleaseCustodyLoans.callback_covers,ReleaseCustodyLoans.callback_runtimes,FreshNamedFrame.callback_covers,
     FreshNamedFrame.callback_runtimes,true_and,and_true]
   case enterTail _ _ tail _ _ _ => exact ⟨tail.callback_covers covered,tail.callback_runtimes.symm⟩
 
@@ -66,6 +67,8 @@ theorem EffectStep.callback_control {program : Kernel.Program} {before after : S
     · rw [List.append_assoc]
       exact FramesCallbackCovers.map_free_append free ⟨trivial,trivial,covered⟩
     · simp only [Foreign.AmbientRuntimes.map_free free,Foreign.AmbientRuntimes.nil,List.nil_append]
+  case resumeCopyExhausted copied _ =>
+    simp_all only [copied.result,true_and]
   case disposeContinuation =>
     split <;> simp_all only [Task.CallbackCovers,Task.callbackRuntimes,true_and]
 
@@ -91,7 +94,7 @@ theorem Step.callback_entry {program : Kernel.Program} {model : Model} {before a
         (registration.access ≠ .owned → registration ∈ model.registrations after.hostState) ∧
         (registration.access = .owned → registration ∉ model.registrations after.hostState) := by
   cases step <;> simp_all
-  case callback admitted _ _ _ _ =>
+  case callback admitted _ =>
     rw [← frame.1.2.1]
     exact ⟨admitted.runtime,admitted.entry,_,admitted.registered,admitted.identity,rfl,rfl,
       admitted.active,admitted.lent,admitted.owned_unregistered⟩
@@ -138,19 +141,19 @@ theorem Step.callbacks {program : Kernel.Program} {model : Model} {before after 
     exact (lawful.start _ _ _ _ _ selected (kept.worldTyped valid inventory typed).1
       callTyped precondition started).2.2.live_runtimes frameLive
   case host _ _ selected active changed =>
-    have held := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
+    have held := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
     exact ⟨held,fun runtime member => held runtime (taskCovers member)⟩
   case result _ _ selected active changed _ _ =>
-    have held := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
+    have held := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
     exact fun runtime member => held runtime (taskCovers member)
-  case callback _ _ selected active changed admitted _ _ _ _ =>
-    have held := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
+  case callback _ _ selected active changed admitted _ =>
+    have held := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
     exact ⟨⟨admitted.runtime,held⟩,fun runtime member => held runtime (taskCovers member)⟩
   case callbackReturned _ _ selected postcondition returned =>
     have held := (lawful.callbackReturned _ _ _ _ _ _ _ _ selected typed.1 postcondition returned).2.2.live_runtimes taskLive.2
     exact ⟨held,fun runtime member => held runtime (frameCovers.1 member)⟩
   case fault _ _ selected active changed =>
-    have held := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
+    have held := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active changed).2.2.2.2.2.2.2.2.live_runtimes taskLive
     exact fun runtime member => held runtime (taskCovers member)
 
 end Foreign
@@ -188,9 +191,19 @@ theorem Run.callbacks {program : Kernel.Program} {host : Foreign.Model} {before 
     (run : Run program host before trace after) : host.CallbacksWellFormed after := by
   induction run with
   | refl => exact callbacks
-  | silent step _ ih | visible step _ ih =>
-    exact ih (step.worldTyped valid inventory lawful typed) (step.suspensions valid inventory lawful typed suspensions)
+  | silent step tail ih =>
+    exact ih (step.worldTyped valid inventory lawful typed)
+      (step.suspensions valid inventory lawful typed suspensions (by intro impossible; cases impossible))
       (step.callbacks valid inventory lawful typed suspensions callbacks)
+  | @visible before middle after event trace step tail ih =>
+    have retained := step.callbacks valid inventory lawful typed suspensions callbacks
+    by_cases fatal : event = Event.fatal .resource
+    · subst fatal
+      rw [tail.after_eq_of_fatal step.fatal_task]
+      exact retained
+    · exact ih (step.worldTyped valid inventory lawful typed)
+        (step.suspensions valid inventory lawful typed suspensions (fun equal => fatal (Option.some.inj equal))) retained
+
 
 /-- An executing callback's runtime remains live after arbitrary intervening
 source and nested host execution, including its retained destruction phase. -/

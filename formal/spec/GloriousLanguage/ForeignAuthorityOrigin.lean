@@ -2,16 +2,16 @@ import GloriousLanguage.ControlOriginPreservation
 import GloriousLanguage.ForeignRegistration
 
 /-! Opaque registry authority has an actual origin before it can be used.
-External-domain grants are root authority, projected loans are authenticated
-by the shared place resolver, and registration changes consume that same
-access path. Historical recording is derived, never a post-permission axiom. -/
+External-domain root grants carry no explicit loan identities; guarded or loan
+authority comes from the shared resolver and actual handed/registered seeds.
+Historical recording follows those producers, not a post-permission axiom. -/
 namespace Glorious.Language
 
-theorem Authority.recorded_of_no_parent {authority : Authority} {loans : Table Loan}
-    (root : authority.parentLoan = none) : authority.Recorded loans := by
+theorem Authority.recorded_of_no_carriers {authority : Authority} {loans : Table Loan}
+    (root : authority.carriers = []) : authority.Recorded loans := by
   induction authority with
   | owner => trivial
-  | loan => cases root
+  | loan | guarded => simp only [Authority.carriers,List.cons_ne_nil] at root
   | shared backing ih => exact ih root
 
 theorem Authority.lend_recorded_iff {authority : Authority} {access : Access} {loans : Table Loan} :
@@ -21,7 +21,7 @@ theorem Authority.lend_recorded_iff {authority : Authority} {access : Access} {l
 
 namespace Foreign
 
-open Kernel Execution
+open _root_.Glorious.Language.Kernel Execution
 
 theorem Model.AuthoritiesRecorded.mono {model : Model} {before after : World} {state : List Nat}
     (recorded : model.AuthoritiesRecorded before state)
@@ -48,19 +48,17 @@ theorem Reachable.recorded {program : Language.Program} {world : World}
   induction reachable with
   | seed member => exact recorded _ member
   | project _ resolved ih => exact resolved.recorded ih
-  | pointer => split <;> trivial
+  | subplace _ _ _ ih => exact ih
 
 theorem AccessSeed.recorded {program : Kernel.Program} {model : Model} {contract : Contract}
     {initial current : World} {session : ForeignSession} {place : ResolvedPlace}
     (known : AuthoritySupport.Recorded (session.known.map ResolvedPlace.authority) current.loans)
     (registry : model.AuthoritiesRecorded current session.state)
     (seed : AccessSeed program model contract initial current session place) : place.authority.Recorded current.loans := by
-  rcases seed with member | ⟨registration,member,_,_,rfl,_⟩ | ⟨_,root,_⟩ | ⟨_,_,owner,_⟩
+  rcases seed with ⟨member,_⟩ | ⟨registration,member,_,_,rfl,_⟩ | ⟨_,root,_⟩
   · exact AuthoritySupport.recorded_map.mp known place member
   · exact Authority.lend_recorded_iff.mpr (registry registration member)
-  · exact Authority.recorded_of_no_parent root
-  · rw [owner]
-    trivial
+  · exact Authority.recorded_of_no_carriers root
 
 theorem Accessible.recorded {program : Kernel.Program} {model : Model} {contract : Contract}
     {initial current : World} {session : ForeignSession} {place : ResolvedPlace}
@@ -102,15 +100,18 @@ theorem Model.Lawful.start_authorities_recorded {program : Kernel.Program} {mode
 
 theorem Model.Lawful.host_authorities_recorded {program : Kernel.Program} {model : Model}
     {session : ForeignSession} {imported : Import} {contract : Contract} {before after : World}
-    {observation next : List Nat} {action : HostAction}
+    {observation next : List Nat} {actions : List MutationAction} {action : HostAction}
     (lawful : model.Lawful program) (well : before.WellFormed)
     (selected : Selected program model session.call imported contract) (active : contract.session before session)
-    (step : model.step session.call.binding.declaration before session observation after action next)
+    (step : model.step session.call.binding.declaration before session observation actions after action next)
     (known : AuthoritySupport.Recorded session.authoritySupport before.loans)
     (registry : model.AuthoritiesRecorded before session.state) : model.AuthoritiesRecorded after next := by
-  have retained := (lawful.host_suspensionExtension well selected active step).recorded
-  exact (lawful.step _ _ _ _ _ _ _ _ selected well active step).2.2.2.2.2.2.2.2.recorded
-    (ForeignSession.known_authority_support (known.mono retained)) (registry.mono retained) rfl
+  have facts := lawful.step _ _ _ _ _ _ _ _ _ selected well active step
+  have retained := facts.1.recorded
+  have published := ForeignSession.advance_authority_support (state := session.state) (known.mono retained)
+    (fun resource member => facts.1.published_recorded member)
+  exact facts.2.2.2.2.2.2.2.2.recorded
+    (ForeignSession.known_authority_support published) (registry.mono retained) rfl
 
 theorem Model.Lawful.returned_authorities_recorded {program : Kernel.Program} {model : Model}
     {session : ForeignSession} {imported : Import} {contract : Contract} {world : World}
@@ -148,9 +149,8 @@ theorem Step.host_authorities {program : Kernel.Program} {model : Model} {before
   case result selected active transition _ transferred =>
     exact (lawful.host_authorities_recorded typed.1 selected active transition taskRecorded registry).mono
       transferred.suspensionExtension.recorded
-  case callback selected active transition _ lent _ _ consumed =>
-    exact (lawful.host_authorities_recorded typed.1 selected active transition taskRecorded registry).mono
-      (lent.suspensionExtension.trans consumed.suspensionExtension).recorded
+  case callback selected active transition _ _ =>
+    exact lawful.host_authorities_recorded typed.1 selected active transition taskRecorded registry
   case callbackReturned selected postcondition returned =>
     exact lawful.returned_authorities_recorded typed.1 selected postcondition returned taskRecorded registryAfter
   case fault selected active transition =>
@@ -169,7 +169,7 @@ theorem Step.host_authorities {program : Kernel.Program} {host : Foreign.Model}
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (registry : host.AuthoritiesRecorded before.world before.hostState)
     (step : Step program host before event after) : host.AuthoritiesRecorded after.world after.hostState := by
-  have retained := (step.suspension_storage valid inventory lawful typed control.suspensions).2
+  have retained := step.recorded valid inventory lawful typed control.suspensions
   have old := registry.mono retained
   rcases step.host_state with unchanged | foreign
   · exact unchanged ▸ old
@@ -186,9 +186,19 @@ theorem Run.host_authorities {program : Kernel.Program} {host : Foreign.Model}
     (run : Run program host before trace after) : host.AuthoritiesRecorded after.world after.hostState := by
   induction run with
   | refl => exact registry
-  | silent step _ ih | visible step _ ih =>
-    exact ih (step.worldTyped valid inventory lawful typed) (step.controlWellFormed valid inventory lawful typed control)
+  | silent step tail ih =>
+    exact ih (step.worldTyped valid inventory lawful typed)
+      (step.controlWellFormed valid inventory lawful typed control (by intro impossible; cases impossible))
       (step.host_authorities valid inventory lawful typed control registry)
+  | @visible before middle after event trace step tail ih =>
+    have records := step.host_authorities valid inventory lawful typed control registry
+    by_cases fatal : event = Event.fatal .resource
+    · subst fatal
+      rw [tail.after_eq_of_fatal step.fatal_task]
+      exact records
+    · exact ih (step.worldTyped valid inventory lawful typed)
+        (step.controlWellFormed valid inventory lawful typed control (fun equal => fatal (Option.some.inj equal))) records
+
 
 end Execution
 

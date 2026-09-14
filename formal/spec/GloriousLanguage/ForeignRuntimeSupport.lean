@@ -110,6 +110,30 @@ theorem CloseRegions.callback_covers {regions : List Identity} {next : Task} {am
   | nil => rfl
   | cons _ _ ih => exact ih
 
+theorem ReleaseLoans.callback_runtimes {identities : List Identity} {next : Task} :
+    (ReleaseLoans identities next).callbackRuntimes = next.callbackRuntimes := by
+  unfold ReleaseLoans
+  induction identities.eraseDups with
+  | nil => rfl
+  | cons _ _ ih => exact ih
+
+theorem ReleaseLoans.callback_covers {identities : List Identity} {next : Task} {ambient : List Identity} :
+    (ReleaseLoans identities next).CallbackCovers ambient ↔ next.CallbackCovers ambient := by
+  unfold ReleaseLoans
+  induction identities.eraseDups with
+  | nil => rfl
+  | cons _ _ ih => exact ih
+
+theorem ReleaseCustodyLoans.callback_runtimes {world : World} {custody : ClaimCustody} {next : Task} :
+    (ReleaseCustodyLoans world custody next).callbackRuntimes = next.callbackRuntimes :=
+  ReleaseLoans.callback_runtimes
+
+theorem ReleaseCustodyLoans.callback_covers {world : World} {custody : ClaimCustody}
+    {next : Task} {ambient : List Identity} :
+    (ReleaseCustodyLoans world custody next).CallbackCovers ambient ↔ next.CallbackCovers ambient :=
+  ReleaseLoans.callback_covers
+
+
 theorem DisposesReservations.callback_runtimes {context : Context} {places : List ResolvedPlace} {next : Task} :
     (DisposesReservations context places next).callbackRuntimes = next.callbackRuntimes := by
   induction places with

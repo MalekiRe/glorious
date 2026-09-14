@@ -54,7 +54,7 @@ theorem AccessSeed.avoids_internal_during {program : Kernel.Program} {model : Mo
     (seed : AccessSeed program model contract initial current session place) : place.address.root ≠ id := by
   rcases seed with ⟨present,_⟩ |
       ⟨registration,member,active,retained,rfl,custodied,rootFound,domain,found,home⟩ |
-      ⟨externalClause,parentNone,rootFound,domain,found,home,domainEq,memberDomain⟩
+      ⟨externalClause,carrierFree,rootFound,domain,found,home,domainEq,memberDomain⟩
   · exact known _ present
   · intro same
     have selectedAt : current.roots.get registration.owner.root = some root := same ▸ selected

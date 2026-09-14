@@ -7,7 +7,7 @@ its complete caller stack, including host callback exposure. The hook's fresh
 argument handle is not an assumed input or an erased-stack reconstruction. -/
 namespace Glorious.Language.Execution
 
-open Kernel Contracts
+open _root_.Glorious.Language.Kernel Contracts
 
 theorem LocalStep.hook_invocation_start {program : Kernel.Program} {host : Foreign.Model}
     {before entering : State} {address : Address} {hook : DeclId}
@@ -29,7 +29,7 @@ theorem LocalStep.hook_invocation_start {program : Kernel.Program} {host : Forei
       entering.frames = .hook caller address authority handle loan next :: before.frames ∧
       InvocationStart program host function [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]
         (.caller { caller with unsafeAllowed := false } entering.frames) entering := by
-  have afterControl := Step.controlWellFormed valid inventory lawful typed control (Or.inl dispatch)
+  have afterControl := Step.controlWellFormed valid inventory lawful typed control (Or.inl dispatch) (by simp)
   have afterRegistry := Step.host_authorities valid inventory lawful typed control registry (Or.inl dispatch)
   have afterCallbacks := Step.callbacks valid inventory lawful typed control.suspensions callbacks (Or.inl dispatch)
   obtain ⟨caller,function,authority,handle,loan,next,value,task,stored,selected,enterTask,frames,inputsTyped,formals,admitted⟩ :=

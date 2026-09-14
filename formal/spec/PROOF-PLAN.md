@@ -367,11 +367,21 @@ the actual resource-fatal terminal. The three blanket universal nonfatal-run
 premises in suspension consumers are removed. Saved-root exclusion depends
 only on immutable capture metadata and remains valid at fatal endpoints.
 
-Next: migrate ambient host/private/Drop consumers to this contract, deriving
-their nonfatal requirements from actual traces or successors and treating a
-fatal final step as terminal, not assuming complete after-control. Their full
-proof gate is not yet checked. Then continue original source-fact production,
-proper-tail entry and whole-task progress on this same dependency chain.
+Ambient host registry and callback consumers now follow actual indexed
+publications and admission recipes. Their run guarantees remain unconditional:
+an actual resource-fatal step retains the required records and its tail is
+reflexive. Complete after-control is used only on nonfatal prefixes. External
+root grants are carrier-free; absence of a parent loan did not exclude explicit
+guard carriers. The actual hook dispatcher now constructs finite invocation
+admission in the ambient machine, preserving its caller, registry and callbacks.
+The combined `DropInvocation`/`DropSuspension` gate passes 181 jobs; registry,
+callback, dispatch and immutable saved-suspension audits use only standard
+axioms. This gate does not include private-body preservation.
+
+Next: migrate private storage/control through actual raw returns, cleanup
+queues and physical exhaustion prefixes, retaining the real internal routing
+restriction on admitted Drop intervals. Then continue original source-fact
+production, proper-tail entry and whole-task progress on this dependency chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

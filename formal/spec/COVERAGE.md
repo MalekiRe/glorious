@@ -481,9 +481,18 @@ fatal endpoint or an infinite successor chain supplies the required nonfatal
 run. General observation/reachability now state complete control/suspensions
 or the actual resource-fatal terminal, instead of assuming all runs nonfatal.
 Saved-control root exclusion uses immutable metadata and remains unconditional.
-Ambient host, private and Drop consumers are not yet integrated with this
-contract. Original source facts from meaningful task admission, proper-tail
-progress and whole-task progress remain open.
+Actual indexed host publications, registry origins and callback runtimes now
+preserve their guarantees even at resource-fatal endpoints: the final step
+preserves those records and the actual terminal task has no successor. Root
+grants require carrier-free authority, not merely an absent parent loan.
+The ambient Drop dispatcher constructs the finite `InvocationStart` from
+actual hook inputs while retaining the caller, registry and callback state.
+`DropInvocation` plus `DropSuspension` pass 181 jobs; the registry, callback,
+dispatch and saved-suspension audits use only standard axioms. The latter
+theorem retains unconditional historical exclusion while distinguishing
+complete after-control from the actual resource-fatal terminal. Private-body
+preservation is not yet integrated. Original source facts from meaningful task
+admission, proper-tail progress and whole-task progress remain open.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
