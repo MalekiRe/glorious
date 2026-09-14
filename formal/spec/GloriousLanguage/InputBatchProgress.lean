@@ -586,6 +586,54 @@ theorem Value.BatchCompatible.of_eq {before after : World} {value : Value}
   ⟨(fun _ _ _ _ => by rw [loans]),
    (fun resident authority access reached binding member held => held.frame locations loans)⟩
 
+/-- The actual loan write constructs a ready reference from finite source
+observations: it misses the source and its reachable support, and its new row
+is compatible with the source graph's existing views. No resulting-world
+readiness, permission or framing certificate is an input. -/
+theorem FormsLoan.handed_off_ready {program : RuntimeProgram} {purpose : LoanPurpose}
+    {before after : World} {authority : Authority} {mode : Mutability} {region : Identity}
+    {referent destination : Address} {value : Value} (valid : before.WellFormed)
+    (borrowed : FormsLoan program purpose before authority mode region referent destination after)
+    (stored : before.Stores referent value) (separated : ¬ destination.Overlaps referent)
+    (outside : value.SupportOutside before destination)
+    (compatible : value.ViewsLoanCompatible before (if mode = .shared then .shared else .unique)
+      referent mode (authority.guardLoans before)) :
+    ∃ type, after.Stores destination (.resident before.nextOwner (.reference mode (.runtimeRegion region) type)
+      (.reference before.nextLoan) true []) ∧
+      (Value.resident before.nextOwner (.reference mode (.runtimeRegion region) type)
+        (.reference before.nextLoan) true []).Initialized ∧
+      (Value.resident before.nextOwner (.reference mode (.runtimeRegion region) type)
+        (.reference before.nextLoan) true []).ResourcesAccessible program after .owned := by
+  have source : value.Initialized ∧ value.ResourcesAccessible program before (if mode = .shared then .shared else .unique) := by
+    cases borrowed with
+    | borrow actual _ initialized _ _ ready _ _ _ _ _ =>
+      have same := Option.some.inj (actual.symm.trans stored)
+      exact same ▸ ⟨initialized,ready⟩
+  have framed : value.SupportFramed before after := by
+    cases borrowed with
+    | borrow _ _ _ _ _ _ _ _ _ _ written =>
+      have physical := Value.SupportFramed.of_write written outside (fun observed _ => World.write_locations written observed.root)
+      exact physical
+  have retained : after.Stores referent value := by
+    cases borrowed with
+    | borrow _ _ _ _ _ _ _ _ _ _ written => exact (World.write_disjoint written separated).trans stored
+  have batch := Value.BatchCompatible.of_rows (borrowed.resourceRowsRetained valid)
+    (value := value) (fun identity current access reached =>
+      let ⟨loan,found,_⟩ := source.2.2.1 identity current access reached
+      ⟨loan,found⟩)
+  have ready := source.2.frame_input batch framed (fun query requested address views held =>
+    borrowed.permitted valid held (compatible query requested address views))
+  obtain ⟨type,handle,found⟩ := borrowed.created_handle
+  refine ⟨type,handle,?_,?_⟩
+  · intro path resident located
+    cases located with
+    | root => exact ⟨rfl,by simp [Value.fields]⟩
+    | field field _ => simp [Value.fields] at field
+  · apply Value.ResourcesAccessible.reference found retained source.1
+    · simpa only [ReferenceAccess,reduceCtorEq,false_or] using ready
+    · simpa only [ReferenceAccess,reduceCtorEq,false_or] using borrowed.borrower_permitted valid
+
+
 namespace Kernel
 
 /-- Everything an actual binding step is observed to do by one other input of
@@ -1805,6 +1853,41 @@ theorem Value.ObservedViews.backward {before middle : World} {value : Value} {ac
     · exact atAuthority
     · exact atRequested
     · exact atAddress
+
+/-- Fresh physical allocation discharges the handle-write exclusions. The
+only graph compatibility premise is read in the original caller world, before
+allocating the handle or forming its loan; all loan purposes use this producer. -/
+theorem _root_.Glorious.Language.Execution.Temporary.borrowed_handle_ready
+    {program : Kernel.Program} {before allocated after : World} {purpose : LoanPurpose}
+    {context : Execution.Context} {mode : Mutability} {region : Identity} {value : Value}
+    {referent handle : Address} {authority : Authority}
+    (valid : before.WellFormed) (stored : before.Stores referent value)
+    (ready : value.ResourcesAccessible program before (if mode = .shared then .shared else .unique))
+    (temporary : Execution.Temporary program context (.reference mode (.runtimeRegion region) value.type) before handle allocated)
+    (borrowed : FormsLoan program purpose allocated authority mode region referent handle after)
+    (compatible : value.ViewsLoanCompatible before (if mode = .shared then .shared else .unique)
+      referent mode (authority.guardLoans before)) :
+    ∃ type, after.Stores handle (.resident allocated.nextOwner (.reference mode (.runtimeRegion region) type)
+      (.reference allocated.nextLoan) true []) ∧
+      (Value.resident allocated.nextOwner (.reference mode (.runtimeRegion region) type)
+        (.reference allocated.nextLoan) true []).Initialized ∧
+      (Value.resident allocated.nextOwner (.reference mode (.runtimeRegion region) type)
+        (.reference allocated.nextLoan) true []).ResourcesAccessible program after .owned := by
+  obtain ⟨layout,allocation⟩ := temporary
+  have fresh := (Allocates.fresh_root allocation).1
+  have frame := allocation.supportFramed valid ready
+  have batch := Value.BatchCompatible.of_eq (allocation.locationExtension valid) allocation.loans (value := value)
+  apply borrowed.handed_off_ready (allocation.wellFormed valid) ((allocation.read valid referent).trans stored)
+  · intro overlap
+    exact (Nat.ne_of_lt (stored.rooted_bound valid)) (overlap.1.symm.trans fresh)
+  · intro observed supported overlap
+    have prior := (Value.Support.frame allocation.loans frame).mpr supported
+    exact (Nat.ne_of_lt (Value.Support.root_bound valid ready prior)) (overlap.1.symm.trans fresh)
+  · intro query requested observed views
+    rw [Authority.guardLoans.loans_congr allocation.loans]
+    exact Authority.LoanCompatible.loans_congr allocation.loans
+      (compatible query requested observed (Value.ObservedViews.backward batch frame views))
+
 
 /-- Every authority one pending input's permission reading names is recorded in
 the source world, so its compatibility is re-read from the source rows. -/

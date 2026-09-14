@@ -53,6 +53,139 @@ theorem Permitted.locationExtension {before after : World} {authority : Authorit
       obtain ⟨loan,selected,guard⟩ := permission.2.2
       exact ⟨⟨changed,found⟩,ih permission.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
 
+/-- The common rebasing producer identifies the sole extra authority of a
+borrowed view and preserves its access bound at every reached resident. -/
+theorem Value.ReachableResident.loan_view {world : World} {value resident : Value}
+    {identity : Identity} {current : Authority} {incoming access : Access}
+    (reached : value.ReachableResident world ((Authority.loan identity).lend incoming) incoming resident current access) :
+    ∃ base, value.ReachableResident world .owner incoming resident base access ∧
+      current.carriers = identity :: base.carriers ∧ (access ≠ .shared → incoming ≠ .shared) := by
+  obtain ⟨base,nextAccess,prior,⟨trail,original,rebased⟩,same,shared⟩ := reached.rebase_carriers .owner incoming
+  have equal := same rfl
+  subst nextAccess
+  simp only [Authority.carriers_lend,Authority.carriers,List.nil_append,List.singleton_append] at original rebased
+  rw [← rebased] at original
+  exact ⟨base,prior,original,fun nonshared initialShared => nonshared (shared initialShared)⟩
+
+/-- A permitted borrower adds its explicit carrier to the existing reachable
+permissions. The original graph and access bounds come from the common
+rebasing producer, not a separately reconstructed resource inventory. -/
+theorem Value.ResourcesAccessible.loan_permissions {program : RuntimeProgram} {world : World} {value : Value}
+    {identity : Identity} {loan : Loan} {incoming : Access}
+    (ready : value.ResourcesAccessible program world incoming)
+    (found : world.loans.get identity = some loan) (carrier : LoanPermission world identity incoming loan.referent) :
+    value.ReferencesAccessible world ((Authority.loan identity).lend incoming) incoming ∧
+      ∀ resident current access, value.ReachableResident world ((Authority.loan identity).lend incoming) incoming resident current access →
+        ∀ binding ∈ resident.resources, Permitted world (current.resourceView binding access) (ResourceAccess access binding) binding.address := by
+  constructor
+  · intro nested current access reached
+    obtain ⟨resident,reached,head⟩ := reached
+    obtain ⟨base,prior,carriers,weaker⟩ := reached.loan_view
+    obtain ⟨selected,selectedFound,live,permission⟩ := ready.references nested base access ⟨resident,prior,head⟩
+    refine ⟨selected,selectedFound,live,Permitted.referenceView_iff.mpr ?_⟩
+    obtain ⟨backing,existing⟩ := Permitted.referenceView_iff.mp permission
+    refine ⟨backing,?_⟩
+    intro guardian member
+    rw [carriers] at member
+    rcases List.mem_cons.mp member with rfl | member
+    · refine ⟨loan,found,carrier.weaken ?_⟩
+      intro nonshared
+      apply weaker
+      intro shared
+      exact nonshared (by simp only [ReferenceAccess,shared,true_or,ite_true])
+    · exact existing guardian member
+  · intro resident current access reached binding member
+    obtain ⟨base,prior,carriers,weaker⟩ := reached.loan_view
+    obtain ⟨backing,existing⟩ := Permitted.resourceView_iff.mp (ready.2.2.2 resident base access prior binding member)
+    apply Permitted.resourceView_iff.mpr
+    refine ⟨backing,?_⟩
+    intro guardian inside
+    rw [carriers] at inside
+    rcases List.mem_cons.mp inside with rfl | inside
+    · refine ⟨loan,found,carrier.weaken ?_⟩
+      intro nonshared
+      apply weaker
+      intro shared
+      apply nonshared
+      rw [shared]
+      unfold ResourceAccess
+      split <;> rfl
+    · exact existing guardian inside
+
+
+/-- A materialized reference has no resident fields or resources. Its graph
+is exactly its root plus the actual stored referent's graph at the reference
+view; neither a guessed row nor an invented edge can enter this decomposition. -/
+theorem Value.ReachableResident.reference_cases {world : World} {owner identity : Identity}
+    {type : Term} {loan : Loan} {target resident : Value} {current : Authority} {incoming access : Access}
+    (found : world.loans.get identity = some loan) (stored : world.Stores loan.referent target)
+    (reached : (Value.resident owner type (.reference identity) true []).ReachableResident world .owner incoming resident current access) :
+    (resident = .resident owner type (.reference identity) true [] ∧ current = .owner ∧ access = incoming) ∨
+      target.ReachableResident world ((Authority.loan identity).lend (ReferenceAccess incoming loan.mode))
+        (ReferenceAccess incoming loan.mode) resident current access := by
+  induction reached with
+  | resident located =>
+    cases located with
+    | root => exact Or.inl ⟨rfl,rfl,rfl⟩
+    | field field _ => simp [Value.fields] at field
+  | @referent carrier parent parentAuthority parentAccess actual actualTarget path resident prior reference selected read located ih =>
+    rcases ih with ⟨rfl,rfl,rfl⟩ | nested
+    · have parentEq : parent = identity := by simpa [Value.head] using reference.symm
+      subst parent
+      have loanEq := Option.some.inj (selected.symm.trans found)
+      subst actual
+      have targetEq := Option.some.inj (read.symm.trans stored)
+      subst actualTarget
+      exact Or.inr (.resident located)
+    · exact Or.inr (.referent nested reference selected read located)
+  | resource prior member read located ih =>
+    rcases ih with ⟨rfl,rfl,rfl⟩ | nested
+    · simp [Value.resources] at member
+    · exact Or.inr (.resource nested member read located)
+
+/-- Closure, restored initialization and every nested permission compose into
+readiness of the actual reference resident. The referent's graph is traversed
+through its borrower, including all explicit carrier permissions. -/
+theorem Value.ResourcesAccessible.reference {program : RuntimeProgram} {world : World}
+    {owner identity : Identity} {type : Term} {loan : Loan} {target : Value} {incoming : Access}
+    (found : world.loans.get identity = some loan) (stored : world.Stores loan.referent target)
+    (initialized : target.Initialized)
+    (ready : target.ResourcesAccessible program world (ReferenceAccess incoming loan.mode))
+    (permission : Permitted world (.loan identity) (ReferenceAccess incoming loan.mode) loan.referent) :
+    (Value.resident owner (.reference loan.mode (.runtimeRegion loan.region) type) (.reference identity) true []).ResourcesAccessible program world incoming := by
+  have live : loan.live = true := by
+    obtain ⟨actual,selected,live,_⟩ := permission.2
+    have same := Option.some.inj (selected.symm.trans found)
+    exact same ▸ live
+  obtain ⟨references,resources⟩ := ready.loan_permissions found permission.2
+  refine ⟨?_,?_,?_,?_⟩
+  · intro resident current access reached
+    rcases reached.reference_cases found stored with ⟨rfl,rfl,rfl⟩ | nested
+    · exact ⟨by simp [Value.resources],rfl⟩
+    · obtain ⟨base,requested,nested⟩ := nested.rebase .owner .shared
+      exact ready.1 resident base requested nested
+  · rintro nested current access ⟨node,reached,head⟩
+    rcases reached.reference_cases found stored with ⟨rfl,rfl,rfl⟩ | nestedReach
+    · have same : nested = identity := by simpa [Value.head] using head.symm
+      subst nested
+      refine ⟨loan,found,live,⟨target,stored,initialized⟩,?_⟩
+      intro actual selected
+      have same := Option.some.inj (selected.symm.trans stored)
+      exact same ▸ ready.1
+    · obtain ⟨base,requested,nestedReach⟩ := nestedReach.rebase .owner .shared
+      exact ready.2.1 nested base requested ⟨node,nestedReach,head⟩
+  · rintro nested current access ⟨node,reached,head⟩
+    rcases reached.reference_cases found stored with ⟨rfl,rfl,rfl⟩ | nestedReach
+    · have same : nested = identity := by simpa [Value.head] using head.symm
+      subst nested
+      exact ⟨loan,found,live,Permitted.lend_iff.mpr permission⟩
+    · exact references nested current access ⟨node,nestedReach,head⟩
+  · intro resident current access reached binding member
+    rcases reached.reference_cases found stored with ⟨rfl,rfl,rfl⟩ | nested
+    · simp [Value.resources] at member
+    · exact resources resident current access nested binding member
+
+
 theorem Value.ReachableResident.nested {world : World} {value carrier resident : Value}
     {authority current : Authority} {incoming access : Access} {path : List Nat}
     (reached : value.ReachableResident world authority incoming carrier current access)
@@ -458,6 +591,17 @@ theorem AllocationClaim.frame {before after : World} {authority : Authority} {ad
     newSelected,by simpa only [homeEq] using home,?_⟩
   intro child successor found live kind ancestry
   exact latest child successor (by simpa only [loans] using found) live kind (ancestry.transport loans.symm)
+
+theorem StorageBinding.HeldBy.referent_recorded {world : World} {owner : Identity} {binding : StorageBinding}
+    (held : binding.HeldBy world owner) :
+    ∃ identity loan, world.loans.get identity = some loan ∧ loan.live = true ∧ loan.referent = binding.address := by
+  obtain ⟨custody,resources⟩ := held
+  rcases resources with ⟨claim,_⟩ | borrow
+  · obtain ⟨identity,loan,root,domain,parent,found,live,kind,referent,whole,selected,home,latest⟩ := claim
+    exact ⟨identity,loan,found,live,referent⟩
+  · obtain ⟨identity,loan,parent,found,live,kind,referent,shared⟩ := borrow
+    exact ⟨identity,loan,found,live,referent⟩
+
 
 theorem StorageBinding.HeldBy.frame {before after : World} {binding : StorageBinding} {owner : Identity}
     (locations : before.LocationExtension after)

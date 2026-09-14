@@ -308,9 +308,31 @@ carrier permission contracts, using only `propext` and `Quot.sound`. The
 integrated source/input/pattern/suspension/control/privacy gate passes 221
 jobs; the cleaned input/destructor dependency closure passes 158 jobs.
 Original-admission `enterStep` retains its standard-axiom-only audit.
-No example module or replacement admission callback was introduced. Next:
-construct actual reference-handle readiness, migrate `InvocationStart` and
-its real Drop producer, and continue the same source/task progress chain.
+No example module or replacement admission callback was introduced.
+
+Actual created-reference readiness now closes the next boundary. The common
+`ReachableResident.rebase_carriers` producer tracks explicit carriers and
+access bounds; the existing rebase is its projection. Exact view permissions
+then establish full `ResourcesAccessible` for a reference handle from its
+actual live row, stored initialized target, target readiness and permission.
+`FormsLoan.handed_off_ready` constructs that readiness across the real write
+and fresh row using original source support separation and view compatibility.
+`Temporary.borrowed_handle_ready` derives separation from actual allocation
+freshness. `LocalStep.hook_handle_ready` consumes that proof and actual handle
+privacy: every reference/resource support edge has a live loan, which private
+storage excludes from the cleared slot. The result is the real destructor
+argument's initialized singleton `HandoffReady`, not an after-state admission
+premise. The existing retained-resource loan witness is promoted from the
+suspension namespace and reused by both consumers.
+The strict `DropHandle`/`SuspensionContent` dependency gate passes 166 jobs.
+Axiom audits: carrier rebase uses only `propext`; complete reference readiness
+uses `propext` and `Quot.sound`; actual formation, temporary and hook dispatch
+use only those plus `Classical.choice`. No routine examples/tests were added.
+The original source graph readiness and prospective-row view compatibility
+remain finite explicit pre-state requirements, not consequences proved here
+from `WorldTyped` or Drop selection. Next: integrate the actual handoff product
+into `InvocationStart`, produce source requirements through meaningful task
+admission, and continue ordinary/proper-tail and whole-task progress.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

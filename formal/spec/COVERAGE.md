@@ -438,8 +438,24 @@ control and destructor-privacy consumers check with the corrected producer.
 The redundant global/recorded guard-frame products and graph admission
 premises are removed; real loan-construction dependency framing is retained.
 The integrated 221-job gate and original-admission entry-step axiom audit
-pass. Created-reference handle readiness, general invocation admission and
-proper-tail progress still require integration; this is not full conformance.
+pass.
+
+Created-reference readiness is now constructed through the actual loan
+formation and temporary allocation. `Value.ReachableResident.rebase_carriers`
+is the common graph producer; the existing weaker rebase projects it.
+`Value.ResourcesAccessible.reference` proves complete nested reference and
+retained-resource access, not merely direct dereference permission.
+`FormsLoan.handed_off_ready` and `Temporary.borrowed_handle_ready` frame the
+original source and discharge actual fresh-slot separation. Private storage
+excludes every reachable live-loan/resource support edge from the slot being
+cleared, so `LocalStep.hook_handle_ready` constructs the actual destructor
+argument's initialized singleton `HandoffReady`. The retained-resource loan
+witness is promoted from suspension-only scope and shared, not duplicated.
+The `DropHandle`/`SuspensionContent` gate passes 166 jobs; graph, reference,
+formation, temporary and actual-step theorem audits use standard axioms only.
+Original source readiness and prospective-row view compatibility are explicit
+finite pre-state requirements. Their production from general task admission,
+full `InvocationStart` integration and proper-tail progress remain open.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

@@ -390,6 +390,28 @@ def ResourceAccess (incoming : Access) (binding : StorageBinding) : Access :=
 def Authority.resourceView (authority : Authority) (binding : StorageBinding) (access : Access) : Authority :=
   (authority.carriers.foldr (fun carrier backing => .guarded backing carrier) binding.authority).lend (ResourceAccess access binding)
 
+theorem Authority.carriers_lend (authority : Authority) (access : Access) :
+    (authority.lend access).carriers = authority.carriers := by
+  unfold Authority.lend
+  split <;> rfl
+
+theorem Authority.carriers_guarded_fold (authority : Authority) (carriers : List Identity) :
+    (carriers.foldr (fun carrier backing => Authority.guarded backing carrier) authority).carriers =
+      carriers ++ authority.carriers := by
+  induction carriers with
+  | nil => rfl
+  | cons carrier rest ih => simp only [List.foldr_cons,Authority.carriers,ih,List.cons_append]
+
+theorem Authority.carriers_referenceView (authority : Authority) (identity : Identity) (access : Access) :
+    (authority.referenceView identity access).carriers = authority.carriers ++ [identity] := by
+  simp only [Authority.referenceView,Authority.carriers_lend,Authority.throughReference,
+    Authority.carriers_guarded_fold,Authority.carriers]
+
+theorem Authority.carriers_resourceView (authority : Authority) (binding : StorageBinding) (access : Access) :
+    (authority.resourceView binding access).carriers = authority.carriers ++ binding.authority.carriers := by
+  simp only [Authority.resourceView,Authority.carriers_lend,Authority.carriers_guarded_fold]
+
+
 /-- The referent's lifetime is distinct from the temporary home of an
 invocation's reference handle. A callee-owned handle may be cleared while an
 outgoing child keeps this actual source-region loan alive. -/
@@ -637,19 +659,46 @@ theorem Value.Initialized.resident {value resident : Value} {path : List Nat}
     (initialized : value.Initialized) (inside : ResidentAt value path resident) : resident.Initialized :=
   fun _ _ nested => initialized _ _ (inside.append nested)
 
+/-- Rebasing follows the same graph once and retains its exact carrier suffix.
+The initial authority changes, but no inherited dependency is introduced and
+matching initial access yields matching access at every reached node. -/
+theorem Value.ReachableResident.rebase_carriers {world : World} {value resident : Value}
+    {authority current : Authority} {incoming access : Access}
+    (reachable : value.ReachableResident world authority incoming resident current access)
+    (base : Authority) (requested : Access) :
+    ∃ next nextAccess, value.ReachableResident world base requested resident next nextAccess ∧
+      (∃ trail, current.carriers = authority.carriers ++ trail ∧ next.carriers = base.carriers ++ trail) ∧
+      (requested = incoming → nextAccess = access) ∧ (requested = .shared → nextAccess = .shared) := by
+  induction reachable with
+  | resident located => exact ⟨_,_,.resident located,⟨[],by simp,by simp⟩,id,id⟩
+  | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
+    obtain ⟨next,nextAccess,reached,⟨trail,original,rebased⟩,same,shared⟩ := ih
+    refine ⟨_,_,.referent reached reference found stored located,⟨trail ++ [parent],?_,?_⟩,?_,?_⟩
+    · rw [Authority.carriers_referenceView,original,List.append_assoc]
+    · rw [Authority.carriers_referenceView,rebased,List.append_assoc]
+    · intro equal
+      exact congrArg (fun access => ReferenceAccess access loan.mode) (same equal)
+    · intro equal
+      simp only [ReferenceAccess,shared equal,true_or,ite_true]
+  | @resource carrier current access binding target path resident prior member stored located ih =>
+    obtain ⟨next,nextAccess,reached,⟨trail,original,rebased⟩,same,shared⟩ := ih
+    refine ⟨_,_,.resource reached member stored located,⟨trail ++ binding.authority.carriers,?_,?_⟩,?_,?_⟩
+    · rw [Authority.carriers_resourceView,original,List.append_assoc]
+    · rw [Authority.carriers_resourceView,rebased,List.append_assoc]
+    · intro equal
+      exact congrArg (fun access => ResourceAccess access binding) (same equal)
+    · intro equal
+      rw [shared equal]
+      unfold ResourceAccess
+      split <;> rfl
+
 theorem Value.ReachableResident.rebase {world : World} {value resident : Value}
     {authority current : Authority} {incoming access : Access}
     (reachable : value.ReachableResident world authority incoming resident current access)
     (base : Authority) (requested : Access) :
     ∃ next nextAccess, value.ReachableResident world base requested resident next nextAccess := by
-  induction reachable with
-  | resident located => exact ⟨_,_,.resident located⟩
-  | referent _ reference found stored located ih =>
-      obtain ⟨_,_,prior⟩ := ih
-      exact ⟨_,_,.referent prior reference found stored located⟩
-  | resource _ member stored located ih =>
-      obtain ⟨_,_,prior⟩ := ih
-      exact ⟨_,_,.resource prior member stored located⟩
+  obtain ⟨next,nextAccess,reached,_⟩ := reachable.rebase_carriers base requested
+  exact ⟨next,nextAccess,reached⟩
 
 theorem Value.ReachableResident.resident_prefix {world : World} {value child resident : Value}
     {authority current : Authority} {incoming access : Access} {path : List Nat}

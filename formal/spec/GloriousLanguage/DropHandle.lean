@@ -1,5 +1,6 @@
 import GloriousLanguage.PrivateStorage
 import GloriousLanguage.ActivationStorageOrigin
+import GloriousLanguage.InputBatchProgress
 
 /-! The actual hook dispatch and common input binder establish caller-handle
 privacy. Generic storage and input framing live in the lower shared producer. -/
@@ -44,5 +45,34 @@ theorem LocalStep.hook_entry_private {program : Kernel.Program} {before entering
       have moved := entered.owned_handle_private afterTyped trivial rfl whole found privateRoot
       exact ⟨context,callee,function,authority,handle,loan,next,{ root with value := none },beforeTask,rfl,rfl,rfl,
         entered.fresh_context.1,moved.1,live,rfl,home,whole,fresh,freshLoan,moved.2.1,moved.2.2⟩
+
+/-- Actual destructor dispatch creates an initialized, handoff-ready argument
+at its real caller-owned handle. Admission names only the original Self graph
+and its compatibility with the prospective destructor row, not an after-world
+input or an assumed invocation step. -/
+theorem LocalStep.hook_handle_ready {program : Kernel.Program} {before entering : State}
+    {address : Address} {hook : DeclId} (valid : before.world.WellFormed)
+    (source : ∀ caller authority next value, before.task = .destroy caller address authority next →
+      before.world.Stores address value →
+      value.ResourcesAccessible program before.world .unique ∧
+      value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
+    (dispatch : LocalStep program before (some (.hookEnter address hook)) entering) :
+    ∃ (caller : Context) (function : Kernel.Function) (authority : Authority)
+      (handle : Address) (loan : Identity) (next : Task) (original argument : Value),
+      before.task = .destroy caller address authority next ∧ before.world.Stores address original ∧
+      Kernel.DropInstance program original.type (.runtimeRegion caller.region) hook function ∧
+      entering.task = .enter { caller with unsafeAllowed := false } function
+        (.supplied [⟨.argument 0,function.parameters.head!,handle,.owner,.owned⟩]) false ∧
+      entering.frames = .hook caller address authority handle loan next :: before.frames ∧
+      entering.world.Stores handle argument ∧ argument.Initialized ∧
+      argument.HandoffReady program entering.world .owned [handle] := by
+  cases dispatch with
+  | @destroyHook context _ authority next value _ function allocated handle after loan task stored _ _ selected temporary borrowed loanId =>
+    obtain ⟨ready,compatible⟩ := source context authority next value task stored
+    obtain ⟨type,handleStored,initialized,resources⟩ := temporary.borrowed_handle_ready valid stored ready borrowed compatible
+    obtain ⟨root,found,home,whole,privateRoot⟩ := temporary.borrowed_handle_private valid stored borrowed
+    exact ⟨context,function,authority,handle,loan,next,value,_,task,stored,selected,rfl,rfl,
+      handleStored,initialized,Value.ResourcesAccessible.private_handoff resources privateRoot⟩
+
 
 end Glorious.Language.Execution

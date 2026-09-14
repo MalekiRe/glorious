@@ -237,9 +237,21 @@ or a dependency of this project.
   `Permitted.referenceView_iff` and `resourceView_iff` contracts prove exactly
   which permissions remain required. Ordered-input, control, pattern and
   suspension consumers use the common corrected views; obsolete guard-frame
-  products and their duplicate observations are removed. Newly created
-  reference-handle readiness and general `InvocationStart` integration remain
-  on the entry-progress chain, not established by this view repair.
+  products and their duplicate observations are removed.
+- Created-reference readiness now follows the actual loan graph. The common
+  carrier-preserving rebase derives full reference/resource access for a new
+  handle; `FormsLoan.handed_off_ready` frames the original source across the
+  actual write and fresh loan. `Temporary.borrowed_handle_ready` discharges
+  fresh-slot separation from the real allocation.
+  `LocalStep.hook_handle_ready` consumes these producers and actual private
+  storage to establish the destructor argument's initialized singleton
+  `HandoffReady`, including exclusion of the slot the binder clears. The
+  source graph readiness and prospective-row view compatibility are finite
+  original-world hypotheses, not assumed after-world readiness. The strict
+  `DropHandle`/`SuspensionContent` gate passes 166 jobs; general theorem audits
+  report standard axioms only. Producing those source facts from task
+  admission and integrating the actual argument into `InvocationStart` remain
+  open; this result does not claim general invocation progress.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

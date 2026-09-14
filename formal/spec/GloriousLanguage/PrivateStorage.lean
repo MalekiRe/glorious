@@ -481,6 +481,26 @@ theorem Temporary.borrowed_handle_private {program : Kernel.Program} {before all
   have same : changed.home = root.home := by simpa [Root.location] using congrArg Root.home location
   exact same.trans home
 
+/-- No live reference or retained resource can observe a private handle root.
+Thus the actual value can be handed off while that caller slot is cleared. -/
+theorem Value.ResourcesAccessible.private_handoff {program : RuntimeProgram} {world : World}
+    {value : Value} {access : Access} {address : Address}
+    (ready : value.ResourcesAccessible program world access) (privateRoot : CanEndStorage world address.root) :
+    value.HandoffReady program world access [address] := by
+  refine ⟨ready,?_⟩
+  intro source member observed supported overlap
+  have same := List.mem_singleton.mp member
+  subst source
+  obtain ⟨resident,current,requested,reached,edge⟩ := supported
+  rcases edge with ⟨identity,loan,head,found,rfl⟩ | ⟨binding,member,rfl⟩
+  · obtain ⟨active,selected,live,_⟩ := ready.2.1 identity current requested ⟨resident,reached,head⟩
+    have same := Option.some.inj (selected.symm.trans found)
+    exact privateRoot.1 identity loan found (same ▸ live) overlap.1.symm
+  · obtain ⟨identity,loan,found,live,referent⟩ :=
+      StorageBinding.HeldBy.referent_recorded ((ready.1 resident current requested reached).1 binding member)
+    exact privateRoot.1 identity loan found live ((congrArg Address.root referent).trans overlap.1.symm)
+
+
 /-- The actual ordinary supplied entry consumes the single owned hook input.
 Its saved caller slot is empty and private before the body starts. -/
 theorem EnterWorld.owned_handle_private {program : Kernel.Program} {before : State} {after : World}

@@ -413,16 +413,6 @@ theorem AllocationClaim.fresh {before after : World} {fresh : Identity}
   exact latest child successor (by rw [← loans]; exact found') live' kind'
     (AncestorLoan.transport loans.symm ancestor)
 
-theorem StorageBinding.HeldBy.referent_recorded {world : World} {owner : Identity} {binding : StorageBinding}
-    (held : binding.HeldBy world owner) :
-    ∃ identity loan, world.loans.get identity = some loan ∧ loan.live = true ∧ loan.referent = binding.address := by
-  obtain ⟨custody,resources⟩ := held
-  rcases resources with ⟨claim,_⟩ | borrow
-  · obtain ⟨identity,loan,root,domain,parent,found,live,kind,referent,whole,selected,home,latest⟩ := claim
-    exact ⟨identity,loan,found,live,referent⟩
-  · obtain ⟨identity,loan,parent,found,live,kind,referent,shared⟩ := borrow
-    exact ⟨identity,loan,found,live,referent⟩
-
 theorem StorageBinding.HeldBy.fresh {before after : World} {fresh : Identity}
     (rows : ∀ id, id ≠ fresh → after.roots.get id = before.roots.get id)
     (loans : after.loans = before.loans) {owner : Identity} {binding : StorageBinding}
