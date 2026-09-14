@@ -6,18 +6,6 @@ transition preserves old residents and the loan table. This includes fresh
 continuation construction; it does not inspect unrelated newly stored values. -/
 namespace Glorious.Language
 
-theorem Permitted.of_same_loans {before after : World} {address : Address}
-    {authority : Authority} {access : Access}
-    (loans : after.loans = before.loans) (root : ∃ root, after.root address = some root)
-    (permitted : Permitted before authority access address) : Permitted after authority access address := by
-  induction authority with
-  | owner => exact ⟨root,by simpa only [loans] using permitted.2⟩
-  | loan identity => exact ⟨root,permitted.2.transport loans⟩
-  | shared backing ih => exact ⟨root,permitted.2.1,ih permitted.2.2⟩
-  | guarded backing carrier ih =>
-      obtain ⟨loan,selected,guard⟩ := permitted.2.2
-      exact ⟨root,ih permitted.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
-
 theorem Permitted.stores_iff {before after : World} {address : Address} {value : Value}
     {authority : Authority} {access : Access}
     (loans : after.loans = before.loans) (stored : before.Stores address value)

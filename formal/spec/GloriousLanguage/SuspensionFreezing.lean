@@ -189,7 +189,7 @@ theorem World.rehome_frames {before after : World} {select : Identity → Root �
 
 theorem suspendRoots.frames (world : World) (roots : List Identity) (id : Identity) {wanted : List Identity} :
     world.Frames wanted (suspendRoots world roots id) :=
-  World.rehome_frames (suspendRoots.eq_rehome' world roots id)
+  World.rehome_frames (suspendRoots.eq_rehome world roots id)
 
 theorem restoreRoots.frames (world : World) (homes : Table Home) {roots : List Identity} :
     world.Frames roots (restoreRoots world homes) :=
@@ -285,7 +285,7 @@ theorem suspendRoots.exists_root {world : World} {roots : List Identity} {id roo
   have rows : (suspendRoots world roots id).roots.get rootId =
       (world.roots.get rootId).map (fun current =>
         { current with home := if rootId ∈ roots then .suspended id else current.home }) := by
-    rw [suspendRoots.eq_rehome']
+    rw [suspendRoots.eq_rehome]
     exact World.rehome_get world (fun key current => if key ∈ roots then .suspended id else current.home) rootId
   rw [rows,found]
   rfl

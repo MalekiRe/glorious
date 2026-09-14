@@ -228,6 +228,21 @@ theorem LoanPermission.transport {before after : World} {identity : Identity} {a
   exact AncestorLoan.transport loans
     (allowed other loan (by simpa only [loans] using found) live different overlap conflict)
 
+/-- Authority checks depend on the loan table and existence of the observed
+root, not its administrative home or unrelated retired storage. -/
+theorem Permitted.of_same_loans {before after : World} {address : Address}
+    {authority : Authority} {access : Access}
+    (loans : after.loans = before.loans) (root : ∃ root, after.root address = some root)
+    (permitted : Permitted before authority access address) : Permitted after authority access address := by
+  induction authority with
+  | owner => exact ⟨root,by simpa only [loans] using permitted.2⟩
+  | loan identity => exact ⟨root,permitted.2.transport loans⟩
+  | shared backing ih => exact ⟨root,permitted.2.1,ih permitted.2.2⟩
+  | guarded backing carrier ih =>
+      obtain ⟨loan,selected,guard⟩ := permitted.2.2
+      exact ⟨root,ih permitted.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
+
+
 theorem Permitted.transport {before after : World} {authority : Authority} {access : Access} {address : Address}
     (locations : ∀ id, (after.roots.get id).map Root.location = (before.roots.get id).map Root.location)
     (loans : after.loans = before.loans) (permission : Permitted before authority access address) :
@@ -236,13 +251,7 @@ theorem Permitted.transport {before after : World} {authority : Authority} {acce
     cases authority <;> exact permission.1
   obtain ⟨root,selected⟩ := rootExists
   obtain ⟨changed,found,_⟩ := World.root_transport locations selected
-  induction authority with
-  | owner => exact ⟨⟨changed,found⟩,by simpa only [loans] using permission.2⟩
-  | loan id => exact ⟨⟨changed,found⟩,permission.2.transport loans⟩
-  | shared backing ih => exact ⟨⟨changed,found⟩,permission.2.1,ih permission.2.2⟩
-  | guarded backing carrier ih =>
-      obtain ⟨loan,selected,guard⟩ := permission.2.2
-      exact ⟨⟨changed,found⟩,ih permission.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
+  exact permission.of_same_loans loans ⟨changed,found⟩
 
 theorem Transfers.wellFormed {program : RuntimeProgram} {before after : World} {authority source destination}
     (valid : before.WellFormed) (transfer : Transfers program before authority source destination after) : after.WellFormed := by

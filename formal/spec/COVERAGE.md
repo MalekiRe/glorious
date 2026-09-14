@@ -521,6 +521,25 @@ The combined `ExternalHomePreservation`, `DropPrivate`, `DropSuspension` and
 standard axioms. Root liveness, resident contents and general source progress
 are not established by this separation result.
 
+Ordinary replay progress now consumes only the original argument facts.
+`SnapshotMap.old_permitted` derives compatibility from the actual selector
+(only live shared loans are copied), old permission exclusions and the parent
+mode invariant; no extra copy-compatibility admission is introduced. The
+canonical old-row and support frame transports the original handoff graph.
+Final replay uses the active saved-home inventory and the shared rehome
+producer. `resumeLast_or_exhausted` and `resumeCopy_or_blocked` retain their
+exact successor worlds, and `resume_progress` derives the branch from the
+actual accounted budget. `Run.replay_owned` derives its nonfatal prefix from
+the actual next replay instead of requiring a separate run certificate.
+The shared permission/rehome migration also checks the original-input, pattern
+and actual destructor-purpose Drop dispatch consumers. The combined nine-target
+gate passes 244 jobs; twelve general audits use only standard axioms.
+`DropReturn` is explicitly excluded: its unit-shell proof still lacks actual
+custody relinquishment and `ReleaseCustodyLoans`. Its fixed trace and unchanged
+loan table are not established by structural typing or private root provenance.
+The original custody producer and real draining consumer remain to be integrated;
+neither proper-tail replay nor whole-task progress is claimed here.
+
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
 write precedes the shell write and is performed on the relinquished world) and

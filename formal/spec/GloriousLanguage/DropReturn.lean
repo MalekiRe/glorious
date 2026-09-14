@@ -10,22 +10,6 @@ current receiver's fields. Arbitrary source destruction inside a hook may
 recursively invoke Drop and diverge; that is not an administrative re-entry. -/
 namespace Glorious.Language
 
-/-- Loans determine authority checks once the observed storage still exists.
-This local framing law does not require unrelated retired roots to stay live. -/
-theorem Permitted.sameLoansAt {before after : World} {authority : Authority}
-    {access : Access} {address : Address}
-    (loans : after.loans = before.loans) (located : ∃ root, after.root address = some root)
-    (permission : Permitted before authority access address) :
-    Permitted after authority access address := by
-  induction authority with
-  | owner => exact ⟨located,by simpa only [loans] using permission.2⟩
-  | loan id =>
-    obtain ⟨_,active,found,live,root,generation,path,mode,allowed⟩ := permission
-    refine ⟨located,active,by simpa only [loans] using found,live,root,generation,path,mode,?_⟩
-    intro other loan found live different overlap conflict
-    exact (allowed other loan (by simpa only [loans] using found) live different overlap conflict).sameLoans loans.symm
-  | shared backing ih => exact ⟨located,permission.2.1,ih permission.2.2⟩
-
 /-- A fieldless unit root cannot also contain a non-unit receiver. Thus the
 cleanup's physical disjointness follows from its real stored inhabitants. -/
 theorem World.stores_outside_unit {world : World} {unitAddress address : Address}
@@ -159,7 +143,7 @@ theorem hookReturned_administrative {program : Kernel.Program} {host : Foreign.M
   have located : ∃ root, after.world.root address = some root :=
     (Option.bind_eq_some_iff.mp retained).imp fun _ found => found.1
   refine ⟨after,.silent (Or.inl start) cleanup.run,rfl,rfl,retained,rfl,ended,?_,?_,?_⟩
-  · exact fun _ _ permission => permission.sameLoansAt (before := before.world) (after := after.world) rfl located
+  · exact fun _ _ permission => permission.of_same_loans (before := before.world) (after := after.world) rfl located
   · exact cleanup.worldTyped (before := started) valid inventory typed
   · cases selected : (List.range receiver.fields.length).reverse with
     | nil => exact ⟨none,_,.fieldsDone (context := outer) (address := address) (authority := authority)

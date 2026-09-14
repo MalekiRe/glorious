@@ -375,6 +375,13 @@ structure Suspension.CaptureOrigin (suspension : Suspension) : Prop where
     CapturedHome suspension.handler suspension.frames home
   foreignFree : ∀ frame ∈ suspension.frames, frame.ForeignFree
 
+theorem Suspension.CaptureOrigin.home_none {suspension : Suspension}
+    (origin : suspension.CaptureOrigin) {root : Identity} (outside : root ∉ suspension.roots) :
+    suspension.homes.get root = none := by
+  cases found : suspension.homes.get root with
+  | none => rfl
+  | some home => exact False.elim (outside ((origin.domain root).mp ⟨home,found⟩))
+
 /-- The executable control invariant combines the existing budget component
 with capture provenance and active ownership of the current root inventory.
 Historical bounds survive settlement; liveness belongs only to active roots. -/

@@ -1,5 +1,5 @@
 import GloriousLanguage.SuspensionAdmission
-import GloriousLanguage.RehomeFraming
+import GloriousLanguage.RehomePreservation
 import GloriousLanguage.ReferenceTransferPreservation
 
 /-! Captured content is a real product of the actual capture, replay and
@@ -13,192 +13,6 @@ replay. -/
 namespace Glorious.Language
 
 open _root_.Glorious.Language.Kernel
-
-/-- Relabel the home of every root while leaving values, loans and reads of the
-world untouched. `suspendRoots` and `restoreRoots` are both instances; no second
-storage inventory is introduced. -/
-def World.rehome (world : World) (select : Identity → Root → Home) : World :=
-  { world with roots := world.roots.map (fun (key,root) => (key,{ root with home := select key root })) }
-
-theorem World.rehome_loans (world : World) (select : Identity → Root → Home) :
-    (world.rehome select).loans = world.loans := rfl
-
-theorem World.rehome_stores {world : World} {select : Identity → Root → Home} {address : Address}
-    {value : Value} : (world.rehome select).Stores address value ↔ world.Stores address value := by
-  unfold World.Stores World.rehome
-  rw [World.rehome_read]
-
-theorem World.rehome_initialized {world : World} {select : Identity → Root → Home} {address : Address} :
-    (world.rehome select).Initialized address ↔ world.Initialized address := by
-  unfold World.Initialized
-  exact exists_congr fun value => and_congr World.rehome_stores Iff.rfl
-
-theorem World.rehome_resident {world : World} {select : Identity → Root → Home} {address : Address}
-    {value : Value} : (world.rehome select).Resident address value ↔ world.Resident address value := by
-  unfold World.rehome
-  constructor
-  · rintro ⟨root,whole,found,live,generation,contents,located⟩
-    obtain ⟨original,originalAt,equal⟩ := Option.map_eq_some_iff.mp (by
-      rw [World.rehome_get] at found; exact found)
-    subst equal
-    exact ⟨original,whole,originalAt,live,generation,contents,located⟩
-  · rintro ⟨root,whole,found,live,generation,contents,located⟩
-    exact ⟨{ root with home := select address.root root },whole,
-      by rw [World.rehome_get,found]; rfl,live,generation,contents,located⟩
-
-/-- The relative index of the reachability graph is a function of the loan table
-alone, so rehoming changes no edge. -/
-theorem Value.ReachableResident.rehome {before : World} {select : Identity → Root → Home}
-    {value resident : Value} {authority current : Authority} {incoming access : Access} :
-    value.ReachableResident before authority incoming resident current access ↔
-      value.ReachableResident (before.rehome select) authority incoming resident current access := by
-  constructor
-  · intro reached
-    induction reached with
-    | resident located => exact .resident located
-    | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
-        exact Value.ReachableResident.referent ih reference found
-          ((World.rehome_stores (world := before) (select := select)).mpr stored) located
-    | @resource carrier current access binding target path resident prior member stored located ih =>
-        exact Value.ReachableResident.resource ih member
-          ((World.rehome_stores (world := before) (select := select)).mpr stored) located
-  · intro reached
-    induction reached with
-    | resident located => exact .resident located
-    | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
-        exact Value.ReachableResident.referent ih reference found
-          ((World.rehome_stores (world := before) (select := select)).mp stored) located
-    | @resource carrier current access binding target path resident prior member stored located ih =>
-        exact Value.ReachableResident.resource ih member
-          ((World.rehome_stores (world := before) (select := select)).mp stored) located
-
-theorem Value.ReachableReference.rehome {before : World} {select : Identity → Root → Home}
-    {value : Value} {authority : Authority} {incoming : Access} {identity : Identity}
-    {current : Authority} {access : Access} :
-    value.ReachableReference before authority incoming identity current access ↔
-      value.ReachableReference (before.rehome select) authority incoming identity current access := by
-  constructor
-  · rintro ⟨resident,reached,head⟩
-    exact ⟨resident,(Value.ReachableResident.rehome.mp reached),head⟩
-  · rintro ⟨resident,reached,head⟩
-    exact ⟨resident,(Value.ReachableResident.rehome.mpr reached),head⟩
-
-theorem Authority.Custodied.rehome {world : World} {select : Identity → Root → Home}
-    {custody : ClaimCustody} (authority : Authority) (custodied : authority.Custodied world custody) :
-    authority.Custodied (world.rehome select) custody := by
-  induction authority with
-  | owner => trivial
-  | loan id => exact custodied
-  | shared backing => simpa only [Authority.Custodied,World.rehome_loans] using custodied
-  | guarded backing carrier ih => exact ih custodied
-
-theorem Authority.Recorded.rehome {world : World} {select : Identity → Root → Home}
-    {authority : Authority} (recorded : authority.Recorded world.loans) :
-    authority.Recorded (world.rehome select).loans := by
-  simpa only [World.rehome_loans] using recorded
-
-/-- Rehoming retains allocation claims whose root is not relabelled. Roots
-carried by a local, capture, suspended, static or exterior home never carried an
-allocation claim, so they cannot lose one. -/
-theorem AncestorLoan.transport_rehome {before : World} {select : Identity → Root → Home}
-    {ancestor child : Identity} (loans : (before.rehome select).loans = before.loans)
-    (related : AncestorLoan (before.rehome select) ancestor child) : AncestorLoan before ancestor child := by
-  induction related with
-  | refl => exact .refl
-  | parent found parent _ ih => exact .parent (by simpa only [loans] using found) parent ih
-
-theorem AllocationClaim.rehome {before : World} {select : Identity → Root → Home} {roots : List Identity}
-    (outside : ∀ id, id ∉ roots → ∀ root, select id root = root.home)
-    (internal : ∀ id ∈ roots, ∀ root, before.roots.get id = some root →
-      (∀ domain, root.home ≠ .allocation domain) ∧ (∀ domain, root.home ≠ .external domain))
-    {authority : Authority} {address : Address} (claim : AllocationClaim before authority address) :
-    AllocationClaim (before.rehome select) authority address := by
-  obtain ⟨identity,loan,root,domain,parent,found,live,kind,referent,whole,selected,home,latest⟩ := claim
-  have rootAt : before.roots.get address.root = some root := (World.root_found selected).1
-  by_cases member : address.root ∈ roots
-  · rcases home with same | same
-    · exact False.elim ((internal address.root member root rootAt).1 domain same)
-    · exact False.elim ((internal address.root member root rootAt).2 domain same)
-  · refine ⟨identity,loan,root,domain,parent,found,live,kind,referent,whole,?_,?_,?_⟩
-    · unfold World.rehome
-      rw [World.rehome_root,selected]
-      simp only [Option.map_some]
-      rw [outside address.root member root]
-    · rcases home with same | same
-      · exact Or.inl same
-      · exact Or.inr same
-    · intro child successor found' live' kind' ancestor
-      exact latest child successor found' live' kind'
-        (AncestorLoan.transport_rehome (World.rehome_loans before select).symm ancestor)
-
-theorem StorageBinding.HeldBy.rehome {before : World} {select : Identity → Root → Home} {roots : List Identity}
-    (outside : ∀ id, id ∉ roots → ∀ root, select id root = root.home)
-    (internal : ∀ id ∈ roots, ∀ root, before.roots.get id = some root →
-      (∀ domain, root.home ≠ .allocation domain) ∧ (∀ domain, root.home ≠ .external domain))
-    {owner : Identity} {binding : StorageBinding} (held : binding.HeldBy before owner) :
-    binding.HeldBy (before.rehome select) owner := by
-  obtain ⟨custody,resources⟩ := held
-  refine ⟨Authority.Custodied.rehome _ custody,?_⟩
-  rcases resources with ⟨claim,added⟩ | borrow
-  · exact Or.inl ⟨AllocationClaim.rehome outside internal claim,added⟩
-  · exact Or.inr (by simpa only [World.rehome_loans before select] using borrow)
-
-theorem Value.InvariantClosed.rehome {program : RuntimeProgram} {before : World}
-    {select : Identity → Root → Home} {resident : Value}
-    (closed : resident.InvariantClosed program before) :
-    resident.InvariantClosed program (before.rehome select) := by
-  cases resident with
-  | resident owner type head live fields resources =>
-    dsimp only [Value.InvariantClosed] at closed ⊢
-    cases type with
-    | nominal identity arguments =>
-        obtain ⟨data,found,shape⟩ := closed
-        refine ⟨data,found,?_⟩
-        cases invariant : data.invariant with
-        | none => simpa only [invariant] using shape
-        | some declared =>
-            obtain ⟨contract,lookup,ownerAt,holds⟩ := by simpa only [invariant] using shape
-            exact ⟨contract,lookup,ownerAt,contract.rehomed before select _ holds⟩
-    | _ => exact closed
-
-theorem Value.ResourcesClosed.rehome {program : RuntimeProgram} {before : World}
-    {select : Identity → Root → Home} {roots : List Identity}
-    (outside : ∀ id, id ∉ roots → ∀ root, select id root = root.home)
-    (internal : ∀ id ∈ roots, ∀ root, before.roots.get id = some root →
-      (∀ domain, root.home ≠ .allocation domain) ∧ (∀ domain, root.home ≠ .external domain))
-    {value : Value} (closed : value.ResourcesClosed program before) :
-    value.ResourcesClosed program (before.rehome select) := by
-  intro resident authority access reached
-  have prior := Value.ReachableResident.rehome.mpr reached
-  obtain ⟨held,declared⟩ := closed resident authority access prior
-  exact ⟨fun binding member => StorageBinding.HeldBy.rehome outside internal (held binding member),
-    Value.InvariantClosed.rehome declared⟩
-
-theorem Value.LoansRestored.rehome {program : RuntimeProgram} {before : World}
-    {select : Identity → Root → Home} {roots : List Identity}
-    (outside : ∀ id, id ∉ roots → ∀ root, select id root = root.home)
-    (internal : ∀ id ∈ roots, ∀ root, before.roots.get id = some root →
-      (∀ domain, root.home ≠ .allocation domain) ∧ (∀ domain, root.home ≠ .external domain))
-    {value : Value} (restored : value.LoansRestored program before) :
-    value.LoansRestored program (before.rehome select) := by
-  intro identity authority access reached
-  have prior := Value.ReachableReference.rehome.mpr reached
-  obtain ⟨loan,found,live,initialized,closed⟩ := restored identity authority access prior
-  exact ⟨loan,found,live,(World.rehome_initialized (world := before) (select := select)).mpr initialized,
-    fun referent stored =>
-      Value.ResourcesClosed.rehome outside internal (closed referent ((World.rehome_stores (world := before) (select := select)).mp stored))⟩
-
-theorem World.ResourcesClosed.rehome {program : RuntimeProgram} {before : World}
-    {select : Identity → Root → Home} {roots : List Identity}
-    (outside : ∀ id, id ∉ roots → ∀ root, select id root = root.home)
-    (internal : ∀ id ∈ roots, ∀ root, before.roots.get id = some root →
-      (∀ domain, root.home ≠ .allocation domain) ∧ (∀ domain, root.home ≠ .external domain))
-    {address : Address} (closed : World.ResourcesClosed program before address) :
-    World.ResourcesClosed program (before.rehome select) address := by
-  intro value stored
-  obtain ⟨resources,restored⟩ := closed value ((World.rehome_stores (world := before) (select := select)).mp stored)
-  exact ⟨Value.ResourcesClosed.rehome outside internal resources,
-    Value.LoansRestored.rehome outside internal restored⟩
 
 theorem Suspensible.rehome {program : RuntimeProgram} {before : World} {select : Identity → Root → Home}
     {roots : List Identity}
@@ -278,13 +92,6 @@ theorem DelimitedRoots.home_not_allocation {world : World} {handler : InstalledH
   rcases shape with shape | shape <;>
     (constructor <;> (intro domain equal; rw [shape] at equal; cases equal))
 
-theorem suspendRoots.eq_rehome' (world : World) (roots : List Identity) (id : Identity) :
-    suspendRoots world roots id = world.rehome (fun key root => if key ∈ roots then .suspended id else root.home) :=
-  suspendRoots.eq_rehome world roots id
-
-theorem restoreRoots.eq_rehome (world : World) (homes : Table Home) :
-    restoreRoots world homes = world.rehome (fun key root => (homes.get key).getD root.home) := rfl
-
 /-- The actual capture relabels the selected roots to the suspension; it moves
 no value, creates no loan and changes no read, so the replay admission the
 operation boundary granted for those roots is retained by the capture itself. -/
@@ -297,7 +104,7 @@ theorem DelimitedRoots.replayable_suspendRoots {program : Kernel.Program} {world
     Replayable program (suspendRoots world roots id) roots ∧ ∀ frame ∈ inner, SnapshotFrame frame := by
   obtain ⟨replayable,frames⟩ := SuspendPermission.replayable_frames permission upper multi
   constructor
-  · rw [suspendRoots.eq_rehome']
+  · rw [suspendRoots.eq_rehome]
     refine Replayable.rehome (roots := roots)
       (select := fun key root => if key ∈ roots then .suspended id else root.home) ?_ ?_ replayable
     · intro key outside root
@@ -332,7 +139,7 @@ theorem Suspension.restore_replayable {program : Kernel.Program} {before : State
 
 
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 /-- Read agreement at every address outside one fresh root: the fresh root has
 its own identity, so every previously existing row is untouched. -/

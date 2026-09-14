@@ -298,6 +298,19 @@ or a dependency of this project.
   general run, retained cancellation and admitted-invocation audits use only
   standard axioms. This proves cleanup separation, not resident liveness or
   whole-program progress.
+- Ordinary replay now has `resume_progress` from original-world stored,
+  initialized, permitted handoff evidence and one positive layout request. The
+  active budget selects final restoration or copying; only copying requires
+  the original physical snapshot admission. Both branches construct the real
+  replay or exact physical-exhaustion prefix, without future-world readiness
+  callbacks. Live shared-row selection itself preserves every original
+  permission through copying. Rehome graph and permission producers are shared
+  with input, pattern and Drop dispatch consumers; the combined gate passes
+  244 jobs, and twelve general audits use only standard axioms. This is not
+  proper-tail or whole-task progress. `DropReturn` remains a recorded failing
+  consumer, outside that gate: its fixed three-event suffix omits mandatory
+  unit-custody relinquishment and pending-loan draining. Original custody
+  admission and the real drain must replace that obsolete cleanup claim.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

@@ -207,7 +207,6 @@ theorem Run.replay_owned {program : Kernel.Program} {host : Foreign.Model}
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (run : Run program host before trace current)
     (selected : current.resumptions.get id = some suspension)
-    (runSafe : run.NonFatal)
     (replay : EffectStep program current (some (.replay id last)) after) :
     (last = true ∧ ∀ rootId ∈ suspension.roots, ∃ root, after.world.roots.get rootId = some root ∧
       ∃ frame ∈ after.frames, FrameOwns frame root) ∨
@@ -215,7 +214,8 @@ theorem Run.replay_owned {program : Kernel.Program} {host : Foreign.Model}
       map.roots = suspension.roots ∧ map.rootBase = current.world.nextRoot ∧
       ∀ rootId ∈ suspension.roots, ∃ root, after.world.roots.get (map.root rootId) = some root ∧
         ∃ frame ∈ after.frames, FrameOwns frame root) := by
-  have currentValid := run.suspensions programValid inventory lawful typed control.suspensions runSafe
+  have currentValid := run.suspensions programValid inventory lawful typed control.suspensions
+    (run.nonFatal_of_final replay.task_not_fatal)
   have currentWell := (run.worldTyped programValid inventory lawful typed).1
   cases last with
   | true => exact Or.inl ⟨rfl,replay.last_replay_owned currentValid currentWell selected⟩

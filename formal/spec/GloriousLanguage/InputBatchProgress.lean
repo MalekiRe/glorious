@@ -2574,21 +2574,6 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
       (fun _ _ _ _ _ _ _ _ permission => permission)
 
 
-/-- A permission survives a step that retains the loan table, given a root at
-the observed address. The same criterion is stated by the pattern-plan
-transport, which is not in this module's import closure. -/
-theorem Permitted.of_same_loans {before after : World} {address : Address}
-    {authority : Authority} {access : Access}
-    (loans : after.loans = before.loans) (root : ∃ root, after.root address = some root)
-    (permitted : Permitted before authority access address) : Permitted after authority access address := by
-  induction authority with
-  | owner => exact ⟨root,by simpa only [loans] using permitted.2⟩
-  | loan identity => exact ⟨root,permitted.2.transport loans⟩
-  | shared backing ih => exact ⟨root,permitted.2.1,ih permitted.2.2⟩
-  | guarded backing carrier ih =>
-      obtain ⟨loan,selected,guard⟩ := permitted.2.2
-      exact ⟨root,ih permitted.2.1,loan,by simpa only [loans] using selected,guard.transport loans⟩
-
 /-- The world one value write produces. -/
 abbrev writtenWorld (before : World) (address : Address) (root : Root) (replacement : Option Value) : World :=
   { before with roots := before.roots.set address.root { root with value := replacement } }

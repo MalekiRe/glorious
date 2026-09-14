@@ -102,6 +102,151 @@ theorem SnapshotMap.old_loan_lookup {program : Kernel.Program} {before : State} 
       · have : id = before.world.nextLoan + old := by simpa [Relocation.loan,relocateId,included,selected.loanBase] using same
         exact False.elim ((Nat.not_lt_of_ge (Nat.le_add_right _ _)) (this ▸ bound))
 
+/-- Old loan permissions survive the actual copy table when every selected
+new row is compatible with their original overlap and guard observations. -/
+theorem Relocation.old_loanPermission {world : World} {map : Relocation} {homes : Table Home}
+    {identity : Identity} {requested : Access} {address : Address}
+    (valid : world.WellFormed) (permission : LoanPermission world identity requested address)
+    (compatible : ∀ id loan, world.loans.get id = some loan → id ∈ map.loans →
+      (Authority.loan identity).LoanCompatible world requested address
+        (map.loanValue loan).referent (map.loanValue loan).mode (map.loanValue loan).guards) :
+    LoanPermission (map.copyWorld world homes) identity requested address := by
+  obtain ⟨active,found,live,root,generation,path,mode,excluded,guards,dependent⟩ := permission
+  refine ⟨active,Relocation.old_loan found,live,root,generation,path,mode,?_,?_,?_⟩
+  · intro other loan selected alive different overlap conflict
+    rcases Relocation.loan_origin valid.2.1 selected with original | ⟨old,previous,present,included,rfl,rfl⟩
+    · exact (excluded other loan original alive different overlap conflict).weaken
+        (fun _ _ => Relocation.old_loan)
+    · exact False.elim ((compatible old previous present included).1 overlap conflict)
+  · intro guard member
+    obtain ⟨loan,selected,alive⟩ := guards guard member
+    exact ⟨loan,Relocation.old_loan selected,alive⟩
+  · intro other loan selected alive member
+    rcases Relocation.loan_origin valid.2.1 selected with original | ⟨old,previous,present,included,rfl,rfl⟩
+    · exact dependent other loan original alive member
+    · exact (compatible old previous present included).2 member
+
+/-- Copy permission framing consumes original selected-row compatibility, not
+an assumed permission in an arbitrary copied world. -/
+theorem Relocation.old_permitted {world : World} {map : Relocation} {homes : Table Home}
+    {authority : Authority} {requested : Access} {address : Address}
+    (valid : world.WellFormed) (permission : Permitted world authority requested address)
+    (compatible : ∀ id loan, world.loans.get id = some loan → id ∈ map.loans →
+      authority.LoanCompatible world requested address
+        (map.loanValue loan).referent (map.loanValue loan).mode (map.loanValue loan).guards) :
+    Permitted (map.copyWorld world homes) authority requested address := by
+  obtain ⟨root,selected⟩ := permission.root
+  induction authority with
+  | owner =>
+    refine ⟨⟨root,Relocation.old_selected_root selected⟩,?_⟩
+    intro identity loan found live overlap conflict
+    rcases Relocation.loan_origin valid.2.1 found with original | ⟨old,previous,present,included,rfl,rfl⟩
+    · exact permission.2 identity loan original live overlap conflict
+    · exact compatible old previous present included overlap conflict
+  | loan identity =>
+    exact ⟨⟨root,Relocation.old_selected_root selected⟩,Relocation.old_loanPermission valid permission.2 compatible⟩
+  | shared backing ih =>
+    exact ⟨⟨root,Relocation.old_selected_root selected⟩,permission.2.1,ih permission.2.2 compatible⟩
+  | guarded backing carrier ih =>
+    obtain ⟨loan,found,allowed⟩ := permission.2.2
+    exact ⟨⟨root,Relocation.old_selected_root selected⟩,
+      ih permission.2.1 (fun id loan found included => (compatible id loan found included).1),
+      loan,Relocation.old_loan found,Relocation.old_loanPermission valid allowed
+        (fun id previous present included => (compatible id previous present included).2 loan found)⟩
+
+
+/-- A fresh relocated referent cannot overlap an old root. Thus every overlap
+observed by an original permission comes from an unchanged source referent. -/
+theorem SnapshotMap.old_overlap {program : Kernel.Program} {before : State} {suspension : Suspension}
+    {map : Relocation} {address referent : Address} (selected : SnapshotMap program before suspension map)
+    (bound : address.root < before.world.nextRoot) (overlap : address.Overlaps (map.address referent)) :
+    address.Overlaps referent := by
+  by_cases included : referent.root ∈ map.roots
+  · have fresh : before.world.nextRoot ≤ address.root := by
+      rw [overlap.1]
+      simp only [Relocation.address,Relocation.root,relocateId,if_pos included,selected.rootBase]
+      exact Nat.le_add_right _ _
+    exact False.elim (Nat.not_lt_of_ge fresh bound)
+  · simpa only [Relocation.address_unselected included] using overlap
+
+/-- A shared source row cannot conflict with an admitted old unique use: the
+only ancestry exemption would put a shared ancestor above a unique descendant,
+which the world's actual parent-mode invariant excludes. Copied guards either
+retain their old identity or are fresh and cannot name an old carrier. -/
+theorem SnapshotMap.old_loan_compatible {program : Kernel.Program} {before : State} {suspension : Suspension}
+    {map : Relocation} {identity old : Identity} {requested : Access} {address : Address} {loan : Loan}
+    (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
+    (permission : LoanPermission before.world identity requested address)
+    (present : before.world.loans.get old = some loan) (included : old ∈ map.loans) :
+    (Authority.loan identity).LoanCompatible before.world requested address
+      (map.loanValue loan).referent (map.loanValue loan).mode (map.loanValue loan).guards := by
+  obtain ⟨active,found,live,root,generation,path,mode,excluded,guards,dependent⟩ := permission
+  have source := selected.selected_loan included present
+  constructor
+  · intro overlap conflict
+    have bound : address.root < before.world.nextRoot := root ▸ World.live_loan_root_bound valid found live
+    have originalOverlap := selected.old_overlap bound overlap
+    have notShared : requested ≠ .shared := by
+      rcases conflict with requested | unique
+      · exact requested
+      · change loan.mode = .unique at unique
+        cases source.2.symm.trans unique
+    have unique := mode notShared
+    by_cases same : old = identity
+    · subst old
+      have equal : loan = active := Option.some.inj (present.symm.trans found)
+      subst loan
+      cases source.2.symm.trans unique
+    · have ancestry := excluded old loan present source.1 same originalOverlap conflict
+      have ancestorUnique := ancestry.unique_ancestor (World.loanParents valid) present found unique
+      cases source.2.symm.trans ancestorUnique
+  · intro member
+    change identity ∈ loan.guards.map map.loan at member
+    obtain ⟨guard,guardMember,equal⟩ := List.mem_map.mp member
+    by_cases copied : guard ∈ map.loans
+    · have fresh : before.world.nextLoan ≤ identity := by
+        rw [← equal]
+        simp only [Relocation.loan,relocateId,if_pos copied,selected.loanBase]
+        exact Nat.le_add_right _ _
+      exact False.elim (Nat.not_lt_of_ge fresh (World.loanBounds valid found))
+    · have same : guard = identity := by simpa only [Relocation.loan,relocateId,if_neg copied] using equal
+      exact dependent old loan present source.1 (same ▸ guardMember)
+
+/-- The authoritative snapshot selector copies only shared rows. It therefore
+produces, rather than assumes, compatibility with every original permission. -/
+theorem SnapshotMap.old_compatible {program : Kernel.Program} {before : State} {suspension : Suspension}
+    {map : Relocation} {authority : Authority} {requested : Access} {address : Address}
+    (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
+    (permission : Permitted before.world authority requested address) :
+    ∀ id loan, before.world.loans.get id = some loan → id ∈ map.loans →
+      authority.LoanCompatible before.world requested address
+        (map.loanValue loan).referent (map.loanValue loan).mode (map.loanValue loan).guards := by
+  obtain ⟨root,rootAt⟩ := permission.root
+  induction authority with
+  | owner =>
+    intro id loan found included overlap conflict
+    exact permission.2 id loan found (selected.selected_loan included found).1
+      (selected.old_overlap (World.root_bound valid (World.root_found rootAt).1) overlap) conflict
+  | loan identity =>
+    exact fun _ _ found included => selected.old_loan_compatible valid permission.2 found included
+  | shared backing ih => exact ih permission.2.2
+  | guarded backing carrier ih =>
+    intro id loan found included
+    refine ⟨ih permission.2.1 id loan found included,?_⟩
+    intro original originalAt
+    obtain ⟨current,currentAt,allowed⟩ := permission.2.2
+    have same : current = original := Option.some.inj (currentAt.symm.trans originalAt)
+    subst current
+    exact selected.old_loan_compatible valid allowed found included
+
+theorem SnapshotMap.old_permitted {program : Kernel.Program} {before : State} {suspension : Suspension}
+    {map : Relocation} {homes : Table Home} {authority : Authority} {requested : Access} {address : Address}
+    (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
+    (permission : Permitted before.world authority requested address) :
+    Permitted (map.copyWorld before.world homes) authority requested address :=
+  Relocation.old_permitted valid permission (selected.old_compatible valid permission)
+
+
 theorem SnapshotMap.ancestor_old {program : Kernel.Program} {before : State} {suspension : Suspension}
     {map : Relocation} {homes : Table Home} {ancestor child : Identity}
     (valid : before.world.WellFormed) (selected : SnapshotMap program before suspension map)
@@ -155,6 +300,17 @@ theorem SnapshotMap.old_heldBy {program : Kernel.Program} {before : State} {susp
   rcases held.2 with ⟨claim,writable⟩ | ⟨id,loan,parent,found,live,kind,referent,shared⟩
   · exact Or.inl ⟨selected.old_allocationClaim valid claim,writable⟩
   · exact Or.inr ⟨id,loan,parent,Relocation.old_loan found,live,kind,referent,shared⟩
+
+/-- The existing old-row, claim and custody proofs supply the common resource
+frame used by the original argument's reachable graph. -/
+theorem SnapshotMap.old_resourceRows {program : Kernel.Program} {before : State} {suspension : Suspension}
+    {map : Relocation} {homes : Table Home} (valid : before.world.WellFormed)
+    (selected : SnapshotMap program before suspension map) :
+    before.world.ResourceRowsRetained (map.copyWorld before.world homes) :=
+  ⟨fun _ loan found => ⟨loan,Relocation.old_loan found,rfl⟩,
+    fun _ _ claim => selected.old_allocationClaim valid claim,
+    fun _ _ held => Relocation.old_custodied held⟩
+
 
 theorem SnapshotMap.copied_heldBy {program : Kernel.Program} {before : State} {suspension : Suspension}
     {map : Relocation} {homes : Table Home} {address : Address} {value : Value} {binding : StorageBinding}
@@ -232,6 +388,26 @@ theorem Relocation.old_supportFramed {program : RuntimeProgram} {map : Relocatio
   obtain ⟨root,selected⟩ := closed.support_root valid restored supported
   have found := (World.root_found selected).1
   exact ⟨Relocation.old_read selected,by rw [Relocation.old_root found,found]⟩
+
+/-- The caller's original handoff graph remains ready after the actual copy.
+Shared-row selection supplies all permission compatibility; no copied-world
+readiness or extra source compatibility assumption is required. -/
+theorem CopiesSnapshot.old_handoffReady {program : Kernel.Program} {before after : State}
+    {suspension : Suspension} {map : Relocation} {value : Value} {access : Access} {footprint : List Address}
+    (valid : before.world.WellFormed) (copied : CopiesSnapshot program before suspension map after)
+    (ready : value.HandoffReady program before.world access footprint) :
+    value.HandoffReady program after.world access footprint := by
+  have rows := copied.relocation.old_resourceRows (homes := suspension.homes) valid
+  have batch : value.BatchCompatible before.world (map.copyWorld before.world suspension.homes) := by
+    apply Value.BatchCompatible.of_rows rows
+    intro identity current access reached
+    obtain ⟨loan,found,_⟩ := ready.1.2.1 identity current access reached
+    exact ⟨loan,found⟩
+  have framed := Relocation.old_supportFramed (map := map) (homes := suspension.homes) valid ready.1.1 ready.1.2.1
+  rw [copied.result]
+  exact ready.frame_batch batch framed
+    (fun _ _ _ _ permission => copied.relocation.old_permitted valid permission)
+
 
 /-- Proof-only provenance for a node of the actual post-copy graph. Each node
 is either a captured resident under the one relocation or an unchanged

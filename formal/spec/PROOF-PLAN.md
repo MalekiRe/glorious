@@ -408,8 +408,33 @@ the stale eager-lending proofs. `ExternalHomePreservation`, `DropPrivate`,
 axioms only in the audited general consumers. This is cleanup separation, not
 resident liveness or a general progress theorem.
 
-Next: derive original source facts and proper-tail entry from meaningful task
-admission, then close general task progress on this same dependency chain.
+The ordinary replay boundary now closes from original-world handoff evidence.
+`resume_progress` consumes the selected active/accounted suspension, its guarded
+physical admission, stored initialized argument, owned permission, handoff graph
+and positive original layout request. Final restoration derives readiness from
+the actual internal saved inventory. Copying derives old permission compatibility
+from live shared-row selection, fresh identities and the loan-parent mode law;
+the common resource-row/support product frames the entire original argument.
+No copied-world well-formedness/readiness callback or restored-world argument
+premise remains in either branch. Exact blocked-copy, completed-copy and restored
+argument-exhaustion worlds are retained. Shared rehome and same-loan permission
+producers replace duplicate proofs; actual replay also proves its prefix
+nonfatality for the ownership consumer. The replay/content/freezing, input,
+pattern, Drop dispatch, external-home and private/Drop suspension gate passes
+244 jobs, and twelve general audits use only standard axioms.
+
+The migration exposes a still-failing `DropReturn` consumer, not a passed cleanup
+gate. Its old unit-shell suffix skips `RelinquishesCustody` and
+`ReleaseCustodyLoans`; private roots and structural typing do not establish
+the unit owner's owning-claim discharge or an unchanged loan table. Do not
+add a reflexive relinquishment oracle or restrict away pending returns to
+preserve that obsolete fixed-trace proof. Carry original custody admission
+through the real relinquished write and loan drain, preserving receiver
+permissions via the existing permission-state frame.
+
+Next: close that actual returned-unit custody/drain boundary, derive original
+source facts and proper-tail entry from meaningful task admission, then close
+general task progress on the same dependency chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

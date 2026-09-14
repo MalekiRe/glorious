@@ -192,13 +192,6 @@ theorem Suspension.CaptureOrigin.transport {before after : Suspension} (origin :
   · simpa only [homes,handler,frames] using origin.ownedHomes
   · simpa only [frames] using origin.foreignFree
 
-theorem Suspension.CaptureOrigin.home_none {suspension : Suspension}
-    (origin : suspension.CaptureOrigin) {root : Identity} (outside : root ∉ suspension.roots) :
-    suspension.homes.get root = none := by
-  cases found : suspension.homes.get root with
-  | none => rfl
-  | some home => exact False.elim (outside ((origin.domain root).mp ⟨home,found⟩))
-
 /-- Active capture inventories are disjoint because a root has one actual
 storage home. No separate pairwise ownership ledger is assumed. -/
 theorem State.SuspensionsWellFormed.active_disjoint {state : State}
