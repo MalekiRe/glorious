@@ -39,6 +39,12 @@ theorem RawPointer.Origin.retire {pointer : RawPointer} {before after : World} {
         exact ⟨_,Table.get_set _ _ _,address,offset⟩
       · exact ⟨root,by simpa [Table.get_set_other _ _ _ _ same] using found,address,offset⟩
 
+theorem Typing.ValueTyped.pointer_head {program : Kernel.Program} {world : World} {value : Value}
+    {pointer : RawPointer} (typed : Typing.ValueTyped program world value) (head : value.head = .pointer pointer) :
+    pointer.address < 2^program.declarations.input.target.pointerBits ∧ pointer.Origin world := by
+  cases typed <;> simp_all [Value.head,Execution.ConstructorHead]
+
+
 namespace Memory
 
 theorem ReleasesStorageClaims.pointer_origin {before after : World} {place : ResolvedPlace}
@@ -126,6 +132,15 @@ theorem RawRange.origin {program : Program} {world : World} {pointer : RawPointe
   exact ⟨root,found,address,Nat.le_trans (Nat.le_add_right _ _) bound⟩
 
 namespace Execution
+
+/-- Pointer representation facts come from the actual resident, without
+claiming current-generation validity or permission to dereference it. -/
+theorem PointerAt.bound_origin {program : Kernel.Program} {world : World} {source : ResolvedPlace} {pointer : RawPointer}
+    (typed : Typing.WorldTyped program world) (observed : PointerAt world source pointer) :
+    pointer.address < 2^program.declarations.input.target.pointerBits ∧ pointer.Origin world := by
+  obtain ⟨value,stored,head,_⟩ := observed.2
+  exact (World.stores_typed typed.roots stored).pointer_head head
+
 
 
 /-- A pointer-producing primitive either installs its typed pointer or

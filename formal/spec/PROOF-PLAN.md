@@ -50,15 +50,15 @@ request, without successful-move/release or post-world typing assumptions.
 The fresh allocator consumes the generalized actual reference-row frame;
 the existing unchanged-table consumers remain wrappers around that proof.
 
-The immediate dependency chain remains general ordinary input/pre-entry
-progress, source-admitted raw copy and borrow construction, physical replay and
-progress for the remaining raw primitives. Input batch readiness must retain permissions and
-custody under each earlier real loan creation or transfer, allowing compatible
-shared views while excluding genuine mode/guard/custody interference. It must
-not assume every pending post-state is ready or that allocation succeeds.
-The remaining complete control-lifetime/private/foreign-runtime consumers must
-then use those same actual outcomes. No helpers or checked storage projection
-settle full soundness.
+The immediate dependency chain now closes remaining raw primitive dispatch and
+overlap-aware bulk relocation, then consumes these original-world constructors
+in compositional source/task resource judgments. Ordinary input preparation,
+proper-tail entry, physical replay, raw copy/borrow and pointer arithmetic have
+the constructed outcomes recorded below. Neither `CodeType` alone nor a
+renamed run-wide progress certificate supplies path-sensitive ownership and
+cleanup permission. Complete task/frame liveness, cancellation and lawful
+resource completion must follow the same actual producer chain. Helper proofs
+and checked storage projections do not settle full soundness.
 
 1. Prove the storage algebra, typed destination obligations, partial-hole
    invariants and reference preservation for arbitrary storage paths. Keep one
@@ -488,9 +488,29 @@ relation, stored initialized value, `MoveReady` footprint, owned source
 permission, destination vacancy/type and pairwise disjointness, with the moved
 payload's recursive resources still accessible afterwards. Their inputs are
 before-state facts only; a missing admission is never reclassified as a
-resource fault. Raw copy, raw borrow, pointer arithmetic, ordered
-capture/call-entry totality, missing capture-exhaustion outcomes, physical
-replay and the remaining raw primitives stay open.
+resource fault. Raw copy, raw borrow and pointer arithmetic are now constructed
+below; ordered entry and physical replay are covered above. The remaining
+primitive dispatch and general source/task progress obligations stay open.
+
+Raw copy, raw borrow and pointer arithmetic now consume finite original-world
+facts in real machine steps. The copy producer uses the existing structural
+Copy traversal and explicit duplicability, preserves the source and returns an
+initialized owned-view-ready clone. Raw borrow uses the same `FormsLoan`
+producer and new-reference readiness proof as input entry; physical pointer
+provenance does not replace access, addressability, support or view-compatibility
+obligations. No copied or borrowed after-world is an admission argument.
+
+Offset and address replacement construct the bounded result and real pointer
+write, retaining allocation identity, generation and domain. Replacement gets
+its unsigned bound from the actual scalar operand; address inspection gets its
+bound from resident pointer typing and constructs the real scalar write.
+The existing layout progress/uniqueness producer remains unchanged. The combined
+raw/layout gate passes 179 jobs; sixteen general theorem audits use only
+standard Lean axioms. Next: construct overlapping bulk relocation and connect
+the missing `rawMove` manifest dispatch, then consume the complete primitive
+boundary in compositional source/task admission. Current run-wide
+`ResourceAdmissionAt` is still an assumption, not a soundness theorem.
+
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over
 `CopyProgress`, `LabelExecution`, `RawMutationProgress`, `SemanticPreservation`,

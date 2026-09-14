@@ -29,6 +29,21 @@ theorem StoresScalar.exists {program : Kernel.Program} {before : World} {destina
     destinationType.vacant destinationType.addressType
   exact ⟨after,valid,destinationType,constructed⟩
 
+theorem StoresScalar.typed_result {program : Kernel.Program} {before after : World}
+    {destination : Address} {scalar : ScalarValue}
+    (stored : StoresScalar program before destination scalar after) :
+    ∃ value, after.Stores destination value ∧ Typing.ValueTyped program after value ∧
+      value.type = .scalar scalar.type ∧ value.head = .scalar scalar := by
+  obtain ⟨valid,_,constructed⟩ := stored
+  cases constructed with
+  | construct _ _ ready _ cleared written =>
+    have sources := ready.1
+    cases sources
+    cases cleared
+    refine ⟨.resident before.nextOwner (.scalar scalar.type) (.scalar scalar) true [],?_,.scalar valid,rfl,rfl⟩
+    simpa [Value.atPath,World.Stores,World.read,World.root] using World.write_read_inside written []
+
+
 theorem ScalarValues.exists {program : Kernel.Program} {world : World} {sources : List ResolvedPlace}
     {types : List Term} (worldTyped : Typing.WorldTyped program world)
     (inputs : ListRel (fun source type => Permitted world source.authority .shared source.address ∧

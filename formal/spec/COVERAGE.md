@@ -144,6 +144,28 @@ the actual primitive and its unit/moved result from before-state admission only
 disjointness), with the moved payload's recursive resources still accessible in
 the result world.
 
+Raw observation and pointer arithmetic now have constructed machine outcomes.
+`RawRead.copy_exists` consumes explicit source duplicability, shared readiness
+and the real pointer/range relation, preserves the source resident and produces
+an initialized owned-view-ready copy. `RawBorrow.exists` consumes source
+addressability, live lifetime, actual access, retained support and finite new-loan
+view compatibility; the common `FormsLoan` producer constructs the checked
+reference and its recursively accessible result without a post-world certificate.
+Both feed actual `PrimitiveStep` and `Step` consumers.
+
+Pointer offset and provenance-preserving address replacement construct their
+actual numeric result and destination write from a selected live allocation,
+matching generation and permitted bounds, including one-past positions. Address
+replacement derives its target-width bound from the actual unsigned scalar;
+address inspection derives it from the actual typed pointer resident. Inspection
+does not require a live allocation and grants no ownership or dereference
+permission. The existing constructive unique layout query is reused unchanged.
+The combined raw/layout gate passes 179 jobs, and sixteen general axiom audits
+report only standard Lean axioms. General overlapping bulk-move construction,
+missing primitive dispatch and source/task admission remain open. In particular,
+the `rawMove` manifest tag still lacks an explicit primitive transition.
+
+
 `UnsafeInvariantContract.copyResources` is added as an admission law of the
 existing contract: a valid pre-world, the contract's holds predicate and actual
 duplicability imply the erased retained bindings are read-only. It is the

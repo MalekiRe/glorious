@@ -196,9 +196,19 @@ or a dependency of this project.
   move-read/write and the actual unit installation from the pointer/range
   relation, stored initialized value, `MoveReady` footprint, owned source
   permission, destination vacancy/type and pairwise disjointness; the moved
-  payload's resources stay accessible in the result world. Raw copy and raw
-  borrow construction, pointer arithmetic and source-admission synthesis remain
-  open.
+  payload's resources stay accessible in the result world. `RawRead.copy_exists`
+  now constructs the real copy from explicit duplicability and shared readiness,
+  retaining the source and producing an initialized owned-view-ready result.
+  `RawBorrow.exists` uses the common checked loan producer, original support
+  and new-view compatibility to construct the actual accessible reference.
+  Both reach `PrimitiveStep` and `Step`. Pointer offset/address replacement
+  likewise construct the bounded result and real destination write, retaining
+  provenance and generation; replacement derives its unsigned bound from the
+  actual scalar operand. Address inspection derives its bound from the typed
+  pointer resident without granting dereference permission. Existing layout
+  progress is reused unchanged. The raw/layout gate passes 179 jobs; sixteen
+  general axiom audits report standard axioms only. Overlapping bulk-move
+  construction, missing primitive dispatch and source/task admission remain open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.
