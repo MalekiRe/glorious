@@ -28,7 +28,7 @@ theorem LocalStep.hook_entry_private {program : Kernel.Program} {before entering
       handle.root = before.world.nextRoot ∧
       loan = before.world.nextLoan ∧
       CanEndStorage body.world handle.root ∧
-      (∀ binding ∈ callee.environment, binding.address.root ≠ handle.root) := by
+      handle.root ∉ callee.rootSupport := by
   have afterTyped := dispatch.worldTyped valid inventory typed
   cases dispatch with
   | @destroyHook context _ authority next value _ function allocated handle after loan beforeTask stored _ _ selected temporary borrowed identity =>

@@ -6,7 +6,7 @@ An active suspension owns exactly its current suspended roots; its historical
 restoration table cannot rehome a distinct private logical root. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 /-- First-handler routing has one delimiter position. The selected arm need
 not be identified to show that the actual transition stays above a boundary. -/
@@ -66,6 +66,26 @@ theorem DelimitedRoots.avoids_private {world : World} {handler : InstalledHandle
   · obtain ⟨returning,privateOwner⟩ := framesPrivate frame member
     exact privateOwner.not_owns_temporary owns
 
+theorem Routes.delimited_avoids_private {program : Kernel.Program} {before : State} {operation : DeclId}
+    {arguments : List Term} {payload : List ResolvedPlace} {captured rest inner ambient : List Frame}
+    {handler : InstalledHandler} {owns : Bool} {arm : OperationArm} {returnTo : Context}
+    {world : World} {kept roots : List Identity} {id owner savedScope : Identity} {root : Root}
+    (route : Routes program before operation arguments payload captured handler owns arm rest)
+    (stack : before.frames = inner ++ ambient)
+    (internal : (Contracts.InvocationBoundary.caller returnTo ambient).InternalOperation
+      program before operation arguments payload)
+    (frames : PrivateFrames owner inner) (selected : DelimitedRoots world handler captured kept roots)
+    (slot : world.PrivateSlot id root) (home : root.home = .temporary owner savedScope) : id ∉ roots := by
+  obtain ⟨between,restShape⟩ := route.internal_outer internal
+  have innerShape : inner = captured ++ .handler handler owns :: between := by
+    apply List.append_cancel_right (bs := ambient)
+    rw [← stack,route.1,restShape]
+    simp only [List.append_assoc,List.cons_append]
+  rw [innerShape] at frames
+  exact selected.avoids_private slot home (PrivateFrames.append_right frames).1
+    (fun frame member => frames.member (List.mem_append_left _ member))
+
+
 theorem PayloadPlan.avoids_root {program : Language.Program} {world : World}
     {addresses : List Address} {patterns : List Pattern} {actions : PatternActions} {id : Identity}
     (planned : PayloadPlan program world addresses patterns actions) (safe : CanEndStorage world id)
@@ -78,18 +98,19 @@ theorem PayloadPlan.avoids_root {program : Language.Program} {world : World}
       have restOutside := ih (fun address member => outside address (List.mem_cons_of_mem _ member))
       simp_all [ScheduledPattern,List.flatMap_append,List.mem_append]
 
-theorem Protects.private_slot {program : Kernel.Program} {context : Context} {before after : World}
-    {sources : List ResolvedPlace} {destinations : List Address} {id : Identity} {root : Root}
-    (kept : Protects program context before sources destinations after)
-    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (typed : Typing.WorldTyped program before) (slot : before.PrivateSlot id root) :
+theorem ProtectsAttemptFor.private_slot {program : Kernel.Program} {context : Context} {before after : World}
+    {footprint destinations : List Address} {sources : List ResolvedPlace} {outcome : PreparationOutcome}
+    {id : Identity} {root : Root}
+    (kept : ProtectsAttemptFor program context footprint before sources destinations after outcome)
+    (well : before.WellFormed) (slot : before.PrivateSlot id root) :
     after.PrivateSlot id root ∧ ∀ address ∈ destinations, address.root ≠ id := by
   induction kept with
-  | nil => exact ⟨slot,by simp⟩
-  | cons first _ ih =>
-    obtain ⟨middle,outside⟩ := first.private_slot typed.1 slot
-    obtain ⟨finish,rest⟩ := ih (first.worldTyped valid inventory typed) middle
+  | nil | exhausted => exact ⟨slot,by simp⟩
+  | cons _ first _ ih =>
+    obtain ⟨middle,outside⟩ := first.private_slot well slot
+    obtain ⟨finish,rest⟩ := ih (first.wellFormed well) middle
     exact ⟨finish,fun address member => (List.mem_cons.mp member).elim (fun same => same ▸ outside) (rest address)⟩
+
 
 theorem RetiresEmpty.private_slot {before after : World} {addresses : List Address} {id : Identity} {root : Root}
     (retired : RetiresEmpty before addresses after) (slot : before.PrivateSlot id root)
@@ -110,10 +131,14 @@ theorem Installs.private_slot {program : Kernel.Program} {before : State} {after
   have secondTyped := two.worldTyped (one.worldTyped typed)
   obtain ⟨capturedSlot,sourcesOutside⟩ := capturedValues.private_slot secondTyped.1
     (FreshRegion.private_slot two (FreshRegion.private_slot one slot))
-  obtain ⟨boundSlot,bindingsOutside⟩ := boundValues.private_slot
-    (capturedValues.worldTyped valid inventory secondTyped).1 capturedSlot
+  obtain ⟨boundSlot,bindingsOutside⟩ := BindsInputsAttemptFor.private_slot boundValues
+    (capturedValues.worldTyped valid inventory secondTyped).1 capturedSlot (by
+      intro input member
+      obtain ⟨⟨localSlot,address⟩,present,rfl⟩ := List.mem_map.mp member
+      exact sourcesOutside address (List.of_mem_zip present).2)
   refine ⟨retired.private_slot boundSlot sourcesOutside,?_⟩
   intro member
+  simp only [Context.rootSupport,List.flatMap_nil,List.append_nil] at member
   obtain ⟨binding,present,same⟩ := List.mem_map.mp member
   exact bindingsOutside binding present same
 
@@ -140,28 +165,76 @@ theorem State.SuspensionsWellFormed.restore_private {state : State} {id key : Id
   · rfl
   · rfl
 
+theorem suspendRoots.private_slot {world : World} {roots : List Identity} {key id : Identity} {root : Root}
+    (slot : world.PrivateSlot id root) (outside : id ∉ roots) :
+    (suspendRoots world roots key).PrivateSlot id root := by
+  apply slot.stable
+  · simp only [suspendRoots.get,slot.found,Option.map_some,if_neg outside]
+  · rfl
+  · rfl
+
+theorem CopiesSnapshot.private_slot {program : Kernel.Program} {before after : State}
+    {suspension : Suspension} {map : Relocation} {id : Identity} {root : Root}
+    (copied : CopiesSnapshot program before suspension map after)
+    (well : before.world.WellFormed) (slot : before.world.PrivateSlot id root) :
+    after.world.PrivateSlot id root := by
+  rw [copied.result]
+  refine slot.retain (Relocation.old_root slot.found) ?_ slot.safe.2.1
+  intro key loan found live
+  rcases Relocation.loan_origin well.2.1 found with present | ⟨old,original,present,_,rfl,rfl⟩
+  · exact slot.safe.1 key loan present live
+  · have outside := slot.safe.1 old original present live
+    change (map.address original.referent).root ≠ id
+    by_cases included : original.referent.root ∈ map.roots
+    · simp only [Relocation.address,Relocation.root,relocateId,if_pos included,copied.relocation.rootBase]
+      exact (Nat.ne_of_lt (Nat.lt_of_lt_of_le (slot.bound well) (Nat.le_add_right _ _))).symm
+    · simpa only [Relocation.address,Relocation.root,relocateId,if_neg included] using outside
+
+
 theorem EffectStep.private_slot {program : Kernel.Program} {before after : State} {event : Option Event}
-    {id : Identity} {root : Root}
+    {id owner savedScope loan : Identity} {root : Root} {inner outer : List Frame}
+    {caller : Context} {address handle : Address} {authority : Authority} {next : Task}
     (step : EffectStep program before event after)
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world) (suspensions : before.SuspensionsWellFormed)
-    (slot : before.world.PrivateSlot id root)
+    (slot : before.world.PrivateSlot id root) (home : root.home = .temporary owner savedScope)
+    (frames : PrivateFrames owner inner)
+    (stack : before.frames = inner ++ .hook caller address authority handle loan next :: outer)
+    (internalOperation : ∀ context operation arguments payload,
+      before.task = .perform context operation arguments payload →
+      (Contracts.InvocationBoundary.caller caller (.hook caller address authority handle loan next :: outer)).InternalOperation
+        program before operation arguments payload)
     (noReplay : ∀ key last, event ≠ some (.replay key last))
     (noSuspend : ∀ key, event ≠ some (.suspend key)) : after.world.PrivateSlot id root := by
   cases step
   all_goals try exact slot
   case install installed => exact (installed.private_slot valid inventory typed slot).1
-  case terminal _ _ _ _ started kept _ _ _ =>
-    exact (kept.private_slot valid inventory (started.worldTyped typed)
+  case terminal _ _ _ _ started kept _ _ _ |
+      terminalPayloadExhausted started kept | suspendTailPayloadExhausted started kept =>
+    exact (ProtectsAttemptFor.private_slot kept (started.worldTyped typed).1
       (FreshRegion.private_slot started.1 slot)).1
+  case suspendPayloadExhausted started kept =>
+    obtain ⟨_,_,started,_,_,_⟩ := started
+    exact (ProtectsAttemptFor.private_slot kept (started.worldTyped typed).1
+      (FreshRegion.private_slot started.1 slot)).1
+  case suspendContinuationExhausted route started kept selected _ _ _ =>
+    obtain ⟨_,_,started,_,_,_⟩ := started
+    have movedSlot := (ProtectsAttemptFor.private_slot kept (started.worldTyped typed).1
+      (FreshRegion.private_slot started.1 slot)).1
+    exact suspendRoots.private_slot movedSlot
+      (route.delimited_avoids_private stack (internalOperation _ _ _ _ (by assumption)) frames selected movedSlot home)
   case suspend | suspendTailArm => exact False.elim (noSuspend _ rfl)
-  case resumeLast => exact False.elim (noReplay _ _ rfl)
-  case resumeCopy => exact False.elim (noReplay _ _ rfl)
+  case resumeLast | resumeCopy => exact False.elim (noReplay _ _ rfl)
+  case resumeLastExhausted found active _ restored _ =>
+    rw [restored]
+    exact suspensions.restore_private slot found active.1
+  case resumeCopyExhausted _ _ _ copied _ => exact copied.private_slot typed.1 slot
   case resumeReturns kept | completed _ kept _ _ | serviced _ kept _ _ => exact (kept.private_slot typed.1 slot).1
   case completionIdentity _ started kept _ _ | completion started kept _ _ _ _ =>
     exact (kept.private_slot (started.worldTyped typed).1 (FreshRegion.private_slot started.1 slot)).1
   case disposeContinuation stored _ _ _ cleared => exact slot.write cleared (slot.stored_outside stored)
   case cancel found active _ _ => exact suspensions.restore_private slot found active.1
+
 
 theorem EffectStep.private_control {program : Kernel.Program} {before after : State} {event : Option Event}
     {id owner savedScope loan : Identity} {root : Root} {inner outer : List Frame}
@@ -180,11 +253,17 @@ theorem EffectStep.private_control {program : Kernel.Program} {before after : St
     (noSuspend : ∀ key, event ≠ some (.suspend key)) :
     ∃ remaining, after.frames = remaining ++ .hook caller address authority handle loan next :: outer ∧
       PrivateControl id owner remaining after.task := by
-  have slotAfter := step.private_slot valid inventory typed suspensions slot noReplay noSuspend
+  have slotAfter := step.private_slot valid inventory typed suspensions slot home control.2.2.2 stack internalOperation noReplay noSuspend
   obtain ⟨taskRoots,frameRoots,taskOwner,frameOwners⟩ := control
   cases step
   all_goals simp_all only [Task.rootSupport,Task.PrivateActivation,List.mem_append,List.mem_cons,
     List.not_mem_nil,or_false,not_or]
+  case terminalPayloadExhausted | suspendPayloadExhausted | suspendTailPayloadExhausted |
+      suspendContinuationExhausted | resumeLastExhausted | resumeCopyBlocked =>
+    exact ⟨inner,rfl,by simp [PrivateControl,Task.rootSupport,Task.PrivateActivation,frameRoots,frameOwners]⟩
+  case resumeCopyExhausted _ _ _ copied _ =>
+    rw [copied.result]
+    exact ⟨inner,by simpa using stack,by simp [PrivateControl,Task.rootSupport,Task.PrivateActivation,frameRoots,frameOwners]⟩
   case operationCall _ _ _ _ _ _ _ resolved =>
     have payloadOutside := resolved.avoids_root (Context.bindings_avoid_root taskRoots) slotAfter.safe
     refine ⟨inner,rfl,?_,frameRoots,taskOwner,frameOwners⟩
@@ -203,7 +282,7 @@ theorem EffectStep.private_control {program : Kernel.Program} {before after : St
     have handlerPrivate : owner ∉ handler.activationSupport := suffixOwners.1
     have rootsOutside := selected.avoids_private slotAfter home handlerPrivate
       (fun frame member => frameOwners.member (List.mem_append_left _ member))
-    have keptOutside := (keptPayload.private_slot valid inventory (started.worldTyped typed)
+    have keptOutside := (ProtectsAttemptFor.private_slot keptPayload (started.worldTyped typed).1
       (FreshRegion.private_slot started.1 slot)).2
     have actionsOutside := planned.avoids_root slotAfter.safe keptOutside
     simp only [List.flatMap_append,List.flatMap_cons,Frame.rootSupport,List.mem_append,not_or] at frameRoots
@@ -224,6 +303,7 @@ theorem EffectStep.private_control {program : Kernel.Program} {before after : St
     simp_all [PrivateControl,Task.rootSupport,Frame.rootSupport,InstalledHandler.rootSupport,
       Task.PrivateActivation,PrivateFrames,Frame.PrivateActivation,InstalledHandler.activationSupport,
       Context.rootSupport,ne_comm]
+    exact taskRoots.2
   case continuationCall resolved _ _ _ argument =>
     obtain ⟨place,_,resolvedArgument⟩ := argument
     have outside := Context.resolves_avoids_root taskRoots slotAfter.safe resolvedArgument

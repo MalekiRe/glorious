@@ -5,7 +5,7 @@ The active task and writable binding frame provide operand exclusion; the
 saved hook guard is deliberately permitted to retain its private handle. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 
 theorem Captures.private_slot {program : Kernel.Program} {context : Context} {before after : World}
@@ -56,25 +56,34 @@ theorem LocalStep.private_slot {program : Kernel.Program} {before after : State}
   all_goals simp_all only [Task.rootSupport,List.mem_append,List.mem_cons,
     not_or,List.not_mem_nil,or_false]
   case evaluate allocated | bind allocated | invoke allocated => exact allocated.private_slot (slot.bound well) slot
-  case result kept | activationReturn kept _ _ | scopeReturn kept _ _ => exact (kept.private_slot well slot).1
+  case result kept => exact (kept.private_slot well slot).1
+  case activationReturn kept returned _ _ | scopeReturn kept returned _ _ =>
+    exact returned.private_slot (kept.wellFormed well) (kept.private_slot well slot).1 taskOutside.1
+  case labelReturn returned => exact returned.private_slot well slot taskOutside.1
   case transfer moved => exact moved.private_slot slot (Ne.symm taskOutside.2.1)
-  case call consumed => exact consumed.private_slot slot
-  case enter entered | enterTail entered _ _ _ _ => exact (entered.private_slot well slot taskOutside.2).1
-  case bindReturn moved => exact moved.private_slot slot (bindingOutside _ _ _ _ rfl)
+  case enter entered | enterExhausted entered =>
+    exact (EnterWorldAttempt.private_slot entered well slot taskOutside.2).1
+  case enterTail entered relinquished _ _ _ _ =>
+    exact relinquished.private_slot (EnterWorldAttempt.private_slot entered well slot taskOutside.2).1
+  case bindReturn moved returned =>
+    exact returned.private_slot (moved.wellFormed well)
+      (moved.private_slot slot (bindingOutside _ _ _ _ rfl)) taskOutside.1
   case scope fresh _ => exact FreshRegion.private_slot fresh slot
   case patternBind bound => exact (bound.private_slot well slot).1
   case patternShell deconstructed =>
     cases deconstructed with
-    | shell stored _ _ _ written => exact slot.write written (slot.stored_outside stored)
+    | shell stored _ _ _ _ written => exact slot.write written (slot.stored_outside stored)
   case destroyHook temporary borrowed _ =>
     exact borrowed.private_slot (temporary.private_slot well slot)
       (temporary.choose_spec.fresh_avoids (slot.bound well))
   case destroyReference stored _ _ _ written => exact slot.write written (slot.stored_outside stored)
-  case shellDone stored _ _ written => exact slot.write written (slot.stored_outside stored)
+  case shellDone stored _ _ relinquished written =>
+    exact (relinquished.private_slot slot).write written (slot.stored_outside stored)
   case retire retired => exact retired.private_slot slot (Ne.symm taskOutside.1)
   case regionEnd ended =>
     obtain ⟨_,_,rfl⟩ := ended
     exact ⟨slot.found,slot.vacant,slot.safe,slot.internalHome⟩
   case loanEnd ended | releaseRoot _ _ ended | releaseChild _ _ ended => exact ended.private_slot slot
+  case releaseStorageReturned _ returned => exact returned.private_slot slot
 
 end Glorious.Language.Execution

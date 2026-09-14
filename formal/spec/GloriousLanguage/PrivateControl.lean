@@ -6,27 +6,74 @@ Returning to the caller is allowed only after the inner prefix is exhausted;
 an activation frame's caller is not mistaken for its cleanup owner. -/
 namespace Glorious.Language.Execution
 
-open Kernel
-
-theorem Context.bindings_avoid_root {context : Context} {id : Identity} (outside : id ∉ context.rootSupport) :
-    ∀ binding ∈ context.environment, binding.address.root ≠ id :=
-  fun binding present same => outside (List.mem_map.mpr ⟨binding,present,same⟩)
+open _root_.Glorious.Language.Kernel
 
 theorem Context.bind_avoids_root {context : Context} {localSlot : Local} {address : Address}
     {authority : Authority} {id : Identity} (outside : id ∉ context.rootSupport)
     (separate : address.root ≠ id) : id ∉ (context.bind localSlot address authority).rootSupport := by
+  simp only [Context.rootSupport,List.mem_append,not_or] at outside ⊢
+  refine ⟨?_,outside.2⟩
   intro member
   obtain ⟨binding,present,same⟩ := List.mem_map.mp member
   simp only [Context.bind,List.mem_cons,List.mem_filter] at present
   rcases present with rfl | ⟨present,_⟩
   · exact separate same
-  · exact outside (List.mem_map.mpr ⟨binding,present,same⟩)
+  · exact outside.1 (List.mem_map.mpr ⟨binding,present,same⟩)
+
+theorem Context.bindResource_avoids_root {context : Context} {identity : Identity} {place : ResolvedPlace}
+    {id : Identity} (outside : id ∉ context.rootSupport) (separate : place.address.root ≠ id) :
+    id ∉ (context.bindResource identity place).rootSupport := by
+  simp only [Context.rootSupport,List.mem_append,not_or] at outside ⊢
+  refine ⟨?_,outside.2⟩
+  intro member
+  obtain ⟨binding,present,same⟩ := List.mem_map.mp member
+  simp only [Context.bindResource,List.mem_cons,List.mem_filter] at present
+  rcases present with rfl | ⟨present,_⟩
+  · exact separate same
+  · exact outside.1 (List.mem_map.mpr ⟨binding,present,same⟩)
+
 
 theorem Context.resolves_avoids_root {context : Context} {world : World} {place : Place}
     {address : Address} {authority : Authority} {id : Identity}
     (outside : id ∉ context.rootSupport) (safe : CanEndStorage world id)
     (resolved : ResolvesPlace world context.environment place address authority) : address.root ≠ id :=
-  resolved.avoids_root (fun binding present same => outside (List.mem_map.mpr ⟨binding,present,same⟩)) safe
+  resolved.avoids_root (Context.bindings_avoid_root outside) safe
+
+theorem Context.install_avoids_root {context : Context} {bindings : Environment} {id : Identity}
+    (outside : id ∉ context.rootSupport) (fresh : ∀ binding ∈ bindings, binding.address.root ≠ id) :
+    id ∉ ({ context with environment := context.environment.install bindings }).rootSupport := by
+  simp only [Context.rootSupport,List.mem_append,not_or] at outside ⊢
+  refine ⟨?_,outside.2⟩
+  intro member
+  obtain ⟨binding,present,same⟩ := List.mem_map.mp member
+  simp only [Environment.install,List.mem_append,List.mem_filter] at present
+  rcases present with present | ⟨present,_⟩
+  · exact fresh binding present same
+  · exact outside.1 (List.mem_map.mpr ⟨binding,present,same⟩)
+
+theorem Context.inheritResources_avoids_root {source receiver : Context} {id : Identity}
+    (sourceOutside : id ∉ source.rootSupport) (receiverOutside : id ∉ receiver.rootSupport) :
+    id ∉ (receiver.inheritResources source).rootSupport := by
+  apply Context.install_avoids_root (context := receiver) receiverOutside
+  intro binding member
+  exact Context.bindings_avoid_root sourceOutside binding (List.mem_filter.mp member).1
+
+theorem ReturnsResources.private_context {program : Kernel.Program} {source receiver returned : Context}
+    {before after : World} {result : Address} {id : Identity} {root : Root}
+    (returnedResources : ReturnsResources program source receiver before result returned after)
+    (well : before.WellFormed) (slot : before.PrivateSlot id root)
+    (sourceOutside : id ∉ source.rootSupport) (receiverOutside : id ∉ receiver.rootSupport) :
+    id ∉ returned.rootSupport := by
+  cases returnedResources with
+  | localReturn _ => exact Context.inheritResources_avoids_root sourceOutside receiverOutside
+  | invocationReturn _ resolved _ bound _ =>
+    have bindingsOutside := (BindsInputsAttemptFor.private_slot bound well slot
+      (resolved.avoids_root (Context.bindings_avoid_root sourceOutside) slot.safe)).2
+    apply Context.install_avoids_root receiverOutside
+    intro binding member
+    obtain ⟨original,present,rfl⟩ := List.mem_map.mp member
+    exact bindingsOutside original present
+
 
 theorem ResolvedOperands.avoids_root {world : World} {environment : Environment}
     {places : List Place} {operands : List ResolvedPlace} {id : Identity}
@@ -86,7 +133,7 @@ def Task.PrivateActivation (owner : Identity) (returning : Bool) : Task → Prop
   | .finishClause handler _ _ _ => owner ∉ handler.activationSupport
   | .foreign session _ | .foreignCallbackReturned session _ _ _ => session.call.context.activation ≠ owner
   | .leave _ _ _ => False
-  | .stopped _ | .fatal _ => True
+  | .stopped _ _ | .fatal _ => True
 
 def Frame.PrivateActivation (owner : Identity) (returning : Bool) : Frame → Prop
   | .binding context _ _ | .scope context _ _ | .label context _ _ _
@@ -170,6 +217,20 @@ theorem RetireAddresses.avoids_root {addresses : List Address} {next : Task} {id
   induction regions.eraseDups with
   | nil => rfl
   | cons _ _ ih => exact ih
+
+@[simp] theorem ReleaseLoans.private_activation (loans : List Identity) (next : Task)
+    (owner : Identity) (returning : Bool) :
+    (ReleaseLoans loans next).PrivateActivation owner returning = next.PrivateActivation owner returning := by
+  unfold ReleaseLoans
+  induction loans.eraseDups with
+  | nil => rfl
+  | cons _ _ ih => exact ih
+
+@[simp] theorem ReleaseCustodyLoans.private_activation (world : World) (custody : ClaimCustody) (next : Task)
+    (owner : Identity) (returning : Bool) :
+    (ReleaseCustodyLoans world custody next).PrivateActivation owner returning = next.PrivateActivation owner returning :=
+  ReleaseLoans.private_activation _ next owner returning
+
 
 theorem _root_.Glorious.Language.Kernel.ScopeRoots.avoids_private {world : World}
     {activation scope owner savedScope id : Identity} {root : Root} {kept roots : List Identity}

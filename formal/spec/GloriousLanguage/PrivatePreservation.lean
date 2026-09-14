@@ -7,7 +7,7 @@ through an admitted invocation interval. The proof follows all six transition
 families and excludes a hook pop using the current invocation boundary. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem LocalStep.hook_pop_yield {program : Kernel.Program} {before after : State} {event : Option Event}
     {caller : Context} {address handle : Address} {authority : Authority} {loan : Identity}
@@ -18,7 +18,7 @@ theorem LocalStep.hook_pop_yield {program : Kernel.Program} {before after : Stat
   all_goals try exact ⟨_,_,by assumption⟩
   all_goals simp_all only [reduceCtorEq]
   all_goals try (have size := congrArg List.length popped; simp at size <;> omega)
-  case enterTail _ _ _ _ _ _ _ _ _ _ _ route _ _ _ => cases route <;> simp_all
+  case enterTail _ _ route _ _ _ => cases route <;> simp_all
 
 theorem Step.private_guard {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event}
@@ -52,7 +52,8 @@ theorem Step.private_guard {program : Kernel.Program} {host : Foreign.Model}
   · have frames : after.frames = before.frames := by cases atom <;> rfl
     exact ⟨atom.private_slot typed.1 slot control.1,
       Or.inl ⟨inner,frames.trans stack,atom.private_control typed.1 slot control⟩⟩
-  · exact ⟨effect.private_slot valid inventory typed admitted.suspensions slot noReplay noSuspend,
+  · exact ⟨effect.private_slot valid inventory typed admitted.suspensions slot home control.2.2.2 stack
+      internalOperation noReplay noSuspend,
       Or.inl (effect.private_control valid inventory typed admitted.suspensions slot home ownerBound control stack
         internalOperation noReplay noSuspend)⟩
   · obtain ⟨frames,afterControl⟩ := branch.private_control typed.1 slot control noLeave
@@ -60,9 +61,9 @@ theorem Step.private_guard {program : Kernel.Program} {host : Foreign.Model}
       Or.inl ⟨inner,frames.trans stack,afterControl⟩⟩
   · have frames : after.frames = before.frames := by cases primitive <;> rfl
     exact ⟨primitive.private_slot typed.1 slot control.1,
-      Or.inl ⟨inner,frames.trans stack,primitive.private_control control⟩⟩
-  · exact ⟨foreign.private_slot valid inventory lawful typed slot control.1,
-      Or.inl (foreign.private_control valid inventory lawful typed slot control stack outerOutside)⟩
+      Or.inl ⟨inner,frames.trans stack,primitive.private_control typed.1 slot control⟩⟩
+  · exact ⟨foreign.private_slot lawful typed.1 slot control.1,
+      Or.inl (foreign.private_control lawful typed.1 slot control stack outerOutside)⟩
 
 /-- Interval guards supply the actual internal route at every pre-state.
 A hook pop would require a caller handoff at that same pre-state, which the
@@ -103,7 +104,7 @@ theorem _root_.Glorious.Language.Contracts.InvocationRun.private_guard
     obtain ⟨middleSlot,middleControl⟩ := actual.private_guard valid inventory lawful typed admitted slot home control stack outerOutside
       (by simp) (by simp) (by simp) (fun context operation arguments payload task => step.1.2.2.1 _ _ _ _ task)
     rcases middleControl with ⟨remaining,middleFrames,middleControl⟩ | ⟨localStep,_,rfl,middleFrames⟩
-    · exact ih (actual.worldTyped valid inventory lawful typed) (actual.controlWellFormed valid inventory lawful typed admitted)
+    · exact ih (actual.worldTyped valid inventory lawful typed) (actual.controlWellFormed valid inventory lawful typed admitted (by simp))
         middleSlot middleControl middleFrames safe
     · obtain ⟨context,result,yieldTask⟩ := localStep.hook_pop_yield stack middleFrames
       exact False.elim (Contracts.InvocationStep.not_handoff step ⟨context,result,yieldTask,stack⟩)
@@ -116,8 +117,13 @@ theorem _root_.Glorious.Language.Contracts.InvocationRun.private_guard
       (fun key equal => safeEvent.2.2 key (Option.some.inj equal))
       (fun context operation arguments payload task => step.1.2.2.1 _ _ _ _ task)
     rcases middleControl with ⟨remaining,middleFrames,middleControl⟩ | ⟨_,impossible,_⟩
-    · exact ih (actual.worldTyped valid inventory lawful typed) (actual.controlWellFormed valid inventory lawful typed admitted)
-        middleSlot middleControl middleFrames (fun observed member => safe observed (List.mem_cons_of_mem event member))
+    · by_cases fatal : event = Event.fatal .resource
+      · subst event
+        rw [(Contracts.InvocationRun.execution rest).after_eq_of_fatal actual.fatal_task]
+        exact ⟨remaining,middleFrames,middleSlot,middleControl⟩
+      · exact ih (actual.worldTyped valid inventory lawful typed)
+          (actual.controlWellFormed valid inventory lawful typed admitted (fun equal => fatal (Option.some.inj equal)))
+          middleSlot middleControl middleFrames (fun observed member => safe observed (List.mem_cons_of_mem event member))
     · cases impossible
 
 end Glorious.Language.Execution

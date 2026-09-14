@@ -21,7 +21,7 @@ theorem LocalStep.hook_entry_old_suspensions {program : Kernel.Program} {host : 
       body.world.roots.get handle.root = some root ∧ root.live = true ∧ root.value = none ∧
       root.home = .temporary caller.activation caller.scope ∧ handle.fields = [] ∧
       handle.root = before.world.nextRoot ∧ loan = before.world.nextLoan ∧ CanEndStorage body.world handle.root ∧
-      (∀ binding ∈ callee.environment, binding.address.root ≠ handle.root) ∧
+      handle.root ∉ callee.rootSupport ∧
       (after.ControlWellFormed ∨ after.task = .fatal .resource) ∧
       (∀ id original, before.resumptions.get id = some original →
         ∀ current, after.resumptions.get id = some current →

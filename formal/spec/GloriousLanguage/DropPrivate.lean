@@ -8,7 +8,7 @@ The actual selected Drop contract supplies interval control restrictions; the
 caller stack and host exposure are retained throughout. -/
 namespace Glorious.Language.Execution
 
-open Kernel Contracts
+open _root_.Glorious.Language.Kernel Contracts
 
 theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.Model}
     {before entering body : State} {address : Address} {hook : DeclId}
@@ -29,9 +29,9 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
       handle.root ∉ before.frames.flatMap Frame.rootSupport ∧
       PrivateControl handle.root caller.activation inner body.task := by
   obtain ⟨caller,callee,function,authority,handle,loan,next,root,startTask,frames,task,bodyFrames,
-      freshActivation,found,live,vacant,home,whole,fresh,freshLoan,safe,bindings⟩ :=
+      freshActivation,found,live,vacant,home,whole,fresh,freshLoan,safe,calleeOutside⟩ :=
     dispatch.hook_entry_private valid inventory typed entry
-  have enteringControl := (Step.controlWellFormed valid inventory lawful typed admitted (Or.inl dispatch))
+  have enteringControl := Step.controlWellFormed valid inventory lawful typed admitted (Or.inl dispatch) (by simp)
   have callerBound : caller.activation < entering.nextActivation :=
     enteringControl.activations.frames caller.activation (by rw [frames]; simp [Frame.activationSupport])
   have calleeFresh : callee.activation ≠ caller.activation := by
@@ -47,10 +47,6 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
     have bound := admitted.frames handle.root member
     rw [fresh] at bound
     exact Nat.lt_irrefl _ bound
-  have calleeOutside : handle.root ∉ callee.rootSupport := by
-    intro member
-    obtain ⟨binding,present,same⟩ := List.mem_map.mp member
-    exact bindings binding present same
   let inner := FreshNamedFrame function callee entering.nextBrand callee.region ++
     [.activation { caller with unsafeAllowed := false } callee.activation callee.region]
   refine ⟨caller,callee,function,authority,handle,loan,next,root,inner,startTask,frames,task,?_,home,live,whole,
@@ -115,7 +111,8 @@ theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : 
   have safe := (contract.2.1 host _ _ entering trace after lawful initial interval).1.1
   obtain ⟨remaining,afterFrames,afterSlot,afterControl⟩ :=
     run.private_guard valid inventory lawful (entered.worldTyped valid inventory lawful typed)
-    (entered.controlWellFormed valid inventory lawful typed admitted) slot home privateControl frames outerOutside
+    (entered.controlWellFormed valid inventory lawful typed admitted (entered.nonFatal_of_trace (by simp)))
+    slot home privateControl frames outerOutside
     (fun event member => ⟨(safe event member).1,(safe event member).2.2,(safe event member).2.1⟩)
   refine ⟨remaining,afterFrames,afterSlot,afterControl,?_⟩
   by_cases handoff : (InvocationBoundary.caller { caller with unsafeAllowed := false }

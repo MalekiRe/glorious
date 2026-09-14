@@ -281,8 +281,16 @@ or a dependency of this project.
   `DropSuspension` gate passes 181 jobs; registry, callback, dispatch and
   saved-suspension audits use only standard axioms. External root grants are
   carrier-free; a missing parent alone does not exclude explicit guard loans.
-  Private-body preservation remains under migration. Original source-fact
-  production, proper-tail progress and whole-task progress remain open.
+  Private-body integration now passes the combined `DropPrivate` and
+  `DropSuspension` gate (190 jobs). All six transition families preserve the
+  actual private slot and guard, including physical resource-fatal prefixes.
+  Internal routing keeps partial suspension above the guard; snapshot copies
+  use actual root/loan origins. The invocation and arbitrary-run Drop prefix
+  theorems retain this guarantee without assuming complete fatal after-control;
+  their audits use only standard axioms. Original source handoff evidence and
+  selected Drop admission remain hypotheses, not consequences of arbitrary
+  world typing. Source-fact production, proper-tail progress and whole-task
+  progress remain open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

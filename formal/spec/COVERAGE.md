@@ -490,9 +490,22 @@ actual hook inputs while retaining the caller, registry and callback state.
 `DropInvocation` plus `DropSuspension` pass 181 jobs; the registry, callback,
 dispatch and saved-suspension audits use only standard axioms. The latter
 theorem retains unconditional historical exclusion while distinguishing
-complete after-control from the actual resource-fatal terminal. Private-body
-preservation is not yet integrated. Original source facts from meaningful task
-admission, proper-tail progress and whole-task progress remain open.
+complete after-control from the actual resource-fatal terminal.
+
+Private-body integration now passes `DropPrivate` plus `DropSuspension` (190
+jobs). Actual raw-return binding, proper-tail custody cleanup, allocation-claim
+origins and deferred contextual/callback recipes feed the same private-control
+invariant. An absent suspend event does not rule out a partial freeze: the real
+internal route and private frame owners prove that its root selection omits
+the caller slot. Real snapshot-copy origins preserve that slot during replay
+exhaustion. `InvocationRun.private_guard` remains unconditional on fatal
+endpoints because the actual final step preserves privacy and has no successor.
+The Drop theorem factors arbitrary ambient runs up to the first normal return
+while preserving the private prefix. Handoff, copy, effect, host, invocation
+and Drop audits use only standard axioms. Finite original handoff evidence and
+selected Drop admission remain required; this is not a proof of body progress
+or termination from world typing. Original source-fact production, proper-tail
+progress and whole-task progress remain open.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

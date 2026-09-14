@@ -34,6 +34,24 @@ theorem World.PrivateSlot.transport {before after : World} {id : Identity} {root
     (safe : CanEndStorage after id) : after.PrivateSlot id root :=
   ⟨roots.trans slot.found,slot.vacant,safe,slot.internalHome⟩
 
+theorem World.PrivateSlot.retain {before after : World} {id : Identity} {root : Root}
+    (slot : before.PrivateSlot id root) (found : after.roots.get id = some root)
+    (loans : ∀ key loan, after.loans.get key = some loan → loan.live = true → loan.referent.root ≠ id)
+    (reservations : ∀ key available, after.availability.get key = some available → available.active = true →
+      ∀ place ∈ available.reserved, place.address.root ≠ id) : after.PrivateSlot id root := by
+  refine ⟨found,slot.vacant,⟨loans,reservations,?_⟩,slot.internalHome⟩
+  intro actual selected key home
+  have same := Option.some.inj (selected.symm.trans found)
+  subst actual
+  exact slot.safe.2.2 root slot.found key home
+
+theorem World.PrivateSlot.stable {before after : World} {id : Identity} {root : Root}
+    (slot : before.PrivateSlot id root) (roots : after.roots.get id = before.roots.get id)
+    (loans : after.loans = before.loans) (availability : after.availability = before.availability) :
+    after.PrivateSlot id root :=
+  slot.transport roots (slot.safe.sameHomes (by rw [roots]) loans availability)
+
+
 theorem World.PrivateSlot.write {before after : World} {id : Identity} {root : Root}
     {address : Address} {value : Option Value} (slot : before.PrivateSlot id root)
     (written : before.write address value = some after) (outside : address.root ≠ id) :
@@ -237,6 +255,28 @@ theorem EndsLoan.private_slot {program : RuntimeProgram} {before after : World} 
   · cases ended; rfl
   · exact ended.releaseFrame.canEndStorage slot.safe
 
+theorem ReturnsStorageLoan.private_slot {before after : World} {loan id : Identity} {root : Root}
+    (returned : ReturnsStorageLoan before loan after) (slot : before.PrivateSlot id root) :
+    after.PrivateSlot id root := by
+  cases returned
+  exact slot.loan_set (by intro impossible; cases impossible)
+
+theorem RelinquishesCustody.private_slot {before after : World} {custody : ClaimCustody}
+    {id : Identity} {root : Root} (relinquished : RelinquishesCustody before custody after)
+    (slot : before.PrivateSlot id root) : after.PrivateSlot id root := by
+  apply slot.transport (by cases relinquished; rfl)
+  refine ⟨?_,?_⟩
+  · intro key loan found live
+    obtain ⟨original,present,same⟩ := relinquished.reflected found
+    have originalLive : original.live = true := (congrArg Loan.live same).symm.trans live
+    have referent : loan.referent.root = original.referent.root :=
+      congrArg (fun loan => loan.referent.root) same
+    rw [referent]
+    exact slot.safe.1 key original present originalLive
+  · cases relinquished
+    exact slot.safe.2
+
+
 /-- Moving an entire source root to distinct storage retains the source's
 location and leaves its exact value slot empty. -/
 theorem Transfers.source_root {program : RuntimeProgram} {before after : World}
@@ -262,6 +302,29 @@ theorem ResolvesPlace.avoids_root {world : World} {environment : Environment}
     address.root ≠ id := by
   cases resolved with
   | localSlot selected projections => exact projections.avoids_root (outside _ selected.1) safe.1
+
+theorem ResolvesResource.avoids_root {world : World} {environment : Environment} {custody : ClaimCustody}
+    {place : ResolvedPlace} {id : Identity} (resolved : ResolvesResource world environment custody place)
+    (outside : ∀ binding ∈ environment, binding.address.root ≠ id) (safe : CanEndStorage world id) :
+    place.address.root ≠ id := by
+  induction resolved with
+  | binding selected _ => exact outside _ selected.1
+  | project _ projected _ ih => exact projected.avoids_root ih safe.1
+  | subplace _ included _ ih => exact fun same => ih (included.1.trans same)
+
+theorem ResourceInputs.avoids_root {program : Language.Program} {world : World}
+    {environment : Environment} {custody : ClaimCustody} {inputs : List InvocationInput} {id : Identity}
+    (resolved : ResourceInputs program world environment custody inputs)
+    (outside : ∀ binding ∈ environment, binding.address.root ≠ id) (safe : CanEndStorage world id) :
+    ∀ input ∈ inputs, input.storage.root ≠ id := by
+  induction resolved with
+  | nil => simp
+  | cons first _ _ ih | allocation first _ _ _ ih | loan first _ _ ih =>
+    intro input member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact first.avoids_root outside safe
+    · exact ih input member
+
 
 theorem LendsResident.private_slot {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission} {id : Identity} {root : Root}
@@ -346,6 +409,22 @@ theorem BindsInputAt.owned_private_root {program : RuntimeProgram} {recipient : 
 end Kernel
 
 namespace Execution
+
+theorem Context.bindings_avoid_root {context : Context} {id : Identity} (outside : id ∉ context.rootSupport) :
+    ∀ binding ∈ context.environment, binding.address.root ≠ id :=
+  fun binding present same => outside (List.mem_append_left _ (List.mem_map.mpr ⟨binding,present,same⟩))
+
+theorem ReturnsResources.private_slot {program : Kernel.Program} {source receiver returned : Context}
+    {before after : World} {result : Address} {id : Identity} {root : Root}
+    (returnedResources : ReturnsResources program source receiver before result returned after)
+    (well : before.WellFormed) (slot : before.PrivateSlot id root) (outside : id ∉ source.rootSupport) :
+    after.PrivateSlot id root := by
+  cases returnedResources with
+  | localReturn _ => exact slot
+  | invocationReturn _ resolved _ bound relinquished =>
+    exact relinquished.private_slot (Kernel.BindsInputsAttemptFor.private_slot bound well slot
+      (resolved.avoids_root (Context.bindings_avoid_root outside) slot.safe)).1
+
 
 theorem FreshRegion.private_slot {before after : World} {region id : Identity} {root : Root}
     (fresh : FreshRegion before region after) (slot : before.PrivateSlot id root) : after.PrivateSlot id root := by
@@ -512,7 +591,7 @@ theorem EnterWorld.owned_handle_private {program : Kernel.Program} {before : Sta
     (selected : before.world.root input.storage = some root) (safe : CanEndStorage before.world input.storage.root) :
     after.roots.get input.storage.root = some { root with value := none } ∧
       CanEndStorage after input.storage.root ∧
-      (∀ binding ∈ callee.environment, binding.address.root ≠ input.storage.root) := by
+      input.storage.root ∉ callee.rootSupport := by
   obtain ⟨withRegion,prepared,inputs,environment,declaration,boundWorld,selectedFunction,fresh,preparation,incoming,bound,finished,context,unsafeOk⟩ := entered.prepared
   cases preparation
   cases finished
@@ -524,9 +603,8 @@ theorem EnterWorld.owned_handle_private {program : Kernel.Program} {before : Sta
     obtain ⟨vacant,privateRoot,outside⟩ := first.owned_private_root (fresh.worldTyped typed).1 resident owned whole selectedRegion safeRegion
     refine ⟨vacant,privateRoot,?_⟩
     rw [context]
-    intro binding member
-    simp only [List.mem_singleton] at member
-    exact member ▸ outside
+    simpa only [Context.rootSupport,List.flatMap_cons,List.flatMap_nil,List.map_cons,List.map_nil,
+      List.append_nil,List.mem_append,List.mem_cons,List.not_mem_nil,or_false,not_or,and_self] using Ne.symm outside
 
 end Execution
 end Glorious.Language

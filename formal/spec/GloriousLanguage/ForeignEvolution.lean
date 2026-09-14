@@ -490,10 +490,9 @@ theorem Mutation.liveLoan_origin {program : Kernel.Program} {policy : AuthorityP
     exact Or.inl ⟨loan,ended.loan_live_before found live,live,rfl⟩
 
 /-- Every place a host mutation publishes is a destination that mutation really
-allocated, so it lies at or above the mutation's initial root frontier. This is
-the producer that replaces the deleted `FreshExposed` bound: a caller with a
-private root `id < before.nextRoot` can conclude that no published place names
-it. -/
+allocated, so it lies at or above the mutation's initial root frontier. A caller
+with a private root below that frontier can conclude that no actual published
+place names it. -/
 theorem Mutation.produced_fresh {program : Kernel.Program} {policy : AuthorityPolicy}
     {before after : World} {action : MutationAction} {custody : ClaimCustody}
     (changed : Mutation program policy before action after) {resource : ProducedResource}

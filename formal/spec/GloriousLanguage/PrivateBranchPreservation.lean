@@ -7,7 +7,7 @@ namespace Glorious.Language
 
 
 namespace Execution
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem CopiesObservations.private_slot {program : Kernel.Program} {context : Context}
     {before after : World} {observations : List (Local × Address × Authority)} {bindings : List (Local × Address)}
@@ -69,9 +69,6 @@ theorem ControlStep.private_slot {program : Kernel.Program} {before after : Stat
   case destroyAvailable stored _ _ _ _ written =>
     exact (slot.write written (slot.stored_outside stored)).availability_set (by simp)
   case destroySpentAvailable stored _ _ _ _ written => exact slot.write written (slot.stored_outside stored)
-  case contextualCall _ _ _ _ _ _ _ _ witness _ _ _ _ _ _ _ _ _ _ _ consumed retired =>
-    exact retired.private_slot (consumed.private_slot slot)
-      (Context.resolves_avoids_root taskOutside slot.safe witness)
   case positiveTest _ _ _ _ _ _ _ allocated tested | negativeTest _ _ _ _ _ _ _ _ allocated tested =>
     exact tested.private_slot (Nat.lt_of_lt_of_le (slot.bound well) (allocated.suspensionExtension (by simp)).counter)
       (allocated.private_slot (slot.bound well) slot) (allocated.fresh_avoids (slot.bound well))
@@ -146,13 +143,15 @@ theorem ControlStep.private_control {program : Kernel.Program} {before after : S
       exact reservedOutside closable.1 place (List.mem_reverse.mp member)
     · exact DisposesReservations.private_activation taskOwner.1 taskOwner.2
   case destroySpentAvailable => exact ⟨True.intro,taskRoots.2.2,frameRoots,taskOwner.2,frameOwners⟩
-  case contextualCall _ resolved _ _ _ _ _ _ witness _ _ _ _ _ _ _ _ _ captures inputs _ _ =>
+  case contextualCall _ _ resolved _ _ _ _ _ _ _ witness _ _ captures inputs resources =>
     have receiverOutside := Context.resolves_avoids_root taskRoots slot.safe resolved
     have witnessOutside := Context.resolves_avoids_root taskRoots slot.safe witness
     have capturesOutside := captures.avoids_root slot
     have inputsOutside := inputs.avoids_root taskRoots slot.safe
+    have resourcesOutside := resources.avoids_root (Context.bindings_avoid_root taskRoots) slot.safe
     refine ⟨True.intro,?_⟩
-    simp_all [PrivateControl,Task.rootSupport,EntrySource.rootSupport,Task.PrivateActivation,ne_comm]
+    simp_all [PrivateControl,Task.rootSupport,EntrySource.rootSupport,Task.PrivateActivation,
+      List.mem_flatMap,InvocationInput.rootSupport,ne_comm]
 
 end Execution
 end Glorious.Language

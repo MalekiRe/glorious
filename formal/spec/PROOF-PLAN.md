@@ -376,12 +376,27 @@ guard carriers. The actual hook dispatcher now constructs finite invocation
 admission in the ambient machine, preserving its caller, registry and callbacks.
 The combined `DropInvocation`/`DropSuspension` gate passes 181 jobs; registry,
 callback, dispatch and immutable saved-suspension audits use only standard
-axioms. This gate does not include private-body preservation.
+axioms.
 
-Next: migrate private storage/control through actual raw returns, cleanup
-queues and physical exhaustion prefixes, retaining the real internal routing
-restriction on admitted Drop intervals. Then continue original source-fact
-production, proper-tail entry and whole-task progress on this dependency chain.
+Private-body integration is now checked by the combined `DropPrivate` and
+`DropSuspension` gate (190 jobs). Actual raw-return binding and tail custody
+cleanup preserve both the private slot and complete context support, including
+carried input contracts. Raw allocation/reallocation use actual fresh claim
+origins; host privacy consumes the existing indexed internal-root invariant.
+Obsolete endpoint-exposure and eager callback-lending proof paths are removed.
+
+Resource-fatal private preservation is not obtained by excluding fatal events.
+The actual internal route and private frame owners exclude the caller root from
+partial suspension; physical snapshot copying preserves the old root and
+reflects every live loan through its real origin. The final fatal step preserves
+privacy, and its actual invocation tail is reflexive. The general invocation
+and arbitrary ambient-run Drop-prefix theorems retain their private-slot/guard
+conclusions. Handoff, copy, effect, host, invocation and Drop audits use only
+standard axioms. Original handoff facts and selected Drop admission are still
+hypotheses; this does not prove arbitrary body progress or termination.
+
+Next: derive original source facts and proper-tail entry from meaningful task
+admission, then close general task progress on this same dependency chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
