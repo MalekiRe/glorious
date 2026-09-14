@@ -254,6 +254,45 @@ def CapturedHome (handler : InstalledHandler) (inner : List Frame) (home : Home)
   HomeOwnedByScope home handler.computation.activation handler.computation.scope ∨
     ∃ frame ∈ inner, FrameOwnsHome frame home
 
+theorem HomeOwnedByActivation.shape {home : Home} {activation : Identity}
+    (owned : HomeOwnedByActivation home activation) :
+    ∃ scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
+  rcases owned with ⟨scope,same⟩ | ⟨scope,same⟩
+  · exact ⟨scope,Or.inl same⟩
+  · exact ⟨scope,Or.inr same⟩
+
+/-- A home that a captured frame owns is a local or temporary home; capture never
+relabels allocation or exterior storage. -/
+theorem CapturedHome.local_or_temporary {handler : InstalledHandler} {inner : List Frame} {home : Home}
+    (owned : CapturedHome handler inner home) :
+    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
+  rcases owned with scope | ⟨frame,member,owned⟩
+  · exact ⟨_,_,scope⟩
+  · cases frame with
+    | activation caller activation region =>
+        obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+        exact ⟨activation,scope,shape⟩
+    | scope caller scope region => exact ⟨_,_,owned⟩
+    | handler installed owns =>
+        rcases owned with owned | ⟨_,owned⟩
+        · exact ⟨_,_,owned⟩
+        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+          exact ⟨_,_,shape⟩
+    | serviced installed owns clause continuation =>
+        rcases owned with owned | ⟨_,owned⟩
+        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+          exact ⟨_,_,shape⟩
+        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+          exact ⟨_,_,shape⟩
+    | completion installed owns clause =>
+        rcases owned with owned | ⟨_,owned⟩
+        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+          exact ⟨_,_,shape⟩
+        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
+          exact ⟨_,_,shape⟩
+    | _ => exact False.elim owned
+
+
 def Frame.ownedRegions : Frame → List Identity
   | .activation _ _ region | .scope _ _ region => [region]
   | .handler installed owns => installed.computation.region :: (if owns then [installed.environment.region] else [])

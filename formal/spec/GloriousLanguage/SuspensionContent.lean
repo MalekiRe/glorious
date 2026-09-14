@@ -12,7 +12,7 @@ storage transitions the machine really performs instead of being re-assumed at
 replay. -/
 namespace Glorious.Language
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 /-- Relabel the home of every root while leaving values, loans and reads of the
 world untouched. `suspendRoots` and `restoreRoots` are both instances; no second
@@ -262,45 +262,7 @@ theorem Replayable.rehome {program : RuntimeProgram} {before : World} {select : 
 
 namespace Execution
 
-open Kernel
-
-theorem HomeOwnedByActivation.shape {home : Home} {activation : Identity}
-    (owned : HomeOwnedByActivation home activation) :
-    ∃ scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
-  rcases owned with ⟨scope,same⟩ | ⟨scope,same⟩
-  · exact ⟨scope,Or.inl same⟩
-  · exact ⟨scope,Or.inr same⟩
-
-/-- A home that a captured frame owns is a local or temporary home; capture never
-relabels allocation or exterior storage. -/
-theorem CapturedHome.local_or_temporary {handler : InstalledHandler} {inner : List Frame} {home : Home}
-    (owned : CapturedHome handler inner home) :
-    ∃ activation scope, home = .localSlot activation scope ∨ home = .temporary activation scope := by
-  rcases owned with scope | ⟨frame,member,owned⟩
-  · exact ⟨_,_,scope⟩
-  · cases frame with
-    | activation caller activation region =>
-        obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-        exact ⟨activation,scope,shape⟩
-    | scope caller scope region => exact ⟨_,_,owned⟩
-    | handler installed owns =>
-        rcases owned with owned | ⟨_,owned⟩
-        · exact ⟨_,_,owned⟩
-        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-          exact ⟨_,_,shape⟩
-    | serviced installed owns clause continuation =>
-        rcases owned with owned | ⟨_,owned⟩
-        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-          exact ⟨_,_,shape⟩
-        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-          exact ⟨_,_,shape⟩
-    | completion installed owns clause =>
-        rcases owned with owned | ⟨_,owned⟩
-        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-          exact ⟨_,_,shape⟩
-        · obtain ⟨scope,shape⟩ := HomeOwnedByActivation.shape owned
-          exact ⟨_,_,shape⟩
-    | _ => exact False.elim owned
+open _root_.Glorious.Language.Kernel
 
 /-- The roots a capture selects carry local or temporary homes, so their home
 is never an allocation or exterior domain. -/

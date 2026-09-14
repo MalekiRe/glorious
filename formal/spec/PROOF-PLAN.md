@@ -395,6 +395,19 @@ conclusions. Handoff, copy, effect, host, invocation and Drop audits use only
 standard axioms. Original handoff facts and selected Drop admission are still
 hypotheses; this does not prove arbitrary body progress or termination.
 
+The external cleanup consumers now close this boundary without weakening
+separation at fatal endpoints. Capture/restore reflection derives exterior-home
+provenance from actual root updates and saved frame ownership; the existing
+captured-home shape theorem is shared at `Machine`, not duplicated. Actual
+partial payload, freeze and replay steps preserve active saved-root exclusion
+independently of full after-control. Arbitrary-run external homes, retained
+record origins, cancellation separation and admitted invocation all consume
+that producer. Indexed host publications and deferred callback entry replace
+the stale eager-lending proofs. `ExternalHomePreservation`, `DropPrivate`,
+`DropSuspension` and `SuspensionContent` pass 199 jobs together, with standard
+axioms only in the audited general consumers. This is cleanup separation, not
+resident liveness or a general progress theorem.
+
 Next: derive original source facts and proper-tail entry from meaningful task
 admission, then close general task progress on this same dependency chain.
 

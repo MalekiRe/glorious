@@ -507,6 +507,20 @@ selected Drop admission remain required; this is not a proof of body progress
 or termination from world typing. Original source-fact production, proper-tail
 progress and whole-task progress remain open.
 
+External cleanup separation now follows the same terminal-aware contract.
+Capture cannot create an exterior home; restoration reads the actual saved
+frame-owned homes. The existing ownership-shape proof is promoted to `Machine`
+and shared by content preservation and fatal restoration reflection. Actual
+fatal steps preserve active saved-root exclusion even when restored/frozen
+storage no longer satisfies full suspension ownership. The general run,
+retained-record origin, cancellation and admitted-invocation consumers retain
+their unconditional separation conclusions. Host publications are indexed by
+actual actions, and callbacks use deferred entry without fictitious lending.
+The combined `ExternalHomePreservation`, `DropPrivate`, `DropSuspension` and
+`SuspensionContent` gate passes 199 jobs; the general consumer audits use only
+standard axioms. Root liveness, resident contents and general source progress
+are not established by this separation result.
+
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
 write precedes the shell write and is performed on the relinquished world) and

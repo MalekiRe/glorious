@@ -291,6 +291,13 @@ or a dependency of this project.
   selected Drop admission remain hypotheses, not consequences of arbitrary
   world typing. Source-fact production, proper-tail progress and whole-task
   progress remain open.
+  External cleanup separation is now integrated as well: `ExternalHomePreservation`,
+  `DropPrivate`, `DropSuspension` and `SuspensionContent` pass 199 jobs together.
+  External/allocation homes and active saved-root exclusion survive actual
+  fatal payload, freeze and replay prefixes without full after-control. The
+  general run, retained cancellation and admitted-invocation audits use only
+  standard axioms. This proves cleanup separation, not resident liveness or
+  whole-program progress.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

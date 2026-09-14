@@ -8,7 +8,7 @@ suspension ownership. This proves cleanup separation, not stored-value liveness
 or exclusivity against explicit aliases. -/
 namespace Glorious.Language
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem World.HomeExtension.root_home {before after : World} {id : Identity} {root : Root}
     (preserved : before.HomeExtension after) (bound : id < before.nextRoot)
@@ -56,6 +56,48 @@ theorem State.SuspensionsWellFormed.restore_external {state : State} {id rootId 
   have absent := (valid.origin id suspension selected).home_none outside
   simp only [restoreRoots.get,found,Option.map_some,absent,Option.getD_none]
 
+/-- Internal capture can suspend a root, but cannot give it an exterior home. -/
+theorem suspendRoots.external_reflected {world : World} {roots : List Identity} {id rootId domain : Identity}
+    {root : Root} (found : (suspendRoots world roots id).roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) :
+    ∃ original, world.roots.get rootId = some original ∧ original.home = root.home := by
+  rw [suspendRoots.get] at found
+  obtain ⟨original,present,rfl⟩ := Option.map_eq_some_iff.mp found
+  by_cases captured : rootId ∈ roots
+  · simp [captured] at external
+  · exact ⟨original,present,by simp [captured]⟩
+
+/-- Saved capture homes are actual frame-owned local/temporary homes. Even a
+fatal restoration prefix cannot convert an internal root to exterior storage. -/
+theorem restoreRoots.external_reflected {world : World} {suspension : Suspension} {rootId domain : Identity}
+    {root : Root} (origin : suspension.CaptureOrigin)
+    (found : (restoreRoots world suspension.homes).roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) :
+    ∃ original, world.roots.get rootId = some original ∧ original.home = root.home := by
+  rw [restoreRoots.get] at found
+  obtain ⟨original,present,rfl⟩ := Option.map_eq_some_iff.mp found
+  cases saved : suspension.homes.get rootId with
+  | none => exact ⟨original,present,rfl⟩
+  | some home =>
+    obtain ⟨activation,scope,shape⟩ := CapturedHome.local_or_temporary (origin.ownedHomes rootId home saved)
+    rcases shape with shape | shape <;> simp [saved,shape] at external
+
+/-- Historical active roots remain non-exterior under the real home extension;
+this does not require the extension to establish complete after-control. -/
+theorem State.SuspensionsWellFormed.external_not_captured_after {state : State} {after : World}
+    {id rootId domain : Identity} {suspension : Suspension} {root : Root}
+    (valid : state.SuspensionsWellFormed) (well : state.world.WellFormed)
+    (extension : state.world.HomeExtension after) (selected : state.resumptions.get id = some suspension)
+    (active : suspension.active = true) (found : after.roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) : rootId ∉ suspension.roots := by
+  intro member
+  obtain ⟨original,originalAt,_,originalHome⟩ := (valid.active id suspension selected active rootId).mp member
+  obtain ⟨current,currentAt,currentHome⟩ := extension.root_home (World.root_bound well originalAt) originalAt
+  have same : current = root := Option.some.inj (currentAt.symm.trans found)
+  subst current
+  rcases external with external | external <;> rw [currentHome,originalHome] at external <;> cases external
+
+
 /-- Every real effect transition retains an external/allocation home. In
 particular, historical saved homes cannot overwrite an unrelated current owner:
 restoration requires the selected suspension's actual active root inventory. -/
@@ -66,6 +108,23 @@ theorem EffectStep.external_home {program : Kernel.Program} {before after : Stat
     (external : root.home = .external domain ∨ root.home = .allocation domain) :
     ∃ current, after.world.roots.get rootId = some current ∧ current.home = root.home := by
   have bound := World.root_bound well found
+  by_cases fatal : event = some (.fatal .resource)
+  · subst event
+    cases step with
+    | terminalPayloadExhausted _ _ _ _ _ started kept
+    | suspendPayloadExhausted _ _ _ _ _ _ _ started kept
+    | suspendTailPayloadExhausted _ _ _ _ _ _ _ _ started kept =>
+      exact (started.suspensionExtension.trans kept.suspensionExtension).toHomeExtension.root_home bound found
+    | suspendContinuationExhausted _ _ _ _ _ _ _ started kept selected _ _ _ =>
+      have moved := (started.suspensionExtension.trans kept.suspensionExtension).toHomeExtension
+      obtain ⟨current,currentAt,home⟩ := moved.root_home bound found
+      exact ⟨current,selected.retains_external currentAt (by simpa only [home] using external),home⟩
+    | resumeLastExhausted _ selected active _ restored _ =>
+      subst restored
+      exact ⟨root,valid.restore_external selected active.1 found external,rfl⟩
+    | resumeCopyExhausted _ selected _ _ copied _ =>
+      exact (copied.suspensionExtension well (valid.origin _ _ selected)).toHomeExtension.root_home bound found
+    | resumeCopyBlocked => exact ⟨root,found,rfl⟩
   by_cases capture : ∃ id, event = some (.suspend id)
   · obtain ⟨id,rfl⟩ := capture
     cases step with
@@ -101,7 +160,7 @@ theorem EffectStep.external_home {program : Kernel.Program} {before after : Stat
     | cancel _ selected active _ _ => exact ⟨root,valid.restore_external selected active.1 found external,rfl⟩
   exact (step.ordinary_suspensionExtension (fun id same => capture ⟨id,same⟩)
     (fun id last same => replay ⟨id,last,same⟩)
-    (fun id same => cancel ⟨id,same⟩)).toHomeExtension.root_home bound found
+    (fun id same => cancel ⟨id,same⟩) fatal).toHomeExtension.root_home bound found
 
 theorem Step.external_home {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event} {rootId : Identity} {root : Root} {domain : Identity}
@@ -119,8 +178,94 @@ theorem Step.external_home {program : Kernel.Program} {host : Foreign.Model}
   · exact primitive.suspensionExtension.toHomeExtension.root_home bound found
   · exact (foreign.suspensionExtension lawful well).toHomeExtension.root_home bound found
 
+/-- Partial payload/freeze/replay worlds retain external cleanup separation
+although they need not have complete active suspension ownership. -/
+theorem EffectStep.fatal_external_separation {program : Kernel.Program} {before after : State}
+    {id rootId domain : Identity} {suspension : Suspension} {root : Root}
+    (valid : before.SuspensionsWellFormed) (well : before.world.WellFormed)
+    (step : EffectStep program before (some (.fatal .resource)) after)
+    (selected : after.resumptions.get id = some suspension) (active : suspension.active = true)
+    (found : after.world.roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) : rootId ∉ suspension.roots := by
+  cases step with
+  | terminalPayloadExhausted _ _ _ _ _ started kept
+  | suspendPayloadExhausted _ _ _ _ _ _ _ started kept
+  | suspendTailPayloadExhausted _ _ _ _ _ _ _ _ started kept =>
+    exact valid.external_not_captured_after well
+      (started.suspensionExtension.trans kept.suspensionExtension).toHomeExtension selected active found external
+  | suspendContinuationExhausted _ _ _ _ _ _ _ started kept _ _ _ _ =>
+    obtain ⟨original,originalAt,home⟩ := suspendRoots.external_reflected found external
+    exact valid.external_not_captured_after well
+      (started.suspensionExtension.trans kept.suspensionExtension).toHomeExtension selected active originalAt
+      (by simpa only [home] using external)
+  | resumeLastExhausted _ source _ _ restored _ =>
+    subst restored
+    obtain ⟨original,originalAt,home⟩ := restoreRoots.external_reflected (valid.origin _ _ source) found external
+    exact valid.external_not_captured selected active originalAt (by simpa only [home] using external)
+  | resumeCopyExhausted _ source _ _ copied _ =>
+    have table := congrArg State.resumptions copied.result
+    exact valid.external_not_captured_after well
+      (copied.suspensionExtension well (valid.origin _ _ source)).toHomeExtension
+      (by simpa only [table] using selected) active found external
+  | resumeCopyBlocked => exact valid.external_not_captured selected active found external
+
+/-- Every actual transition keeps active saved root lists separate from
+exterior storage, including resource-fatal endpoints. -/
+theorem Step.active_external_separation {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event} {id rootId domain : Identity}
+    {suspension : Suspension} {root : Root}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed) (step : Step program host before event after)
+    (selected : after.resumptions.get id = some suspension) (active : suspension.active = true)
+    (found : after.world.roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) : rootId ∉ suspension.roots := by
+  rcases step with localStep | atom | effect | branch | primitive | foreign
+  · have table : after.resumptions = before.resumptions := by cases localStep <;> rfl
+    exact suspensions.external_not_captured_after typed.1 localStep.suspensionExtension.toHomeExtension
+      (by simpa only [table] using selected) active found external
+  · have table : after.resumptions = before.resumptions := by cases atom <;> rfl
+    exact suspensions.external_not_captured_after typed.1 atom.suspensionExtension.toHomeExtension
+      (by simpa only [table] using selected) active found external
+  · by_cases fatal : event = some (.fatal .resource)
+    · subst event
+      exact effect.fatal_external_separation suspensions typed.1 selected active found external
+    · exact (effect.suspensions valid inventory suspensions typed fatal).external_not_captured selected active found external
+  · have table : after.resumptions = before.resumptions := by cases branch <;> rfl
+    exact suspensions.external_not_captured_after typed.1 branch.suspensionExtension.toHomeExtension
+      (by simpa only [table] using selected) active found external
+  · have table : after.resumptions = before.resumptions := by cases primitive <;> rfl
+    exact suspensions.external_not_captured_after typed.1 primitive.suspensionExtension.toHomeExtension
+      (by simpa only [table] using selected) active found external
+  · exact (foreign.suspensions lawful typed.1 suspensions).external_not_captured selected active found external
+
+/-- Arbitrary actual runs retain external separation. At exhaustion the last
+step supplies the result and its remaining run is necessarily reflexive. -/
+theorem Run.active_external_separation {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} {id rootId domain : Identity}
+    {suspension : Suspension} {root : Root}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed) (run : Run program host before trace after)
+    (selected : after.resumptions.get id = some suspension) (active : suspension.active = true)
+    (found : after.world.roots.get rootId = some root)
+    (external : root.home = .external domain ∨ root.home = .allocation domain) : rootId ∉ suspension.roots := by
+  induction run with
+  | refl => exact suspensions.external_not_captured selected active found external
+  | silent step rest ih =>
+    exact ih (step.worldTyped valid inventory lawful typed)
+      (step.suspensions valid inventory lawful typed suspensions (by simp)) selected found
+  | @visible before middle after event trace step rest ih =>
+    by_cases fatal : event = Event.fatal .resource
+    · subst event
+      rw [rest.after_eq_of_fatal step.fatal_task] at selected found
+      exact step.active_external_separation valid inventory lawful typed suspensions selected active found external
+    · exact ih (step.worldTyped valid inventory lawful typed)
+        (step.suspensions valid inventory lawful typed suspensions (fun equal => fatal (Option.some.inj equal))) selected found
+
+
 /-- Existing exterior ownership survives arbitrary interleaving of source
-code, host mutation, nested callback lending/consumption, capture and replay.
+code, host mutation, deferred callback entry, capture and replay.
 The root's live bit and resident value are deliberately not claimed invariant. -/
 theorem Run.external_home {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} {rootId : Identity} {root : Root} {domain : Identity}
@@ -132,11 +277,21 @@ theorem Run.external_home {program : Kernel.Program} {host : Foreign.Model}
     ∃ current, after.world.roots.get rootId = some current ∧ current.home = root.home := by
   induction run generalizing root with
   | refl => exact ⟨root,found,rfl⟩
-  | silent step _ ih | visible step _ ih =>
+  | silent step rest ih =>
     obtain ⟨current,currentAt,home⟩ := step.external_home lawful typed.1 suspensions found external
     obtain ⟨last,lastAt,lastHome⟩ := ih (step.worldTyped valid inventory lawful typed)
-      (step.suspensions valid inventory lawful typed suspensions) currentAt (by simpa only [home] using external)
+      (step.suspensions valid inventory lawful typed suspensions (by simp)) currentAt (by simpa only [home] using external)
     exact ⟨last,lastAt,lastHome.trans home⟩
+  | @visible before middle after event trace step rest ih =>
+    obtain ⟨current,currentAt,home⟩ := step.external_home lawful typed.1 suspensions found external
+    by_cases fatal : event = Event.fatal .resource
+    · subst event
+      rw [rest.after_eq_of_fatal step.fatal_task]
+      exact ⟨current,currentAt,home⟩
+    · obtain ⟨last,lastAt,lastHome⟩ := ih (step.worldTyped valid inventory lawful typed)
+        (step.suspensions valid inventory lawful typed suspensions (fun equal => fatal (Option.some.inj equal)))
+        currentAt (by simpa only [home] using external)
+      exact ⟨last,lastAt,lastHome.trans home⟩
 
 end Execution
 
@@ -166,9 +321,9 @@ theorem Registration.Valid.retained_home_extension {program : Kernel.Program} {b
   exact ⟨current,domain,currentAt,by simpa only [currentHome] using home⟩
 
 /-- A real registry-changing producer establishes retained storage's exterior
-home in its mutation world, and actual callback lending/consumption preserves
-that home. Only callback-result cleanup leaves the registry untouched. This
-does not reassert initialized callable contents after source receiver moves. -/
+home in its actual mutation world. A callback schedules its receiver recipe
+without another storage mutation; callback-result cleanup leaves the registry
+untouched. This does not assert resident liveness after receiver moves. -/
 theorem Step.retained_home_origin {program : Kernel.Program} {model : Model}
     {before after : State} {event : Option Event} {registration : Registration}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -186,17 +341,15 @@ theorem Step.retained_home_origin {program : Kernel.Program} {model : Model}
     exact Or.inr ((registry.2 registration member).retained_home active retained)
   | host _ _ selected sessionActive changed
   | fault _ _ selected sessionActive changed =>
-    have registry := (lawful.step _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed).2.2.2.1
+    have registry := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed).2.2.2.1
     exact Or.inr ((registry.2 registration member).retained_home active retained)
   | result _ _ selected sessionActive changed _ transferred =>
-    have law := lawful.step _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed
+    have law := lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed
     exact Or.inr ((law.2.2.2.1.2 registration member).retained_home_extension
       (law.1.worldTyped valid inventory typed).1 transferred.authorityStable.homes active retained)
-  | callback _ _ selected sessionActive changed _ lent _ _ consumed =>
-    have law := lawful.step _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed
-    exact Or.inr ((law.2.2.2.1.2 registration member).retained_home_extension
-      (law.1.worldTyped valid inventory typed).1
-      (lent.suspensionExtension.toHomeExtension.trans consumed.suspensionExtension.toHomeExtension) active retained)
+  | callback _ _ selected sessionActive changed _ _ =>
+    have law := lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 sessionActive changed
+    exact Or.inr ((law.2.2.2.1.2 registration member).retained_home active retained)
   | callbackResult => exact Or.inl member
   | callbackReturned _ _ selected postcondition returned =>
     have registry := (lawful.callbackReturned _ _ _ _ _ _ _ _ selected typed.1 postcondition returned).2.1
@@ -236,9 +389,9 @@ theorem Run.retained_home_origin {program : Kernel.Program} {host : Foreign.Mode
         (root.home = .external domain ∨ root.home = .allocation domain) := by
   induction run with
   | refl => exact Or.inl member
-  | silent step rest ih | visible step rest ih =>
+  | silent step rest ih =>
     have middleTyped := step.worldTyped valid inventory lawful typed
-    have middleSuspensions := step.suspensions valid inventory lawful typed suspensions
+    have middleSuspensions := step.suspensions valid inventory lawful typed suspensions (by simp)
     rcases ih middleTyped middleSuspensions member with previous | home
     · rcases step.retained_home_origin valid inventory lawful typed previous active retained with original |
         ⟨root,domain,found,home⟩
@@ -247,6 +400,22 @@ theorem Run.retained_home_origin {program : Kernel.Program} {host : Foreign.Mode
           middleSuspensions found home
         exact Or.inr ⟨current,domain,currentAt,by simpa only [currentHome] using home⟩
     · exact Or.inr home
+  | @visible before middle after event trace step rest ih =>
+    by_cases fatal : event = Event.fatal .resource
+    · subst event
+      rw [rest.after_eq_of_fatal step.fatal_task] at member ⊢
+      exact step.retained_home_origin valid inventory lawful typed member active retained
+    · have middleTyped := step.worldTyped valid inventory lawful typed
+      have middleSuspensions := step.suspensions valid inventory lawful typed suspensions
+        (fun equal => fatal (Option.some.inj equal))
+      rcases ih middleTyped middleSuspensions member with previous | home
+      · rcases step.retained_home_origin valid inventory lawful typed previous active retained with original |
+          ⟨root,domain,found,home⟩
+        · exact Or.inl original
+        · obtain ⟨current,currentAt,currentHome⟩ := rest.external_home valid inventory lawful middleTyped
+            middleSuspensions found home
+          exact Or.inr ⟨current,domain,currentAt,by simpa only [currentHome] using home⟩
+      · exact Or.inr home
 
 theorem Run.retained_home {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} {registration : Foreign.Registration}
@@ -265,16 +434,16 @@ theorem Run.retained_home {program : Kernel.Program} {host : Foreign.Model}
     exact ⟨current,domain,currentAt,by simpa only [currentHome] using home⟩
   · exact home
 
-/-- This is exactly the implicit cleanup ownership used by scope/activation
-selection and active continuation cancellation, not a permission to read or
-move the root's resident contents. -/
-theorem State.external_cleanup_separation {state : State} {rootId : Identity} {root : Root} {domain : Identity}
-    (suspensions : state.SuspensionsWellFormed) (found : state.world.roots.get rootId = some root)
+/-- Exterior homes are outside the actual source-scope and activation cleanup
+inventories. Active continuation inventories are handled by the execution
+producer above, independently of complete after-control. -/
+theorem _root_.Glorious.Language.World.external_cleanup_separation {world : World}
+    {rootId : Identity} {root : Root} {domain : Identity}
+    (found : world.roots.get rootId = some root)
     (external : root.home = .external domain ∨ root.home = .allocation domain) :
-    (∀ activation scope kept roots, ScopeRoots state.world activation scope kept roots → rootId ∉ roots) ∧
-    (∀ activation kept roots, ActivationRoots state.world activation kept roots → rootId ∉ roots) ∧
-    ∀ id suspension, state.resumptions.get id = some suspension → suspension.active = true → rootId ∉ suspension.roots := by
-  refine ⟨?_,?_,fun _ _ selected active => suspensions.external_not_captured selected active found external⟩
+    (∀ activation scope kept roots, ScopeRoots world activation scope kept roots → rootId ∉ roots) ∧
+    (∀ activation kept roots, ActivationRoots world activation kept roots → rootId ∉ roots) := by
+  constructor
   · intro activation scope kept roots cleanup member
     obtain ⟨other,otherAt,_,owned,_⟩ := (cleanup.2 rootId).mp member
     have same : root = other := Option.some.inj (found.symm.trans otherAt)
@@ -300,7 +469,9 @@ theorem Run.retained_cleanup_separation {program : Kernel.Program} {host : Forei
     ∀ id suspension, after.resumptions.get id = some suspension → suspension.active = true →
       registration.owner.root ∉ suspension.roots := by
   obtain ⟨root,domain,found,home⟩ := run.retained_home valid inventory lawful typed suspensions initial member active retained
-  exact State.external_cleanup_separation (run.suspensions valid inventory lawful typed suspensions) found home
+  have localHomes := World.external_cleanup_separation found home
+  exact ⟨localHomes.1,localHomes.2,fun _ _ selected active =>
+    run.active_external_separation valid inventory lawful typed suspensions selected active found home⟩
 
 theorem Run.new_retained_cleanup_separation {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} {registration : Foreign.Registration}
@@ -316,7 +487,9 @@ theorem Run.new_retained_cleanup_separation {program : Kernel.Program} {host : F
       registration.owner.root ∉ suspension.roots := by
   obtain ⟨root,domain,found,home⟩ :=
     (run.retained_home_origin valid inventory lawful typed suspensions member active retained).resolve_left new
-  exact State.external_cleanup_separation (run.suspensions valid inventory lawful typed suspensions) found home
+  have localHomes := World.external_cleanup_separation found home
+  exact ⟨localHomes.1,localHomes.2,fun _ _ selected active =>
+    run.active_external_separation valid inventory lawful typed suspensions selected active found home⟩
 
 /-- Cancellation's real scheduled root list cannot contain the retained
 owner, even after arbitrary intervening source computation and host callbacks. -/
