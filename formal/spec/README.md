@@ -231,9 +231,15 @@ or a dependency of this project.
   no attached predicate is ignored. The canonical declaration-selection proof
   is shared at `Kernel`, and destructor-handle privacy now consumes the real
   `.destructor` loan purpose. The integrated gate including `DropHandle` passes
-  221 jobs. Nested-reference inherited-guard handling remains a known modeling
-  bug on the input-readiness path; its general Lean reproduction is recorded
-  in `PROOF-PLAN.md`.
+  221 jobs. `Authority.carriers` now distinguishes explicit access authorities
+  from inherited loan dependencies. Reference/resource views no longer expand
+  inherited guards into independent permission checks. The general
+  `Permitted.referenceView_iff` and `resourceView_iff` contracts prove exactly
+  which permissions remain required. Ordered-input, control, pattern and
+  suspension consumers use the common corrected views; obsolete guard-frame
+  products and their duplicate observations are removed. Newly created
+  reference-handle readiness and general `InvocationStart` integration remain
+  on the entry-progress chain, not established by this view repair.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

@@ -292,16 +292,25 @@ the actual `.destructor` loan purpose, and its real hook-entry consumer checks.
 The integrated `DropHandle` gate passes 221 jobs, with standard-axiom-only
 metadata and privacy audits. Original invocation admission still needs migration.
 
-Reference readiness exposed the next actual modeling error. The general Lean
-reproduction establishes that, for arbitrary world/address/identities, a live
-parent loan with guards `[carrier]` makes
-`Permitted world ((Authority.loan parent).referenceView world nested .unique)
-  .unique address` impossible. The view explicitly re-checks the inherited
-carrier, while the parent loan itself freezes that carrier. No example module
-was added or run; the general implication was proof-checked through stdin.
-Next: correct explicit authority propagation versus inherited dependency
-liveness in the common reference/resource-view producer, migrate all consumers,
-and close actual reference-handle readiness before completing Drop admission.
+Reference readiness exposed an actual modeling error: in the old producer, a
+general Lean derivation showed that a live parent loan with one inherited
+guard made every nested unique reference view unusable. The dependent parent
+froze that guard, which the view then requested again as direct authority.
+The common producer now separates `Authority.carriers` from `guardLoans`.
+Reference/resource views retain explicit authority carriers only; inherited
+guards remain liveness and freeze dependencies in the actual loan semantics.
+The world argument and all superseded view-equality/guard-frame products are
+removed. Ordered-input reflection and framing no longer require independent
+recorded-guard observations or unused well-formedness/recording premises.
+Actual new-loan dependency framing uses the existing `guardLoans.loans_congr`.
+`Permitted.referenceView_iff` and `resourceView_iff` prove exact explicit
+carrier permission contracts, using only `propext` and `Quot.sound`. The
+integrated source/input/pattern/suspension/control/privacy gate passes 221
+jobs; the cleaned input/destructor dependency closure passes 158 jobs.
+Original-admission `enterStep` retains its standard-axiom-only audit.
+No example module or replacement admission callback was introduced. Next:
+construct actual reference-handle readiness, migrate `InvocationStart` and
+its real Drop producer, and continue the same source/task progress chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

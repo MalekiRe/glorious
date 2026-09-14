@@ -448,8 +448,8 @@ theorem Authority.Recorded.fresh_loan {before after : World} {fresh : Loan} {aut
     authority.Recorded after.loans := by
   rw [loans]; exact recorded.set _ _
 
-/-- An authority that names actual loans still observes the same guards, so its
-views are the source views; only the fresh identity itself could disagree. -/
+/-- Fresh loan insertion preserves the inherited dependencies of every
+previously recorded authority used to construct a later loan. -/
 theorem Authority.guardLoans_fresh_loan {before after : World} {fresh : Loan} {authority : Authority}
     (valid : before.WellFormed) (loans : after.loans = before.loans.set before.nextLoan fresh)
     (recorded : authority.Recorded before.loans) :
@@ -465,19 +465,6 @@ theorem Authority.guardLoans_fresh_loan {before after : World} {fresh : Loan} {a
     obtain ⟨inner,⟨loan,found⟩⟩ := recorded
     have bound := World.loanBounds valid found
     simp only [Authority.guardLoans,ih inner,loans,Table.get_set_other _ _ _ _ (Nat.ne_of_lt bound)]
-
-theorem Authority.referenceView_fresh_loan {before after : World} {fresh : Loan} {authority : Authority}
-    (valid : before.WellFormed) (loans : after.loans = before.loans.set before.nextLoan fresh)
-    (recorded : authority.Recorded before.loans) (identity : Identity) (access : Access) :
-    authority.referenceView after identity access = authority.referenceView before identity access := by
-  simp only [Authority.referenceView,Authority.throughReference,
-    Authority.guardLoans_fresh_loan valid loans recorded]
-
-theorem Authority.resourceView_fresh_loan {before after : World} {fresh : Loan} {authority : Authority}
-    (valid : before.WellFormed) (loans : after.loans = before.loans.set before.nextLoan fresh)
-    (recorded : authority.Recorded before.loans) (binding : StorageBinding) (access : Access) :
-    authority.resourceView after binding access = authority.resourceView before binding access := by
-  simp only [Authority.resourceView,Authority.guardLoans_fresh_loan valid loans recorded]
 
 /-- Pending permissions are the reserved places of the active availabilities.
 Inserting a fresh row keeps every one of them: the availability table is not

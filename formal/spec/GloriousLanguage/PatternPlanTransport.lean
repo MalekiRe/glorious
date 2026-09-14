@@ -57,7 +57,7 @@ theorem Kernel.PatternPlan.transport {program : Language.Program} {before after 
       Permitted.stores_iff (authority := authority) (access := access) loans stored retained
     refine .reference retained head (by simpa only [loans] using selected) modeEq live initialized
       ((permission _ _).mp permitted) ?_ ih
-    simpa only [ReferenceView,Authority.referenceView_same_loans loans,← permission _ .unique] using viewed
+    simpa only [ReferenceView,← permission _ .unique] using viewed
   · intro address authority access offset; exact .nil
   · intro address authority access offset pattern rest first later _ _ ihFirst ihRest
     exact .cons ihFirst ihRest

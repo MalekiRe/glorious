@@ -58,10 +58,65 @@ theorem Permitted.lend_shared {world : World} {authority : Authority}
   · exact ⟨shared.root,rfl,shared⟩
   · exact shared
 
-theorem Authority.referenceView_lend (authority : Authority) (world : World)
+/-- Lending at the requested access does not change that access permission. -/
+theorem Permitted.lend_iff {world : World} {authority : Authority} {access : Access} {address : Address} :
+    Permitted world (authority.lend access) access address ↔ Permitted world authority access address := by
+  unfold Authority.lend
+  split
+  · rename_i shared
+    exact ⟨fun held => held.2.2,fun held => ⟨held.root,shared,held⟩⟩
+  · rfl
+
+/-- Guarded access requires the backing permission and exactly the explicit
+carrier permissions, never the carriers' inherited dependency permissions. -/
+theorem Permitted.guarded_fold_iff {world : World} {authority : Authority} {access : Access}
+    {address : Address} (carriers : List Identity) :
+    Permitted world (carriers.foldr (fun carrier backing => Authority.guarded backing carrier) authority) access address ↔
+      Permitted world authority access address ∧
+      ∀ carrier ∈ carriers, ∃ loan, world.loans.get carrier = some loan ∧ LoanPermission world carrier access loan.referent := by
+  induction carriers with
+  | nil => simp
+  | cons carrier rest ih =>
+    constructor
+    · intro held
+      obtain ⟨backing,carriers⟩ := ih.mp held.2.1
+      refine ⟨backing,?_⟩
+      intro identity member
+      rcases List.mem_cons.mp member with rfl | member
+      · exact held.2.2
+      · exact carriers identity member
+    · rintro ⟨backing,carriers⟩
+      have held := ih.mpr ⟨backing,fun identity member => carriers identity (List.mem_cons_of_mem _ member)⟩
+      exact ⟨held.root,held,carriers carrier List.mem_cons_self⟩
+
+/-- The complete dereference permission contract. Inherited guards remain
+checked for liveness by each LoanPermission; they are not requested again as
+independent unique access after their dependent loan has frozen them. -/
+theorem Permitted.referenceView_iff {world : World} {authority : Authority} {identity : Identity}
+    {access : Access} {address : Address} :
+    Permitted world (authority.referenceView identity access) access address ↔
+      Permitted world (.loan identity) access address ∧
+      ∀ carrier ∈ authority.carriers, ∃ loan, world.loans.get carrier = some loan ∧
+        LoanPermission world carrier access loan.referent := by
+  unfold Authority.referenceView Authority.throughReference
+  rw [Permitted.lend_iff]
+  exact Permitted.guarded_fold_iff _
+
+theorem Permitted.resourceView_iff {world : World} {authority : Authority} {binding : StorageBinding}
+    {incoming : Access} :
+    Permitted world (authority.resourceView binding incoming) (ResourceAccess incoming binding) binding.address ↔
+      Permitted world binding.authority (ResourceAccess incoming binding) binding.address ∧
+      ∀ carrier ∈ authority.carriers, ∃ loan, world.loans.get carrier = some loan ∧
+        LoanPermission world carrier (ResourceAccess incoming binding) loan.referent := by
+  unfold Authority.resourceView
+  rw [Permitted.lend_iff]
+  exact Permitted.guarded_fold_iff _
+
+
+theorem Authority.referenceView_lend (authority : Authority)
     (identity : Identity) (incoming requested : Access) :
-    (authority.lend incoming).referenceView world identity requested =
-      authority.referenceView world identity requested := by
+    (authority.lend incoming).referenceView identity requested =
+      authority.referenceView identity requested := by
   unfold Authority.lend
   split <;> rfl
 
@@ -69,7 +124,7 @@ theorem ReferenceView.of_permitted {world : World} {handle : Address}
     {authority : Authority} {incoming : Access}
     (permitted : Permitted world authority incoming handle) (identity : Identity) (mode : Mutability) :
     ReferenceView world handle (authority.lend incoming) identity mode
-      (authority.referenceView world identity (ReferenceAccess incoming mode))
+      (authority.referenceView identity (ReferenceAccess incoming mode))
       (ReferenceAccess incoming mode) := by
   cases mode with
   | shared =>
@@ -135,7 +190,7 @@ theorem Value.LoansRestored.referent {program : RuntimeProgram} {world : World}
   intro next nextAuthority nextAccess nested
   obtain ⟨base,requested,reached⟩ := reachable.rebase .owner .shared
   obtain ⟨view,access,nested⟩ := nested.rebase
-    (base.referenceView world identity (ReferenceAccess requested loan.mode)) (ReferenceAccess requested loan.mode)
+    (base.referenceView identity (ReferenceAccess requested loan.mode)) (ReferenceAccess requested loan.mode)
   exact restored next view access (Value.ReachableReference.referent_prefix reached found stored nested)
 
 theorem Value.SupportOutside.references {world : World} {value : Value} {source : Address}

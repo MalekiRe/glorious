@@ -349,29 +349,46 @@ def Authority.guardLoans : Authority → World → List Identity
   | .guarded backing carrier, world =>
       (carrier :: ((world.loans.get carrier).map Loan.guards).getD []) ++ backing.guardLoans world
 
-/-- Dereferencing a handle retains the authority used to reach its storage.
-The target handle's own loan remains the containment parent; carrier loans are
-independent guards, including guards already inherited by an outer view. -/
-def Authority.throughReference (authority : Authority) (world : World) (identity : Identity) : Authority :=
-  (authority.parentLoan.toList ++ authority.guardLoans world).foldr
-    (fun carrier backing => .guarded backing carrier) (.loan identity)
+/-- The loans explicitly authorizing this source view. Inherited guards are
+already dependencies of these loans; requiring the original carriers again
+would reject access through the very child that freezes them. -/
+def Authority.carriers : Authority → List Identity
+  | .owner => []
+  | .loan identity => [identity]
+  | .shared backing => backing.carriers
+  | .guarded backing carrier => carrier :: backing.carriers
+
+theorem Authority.Recorded.carriers {authority : Authority} {loans : Table Loan}
+    (recorded : authority.Recorded loans) : ∀ identity ∈ authority.carriers, ∃ loan, loans.get identity = some loan := by
+  induction authority with
+  | owner => intro identity member; cases member
+  | loan identity => intro current member; cases List.mem_singleton.mp member; exact recorded
+  | shared backing ih => exact ih recorded
+  | guarded backing carrier ih =>
+    intro identity member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact recorded.2
+    · exact ih recorded.1 identity member
+
+/-- Dereferencing retains every explicit source authority, without turning a
+loan's inherited liveness dependencies into fresh caller permission checks. -/
+def Authority.throughReference (authority : Authority) (identity : Identity) : Authority :=
+  authority.carriers.foldr (fun carrier backing => .guarded backing carrier) (.loan identity)
+
 
 def ReferenceAccess (incoming : Access) (mode : Mutability) : Access :=
   if incoming = .shared ∨ mode = .shared then .shared else .unique
 
-def Authority.referenceView (authority : Authority) (world : World)
-    (identity : Identity) (access : Access) : Authority :=
-  (authority.throughReference world identity).lend access
+def Authority.referenceView (authority : Authority) (identity : Identity) (access : Access) : Authority :=
+  (authority.throughReference identity).lend access
 
 def ResourceAccess (incoming : Access) (binding : StorageBinding) : Access :=
   match binding.authority with
   | .shared _ => .shared
   | _ => incoming
 
-def Authority.resourceView (authority : Authority) (world : World)
-    (binding : StorageBinding) (access : Access) : Authority :=
-  ((authority.parentLoan.toList ++ authority.guardLoans world).foldr
-    (fun carrier backing => .guarded backing carrier) binding.authority).lend (ResourceAccess access binding)
+def Authority.resourceView (authority : Authority) (binding : StorageBinding) (access : Access) : Authority :=
+  (authority.carriers.foldr (fun carrier backing => .guarded backing carrier) binding.authority).lend (ResourceAccess access binding)
 
 /-- The referent's lifetime is distinct from the temporary home of an
 invocation's reference handle. A callee-owned handle may be cleared while an
@@ -580,12 +597,12 @@ inductive Value.ReachableResident (world : World) (value : Value)
       carrier.head = .reference parent → world.loans.get parent = some loan →
       world.Stores loan.referent target → ResidentAt target path resident →
       value.ReachableResident world authority incoming resident
-        (parentAuthority.referenceView world parent (ReferenceAccess parentAccess loan.mode))
+        (parentAuthority.referenceView parent (ReferenceAccess parentAccess loan.mode))
         (ReferenceAccess parentAccess loan.mode)
   | resource {carrier current access binding target path resident} :
       value.ReachableResident world authority incoming carrier current access → binding ∈ carrier.resources →
       world.Stores binding.address target → ResidentAt target path resident →
-      value.ReachableResident world authority incoming resident (current.resourceView world binding access)
+      value.ReachableResident world authority incoming resident (current.resourceView binding access)
         (ResourceAccess access binding)
 
 def Value.ReachableReference (world : World) (value : Value) (authority : Authority) (incoming : Access)
@@ -605,7 +622,7 @@ theorem Value.ReachableReference.referent {world : World} {value target resident
     (found : world.loans.get parent = some loan) (stored : world.Stores loan.referent target)
     (located : ResidentAt target path resident) (reference : resident.head = .reference identity) :
     value.ReachableReference world authority incoming identity
-      (current.referenceView world parent (ReferenceAccess access loan.mode)) (ReferenceAccess access loan.mode) := by
+      (current.referenceView parent (ReferenceAccess access loan.mode)) (ReferenceAccess access loan.mode) := by
   obtain ⟨carrier,reached,head⟩ := prior
   exact ⟨resident,.referent reached head found stored located,reference⟩
 
@@ -650,7 +667,7 @@ theorem Value.ReachableResident.referent_prefix {world : World} {value target re
     (prior : value.ReachableReference world authority incoming parent parentAuthority parentAccess)
     (found : world.loans.get parent = some loan) (stored : world.Stores loan.referent target)
     (reachable : target.ReachableResident world
-      (parentAuthority.referenceView world parent (ReferenceAccess parentAccess loan.mode))
+      (parentAuthority.referenceView parent (ReferenceAccess parentAccess loan.mode))
       (ReferenceAccess parentAccess loan.mode) resident current access) :
     value.ReachableResident world authority incoming resident current access := by
   obtain ⟨carrier,reached,head⟩ := prior
@@ -683,7 +700,7 @@ theorem Value.ReachableReference.referent_prefix {world : World} {value target :
     (prior : value.ReachableReference world authority incoming parent parentAuthority parentAccess)
     (found : world.loans.get parent = some loan) (stored : world.Stores loan.referent target)
     (reachable : target.ReachableReference world
-      (parentAuthority.referenceView world parent (ReferenceAccess parentAccess loan.mode))
+      (parentAuthority.referenceView parent (ReferenceAccess parentAccess loan.mode))
       (ReferenceAccess parentAccess loan.mode) identity current access) :
     value.ReachableReference world authority incoming identity current access := by
   obtain ⟨resident,reached,reference⟩ := reachable
@@ -1171,7 +1188,7 @@ def Value.ReferencesAccessible (world : World) (value : Value)
     (authority : Authority) (incoming : Access) : Prop :=
   ∀ identity current access, value.ReachableReference world authority incoming identity current access →
     ∃ loan, world.loans.get identity = some loan ∧ loan.live = true ∧
-      Permitted world (current.referenceView world identity (ReferenceAccess access loan.mode))
+      Permitted world (current.referenceView identity (ReferenceAccess access loan.mode))
         (ReferenceAccess access loan.mode) loan.referent
 
 theorem Value.ReferencesAccessible.resident {world : World} {value child : Value}
@@ -1185,7 +1202,7 @@ theorem Value.ReferencesAccessible.referent {world : World} {value target : Valu
     (ready : value.ReferencesAccessible world authority incoming)
     (reachable : value.ReachableReference world authority incoming identity current access)
     (found : world.loans.get identity = some loan) (stored : world.Stores loan.referent target) :
-    target.ReferencesAccessible world (current.referenceView world identity (ReferenceAccess access loan.mode))
+    target.ReferencesAccessible world (current.referenceView identity (ReferenceAccess access loan.mode))
       (ReferenceAccess access loan.mode) :=
   fun next nextAuthority nextAccess nested => ready next nextAuthority nextAccess
     (Value.ReachableReference.referent_prefix reachable found stored nested)
@@ -1205,7 +1222,7 @@ def Value.ResourcesAccessible (program : RuntimeProgram) (world : World)
   value.ResourcesClosed program world ∧ value.LoansRestored program world ∧
   value.ReferencesAccessible world .owner access ∧
   ∀ resident authority incoming, value.ReachableResident world .owner access resident authority incoming →
-    ∀ binding ∈ resident.resources, Permitted world (authority.resourceView world binding incoming)
+    ∀ binding ∈ resident.resources, Permitted world (authority.resourceView binding incoming)
       (ResourceAccess incoming binding) binding.address
 
 /-- A handoff retains every support of the actual passed value across its
@@ -1250,7 +1267,7 @@ theorem Value.ReferencesAccessible.direct {world : World} {value resident : Valu
     (ready : value.ReferencesAccessible world authority incoming)
     (located : ResidentAt value path resident) (reference : resident.head = .reference identity) :
     ∃ loan, world.loans.get identity = some loan ∧ loan.live = true ∧
-      Permitted world (authority.referenceView world identity (ReferenceAccess incoming loan.mode))
+      Permitted world (authority.referenceView identity (ReferenceAccess incoming loan.mode))
         (ReferenceAccess incoming loan.mode) loan.referent :=
   ready identity authority incoming (.resident located reference)
 
@@ -1277,11 +1294,11 @@ theorem Permitted.recorded {world : World} {authority : Authority} {requested : 
 referent access. All dereference consumers use this same view selection. -/
 def ReferenceView (world : World) (handle : Address) (authority : Authority)
     (id : Identity) (mode : Mutability) (permission : Authority) (access : Access) : Prop :=
-  (mode = .shared ∧ permission = authority.referenceView world id .shared ∧ access = .shared) ∨
+  (mode = .shared ∧ permission = authority.referenceView id .shared ∧ access = .shared) ∨
   (mode = .unique ∧ Permitted world authority .unique handle ∧
-    permission = authority.referenceView world id .unique ∧ access = .unique) ∨
+    permission = authority.referenceView id .unique ∧ access = .unique) ∨
   (mode = .unique ∧ ¬ Permitted world authority .unique handle ∧
-    permission = authority.referenceView world id .shared ∧ access = .shared)
+    permission = authority.referenceView id .shared ∧ access = .shared)
 
 theorem shared_authority_cannot_strengthen {world backing requested address}
     (permission : Permitted world (.shared backing) requested address) : requested = .shared :=

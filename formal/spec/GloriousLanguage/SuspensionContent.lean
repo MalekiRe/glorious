@@ -57,32 +57,20 @@ theorem Value.ReachableResident.rehome {before : World} {select : Identity → R
     induction reached with
     | resident located => exact .resident located
     | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
-        have view := Authority.referenceView_same_loans (World.rehome_loans before select)
-          parentAuthority parent (ReferenceAccess parentAccess loan.mode)
-        simpa only [view] using
-          Value.ReachableResident.referent ih reference found
-            ((World.rehome_stores (world := before) (select := select)).mpr stored) located
+        exact Value.ReachableResident.referent ih reference found
+          ((World.rehome_stores (world := before) (select := select)).mpr stored) located
     | @resource carrier current access binding target path resident prior member stored located ih =>
-        have view := Authority.resourceView_same_loans (World.rehome_loans before select)
-          current binding access
-        simpa only [view] using
-          Value.ReachableResident.resource ih member
-            ((World.rehome_stores (world := before) (select := select)).mpr stored) located
+        exact Value.ReachableResident.resource ih member
+          ((World.rehome_stores (world := before) (select := select)).mpr stored) located
   · intro reached
     induction reached with
     | resident located => exact .resident located
     | @referent carrier parent parentAuthority parentAccess loan target path resident prior reference found stored located ih =>
-        have view := Authority.referenceView_same_loans (World.rehome_loans before select)
-          parentAuthority parent (ReferenceAccess parentAccess loan.mode)
-        simpa only [view] using
-          Value.ReachableResident.referent ih reference found
-            ((World.rehome_stores (world := before) (select := select)).mp stored) located
+        exact Value.ReachableResident.referent ih reference found
+          ((World.rehome_stores (world := before) (select := select)).mp stored) located
     | @resource carrier current access binding target path resident prior member stored located ih =>
-        have view := Authority.resourceView_same_loans (World.rehome_loans before select)
-          current binding access
-        simpa only [view] using
-          Value.ReachableResident.resource ih member
-            ((World.rehome_stores (world := before) (select := select)).mp stored) located
+        exact Value.ReachableResident.resource ih member
+          ((World.rehome_stores (world := before) (select := select)).mp stored) located
 
 theorem Value.ReachableReference.rehome {before : World} {select : Identity → Root → Home}
     {value : Value} {authority : Authority} {incoming : Access} {identity : Identity}
@@ -501,20 +489,15 @@ theorem Value.ReachableResident.outside {program : RuntimeProgram} {before after
       have outside : loan.referent.root ≠ fresh := by
         rw [← same]
         exact avoid parent liveLoan liveAt liveLive
-      have view := Authority.referenceView_same_loans loans parentAuthority parent
-        (ReferenceAccess parentAccess loan.mode)
-      simpa only [view] using
-        Value.ReachableResident.referent ih reference foundBefore
-          ((World.stores_of_rows rows outside).mp stored) located
+      exact Value.ReachableResident.referent ih reference foundBefore
+        ((World.stores_of_rows rows outside).mp stored) located
   | @resource carrier current accessAt binding target path resident prior member stored located ih =>
       have held := (closed carrier current accessAt ih).1 binding member
       obtain ⟨identity,loan,found,live,referent⟩ := StorageBinding.HeldBy.referent_recorded held
       have outside : binding.address.root ≠ fresh := by
         rw [← referent]
         exact avoid identity loan found live
-      have view := Authority.resourceView_same_loans loans current binding accessAt
-      simpa only [view] using
-        Value.ReachableResident.resource ih member ((World.stores_of_rows rows outside).mp stored) located
+      exact Value.ReachableResident.resource ih member ((World.stores_of_rows rows outside).mp stored) located
 
 theorem Value.ReachableResident.nested {world : World} {value carrier resident : Value}
     {authority current : Authority} {incoming access : Access} {path : List Nat}

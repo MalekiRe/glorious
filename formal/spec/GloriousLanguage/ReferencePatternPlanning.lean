@@ -168,7 +168,7 @@ theorem Matches.transport_value {program : RuntimeProgram} {before after : World
       (restored.referent reached found targetStored) ?_
     intro next nextAuthority nextAccess nested actual selected
     obtain ⟨view,requested,nested⟩ := nested.rebase
-      (Authority.owner.referenceView before id (ReferenceAccess .shared loan.mode)) (ReferenceAccess .shared loan.mode)
+      (Authority.owner.referenceView id (ReferenceAccess .shared loan.mode)) (ReferenceAccess .shared loan.mode)
     exact framed next view requested (Value.ReachableReference.referent_prefix reached found targetStored nested) actual selected
   · intro source offset destination value _ _ _ _ _ _; exact .nil
   · intro source offset first rest _ _ ihFirst ihRest destination value stored relocated initialized restored framed bound

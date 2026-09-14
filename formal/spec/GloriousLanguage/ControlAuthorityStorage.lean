@@ -21,32 +21,30 @@ theorem Typing.WorldTyped.reference_recorded {program : Kernel.Program} {world :
 
 theorem ReferenceView.recorded {world : World} {handle : Address} {authority : Authority}
     {id : Identity} {mode : Mutability} {permission : Authority} {access : Access} {loan : Loan}
-    (well : world.WellFormed) (recorded : authority.Recorded world.loans)
+    (recorded : authority.Recorded world.loans)
     (view : ReferenceView world handle authority id mode permission access)
     (found : world.loans.get id = some loan) : permission.Recorded world.loans := by
   rcases view with ⟨_,rfl,_⟩ | ⟨_,_,rfl,_⟩ | ⟨_,_,rfl,_⟩ <;>
-    exact recorded.referenceView well found _
+    exact recorded.referenceView found _
 
 namespace Kernel
 
 theorem ResolvesProjections.recorded {world : World} {environment : Environment}
     {base result : Address} {authority permission : Authority} {projections : List Projection}
     (resolved : ResolvesProjections world environment base authority projections result permission)
-    (well : world.WellFormed)
     (recorded : authority.Recorded world.loans) : permission.Recorded world.loans := by
   induction resolved with
   | nil => exact recorded
   | field _ _ _ ih | index _ _ _ _ _ _ _ ih => exact ih recorded
   | vacantField => exact recorded
-  | dereference _ _ _ _ found _ view _ ih => exact ih (view.recorded well recorded found)
+  | dereference _ _ _ _ found _ view _ ih => exact ih (view.recorded recorded found)
 
 theorem ResolvesPlace.recorded {world : World} {environment : Environment}
     {place : Place} {address : Address} {authority : Authority}
     (resolved : ResolvesPlace world environment place address authority)
-    (well : world.WellFormed)
     (recorded : ∀ binding ∈ environment, binding.authority.Recorded world.loans) : authority.Recorded world.loans := by
   cases resolved with
-  | localSlot selected projections => exact projections.recorded well (recorded _ selected.1)
+  | localSlot selected projections => exact projections.recorded (recorded _ selected.1)
 
 theorem LendsResident.authority_recorded {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
@@ -130,10 +128,9 @@ theorem Context.bind_authority_support {context : Context} {localSlot : Local} {
 
 theorem Context.resolves_recorded {context : Context} {world : World} {place : Place}
     {address : Address} {authority : Authority}
-    (well : world.WellFormed)
     (recorded : AuthoritySupport.Recorded context.authoritySupport world.loans)
     (resolved : ResolvesPlace world context.environment place address authority) : authority.Recorded world.loans :=
-  resolved.recorded well (AuthoritySupport.recorded_map.mp (AuthoritySupport.recorded_append.mp recorded).1)
+  resolved.recorded (AuthoritySupport.recorded_map.mp (AuthoritySupport.recorded_append.mp recorded).1)
 
 theorem ResolvedOperands.authority_support {world : World} {environment : Environment}
     {places : List Place} {operands : List ResolvedPlace}
@@ -150,7 +147,6 @@ theorem ResolvedOperands.authority_support {world : World} {environment : Enviro
 
 theorem ArgumentInputs.authority_support {world : World} {context : Context} {index : Nat}
     {formals : List Local} {places : List Place} {inputs : List InvocationInput}
-    (well : world.WellFormed)
     (recorded : AuthoritySupport.Recorded context.authoritySupport world.loans)
     (prepared : ArgumentInputs world context index formals places inputs) :
     AuthoritySupport.Recorded (inputs.map InvocationInput.authority) world.loans := by
@@ -158,12 +154,11 @@ theorem ArgumentInputs.authority_support {world : World} {context : Context} {in
   | nil => simp
   | cons resolved _ _ ih =>
     simp only [List.map_cons,AuthoritySupport.recorded_cons]
-    exact ⟨Context.resolves_recorded well recorded resolved,ih⟩
+    exact ⟨Context.resolves_recorded recorded resolved,ih⟩
 
 theorem _root_.Glorious.Language.Kernel.PatternPlan.authority_support {program : Language.Program} {world : World}
     {address : Address} {authority : Authority} {access : Access} {pattern : Pattern}
     {actions : PatternActions} (planned : PatternPlan program world address authority access pattern actions)
-    (well : world.WellFormed)
     (recorded : authority.Recorded world.loans) :
     AuthoritySupport.Recorded ((ScheduledPattern actions).flatMap PatternAction.authoritySupport) world.loans := by
   refine PatternPlan.rec
@@ -181,7 +176,7 @@ theorem _root_.Glorious.Language.Kernel.PatternPlan.authority_support {program :
       AuthoritySupport.recorded_append,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_nil,and_true]
   case refine_9 =>
     rename_i found _ _ _ _ view _ ih recorded
-    have nested := ih (view.recorded well (recorded.lend _) found)
+    have nested := ih (view.recorded (recorded.lend _) found)
     split <;> simp_all only [List.flatMap_cons,List.flatMap_nil,PatternAction.authoritySupport,
       AuthoritySupport.recorded_append,AuthoritySupport.recorded_cons,AuthoritySupport.recorded_nil,and_true]
 

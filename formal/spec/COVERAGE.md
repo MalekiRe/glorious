@@ -426,13 +426,20 @@ ignoring predicates. `Temporary.borrowed_handle_private` consumes every actual
 consumer checks again. The integrated gate including `DropHandle` passes 221
 jobs; metadata and hook-entry axiom audits report standard axioms only.
 
-The next input-readiness obligation exposed a guard-model bug, not a missing
-proof annotation. A general Lean derivation proves nested unique reference
-access impossible whenever its live parent loan has one inherited guard: the
-view directly re-checks that already-frozen inherited carrier. Explicit source
-authority and inherited loan dependencies must be distinguished in the common
-reference/resource-view producer. This remains open; no full conformance is
-claimed by the metadata or privacy gate.
+The inherited-guard modeling bug is repaired in the common producer.
+`Authority.carriers` retains only the authority expression's explicit loans;
+`throughReference`, `referenceView` and `resourceView` are world-independent.
+Inherited `Loan.guards` remain liveness dependencies and freeze their direct
+carriers; they are not requested again as independent access permissions.
+`Permitted.referenceView_iff` and `resourceView_iff` prove the full explicit
+carrier permission contracts. Their axiom audits report `propext` and
+`Quot.sound` only. Actual source address, ordered-input, pattern, snapshot,
+control and destructor-privacy consumers check with the corrected producer.
+The redundant global/recorded guard-frame products and graph admission
+premises are removed; real loan-construction dependency framing is retained.
+The integrated 221-job gate and original-admission entry-step axiom audit
+pass. Created-reference handle readiness, general invocation admission and
+proper-tail progress still require integration; this is not full conformance.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

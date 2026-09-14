@@ -43,23 +43,6 @@ theorem AllocatesBuffer.old_loan {program : Program} {before after : World}
   cases allocated
   exact (Table.get_set_other _ _ _ _ (Nat.ne_of_lt (World.loanBounds valid found))).trans found
 
-theorem AllocatesBuffer.guardsFramed {program : Program} {before after : World}
-    {custody : ClaimCustody} {allocation : ResolvedPlace}
-    {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
-    (valid : before.WellFormed)
-    (allocated : AllocatesBuffer program custody before domain element count base pointer allocation after) :
-    before.GuardsFramed after := by
-  cases allocated
-  intro identity
-  by_cases same : identity = before.nextLoan
-  · subst identity
-    have absent : before.loans.get before.nextLoan = none := by
-      cases found : before.loans.get before.nextLoan with
-      | none => rfl
-      | some loan => exact False.elim (Nat.lt_irrefl _ (World.loanBounds valid found))
-    simp only [Table.get_set,absent,Option.map_none,Option.getD_none,Option.map_some,Option.getD_some]
-  · simp only [Table.get_set_other _ _ _ _ same]
-
 theorem AllocatesBuffer.ancestor_before {program : Program} {before after : World}
     {custody : ClaimCustody} {allocation : ResolvedPlace}
     {domain : Identity} {element : Term} {count base : Nat} {pointer : RawPointer}
@@ -214,7 +197,7 @@ theorem AllocatesBuffer.handoffReady {program : RuntimeProgram} {before after : 
     intro identity current access reached
     obtain ⟨loan,found,_⟩ := ready.1.2.1 identity current access reached
     exact congrArg (Option.map Loan.permissionState) ((allocated.old_loan valid found).trans found.symm)
-  exact ready.frame_observed rows (allocated.guardsFramed valid) (allocated.supportFramed valid ready.1)
+  exact ready.frame_observed rows (allocated.supportFramed valid ready.1)
     (fun _ _ held => allocated.heldBy valid held) (fun _ _ _ permission => allocated.permitted valid permission)
 
 end Glorious.Language.Memory
