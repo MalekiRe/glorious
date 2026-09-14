@@ -417,6 +417,23 @@ finite original entry contract; proper-tail custody/suspension-safe cleanup,
 general source admission and task/frame integration remain open. No full-tree
 success is claimed; preserved example modules were not run.
 
+The shared `BodyInventory` now checks `RuntimeProgram.UnsafeContractsValid`:
+unsafe caller contracts belong to actual unsafe function declarations (§15.1).
+The declaration-selection producer is promoted to `Kernel` and reused by Drop
+and instantiation; safe selected instances derive contract absence rather than
+ignoring predicates. `Temporary.borrowed_handle_private` consumes every actual
+`FormsLoan` purpose, including `.destructor`, and the real hook-entry privacy
+consumer checks again. The integrated gate including `DropHandle` passes 221
+jobs; metadata and hook-entry axiom audits report standard axioms only.
+
+The next input-readiness obligation exposed a guard-model bug, not a missing
+proof annotation. A general Lean derivation proves nested unique reference
+access impossible whenever its live parent loan has one inherited guard: the
+view directly re-checks that already-frozen inherited carrier. Explicit source
+authority and inherited loan dependencies must be distinguished in the common
+reference/resource-view producer. This remains open; no full conformance is
+claimed by the metadata or privacy gate.
+
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished
 write precedes the shell write and is performed on the relinquished world) and

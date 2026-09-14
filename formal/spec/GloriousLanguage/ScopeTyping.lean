@@ -4,15 +4,6 @@ import GloriousLanguage.RuntimeSupport
 arguments, so installing the callee's fresh scope cannot change input types. -/
 namespace Glorious.Language
 
-theorem Kernel.Program.function_declaration {program : Kernel.Program} {id : DeclId} {function : Kernel.Function}
-    (found : program.function id = some function) : function.declaration = id := by
-  have matching := List.find?_some found
-  change (function.declaration.package == id.package && function.declaration.serial == id.serial) = true at matching
-  simp only [Bool.and_eq_true,beq_iff_eq] at matching
-  cases identity : function.declaration
-  cases id
-  simp_all
-
 theorem Kernel.Instance.scopeClosed {program : Kernel.Program} (valid : ProgramWellFormed program.declarations)
     (inventory : Kernel.BodyInventory program) {id : DeclId} {arguments : List Term} {function : Kernel.Function}
     (selected : Kernel.Instance program id arguments function) :

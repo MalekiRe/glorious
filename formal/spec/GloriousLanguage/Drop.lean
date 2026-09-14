@@ -100,13 +100,7 @@ theorem DropApplication.body {program : Kernel.Program} {self region : Term} {ho
         simp at absent
       | some => rfl
     obtain ⟨body,bodyAt⟩ := Option.isSome_iff_exists.mp present
-    have bodyId : body.declaration = hook := by
-      have matching := List.find?_some bodyAt
-      change (body.declaration.package == hook.package && body.declaration.serial == hook.serial) = true at matching
-      simp only [Bool.and_eq_true,beq_iff_eq] at matching
-      cases identity : body.declaration
-      cases hook
-      simp_all
+    have bodyId : body.declaration = hook := Program.function_declaration bodyAt
     obtain ⟨actual,actualAt,bodySignature,_,bodyCaptures⟩ := inventory.2.1 body (List.mem_of_find?_eq_some bodyAt)
     rw [bodyId] at actualAt
     have same := Option.some.inj (actualAt.symm.trans found)

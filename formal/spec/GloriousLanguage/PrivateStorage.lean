@@ -462,11 +462,11 @@ theorem EnterWorldAttempt.private_slot {program : Kernel.Program} {before : Stat
 /-- The hook's temporary root has no incoming live loans or reservations.
 The newly formed loan names Self, not the fresh reference-handle root. -/
 theorem Temporary.borrowed_handle_private {program : Kernel.Program} {before allocated after : World}
-    {context : Context} {value : Value} {address handle : Address} {authority : Authority}
+    {purpose : LoanPurpose} {context : Context} {value : Value} {address handle : Address} {authority : Authority}
     (well : before.WellFormed) (stored : before.Stores address value)
     (temporary : Temporary program context (.reference .unique (.runtimeRegion context.region) value.type)
       before handle allocated)
-    (borrowed : Borrows program allocated authority .unique context.region address handle after) :
+    (borrowed : FormsLoan program purpose allocated authority .unique context.region address handle after) :
     ∃ root, after.root handle = some root ∧ root.home = .temporary context.activation context.scope ∧
       handle.fields = [] ∧ CanEndStorage after handle.root := by
   obtain ⟨layout,allocation⟩ := temporary

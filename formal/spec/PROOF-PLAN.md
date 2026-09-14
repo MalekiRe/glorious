@@ -283,6 +283,26 @@ producers to this finite admission and derive proper-tail custody and safe
 caller cleanup. General source resource progress and task/frame consumers
 remain open; no full-tree conformance is claimed.
 
+The unsafe caller-contract metadata boundary is now checked by the shared
+`BodyInventory`: attached contracts must name actual unsafe declarations, as
+required by §15.1. `Instance.unsafe_contract_none` derives the safe-instance
+case; it does not discard predicates. The canonical declaration-selection
+proof is promoted to `Kernel` and reused. Destructor-handle privacy now consumes
+the actual `.destructor` loan purpose, and its real hook-entry consumer checks.
+The integrated `DropHandle` gate passes 221 jobs, with standard-axiom-only
+metadata and privacy audits. Original invocation admission still needs migration.
+
+Reference readiness exposed the next actual modeling error. The general Lean
+reproduction establishes that, for arbitrary world/address/identities, a live
+parent loan with guards `[carrier]` makes
+`Permitted world ((Authority.loan parent).referenceView world nested .unique)
+  .unique address` impossible. The view explicitly re-checks the inherited
+carrier, while the parent loan itself freezes that carrier. No example module
+was added or run; the general implication was proof-checked through stdin.
+Next: correct explicit authority propagation versus inherited dependency
+liveness in the common reference/resource-view producer, migrate all consumers,
+and close actual reference-handle readiness before completing Drop admission.
+
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
 producer and derives the unit installer's typed result, actual write, framing

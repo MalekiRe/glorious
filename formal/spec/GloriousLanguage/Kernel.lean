@@ -210,8 +210,19 @@ instance : Coe Program RuntimeProgram := ⟨Program.toRuntimeProgram⟩
 def Program.function (program : Program) (id : DeclId) : Option Function :=
   program.functions.find? (fun function => function.declaration == id)
 
-/-- The body/declaration boundary, shared by specification admission and
-resident typing. This is independent of execution or resource soundness. -/
+theorem Program.function_declaration {program : Program} {identity : DeclId} {function : Function}
+    (found : program.function identity = some function) : function.declaration = identity := by
+  have matching := List.find?_some found
+  change (function.declaration.package == identity.package && function.declaration.serial == identity.serial) = true at matching
+  simp only [Bool.and_eq_true,beq_iff_eq] at matching
+  cases declared : function.declaration
+  cases identity
+  simp_all
+
+
+/-- The body/declaration and caller-contract metadata boundary, shared by
+specification admission and resident typing. This asserts no execution or
+resource-soundness conclusion. -/
 def BodyInventory (program : Program) : Prop :=
   (program.functions.map (·.declaration)).Nodup ∧
   (∀ function ∈ program.functions, ∃ declaration, program.declarations.function function.declaration = some declaration ∧
@@ -219,7 +230,7 @@ def BodyInventory (program : Program) : Prop :=
     function.captures.map (·.type) = declaration.captures) ∧
   (∀ declaration anchor, program.declarations.function declaration.header.id = some declaration → declaration.origin = .source anchor →
     ∃ function ∈ program.functions, function.declaration = declaration.header.id) ∧
-  (∀ function ∈ program.functions, function.Lexical)
+  (∀ function ∈ program.functions, function.Lexical) ∧ program.UnsafeContractsValid
 
 abbrev Binding := StorageBinding
 

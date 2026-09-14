@@ -311,7 +311,7 @@ theorem Function.mapTerms_eq_self (f : Term → Term) (function : Function)
 
 theorem BodyInventory.lexical {program : Program} (inventory : BodyInventory program)
     {function : Function} (member : function ∈ program.functions) : function.Lexical :=
-  inventory.2.2.2 function member
+  inventory.2.2.2.1 function member
 
 end Kernel
 

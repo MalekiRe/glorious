@@ -1116,6 +1116,26 @@ structure RuntimeProgram where
   unsafeContracts : DeclId → Option UnsafeResourceContract := fun _ => none
   unsafeInvariants : DeclId → Option (UnsafeInvariantContract declarations) := fun _ => none
 
+/-- Caller-unsafe contracts belong to unsafe function declarations (§15.1).
+Safe bodies may establish unsafe invariants internally; they cannot impose
+hidden unsafe obligations on an ordinary caller, including implicit Drop. -/
+def RuntimeProgram.UnsafeContractsValid (program : RuntimeProgram) : Prop :=
+  ∀ identity contract, program.unsafeContracts identity = some contract →
+    ∃ declaration, program.declarations.function identity = some declaration ∧ declaration.signature.unsafeAllowed = true
+
+theorem RuntimeProgram.UnsafeContractsValid.safe {program : RuntimeProgram} {identity : DeclId}
+    {declaration : FunctionDefinition} (valid : program.UnsafeContractsValid)
+    (declared : program.declarations.function identity = some declaration)
+    (safe : declaration.signature.unsafeAllowed = false) : program.unsafeContracts identity = none := by
+  cases selected : program.unsafeContracts identity with
+  | none => rfl
+  | some contract =>
+    obtain ⟨actual,found,requiresUnsafe⟩ := valid identity contract selected
+    have same := Option.some.inj (found.symm.trans declared)
+    subst actual
+    cases safe.symm.trans requiresUnsafe
+
+
 /-- The declaration's local closed invariant for this actual resident. Its
 recursive use and independent storage custody are supplied by ResourcesClosed. -/
 def Value.InvariantClosed (program : RuntimeProgram) (world : World) (resident : Value) : Prop :=

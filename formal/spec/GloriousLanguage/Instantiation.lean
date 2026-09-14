@@ -138,5 +138,20 @@ def Instance (program : Program) (id : DeclId) (arguments : List Term) (function
     (∀ argument ∈ arguments, argument.ScopeClosed) ∧
     function = template.instantiate substitution
 
+/-- Instantiation retains the declaration's caller-safety flag. The shared
+body/declaration inventory excludes hidden unsafe caller contracts on a safe
+selected body; it never discards or assumes an attached predicate. -/
+theorem Instance.unsafe_contract_none {program : Program} {identity : DeclId} {arguments : List Term}
+    {function : Function} (inventory : BodyInventory program)
+    (selected : Instance program identity arguments function) (safe : function.signature.unsafeAllowed = false) :
+    program.unsafeContracts function.declaration = none := by
+  obtain ⟨template,declaration,substitution,body,declared,signature,_,_,_,rfl⟩ := selected
+  have declarationSafe : declaration.signature.unsafeAllowed = false := by
+    simpa only [Function.instantiate,Function.transformTerms,signature,Signature.instantiate] using safe
+  change program.unsafeContracts template.declaration = none
+  rw [Program.function_declaration body]
+  exact inventory.2.2.2.2.safe declared declarationSafe
+
+
 end Kernel
 end Glorious.Language

@@ -225,6 +225,15 @@ or a dependency of this project.
   actual non-tail machine step, including exact-prefix physical exhaustion.
   General `InvocationStart` admission and proper-tail custody/cleanup remain
   open. The strict 220-job gate and general theorem axiom audits pass.
+- `BodyInventory` also validates unsafe caller-contract declaration ownership
+  (§15.1): an attached contract must name an unsafe function declaration.
+  `Instance.unsafe_contract_none` derives absence for safe selected bodies;
+  no attached predicate is ignored. The canonical declaration-selection proof
+  is shared at `Kernel`, and destructor-handle privacy now consumes the real
+  `.destructor` loan purpose. The integrated gate including `DropHandle` passes
+  221 jobs. Nested-reference inherited-guard handling remains a known modeling
+  bug on the input-readiness path; its general Lean reproduction is recorded
+  in `PROOF-PLAN.md`.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the
