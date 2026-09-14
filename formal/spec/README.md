@@ -215,17 +215,16 @@ or a dependency of this project.
   Receiver addresses may be projected; ordinary and raw inputs share the fold.
   Callable typing supplies capture arity and the empty shell-resource list.
   No future-world finishing callback, pre-emptied captures or assumed successor
-  remains. The theorem still requires actual receiver/witness preparation,
-  original source readiness, prepared-state input compatibility and fresh-row
-  compatibility with the owned receiver. `EntrySource.prepare` now constructs
-  preparation success/exhaustion from original recipe readiness, positive
-  requests and observed-graph compatibility. `EntrySource.prepareInputs` now
-  constructs all preparation outcomes and derives every completed recipe
-  input product, including resident capture re-authoring, from the original
-  world. `EntrySource.prepareFreshInputs` additionally constructs the actual
-  fresh callee lifetime from caller-world admission, retargets positive layout
-  requests, and derives recipe readiness and the complete preparation product.
-  Whole-entry composition remains open. The strict 220-job gate passes.
+  remains. This prepared-phase theorem is now consumed by
+  `EntrySource.Admitted.enterWorldAttempt`: original-world recipe readiness,
+  positive requests, input interference, incoming resources and owned-receiver
+  compatibility construct every real entry outcome. Fresh-lifetime creation,
+  authority-changing captures, ordered binding and receiver retirement are
+  composed; no intermediate-world admission is supplied.
+  `EntrySource.Admitted.enterStep` consumes the same finite admission in the
+  actual non-tail machine step, including exact-prefix physical exhaustion.
+  General `InvocationStart` admission and proper-tail custody/cleanup remain
+  open. The strict 220-job gate and general theorem axiom audits pass.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

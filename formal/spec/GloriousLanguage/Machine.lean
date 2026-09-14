@@ -620,6 +620,11 @@ inductive PreparesEntryAttempt (program : Kernel.Program) (callee : Context) (fu
       PreparesEntryAttempt program callee function before
         (.contextual receiver receiverAccess witness witnessAccess (captures ++ arguments)) [] middle .exhausted
 
+theorem PreparesEntryAttempt.exhausted_inputs {program : Kernel.Program} {callee : Context} {function : Function}
+    {before after : World} {source : EntrySource} {inputs : List InvocationInput}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after .exhausted) : inputs = [] := by
+  cases prepared <;> rfl
+
 /-- Completed preparation is the successful specialization of the same attempt. -/
 abbrev PreparesEntry (program : Kernel.Program) (callee : Context) (function : Function)
     (before : World) (source : EntrySource) (inputs : List InvocationInput) (after : World) : Prop :=

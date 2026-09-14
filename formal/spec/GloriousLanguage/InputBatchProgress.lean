@@ -1187,7 +1187,7 @@ structure Kernel.StepFrame (before middle : World) : Prop where
   step installs at most one root, at the frontier itself. -/
   rooted : ∀ id, id < before.nextRoot →
     (middle.roots.get id).map Root.location = (before.roots.get id).map Root.location
-  /-- No recorded root below the frontier has an allocation or external home. -/
+  /-- Every recorded allocation/external root is below the original frontier. -/
   anchored : ∀ id root, middle.roots.get id = some root →
     ((∃ domain, root.home = .allocation domain) ∨ ∃ domain, root.home = .external domain) →
       id < before.nextRoot
@@ -5343,6 +5343,150 @@ theorem Execution.EntrySource.prepareFreshInputs {program : Kernel.Program} {cal
     (fresh.entrySourceReady valid ready) (fresh.entryPreparationConditions valid product conditions)
     (fresh.inputsCompatible valid product) nodup
   exact ⟨withRegion,inputs,after,outcome,fresh,prepared,product⟩
+
+
+/-- Value-only writes after a lending step preserve that same physical and
+loan-row frame. They neither create a second fresh row nor move a root. -/
+theorem Kernel.StepFrame.follow_locations {before middle after : World} (frame : StepFrame before middle)
+    (locations : ∀ identity, (after.roots.get identity).map Root.location = (middle.roots.get identity).map Root.location)
+    (loans : after.loans = middle.loans) : StepFrame before after where
+  retained := fun identity different => by rw [loans]; exact frame.retained identity different
+  rooted := fun identity bounded => (locations identity).trans (frame.rooted identity bounded)
+  anchored := fun identity root found home => by
+    obtain ⟨original,selected,same⟩ := World.root_origin locations found
+    exact frame.anchored identity original selected (by simpa only [congrArg Root.home same] using home)
+
+/-- Owned preparation keeps the original input authorities. Its only possible
+fresh row is the contextual witness loan; actual shell/witness consumption
+preserves the resulting frame. The receiver's record comes from its actual
+callable permission, not a separate provenance admission. -/
+theorem Execution.PreparesEntry.ownedReceiver_frame {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before after : World} {source : Execution.EntrySource} {inputs : List InvocationInput}
+    {receiver : ResolvedPlace} (valid : before.WellFormed)
+    (prepared : Execution.PreparesEntry program callee function before source inputs after)
+    (owned : source.ownedReceiver = some receiver) :
+    inputs = source.originalInputs function ∧ StepFrame before after ∧ receiver.authority.Recorded before.loans := by
+  cases prepared with
+  | supplied => cases owned
+  | resident callable _ lent captures consumed =>
+    simp only [Execution.EntrySource.ownedReceiver] at owned
+    split at owned
+    next mode =>
+      cases mode
+      cases Option.some.inj owned
+      cases lent with
+      | owned =>
+        obtain ⟨value,stored,initialized,head,resources,permission⟩ := callable
+        exact ⟨by simp only [Execution.EntrySource.originalInputs,captures.1],
+          Kernel.StepFrame.of_locations valid consumed.locations consumed.loans,permission.recorded⟩
+      | lent modes _ _ _ _ => simp at modes
+    next => cases owned
+  | contextual callable _ _ _ receiverLent witnessLent _ consumed cleared =>
+    simp only [Execution.EntrySource.ownedReceiver] at owned
+    split at owned
+    next mode =>
+      cases mode
+      cases Option.some.inj owned
+      cases receiverLent with
+      | owned =>
+        obtain ⟨value,stored,initialized,head,resources,permission⟩ := callable
+        exact ⟨rfl,((witnessLent.stepFrame valid).follow_locations consumed.locations consumed.loans).follow_locations
+          cleared.locations cleared.loans,permission.recorded⟩
+      | lent modes _ _ _ _ => simp at modes
+    next => cases owned
+
+/-- The owned receiver's compatibility is checked against original inputs in
+the caller world. Actual fresh-region and preparation frames derive the binder
+premise; no compatibility predicate at the prepared world is assumed. -/
+theorem Execution.PreparesEntry.original_receiver_compatible {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {original before after : World} {source : Execution.EntrySource} {inputs : List InvocationInput}
+    {region : Identity} (valid : original.WellFormed) (fresh : FreshRegion original region before)
+    (prepared : Execution.PreparesEntry program callee function before source inputs after)
+    (recorded : ∀ input ∈ source.originalInputs function, input.authority.Recorded original.loans)
+    (compatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ source.originalInputs function,
+      input.PermissionCompatible original receiver.authority .owned receiver.address) :
+    ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ inputs,
+      input.PermissionCompatible after receiver.authority .owned receiver.address := by
+  intro receiver owned input member
+  obtain ⟨same,frame,receiverRecorded⟩ := prepared.ownedReceiver_frame (fresh.wellFormed valid) owned
+  rw [same] at member
+  have originalFrame : StepFrame original after := by
+    obtain ⟨rfl,rfl⟩ := fresh
+    exact ⟨frame.retained,frame.rooted,frame.anchored⟩
+  have originalRecorded : receiver.authority.Recorded original.loans := by
+    simpa only [fresh.2] using receiverRecorded
+  exact (compatible receiver owned input member).frame valid originalFrame (recorded input member) originalRecorded
+
+
+/-- Original-world entry obligations, before creating the callee lifetime.
+These are source/storage/loan/layout predicates, not execution, progress or
+future-world finishing assumptions. Proper-tail caller cleanup is separate. -/
+structure Execution.EntrySource.Admitted (program : Kernel.Program) (world : World) (region : Identity)
+    (function : Function) (source : Execution.EntrySource) : Prop where
+  ready : source.Ready program world function
+  preparation : source.PreparationConditions program world region function
+  inputs : InvocationInputsCompatible program ((source.originalInputs function).flatMap InvocationInput.clearedStorage)
+    region world (source.originalInputs function)
+  incoming : IncomingResources program function world (source.originalInputs function)
+  receiverCompatible : ∀ receiver, source.ownedReceiver = some receiver → ∀ input ∈ source.originalInputs function,
+    input.PermissionCompatible world receiver.authority .owned receiver.address
+
+
+/-- Whole entry from original invocation facts: create the callee lifetime,
+prepare the actual recipe, bind every resident/raw input in order and retire
+an owned receiver. Either physical exhaustion preserves its real prefix, or
+all phases complete. No intermediate-world admission or finishing callback
+is a premise. -/
+theorem Execution.EntrySource.Admitted.enterWorldAttempt {program : Kernel.Program} {before : Execution.State}
+    {caller : Execution.Context} {function : Function} {source : Execution.EntrySource}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (admitted : source.Admitted program before.world caller.region function)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ context after outcome, Execution.EnterWorldAttempt program before caller function source context after outcome := by
+  obtain ⟨ready,conditions,product,incoming,receiverCompatible⟩ := admitted
+  obtain ⟨declaration,declared⟩ := declared
+  let callee : Execution.Context := ⟨[],declaration.header.module,before.nextActivation,before.world.nextRegion,
+    before.world.nextRegion,function.entryScope before.world.nextRegion before.nextBrand,false,[⟨function.declaration,[]⟩]⟩
+  obtain ⟨withRegion,inputs,after,outcome,fresh,prepared,preparedInputs⟩ :=
+    source.prepareFreshInputs (callee := callee) typed.1 rfl ready conditions product incoming
+  cases outcome with
+  | complete =>
+    have footprint : inputs.flatMap InvocationInput.clearedStorage =
+        (source.originalInputs function).flatMap InvocationInput.clearedStorage :=
+      congrArg List.flatten (Execution.PreparesEntry.map_inputs prepared InvocationInput.clearedStorage (by intros; rfl))
+    have inputsReady : InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage)
+        before.world.nextRegion after inputs := by
+      rw [footprint]
+      exact preparedInputs rfl
+    exact Kernel.EntryBatch.enterWorldAttempt callee ⟨rfl,rfl,rfl⟩ valid inventory typed ready
+      ⟨declaration,declared⟩ prepared fresh incoming inputsReady
+      (Execution.PreparesEntry.original_receiver_compatible typed.1 fresh prepared
+        (fun input member => product.2.2.1 input member) receiverCompatible)
+      callerUnsafe
+  | exhausted =>
+    have empty := prepared.exhausted_inputs
+    subst inputs
+    exact ⟨callee,after,.exhausted,.preparationExhausted declared fresh prepared incoming rfl callerUnsafe⟩
+
+
+/-- The original admission is consumed by the actual non-tail machine step,
+including physical resource failure. It does not merely produce a prepared
+world or an unused compatibility certificate. -/
+theorem Execution.EntrySource.Admitted.enterStep {program : Kernel.Program} {before : Execution.State}
+    {caller : Execution.Context} {function : Function} {source : Execution.EntrySource}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (admitted : source.Admitted program before.world caller.region function)
+    (declared : ∃ declaration, program.declarations.function function.declaration = some declaration)
+    (task : before.task = .enter caller function source false)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ event after, Execution.LocalStep program before event after := by
+  obtain ⟨context,world,outcome,entered⟩ := admitted.enterWorldAttempt valid inventory typed declared callerUnsafe
+  cases outcome with
+  | complete => exact ⟨none,_,.enter task entered⟩
+  | exhausted => exact ⟨some (.fatal .resource),_,.enterExhausted task entered⟩
 
 
 end Glorious.Language

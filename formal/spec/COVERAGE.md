@@ -246,9 +246,9 @@ source-derived execution progress. Original source readiness, actual
 receiver/witness preparation, original-world incoming-resource agreement, prepared-state
 batch compatibility and receiver fresh-row compatibility remain explicit
 admission premises of that endpoint; separate batch framing is now derived.
-General preparation construction and all-source original-input transport are
-proved below. Source-derived conditions, whole-entry composition, proper-tail
-cleanup and whole-machine progress remain open.
+Whole preparation and ordinary entry composition from finite original-world
+admission are proved below. Source-derived admission, proper-tail cleanup and
+whole-machine progress remain open.
 
 The scoped framing promotions are now integrated and checked, not resident in a
 lane workspace. They are level moves plus one disclosed redesign: the
@@ -394,16 +394,28 @@ lifetime support while selecting the actually live callee lifetime. Actual
 preparation outcome from original-world incoming resources, readiness, requests
 and interference. No fresh-world product or chosen preparation is admitted.
 The strict 220-job gate passes; the new construction and frame theorem axiom
-audits report standard axioms only. Receiver/binder composition remains open.
+audits report standard axioms only.
+
+Whole entry now consumes `EntrySource.Admitted`, a product of original-world
+recipe readiness, positive preparation/layout requests, input interference,
+incoming-resource agreement and receiver fresh-row compatibility. Actual owned
+preparation preserves original input authorities and at most the witness's
+fresh row; shared loan/storage frames derive prepared receiver compatibility.
+`Admitted.enterWorldAttempt` constructs lifetime creation, preparation, the
+ordered resident/raw binder and actual receiver retirement, or the exact
+physical exhaustion prefix. `Admitted.enterStep` consumes it in the real
+non-tail machine transition. The strict 220-job gate and the general entry,
+step, receiver and exhaustion axiom audits pass with standard axioms only.
 
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
 records, including guarded carriers, through actual preparation, binding and
 receiver finishing. These general theorem axiom audits also report only the
-standard axioms. Original semantic admission, fresh-lifetime request transport,
-receiver fresh-row compatibility and whole-entry/task/frame integration remain
-open. No full-tree success is claimed; preserved example modules were not run.
+standard axioms. The existing `InvocationStart` admission still needs the
+finite original entry contract; proper-tail custody/suspension-safe cleanup,
+general source admission and task/frame integration remain open. No full-tree
+success is claimed; preserved example modules were not run.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

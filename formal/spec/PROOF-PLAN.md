@@ -272,10 +272,16 @@ and positive requests retarget to the genuinely live callee region. Readiness,
 graph compatibility, consumption exclusions and the full input product are
 derived across this step rather than re-admitted in a future world. The strict
 220-job gate and the new general theorem axiom audits pass with standard axioms
-only. Next: compose original semantic admission and receiver fresh-row
-compatibility with actual preparation/binding/retirement. Higher task/frame
-consumers and general resource progress remain open; no full-tree conformance
-is claimed.
+only. `EntrySource.Admitted.enterWorldAttempt` now consumes the finite original-
+world contract to construct fresh preparation, ordered binding and receiver
+retirement or exact-prefix exhaustion. Owned preparation's real loan/storage
+frame derives receiver compatibility; no prepared-world condition is assumed.
+`Admitted.enterStep` consumes the result in the actual non-tail machine step.
+The strict 220-job gate and general entry/step/receiver/exhaustion axiom audits
+pass with standard axioms only. Next: migrate `InvocationStart` and its real
+producers to this finite admission and derive proper-tail custody and safe
+caller cleanup. General source resource progress and task/frame consumers
+remain open; no full-tree conformance is claimed.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -335,15 +341,14 @@ ownership and the final physical write; it no longer assumes finishing in an
 arbitrary future world. The strict 73-job dependency gate passed and the
 endpoint uses only the standard Lean logical axioms.
 
-Next on this dependency chain: derive original source readiness and concrete
-preparation conditions from source admission, and compose ordered binding with
-receiver finishing. All preparation outcomes and their successful original-to-
-prepared input products are now constructed, including capture re-authoring.
-Incoming resources are now checked at the original invocation, not its mutated
-prepared world, and prepared uniqueness is derived. Fresh-lifetime requests
-and the complete fresh/preparation product are now constructed from caller-
-world facts. Receiver compatibility and original semantic admission remain
-real obligations.
+Next on this dependency chain: derive the finite original entry contract from
+source admission, migrate the actual `InvocationStart` producers, and establish
+proper-tail custody/suspension-safe cleanup. Fresh preparation, capture re-
+authoring, binding and receiver finishing now compose from caller-world facts
+in `EntrySource.Admitted.enterWorldAttempt`; `Admitted.enterStep` consumes this
+in the actual non-tail transition. Incoming resources remain checked at the
+original invocation, not its mutated prepared world, and all prepared input
+uniqueness and receiver compatibility are derived.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains
