@@ -5,7 +5,7 @@ context owner. Reservation and pattern machinery preserve the same home and
 control bounds as ordinary invocation; they do not introduce new activations. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem LabelRoute.activation_support {frames inner outer : List Frame} {brand region : Identity}
     {context : Context} {type : Term} {limit : Identity}
@@ -62,16 +62,6 @@ theorem TestResult.activationsBelow {program : Kernel.Program} {context : Contex
       (fields.choose_spec.2.2.2.2.activationsBelow
         (packed.activationsBelow (copied.activationsBelow bounded owner) owner) owner)
 
-theorem ConsumesAvailability.activationsBelow {before after : World}
-    {address : Address} {id : Identity} {access : Access} {limit : Identity}
-    (consumed : ConsumesAvailability before address id access after)
-    (bounded : before.ActivationsBelow limit) : after.ActivationsBelow limit := by
-  cases consumed with
-  | lent => exact bounded
-  | owned _ written =>
-    have actual := World.write_activationsBelow written bounded
-    exact actual
-
 theorem ControlStep.activation_frontier {program : Kernel.Program} {before after : State} {event : Option Event}
     (step : ControlStep program before event after) : before.nextActivation ≤ after.nextActivation := by
   cases step <;> exact Nat.le_refl _
@@ -105,7 +95,6 @@ theorem ControlStep.homes_activationsBelow {program : Kernel.Program} {before af
     have actual := World.write_activationsBelow written bounded
     exact actual
   case destroySpentAvailable written => exact World.write_activationsBelow written bounded
-  case contextualCall consumed closed => exact closed.activationsBelow (consumed.activationsBelow bounded)
   case positiveTest allocated tested | negativeTest allocated tested =>
     exact tested.activationsBelow (allocated.activationsBelow bounded (by simpa using taskBound)) taskBound
 

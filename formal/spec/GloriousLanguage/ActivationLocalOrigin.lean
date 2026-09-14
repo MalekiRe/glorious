@@ -4,7 +4,7 @@ import GloriousLanguage.ActivationStorageOrigin
 frontier of the activations actually present in their storage and control. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 @[simp] theorem CloseRegions.activation_support (regions : List Identity) (next : Task) :
     (CloseRegions regions next).activationSupport = next.activationSupport := by
@@ -19,6 +19,18 @@ open Kernel
   induction addresses with
   | nil => rfl
   | cons _ _ ih => exact ih
+
+@[simp] theorem ReleaseLoans.activation_support (identities : List Identity) (next : Task) :
+    (ReleaseLoans identities next).activationSupport = next.activationSupport := by
+  unfold ReleaseLoans
+  induction identities.eraseDups with
+  | nil => rfl
+  | cons _ _ ih => exact ih
+
+@[simp] theorem ReleaseCustodyLoans.activation_support (world : World) (custody : ClaimCustody) (next : Task) :
+    (ReleaseCustodyLoans world custody next).activationSupport = next.activationSupport :=
+  ReleaseLoans.activation_support _ _
+
 
 theorem TailFrames.activation_support {frames rest : List Frame} {activation : Identity}
     {outer : Context} {regions : List Identity} {limit : Identity}
@@ -60,14 +72,17 @@ theorem LocalStep.activation_support {program : Kernel.Program} {before after : 
   cases step
   all_goals simp_all only [Task.activationSupport,Frame.activationSupport,List.flatMap_cons,List.flatMap_append,
     List.flatMap_nil,RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,
-    true_and,and_true,CloseRegions.activation_support,Context.bind,Context.bindRegion,Context.bindBrand]
+    true_and,and_true,CloseRegions.activation_support,ReleaseLoans.activation_support,ReleaseCustodyLoans.activation_support,
+    Context.bind,Context.bindRegion,Context.bindBrand]
   case enter entered =>
     have owner := entered.activation_lt
     exact ⟨owner,FreshNamedFrame.activation_support owner,owner⟩
-  case enterTail entered route _ _ _ =>
+  case enterTail entered _ route _ _ _ =>
     have owner := entered.activation_lt
     obtain ⟨outerBound,restBound⟩ := route.activation_support framesAfter
     exact ⟨owner,FreshNamedFrame.activation_support owner,⟨outerBound,owner⟩,restBound⟩
+  case bindReturn _ returned | scopeReturn _ returned _ _ | labelReturn returned | activationReturn _ returned _ _ =>
+    simpa only [returned.activation] using frameBound.1
 
 theorem AtomStep.activation_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (taskBound : RootSupport.Below before.task.activationSupport before.nextActivation)
@@ -90,10 +105,16 @@ theorem LocalStep.homes_activationsBelow {program : Kernel.Program} {before afte
   case evaluate allocated | bind allocated | invoke allocated =>
     exact allocated.activationsBelow bounded (by simpa using taskBound)
   case result kept => exact kept.activationsBelow bounded taskBound
-  case transfer moved | bindReturn moved => exact moved.activationsBelow bounded
-  case call consumed => exact consumed.activationsBelow bounded
-  case enter entered | enterTail entered _ _ _ _ => exact entered.activationsBelow bounded
-  case activationReturn kept _ _ | scopeReturn kept _ _ => exact kept.activationsBelow bounded frameBound.1
+  case transfer moved => exact moved.activationsBelow bounded
+  case bindReturn moved returned => exact returned.activationsBelow (moved.activationsBelow bounded) frameBound.1
+  case enter entered | enterExhausted entered => exact EnterWorldAttempt.activationsBelow entered bounded
+  case enterTail entered relinquished _ _ _ _ =>
+    exact relinquished.activationsBelow (EnterWorldAttempt.activationsBelow entered bounded)
+  case activationReturn kept returned _ _ =>
+    exact returned.activationsBelow (kept.activationsBelow bounded frameBound.1) frameBound.1
+  case scopeReturn kept returned _ _ =>
+    exact returned.activationsBelow (kept.activationsBelow bounded frameBound.1) frameBound.1
+  case labelReturn returned => exact returned.activationsBelow bounded frameBound.1
   case scope region _ => exact region.activationsBelow bounded
   case patternBind bound => exact bound.activationsBelow bounded taskBound
   case patternShell deconstructed =>
@@ -101,7 +122,9 @@ theorem LocalStep.homes_activationsBelow {program : Kernel.Program} {before afte
     exact World.write_activationsBelow (by assumption) bounded
   case destroyHook allocated borrowed _ =>
     exact borrowed.activationsBelow (allocated.activationsBelow bounded taskBound.1)
-  case destroyReference written | shellDone written => exact World.write_activationsBelow written bounded
+  case destroyReference written => exact World.write_activationsBelow written bounded
+  case shellDone relinquished written => exact World.write_activationsBelow written (relinquished.activationsBelow bounded)
+  case releaseStorageReturned returned => exact returned.activationsBelow bounded
   case retire retired => exact retired.activationsBelow bounded
   case regionEnd ended => exact ended.activationsBelow bounded
   case loanEnd ended | releaseRoot ended | releaseChild ended => exact ended.activationsBelow bounded

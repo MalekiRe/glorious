@@ -4,7 +4,7 @@ import GloriousLanguage.ControlLocalOrigin
 of their actual dynamic products through ordinary control transfer. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem LabelRoute.control_support {frames inner outer : List Frame} {brand region : Identity}
     {context : Context} {type : Term} {limit : Identity}
@@ -72,10 +72,10 @@ theorem ControlStep.control_support {program : Kernel.Program} {before after : S
     rw [RootSupport.below_map]
     intro place member
     exact World.reserved_root_bound typed.1 found permission.1 (List.mem_reverse.mp member)
-  case contextualCall receiver _ _ _ _ witness _ _ _ _ _ captures inputs _ _ =>
-    exact ⟨Nat.lt_of_lt_of_le (receiver.root_bound typed.1) frontier,
-      Nat.lt_of_lt_of_le (witness.root_bound typed.1) frontier,
-      (captures.root_support typed.1).mono frontier,(inputs.root_support typed.1 taskBound).mono frontier⟩
+  case contextualCall receiver _ _ _ _ _ _ _ witness _ _ captures inputs resources =>
+    exact ⟨Context.resolves_root_bound typed.1 taskBound receiver,Context.resolves_root_bound typed.1 taskBound witness,
+      ⟨captures.root_support typed.1,inputs.root_support typed.1 taskBound⟩,
+      resources.root_support typed.1 (RootSupport.below_map.mp (RootSupport.below_append.mp taskBound).1)⟩
   case positiveTest allocated tested =>
     exact Context.bind_root_support taskAfter (Nat.lt_of_lt_of_le allocated.root_bound tested.suspensionExtension.counter)
   case negativeTest allocated tested =>

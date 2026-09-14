@@ -552,6 +552,49 @@ theorem Mutations.published_fresh {program : Kernel.Program} {custody : ClaimCus
       · exact first.produced_fresh own
       · exact Nat.le_trans first.homeExtension.counter (ih published)
 
+theorem _root_.Glorious.Language.Memory.AllocatesBuffer.root_bound {program : Language.Program}
+    {custody : ClaimCustody} {before after : World} {domain element count base pointer allocation}
+    (allocated : Memory.AllocatesBuffer program custody before domain element count base pointer allocation after) :
+    allocation.address.root < after.nextRoot := by
+  cases allocated
+  exact Nat.lt_succ_self _
+
+theorem _root_.Glorious.Language.Memory.ReallocatesBuffer.root_bound {program : RuntimeProgram}
+    {custody : ClaimCustody} {before after : World} {oldAllocation : ResolvedPlace} {old : RawPointer}
+    {domain element count base pointer allocation}
+    (reallocated : Memory.ReallocatesBuffer program custody before oldAllocation old domain element count base pointer allocation after) :
+    allocation.address.root < after.nextRoot := by
+  cases reallocated with
+  | grow ready allocated moved released =>
+    exact Nat.lt_of_lt_of_le allocated.root_bound
+      (Nat.le_trans moved.authorityStable.homes.counter released.homeExtension.counter)
+
+theorem Mutation.produced_root_bound {program : Kernel.Program} {policy : AuthorityPolicy}
+    {before after : World} {action : MutationAction} {custody : ClaimCustody}
+    (changed : Mutation program policy before action after) {resource : ProducedResource}
+    (member : resource ∈ action.produced custody) : resource.place.address.root < after.nextRoot := by
+  cases changed <;> simp only [MutationAction.produced,List.mem_singleton,List.not_mem_nil] at member
+  case allocate allocated | allocateExterior allocated =>
+    subst member
+    cases allocated
+    exact Nat.lt_succ_self _
+  case allocateBuffer allocated | reallocateBuffer allocated =>
+    subst member
+    exact allocated.root_bound
+
+theorem Mutations.published_root_bound {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World} {produced actions}
+    (changed : Mutations program custody policy before produced actions after) {resource : ProducedResource}
+    (member : resource ∈ TransactionOutputs custody actions) : resource.place.address.root < after.nextRoot := by
+  induction changed with
+  | refl => simp only [TransactionOutputs,List.flatMap_nil,List.not_mem_nil] at member
+  | cons first rest ih =>
+    simp only [TransactionOutputs,List.flatMap_cons,List.mem_append] at member
+    rcases member with own | published
+    · exact Nat.lt_of_lt_of_le (first.produced_root_bound own) rest.homeExtension.counter
+    · exact ih published
+
+
 theorem _root_.Glorious.Language.Memory.AllocatesBuffer.authority_recorded {program : Language.Program}
     {custody : ClaimCustody} {before after : World} {domain element count base pointer allocation}
     (allocated : Memory.AllocatesBuffer program custody before domain element count base pointer allocation after) :

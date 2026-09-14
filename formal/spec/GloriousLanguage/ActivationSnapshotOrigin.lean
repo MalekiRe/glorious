@@ -5,7 +5,7 @@ Relocated activations remain below the enlarged counter, and newly selected
 activation identities cannot collide with any previously allocated identity. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem Routes.activation_support {program : Kernel.Program} {before : State}
     {operation : DeclId} {arguments : List Term} {payload : List ResolvedPlace}

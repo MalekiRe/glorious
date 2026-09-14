@@ -4,7 +4,7 @@ import GloriousLanguage.ControlStorageOrigin
 actual task and retained frames, including entry, tail cleanup and Drop. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem TailFrames.control_support {frames rest : List Frame} {activation : Identity}
     {outer : Context} {regions : List Identity} {limit : Identity}
@@ -38,7 +38,7 @@ theorem LocalStep.control_support {program : Kernel.Program} {before after : Sta
   all_goals simp_all only [Task.rootSupport,Frame.rootSupport,PatternAction.rootSupport,
     EntrySource.rootSupport,InvocationInput.rootSupport,List.flatMap_cons,List.flatMap_append,
     List.flatMap_nil,RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,
-    true_and,and_true,CloseRegions.root_support,Address.child]
+    true_and,and_true,CloseRegions.root_support,ReleaseLoans.root_support,ReleaseCustodyLoans.root_support,Address.child]
   case evaluate allocated => exact ⟨Context.bind_root_support taskAfter allocated.root_bound,allocated.root_bound⟩
   case bind allocated => exact ⟨Context.bind_root_support taskAfter allocated.root_bound,allocated.root_bound⟩
   case result kept => exact kept.root_bound
@@ -47,19 +47,26 @@ theorem LocalStep.control_support {program : Kernel.Program} {before after : Sta
     have targetBound := Context.resolves_root_bound typed.1 taskBound target
     exact ⟨targetBound,Context.resolves_root_bound typed.1 taskBound source,targetBound⟩
   case invoke allocated => exact ⟨Context.bind_root_support taskAfter allocated.root_bound,allocated.root_bound⟩
-  case call resolved _ _ _ _ inputs _ =>
-    exact ⟨Nat.lt_of_lt_of_le (Context.resolves_root_bound typed.1 taskBound resolved) frontier,
-      (inputs.root_support typed.1 taskBound).mono frontier⟩
+  case call resolved _ _ _ _ inputs resources =>
+    exact ⟨Context.resolves_root_bound typed.1 taskBound resolved,inputs.root_support typed.1 taskBound,
+      resources.root_support typed.1 (RootSupport.below_map.mp (RootSupport.below_append.mp taskBound).1)⟩
   case enter entered =>
     have contextBound := entered.context_root_support typed.1
     exact ⟨contextBound,FreshNamedFrame.root_support contextBound⟩
-  case enterTail entered route roots _ _ =>
-    have contextBound := entered.context_root_support typed.1
+  case enterTail entered relinquished route roots _ _ =>
+    have contextBound := (entered.context_root_support typed.1).mono relinquished.counter
+    have extended := Context.append_contracts_root_support contextBound taskAfter.1
     obtain ⟨outerBound,restBound⟩ := route.control_support framesAfter
-    exact ⟨⟨roots.root_support afterWell,contextBound⟩,FreshNamedFrame.root_support contextBound,outerBound,restBound⟩
-  case activationReturn kept roots _ => exact ⟨roots.root_support afterWell,kept.root_bound⟩
+    exact ⟨⟨roots.root_support afterWell,extended⟩,FreshNamedFrame.root_support extended,outerBound,restBound⟩
+  case bindReturn moved returned =>
+    exact returned.context_root_support (moved.wellFormed typed.1) taskAfter.1 framesAfter.1.1
+  case activationReturn kept returned roots _ | scopeReturn kept returned roots _ =>
+    exact ⟨roots.root_support afterWell,
+      returned.context_root_support (kept.wellFormed typed.1) taskAfter.1 framesAfter.1,
+      Nat.lt_of_lt_of_le kept.root_bound returned.counter⟩
+  case labelReturn returned =>
+    exact returned.context_root_support typed.1 taskAfter.1 framesAfter.1
   case scope => exact taskAfter
-  case scopeReturn kept roots _ => exact ⟨roots.root_support afterWell,kept.root_bound⟩
   case label => exact taskBound
   case choose resolved _ planned =>
     exact planned.root_support typed.1 (Context.resolves_root_bound typed.1 taskBound resolved)

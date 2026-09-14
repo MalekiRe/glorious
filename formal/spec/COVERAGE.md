@@ -471,10 +471,19 @@ ordered action transaction, replacing obsolete endpoint `FreshExposed` reasoning
 The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
 gate passes 163 jobs. Ordinary invocation, actual hook-input, historical/saved
 recording and transaction-output audits report standard axioms only.
-`DropInvocation`/`DropPrivate` are source-migrated but their higher control and
-activation dependencies, including non-resource-fatal suspension premises, are
-not yet checked. Producing original source facts from meaningful task admission,
-proper-tail progress and general task progress remain open.
+Root and activation consumers now follow the same actual invocation recipes,
+returned contexts, claim releases and host outputs. The complete
+`ControlOriginPreservation` gate passes 173 jobs, with standard-only axiom
+audits for terminal inversion, nonfatal-path construction, control preservation,
+divergence, published root bounds and activation preservation. A real fatal
+event produces a terminal task with no successor; therefore a non-resource-
+fatal endpoint or an infinite successor chain supplies the required nonfatal
+run. General observation/reachability now state complete control/suspensions
+or the actual resource-fatal terminal, instead of assuming all runs nonfatal.
+Saved-control root exclusion uses immutable metadata and remains unconditional.
+Ambient host, private and Drop consumers are not yet integrated with this
+contract. Original source facts from meaningful task admission, proper-tail
+progress and whole-task progress remain open.
 
 The paused task/frame consumers are recovered and checked rather than rebuilt.
 `CleanupPreservation` gains the actual custody-return step (the relinquished

@@ -5,36 +5,40 @@ external allocation domain. Callback entry and cleanup retain their original
 context identities; ordinary entry alone creates the fresh source activation. -/
 namespace Glorious.Language.Foreign
 
-open Kernel Execution Memory
+open _root_.Glorious.Language.Kernel Execution Memory
 
 theorem Mutation.activationsBelow {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    {limit : Identity} (changed : Mutation program policy before after)
+    {action : MutationAction} {limit : Identity} (changed : Mutation program policy before action after)
     (homes : ∀ home region, policy.home home region → home.ActivationsBelow limit)
     (bounded : before.ActivationsBelow limit) : after.ActivationsBelow limit := by
-  cases changed with
-  | allocate allowed allocated => exact allocated.activationsBelow bounded (homes _ _ allowed)
-  | scalar _ stored => exact stored.2.2.activationsBelow bounded
-  | unit _ stored | pointer _ _ _ _ stored => exact stored.2.activationsBelow bounded
-  | aggregate _ _ _ _ constructed => exact constructed.activationsBelow bounded
-  | acquire _ _ acquired => exact acquired.activationsBelow bounded
-  | borrow _ _ borrowed => exact borrowed.activationsBelow bounded
-  | allocateBuffer _ allocated => exact allocated.activationsBelow bounded
-  | reallocateBuffer _ _ reallocated => exact reallocated.activationsBelow bounded
-  | releaseBuffer _ _ released => exact released.activationsBelow bounded
-  | rawRead _ _ read => exact read.activationsBelow bounded
-  | rawWrite _ _ written => exact written.activationsBelow bounded
-  | rawBorrow _ _ borrowed => exact borrowed.activationsBelow bounded
-  | bulkMove _ _ moved => exact moved.activationsBelow bounded
-  | retire _ _ retired => exact retired.activationsBelow bounded
-  | endLoan ended => exact ended.activationsBelow bounded
+  cases changed
+  case allocate allowed _ allocated | allocateExterior allowed _ allocated =>
+    have actual := allocated.activationsBelow bounded (homes _ _ allowed)
+    exact actual
+  case scalar stored => exact stored.2.2.activationsBelow bounded
+  case unit stored | pointer stored => exact stored.2.activationsBelow bounded
+  case aggregate constructed => exact constructed.activationsBelow bounded
+  case acquire acquired => exact acquired.activationsBelow bounded
+  case borrow borrowed => exact borrowed.activationsBelow bounded
+  case allocateBuffer allocated => exact allocated.activationsBelow bounded
+  case reallocateBuffer reallocated => exact reallocated.activationsBelow bounded
+  case releaseBuffer released => exact released.activationsBelow bounded
+  case rawRead read => exact read.activationsBelow bounded
+  case rawWrite written => exact written.activationsBelow bounded
+  case rawBorrow borrowed => exact borrowed.activationsBelow bounded
+  case bulkMove moved => exact moved.activationsBelow bounded
+  case retire retired => exact retired.activationsBelow bounded
+  case endLoan ended => exact ended.activationsBelow bounded
 
-theorem Mutations.activationsBelow {program : Kernel.Program} {policy : AuthorityPolicy} {before after : World}
-    {limit : Identity} (changed : Mutations program policy before after)
-    (homes : ∀ home region, policy.home home region → home.ActivationsBelow limit)
+
+theorem Mutations.activationsBelow {program : Kernel.Program} {custody : ClaimCustody}
+    {policy : List ProducedResource → AuthorityPolicy} {before after : World} {produced actions}
+    {limit : Identity} (changed : Mutations program custody policy before produced actions after)
+    (homes : ∀ published home region, (policy published).home home region → home.ActivationsBelow limit)
     (bounded : before.ActivationsBelow limit) : after.ActivationsBelow limit := by
   induction changed with
   | refl => exact bounded
-  | cons first _ ih => exact ih (first.activationsBelow homes bounded)
+  | cons first _ ih => exact ih (first.activationsBelow (homes _) bounded)
 
 theorem Policy.homes_activationsBelow {program : Kernel.Program} {model : Model} {contract : Contract}
     {world : World} {session : ForeignSession} {limit : Identity}
@@ -47,14 +51,14 @@ theorem Policy.homes_activationsBelow {program : Kernel.Program} {model : Model}
 
 theorem Model.Lawful.host_activationsBelow {program : Kernel.Program} {model : Model}
     {session : ForeignSession} {imported : Import} {contract : Contract} {before after : World}
-    {observation next : List Nat} {action : HostAction} {limit : Identity}
+    {observation next : List Nat} {actions : List MutationAction} {action : HostAction} {limit : Identity}
     (lawful : model.Lawful program) (well : before.WellFormed)
     (selected : Selected program model session.call imported contract) (active : contract.session before session)
-    (step : model.step session.call.binding.declaration before session observation after action next)
+    (step : model.step session.call.binding.declaration before session observation actions after action next)
     (bounded : before.ActivationsBelow limit) (owner : session.call.context.activation < limit) :
     after.ActivationsBelow limit :=
-  (lawful.step _ _ _ _ _ _ _ _ selected well active step).1.activationsBelow
-    (Policy.homes_activationsBelow owner) bounded
+  (lawful.step _ _ _ _ _ _ _ _ _ selected well active step).1.activationsBelow
+    (fun _ => Policy.homes_activationsBelow owner) bounded
 
 theorem CallbackReturnTask.activation_support {session : ForeignSession} {registration : CallbackEntry} {result : Address}
     {lease : Option ReceiverLease} {next : Code} {limit : Identity}
@@ -95,9 +99,8 @@ theorem Step.homes_activationsBelow {program : Kernel.Program} {model : Model} {
     exact lawful.host_activationsBelow well selected active transition bounded taskBound
   case result selected active transition _ transferred =>
     exact transferred.activationsBelow (lawful.host_activationsBelow well selected active transition bounded taskBound)
-  case callback selected active transition _ lent _ _ consumed =>
-    exact consumed.activationsBelow (lent.activationsBelow
-      (lawful.host_activationsBelow well selected active transition bounded taskBound) taskBound)
+  case callback selected active transition _ _ =>
+    exact lawful.host_activationsBelow well selected active transition bounded taskBound
   case callbackResult kept retired => exact retired.activationsBelow (kept.activationsBelow bounded frameBound.1)
 
 end Glorious.Language.Foreign

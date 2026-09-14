@@ -351,12 +351,27 @@ buffer authority with primitive binding, not scanning endpoint roots.
 The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
 gate passes 163 jobs. Ordinary-step, actual-hook-input, historical/saved
 recording and transaction-output audits report only standard axioms.
-`DropInvocation` and `DropPrivate` source callers are migrated but not yet
-proof-checked: their higher root/control/activation consumers and the
-non-resource-fatal suspension premise must be repaired next. No claim of
-general control preservation, Drop interval completion, proper-tail progress
-or whole-task progress is made. Continue this same invocation/task dependency
-chain, including production of the original source requirements.
+The root and activation families now consume those same actual products,
+including source/resource resolution, returned caller contexts, raw buffer
+claims and the indexed host transaction. The `ControlOriginPreservation`
+gate passes 173 jobs. Axiom audits for terminal inversion, nonfatal-path
+construction, control preservation, divergence, published-root bounds and
+activation preservation report standard axioms only.
+
+The whole-control contract now distinguishes completed suspension ownership
+from physical exhaustion. Actual fatal events produce terminal tasks with no
+successor. `Run.nonFatal_of_final` derives the required path property from
+an actual non-resource-fatal endpoint; infinite runs use their actual next
+step. General observation/reachability state complete control/suspensions or
+the actual resource-fatal terminal. The three blanket universal nonfatal-run
+premises in suspension consumers are removed. Saved-root exclusion depends
+only on immutable capture metadata and remains valid at fatal endpoints.
+
+Next: migrate ambient host/private/Drop consumers to this contract, deriving
+their nonfatal requirements from actual traces or successors and treating a
+fatal final step as terminal, not assuming complete after-control. Their full
+proof gate is not yet checked. Then continue original source-fact production,
+proper-tail entry and whole-task progress on this same dependency chain.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value

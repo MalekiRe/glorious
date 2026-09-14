@@ -1,8 +1,8 @@
 import GloriousLanguage.ControlEffectOrigin
 
-/-! Host sessions keep only actual exposed addresses. Fresh publication,
-callback entry and callback return preserve their support through the same
-allocation, invocation lease and ordinary transfer producers. -/
+/-! Actual host transactions publish only the resources their indexed actions
+produce. Raw binding, callback recipes and callback return retain the same
+physical root provenance as ordinary execution. -/
 namespace Glorious.Language
 
 theorem World.stores_root_bound {world : World} {address : Address} {value : Value}
@@ -10,7 +10,7 @@ theorem World.stores_root_bound {world : World} {address : Address} {value : Val
   obtain ⟨root,found,_⟩ := Option.bind_eq_some_iff.mp stored
   exact World.address_root_bound well found
 
-theorem Transfers.source_root_bound {program : Program} {before after : World}
+theorem Transfers.source_root_bound {program : RuntimeProgram} {before after : World}
     {source destination : Address} {authority : Authority} (well : before.WellFormed)
     (transferred : Transfers program before authority source destination after) : source.root < after.nextRoot := by
   have bounded : source.root < before.nextRoot := by
@@ -20,7 +20,7 @@ theorem Transfers.source_root_bound {program : Program} {before after : World}
 
 namespace Kernel
 
-theorem LendsResident.lease_root_support {program : Language.Program} {before after : World}
+theorem LendsResident.lease_root_support {program : RuntimeProgram} {before after : World}
     {activation scope region address authority access lease permission}
     (well : before.WellFormed)
     (lent : LendsResident program activation scope region before address authority access lease permission after) :
@@ -29,8 +29,8 @@ theorem LendsResident.lease_root_support {program : Language.Program} {before af
   · subst access
     cases lent with
     | owned => simp
-    | lent access _ _ _ => simp at access
-  · obtain ⟨witness,root,_,_,_,selected,_,_,found,_⟩ := lent.lease_origin owned
+    | lent access _ _ _ _ => simp at access
+  · obtain ⟨witness,root,_,_,_,_,selected,_,_,found,_⟩ := lent.lease_origin owned
     rw [selected]
     simp only [Option.toList_some,List.map_cons,List.map_nil,RootSupport.below_cons,RootSupport.below_nil,and_true]
     exact World.address_root_bound (lent.wellFormed well) found
@@ -39,7 +39,7 @@ end Kernel
 
 namespace Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem PrimitiveStep.control_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (taskBound : RootSupport.Below before.task.rootSupport before.world.nextRoot)
@@ -51,7 +51,10 @@ theorem PrimitiveStep.control_support {program : Kernel.Program} {before after :
   have taskAfter := taskBound.mono frontier
   have framesAfter := frameBound.mono frontier
   cases step <;> simp_all only [Task.rootSupport,RootSupport.below_append,RootSupport.below_cons,
-    RootSupport.below_nil,true_and]
+    RootSupport.below_nil,and_true]
+  case allocate allocated stored | reallocate allocated stored =>
+    exact Context.bindResource_root_support taskAfter.1
+      (Nat.lt_of_lt_of_le allocated.root_bound stored.2.authorityStable.homes.counter)
 
 theorem CaptureInputs.root_support {world : World} {receiver : Address} {authority : Authority} {access : Access}
     {formals : List Local} {inputs : List InvocationInput} (well : world.WellFormed)
@@ -81,7 +84,7 @@ end Execution
 
 namespace Foreign
 
-open Kernel Execution
+open _root_.Glorious.Language.Kernel Execution
 
 theorem CallbackInputs.root_support {world : World} {formals : List Local}
     {arguments : List ResolvedPlace} {inputs : List InvocationInput}
@@ -106,24 +109,22 @@ theorem AmbientExposed.root_support {frames : List Frame} {limit : Identity}
     all_goals try exact ih bounded.2
     exact RootSupport.below_append.mpr ⟨ForeignSession.known_root_support (RootSupport.below_append.mp bounded.1).1,ih bounded.2⟩
 
-theorem FreshExposed.root_support {before after : World} (well : after.WellFormed) :
-    RootSupport.Below ((FreshExposed before after).map (fun place => place.address.root)) after.nextRoot := by
-  rw [RootSupport.below_map]
-  intro place exposed
-  obtain ⟨⟨id,root⟩,member,selected⟩ := List.mem_filterMap.mp exposed
-  dsimp only at selected
-  split at selected
-  · cases selected
-    exact World.root_bound well (well.1.get_of_mem member)
-  · cases selected
-
 theorem _root_.Glorious.Language.Execution.ForeignSession.advance_root_support
-    {session : ForeignSession} {before after : World} {state : List Nat}
-    (well : after.WellFormed) (bounded : RootSupport.Below session.rootSupport after.nextRoot) :
-    RootSupport.Below (session.advance before after state).rootSupport after.nextRoot := by
+    {session : ForeignSession} {produced : List ProducedResource} {state : List Nat} {limit : Identity}
+    (bounded : RootSupport.Below session.rootSupport limit)
+    (published : ∀ resource ∈ produced, resource.place.address.root < limit) :
+    RootSupport.Below (session.advance produced state).rootSupport limit := by
   simp only [ForeignSession.rootSupport,RootSupport.below_append] at bounded
   simp only [ForeignSession.advance,ForeignSession.rootSupport,List.map_append,RootSupport.below_append]
-  exact ⟨bounded.1,bounded.2,FreshExposed.root_support well⟩
+  refine ⟨bounded.1,bounded.2,?_⟩
+  rw [RootSupport.below_map]
+  intro place member
+  obtain ⟨resource,producedMember,selected⟩ := List.mem_filterMap.mp member
+  split at selected
+  · cases selected
+    exact published resource producedMember
+  · cases selected
+
 
 theorem CallbackReturnTask.root_support {session : ForeignSession} {registration : CallbackEntry} {result : Address}
     {lease : Option ReceiverLease} {next : Code} {limit : Identity}
@@ -153,28 +154,25 @@ theorem Step.control_support {program : Kernel.Program} {model : Model} {before 
   have afterTyped := step.worldTyped valid inventory lawful typed
   have afterWell := afterTyped.1
   cases step
-  all_goals simp_all only [Task.rootSupport,Frame.rootSupport,EntrySource.rootSupport,List.flatMap_cons,List.flatMap_append,
+  all_goals simp_all only [Task.rootSupport,Frame.rootSupport,EntrySource.rootSupport,List.flatMap_cons,
     RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,and_true]
   case enter kept _ _ _ =>
     exact RootSupport.below_append.mpr ⟨RootSupport.below_append.mpr
       ⟨taskAfter.1,RootSupport.below_cons.mpr ⟨taskAfter.2.1,kept.root_support⟩⟩,
       AmbientExposed.root_support framesAfter⟩
-  case host => exact ForeignSession.advance_root_support afterWell taskAfter
+  case host selected active transition =>
+    have changed := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active transition).1
+    exact ForeignSession.advance_root_support taskAfter (fun resource member => changed.published_root_bound member)
   case result selected active transition _ transferred =>
     have hostWell := (lawful.host_worldTyped valid inventory typed selected active transition).1
     have contextBound := (RootSupport.below_append.mp (RootSupport.below_append.mp taskAfter).1).1
     exact ⟨transferred.source_root_bound hostWell,contextBound⟩
-  case callback selected active transition _ lent captures inputs consumed =>
-    have hostWell := (lawful.host_worldTyped valid inventory typed selected active transition).1
-    have lendWell := lent.wellFormed hostWell
-    have hostFrontier := (lawful.host_suspensionExtension typed.1 selected active transition).counter
-    have consumedFrontier := consumed.suspensionExtension.counter
-    have hostToFinal := Nat.le_trans lent.suspensionExtension.counter consumedFrontier
+  case callback selected active transition admitted inputs =>
+    have changed := (lawful.step _ _ _ _ _ _ _ _ _ selected typed.1 active transition).1
     have contextBound := (RootSupport.below_append.mp (RootSupport.below_append.mp taskAfter).1).1
-    refine ⟨⟨contextBound,(captures.root_support lendWell).mono consumedFrontier,
-      (inputs.root_support lendWell).mono consumedFrontier⟩,?_,
-      (lent.lease_root_support hostWell).mono consumedFrontier⟩
-    exact (ForeignSession.advance_root_support hostWell (taskBound.mono hostFrontier)).mono hostToFinal
+    obtain ⟨_,_,_,_,_,permission⟩ := admitted.receiver
+    exact ⟨⟨contextBound,permission.root_bound afterWell,inputs.root_support afterWell⟩,
+      ForeignSession.advance_root_support taskAfter (fun resource member => changed.published_root_bound member),by simp⟩
   case callbackResult kept retired =>
     exact CallbackReturnTask.root_support framesAfter.1.1
       (Nat.lt_of_lt_of_le kept.root_bound retired.suspensionExtension.counter) framesAfter.1.2

@@ -57,6 +57,27 @@ theorem ResolvesPlace.root_bound {world : World} {environment : Environment}
   cases resolved with
   | localSlot selected projections => exact projections.root_bound well (bounded _ selected.1)
 
+theorem ResolvesResource.root_bound {world : World} {environment : Environment}
+    {custody : ClaimCustody} {place : ResolvedPlace} (well : world.WellFormed)
+    (bounded : ∀ binding ∈ environment, binding.address.root < world.nextRoot)
+    (resolved : ResolvesResource world environment custody place) : place.address.root < world.nextRoot := by
+  induction resolved with
+  | binding selected _ => exact bounded _ selected.1
+  | project _ projected _ ih => exact projected.root_bound well ih
+  | subplace _ included _ ih => exact included.1 ▸ ih
+
+theorem ResourceInputs.root_support {program : Language.Program} {world : World}
+    {environment : Environment} {custody : ClaimCustody} {inputs : List InvocationInput}
+    (well : world.WellFormed) (bounded : ∀ binding ∈ environment, binding.address.root < world.nextRoot)
+    (resolved : ResourceInputs program world environment custody inputs) :
+    RootSupport.Below (inputs.flatMap InvocationInput.rootSupport) world.nextRoot := by
+  induction resolved with
+  | nil => simp
+  | cons first _ _ ih | allocation first _ _ _ ih | loan first _ _ ih =>
+    simpa only [List.flatMap_cons,InvocationInput.rootSupport,List.singleton_append,RootSupport.below_cons] using
+      And.intro (first.root_bound well bounded) ih
+
+
 end Kernel
 
 namespace Execution
@@ -78,6 +99,18 @@ theorem Context.bind_root_support {context : Context} {localSlot : Local} {addre
   · exact fresh
   · exact bounded.1 entry.address.root
       (List.mem_map.mpr ⟨entry,rest.1,rfl⟩)
+
+theorem Context.bindResource_root_support {context : Context} {identity : Identity} {place : ResolvedPlace}
+    {limit : Identity} (bounded : RootSupport.Below context.rootSupport limit) (fresh : place.address.root < limit) :
+    RootSupport.Below (context.bindResource identity place).rootSupport limit := by
+  simp only [Context.rootSupport,RootSupport.below_append,RootSupport.below_map] at bounded ⊢
+  refine ⟨?_,bounded.2⟩
+  intro binding member
+  simp only [Context.bindResource,List.mem_cons,List.mem_filter] at member
+  rcases member with rfl | ⟨member,_⟩
+  · exact fresh
+  · exact bounded.1 binding member
+
 
 theorem Context.resolves_root_bound {context : Context} {world : World} {place : Place}
     {address : Address} {authority : Authority} (well : world.WellFormed)
@@ -230,6 +263,16 @@ theorem Context.install_root_support {context : Context} {bindings : Environment
     rw [← same]
     exact contextParts.2 _ (List.mem_flatMap.mpr ⟨contract,contractMember,
       List.mem_map.mpr ⟨binding,bindingMember,rfl⟩⟩)
+
+theorem Context.append_contracts_root_support {context caller : Context} {limit : Identity}
+    (bounded : RootSupport.Below context.rootSupport limit) (callerBound : RootSupport.Below caller.rootSupport limit) :
+    RootSupport.Below
+      ({ context with resourceContracts := context.resourceContracts ++ caller.resourceContracts }).rootSupport limit := by
+  have parts := RootSupport.below_append.mp bounded
+  have callerParts := RootSupport.below_append.mp callerBound
+  simp only [Context.rootSupport,List.flatMap_append,RootSupport.below_append]
+  exact ⟨parts.1,parts.2,callerParts.2⟩
+
 
 theorem ReturnsResources.context_root_support {program : Kernel.Program} {source receiver : Context}
     {before after : World} {result : Address} {context : Context}

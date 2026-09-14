@@ -262,11 +262,21 @@ or a dependency of this project.
   The combined `DropHandle`/`ControlAuthorityForeign`/`ResumptionPreservation`
   gate passes 163 jobs; ordinary entry, actual Drop input, saved/historical
   recording and published-output axiom audits report standard axioms only.
-  `DropInvocation` and `DropPrivate` source consumers are migrated but not yet
-  proof-checked: their higher control/activation dependencies and non-resource-
-  fatal suspension-premise consumers still require repair. Original source
-  fact production from task admission, proper-tail progress and whole-task
-  progress remain open.
+- Whole-control provenance now follows the actual raw inputs, returned caller
+  contexts, cleanup queues and ordered host outputs. Buffer root bounds and
+  activation homes share the real allocation/claim-release producers; the
+  superseded availability proof is removed. The `ControlOriginPreservation`
+  gate passes 173 jobs. Terminal inversion, nonfatal-path derivation, complete
+  control preservation, divergence, published-root and activation audits use
+  only standard axioms. `Step.controlWellFormed` and its run consumer require
+  non-resource-fatal execution. General observations/reachability retain
+  complete control or the actual resource-fatal terminal; infinite execution
+  derives safety from its real successors. The blanket “every run is nonfatal”
+  assumptions are removed from suspension consumers. Immutable saved control
+  still excludes future roots at fatal endpoints.
+  Ambient host/private/Drop consumers remain under migration; this gate does
+  not check their final integration. Original source-fact production,
+  proper-tail progress and whole-task progress remain open.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

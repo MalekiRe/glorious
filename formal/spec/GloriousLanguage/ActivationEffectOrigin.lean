@@ -5,7 +5,7 @@ one activation frontier. Saved homes obtain their bounds from the actual
 captured ownership roles, never an assumed well-formed replay result. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem RetiresEmpty.activationsBelow {before after : World} {addresses : List Address} {limit : Identity}
     (retired : RetiresEmpty before addresses after) (bounded : before.ActivationsBelow limit) :
@@ -76,7 +76,7 @@ theorem CreatesContinuation.activationsBelow {program : Kernel.Program} {context
 theorem EffectStep.activation_frontier {program : Kernel.Program} {before after : State} {event : Option Event}
     (step : EffectStep program before event after) : before.nextActivation ≤ after.nextActivation := by
   cases step <;> try first | exact Nat.le_succ _ | exact Nat.le_refl _
-  case resumeCopy copied _ => exact copied.activation_frontier
+  case resumeCopy copied _ | resumeCopyExhausted copied _ => exact copied.activation_frontier
 
 theorem EffectStep.activation_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (valid : before.ActivationsWellFormed) (step : EffectStep program before event after) :
@@ -112,6 +112,7 @@ theorem EffectStep.activation_support {program : Kernel.Program} {before after :
   case resumeCopy found _ _ copied _ =>
     obtain ⟨contextBound,handlerBound,savedBound⟩ := copied.activation_support (valid.saved _ _ found)
     exact ⟨contextBound,savedBound,handlerBound⟩
+  case resumeCopyExhausted copied _ => simpa only [copied.result] using framesAfter
   case completionIdentity started _ _ _ | completion started _ _ _ _ _ =>
     exact ⟨started.activation_lt,started.activation_lt⟩
   case finishedOwnedClause =>
@@ -133,6 +134,12 @@ theorem EffectStep.homes_activationsBelow {program : Kernel.Program} {before aft
     RootSupport.below_append,RootSupport.below_cons,RootSupport.below_nil,and_true]
   all_goals try exact bounded
   case install installed => exact installed.homes_activationsBelow bounded taskBound
+  case terminalPayloadExhausted started attempted | suspendPayloadExhausted started attempted |
+      suspendTailPayloadExhausted started attempted =>
+    exact attempted.activationsBelow (started.activationsBelow (bounded.mono (Nat.le_succ _))) started.activation_lt
+  case suspendContinuationExhausted started keptPayload _ _ _ _ =>
+    exact suspendRoots.activationsBelow
+      (keptPayload.activationsBelow (started.activationsBelow (bounded.mono (Nat.le_succ _))) started.activation_lt)
   case terminal started keptTransfer _ _ _ =>
     exact keptTransfer.activationsBelow (started.activationsBelow (bounded.mono (Nat.le_succ _))) started.activation_lt
   case suspend started keptTransfer _ _ _ created _ _ =>
@@ -148,10 +155,16 @@ theorem EffectStep.homes_activationsBelow {program : Kernel.Program} {before aft
     exact kept.activationsBelow
       (restoreRoots.activationsBelow bounded (fun _ _ present =>
         (suspensions.origin _ _ found).homes_activationsBelow saved present)) (RootSupport.below_cons.mp saved).1
+  case resumeLastExhausted found _ _ restored _ =>
+    subst restored
+    exact restoreRoots.activationsBelow bounded (fun _ _ present =>
+      (suspensions.origin _ _ found).homes_activationsBelow (valid.saved _ _ found) present)
   case resumeCopy found _ _ copied kept =>
     have saved := valid.saved _ _ found
     exact kept.activationsBelow (copied.homes_activationsBelow well bounded (suspensions.origin _ _ found) saved)
       (copied.activation_support saved).1
+  case resumeCopyExhausted found _ _ copied _ =>
+    exact copied.homes_activationsBelow well bounded (suspensions.origin _ _ found) (valid.saved _ _ found)
   case resumeReturns kept => exact kept.activationsBelow bounded frameBound.1
   case completionIdentity started kept _ _ | completion started kept _ _ _ _ =>
     exact kept.activationsBelow (started.activationsBelow (bounded.mono (Nat.le_succ _))) started.activation_lt

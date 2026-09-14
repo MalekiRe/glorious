@@ -5,7 +5,7 @@ cancellation consume one control-support invariant. Settled metadata keeps
 its historical origin without asserting that discarded frames remain live. -/
 namespace Glorious.Language.Execution
 
-open Kernel
+open _root_.Glorious.Language.Kernel
 
 theorem CopiesSnapshot.root_frontier {program : Kernel.Program} {before after : State}
     {suspension : Suspension} {map : Relocation} (copied : CopiesSnapshot program before suspension map after) :
@@ -17,6 +17,14 @@ theorem EffectStep.root_frontier {program : Kernel.Program} {before after : Stat
     (step : EffectStep program before event after) : before.world.nextRoot ≤ after.world.nextRoot := by
   cases step <;> try exact Nat.le_refl _
   case install installed => exact installed.suspensionExtension.counter
+  case terminalPayloadExhausted started attempted | suspendPayloadExhausted started attempted |
+      suspendTailPayloadExhausted started attempted =>
+    exact Nat.le_trans started.suspensionExtension.counter attempted.suspensionExtension.counter
+  case suspendContinuationExhausted started keptPayload _ _ _ _ =>
+    exact Nat.le_trans started.suspensionExtension.counter keptPayload.suspensionExtension.counter
+  case resumeLastExhausted restored _ => rw [restored]; exact Nat.le_refl _
+  case resumeCopyExhausted copied _ => exact copied.root_frontier
+
   case terminal started keptTransfer _ _ _ =>
     exact Nat.le_trans started.suspensionExtension.counter keptTransfer.suspensionExtension.counter
   case suspend started keptTransfer _ _ _ created _ _ =>
@@ -89,7 +97,9 @@ theorem Installs.root_support {program : Kernel.Program} {before : State} {outer
   have inputsWell := (capturedValues.worldTyped valid inventory (two.worldTyped (one.worldTyped typed))).1
   have environmentBound := RootSupport.below_map.mpr (boundValues.bindings_root_bound inputsWell)
   simp only [InstalledHandler.rootSupport,RootSupport.below_append]
-  exact ⟨⟨environmentBound.mono retired.suspensionExtension.counter,outerBound⟩,outerBound⟩
+  refine ⟨⟨?_,outerBound⟩,outerBound⟩
+  simpa only [Context.rootSupport,List.flatMap_nil,List.append_nil] using
+    environmentBound.mono retired.suspensionExtension.counter
 
 theorem EffectStep.control_support {program : Kernel.Program} {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -141,6 +151,7 @@ theorem EffectStep.control_support {program : Kernel.Program} {before after : St
     obtain ⟨contextBound,handlerBound,savedBound⟩ := copied.control_support (control.saved_current found)
     have transferred := keptTransfer.suspensionExtension.counter
     exact ⟨⟨contextBound.mono transferred,keptTransfer.root_bound⟩,savedBound.mono transferred,handlerBound.mono transferred⟩
+  case resumeCopyExhausted copied _ => simpa only [copied.result] using framesAfter
   case resumeReturns keptTransfer => exact keptTransfer.root_bound
   case completionIdentity started keptTransfer roots _ =>
     have clauseBound := started.root_support framesAfter.1

@@ -2,9 +2,10 @@ import GloriousLanguage.ControlForeignOrigin
 import GloriousLanguage.ControlAuthorityForeign
 import GloriousLanguage.ActivationPreservation
 
-/-! Whole-machine provenance of actual current and saved control. The
-canonical invocation contract supplies this invariant; all finite and
-infinite execution consumers obtain it by preservation, not admission. -/
+/-! Whole-machine provenance of actual current and saved control. Complete
+ownership is preserved along non-resource-fatal execution. Fatal endpoints
+remain actual terminals; historical saved metadata never gains future roots,
+loans or activations, even through an interrupted final step. -/
 namespace Glorious.Language
 
 namespace Execution
@@ -13,7 +14,8 @@ theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
-    (control : before.ControlWellFormed) (step : Step program host before event after) :
+    (control : before.ControlWellFormed) (step : Step program host before event after)
+    (notFatal : event ≠ some (.fatal .resource)) :
     after.ControlWellFormed := by
   have support :
       (RootSupport.Below after.task.rootSupport after.world.nextRoot ∧
@@ -34,7 +36,7 @@ theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
         primitive.authority_support control.taskAuthorities control.frameAuthorities⟩
     · exact ⟨foreign.control_support valid inventory lawful typed control.task control.frames,
         foreign.authority_support lawful typed.1 control.taskAuthorities control.frameAuthorities⟩
-  exact ⟨step.suspensions valid inventory lawful typed control.suspensions,
+  exact ⟨step.suspensions valid inventory lawful typed control.suspensions notFatal,
     support.1.1,support.1.2,step.saved_control_origin control,support.2.1,support.2.2,
     step.saved_authority_origin valid inventory lawful typed control.suspensions
       control.taskAuthorities control.frameAuthorities control.savedAuthorities,
@@ -44,31 +46,44 @@ theorem Run.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
-    (control : before.ControlWellFormed) (run : Run program host before trace after) :
+    (control : before.ControlWellFormed) (run : Run program host before trace after) (safe : run.NonFatal) :
     after.ControlWellFormed := by
-  induction run with
+  induction safe with
   | refl => exact control
-  | silent step _ ih | visible step _ ih =>
-    exact ih (step.worldTyped valid inventory lawful typed) (step.controlWellFormed valid inventory lawful typed control)
+  | silent step tail tailPred ih =>
+    exact ih (step.worldTyped valid inventory lawful typed)
+      (step.controlWellFormed valid inventory lawful typed control (by intro impossible; cases impossible))
+  | visible step neutral tail tailPred ih =>
+    exact ih (step.worldTyped valid inventory lawful typed)
+      (step.controlWellFormed valid inventory lawful typed control neutral)
+
+theorem Run.controlWellFormed_or_fatal {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (control : before.ControlWellFormed) (run : Run program host before trace after) :
+    after.ControlWellFormed ∨ after.task = .fatal .resource := by
+  by_cases fatal : after.task = .fatal .resource
+  · exact Or.inr fatal
+  · exact Or.inl (run.controlWellFormed valid inventory lawful typed control (run.nonFatal_of_final fatal))
+
 
 /-- An old suspension cannot acquire an address of storage allocated after
 that suspension was admitted, even after arbitrary execution and settlement.
-This consumes the actual retained metadata and complete control invariant. -/
+The actual immutable control metadata suffices, including at a fatal endpoint. -/
 theorem Run.old_saved_control_excludes_future_root {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} {id root : Identity} {original current : Suspension}
-    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
     (control : before.ControlWellFormed) (run : Run program host before trace after)
     (beforeAt : before.resumptions.get id = some original) (afterAt : after.resumptions.get id = some current)
     (future : before.world.nextRoot ≤ root) : root ∉ current.controlRootSupport := by
-  obtain ⟨retained,present,_,_,_,limit,_⟩ := run.retains_metadata control.suspensions.budgets beforeAt
+  obtain ⟨retained,present,_,_,_,_,context,handler,frames,_⟩ := run.retains_metadata control.suspensions.budgets beforeAt
   have same := Option.some.inj (present.symm.trans afterAt)
   subst retained
-  have finish := run.controlWellFormed valid inventory lawful typed control
-  intro member
-  have below := finish.saved id current afterAt root member
-  rw [limit] at below
-  exact Nat.not_lt_of_ge future (Nat.lt_of_lt_of_le below (control.suspensions.frontier id original beforeAt))
+  have support : current.controlRootSupport = original.controlRootSupport := by
+    simp only [Suspension.controlRootSupport,context,handler,frames]
+  rw [support]
+  exact control.no_future_saved beforeAt future
+
 
 /-- Capture metadata is immutable through arbitrary execution. Consequently
 an old context, frame, callback lease or pending cleanup cannot acquire a
@@ -142,8 +157,8 @@ theorem InvocationStart.run_control {program : Kernel.Program} {host : Foreign.M
     {trace : List Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) {boundary : InvocationBoundary} (initial : InvocationStart program host function inputs boundary start)
-    (run : Execution.Run program host start trace finish) : finish.ControlWellFormed :=
-  run.controlWellFormed valid inventory lawful initial.1.1 initial.control
+    (run : Execution.Run program host start trace finish) (safe : run.NonFatal) : finish.ControlWellFormed :=
+  run.controlWellFormed valid inventory lawful initial.1.1 initial.control safe
 
 theorem Observes.control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
@@ -152,10 +167,10 @@ theorem Observes.control {program : Kernel.Program} {host : Foreign.Model}
     ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
       finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧
-      start.ControlWellFormed ∧ finish.ControlWellFormed := by
+      start.ControlWellFormed ∧ (finish.ControlWellFormed ∨ finish.task = .fatal .resource) := by
   obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
   exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.control,
-    initial.run_control valid inventory lawful run.execution⟩
+    run.execution.controlWellFormed_or_fatal valid inventory lawful initial.1.1 initial.control⟩
 
 theorem Diverges.control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
@@ -166,6 +181,7 @@ theorem Diverges.control {program : Kernel.Program} {host : Foreign.Model}
   obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
   exact initial.run_control valid inventory lawful (InvocationRun.prefix steps n).execution
+    ((InvocationRun.prefix steps n).execution.nonFatal_of_final (steps n).2.task_not_fatal)
 
 end Contracts
 
@@ -175,9 +191,9 @@ theorem reachable_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (reachable : (Semantics program host function inputs).Reachable state) :
-    state.ControlWellFormed := by
+    state.ControlWellFormed ∨ state.task = .fatal .resource := by
   obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
-  exact initial.run_control valid inventory lawful run
+  exact run.controlWellFormed_or_fatal valid inventory lawful initial.1.1 initial.control
 
 end Specification
 end Glorious.Language

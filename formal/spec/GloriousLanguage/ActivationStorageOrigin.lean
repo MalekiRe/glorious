@@ -101,6 +101,25 @@ theorem FreshRegion.activationsBelow {before after : World} {region limit : Iden
     (fresh : FreshRegion before region after) (bounded : before.ActivationsBelow limit) :
     after.ActivationsBelow limit := by rcases fresh with ⟨_,rfl⟩; exact bounded
 
+theorem ReleasesStorageClaims.activationsBelow {before after : World} {place : ResolvedPlace} {limit : Identity}
+    (released : ReleasesStorageClaims before place after) (bounded : before.ActivationsBelow limit) :
+    after.ActivationsBelow limit := by
+  cases released
+  exact bounded
+
+theorem RelinquishesCustody.activationsBelow {before after : World} {custody : ClaimCustody} {limit : Identity}
+    (relinquished : RelinquishesCustody before custody after) (bounded : before.ActivationsBelow limit) :
+    after.ActivationsBelow limit := by
+  cases relinquished
+  exact bounded
+
+theorem ReturnsStorageLoan.activationsBelow {before after : World} {identity limit : Identity}
+    (returned : ReturnsStorageLoan before identity after) (bounded : before.ActivationsBelow limit) :
+    after.ActivationsBelow limit := by
+  cases returned
+  exact bounded
+
+
 namespace Kernel
 
 theorem LendsResident.activationsBelow {program : RuntimeProgram} {before after : World}
@@ -147,6 +166,21 @@ end Kernel
 namespace Execution
 
 open _root_.Glorious.Language.Kernel
+theorem ReturnsResources.activation {program : Kernel.Program} {source receiver : Context}
+    {before after : World} {result : Address} {context : Context}
+    (returned : ReturnsResources program source receiver before result context after) :
+    context.activation = receiver.activation := by
+  cases returned <;> rfl
+
+theorem ReturnsResources.activationsBelow {program : Kernel.Program} {source receiver : Context}
+    {before after : World} {result : Address} {context : Context} {limit : Identity}
+    (returned : ReturnsResources program source receiver before result context after)
+    (bounded : before.ActivationsBelow limit) (owner : receiver.activation < limit) : after.ActivationsBelow limit := by
+  cases returned with
+  | localReturn => exact bounded
+  | invocationReturn _ _ _ bound relinquished => exact relinquished.activationsBelow (bound.activationsBelow bounded owner)
+
+
 
 theorem Temporary.activationsBelow {program : Kernel.Program} {context : Context}
     {type : Term} {before after : World} {address : Address} {limit : Identity}

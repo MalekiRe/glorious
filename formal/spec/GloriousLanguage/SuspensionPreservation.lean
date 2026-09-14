@@ -73,14 +73,44 @@ theorem EffectStep.task_not_fatal {program : Kernel.Program} {before after : Sta
     (step : EffectStep program before event after) {reason : Fatal} : before.task ≠ .fatal reason := by
   cases step <;> intro h <;> simp_all
 
-/- REMAINING DERIVATION (mechanical, no semantic gap): `Run.NonFatal` is
-derivable from a run whose recorded events avoid resource exhaustion
-(`Run.nonFatal_of_trace`, by induction: the `visible` case takes the event's
-non-fatality from the trace's head) and from a run that ends in a non-fatal task
-(using `Step.task_not_fatal`, provable because every `Step` constructor fixes
-`before.task` to a non-fatal shape, so a fatal task has no successor step). Both
-not-yet-written lemmas only feed the trace/task hypotheses that the three
-consumer theorems below now carry explicitly. -/
+/-- Fatal tasks have no successor in the actual union of machine rules. -/
+theorem Step.task_not_fatal {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event} (step : Step program host before event after)
+    {reason : Fatal} : before.task ≠ .fatal reason := by
+  rcases step with step | step | step | step | step | step <;>
+    cases step <;> intro impossible <;> simp_all only [reduceCtorEq]
+
+/-- Every published fatal event names the actual terminal task. -/
+theorem Step.fatal_task {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {reason : Fatal} (step : Step program host before (some (.fatal reason)) after) :
+    after.task = .fatal reason := by
+  generalize eventAt : some (Event.fatal reason) = event at step
+  rcases step with step | step | step | step | step | step <;> cases step <;> simp_all
+  all_goals split at eventAt <;> simp_all
+  all_goals split at eventAt <;> simp_all
+
+theorem Run.task_not_fatal_of_final {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} (run : Run program host before trace after)
+    {reason : Fatal} (final : after.task ≠ .fatal reason) : before.task ≠ .fatal reason := by
+  cases run with
+  | refl => exact final
+  | silent step _ | visible step _ => exact step.task_not_fatal
+
+/-- A real non-resource-fatal endpoint rules out an earlier exhaustion event:
+that event would have produced a terminal task with no following step. -/
+theorem Run.nonFatal_of_final {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event} (run : Run program host before trace after)
+    (final : after.task ≠ .fatal .resource) : run.NonFatal := by
+  induction run with
+  | refl => exact .refl
+  | silent step tail ih => exact .silent step tail (ih final)
+  | visible step tail ih =>
+    refine .visible step ?_ tail (ih final)
+    intro equal
+    cases equal
+    exact (tail.task_not_fatal_of_final final) step.fatal_task
+
+
 /-- A run whose every recorded event avoids resource exhaustion is non-fatal. -/
 theorem Run.nonFatal_of_trace {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {trace : List Event} (run : Run program host before trace after)
@@ -122,6 +152,20 @@ theorem Run.suspensions {program : Kernel.Program} {host : Foreign.Model}
     (suspensions : before.SuspensionsWellFormed)
     (run : Run program host before trace after) (safe : run.NonFatal) : after.SuspensionsWellFormed :=
   (run.suspension_storage valid inventory lawful typed suspensions safe).1
+
+/-- Complete ownership is retained at a running endpoint. Exhaustion instead
+retains its actual terminal partial world, whose historical records are handled
+by the unconditional recording theorem. -/
+theorem Run.suspensions_or_fatal {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (suspensions : before.SuspensionsWellFormed) (run : Run program host before trace after) :
+    after.SuspensionsWellFormed ∨ after.task = .fatal .resource := by
+  by_cases fatal : after.task = .fatal .resource
+  · exact Or.inr fatal
+  · exact Or.inl (run.suspensions valid inventory lawful typed suspensions (run.nonFatal_of_final fatal))
+
 
 theorem State.SuspensionsWellFormed.root_bound {state : State} (valid : state.SuspensionsWellFormed)
     {id root : Identity} {suspension : Suspension} (found : state.resumptions.get id = some suspension)
@@ -185,27 +229,25 @@ inventories. No independent abstract-world table is reconstructed. -/
 theorem Observes.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {observation : Observation}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (observed : Observes program host function observation)
-    (safe : ∀ {a b t} (run : Execution.Run program host a t b), run.NonFatal) :
+    (lawful : host.Lawful program) (observed : Observes program host function observation) :
     ∃ boundary start finish, InvocationStart program host function observation.input boundary start ∧
       start.world = observation.before ∧ Execution.Run program host start observation.events finish ∧
       finish.world = observation.after ∧ AtOutcome program boundary finish observation.outcome ∧
-      start.SuspensionsWellFormed ∧ finish.SuspensionsWellFormed := by
+      start.SuspensionsWellFormed ∧ (finish.SuspensionsWellFormed ∨ finish.task = .fatal .resource) := by
   obtain ⟨boundary,start,finish,initial,before,run,after,outcome⟩ := observed
   exact ⟨boundary,start,finish,initial,before,run.execution,after,outcome,initial.suspensions,
-    initial.run_suspensions valid inventory lawful run.execution (safe run.execution)⟩
+    run.execution.suspensions_or_fatal valid inventory lawful initial.1.1 initial.suspensions⟩
 
 theorem Diverges.suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
     {states : Nat → Execution.State} {events : Nat → Option Execution.Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events)
-    (safe : ∀ {a b t} (run : Execution.Run program host a t b), run.NonFatal) :
+    (lawful : host.Lawful program) (infinite : Diverges program host function inputs states events) :
     ∀ n, (states n).SuspensionsWellFormed := by
   obtain ⟨boundary,initial,steps⟩ := infinite
   intro n
   exact initial.run_suspensions valid inventory lawful (InvocationRun.prefix steps n).execution
-    (safe (InvocationRun.prefix steps n).execution)
+    ((InvocationRun.prefix steps n).execution.nonFatal_of_final (steps n).2.task_not_fatal)
 
 end Contracts
 
@@ -214,11 +256,10 @@ namespace Specification
 theorem reachable_suspensions {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
-    (lawful : host.Lawful program) (reachable : (Semantics program host function inputs).Reachable state)
-    (safe : ∀ {a b t} (run : Execution.Run program host a t b), run.NonFatal) :
-    state.SuspensionsWellFormed := by
+    (lawful : host.Lawful program) (reachable : (Semantics program host function inputs).Reachable state) :
+    state.SuspensionsWellFormed ∨ state.task = .fatal .resource := by
   obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
-  exact initial.run_suspensions valid inventory lawful run (safe run)
+  exact run.suspensions_or_fatal valid inventory lawful initial.1.1 initial.suspensions
 
 end Specification
 end Glorious.Language
