@@ -1587,9 +1587,28 @@ def RawRange (program : Program) (world : World) (pointer : RawPointer) (length 
     0 < alignment ∧ pointer.address % alignment = 0 ∧
     pointer.address + length < 2^program.input.target.pointerBits
 
+/-- A phase may create lifetimes without invalidating earlier lifetime
+references. Input observation needs this monotone boundary, not table identity. -/
+structure World.RegionExtension (before after : World) : Prop where
+  regions : ∀ region ∈ before.liveRegions, region ∈ after.liveRegions
+  frontier : before.nextRegion ≤ after.nextRegion
+
+theorem World.RegionExtension.of_eq {before after : World}
+    (regions : after.liveRegions = before.liveRegions) (frontier : after.nextRegion = before.nextRegion) :
+    before.RegionExtension after :=
+  ⟨fun _ member => by rw [regions]; exact member,Nat.le_of_eq frontier.symm⟩
+
+theorem World.RegionExtension.refl (world : World) : world.RegionExtension world := .of_eq rfl rfl
+
+
 def FreshRegion (before : World) (region : Identity) (after : World) : Prop :=
   region = before.nextRegion ∧ after = { before with
     liveRegions := region :: before.liveRegions, nextRegion := region+1 }
+
+theorem FreshRegion.regionExtension {before after : World} {region : Identity}
+    (fresh : FreshRegion before region after) : before.RegionExtension after := by
+  obtain ⟨rfl,rfl⟩ := fresh
+  exact ⟨fun _ member => List.mem_cons_of_mem _ member,Nat.le_succ _⟩
 
 def Suspensible (program : RuntimeProgram) (world : World) (roots : List Identity) : Prop :=
   (∀ id loan, world.loans.get id = some loan → loan.live = true →

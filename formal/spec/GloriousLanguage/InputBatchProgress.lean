@@ -636,7 +636,7 @@ structure StepObservation (program : RuntimeProgram) (footprint : List Address) 
     ∃ current, middle.loans.get identity = some current ∧ current.region = loan.region
   borrowRegion : ∀ address regionId, other.authority.BorrowRegion before address regionId →
     other.authority.BorrowRegion middle address regionId
-  regionState : middle.liveRegions = before.liveRegions ∧ middle.nextRegion = before.nextRegion
+  regionState : before.RegionExtension middle
   /-- Only a resident input carries a value whose graph the batch observes;
   an erased port's storage is read as its own claim/loan record instead. -/
   value : ∀ (localSlot : Local) (value : Value), other.formal = .resident localSlot →
@@ -704,14 +704,14 @@ theorem InvocationInput.storageRequest_of_observation {program : RuntimeProgram}
       by_cases owned : access = .owned
       · subst owned
         obtain ⟨layout,request⟩ := request
-        exact ⟨layout,AllocationRequest.same_regions request observation.regionState.1
-          observation.regionState.2⟩
+        exact ⟨layout,request.retarget (observation.regionState.regions _ request.region_live)
+          observation.regionState.frontier⟩
       · simp only [InvocationInput.StorageRequest,if_neg owned]
         simp only [InvocationInput.StorageRequest,if_neg owned] at request
         obtain ⟨loanRegion,layout,borrowed,sourceType,request⟩ := request
         exact ⟨loanRegion,layout,observation.borrowRegion storage loanRegion borrowed,
           observation.type localSlot.type sourceType,
-          AllocationRequest.same_regions request observation.regionState.1 observation.regionState.2⟩
+          request.retarget (observation.regionState.regions _ request.region_live) observation.regionState.frontier⟩
     | storage _ _ | allocation _ _ | loan _ _ => exact trivial
 
 end Kernel
@@ -1078,7 +1078,7 @@ theorem StepObservation.of_loans {program : RuntimeProgram} {footprint : List Ad
     {region : Identity} {before middle : World} {other : InvocationInput}
     (roots : middle.roots = before.roots)
     (nextRootBound : before.nextRoot ≤ middle.nextRoot)
-    (regionState : middle.liveRegions = before.liveRegions ∧ middle.nextRegion = before.nextRegion)
+    (regionState : before.RegionExtension middle)
     (permissionRows : ∀ identity loan, before.loans.get identity = some loan →
       ∃ current, middle.loans.get identity = some current ∧ current.permissionState = loan.permissionState)
     (regionRows : ∀ identity loan, before.loans.get identity = some loan →
@@ -2229,7 +2229,7 @@ theorem StepObservation.of_storageClaim {program : RuntimeProgram} {recipient : 
           (input.authority.guardLoans before) .storageBorrow fresh authority requested address
           (Or.inr ⟨localSlot,value,formal,stored,views⟩))
     exact Glorious.Language.Kernel.StepObservation.of_loans (middle := world) rfl
-      (Nat.le_of_eq nextRootEq.symm) regionState
+      (Nat.le_of_eq nextRootEq.symm) (.of_eq regionState.1 regionState.2)
       (fun id loan found => StepFrame.row_of_before valid frame found)
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
@@ -2337,7 +2337,7 @@ theorem StepObservation.of_guardedClaim {program : RuntimeProgram} {recipient : 
           (input.authority.guardLoans before) .owning fresh authority requested address
           (Or.inr ⟨localSlot,value,formal',stored,views⟩))
     exact Glorious.Language.Kernel.StepObservation.of_loans (middle := world) rfl
-      (Nat.le_of_eq nextRootEq.symm) regionState
+      (Nat.le_of_eq nextRootEq.symm) (.of_eq regionState.1 regionState.2)
       (fun id loan found => StepFrame.row_of_before valid frame found)
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
@@ -2425,7 +2425,7 @@ theorem StepObservation.of_allocationTransfer {program : RuntimeProgram} {recipi
       fun localSlot value formal' stored authority requested address views permission =>
         forward authority requested address (Or.inr ⟨localSlot,value,formal',stored,views⟩) permission
     exact Glorious.Language.Kernel.StepObservation.of_loans (middle := _) rfl
-      (Nat.le_of_eq nextRootEq.symm) regionState
+      (Nat.le_of_eq nextRootEq.symm) (.of_eq regionState.1 regionState.2)
       (fun id loan found => StepFrame.row_of_before valid frame found)
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
@@ -2505,7 +2505,7 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
       fun localSlot value formal' stored authority requested address views permission =>
         forward authority requested address (Or.inr ⟨localSlot,value,formal',stored,views⟩) permission
     exact Glorious.Language.Kernel.StepObservation.of_loans (middle := _) rfl
-      (Nat.le_of_eq nextRootEq.symm) regionState
+      (Nat.le_of_eq nextRootEq.symm) (.of_eq regionState.1 regionState.2)
       (fun id loan found => StepFrame.row_of_before valid frame found)
       (fun id loan found =>
         let ⟨current,selected,shape⟩ := StepFrame.row_of_before valid frame found
@@ -2515,7 +2515,7 @@ theorem StepObservation.of_storageLoanTransfer {program : RuntimeProgram} {recip
       (fun _ _ _ _ => Value.SupportFramed.of_roots rfl) framePermittedChannel
   | shared _backingEq _parentEq _rowFound _live _kind _mode _referent =>
     exact Glorious.Language.Kernel.StepObservation.of_loans (middle := before) rfl
-      (Nat.le_refl _) ⟨rfl,rfl⟩
+      (Nat.le_refl _) (.refl _)
       (fun _ _ found => ⟨_,found,rfl⟩)
       (fun _ _ found => ⟨_,found,rfl⟩)
       (fun authority access address _ permission => permission)
@@ -2734,7 +2734,7 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
     | owned =>
       exact ⟨fun _ _ stored => stored,fun _ _ stored => stored,Nat.le_refl _,fun located => located,fun _ typed => typed,
         fun _ _ permission => permission,fun claim => claim,
-        fun _ loan found => ⟨loan,found,rfl⟩,fun _ loan found => ⟨loan,found,rfl⟩,fun _ _ region => region,⟨rfl,rfl⟩,
+        fun _ loan found => ⟨loan,found,rfl⟩,fun _ loan found => ⟨loan,found,rfl⟩,fun _ _ region => region,.refl _,
         fun _ _ _ _ => ⟨⟨fun _ _ _ _ => rfl,fun _ _ found => by rw [found]; rfl,fun _ _ _ _ _ _ held => held⟩,
           fun _ _ => ⟨rfl,rfl⟩⟩,fun _ _ _ _ _ _ _ _ held => held⟩
     | lent modes sourceStored borrowRegion allocProof formed =>
@@ -2883,7 +2883,7 @@ theorem StepObservation.of_lendsResident {program : RuntimeProgram} {activation 
               (writtenWorld lentAllocated lentHandle writtenRoot writtenValue)
               inputStorage inputAuthority lentMode lentRegion) allocatedValid stepLoans)
             (Authority.BorrowRegion.allocates valid allocProof borrowed')
-        · refine ⟨?_,?_⟩
+        · refine World.RegionExtension.of_eq ?_ ?_
           · exact (FormsLoan.region_state formed').1.trans (Allocates.region_state allocProof).1
           · exact (FormsLoan.region_state formed').2.trans (Allocates.region_state allocProof).2
         · intro localSlot value' formal' stored'
@@ -3005,7 +3005,7 @@ theorem StepObservation.of_ownedTransfer {program : RuntimeProgram} {activation 
         (fun id loan found => ⟨loan,by rw [stepLoans]; exact found,rfl⟩)
         (Authority.BorrowRegion.allocates (before := before) (after := allocated)
           valid allocation borrowed')
-    · refine ⟨?_,?_⟩
+    · refine World.RegionExtension.of_eq ?_ ?_
       · exact (World.write_region_state installEq).1.trans
           ((World.write_region_state clearedEq).1.trans (Allocates.region_state allocation).1)
       · exact (World.write_region_state installEq).2.trans
@@ -4450,7 +4450,7 @@ theorem Kernel.StepObservation.of_storage_frame {program : RuntimeProgram} {foot
     fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩,
     fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩,
     fun _ _ borrowed => borrowed.transport extension (fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩),
-    regions,?_,?_⟩
+    World.RegionExtension.of_eq regions.1 regions.2,?_,?_⟩
   · intro localSlot value formal stored
     exact ⟨⟨fun _ _ _ _ => by rw [loans],fun _ _ found => by rw [loans,found]; rfl,
       fun _ _ _ _ _ _ held => held.frame extension loans⟩,framed localSlot value formal stored⟩
@@ -5111,6 +5111,238 @@ theorem Execution.EntrySource.prepareInputs {program : Kernel.Program} {callee :
   intro complete
   subst outcome
   exact Execution.PreparesEntry.inputsCompatible valid prepared product nodup conditions
+
+
+/-- A fresh lifetime preserves the same authoritative input observations.
+Only lifetime metadata grows; no input storage, authority or loan row changes. -/
+theorem FreshRegion.stepObservation {program : RuntimeProgram} {before after : World}
+    {freshRegion region : Identity} {footprint : List Address} {input : InvocationInput}
+    (fresh : FreshRegion before freshRegion after) : StepObservation program footprint region before after input := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have extension := World.LocationExtension.of_roots roots
+  apply Kernel.StepObservation.of_loans roots (by rw [fresh.2]; exact Nat.le_refl _) fresh.regionExtension
+    (fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩)
+    (fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩)
+  · exact fun _ _ _ _ permission => permission.locationExtension extension loans
+  · exact fun _ _ _ claim => claim.frame extension loans
+  · exact fun _ _ _ _ => Value.BatchCompatible.of_eq extension loans
+  · exact fun _ _ _ _ => Value.SupportFramed.of_roots roots
+  · exact fun _ _ _ _ _ _ _ _ permission => permission.locationExtension extension loans
+
+theorem Kernel.InvocationInput.StorageRequest.retarget {program : RuntimeProgram} {world : World}
+    {original target : Identity} {input : InvocationInput}
+    (request : input.StorageRequest program world original) (live : target ∈ world.liveRegions) :
+    input.StorageRequest program world target := by
+  cases formal : input.formal with
+  | resident localSlot =>
+    simp only [InvocationInput.StorageRequest,formal] at request ⊢
+    by_cases owned : input.access = .owned
+    · simp only [if_pos owned] at request ⊢
+      obtain ⟨layout,request⟩ := request
+      exact ⟨layout,request.retarget live (Nat.le_refl _)⟩
+    · simp only [if_neg owned] at request ⊢
+      obtain ⟨region,layout,borrowed,typed,request⟩ := request
+      exact ⟨region,layout,borrowed,typed,request.retarget live (Nat.le_refl _)⟩
+  | storage _ _ | allocation _ _ | loan _ _ => simp only [InvocationInput.StorageRequest,formal]
+
+theorem Kernel.InvocationInputsCompatible.retarget {program : RuntimeProgram} {world : World}
+    {original target : Identity} {footprint : List Address} {inputs : List InvocationInput}
+    (product : InvocationInputsCompatible program footprint original world inputs) (live : target ∈ world.liveRegions) :
+    InvocationInputsCompatible program footprint target world inputs :=
+  ⟨product.1,fun input member => (product.requests input member).retarget live,product.2.2⟩
+
+/-- Caller-world requests select the same layouts for the new callee lifetime.
+The whole readiness/interference product crosses the actual fresh-region step;
+it is not re-admitted in the resulting world. -/
+theorem FreshRegion.inputsCompatible {program : RuntimeProgram} {before after : World}
+    {original region : Identity} {footprint : List Address} {inputs : List InvocationInput}
+    (valid : before.WellFormed) (fresh : FreshRegion before region after)
+    (product : InvocationInputsCompatible program footprint original before inputs) :
+    InvocationInputsCompatible program footprint region after inputs := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have framed := product.of_observations valid (fresh.wellFormed valid)
+    (Kernel.StepFrame.of_locations valid (fun _ => by rw [roots]) loans) (fun _ _ => fresh.stepObservation)
+  exact framed.retarget (by rw [fresh.2]; exact List.mem_cons_self)
+
+/-- The same positive receiver/witness request is retargeted before preparation;
+its referent's source lifetime remains unchanged. -/
+theorem Kernel.LendsResident.Request.freshRegion {program : RuntimeProgram} {before after : World}
+    {original region : Identity} {address : Address} {authority : Authority} {access : Access} {type : Term}
+    (fresh : FreshRegion before region after) (request : LendsResident.Request program before original address authority access type) :
+    LendsResident.Request program after region address authority access type := by
+  intro borrowed
+  obtain ⟨sourceRegion,layout,source,typed,request⟩ := request borrowed
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  exact ⟨sourceRegion,layout,source.transport (World.LocationExtension.of_roots roots)
+    (fun _ loan found => ⟨loan,by rw [loans]; exact found,rfl⟩),AddressType.roots_congr roots typed,
+    request.retarget (by rw [fresh.2]; exact List.mem_cons_self) fresh.regionExtension.frontier⟩
+
+
+theorem FreshRegion.resourcesAccessible {program : RuntimeProgram} {before after : World} {region : Identity}
+    {value : Value} {access : Access} (valid : before.WellFormed) (fresh : FreshRegion before region after)
+    (resources : value.ResourcesAccessible program before access) : value.ResourcesAccessible program after access := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have extension := World.LocationExtension.of_roots roots
+  exact resources.frame_input valid (Value.BatchCompatible.of_eq extension loans) (Value.SupportFramed.of_roots roots)
+    (fun _ _ _ _ permission => permission.locationExtension extension loans)
+
+theorem FreshRegion.viewsLoanCompatible {before after : World} {region : Identity} {value : Value}
+    {access : Access} {referent : Address} {mode : Mutability} {guards : List Identity}
+    (valid : before.WellFormed) (fresh : FreshRegion before region after) (recorded : value.ResourcesRecorded before)
+    (compatible : value.ViewsLoanCompatible before access referent mode guards) :
+    value.ViewsLoanCompatible after access referent mode guards := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have extension := World.LocationExtension.of_roots roots
+  intro query requested observed views
+  exact Authority.LoanCompatible.loans_congr loans (compatible query requested observed
+    (Kernel.Value.ObservedViews.backward valid (Value.BatchCompatible.of_eq extension loans)
+      (Value.SupportFramed.of_roots roots) recorded views))
+
+/-- Fresh-region creation retains the actual recipe, including whole receivers
+and contextual witnesses independently of their capture counts. -/
+theorem FreshRegion.entrySourceReady {program : Kernel.Program} {before after : World} {region : Identity}
+    {function : Function} {source : Execution.EntrySource} (valid : before.WellFormed)
+    (fresh : FreshRegion before region after) (ready : source.Ready program before function) :
+    source.Ready program after function := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have availability : after.availability = before.availability := by rw [fresh.2]
+  have extension := World.LocationExtension.of_roots roots
+  have callable : ∀ address authority access identity arguments,
+      Execution.CallableReceiver program before address authority access identity arguments →
+      Execution.CallableReceiver program after address authority access identity arguments := by
+    intro address authority access identity arguments original
+    obtain ⟨value,stored,initialized,head,resources,permission⟩ := original
+    exact ⟨value,World.Stores.of_roots roots stored,initialized,head,fresh.resourcesAccessible valid resources,
+      permission.locationExtension extension loans⟩
+  cases source with
+  | supplied => trivial
+  | resident receiver access arguments =>
+    obtain ⟨identity,instanceArguments,original,selected⟩ := ready
+    exact ⟨identity,instanceArguments,callable _ _ _ _ _ original,selected⟩
+  | contextual receiver receiverAccess witness witnessAccess inputs =>
+    obtain ⟨identity,instanceArguments,available,captures,arguments,original,selected,witnessReady,reserved,atInputs,
+      shell,storedShell,empty⟩ := ready
+    refine ⟨identity,instanceArguments,available,captures,arguments,callable _ _ _ _ _ original,selected,?_,?_,
+      atInputs,shell,World.Stores.of_roots roots storedShell,empty⟩
+    · obtain ⟨value,id,stored,initialized,head,ledger,availableId,active,live,type,permission⟩ := witnessReady
+      exact ⟨value,id,World.Stores.of_roots roots stored,initialized,head,by rw [availability]; exact ledger,
+        availableId,active,fresh.regionExtension.regions _ live,type,permission.locationExtension extension loans⟩
+    · refine ⟨reserved.1,reserved.2.1,reserved.2.2.1,?_⟩
+      intro input member
+      obtain ⟨permission,value,stored,initialized,type⟩ := reserved.2.2.2 input member
+      exact ⟨permission.locationExtension extension loans,value,World.Stores.of_roots roots stored,initialized,type⟩
+
+
+/-- The source preflight crosses actual fresh-lifetime creation. Requests are
+retargeted; all graph compatibility and write exclusions are reflected to the
+caller-world input product before they are used. -/
+theorem FreshRegion.entryPreparationConditions {program : Kernel.Program} {before after : World}
+    {original region : Identity} {function : Function} {source : Execution.EntrySource} {footprint : List Address}
+    (valid : before.WellFormed) (fresh : FreshRegion before region after)
+    (product : InvocationInputsCompatible program footprint original before (source.originalInputs function))
+    (conditions : source.PreparationConditions program before original function) :
+    source.PreparationConditions program after region function := by
+  have roots : after.roots = before.roots := by rw [fresh.2]
+  have loans : after.loans = before.loans := by rw [fresh.2]
+  have extension := World.LocationExtension.of_roots roots
+  have frame := Kernel.StepFrame.of_locations valid (fun _ => by rw [roots]) loans
+  have facts := product.inputFramed valid
+  have stores : ∀ address value, after.Stores address value → before.Stores address value :=
+    fun _ _ => World.Stores.of_roots roots.symm
+  have guards : ∀ authority : Authority, authority.guardLoans after = authority.guardLoans before :=
+    Authority.guardLoans.loans_congr loans
+  have reads : ∀ input ∈ source.originalInputs function, ∀ query requested observed,
+      input.ReadsPermission after query requested observed → input.ReadsPermission before query requested observed := by
+    intro input member query requested observed read
+    exact Kernel.InvocationInput.ReadsPermission.backward valid (fresh.wellFormed valid) frame
+      (fresh.stepObservation (program := program) (footprint := footprint) (region := original))
+      (facts input member).1 (facts input member).2.1
+      (fun localSlot value atFormal stored => ((facts input member).2.2 localSlot value atFormal stored).resourcesRecorded) read
+  have support : ∀ input ∈ source.originalInputs function, ∀ observed,
+      input.RetainsSupport after observed → input.RetainsSupport before observed := by
+    intro input member observed retained
+    exact Kernel.InvocationInput.RetainsSupport.backward valid frame
+      (fresh.stepObservation (program := program) (footprint := footprint) (region := original))
+      (fun localSlot value atFormal stored => ((facts input member).2.2 localSlot value atFormal stored).resourcesRecorded) retained
+  cases source with
+  | supplied => trivial
+  | resident receiver access arguments =>
+    obtain ⟨captures,request,captureViews,argumentViews,separated,supported⟩ := conditions
+    refine ⟨⟨captures.1,?_⟩,?_,?_,?_,separated,?_⟩
+    · intro input member
+      obtain ⟨⟨value,stored,initialized⟩,permission⟩ := captures.2 input member
+      exact ⟨⟨value,World.Stores.of_roots roots stored,initialized⟩,permission.locationExtension extension loans⟩
+    · exact fun value stored => (request value (stores _ _ stored)).freshRegion fresh
+    · intro borrowed input member value stored
+      have prior := stores _ _ stored
+      have originalMember := List.mem_append_left arguments member
+      have compatible := captureViews borrowed input member value prior
+      obtain ⟨⟨localSlot,index⟩,paired,rfl⟩ := List.mem_map.mp member
+      have resources := (Kernel.InvocationInput.ReadyFor.resident (product.ready.2.2 _ originalMember).1 trivial prior).2.2.1.1
+      rw [guards]
+      exact fresh.viewsLoanCompatible valid resources.resourcesRecorded compatible
+    · intro borrowed input member query requested observed read
+      rw [guards]
+      exact Authority.LoanCompatible.loans_congr loans
+        (argumentViews borrowed input member query requested observed (reads input (List.mem_append_right _ member) _ _ _ read))
+    · exact fun owned input member observed retained => supported owned input member observed (support input member observed retained)
+  | contextual receiver receiverAccess witness witnessAccess inputs =>
+    obtain ⟨apart,receiverRequest,witnessRequest,witnessResources,witnessCompatible,receiverCompatible,
+      witnessViews,receiverInputs,witnessInputs,receiverSeparated,receiverSupported,witnessPhysical,witnessSeparated,witnessSupported⟩ := conditions
+    refine ⟨apart,?_,?_,?_,?_,?_,?_,?_,?_,receiverSeparated,?_,witnessPhysical,witnessSeparated,?_⟩
+    · exact fun value stored => (receiverRequest value (stores _ _ stored)).freshRegion fresh
+    · exact fun value stored => (witnessRequest value (stores _ _ stored)).freshRegion fresh
+    · exact fun value stored => fresh.resourcesAccessible valid (witnessResources value (stores _ _ stored))
+    · intro borrowed
+      rw [guards]
+      exact Authority.LoanCompatible.loans_congr loans (witnessCompatible borrowed)
+    · intro borrowed
+      rw [guards]
+      exact Authority.LoanCompatible.loans_congr loans (receiverCompatible borrowed)
+    · intro borrowed value stored
+      have prior := stores _ _ stored
+      rw [guards]
+      exact fresh.viewsLoanCompatible valid (witnessResources value prior).resourcesRecorded (witnessViews borrowed value prior)
+    · intro borrowed input member query requested observed read
+      rw [guards]
+      exact Authority.LoanCompatible.loans_congr loans
+        (receiverInputs borrowed input member query requested observed (reads input member _ _ _ read))
+    · intro borrowed input member query requested observed read
+      rw [guards]
+      exact Authority.LoanCompatible.loans_congr loans
+        (witnessInputs borrowed input member query requested observed (reads input member _ _ _ read))
+    · exact fun owned input member observed retained => receiverSupported owned input member observed (support input member observed retained)
+    · exact fun owned input member observed retained => witnessSupported owned input member observed (support input member observed retained)
+
+/-- Construct the real fresh lifetime and the entire preparation outcome from
+the caller-world recipe, input product and positive requests. No fresh-world
+readiness or chosen preparation derivation is an admission premise. -/
+theorem Execution.EntrySource.prepareFreshInputs {program : Kernel.Program} {callee : Execution.Context}
+    {function : Function} {before : World} {source : Execution.EntrySource}
+    {original : Identity} {footprint : List Address} (valid : before.WellFormed)
+    (calleeRegion : callee.region = before.nextRegion)
+    (ready : source.Ready program before function)
+    (conditions : source.PreparationConditions program before original function)
+    (product : InvocationInputsCompatible program footprint original before (source.originalInputs function))
+    (incoming : IncomingResources program function before (source.originalInputs function)) :
+    ∃ withRegion inputs after outcome,
+      FreshRegion before callee.region withRegion ∧
+      Execution.PreparesEntryAttempt program callee function withRegion source inputs after outcome ∧
+      (outcome = .complete → InvocationInputsCompatible program footprint callee.region after inputs) := by
+  let withRegion := { before with liveRegions := before.nextRegion :: before.liveRegions, nextRegion := before.nextRegion+1 }
+  have fresh : FreshRegion before callee.region withRegion := ⟨calleeRegion,by rw [calleeRegion]⟩
+  have nodup : (source.originalInputs function).Nodup := (List.pairwise_map.mp incoming.1).imp
+    (fun different same => different (congrArg (fun input => input.formal.key) same))
+  obtain ⟨inputs,after,outcome,prepared,product⟩ := source.prepareInputs (fresh.wellFormed valid)
+    (fresh.entrySourceReady valid ready) (fresh.entryPreparationConditions valid product conditions)
+    (fresh.inputsCompatible valid product) nodup
+  exact ⟨withRegion,inputs,after,outcome,fresh,prepared,product⟩
 
 
 end Glorious.Language

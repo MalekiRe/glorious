@@ -265,9 +265,17 @@ removed, and all affected phase-preservation consumers are migrated. The strict
 220-job gate and general entry/original-contract/exhaustion/preparation axiom
 audits pass with standard axioms only.
 
-Next: compose original semantic admission, fresh-lifetime request transport and
-receiver fresh-row compatibility into actual entry. Higher task/frame consumers
-and general resource progress remain open; no full-tree conformance is claimed.
+`EntrySource.prepareFreshInputs` now constructs the actual fresh lifetime and
+complete preparation outcome from caller-world facts. Its shared observation
+contract admits monotone lifetime growth, all existing producers are migrated,
+and positive requests retarget to the genuinely live callee region. Readiness,
+graph compatibility, consumption exclusions and the full input product are
+derived across this step rather than re-admitted in a future world. The strict
+220-job gate and the new general theorem axiom audits pass with standard axioms
+only. Next: compose original semantic admission and receiver fresh-row
+compatibility with actual preparation/binding/retirement. Higher task/frame
+consumers and general resource progress remain open; no full-tree conformance
+is claimed.
 
 Raw mutation progress is constructive for three admitted leaves.
 `UnitStorageConstruction` shares the common vacant-write/empty-input value
@@ -332,8 +340,10 @@ preparation conditions from source admission, and compose ordered binding with
 receiver finishing. All preparation outcomes and their successful original-to-
 prepared input products are now constructed, including capture re-authoring.
 Incoming resources are now checked at the original invocation, not its mutated
-prepared world, and prepared uniqueness is derived. Fresh-lifetime requests,
-receiver compatibility and original semantic admission remain real obligations.
+prepared world, and prepared uniqueness is derived. Fresh-lifetime requests
+and the complete fresh/preparation product are now constructed from caller-
+world facts. Receiver compatibility and original semantic admission remain
+real obligations.
 
 The scoped framing promotions are integrated and checked. They place each
 declaration at the level its consumers need: `Storage` gains

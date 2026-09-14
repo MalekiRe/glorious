@@ -7,14 +7,21 @@ all storage writes and successful handoffs are derived from their contracts. -/
 namespace Glorious.Language
 open Kernel
 
+/-- Positive layout evidence is independent of the allocation lifetime. A
+live target and monotone lifetime frontier suffice to retarget the request. -/
+theorem AllocationRequest.retarget {program : Program} {before after : World}
+    {original target : Identity} {type : Term} {layout : Layout}
+    (request : AllocationRequest program before original type layout)
+    (live : target ∈ after.liveRegions) (frontier : before.nextRegion ≤ after.nextRegion) :
+    AllocationRequest program after target type layout :=
+  ⟨live,request.type_supported.mono frontier,request.layout_valid,request.size_bound,request.layout_of⟩
+
 theorem AllocationRequest.same_regions {program : Program} {before after : World}
     {region : Identity} {type : Term} {layout : Layout}
     (request : AllocationRequest program before region type layout)
     (regions : after.liveRegions = before.liveRegions) (frontier : after.nextRegion = before.nextRegion) :
-    AllocationRequest program after region type layout := by
-  exact ⟨by simpa only [regions] using request.region_live,
-    by simpa only [frontier] using request.type_supported,
-    request.layout_valid,request.size_bound,request.layout_of⟩
+    AllocationRequest program after region type layout :=
+  request.retarget (by rw [regions]; exact request.region_live) (Nat.le_of_eq frontier.symm)
 
 namespace Execution
 

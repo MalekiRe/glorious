@@ -222,7 +222,10 @@ or a dependency of this project.
   requests and observed-graph compatibility. `EntrySource.prepareInputs` now
   constructs all preparation outcomes and derives every completed recipe
   input product, including resident capture re-authoring, from the original
-  world. Whole-entry composition remains open. The strict 220-job gate passes.
+  world. `EntrySource.prepareFreshInputs` additionally constructs the actual
+  fresh callee lifetime from caller-world admission, retargets positive layout
+  requests, and derives recipe readiness and the complete preparation product.
+  Whole-entry composition remains open. The strict 220-job gate passes.
 - `CopyProgress`: source duplication capability and actual closed initialized
   storage construct the single `CopyTree`/`CopyValue` traversal and its fresh
   owner-origin table (`CopyTree.origins_unique` derives key uniqueness from the

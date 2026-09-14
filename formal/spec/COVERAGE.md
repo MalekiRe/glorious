@@ -384,6 +384,18 @@ keys and the actual preparation coordinate theorem. The separate prepared
 `Nodup` premise is removed. The strict 220-job gate and general entry, original-
 contract, exhaustion and preparation axiom audits pass with standard axioms only.
 
+Fresh-lifetime preparation is now constructive from the caller world.
+`StepObservation.regionState` preserves existing live regions and a monotone
+frontier instead of requiring table identity; every old producer is migrated.
+`AllocationRequest.retarget` shares positive layout evidence, retaining source
+lifetime support while selecting the actually live callee lifetime. Actual
+`FreshRegion` transports the whole input product, source recipe and preflight.
+`EntrySource.prepareFreshInputs` constructs the fresh world and every real
+preparation outcome from original-world incoming resources, readiness, requests
+and interference. No fresh-world product or chosen preparation is admitted.
+The strict 220-job gate passes; the new construction and frame theorem axiom
+audits report standard axioms only. Receiver/binder composition remains open.
+
 The private-slot proof transports the original source footprint through
 `PreparesEntry.map_inputs`; erased ports are not mistaken for initialized
 residents. Entry control-authority provenance transports the original recipe
