@@ -848,6 +848,18 @@ theorem Kernel.BindsInputAt.region_state {program : RuntimeProgram} {recipient :
   | guardedAllocation _ _ _ _ _ claimed => exact ClaimsAllocation.region_state claimed
   | loan _ _ _ _ transferred => exact TransfersStorageLoan.region_state transferred
 
+theorem Kernel.BindsInputsAttemptFor.region_state {program : RuntimeProgram} {recipient : ClaimCustody}
+    {activation scope region : Identity} {footprint : List Address} {before after : World}
+    {inputs : List InvocationInput} {bindings : Environment} {outcome : PreparationOutcome}
+    (bound : BindsInputsAttemptFor program recipient activation scope region footprint
+      before inputs bindings after outcome) :
+    after.liveRegions = before.liveRegions ∧ after.nextRegion = before.nextRegion := by
+  induction bound with
+  | nil | exhausted => exact ⟨rfl,rfl⟩
+  | cons _ bound _ ih =>
+    have first := bound.region_state
+    exact ⟨ih.1.trans first.1,ih.2.trans first.2⟩
+
 /-! ## 6. Storage projections of the actual step
 
 Every rule below keeps the live root table: an administrative loan update

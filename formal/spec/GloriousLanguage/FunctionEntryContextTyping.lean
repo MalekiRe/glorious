@@ -1,5 +1,6 @@
 import GloriousLanguage.ControlContextTyping
 import GloriousLanguage.ForeignPreservation
+import GloriousLanguage.AllocationExecution
 
 /-! Actual invocation entry produces a body context or the real exhausted
 prefix. Proper-tail entry preserves the newly admitted callee while scheduling
@@ -30,6 +31,7 @@ def FunctionEntryResult (program : Kernel.Program) (before after : State) (calle
   ((∃ callee,
     Typing.ContextBindingsTyped program after.world (Typing.FunctionContext function callee.module) callee ∧
     Typing.CodeType program (Typing.FunctionContext function callee.module) function.body function.signature.result ∧
+    callee.region ∈ after.world.liveRegions ∧
     ((tail = false ∧ event = none ∧ after.task = .run callee function.body) ∨
       (tail = true ∧ event = some (.tail caller.activation callee.activation) ∧ ∃ roots regions,
         after.task = ReleaseCustodyLoans after.world (.activation caller.activation)
@@ -57,17 +59,20 @@ theorem LocalStep.enter_function_context {program : Kernel.Program} {before afte
   case enter actualRunning entered =>
     obtain ⟨rfl,rfl,rfl,rfl⟩ := Task.enter.inj (actualRunning.symm.trans running)
     exact Or.inl ⟨_,entered.contextBindingsTyped valid inventory worldTyped selected functionTyped formals,
-      entered.bodyTyped functionTyped,Or.inl ⟨rfl,rfl,rfl⟩⟩
+      entered.bodyTyped functionTyped,entered.region_live,Or.inl ⟨rfl,rfl,rfl⟩⟩
   case enterTail actualCaller actualFunction actualSource context enteredWorld afterWorld outer regions rest roots
       actualRunning entered relinquished _ _ _ _ =>
     obtain ⟨rfl,rfl,rfl,rfl⟩ := Task.enter.inj (actualRunning.symm.trans running)
     refine Or.inl ⟨{ context with resourceContracts := context.resourceContracts ++ actualCaller.resourceContracts },
-      ?_,?_,Or.inr ⟨rfl,rfl,_,_,rfl⟩⟩
+      ?_,?_,?_,Or.inr ⟨rfl,rfl,_,_,rfl⟩⟩
     · have retained := relinquished.contextBindingsTyped
         (entered.contextBindingsTyped valid inventory worldTyped selected functionTyped formals)
       exact { retained with }
     · have body := entered.bodyTyped functionTyped
       exact body
+    · have live := entered.region_live
+      cases relinquished
+      exact live
   case enterExhausted actualRunning attempt =>
     obtain ⟨rfl,rfl,rfl,rfl⟩ := Task.enter.inj (actualRunning.symm.trans running)
     exact Or.inr ⟨_,attempt,rfl,rfl⟩

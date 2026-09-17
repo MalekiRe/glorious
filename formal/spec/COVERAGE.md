@@ -1,5 +1,21 @@
 # Specification audit
 
+## Produced invocation-entry lifetime
+
+`EnterWorldAttempt.region_live` derives the callee's live region from actual
+fresh-region creation, receiver/witness preparation, the ordered input attempt
+and receiver finishing. The proof covers successful and exhausted entry;
+neither post-state liveness nor successful allocation is an assumption.
+`FunctionEntryResult` now includes the successful callee's live-region fact.
+Ordinary, contextual, proper-tail and foreign-callback entry consumers derive
+that strengthened result; tail custody relinquishment preserves the fact.
+
+The producer and entry consumers pass strict Lean checking, together with
+`DropDispatch`, `InvocationLifecyclePreservation` and `MatchEntryContextTyping`.
+This is liveness at entry, not preservation through arbitrary body execution,
+the subsequently scheduled tail cleanup, saved frames or replay. Those
+obligations and the derivation of `ResourceAdmissionAt` remain open.
+
 ## Constructive destructor hook outcomes
 
 `Execution.destroyHook_progress` constructs the temporary reference allocation

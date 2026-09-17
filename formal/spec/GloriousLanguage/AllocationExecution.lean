@@ -1,5 +1,6 @@
 import GloriousLanguage.PreparationOutcomes
 import GloriousLanguage.AllocationPreservation
+import GloriousLanguage.InputBatchProgress
 
 /-! Positively admitted local allocation requests progress in the actual
 machine, either to fresh storage or to terminal resource exhaustion. Entry
@@ -22,6 +23,74 @@ theorem Kernel.BindsInputExhausted.allocation {program : RuntimeProgram} {region
   | lent _ _ exhausted => exact exhausted.allocation
 
 namespace Execution
+
+theorem ConsumesReceiver.region_state {before after : World}
+    {address : Address} {authority : Authority} {access : Access}
+    (consumed : ConsumesReceiver before address authority access after) :
+    after.liveRegions = before.liveRegions ∧ after.nextRegion = before.nextRegion := by
+  cases consumed with
+  | lent => exact ⟨rfl,rfl⟩
+  | owned _ _ _ _ written => exact World.write_region_state written
+
+theorem ConsumesAvailability.region_state {before after : World}
+    {address : Address} {authority : Authority} {id : Identity} {access : Access}
+    (consumed : ConsumesAvailability before address authority id access after) :
+    after.liveRegions = before.liveRegions ∧ after.nextRegion = before.nextRegion := by
+  cases consumed with
+  | lent => exact ⟨rfl,rfl⟩
+  | owned _ _ _ _ _ _ written =>
+    have state := World.write_region_state written
+    exact ⟨state.1,state.2⟩
+
+theorem PreparesEntryAttempt.region_state {program : Kernel.Program} {callee : Context}
+    {function : Function} {before after : World} {source : EntrySource}
+    {inputs : List InvocationInput} {outcome : PreparationOutcome}
+    (prepared : PreparesEntryAttempt program callee function before source inputs after outcome) :
+    after.liveRegions = before.liveRegions ∧ after.nextRegion = before.nextRegion := by
+  cases prepared with
+  | supplied | residentExhausted | contextualReceiverExhausted => exact ⟨rfl,rfl⟩
+  | resident _ _ lent _ consumed =>
+    have a := Kernel.LendsResident.region_state lent
+    have b := consumed.region_state
+    exact ⟨b.1.trans a.1,b.2.trans a.2⟩
+  | contextual _ _ _ _ receiver witness _ consumed finished =>
+    have a := Kernel.LendsResident.region_state receiver
+    have b := Kernel.LendsResident.region_state witness
+    have c := consumed.region_state
+    have d := finished.region_state
+    exact ⟨d.1.trans (c.1.trans (b.1.trans a.1)),d.2.trans (c.2.trans (b.2.trans a.2))⟩
+  | contextualWitnessExhausted _ _ _ _ lent _ => exact Kernel.LendsResident.region_state lent
+
+theorem FinishesEntry.region_state {before after : World} {source : EntrySource}
+    (finished : FinishesEntry before source after) :
+    after.liveRegions = before.liveRegions ∧ after.nextRegion = before.nextRegion := by
+  cases finished with
+  | supplied => exact ⟨rfl,rfl⟩
+  | resident finished | contextual finished =>
+    cases finished with
+    | lent => exact ⟨rfl,rfl⟩
+    | owned _ _ _ _ _ _ written => exact World.write_region_state written
+
+/-- Preparation, ordered input binding and receiver finishing preserve the
+actual fresh lifetime, even when an allocation exhausts midway through entry. -/
+theorem EnterWorldAttempt.region_live {program : Kernel.Program} {before : State}
+    {caller callee : Context} {function : Function} {source : EntrySource}
+    {after : World} {outcome : PreparationOutcome}
+    (attempted : EnterWorldAttempt program before caller function source callee after outcome) :
+    callee.region ∈ after.liveRegions := by
+  have region := attempted.fresh_context.2.2
+  rw [region]
+  cases attempted with
+  | @inputs withRegion preparedWorld inputs environment declaration boundWorld _ _ _ fresh prepared _ bound finished _ _ =>
+    have finalRegions : after.liveRegions = boundWorld.liveRegions := by
+      cases outcome with
+      | complete => exact finished.region_state.1
+      | exhausted => subst after; rfl
+    rw [finalRegions,bound.region_state.1,prepared.region_state.1,fresh.2]
+    exact List.mem_cons_self
+  | preparationExhausted _ fresh prepared _ _ _ =>
+    rw [prepared.region_state.1,fresh.2]
+    exact List.mem_cons_self
 
 theorem PreparesEntryAttempt.exhausted_allocation {program : Kernel.Program} {callee : Context}
     {function : Function} {before after : World} {source : EntrySource} {inputs : List InvocationInput}
