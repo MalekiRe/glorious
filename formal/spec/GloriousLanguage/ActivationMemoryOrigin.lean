@@ -98,6 +98,7 @@ theorem PrimitiveStep.homes_activationsBelow {program : Kernel.Program} {before 
     exact stored.2.activationsBelow (allocated.activationsBelow bounded)
   case rawRead read | rawCopy read => exact read.activationsBelow bounded
   case rawWrite written stored => exact stored.2.activationsBelow (written.activationsBelow bounded)
+  case rawMove moved stored => exact stored.2.activationsBelow (moved.activationsBelow bounded)
   case rawBorrow borrowed => exact borrowed.activationsBelow bounded
   case pointerOffset stored | pointerWithAddress stored => exact stored.2.activationsBelow bounded
   case pointerAddress stored => exact stored.2.2.activationsBelow bounded

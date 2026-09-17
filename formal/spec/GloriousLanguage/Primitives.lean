@@ -223,6 +223,20 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       RawWrite program before.world source target pointer type written →
       StoresUnit program written destination after →
       PrimitiveStep program before none { before with world := after, task := .run context next }
+  | rawMove {before context destination binding type sourcePointerAddress targetPointerAddress countAddress next
+      sourcePointer targetPointer count sources destinations moved after} :
+      before.task = .primitive context destination binding [type] [sourcePointerAddress,targetPointerAddress,countAddress] next →
+      binding.primitive = some .rawMove →
+      PointerAt before.world sourcePointerAddress sourcePointer →
+      PointerAt before.world targetPointerAddress targetPointer →
+      ScalarAt before.world countAddress (.integer false .pointer count) → 0 ≤ count →
+      RawMoveRange program.declarations before.world sourcePointer type count.toNat sources →
+      RawMoveRange program.declarations before.world targetPointer type count.toNat destinations →
+      (∀ place ∈ sources ++ destinations,
+        ResolvesResource before.world context.environment (.activation context.activation) place) →
+      BulkMove program before.world sources destinations moved →
+      StoresUnit program moved destination after →
+      PrimitiveStep program before none { before with world := after, task := .run context next }
   | rawBorrow {before context destination binding type pointerAddress next pointer source mode after} :
       before.task = .primitive context destination binding [.reference mode (.runtimeRegion context.region) type] [pointerAddress] next →
       binding.primitive = some .rawBorrow → PointerAt before.world pointerAddress pointer →

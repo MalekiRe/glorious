@@ -230,6 +230,23 @@ def BulkMove (program : Language.RuntimeProgram) (before : World) (sources desti
     Clears before (sources.map ResolvedPlace.address) cleared ∧
     InstallsResidents program.declarations cleared (destinations.map ResolvedPlace.address) residents after
 
+/-- A bulk operand names consecutive logical slots and their actual physical
+addresses. Slot identity is retained even when the element stride is zero;
+numeric pointer equality never supplies ownership or an initialized resident.
+The empty range still has live, aligned, representable backing storage. -/
+def RawMoveRange (program : Language.Program) (world : World) (pointer : RawPointer)
+    (type : Term) (count : Nat) (places : List ResolvedPlace) : Prop :=
+  ∃ layout base start,
+    LayoutOf program ⟨[],[],0,default,true,{}⟩ type layout ∧
+    RawRange program world pointer (count * alignUp layout.size layout.alignment) layout.alignment ∧
+    places.map ResolvedPlace.address = Slots base start count ∧
+    ∀ (index : Nat) (place : ResolvedPlace), places[index]? = some place →
+      PointsTo program world
+        { pointer with
+          address := pointer.address + index * alignUp layout.size layout.alignment
+          offset := pointer.offset + index * alignUp layout.size layout.alignment }
+        place.address type
+
 /-- The pointer and its erased owner select one actual live allocation and
 resident snapshot. Release and reallocation consume this same authentication;
 neither numeric address equality nor a later release can supply it. -/

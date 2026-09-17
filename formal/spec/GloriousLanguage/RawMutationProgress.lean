@@ -33,6 +33,30 @@ theorem PointsTo.addressType {program : Program} {world : World} {pointer : RawP
   obtain ⟨_,_,_,root,offset,_,located,_⟩ := points
   exact ⟨offset,located⟩
 
+theorem RawMoveRange.length {program : Program} {world : World} {pointer : RawPointer}
+    {type : Term} {count : Nat} {places : List ResolvedPlace}
+    (range : RawMoveRange program world pointer type count places) : places.length = count := by
+  obtain ⟨_,_,_,_,_,slots,_⟩ := range
+  simpa [Slots] using congrArg List.length slots
+
+theorem RawMoveRange.pairwise {program : Program} {world : World} {pointer : RawPointer}
+    {type : Term} {count : Nat} {places : List ResolvedPlace}
+    (range : RawMoveRange program world pointer type count places) :
+    places.Pairwise (fun first last => ¬ first.address.Overlaps last.address) := by
+  obtain ⟨_,base,start,_,_,slots,_⟩ := range
+  have apart : (places.map ResolvedPlace.address).Pairwise (fun first last => ¬ first.Overlaps last) := by
+    rw [slots]
+    exact Slots.pairwise base start count
+  exact List.pairwise_map.mp apart
+
+theorem RawMoveRange.addressType {program : Program} {world : World} {pointer : RawPointer}
+    {type : Term} {count : Nat} {places : List ResolvedPlace} {place : ResolvedPlace}
+    (range : RawMoveRange program world pointer type count places) (member : place ∈ places) :
+    AddressType program world place.address type := by
+  obtain ⟨_,_,_,_,_,_,points⟩ := range
+  obtain ⟨index,selected⟩ := List.mem_iff_getElem?.mp member
+  exact (points index place selected).addressType
+
 theorem RawRead.move_exists {program : Kernel.Program} {before : World}
     {source : ResolvedPlace} {pointer : RawPointer} {type : Term} {layout : Layout}
     {destination : Address} {value : Value}
@@ -550,6 +574,131 @@ theorem Step.pointerAddress_typed_progress {program : Kernel.Program} {host : Fo
     task identity pointerAt destinationType
   exact ⟨after,value,Or.inr (Or.inr (Or.inr (Or.inr (Or.inl stepped)))),afterTyped,rest⟩
 
+
+/-- Authenticated pre-state ranges construct the snapshot move and actual
+unit result. Neither a moved world nor a result-write witness is admission. -/
+theorem PrimitiveStep.rawMove_typed_progress {program : Kernel.Program} {before : State}
+    {context : Context} {destination : Address} {binding : RuntimeBinding} {type : Term}
+    {sourcePointerAddress targetPointerAddress countAddress : ResolvedPlace}
+    {sourcePointer targetPointer : RawPointer} {count : Int} {next : Kernel.Code}
+    {sources destinations : List ResolvedPlace}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .primitive context destination binding [type] [sourcePointerAddress,targetPointerAddress,countAddress] next)
+    (identity : binding.primitive = some .rawMove)
+    (sourcePointerAt : PointerAt before.world sourcePointerAddress sourcePointer)
+    (targetPointerAt : PointerAt before.world targetPointerAddress targetPointer)
+    (countAt : ScalarAt before.world countAddress (.integer false .pointer count)) (nonnegative : 0 ≤ count)
+    (sourceRange : RawMoveRange program.declarations before.world sourcePointer type count.toNat sources)
+    (targetRange : RawMoveRange program.declarations before.world targetPointer type count.toNat destinations)
+    (resources : ∀ place ∈ sources ++ destinations,
+      Kernel.ResolvesResource before.world context.environment (.activation context.activation) place)
+    (located : ∀ source ∈ sources, before.world.Located source.address)
+    (permissions : ∀ source ∈ sources, Permitted before.world source.authority .owned source.address ∧
+      ∀ value, before.world.Stores source.address value →
+        value.MoveReady program before.world (((sources ++ destinations).map ResolvedPlace.address) ++ [destination]))
+    (writable : ∀ target ∈ destinations, Permitted before.world target.authority .unique target.address ∧
+      (target.address ∈ sources.map ResolvedPlace.address ∨ before.world.Vacant target.address))
+    (paths : ∀ source ∈ sources, ∀ target ∈ destinations, ¬ source.address.ProperPrefix target.address)
+    (resultApart : ∀ place ∈ sources ++ destinations, ¬ place.address.Overlaps destination)
+    (destinationType : DestinationType before.world destination .unit) :
+    ∃ after, PrimitiveStep program before none after ∧ Typing.WorldTyped program after.world ∧
+      after.task = .run context next ∧
+      (∃ result, after.world.Stores destination result ∧ Typing.ValueTyped program after.world result ∧
+        result.type = .unit ∧ result.head = .unit) ∧
+      (∀ (index : Nat) (source target : ResolvedPlace), sources[index]? = some source → destinations[index]? = some target →
+        after.world.read target.address = before.world.read source.address) ∧
+      (∀ (source : ResolvedPlace) (value : Value), source ∈ sources → before.world.Stores source.address value →
+        value.ResourcesAccessible program after.world .owned) := by
+  let values := sources.map (fun source => before.world.read source.address)
+  have snapshot : ListRel (fun source value => before.world.read source.address = value) sources values := by
+    simpa using (ListRel.maps (relation := fun source value => before.world.read source.address = value)
+      sources id (fun source => before.world.read source.address) (fun _ _ => rfl))
+  have prepared : ListRel (fun target resident =>
+      (target.address ∈ sources.map ResolvedPlace.address ∨ before.world.Vacant target.address) ∧
+      ∀ value, resident = some value → AddressType program.declarations before.world target.address value.type)
+      destinations values := by
+    apply ListRel.of_at (targetRange.length.trans (sourceRange.length.symm.trans snapshot.length_eq))
+    intro index target resident targetAt residentAt
+    obtain ⟨source,sourceAt,read⟩ := snapshot.get_right residentAt
+    refine ⟨(writable target (List.mem_of_getElem? targetAt)).2,?_⟩
+    intro value same
+    have stored := read.trans same
+    obtain ⟨offset,sourceType⟩ := sourceRange.addressType (List.mem_of_getElem? sourceAt)
+    have valueType := sourceType.stored_type valid inventory typed.roots stored
+    rw [valueType]
+    exact targetRange.addressType (List.mem_of_getElem? targetAt)
+  have admitted : ∀ source ∈ sources, Permitted before.world source.authority .owned source.address ∧
+      ∀ value, before.world.Stores source.address value →
+        value.MoveReady program before.world ((sources ++ destinations).map ResolvedPlace.address) := by
+    intro source member
+    refine ⟨(permissions source member).1,?_⟩
+    intro value stored
+    have ready := (permissions source member).2 value stored
+    exact ⟨ready.1,fun address present => ready.2 address (List.mem_append_left _ present)⟩
+  obtain ⟨moved,move⟩ := BulkMove.exists sourceRange.pairwise targetRange.pairwise paths snapshot located admitted
+    (fun target member => (writable target member).1) prepared
+  have movedTyped := move.worldTyped valid inventory typed
+  have resultType := destinationType.frame move.locations (move.read_disjoint resultApart)
+  obtain ⟨after,unit⟩ := StoresUnit.exists (program := program) resultType
+  refine ⟨{ before with world := after, task := .run context next },
+    .rawMove task identity sourcePointerAt targetPointerAt countAt nonnegative sourceRange targetRange resources move unit,
+    unit.worldTyped valid inventory movedTyped,rfl,unit.typed_result,?_,?_⟩
+  · intro index source target sourceAt targetAt
+    have outside : ¬ destination.Overlaps target.address := fun overlap =>
+      resultApart target (List.mem_append_right _ (List.mem_of_getElem? targetAt)) overlap.symm
+    exact (unit.read_disjoint outside).trans (move.snapshot index source target sourceAt targetAt)
+  · intro source value member stored
+    have ready := (permissions source member).2 value stored
+    have frame : value.SupportFramed before.world moved := by
+      intro address supported
+      exact ⟨move.read_disjoint (fun place present => ready.2 place.address
+        (List.mem_append_left _ (List.mem_map.mpr ⟨place,present,rfl⟩)) address supported),move.locations address.root⟩
+    have loans : moved.loans = before.world.loans := by
+      simpa using congrArg World.loans move.rest
+    have accessible := ready.1.frame (.of_locations move.locations) loans frame
+    apply unit.resourcesAccessible accessible
+    intro address supported
+    exact ready.2 destination (List.mem_append_right _ (by simp)) address
+      ((Value.Support.frame loans frame).mpr supported)
+
+theorem Step.rawMove_typed_progress {program : Kernel.Program} {host : Foreign.Model} {before : State}
+    {context : Context} {destination : Address} {binding : RuntimeBinding} {type : Term}
+    {sourcePointerAddress targetPointerAddress countAddress : ResolvedPlace}
+    {sourcePointer targetPointer : RawPointer} {count : Int} {next : Kernel.Code}
+    {sources destinations : List ResolvedPlace}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .primitive context destination binding [type] [sourcePointerAddress,targetPointerAddress,countAddress] next)
+    (identity : binding.primitive = some .rawMove)
+    (sourcePointerAt : PointerAt before.world sourcePointerAddress sourcePointer)
+    (targetPointerAt : PointerAt before.world targetPointerAddress targetPointer)
+    (countAt : ScalarAt before.world countAddress (.integer false .pointer count)) (nonnegative : 0 ≤ count)
+    (sourceRange : RawMoveRange program.declarations before.world sourcePointer type count.toNat sources)
+    (targetRange : RawMoveRange program.declarations before.world targetPointer type count.toNat destinations)
+    (resources : ∀ place ∈ sources ++ destinations,
+      Kernel.ResolvesResource before.world context.environment (.activation context.activation) place)
+    (located : ∀ source ∈ sources, before.world.Located source.address)
+    (permissions : ∀ source ∈ sources, Permitted before.world source.authority .owned source.address ∧
+      ∀ value, before.world.Stores source.address value →
+        value.MoveReady program before.world (((sources ++ destinations).map ResolvedPlace.address) ++ [destination]))
+    (writable : ∀ target ∈ destinations, Permitted before.world target.authority .unique target.address ∧
+      (target.address ∈ sources.map ResolvedPlace.address ∨ before.world.Vacant target.address))
+    (paths : ∀ source ∈ sources, ∀ target ∈ destinations, ¬ source.address.ProperPrefix target.address)
+    (resultApart : ∀ place ∈ sources ++ destinations, ¬ place.address.Overlaps destination)
+    (destinationType : DestinationType before.world destination .unit) :
+    ∃ after, Step program host before none after ∧ Typing.WorldTyped program after.world ∧
+      after.task = .run context next ∧
+      (∃ result, after.world.Stores destination result ∧ Typing.ValueTyped program after.world result ∧
+        result.type = .unit ∧ result.head = .unit) ∧
+      (∀ (index : Nat) (source target : ResolvedPlace), sources[index]? = some source → destinations[index]? = some target →
+        after.world.read target.address = before.world.read source.address) ∧
+      (∀ (source : ResolvedPlace) (value : Value), source ∈ sources → before.world.Stores source.address value →
+        value.ResourcesAccessible program after.world .owned) := by
+  obtain ⟨after,stepped,rest⟩ := PrimitiveStep.rawMove_typed_progress valid inventory typed task identity
+    sourcePointerAt targetPointerAt countAt nonnegative sourceRange targetRange resources located permissions writable
+    paths resultApart destinationType
+  exact ⟨after,Or.inr (Or.inr (Or.inr (Or.inr (Or.inl stepped)))),rest⟩
 
 end Execution
 end Glorious.Language

@@ -123,6 +123,7 @@ theorem PrimitiveStep.suspensionExtension {program : Kernel.Program} {before aft
   | rawRead _ _ _ _ read => exact read.suspensionExtension
   | rawCopy _ _ _ _ read => exact read.suspensionExtension
   | rawWrite _ _ _ _ written stored => exact written.suspensionExtension.trans stored.2.suspensionExtension
+  | rawMove _ _ _ _ _ _ _ _ _ moved stored => exact moved.suspensionExtension.trans stored.2.suspensionExtension
   | rawBorrow _ _ _ _ borrowed => exact borrowed.suspensionExtension
   | pointerOffset _ _ _ _ _ stored => exact stored.2.suspensionExtension
   | pointerAddress _ _ _ stored => exact stored.2.2.suspensionExtension

@@ -80,6 +80,8 @@ theorem PrimitiveStep.worldTyped {program : Kernel.Program} {before after : Stat
   | rawCopy task primitive pointer resource read => exact read.worldTyped valid inventory typed
   | rawWrite task primitive pointer resource written stored =>
     exact stored.worldTyped valid inventory (written.worldTyped valid inventory typed)
+  | rawMove _ _ _ _ _ _ _ _ _ moved stored =>
+    exact stored.worldTyped valid inventory (moved.worldTyped valid inventory typed)
   | rawBorrow task primitive pointer resource borrowed => exact borrowed.worldTyped valid inventory typed
   | pointerOffset task primitive pointer amount offset stored =>
     exact stored.worldTyped valid inventory typed offset.bound offset.origin

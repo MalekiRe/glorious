@@ -217,8 +217,19 @@ or a dependency of this project.
   separation within each range remains required. `BulkMove.typed_progress`
   composes actual construction with world typing, exact indexed snapshot
   preservation (including holes), and relocated resource accessibility.
-  The focused bulk/reallocation/raw gate passes 177 jobs. This does not supply
-  the missing `rawMove` primitive operand contract or source/task admission.
+  The focused bulk/reallocation/raw gate passes 177 jobs.
+- `Memory.RawMoveRange`, `PrimitiveStep.rawMove`, `RawMutationProgress`:
+  raw bulk dispatch now takes an element type and source-pointer,
+  destination-pointer, unsigned-count operands. Each range authenticates
+  logical consecutive slots against actual `PointsTo`, stride and `RawRange`;
+  logical slot identities remain distinct for zero-sized elements. Empty ranges
+  retain live aligned backing requirements. Every slot resolves its own erased
+  authority. General progress constructs snapshot movement and the unit write
+  from original-world readiness, proving exact destination contents and retained
+  resource accessibility after that write. The 249-job integration gate covers
+  semantic, activation, control-authority, suspension, lending and Drop consumers;
+  eight general axiom audits use only standard Lean axioms. Source/task admission
+  and remaining non-raw primitive dispatch are not established by this theorem.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

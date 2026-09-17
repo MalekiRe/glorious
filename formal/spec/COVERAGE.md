@@ -167,9 +167,18 @@ source clearing a destination's proper ancestor. Reallocation uses this same
 constructor instead of a disjoint-only path. `BulkMove.typed_progress` derives
 world typing, exact indexed destination contents (including holes), and
 recursive resource accessibility from the original-world move admission.
-The focused bulk/reallocation/raw gate passes 177 jobs. Missing primitive
-dispatch and source/task admission remain open; the `rawMove` manifest tag
-still lacks an explicit primitive transition and its admitted operand contract.
+The focused bulk/reallocation/raw gate passes 177 jobs. `PrimitiveStep.rawMove`
+now connects the manifest tag to actual `BulkMove` and unit installation.
+`RawMoveRange` authenticates source/destination pointer and count operands
+against consecutive logical slots, actual element stride, physical provenance
+and checked ranges. Zero-sized slots retain logical identity; empty ranges
+require live aligned backing. Authority comes separately from actual resource
+resolution and permission, never pointer bits.
+`Step.rawMove_typed_progress` constructs both writes from original-world
+admission and proves exact destination snapshot and resource accessibility
+through unit installation. The 249-job integration gate and eight general
+axiom audits pass. Source-derived admission and the other missing non-raw
+primitive dispatch cases remain open.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the

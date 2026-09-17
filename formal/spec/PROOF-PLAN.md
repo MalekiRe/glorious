@@ -510,10 +510,15 @@ standard Lean axioms. Overlap-aware `BulkMove.exists` now replaces the
 disjoint-only constructor at the actual reallocation consumer. Its composed
 `BulkMove.typed_progress` proves world typing, exact indexed snapshot contents,
 and relocated resource accessibility; the focused dependency gate passes 177
-jobs. Next: establish the admitted operand contract and missing `rawMove`
-manifest dispatch, then consume the complete primitive boundary in compositional
-source/task admission. Current run-wide `ResourceAdmissionAt` is still an
-assumption, not a soundness theorem.
+jobs. The raw-move operand contract and dispatch are now connected:
+`RawMoveRange` authenticates logical slots, stride and physical range;
+`Step.rawMove_typed_progress` constructs the actual bulk movement and unit
+write, preserving exact destination contents and resource accessibility.
+The 249-job integration gate covers semantic, activation, control-authority,
+suspension, invocation-lending and Drop consumers. Eight general axiom audits
+report only standard axioms. Remaining non-raw dispatch and compositional
+source/task admission remain open. Current run-wide `ResourceAdmissionAt`
+is still an assumption, not a soundness theorem.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over
