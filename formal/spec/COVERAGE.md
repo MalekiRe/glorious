@@ -207,6 +207,13 @@ of the forged ancestor graph. Handoff readiness is derived; current loan-kind,
 guard and physical-layout obligations are discharged. The eight-byte reference
 fixtures require a 64-bit pointer target. No general source soundness is established.
 
+The nested destructor composition boundary is now actual: `CleanupRun.destroy_fields_loop`,
+`destroy_fields_tree` and `CleanupDrain.destroy_node` accept a child run with its real event
+trace instead of an impossible empty-trace premise, and they no longer demand that
+still-unscheduled sibling slots be vacant after one child is destroyed. Final holes follow from
+the selected child hole plus unchanged other slots under the duplicate-free schedule. The leaf
+instance `destroy_child` and the recursive tree producer remain open: a child's destruction
+still needs the recursive `World.Destroys` inventory admitted for arbitrary nesting.
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the
 existing contract: a valid pre-world, the contract's holds predicate and actual
