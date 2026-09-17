@@ -46,6 +46,25 @@ theorem Clears.exists {before : World} {addresses : List Address}
           (located next (by simp [member])))
       exact ⟨after,.cons written cleared⟩
 
+theorem Clears.located {before after : World} {addresses : List Address} {address : Address}
+    (cleared : Clears before addresses after) (located : before.Located address)
+    (outside : ∀ source ∈ addresses, ¬ source.ProperPrefix address) : after.Located address := by
+  induction cleared with
+  | nil => exact located
+  | cons written _ ih =>
+      exact ih (World.write_located written (outside _ (by simp)) located)
+        (fun source member => outside source (List.mem_cons_of_mem _ member))
+
+theorem Clears.selected_vacant {before after : World} {addresses : List Address} {address : Address}
+    (cleared : Clears before addresses after) (member : address ∈ addresses)
+    (located : before.Located address)
+    (outside : ∀ source ∈ addresses, ¬ source.ProperPrefix address) : after.Vacant address := by
+  rcases cleared.located located outside with ⟨value,stored⟩ | vacant
+  · have absent : after.read address = none := by simpa using cleared.cleared member []
+    rw [stored] at absent
+    cases absent
+  · exact vacant
+
 namespace Memory
 
 theorem InstallsResidents.exists {program : Program} {before : World}
@@ -75,20 +94,21 @@ theorem InstallsResidents.exists {program : Program} {before : World}
               obtain ⟨after,installed⟩ := ih (List.pairwise_cons.mp apart).2 pending
               exact ⟨after,.resident head.1 (head.2 value rfl) written installed⟩
 
-/-- A disjoint destination range receives the exact evaluated source snapshot.
-Holes remain holes and nonempty subtrees retain their complete values, including
-resources. The more general actual BulkMove also permits source overlap. -/
-theorem BulkMove.disjoint_exists {program : RuntimeProgram} {before : World}
+/-- Every destination receives the evaluated source snapshot, including when
+it is itself a source. Clearing cannot erase a destination's proper ancestor:
+an equal source slot is legal, but a destroyed nested path is not writable. -/
+theorem BulkMove.exists {program : RuntimeProgram} {before : World}
     {sources destinations : List ResolvedPlace} {values : List (Option Value)}
     (sourceApart : sources.Pairwise (fun first last => ¬ first.address.Overlaps last.address))
     (destinationApart : destinations.Pairwise (fun first last => ¬ first.address.Overlaps last.address))
-    (apart : ∀ source ∈ sources, ∀ destination ∈ destinations, ¬ source.address.Overlaps destination.address)
+    (apart : ∀ source ∈ sources, ∀ destination ∈ destinations, ¬ source.address.ProperPrefix destination.address)
     (snapshot : ListRel (fun source value => before.read source.address = value) sources values)
     (located : ∀ source ∈ sources, before.Located source.address)
     (permissions : ∀ source ∈ sources, Permitted before source.authority .owned source.address ∧
       ∀ value, before.Stores source.address value → value.MoveReady program before ((sources ++ destinations).map ResolvedPlace.address))
     (writable : ∀ destination ∈ destinations, Permitted before destination.authority .unique destination.address)
-    (prepared : ListRel (fun destination resident => before.Vacant destination.address ∧
+    (prepared : ListRel (fun destination resident =>
+      (destination.address ∈ sources.map ResolvedPlace.address ∨ before.Vacant destination.address) ∧
       ∀ value, resident = some value → AddressType program.declarations before destination.address value.type) destinations values) :
     ∃ after, BulkMove program before sources destinations after := by
   obtain ⟨cleared,clears⟩ := Clears.exists (List.pairwise_map.mpr sourceApart) (by
@@ -102,8 +122,14 @@ theorem BulkMove.disjoint_exists {program : RuntimeProgram} {before : World}
     have outside : ∀ address ∈ sources.map ResolvedPlace.address, ¬ address.ProperPrefix destination.address := by
       intro address member
       obtain ⟨source,selected,equal⟩ := List.mem_map.mp member
-      exact equal ▸ (fun included => apart source selected destination present included.1.overlaps)
-    exact ⟨clears.vacant ready.1 outside,fun value found => clears.address_type (ready.2 value found) outside⟩
+      exact equal ▸ apart source selected destination present
+    have vacant : cleared.Vacant destination.address := by
+      rcases ready.1 with selected | vacant
+      · obtain ⟨source,member,equal⟩ := List.mem_map.mp selected
+        exact clears.selected_vacant (List.mem_map.mpr ⟨source,member,equal⟩)
+          (equal ▸ located source member) outside
+      · exact clears.vacant vacant outside
+    exact ⟨vacant,fun value found => clears.address_type (ready.2 value found) outside⟩
   have readyAddresses : ListRel (fun address resident => cleared.Vacant address ∧
       ∀ value, resident = some value → AddressType program.declarations cleared address value.type)
       (destinations.map ResolvedPlace.address) values := ListRel.map_left ResolvedPlace.address ready
@@ -112,7 +138,7 @@ theorem BulkMove.disjoint_exists {program : RuntimeProgram} {before : World}
     snapshot,permissions,?_,clears,installed⟩
   intro destination member
   obtain ⟨resident,present,ready⟩ := prepared.member_left member
-  exact ⟨writable destination member,Or.inr ready.1⟩
+  exact ⟨writable destination member,ready.1⟩
 
 end Memory
 end Glorious.Language

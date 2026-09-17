@@ -50,9 +50,9 @@ request, without successful-move/release or post-world typing assumptions.
 The fresh allocator consumes the generalized actual reference-row frame;
 the existing unchanged-table consumers remain wrappers around that proof.
 
-The immediate dependency chain now closes remaining raw primitive dispatch and
-overlap-aware bulk relocation, then consumes these original-world constructors
-in compositional source/task resource judgments. Ordinary input preparation,
+The immediate dependency chain now closes remaining raw primitive dispatch,
+then consumes the original-world constructors, including overlap-aware bulk
+relocation, in compositional source/task resource judgments. Ordinary input preparation,
 proper-tail entry, physical replay, raw copy/borrow and pointer arithmetic have
 the constructed outcomes recorded below. Neither `CodeType` alone nor a
 renamed run-wide progress certificate supplies path-sensitive ownership and
@@ -506,10 +506,14 @@ its unsigned bound from the actual scalar operand; address inspection gets its
 bound from resident pointer typing and constructs the real scalar write.
 The existing layout progress/uniqueness producer remains unchanged. The combined
 raw/layout gate passes 179 jobs; sixteen general theorem audits use only
-standard Lean axioms. Next: construct overlapping bulk relocation and connect
-the missing `rawMove` manifest dispatch, then consume the complete primitive
-boundary in compositional source/task admission. Current run-wide
-`ResourceAdmissionAt` is still an assumption, not a soundness theorem.
+standard Lean axioms. Overlap-aware `BulkMove.exists` now replaces the
+disjoint-only constructor at the actual reallocation consumer. Its composed
+`BulkMove.typed_progress` proves world typing, exact indexed snapshot contents,
+and relocated resource accessibility; the focused dependency gate passes 177
+jobs. Next: establish the admitted operand contract and missing `rawMove`
+manifest dispatch, then consume the complete primitive boundary in compositional
+source/task admission. Current run-wide `ResourceAdmissionAt` is still an
+assumption, not a soundness theorem.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over

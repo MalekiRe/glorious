@@ -161,9 +161,15 @@ address inspection derives it from the actual typed pointer resident. Inspection
 does not require a live allocation and grants no ownership or dereference
 permission. The existing constructive unique layout query is reused unchanged.
 The combined raw/layout gate passes 179 jobs, and sixteen general axiom audits
-report only standard Lean axioms. General overlapping bulk-move construction,
-missing primitive dispatch and source/task admission remain open. In particular,
-the `rawMove` manifest tag still lacks an explicit primitive transition.
+report only standard Lean axioms. Overlapping bulk-move construction is now
+proved by `BulkMove.exists`: destinations may equal source slots, with no
+source clearing a destination's proper ancestor. Reallocation uses this same
+constructor instead of a disjoint-only path. `BulkMove.typed_progress` derives
+world typing, exact indexed destination contents (including holes), and
+recursive resource accessibility from the original-world move admission.
+The focused bulk/reallocation/raw gate passes 177 jobs. Missing primitive
+dispatch and source/task admission remain open; the `rawMove` manifest tag
+still lacks an explicit primitive transition and its admitted operand contract.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the

@@ -53,6 +53,43 @@ theorem InstallsResidents.read_disjoint {program : Program} {before after : Worl
       exact (ih (fun mutation member => apart mutation (List.mem_cons_of_mem _ member))).trans
         (World.write_disjoint written (apart _ List.mem_cons_self))
 
+/-- Distinct destination slots retain the exact installed snapshot, including
+holes. Later writes cannot replace an earlier slot's contents. -/
+theorem InstallsResidents.snapshot {program : Program} {before after : World}
+    {addresses : List Address} {values : List (Option Value)}
+    (installed : InstallsResidents program before addresses values after)
+    (apart : addresses.Pairwise (fun first last => ¬ first.Overlaps last)) :
+    ListRel (fun address value => after.read address = value) addresses values := by
+  induction installed with
+  | nil => exact .nil
+  | @hole before address addresses values after vacant rest ih =>
+      refine .cons ?_ (ih (List.pairwise_cons.mp apart).2)
+      exact (rest.read_disjoint (fun mutation member overlap =>
+        (List.pairwise_cons.mp apart).1 mutation member overlap.symm)).trans vacant.read_none
+  | @resident before address addresses value values middle after vacant located written rest ih =>
+      refine .cons ?_ (ih (List.pairwise_cons.mp apart).2)
+      have stored : middle.read address = some value := by
+        simpa [Value.atPath] using World.write_read_inside written []
+      exact (rest.read_disjoint (fun mutation member overlap =>
+        (List.pairwise_cons.mp apart).1 mutation member overlap.symm)).trans stored
+
+/-- Bulk relocation preserves the value at each corresponding source index,
+not merely its type or owner shell. Source and destination ranges may overlap. -/
+theorem BulkMove.snapshot {program : RuntimeProgram} {before after : World}
+    {sources destinations : List ResolvedPlace}
+    (moved : BulkMove program before sources destinations after) :
+    ∀ (index : Nat) (source destination : ResolvedPlace), sources[index]? = some source → destinations[index]? = some destination →
+      after.read destination.address = before.read source.address := by
+  obtain ⟨values,cleared,_,_,apart,snapshot,_,_,_,installed⟩ := moved
+  have result := installed.snapshot (List.pairwise_map.mpr apart)
+  intro index source destination sourceAt destinationAt
+  obtain ⟨value,valueAt,read⟩ := snapshot.get_left sourceAt
+  obtain ⟨address,addressAt,written⟩ := result.get_right valueAt
+  have actual : (destinations.map ResolvedPlace.address)[index]? = some destination.address := by
+    simp [List.getElem?_map,destinationAt]
+  have same := Option.some.inj (addressAt.symm.trans actual)
+  exact same ▸ written.trans read.symm
+
 theorem BulkMove.rest {program : RuntimeProgram} {before after : World} {sources destinations : List ResolvedPlace}
     (moved : BulkMove program before sources destinations after) : after = { before with roots := after.roots } := by
   obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved

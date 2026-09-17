@@ -48,6 +48,53 @@ theorem BulkMove.read_disjoint {program : RuntimeProgram} {before after : World}
       obtain ⟨place,present,rfl⟩ := List.mem_map.mp member
       exact apart place (List.mem_append_left _ present)))
 
+/-- The snapshot's recursive resources remain accessible at the corresponding
+destination, even when source and destination ranges overlap. The pending
+write footprint comes from the actual move's original admission. -/
+theorem BulkMove.handed_off_ready {program : RuntimeProgram} {before after : World}
+    {sources destinations : List ResolvedPlace} {index : Nat} {source destination : ResolvedPlace} {value : Value}
+    (moved : BulkMove program before sources destinations after)
+    (sourceAt : sources[index]? = some source) (destinationAt : destinations[index]? = some destination)
+    (stored : before.Stores source.address value) :
+    after.Stores destination.address value ∧ value.ResourcesAccessible program after .owned := by
+  have found := (moved.snapshot index source destination sourceAt destinationAt).trans stored
+  have ready : value.MoveReady program before ((sources ++ destinations).map ResolvedPlace.address) := by
+    obtain ⟨_,_,_,_,_,_,permissions,_,_,_⟩ := moved
+    exact (permissions source (List.mem_of_getElem? sourceAt)).2 value stored
+  have frame : value.SupportFramed before after := by
+    intro address supported
+    exact ⟨moved.read_disjoint (fun place member =>
+      ready.2 place.address (List.mem_map.mpr ⟨place,member,rfl⟩) address supported),moved.locations address.root⟩
+  have loans := congrArg World.loans moved.rest
+  exact ⟨found,ready.1.frame (.of_locations moved.locations) loans frame⟩
+
+/-- Original-world admission constructs overlap-aware relocation with exact
+slot contents, preserved world typing and accessible relocated resources. -/
+theorem BulkMove.typed_progress {program : Kernel.Program} {before : World}
+    {sources destinations : List ResolvedPlace} {values : List (Option Value)}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (sourceApart : sources.Pairwise (fun first last => ¬ first.address.Overlaps last.address))
+    (destinationApart : destinations.Pairwise (fun first last => ¬ first.address.Overlaps last.address))
+    (paths : ∀ source ∈ sources, ∀ destination ∈ destinations, ¬ source.address.ProperPrefix destination.address)
+    (snapshot : ListRel (fun source value => before.read source.address = value) sources values)
+    (located : ∀ source ∈ sources, before.Located source.address)
+    (permissions : ∀ source ∈ sources, Permitted before source.authority .owned source.address ∧
+      ∀ value, before.Stores source.address value → value.MoveReady program before ((sources ++ destinations).map ResolvedPlace.address))
+    (writable : ∀ destination ∈ destinations, Permitted before destination.authority .unique destination.address)
+    (prepared : ListRel (fun destination resident =>
+      (destination.address ∈ sources.map ResolvedPlace.address ∨ before.Vacant destination.address) ∧
+      ∀ value, resident = some value → AddressType program.declarations before destination.address value.type) destinations values) :
+    ∃ after, BulkMove program before sources destinations after ∧ Typing.WorldTyped program after ∧
+      (∀ (index : Nat) (source destination : ResolvedPlace), sources[index]? = some source → destinations[index]? = some destination →
+        after.read destination.address = before.read source.address) ∧
+      (∀ (index : Nat) (source destination : ResolvedPlace) (value : Value),
+        sources[index]? = some source → destinations[index]? = some destination → before.Stores source.address value →
+          after.Stores destination.address value ∧ value.ResourcesAccessible program after .owned) := by
+  obtain ⟨after,moved⟩ := BulkMove.exists sourceApart destinationApart paths snapshot located permissions writable prepared
+  exact ⟨after,moved,moved.worldTyped valid inventory typed,moved.snapshot,
+    fun _ _ _ _ sourceAt destinationAt stored => moved.handed_off_ready sourceAt destinationAt stored⟩
+
 theorem BufferAt.destination_root_ne {before : World} {allocation : ResolvedPlace} {pointer : RawPointer}
     {domain : Identity} {value : Value} {destination : Address} {type : Term}
     (buffer : BufferAt before allocation pointer domain value)

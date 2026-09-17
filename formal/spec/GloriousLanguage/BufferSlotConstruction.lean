@@ -160,14 +160,14 @@ theorem ReallocationSourceReady.move_exists {program : Kernel.Program} {before a
       obtain ⟨layout,located,_⟩ := request.array_layout
       exact ⟨layout,located.runtime_context⟩
   obtain ⟨layout,elementLayout⟩ := elementLayout
-  apply BulkMove.disjoint_exists
+  apply BulkMove.exists
     (List.pairwise_map.mpr (Slots.pairwise oldAllocation.address 0 oldCount))
     (List.pairwise_map.mpr (Slots.pairwise allocation.address 0 oldCount)) ?_ oldSnapshot
     (Slots.located oldStored oldCount length) ?_ ?_ ?_
   · intro source present destination member overlap
     obtain ⟨_,_,rfl⟩ := Slots.resolved_member present
     obtain ⟨_,_,rfl⟩ := Slots.resolved_member member
-    exact different overlap.1
+    exact different overlap.1.1
   · intro source member
     obtain ⟨index,atSource⟩ := List.mem_iff_getElem?.mp member
     obtain ⟨_,sourceEq⟩ := Slots.resolved_at atSource
@@ -196,7 +196,7 @@ theorem ReallocationSourceReady.move_exists {program : Kernel.Program} {before a
     obtain ⟨bounded,rfl⟩ := Slots.resolved_at atDestination
     have newBound : index < newCount := Nat.lt_of_lt_of_le bounded ready.growing
     have hole : newValue.fields[0+index]? = some none := by simp [newFields,newBound]
-    refine ⟨newStored.vacant_child hole,?_⟩
+    refine ⟨Or.inr (newStored.vacant_child hole),?_⟩
     intro child same
     rw [same] at atSlot
     have childType := childrenTyped.2 child (List.mem_of_getElem? atSlot)

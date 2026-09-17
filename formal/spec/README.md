@@ -207,8 +207,18 @@ or a dependency of this project.
   actual scalar operand. Address inspection derives its bound from the typed
   pointer resident without granting dereference permission. Existing layout
   progress is reused unchanged. The raw/layout gate passes 179 jobs; sixteen
-  general axiom audits report standard axioms only. Overlapping bulk-move
-  construction, missing primitive dispatch and source/task admission remain open.
+  general axiom audits report standard axioms only. Missing primitive dispatch
+  and source/task admission remain open.
+- `BulkMoveConstruction`, `BulkMovePreservation`, `BufferReallocationProgress`:
+  `BulkMove.exists` now constructs legal cross-range overlap, replacing the
+  disjoint-only constructor and migrating the reallocation consumer. Exact
+  source slots may also be destinations; clearing a destination's proper
+  ancestor is excluded because that destroys its writable path. Pairwise
+  separation within each range remains required. `BulkMove.typed_progress`
+  composes actual construction with world typing, exact indexed snapshot
+  preservation (including holes), and relocated resource accessibility.
+  The focused bulk/reallocation/raw gate passes 177 jobs. This does not supply
+  the missing `rawMove` primitive operand contract or source/task admission.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.
