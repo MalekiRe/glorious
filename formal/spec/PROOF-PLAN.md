@@ -533,8 +533,10 @@ does the 181-job capability/Copy/Drop/preservation gate. `ExecutionChecks`
 and `SourceChecks` pass their 120-job gate. Subsequent direct strict checks pass
 for Borrow and Binding. Binding moves/copies share derived resource readiness,
 and composite Copy principals use canonical equation composition rather than an
-assumed capability model. Remaining stale Checks modules are Control, Authority,
-and Preservation; no aggregate pass or full source-admitted soundness is claimed.
+assumed capability model. Control now passes direct strict checking with actual
+witness handoff readiness and availability-consumption authority. Remaining stale
+Checks modules are Authority and Preservation; no aggregate pass or full
+source-admitted soundness is claimed.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over

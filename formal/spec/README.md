@@ -249,8 +249,10 @@ or a dependency of this project.
   `BindingChecks` now pass direct strict Lean checking. Binding moves and copies
   share derived reachable-resource handoff readiness; composite Copy principals
   use canonical equation composition, without an assumed capability model.
-  Control, Authority, and Preservation checks remain unrepaired; whole-language
-  soundness remains open.
+  `ControlChecks` also passes direct strict checking after deriving actual
+  witness handoff readiness and retaining availability-consumption authority.
+  Authority and Preservation checks remain unrepaired; whole-language soundness
+  remains open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

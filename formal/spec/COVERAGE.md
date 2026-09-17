@@ -194,8 +194,10 @@ Three capability axiom audits report only standard Lean axioms.
 `BorrowChecks` and `BindingChecks` subsequently pass direct strict Lean checking.
 The binding migration derives move/copy handoff readiness from actual reachable
 residents and composite capabilities through canonical equation composition;
-it does not assume readiness or a capability model. Remaining stale modules are
-`ControlChecks`, `AuthorityChecks`, and `PreservationChecks`.
+it does not assume readiness or a capability model. `ControlChecks` also passes
+direct strict checking with derived witness handoff readiness and explicit
+availability-consumption authority. Remaining stale modules are `AuthorityChecks`
+and `PreservationChecks`.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the
