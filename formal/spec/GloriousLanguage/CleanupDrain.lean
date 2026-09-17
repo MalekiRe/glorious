@@ -1193,6 +1193,105 @@ def World.CellUpdate (after : World) (cell : Address) (index : Nat) (shell chang
     changed.fields.length = shell.fields.length ∧
     (∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]?)
 
+/-- A clear at one child slot re-reads the parent shell as the parent with that
+slot a hole: the same shape `World.Stores.write_child_none` reports, stated as
+the equality a caller can carry forward. -/
+theorem World.Stores.write_child_none_eq {before after : World} {address : Address} {index : Nat}
+    {shell : Value} (stored : before.Stores address shell)
+    (written : before.write (address.child index) none = some after) :
+    after.Stores address (Value.withFields shell (shell.fields.set index none)) := by
+  obtain ⟨parent, slot, parentStored, slotFound, rewritten⟩ := World.write_child_shape written
+  have same : parent = shell := Option.some.inj (parentStored.symm.trans stored)
+  rw [same] at rewritten
+  change after.read address = some (Value.withFields shell (shell.fields.set index none))
+  simpa [Value.atPath] using World.write_read_inside rewritten []
+
+/-- Splitting the last element off a list. This core has no such lemma and the
+address decomposition below needs it. -/
+theorem List.dropLast_append_getLast {α : Type} {l : List α} (h : l ≠ []) :
+    l.dropLast ++ [l.getLast h] = l := by
+  induction l with
+  | nil => exact absurd rfl h
+  | cons head tail ih =>
+      cases tail with
+      | nil => rfl
+      | cons next rest =>
+          have tailNe : (next :: rest) ≠ [] := by simp
+          have step := ih tailNe
+          show head :: ((next :: rest).dropLast ++ [(next :: rest).getLast tailNe]) = head :: next :: rest
+          rw [step]
+
+/-- Every address with a non-empty field list sits one step below its own prefix
+parent. -/
+theorem Address.exists_child {address : Address} (nonempty : address.fields ≠ []) :
+    ∃ parent idx, address = Address.child parent idx := by
+  have shape : address = Address.child { address with fields := address.fields.dropLast }
+      (address.fields.getLast (by simpa using nonempty)) := by
+    cases address with
+    | mk root generation fields =>
+      simp only [Address.child]
+      rw [List.dropLast_append_getLast (by simpa using nonempty)]
+  exact ⟨_, _, shape⟩
+
+/-- Clearing an address with `none` makes it vacant. -/
+theorem World.Vacant.of_write_none {before after : World} {address : Address}
+    (written : before.write address none = some after) : after.Vacant address := by
+  cases fieldsEq : address.fields with
+  | nil =>
+      unfold World.write at written
+      cases selected : before.root address with
+      | none => simp [selected] at written
+      | some root =>
+          have bound := World.root_found selected
+          simp only [selected, fieldsEq, List.isEmpty_nil, ↓reduceIte] at written
+          dsimp at written
+          have afterEq : after = { before with roots := before.roots.set address.root { root with value := none } } :=
+            (Option.some.inj written).symm
+          refine ⟨{ root with value := none }, ?_, Or.inl ⟨fieldsEq, rfl⟩⟩
+          rw [afterEq]
+          simp only [World.root, Table.get_set]
+          simp [bound.2.1, bound.2.2]
+  | cons first rest =>
+      obtain ⟨parent, idx, childEq⟩ := Address.exists_child (by rw [fieldsEq]; simp)
+      rw [childEq] at written
+      obtain ⟨parentShell, slot, parentStored, slotFound, rewritten⟩ := World.write_child_shape written
+      have storedAfter := World.Stores.write_child_none_eq parentStored written
+      have slotHole : (Value.withFields parentShell (parentShell.fields.set idx none)).fields[idx]? = some none := by
+        rw [Value.withFields, Value.fields]
+        exact List.getElem?_set_self (List.getElem?_eq_some_iff.mp slotFound).1
+      have vacant := World.Stores.vacant_child storedAfter slotHole
+      rwa [childEq]
+
+/-- The drain moves loans only, so vacancy survives it. -/
+theorem World.Vacant.loanReleaseFrame {before after : World} {address : Address}
+    (vacant : before.Vacant address) (frame : before.LoanReleaseFrame after) : after.Vacant address := by
+  rcases vacant with ⟨root, selected, shape⟩
+  exact ⟨root, by rw [frame.rest]; exact selected, shape⟩
+
+/-- A vacant child slot of a stored cell reads that cell's slot as a hole. -/
+theorem World.Vacant.read_slot {world : World} {cell : Address} {index : Nat} {cellShell changed : Value}
+    (vacant : world.Vacant (cell.child index)) (stored : world.Stores cell changed)
+    (length : changed.fields.length = cellShell.fields.length)
+    (slot : cellShell.fields[index]? ≠ none) :
+    changed.fields[index]? = some none := by
+  have readNone : world.read (cell.child index) = none := by
+    cases readEq : world.read (cell.child index) with
+    | none => rfl
+    | some value => exact absurd ⟨value, readEq⟩ (World.Vacant.not_stored vacant)
+  have readAppend : world.read (cell.child index) = (world.read cell) >>= fun value => value.atPath [index] :=
+    World.read_append world cell [index]
+  have cellRead : world.read cell = some changed := stored
+  rw [readAppend, cellRead] at readNone
+  simp [Value.atPath] at readNone
+  cases slotEq : changed.fields[index]? with
+  | none =>
+      have le := List.getElem?_eq_none_iff.mp slotEq
+      exact absurd (List.getElem?_eq_none_iff.mpr (by rwa [length] at le)) slot
+  | some v =>
+      rw [slotEq] at readNone
+      simp at readNone
+      rw [readNone]
+
 /-- A subtree whose slots all lie outside a destruction frame's sphere keeps its
 whole inventory in the produced world. -/
 theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after : World}
@@ -1967,19 +2066,6 @@ theorem World.Destroys.sibling_outside {address : Address} {other first : Nat} (
       · exact right.overlaps.symm
   exact Address.child_not_overlaps (Ne.symm different) both
 
-/-- A clear at one child slot re-reads the parent shell as the parent with that
-slot a hole: the same shape `World.Stores.write_child_none` reports, stated as
-the equality a caller can carry forward. -/
-theorem World.Stores.write_child_none_eq {before after : World} {address : Address} {index : Nat}
-    {shell : Value} (stored : before.Stores address shell)
-    (written : before.write (address.child index) none = some after) :
-    after.Stores address (Value.withFields shell (shell.fields.set index none)) := by
-  obtain ⟨parent, slot, parentStored, slotFound, rewritten⟩ := World.write_child_shape written
-  have same : parent = shell := Option.some.inj (parentStored.symm.trans stored)
-  rw [same] at rewritten
-  change after.read address = some (Value.withFields shell (shell.fields.set index none))
-  simpa [Value.atPath] using World.write_read_inside rewritten []
-
 /-- A write strictly inside one child's slot re-reads the parent cell as its old
 shell whose child slot carries the write result. -/
 theorem World.Stores.write_child_child {before after : World} {address : Address} {index inner : Nat}
@@ -2020,5 +2106,265 @@ open Glorious.Language.Kernel
 namespace Glorious.Language.Execution
 
 open Glorious.Language.Kernel
+
+/-- The actual recursive structural destruction. From one admitted
+`World.Destroys` inventory the machine runs the node's structural destruction, its
+whole nested field schedule — each occupied child destroyed by its own such run,
+each already-empty slot by the machine's own vacant step — then the shell clear
+and the drain of the resident owner's pending returns, ending at the caller's
+continuation with the node's address vacant and a destruction frame for its
+sphere. The recursion is strong induction on the size of the actually stored
+`Value`, so it terminates and no child run is assumed anywhere. -/
+theorem CleanupRun.recursive_cleanup_correct {program : Kernel.Program} {host : Foreign.Model} :
+    ∀ (bound : Nat) (before : State) (context : Context) (address : Address) (next : Task) (shell : Value),
+      sizeOf shell ≤ bound →
+      before.task = .destroy context address .owner next →
+      before.world.Stores address shell →
+      World.Destroys program before.world address →
+      ∃ trace after, CleanupRun program host before trace { before with world := after, task := next } ∧
+        after.Vacant address ∧ World.DestroyFrame before.world after address ∧
+        (∀ (cell : Address) (index : Nat) (cellShell : Value), address = cell.child index →
+          before.world.Stores cell cellShell →
+          ∃ changed, World.CellUpdate after cell index cellShell changed) := by
+  intro bound
+  induction bound using Nat.strongRecOn with
+  | ind bound ih =>
+    intro before context address next shell boundLe task stored tree
+    cases tree with
+    | resident treeStored disposable shellDead noContinuation noReference noAvailable permission kinds ancestry treeCustody children =>
+      have valueEq : shell = _ := Option.some.inj (stored.symm.trans treeStored)
+      rw [← valueEq] at treeStored shellDead treeCustody children disposable noContinuation noReference noAvailable
+      have loop : ∀ (remaining : List Nat) (w : World) (nodeShell : Value),
+          remaining.Nodup →
+          (∀ field ∈ remaining, field ∈ World.schedule shell) →
+          w.Stores address nodeShell →
+          nodeShell.fields.length = shell.fields.length →
+          nodeShell.owner = shell.owner →
+          (∀ field ∈ World.schedule shell, field ∉ remaining → nodeShell.fields[field]? = some none) →
+          (∀ field ∈ remaining, nodeShell.fields[field]? = shell.fields[field]?) →
+          World.FieldPending program address shell w remaining →
+          World.DestroyFrame before.world w address →
+          Permitted w .owner .owned address →
+          w.CustodyHandedOff (.resident shell.owner) →
+          (∀ id loan, w.loans.get id = some loan → loan.live = true →
+            loan.kind = .owning ∨ loan.kind = .storageBorrow) →
+          (∀ id loan, w.loans.get id = some loan →
+            (∀ parent, loan.parent = some parent → w.loans.get parent ≠ none) ∧
+            (∀ guard ∈ loan.guards, w.loans.get guard ≠ none)) →
+          ∃ (trace : List Event) (after : World) (finalShell : Value),
+            CleanupRun program host
+              { before with world := w, task := .destroyFields context address .owner remaining next }
+              trace { before with world := after, task := .finishShell address .owner next } ∧
+            after.Stores address finalShell ∧
+            (∀ field ∈ World.schedule shell, finalShell.fields[field]? = some none) ∧
+            finalShell.fields.length = shell.fields.length ∧
+            finalShell.owner = shell.owner ∧
+            World.DestroyFrame before.world after address ∧
+            Permitted after .owner .owned address ∧
+            after.CustodyHandedOff (.resident shell.owner) ∧
+            (∀ id loan, after.loans.get id = some loan → loan.live = true →
+              loan.kind = .owning ∨ loan.kind = .storageBorrow) ∧
+            (∀ id loan, after.loans.get id = some loan →
+              (∀ parent, loan.parent = some parent → after.loans.get parent ≠ none) ∧
+              (∀ guard ∈ loan.guards, after.loans.get guard ≠ none)) := by
+        intro remaining
+        induction remaining with
+        | nil =>
+          intro w nodeShell nodup subset shellStored lenEq ownerEq holes untouched pending frame perm custody kinds ancestry
+          exact ⟨[], w, nodeShell, CleanupRun.fields_done rfl, shellStored,
+            (fun field member => holes field member (by simp)),
+            lenEq, ownerEq, frame, perm, custody, kinds, ancestry⟩
+        | cons field rest inner =>
+          intro w nodeShell nodup subset shellStored lenEq ownerEq holes untouched pending frame perm custody kinds ancestry
+          have inHead : field ∈ (field :: rest : List Nat) := List.mem_cons_self ..
+          have split := List.nodup_cons.mp nodup
+          have fieldNotRest : field ∉ rest := split.1
+          have restNodup : rest.Nodup := split.2
+          have headStep : CleanupRun program host
+              { before with world := w, task := .destroyFields context address .owner (field :: rest) next }
+              []
+              { before with world := w, task := .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) } :=
+            .silent (by simp [Task.Cleanup]) (Or.inl (LocalStep.fieldNext rfl)) .refl
+          by_cases occupied : ∃ child, nodeShell.fields[field]? = some (some child)
+          · obtain ⟨child, slotValue⟩ := occupied
+            have shellSlot : shell.fields[field]? = some (some child) := by
+              rw [← untouched field inHead]
+              exact slotValue
+            have childStored : w.Stores (address.child field) child := World.Stores.child shellStored slotValue
+            have childTree : World.Destroys program w (address.child field) := pending field inHead child shellSlot
+            have sizeSmaller : sizeOf child < sizeOf shell :=
+              Value.field_sizeOf (List.mem_iff_getElem?.mpr ⟨field, shellSlot⟩)
+            have sizeBound : sizeOf child < bound := Nat.lt_of_lt_of_le sizeSmaller boundLe
+            obtain ⟨trace, after, run, _childVacant, childFrame, cellBundle⟩ :=
+              ih (sizeOf child) sizeBound
+                { before with world := w, task := .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) }
+                context (address.child field) (.destroyFields context address .owner rest next) child (Nat.le_refl _) rfl
+                childStored childTree
+            obtain ⟨changed, changedStored, changedSlot, ownerKeep, typeKeep, headKeep, liveKeep, resKeep, lenKeep, slotsKeep⟩ :=
+              cellBundle address field nodeShell rfl shellStored
+            have widened : World.DestroyFrame w after address :=
+              childFrame.inside ⟨rfl, rfl, ⟨[field], rfl⟩⟩
+            have holesNext : ∀ other ∈ World.schedule shell, other ∉ rest → changed.fields[other]? = some none := by
+              intro other otherSched otherNotRest
+              by_cases sameField : other = field
+              · subst sameField
+                exact changedSlot
+              · rw [slotsKeep other sameField]
+                exact holes other otherSched (by
+                  intro member
+                  rcases List.mem_cons.mp member with equal | member
+                  · exact sameField equal
+                  · exact otherNotRest member)
+            have untouchedNext : ∀ other ∈ rest, changed.fields[other]? = shell.fields[other]? := by
+              intro other otherRest
+              have different : other ≠ field := by
+                intro same
+                subst same
+                exact fieldNotRest otherRest
+              rw [slotsKeep other different]
+              exact untouched other (List.mem_cons_of_mem field otherRest)
+            have pendingNext : World.FieldPending program address shell after rest := by
+              intro other otherRest child' childSlot
+              exact World.Destroys.of_destroy_frame (pending other (List.mem_cons_of_mem field otherRest) child' childSlot)
+                childFrame (World.Destroys.sibling_outside (address := address) (other := other) (first := field) (by
+                  intro same
+                  exact fieldNotRest (same ▸ otherRest)))
+            obtain ⟨trace2, after2, finalShell, restRun, finalStored, finalHoles, finalLen, finalOwner, finalFrame, finalPerm, finalCustody, finalKinds, finalAncestry⟩ :=
+              inner after changed restNodup (fun other otherRest => subset other (List.mem_cons_of_mem field otherRest))
+                changedStored (lenKeep.trans lenEq) (ownerKeep.trans ownerEq) holesNext untouchedNext pendingNext
+                (frame.trans widened) (widened.permitted perm) (widened.custody (.resident shell.owner) custody)
+                (widened.kinds kinds) (widened.ancestry ancestry)
+            exact ⟨trace ++ trace2, after2, finalShell, (headStep.append run).append restRun, finalStored, finalHoles,
+              finalLen, finalOwner, finalFrame, finalPerm, finalCustody, finalKinds, finalAncestry⟩
+          · have boundField : field < nodeShell.fields.length := by
+              rw [lenEq]
+              exact World.mem_schedule.mp (subset field inHead)
+            obtain ⟨slotValue, slotFound⟩ : ∃ x, nodeShell.fields[field]? = some x :=
+              ⟨nodeShell.fields[field], List.getElem?_eq_getElem boundField⟩
+            have slotNone : slotValue = none := by
+              cases slotValue with
+              | none => rfl
+              | some childValue => exact absurd ⟨childValue, slotFound⟩ occupied
+            have shellHole : shell.fields[field]? = some none := by
+              rw [← untouched field inHead, slotFound, slotNone]
+            have vacant : w.Vacant (address.child field) :=
+              World.Stores.vacant_child shellStored (by rw [slotFound, slotNone])
+            have vacantRun : CleanupRun program host
+                { before with world := w, task := .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) }
+                [] { before with world := w, task := .destroyFields context address .owner rest next } :=
+              CleanupRun.destroy_vacant rfl vacant
+            obtain ⟨trace2, after2, finalShell, restRun, finalStored, finalHoles, finalLen, finalOwner, finalFrame, finalPerm, finalCustody, finalKinds, finalAncestry⟩ :=
+              inner w nodeShell restNodup (fun other otherRest => subset other (List.mem_cons_of_mem field otherRest))
+                shellStored lenEq ownerEq
+                (by
+                  intro other otherSched otherNotRest
+                  by_cases sameField : other = field
+                  · subst sameField
+                    rw [slotFound, slotNone]
+                  · rw [holes other otherSched (by
+                      intro member
+                      rcases List.mem_cons.mp member with equal | member
+                      · exact sameField equal
+                      · exact otherNotRest member)])
+                (fun other otherRest => untouched other (List.mem_cons_of_mem field otherRest))
+                (fun other otherRest child' childSlot => pending other (List.mem_cons_of_mem field otherRest) child' childSlot)
+                frame perm custody kinds ancestry
+            exact ⟨trace2, after2, finalShell, (headStep.append vacantRun).append restRun, finalStored, finalHoles,
+              finalLen, finalOwner, finalFrame, finalPerm, finalCustody, finalKinds, finalAncestry⟩
+      have started : CleanupRun program host before []
+          { before with task := .destroyFields context address .owner (World.schedule shell) next } :=
+        .silent (by simp [Task.Cleanup,task])
+          (Or.inl (LocalStep.destroyStructural task stored disposable permission (Or.inl shellDead)
+            noContinuation noReference noAvailable)) .refl
+      obtain ⟨trace, afterFields, finalShell, fieldsRun, finalStored, finalHoles, finalLen, finalOwner, frameFields, permFields, custodyFields, kindsFields, ancestryFields⟩ :=
+        loop (World.schedule shell) before.world shell
+          (List.Nodup.reverse List.nodup_range) (fun _ member => member) stored rfl rfl
+          (fun _ member notMember => absurd member notMember)
+          (fun _ _ => rfl)
+          (fun field member child slot => children field child slot)
+          (World.DestroyFrame.refl before.world address) permission treeCustody kinds ancestry
+      have allHoles : ∀ item ∈ finalShell.fields, item = none :=
+        List.eq_none_of_getElem? (fun index bound => by
+          refine finalHoles index ?_
+          rw [World.mem_schedule, ← finalLen]
+          exact bound)
+      obtain ⟨cleared, written⟩ := World.Stores.requestReturns_write_exists finalStored (.resident finalShell.owner)
+      have handed : afterFields.CustodyHandedOff (.resident finalShell.owner) := by
+        rw [finalOwner]
+        exact custodyFields
+      have shellStep : Step program host
+          { before with world := afterFields, task := .finishShell address .owner next } (some (.destroy address finalShell.owner))
+          { before with world := cleared, task := ReleaseCustodyLoans cleared (.resident finalShell.owner) next } :=
+        Or.inl (LocalStep.shellDone rfl finalStored allHoles permFields (RelinquishesCustody.of_handedOff handed) written)
+      have afterWrite : cleared.loans = (afterFields.RequestReturns (.resident finalShell.owner)).loans := by
+        obtain ⟨root, replacement, found, shape⟩ := World.write_value_update written
+        show cleared.loans = _
+        rw [shape]
+      have clearedKinds : ∀ id loan, cleared.loans.get id = some loan → loan.live = true →
+          loan.kind = .owning ∨ loan.kind = .storageBorrow := by
+        intro id loan found live
+        have bridged : (afterFields.RequestReturns (.resident finalShell.owner)).loans.get id = some loan := by
+          rwa [afterWrite] at found
+        rw [World.RequestReturns.get_eq] at bridged
+        obtain ⟨original, originalFound, same⟩ := Option.map_eq_some_iff.mp bridged
+        rw [← same, World.restamp_live] at live
+        rw [← same, World.restamp_kind]
+        exact kindsFields id original originalFound live
+      have clearedAncestry : ∀ id loan, cleared.loans.get id = some loan →
+          (∀ parent, loan.parent = some parent → cleared.loans.get parent ≠ none) ∧
+          (∀ guard ∈ loan.guards, cleared.loans.get guard ≠ none) := by
+        intro id loan found
+        have bridged : (afterFields.RequestReturns (.resident finalShell.owner)).loans.get id = some loan := by
+          rwa [afterWrite] at found
+        rw [World.RequestReturns.get_eq] at bridged
+        obtain ⟨original, originalFound, same⟩ := Option.map_eq_some_iff.mp bridged
+        refine ⟨fun parent link => ?_, fun guard member => ?_⟩
+        · have linkOriginal : original.parent = some parent := by
+            rw [← same, World.restamp_parent] at link
+            exact link
+          have held := (ancestryFields id original originalFound).1 parent linkOriginal
+          intro missing
+          rw [afterWrite, World.RequestReturns.get_eq] at missing
+          exact held (Option.map_eq_none_iff.mp missing)
+        · have memberOriginal : guard ∈ original.guards := by
+            rw [← same, World.restamp_guards] at member
+            exact member
+          have held := (ancestryFields id original originalFound).2 guard memberOriginal
+          intro missing
+          rw [afterWrite, World.RequestReturns.get_eq] at missing
+          exact held (Option.map_eq_none_iff.mp missing)
+      obtain ⟨drained, trace2, drainRun, drainFrame⟩ :=
+        CleanupRun.release_custody_returns
+          (before := { before with world := cleared, task := ReleaseCustodyLoans cleared (.resident finalShell.owner) next })
+          rfl (World.ReleaseReady.custody_of_storage clearedKinds clearedAncestry)
+      have restampFrame : World.DestroyFrame afterFields (afterFields.RequestReturns (.resident finalShell.owner)) address :=
+        World.DestroyFrame.of_requestReturns
+      have clearFrame : World.DestroyFrame (afterFields.RequestReturns (.resident finalShell.owner)) cleared address :=
+        World.DestroyFrame.of_write written ⟨rfl, rfl, ⟨[], by simp⟩⟩
+      have drainedFrame : World.DestroyFrame cleared drained address := drainFrame.destroyFrame
+      have finalFrame : World.DestroyFrame before.world drained address :=
+        ((frameFields.trans restampFrame).trans clearFrame).trans drainedFrame
+      have drainVacant : drained.Vacant address :=
+        World.Vacant.loanReleaseFrame (World.Vacant.of_write_none written) drainFrame
+      refine ⟨trace ++ (.destroy address finalShell.owner :: trace2), drained, ?_, drainVacant, finalFrame, ?_⟩
+      · exact started.append (fieldsRun.append
+          (CleanupRun.visible (by simp [Task.Cleanup]) shellStep .refl |>.append drainRun))
+      · intro cell index cellShell cellEq cellStored
+        obtain ⟨changed, changedStored, ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩ :=
+          finalFrame.ancestor cell index [] cellShell (by rw [cellEq]; rfl) cellStored
+        have cellSlot : cellShell.fields[index]? ≠ none := by
+          intro missing
+          have cellRead : before.world.read cell = some cellShell := cellStored
+          have childRead : before.world.read (cell.child index) = some shell := by
+            rw [← cellEq]
+            exact stored
+          have readAppend : before.world.read (cell.child index) =
+              (before.world.read cell) >>= fun value => value.atPath [index] :=
+            World.read_append before.world cell [index]
+          rw [readAppend, cellRead] at childRead
+          simp [Value.atPath, missing] at childRead
+        have slotHole : changed.fields[index]? = some none :=
+          World.Vacant.read_slot (by rw [← cellEq]; exact drainVacant) changedStored lenEq cellSlot
+        exact ⟨changed, changedStored, slotHole, ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩
 
 end Glorious.Language.Execution

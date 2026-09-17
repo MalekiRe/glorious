@@ -215,6 +215,15 @@ the selected child hole plus unchanged other slots under the duplicate-free sche
 instance `destroy_child` and the recursive tree producer remain open: a child's destruction
 still needs the recursive `World.Destroys` inventory admitted for arbitrary nesting.
 
+The destruction frame now preserves reads only at non-overlapping addresses:
+clearing a child necessarily changes an ancestor's stored value. Root presence
+is preserved everywhere. `World.DestroyFrame.of_write` derives this frame from
+the actual write and subtree containment, not an assumed footprint theorem;
+`World.Destroys.of_destroy_frame` consumes the corrected exclusion relation.
+The focused `CleanupDrain` proof check and aggregate `Specification` target
+pass. Neither check discharges recursive child execution or the run-quantified
+progress/resource-completion assumptions in `ResourceAdmissionAt`.
+
 `UnsafeInvariantContract.copyResources` is added as an admission law of the
 existing contract: a valid pre-world, the contract's holds predicate and actual
 duplicability imply the erased retained bindings are read-only. It is the
