@@ -12,15 +12,17 @@ namespace Execution
 
 theorem LocalStep.callback_control {program : Kernel.Program} {before after : State} {event : Option Event}
     (covered : before.CallbackControl) (step : LocalStep program before event after) :
-    after.CallbackControl ∧ after.callbackRuntimes = before.callbackRuntimes := by
+    after.CallbackControl ∧ after.callbackRuntimes ⊆ before.callbackRuntimes := by
   cases step
   all_goals simp_all only [State.CallbackControl,State.callbackRuntimes,Task.CallbackCovers,
     Task.callbackRuntimes,FramesCallbackCovers,Frame.CallbackCovers,Frame.callbackRuntimes,
     Foreign.AmbientRuntimes.append,Foreign.AmbientRuntimes.cons,List.nil_append,
     CloseRegions.callback_covers,CloseRegions.callback_runtimes,ReleaseLoans.callback_covers,ReleaseLoans.callback_runtimes,
     ReleaseCustodyLoans.callback_covers,ReleaseCustodyLoans.callback_runtimes,FreshNamedFrame.callback_covers,
-    FreshNamedFrame.callback_runtimes,true_and,and_true]
-  case enterTail _ _ tail _ _ _ => exact ⟨tail.callback_covers covered,tail.callback_runtimes.symm⟩
+    FreshNamedFrame.callback_runtimes,true_and,and_true,List.Subset.refl]
+  case destroyHookExhausted => exact List.subset_append_right _ _
+  case enterTail _ _ tail _ _ _ =>
+    exact ⟨tail.callback_covers covered,tail.callback_runtimes.symm ▸ List.Subset.refl _⟩
 
 theorem AtomStep.callback_control {program : Kernel.Program} {before after : State} {event : Option Event}
     (covered : before.CallbackControl) (step : AtomStep program before event after) :
@@ -160,9 +162,9 @@ end Foreign
 
 namespace Execution
 
-/-- Every source-family transition preserves the same runtime support; the
-opaque-state classifier transports liveness. Foreign transitions instead use
-the actual HostStateEvolution law and callback-entry acquisition above. -/
+/-- Source transitions retain live runtime support; fatal termination may
+discard a task continuation but cannot invent a runtime dependency. Foreign
+transitions use actual HostStateEvolution and callback-entry acquisition. -/
 theorem Step.callbacks {program : Kernel.Program} {host : Foreign.Model} {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
@@ -173,7 +175,8 @@ theorem Step.callbacks {program : Kernel.Program} {host : Foreign.Model} {before
         host.CallbacksWellFormed after :=
       ⟨preserved.1,by simpa only [preserved.2,unchanged] using callbacks.live⟩
     rcases step with localStep | atom | effect | branch | primitive | foreign
-    · exact source (localStep.callback_control callbacks.control)
+    · obtain ⟨control,retained⟩ := localStep.callback_control callbacks.control
+      exact ⟨control,fun runtime member => unchanged ▸ callbacks.live runtime (retained member)⟩
     · exact source (atom.callback_control callbacks.control)
     · exact source (effect.callback_control suspensions callbacks.control)
     · exact source (branch.callback_control callbacks.control)

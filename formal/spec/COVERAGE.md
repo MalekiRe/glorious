@@ -1,5 +1,27 @@
 # Specification audit
 
+## Constructive destructor hook outcomes
+
+`Execution.destroyHook_progress` constructs the temporary reference allocation
+and destructor loan from the original receiver's location type, unique
+permission, resource/loan compatibility and positive `AllocationRequest`.
+Its successful outcome retains typed ordinary invocation inputs and the actual
+hook-entry step. Its exhausted outcome retains the same admitted request and
+constructs `LocalStep.destroyHookExhausted`, a fatal resource transition with
+unchanged storage. `Contracts.StateProgress.destroyHook` consumes both outcomes
+as actual invocation progress inside the caller boundary.
+
+Cleanup classification and invocation lending cover the new transition.
+Callback runtime preservation tracks inclusion of retained dependencies:
+fatal termination can abandon a task continuation, but every retained callback
+runtime remains live. General storage, control, private and callback consumers
+pass focused strict Lean checking.
+
+This closes hook dispatch, not execution or termination of arbitrary destructor
+bodies. Source production and preservation of the pre-state permissions,
+resource compatibility, live region and layout request remain obligations of
+general source admission; `ResourceAdmissionAt` is not thereby discharged.
+
 ## Current ABI inventory and transfer checkpoint
 
 `ABISiteAdmission.Code.mem_tailSites` proves declaring-function identity and

@@ -304,6 +304,7 @@ theorem LocalStep.enter_world {program : Kernel.Program} {before after : State} 
   | evaluateExhausted => simp_all
   | bindExhausted => simp_all
   | invokeExhausted => simp_all
+  | destroyHookExhausted => simp_all
   | enterExhausted stepTask attempt =>
     rw [task] at stepTask
     cases stepTask

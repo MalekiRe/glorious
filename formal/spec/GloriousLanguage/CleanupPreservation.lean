@@ -51,6 +51,7 @@ theorem LocalStep.cleanup_change {program : Kernel.Program} {before after : Stat
   case cleanupDone => exact .unchanged
   case cleanupRoot => exact .unchanged
   case destroyVacant => exact .unchanged
+  case destroyHookExhausted => exact .unchanged
   case destroyHook => apply CleanupWorldChange.hook <;> assumption
   case destroyStructural => exact .unchanged
   case destroyReference => apply CleanupWorldChange.clear <;> assumption

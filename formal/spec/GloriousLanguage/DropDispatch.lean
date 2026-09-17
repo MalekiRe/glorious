@@ -4,6 +4,7 @@ import GloriousLanguage.DropCapabilities
 import GloriousLanguage.LocalPreservation
 import GloriousLanguage.ResumptionPreservation
 import GloriousLanguage.DropHandle
+import GloriousLanguage.InputBindingProgress
 
 /-! Admitted destructor declarations dispatch through the ordinary function
 instance and machine hook-entry rules. Neither an executable body, a zero-arg
@@ -61,14 +62,13 @@ end Specification
 
 namespace Execution
 
-/-- Progress at the hook-dispatch boundary. Allocation and borrowing are
-the actual resource prerequisites; admitted declarations produce the body,
-and the original receiver graph supplies the common input admission. Structural
-typing alone is not handoff readiness. The hook may diverge. -/
+/-- Constructive hook dispatch from the original receiver and positive handle
+request. Physical exhaustion is distinct from missing static evidence; the
+successful branch retains the actual input admission. The hook may diverge. -/
 theorem destroyHook_progress {program : Kernel.Program} {before : State} {context : Context}
     {address : Address} {authority : Authority} {next : Task} {value : Value}
     {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
-    {substitution : Substitution} {handle : Address} {withHandle after : World}
+    {substitution : Substitution} {layout : Layout}
     (valid : Specification.WellFormed program) (typed : Typing.WorldTyped program before.world)
     (task : before.task = .destroy context address authority next)
     (stored : before.world.Stores address value) (initialized : value.Initialized)
@@ -79,23 +79,46 @@ theorem destroyHook_progress {program : Kernel.Program} {before : State} {contex
     (instantiated : Instantiates data.generics arguments substitution)
     (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind)
     (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
-    (allocated : Temporary program context (.reference .unique (.runtimeRegion context.region) value.type)
-      before.world handle withHandle)
-    (borrowed : FormsLoan program .destructor withHandle authority .unique context.region address handle after) :
-    ∃ (function : Kernel.Function) (formal : Kernel.Local),
+    (sourceType : AddressType program.declarations before.world address value.type)
+    (permission : Permitted before.world authority .unique address)
+    (request : AllocationRequest program.declarations before.world context.region
+      (.reference .unique (.runtimeRegion context.region) value.type) layout) :
+    (∃ (handle : Address) (withHandle after : World) (function : Kernel.Function) (formal : Kernel.Local),
       function.parameters = [formal] ∧ formal.type = .reference .unique (.runtimeRegion context.region) value.type ∧
       Contracts.DropContract program value.type (.runtimeRegion context.region) function ∧
       Contracts.FunctionInputs function [⟨.argument 0,formal,handle,.owner,.owned⟩] ∧
       Contracts.InputsTyped program [⟨.argument 0,formal,handle,.owner,.owned⟩] after ∧
       LocalStep program before (some (.hookEnter address hook))
         { before with world := after, task := .enter { context with unsafeAllowed := false } function (.supplied [⟨.argument 0,formal,handle,.owner,.owned⟩]) false, frames := .hook context address authority handle withHandle.nextLoan next :: before.frames } ∧
-      Typing.WorldTyped program after := by
+      Typing.WorldTyped program after) ∨
+      AllocationExhausted program.declarations before.world context.region
+        (.reference .unique (.runtimeRegion context.region) value.type) layout ∧
+      LocalStep program before (some (.fatal .resource)) { before with task := .fatal .resource } := by
   obtain ⟨function,principal,dispatch,_,contract,capability,discard⟩ := valid.drop_dispatch selected drops instantiated kinded requirements
     (Kinding.runtimeRegion (id := context.region))
   rw [← nominal] at dispatch contract capability
   have valueTyped := typed.2.1 address value (World.resident_iff_stores.mpr stored)
   have disposable := valueTyped.mayDispose valid.declarations valid.inventory initialized capability discard
   have live := (initialized [] value .root).1
+  rcases request.success_or_exhausted (.temporary context.activation context.scope) true with
+    ⟨handle,withHandle,allocation⟩ | exhausted
+  case inr =>
+    exact Or.inr ⟨exhausted,.destroyHookExhausted task stored live disposable dispatch permission exhausted⟩
+  apply Or.inl
+  have allocated : Temporary program context
+      (.reference .unique (.runtimeRegion context.region) value.type) before.world handle withHandle :=
+    ⟨layout,allocation⟩
+  have regionState : withHandle.liveRegions = before.world.liveRegions := by cases allocation; rfl
+  have readyAfter := (allocation.handoffReady typed.1
+    (show value.HandoffReady program before.world .unique [] from ⟨ready,by simp⟩)).1
+  have permissionAfter := permission.locationExtension (allocation.locationExtension typed.1) allocation.loans
+  have addressable : LoanPurpose.destructor.Admitted program.declarations value.type := by
+    rw [nominal]
+    exact .nominal
+  obtain ⟨after,borrowed⟩ := FormsLoan.exists (purpose := .destructor) (mode := .unique)
+    ((allocation.read typed.1 address).trans stored) (allocation.addressType typed.1 sourceType)
+    initialized (by simpa only [regionState] using request.region_live) addressable
+    readyAfter permissionAfter allocation.created_vacant allocation.created_addressType
   obtain ⟨formal,parameters,formalType⟩ := dispatch.2.2.parameter
   have step := LocalStep.destroyHook task stored live disposable dispatch allocated borrowed rfl
   simp only [parameters,List.head!] at step
@@ -115,9 +138,44 @@ theorem destroyHook_progress {program : Kernel.Program} {before : State} {contex
     _,_,_,enterTask,_,inputs,_,_⟩ := step.hook_inputs_admitted valid.declarations valid.inventory typed source
   obtain ⟨_,_,sourcesEq,_⟩ := Task.enter.inj enterTask
   have inputsEq := EntrySource.supplied.inj sourcesEq
-  refine ⟨function,formal,parameters,formalType,contract,Contracts.FunctionInputs.argument captures parameters,?_,step,afterTyped⟩
+  refine ⟨handle,withHandle,after,function,formal,parameters,formalType,contract,Contracts.FunctionInputs.argument captures parameters,?_,step,afterTyped⟩
   rw [inputsEq]
   exact inputs
 
 end Execution
+
+namespace Contracts
+
+/-- The hook-shell branch of invocation progress consumes the constructed
+dispatch outcome, not an assumed cleanup run or a completed handle loan. -/
+theorem StateProgress.destroyHook {program : Kernel.Program} {host : Foreign.Model}
+    {function : Kernel.Function} {boundary : InvocationBoundary}
+    {before : Execution.State} {context : Execution.Context}
+    {address : Address} {authority : Authority} {next : Execution.Task} {value : Value}
+    {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
+    {substitution : Substitution} {layout : Layout}
+    (valid : Specification.WellFormed program) (typed : Typing.WorldTyped program before.world)
+    (inside : boundary.Inside program before)
+    (task : before.task = .destroy context address authority next)
+    (stored : before.world.Stores address value) (initialized : value.Initialized)
+    (ready : value.ResourcesAccessible program before.world .unique)
+    (compatible : value.ViewsLoanCompatible before.world .unique address .unique (authority.guardLoans before.world))
+    (nominal : value.type = .nominal id arguments)
+    (selected : program.declarations.data id = some data) (drops : data.dropHook = some hook)
+    (instantiated : Instantiates data.generics arguments substitution)
+    (kinded : ∀ argument ∈ arguments, Kinding program.declarations ⟨[],[],0,data.header.module,false,{}⟩ argument argument.kind)
+    (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
+    (sourceType : AddressType program.declarations before.world address value.type)
+    (permission : Permitted before.world authority .unique address)
+    (request : AllocationRequest program.declarations before.world context.region
+      (.reference .unique (.runtimeRegion context.region) value.type) layout) :
+    StateProgress program host function before boundary := by
+  have outcome := Execution.destroyHook_progress valid typed task stored initialized ready compatible
+    nominal selected drops instantiated kinded requirements sourceType permission request
+  apply Or.inr ∘ Or.inr ∘ Or.inr ∘ Or.inr
+  rcases outcome with ⟨handle,withHandle,after,callee,formal,_,_,_,_,_,step,_⟩ | ⟨_,step⟩
+  · exact ⟨_,_,inside,Or.inl step⟩
+  · exact ⟨_,_,inside,Or.inl step⟩
+
+end Contracts
 end Glorious.Language

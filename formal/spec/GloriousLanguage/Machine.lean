@@ -995,6 +995,14 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with task := .destroy context ⟨id,root.generation,[]⟩ .owner (.retire id (.cleanup context roots next)) }
   | destroyVacant {before context address authority next} : before.task = .destroy context address authority next →
       before.world.Vacant address → LocalStep program before none { before with task := next }
+  | destroyHookExhausted {before context address authority next value hook function layout} :
+      before.task = .destroy context address authority next → before.world.Stores address value → value.shellLive = true →
+      MayDispose program.declarations value →
+      DropInstance program value.type (.runtimeRegion context.region) hook function →
+      Permitted before.world authority .unique address →
+      AllocationExhausted program.declarations before.world context.region
+        (.reference .unique (.runtimeRegion context.region) value.type) layout →
+      LocalStep program before (some (.fatal .resource)) { before with task := .fatal .resource }
   | destroyHook {before context address authority next value hook function withHandle handle after loan} :
       before.task = .destroy context address authority next → before.world.Stores address value → value.shellLive = true →
       MayDispose program.declarations value →
