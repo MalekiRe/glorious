@@ -185,6 +185,14 @@ result write. Scalar construction determinism now uses the actual runtime
 handoff contract, restoring `ScalarExecution` (104 jobs). The repaired
 bulk/privacy/scalar-progress theorems use only standard Lean axioms.
 Remaining stale Checks modules still prevent a verified root-module build.
+`BasicChecks` now uses general closed parameter exclusion and canonical
+unique-reference affinity from `CapabilityInversion`, with explicit declaration
+well-formedness where conversion separation needs it. Its strict direct check
+and 82-job gate pass; the capability/Copy/Drop/preservation gate passes 181 jobs.
+Three capability axiom audits report only standard Lean axioms.
+`ExecutionChecks` and `SourceChecks` also pass (120-job combined gate).
+The five remaining failing modules are `BorrowChecks`, `BindingChecks`,
+`ControlChecks`, `AuthorityChecks`, and `PreservationChecks`.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the

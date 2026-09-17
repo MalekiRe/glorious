@@ -238,6 +238,15 @@ or a dependency of this project.
   The repaired bulk/privacy/scalar-progress axiom audit reports only standard
   Lean axioms. These focused repairs do not repair the remaining stale Checks
   modules or establish a passing root-module build.
+- `CapabilityInversion`: `PrincipalOf.not_parameter` and `PrincipalOf.unique`
+  derive closed parameter exclusion and canonical unique-reference affinity
+  from structural origin and conversion separation under well-formed
+  declarations. `BasicChecks` consumes these proofs instead of the removed
+  model-equation interface. Its 82-job gate and direct strict check pass;
+  the capability/Copy/Drop/preservation gate passes 181 jobs and the three
+  capability axiom audits report only standard Lean axioms. `ExecutionChecks`
+  and `SourceChecks` also pass their combined 120-job gate. Five other stale
+  Checks modules remain unrepaired; whole-language soundness remains open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

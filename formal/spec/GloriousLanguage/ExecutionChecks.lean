@@ -119,7 +119,7 @@ example {program : Kernel.Program} {world after : World} {context : Execution.Co
     {place : Place} {mode : Mutability} {region : Identity} {source destination : Address}
     {authority : Authority} {next : Code}
     (resolved : ResolvesPlace world context.environment place source authority)
-    (borrowed : Borrows program.declarations world authority mode region source destination after) :
+    (borrowed : Borrows program world authority mode region source destination after) :
     AtomStep program { world := world, task := .atom context destination (.borrow place mode (.runtimeRegion region)) next }
       (some (.borrow source world.nextLoan))
       { world := after, task := .run context next } :=

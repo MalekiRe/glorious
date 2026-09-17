@@ -163,6 +163,23 @@ theorem CapabilityEvidence.closed_unique_restriction {program : Program} (valid 
   all_goals try { cases head }
   exact ordered
 
+/-- An uninstantiated parameter has no closed structural capability. -/
+theorem PrincipalOf.not_parameter {program : Program} (valid : ProgramWellFormed program)
+    {id : Identity} {kind : Kind} {principal : Principal} :
+    ¬ PrincipalOf program (.parameter id kind) principal := by
+  rintro ⟨⟨context,closed,evidence⟩,_⟩
+  obtain ⟨_,_,_,head,_,_,equation,_⟩ := evidence.closed_structural valid closed True.intro
+  cases equation <;> simp [SameHead,Term.mapChildren] at head
+
+/-- Structural permission supplies affinity; conversion-safe inversion excludes
+any greater permission in the same canonical capability relation. -/
+theorem PrincipalOf.unique (program : Program) (valid : ProgramWellFormed program)
+    (region type : Term) : PrincipalOf program (.reference .unique region type) .affine := by
+  refine ⟨(CapabilityEquation.unique.closedEvidence
+    (program := program) (context := { module := default })).support rfl,?_⟩
+  rintro other ⟨context,closed,evidence⟩
+  exact evidence.closed_unique_restriction valid closed
+
 /-- A copied reference can only be a shared handle, even if its permission
 was obtained through logical conversion or recursive capability evidence. -/
 theorem PrincipalOf.reference_copy_shared {program : Program} (valid : ProgramWellFormed program)

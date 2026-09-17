@@ -64,7 +64,7 @@ example :
     (instantiated.entryScope 100 200).term instantiated.signature.result =
       .reference .shared (.runtimeRegion 7) .unit := by
   simp [referenceTemplate, Function.instantiate, Function.transformTerms, Local.mapTerms, Signature.instantiate,
-    Code.instantiate, Code.transformTerms, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
+    Code.transformTerms, Atom.mapTerms, Term.substitute, Table.get, ScopeInstantiation.term]
 
 example (function : Function) (region brand : Identity) :
     (function.entryScope region brand).term (.scopedRegion function.activationRegion) =

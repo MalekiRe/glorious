@@ -526,6 +526,13 @@ has been migrated to `RuntimeProgram` and `ResidentHandoffReady`; the actual
 bulk/privacy/scalar-progress chain report only standard Lean axioms.
 These supersede the corresponding stale-consumer reports below, not the
 remaining failing Checks modules or the source-admission obligation.
+`BasicChecks` subsequently migrated to closed capability evidence, consuming
+general parameter exclusion and canonical unique-reference affinity with
+well-formed declarations. Its strict direct check and 82-job gate pass, as
+does the 181-job capability/Copy/Drop/preservation gate. `ExecutionChecks`
+and `SourceChecks` pass their 120-job gate. The remaining stale Checks modules
+are Borrow, Binding, Control, Authority, and Preservation; no aggregate pass
+or full source-admitted soundness is claimed.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over

@@ -1,5 +1,6 @@
 import GloriousLanguage.Storage
 import GloriousLanguage.SourceRules
+import GloriousLanguage.CapabilityInversion
 
 /-! Checked boundary regressions, independent of the still-being-repaired
 execution aggregate. The default aggregate imports this module as well. -/
@@ -20,18 +21,16 @@ example : ¬ Substitutes [(4,.staticRegion)] (.parameter 4 .type) .staticRegion 
   intro proof
   cases proof.1
 
-example {program : Program} {id kind principal} : ¬ PrincipalOf program (.parameter id kind) principal := by
-  rintro ⟨model, found⟩
-  have equation := (model.equations _ _).mp found
-  cases equation
+example {program : Program} (valid : ProgramWellFormed program) {id kind principal} :
+    ¬ PrincipalOf program (.parameter id kind) principal := PrincipalOf.not_parameter valid
 
-example {program : Program} (model : CapabilityModel program) :
-    PrincipalOf program (.reference .shared (.rigid 3 .region 0) (.parameter 4 .type)) .duplicable := by
-  exact ⟨model, (model.equations _ _).mpr .shared⟩
+example {program : Program} :
+    PrincipalOf program (.reference .shared (.rigid 3 .region 0) (.parameter 4 .type)) .duplicable :=
+  PrincipalOf.shared program _ _
 
-example {program : Program} (model : CapabilityModel program) :
-    PrincipalOf program (.reference .unique (.rigid 3 .region 0) (.parameter 4 .type)) .affine := by
-  exact ⟨model, (model.equations _ _).mpr .unique⟩
+example {program : Program} (valid : ProgramWellFormed program) :
+    PrincipalOf program (.reference .unique (.rigid 3 .region 0) (.parameter 4 .type)) .affine :=
+  PrincipalOf.unique program valid _ _
 
 private def unitValue : Value := .resident 1 .unit .unit true []
 private def holed : Value := .resident 0 (.tuple [.unit,.unit]) .tuple true [none,some unitValue]
