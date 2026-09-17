@@ -2,7 +2,11 @@ import GloriousLanguage.PrivateBranchPreservation
 
 /-! Foreign mutation, real callback inputs and retained callback cleanup
 preserve the same unexposed caller slot. Ambient exposure projects enclosing
-host handoffs only; a source hook guard does not expose its saved handle. -/
+host handoffs only; a source hook guard does not expose its saved handle.
+`HostRun.private_slot` carries that same slot and its exclusion from the
+session support through arbitrarily many consecutive host continuations,
+consuming the multi-step `HostRun.internal_root` producer rather than a
+single-step framing law. -/
 namespace Glorious.Language
 
 open _root_.Glorious.Language.Kernel Execution
@@ -187,6 +191,77 @@ theorem Step.private_control {program : Kernel.Program} {model : Model} {before 
         Frame.PrivateActivation,Frame.rootSupport,ForeignSession.returned,ForeignSession.rootSupport]
   case fault =>
     exact ⟨inner,rfl,by simp [PrivateControl,Task.rootSupport,Task.PrivateActivation,frameRoots,frameOwners]⟩
+
+/-- Consecutive actual host transitions retain the immutable call and never
+touch the availability table (`Mutations.availability`). These are the framing
+facts a multi-step slot proof needs beyond `HostRun.internal_root`. -/
+theorem Step.foreign_phase {program : Kernel.Program} {model : Model} {before after : State}
+    {event : Option Event} {session continued : ForeignSession} {next following : Code}
+    (lawful : model.Lawful program) (well : before.world.WellFormed)
+    (step : Step program model before event after)
+    (task : before.task = .foreign session next) (result : after.task = .foreign continued following) :
+    continued.call = session.call ∧ after.world.availability = before.world.availability := by
+  cases step with
+  | enter original => cases original.symm.trans task
+  | host original _ selected active changed =>
+    cases original.symm.trans task
+    cases result
+    exact ⟨rfl,(lawful.step _ _ _ _ _ _ _ _ _ selected well active changed).1.availability⟩
+  | result => cases result
+  | callback => cases result
+  | callbackResult original => cases original.symm.trans task
+  | callbackReturned original => cases original.symm.trans task
+  | fault => cases result
+
+theorem HostRun.phase {program : Kernel.Program} {model : Model} {before after : State}
+    {events : List Event} {session continued : ForeignSession} {next following : Code}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : model.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (run : HostRun program model before events after)
+    (task : before.task = .foreign session next) (result : after.task = .foreign continued following) :
+    continued.call = session.call ∧ after.world.availability = before.world.availability := by
+  induction run generalizing session next with
+  | refl original =>
+    cases task.symm.trans result
+    exact ⟨rfl,rfl⟩
+  | cons original step rest ih =>
+    obtain ⟨middle,middleSession,middleTask⟩ := rest.start
+    have middleTyped := step.worldTyped valid inventory lawful typed
+    have middlePhase := step.foreign_phase lawful typed.1 task middleTask
+    obtain ⟨middleCall,middleAvailability⟩ := ih middleTyped middleTask result
+    exact ⟨middleCall.trans middlePhase.1,middleAvailability.trans middlePhase.2⟩
+
+/-- Any number of consecutive host continuations preserves the caller's private
+slot and its absence from the continued foreign session support. This is the
+multi-step form of `Model.Lawful.host_private`, consuming
+`HostRun.internal_root` for the hidden-root invariant; the single-step boundary
+is exactly the one-step case. -/
+theorem HostRun.private_slot {program : Kernel.Program} {model : Model} {before after : State}
+    {events : List Event} {session continued : ForeignSession} {next following : Code}
+    {id : Identity} {root : Root}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : model.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (run : HostRun program model before events after)
+    (task : before.task = .foreign session next) (result : after.task = .foreign continued following)
+    (slot : before.world.PrivateSlot id root) (outside : id ∉ session.rootSupport) :
+    after.world.PrivateSlot id root ∧ id ∉ continued.rootSupport := by
+  have hidden : InternalRoot before.world session id root :=
+    ⟨slot.found,slot.internalHome,Execution.ForeignSession.known_avoids_root outside,slot.safe.1⟩
+  obtain ⟨_,kept⟩ := run.internal_root valid inventory lawful typed task result hidden
+  have phase := run.phase valid inventory lawful typed task result
+  have callSame : continued.call.rootSupport = session.call.rootSupport :=
+    congrArg ForeignCall.rootSupport phase.1
+  have callSafe : id ∉ session.call.rootSupport := fun member =>
+    outside (by simpa only [ForeignSession.rootSupport] using List.mem_append_left _ member)
+  refine ⟨slot.retain kept.1 kept.2.2.2 ?_,?_⟩
+  · simpa only [phase.2] using slot.safe.2.1
+  · intro member
+    simp only [ForeignSession.rootSupport,List.mem_append] at member
+    rw [callSame] at member
+    rcases member with callMember | exposedMember
+    · exact callSafe callMember
+    · obtain ⟨place,present,same⟩ := List.mem_map.mp exposedMember
+      exact kept.2.2.1 place (List.mem_append_right _ present) same
 
 end Foreign
 end Glorious.Language

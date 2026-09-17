@@ -5,18 +5,36 @@ import GloriousLanguage.ActivationPreservation
 /-! Whole-machine provenance of actual current and saved control. Complete
 ownership is preserved along non-resource-fatal execution. Fatal endpoints
 remain actual terminals; historical saved metadata never gains future roots,
-loans or activations, even through an interrupted final step. -/
+loans or activations, even through an interrupted final step.
+
+`Step.taskFrameInvariant` states the complete live task/frame invariant as one
+predicate and proves it from the actual per-family control and authority
+producers; `State.ControlWellFormed` extends it with the saved-control
+invariant, and `Specification.WellFormed.no_invalid_reachable` feeds that
+invariant to the public safety chain. The remaining gaps are honest scope
+limits, each because no producer exists rather than because the statement is
+hard: (1) liveness and progress of the destructor bodies and foreign hook
+bodies that a retained task or frame still names -- only the historical root
+bound and the recorded authorities of those control products are claimed; (2) a
+structural lockstep relation between the task continuation chain and the frame
+stack -- the machine maintains no such producer and none is claimed; (3) the
+initialized-return obligation is still discharged only from the assumed
+`Contracts.ResourceAdmissionAt`, never from this invariant. -/
 namespace Glorious.Language
 
 namespace Execution
 
-theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
+/-- The complete invariant of the live task and its retained frames, composed
+from the actual per-family control and authority producers. Effect transitions
+consume the saved-control component of the pre-state because replay re-installs
+a saved task and frame stack; every other family consumes only its own live
+task/frame facts. -/
+theorem Step.taskFrameInvariant {program : Kernel.Program} {host : Foreign.Model}
     {before after : State} {event : Option Event}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
-    (control : before.ControlWellFormed) (step : Step program host before event after)
-    (notFatal : event ≠ some (.fatal .resource)) :
-    after.ControlWellFormed := by
+    (control : before.ControlWellFormed) (step : Step program host before event after) :
+    after.TaskFrameInvariant := by
   have support :
       (RootSupport.Below after.task.rootSupport after.world.nextRoot ∧
         RootSupport.Below (after.frames.flatMap Frame.rootSupport) after.world.nextRoot) ∧
@@ -36,8 +54,18 @@ theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
         primitive.authority_support control.taskAuthorities control.frameAuthorities⟩
     · exact ⟨foreign.control_support valid inventory lawful typed control.task control.frames,
         foreign.authority_support lawful typed.1 control.taskAuthorities control.frameAuthorities⟩
-  exact ⟨step.suspensions valid inventory lawful typed control.suspensions notFatal,
-    support.1.1,support.1.2,step.saved_control_origin control,support.2.1,support.2.2,
+  exact ⟨support.1.1,support.1.2,support.2.1,support.2.2⟩
+
+theorem Step.controlWellFormed {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (control : before.ControlWellFormed) (step : Step program host before event after)
+    (notFatal : event ≠ some (.fatal .resource)) :
+    after.ControlWellFormed := by
+  exact ⟨step.taskFrameInvariant valid inventory lawful typed control,
+    step.suspensions valid inventory lawful typed control.suspensions notFatal,
+    step.saved_control_origin control,
     step.saved_authority_origin valid inventory lawful typed control.suspensions
       control.taskAuthorities control.frameAuthorities control.savedAuthorities,
     step.activationsWellFormed lawful typed.1 control.suspensions control.activations⟩
@@ -66,6 +94,27 @@ theorem Run.controlWellFormed_or_fatal {program : Kernel.Program} {host : Foreig
   by_cases fatal : after.task = .fatal .resource
   · exact Or.inr fatal
   · exact Or.inl (run.controlWellFormed valid inventory lawful typed control (run.nonFatal_of_final fatal))
+
+/-- The live task/frame invariant follows along the same non-resource-fatal runs
+through the actual control producers. Replay re-installs saved control, so the
+complete pre-state control invariant remains the hypothesis of the run. -/
+theorem Run.taskFrameInvariant {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (control : before.ControlWellFormed) (run : Run program host before trace after) (safe : run.NonFatal) :
+    after.TaskFrameInvariant :=
+  (run.controlWellFormed valid inventory lawful typed control safe).toTaskFrameInvariant
+
+theorem Run.taskFrameInvariant_or_fatal {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {trace : List Event}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (typed : Typing.WorldTyped program before.world)
+    (control : before.ControlWellFormed) (run : Run program host before trace after) :
+    after.TaskFrameInvariant ∨ after.task = .fatal .resource := by
+  by_cases fatal : after.task = .fatal .resource
+  · exact Or.inr fatal
+  · exact Or.inl (run.taskFrameInvariant valid inventory lawful typed control (run.nonFatal_of_final fatal))
 
 
 /-- An old suspension cannot acquire an address of storage allocated after
@@ -179,6 +228,9 @@ end Contracts
 
 namespace Specification
 
+/-- Every reachable public state retains complete control provenance, except at
+the resource-exhaustion terminal, which is a legitimate endpoint rather than an
+ill-formed state. -/
 theorem reachable_control {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -186,6 +238,29 @@ theorem reachable_control {program : Kernel.Program} {host : Foreign.Model}
     state.ControlWellFormed ∨ state.task = .fatal .resource := by
   obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
   exact run.controlWellFormed_or_fatal valid inventory lawful initial.1.1 initial.control
+
+/-- The same reachable states retain the live task/frame invariant. This is the
+part of control provenance the public safety chain exposes directly. -/
+theorem reachable_taskFrameInvariant {program : Kernel.Program} {host : Foreign.Model}
+    {function : Kernel.Function} {inputs : List Kernel.InvocationInput} {state : Execution.State}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (lawful : host.Lawful program) (reachable : (Semantics program host function inputs).Reachable state) :
+    state.TaskFrameInvariant ∨ state.task = .fatal .resource := by
+  rcases reachable_control valid inventory lawful reachable with control | fatal
+  · exact Or.inl control.toTaskFrameInvariant
+  · exact Or.inr fatal
+
+/-- The strengthened public invalidity predicate is unreachable: storage typing
+always holds, and control provenance holds except at the resource-exhaustion
+terminal. `FunctionsAdmitted` therefore need not assume either. -/
+theorem WellFormed.no_invalid_reachable {program : Kernel.Program} (well : WellFormed program)
+    {host : Foreign.Model} {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
+    (lawful : host.Lawful program) (state : Execution.State)
+    (reachable : (Semantics program host function inputs).Reachable state) :
+    ¬ (Semantics program host function inputs).invalid state := by
+  intro invalid
+  exact invalid ⟨reachable_worldTyped well.declarations well.inventory lawful reachable,
+    reachable_control well.declarations well.inventory lawful reachable⟩
 
 end Specification
 end Glorious.Language

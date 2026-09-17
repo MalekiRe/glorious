@@ -5,7 +5,13 @@ import GloriousLanguage.ActivationOrigin
 task, frames and captured control, not another environment or ownership table.
 Code contains lexical places; every runtime address appears in the products
 below. Resident closure fields, pointers and references remain in `World` and
-are governed by its existing storage and value-typing invariants. -/
+are governed by its existing storage and value-typing invariants.
+
+`State.TaskFrameInvariant` names the live part of that provenance as one
+predicate; `State.ControlWellFormed` extends it with the saved control of the
+suspension inventory. Neither claims liveness or progress of the bodies that a
+retained task or frame still names: only boundedness of roots and recording of
+authorities is stated, because only those have producers. -/
 namespace Glorious.Language
 
 namespace Kernel
@@ -79,17 +85,28 @@ def Frame.rootSupport : Frame → List Identity
 def Suspension.controlRootSupport (suspension : Suspension) : List Identity :=
   suspension.context.rootSupport ++ suspension.handler.rootSupport ++ suspension.frames.flatMap Frame.rootSupport
 
-/-- Bounds are historical, not liveness assertions: a canceled or transferred
-frame can retain stale addresses, but can never contain a future root identity.
-Saved support uses the same immutable frontier as the actual capture inventory. -/
-structure State.ControlWellFormed (state : State) : Prop where
-  suspensions : state.SuspensionsWellFormed
+/-- The complete invariant of the live task and its retained frames: every root
+they name already exists, and every authority they record belongs to an actual
+loan. Both components are historical provenance, not liveness: a canceled or
+transferred frame may retain stale addresses, but it can never name a future
+root identity or a loan that was never recorded. Liveness of the retained
+destructor bodies and foreign hook bodies named by such a task is deliberately
+outside this predicate; no producer establishes it. -/
+structure State.TaskFrameInvariant (state : State) : Prop where
   task : RootSupport.Below state.task.rootSupport state.world.nextRoot
   frames : RootSupport.Below (state.frames.flatMap Frame.rootSupport) state.world.nextRoot
-  saved : ∀ id suspension, state.resumptions.get id = some suspension →
-    RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit
   taskAuthorities : AuthoritySupport.Recorded state.task.authoritySupport state.world.loans
   frameAuthorities : AuthoritySupport.Recorded (state.frames.flatMap Frame.authoritySupport) state.world.loans
+
+/-- Complete control provenance: the live task/frame invariant of this state plus
+the saved control of its suspensions. Bounds are historical, not liveness
+assertions: a canceled or transferred frame can retain stale addresses, but can
+never contain a future root identity. Saved support uses the same immutable
+frontier as the actual capture inventory. -/
+structure State.ControlWellFormed (state : State) : Prop extends State.TaskFrameInvariant state where
+  suspensions : state.SuspensionsWellFormed
+  saved : ∀ id suspension, state.resumptions.get id = some suspension →
+    RootSupport.Below suspension.controlRootSupport suspension.captureRootLimit
   savedAuthorities : ∀ id suspension, state.resumptions.get id = some suspension →
     AuthoritySupport.Recorded suspension.controlAuthoritySupport state.world.loans
   activations : state.ActivationsWellFormed

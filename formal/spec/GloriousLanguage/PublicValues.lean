@@ -1,4 +1,5 @@
 import GloriousLanguage.SemanticPreservation
+import GloriousLanguage.ControlOriginPreservation
 
 /-! Complete logical observations of initialized typed residents. References
 observe the existing loan's referent, without unfolding a potentially cyclic
@@ -284,7 +285,7 @@ theorem resourceAdmission_safe_iff {program : Kernel.Program} {host : Foreign.Mo
     · exact False.elim (step.not_stopped stopped)
   · intro results state reachable
     have typed := reachable_worldTyped valid inventory lawful reachable
-    refine ⟨fun invalid => invalid typed,?_⟩
+    refine ⟨fun invalid => invalid ⟨typed,reachable_control valid inventory lawful reachable⟩,?_⟩
     obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
     have progress := (admitted host inputs .isolated start trace state lawful initial inputAccess
       (Contracts.invocation_isolated run)).1

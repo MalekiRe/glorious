@@ -558,7 +558,7 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
     (allowed : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
     InitialInvocation program host function inputs state := by
   apply InvocationStart.isolated inputsTyped functionInputs ?_ registry task frames region allowed admitted
-  refine ⟨State.SuspensionsWellFormed.empty empty homes,?_,?_,?_,?_,?_,?_,?_⟩
+  refine ⟨⟨?_,?_,?_,?_⟩,State.SuspensionsWellFormed.empty empty homes,?_,?_,?_⟩
   · rw [task]
     apply RootSupport.below_append.mpr
     constructor
@@ -577,8 +577,6 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
         (inputsTyped.2.2.2.2 input member).1
       simpa only [Kernel.InvocationInput.rootSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using bound
   · simp [frames]
-  · intros
-    simp_all [Table.get]
   · rw [task]
     apply AuthoritySupport.recorded_append.mpr
     constructor
@@ -595,7 +593,8 @@ theorem InitialInvocation.of_empty_resumptions {program : Kernel.Program} {host 
   · simp [frames]
   · intros
     simp_all [Table.get]
-
+  · intros
+    simp_all [Table.get]
   · refine ⟨activationHomes,?_,?_,?_⟩
     · simpa only [task,Task.activationSupport,RootSupport.below_cons,RootSupport.below_nil,and_true] using activation
     · simp [frames]

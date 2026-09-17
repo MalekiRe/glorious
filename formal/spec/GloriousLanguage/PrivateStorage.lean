@@ -3,7 +3,25 @@ import GloriousLanguage.ControlStorageOrigin
 
 /-! The saved destructor handle is made private by actual temporary allocation,
 borrowing and ordinary owned-input binding. These are entry facts, not
-post-return certificates or an alternate invocation evaluator. -/
+post-return certificates or an alternate invocation evaluator.
+
+The `safe` field is not an independent assumption: `Temporary.borrowed_handle_private`
+derives it from the fresh handle allocation (`Allocates.canEndStorage`) and the
+formed destructor loan (`FormsLoan.canEndStorage`), and the entry binder
+preserves it (`BindsInputAt.owned_private_root`, `EnterWorld.owned_handle_private`).
+The release side consumes the machine's own products rather than assumed
+progress: `World.LoanReleaseFrame.private_slot` for the pending-return drain,
+and the custody handoff (`World.CustodyHandedOff`, produced by the entry
+binder's claims through `Kernel.BindsInputsFor.custody_handedOff`) for a
+relinquishment and for the drain's release frame.
+
+Scope limit: this module proves the slot-side transports, not the destructor
+hook's returned-state admission. The cleanup entry still reads the discharged
+custody and retry readiness of the Drop contract
+(`CustodyDischarge`/`CustodyReleaseReady` in `DropReturn`), and the
+relinquishment-to-drain custody transport
+(`Execution.World.CustodyHandedOff.requestReturns`) stays in the cleanup layer
+(`CleanupDrain`) rather than importing it back down here. -/
 namespace Glorious.Language
 
 /-- A proof view of one actual vacant internal slot. The current control
@@ -249,11 +267,17 @@ theorem Retires.private_slot {before after : World} {target id : Identity} {root
   · cases retired; rfl
   · cases retired; rfl
 
+/-- The actual pending-return drain only turns loans dead, so the private slot
+survives a whole release frame, not merely one `EndsLoan` step. This is the
+frame-level consumer of the machine's own `LoanReleaseFrame` product. -/
+theorem World.LoanReleaseFrame.private_slot {before after : World} {id : Identity} {root : Root}
+    (frame : before.LoanReleaseFrame after) (slot : before.PrivateSlot id root) :
+    after.PrivateSlot id root :=
+  ⟨by rw [frame.rest]; exact slot.found,slot.vacant,frame.canEndStorage slot.safe,slot.internalHome⟩
+
 theorem EndsLoan.private_slot {program : RuntimeProgram} {before after : World} {loan id : Identity} {root : Root}
-    (ended : EndsLoan program before loan after) (slot : before.PrivateSlot id root) : after.PrivateSlot id root := by
-  apply slot.transport
-  · cases ended; rfl
-  · exact ended.releaseFrame.canEndStorage slot.safe
+    (ended : EndsLoan program before loan after) (slot : before.PrivateSlot id root) : after.PrivateSlot id root :=
+  ended.releaseFrame.private_slot slot
 
 theorem ReturnsStorageLoan.private_slot {before after : World} {loan id : Identity} {root : Root}
     (returned : ReturnsStorageLoan before loan after) (slot : before.PrivateSlot id root) :
@@ -265,6 +289,23 @@ theorem RelinquishesCustody.private_slot {before after : World} {custody : Claim
     {id : Identity} {root : Root} (relinquished : RelinquishesCustody before custody after)
     (slot : before.PrivateSlot id root) : after.PrivateSlot id root :=
   slot.transport (by cases relinquished; rfl) (relinquished.canEndStorage slot.safe)
+
+/-- The custody producer the entry binder actually emits feeds the privacy
+boundary directly: relinquishing a handed-off custody only restamps pending
+returns and retains every live referent, so the private root stays unreferenced. -/
+theorem World.CustodyHandedOff.private_slot {world : World} {custody : ClaimCustody}
+    {id : Identity} {root : Root} (handed : world.CustodyHandedOff custody)
+    (slot : world.PrivateSlot id root) : (world.RequestReturns custody).PrivateSlot id root :=
+  RelinquishesCustody.private_slot (.relinquish handed) slot
+
+/-- An actual release frame keeps both conclusions the destructor cleanup reads
+from it: the private slot stays safe and the handed-off custody stays witnessed
+by a live owning successor. -/
+theorem World.CustodyHandedOff.released_private_slot {before after : World} {custody : ClaimCustody}
+    {id : Identity} {root : Root} (handed : before.CustodyHandedOff custody)
+    (frame : before.LoanReleaseFrame after) (slot : before.PrivateSlot id root) :
+    after.PrivateSlot id root ∧ after.CustodyHandedOff custody :=
+  ⟨frame.private_slot slot,handed.loanReleaseFrame frame⟩
 
 
 /-- Moving an entire source root to distinct storage retains the source's

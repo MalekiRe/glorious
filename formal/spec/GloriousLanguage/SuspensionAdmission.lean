@@ -1,12 +1,12 @@
-import GloriousLanguage.SnapshotReplayProgress
+import GloriousLanguage.Effects
 
 /-! Capture-to-replay admission accounting. The suspend rules' own admission
-(`SuspendPermission`) supplies the replayable roots and the snapshot frames of
-the suspension they create, and the actual resumption table change of every
-step retains the created suspension's captured product (roots, saved homes,
-frames, handler, context, inner frames, control authorities, quantity and
-capture limit). This module derives those parts from the real producers and
-retains them along an actual `Run`; it does not restate them at replay. -/
+(`SuspendPermission`) supplies the replayable roots, the snapshot frames and
+the control replayability of the frames it captures. This module projects those
+products out of the disposition admission; carrying them to the replay site
+along an actual `Run` is `SnapshotReplayProgress`, which also owns the
+replay/cancel boundary that consumes them, so this module stays upstream of the
+suspension retention chain that performs the carrying. -/
 namespace Glorious.Language.Execution
 
 open Kernel

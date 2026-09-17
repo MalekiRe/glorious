@@ -124,13 +124,19 @@ def Finished (program : Kernel.Program) (function : Function) (state : State) (r
     ListRel (fun source value => state.world.Stores source.address value) payload residents ∧
     ListRel (Reveals state.world) residents publicScope ∧ result = .outward id arguments publicScope)
 
+/-- The public executable semantics. `invalid` denies every state outside the
+intended well-formed domain: storage typing always, and complete control
+provenance up to the resource-exhaustion terminal, which is a real machine
+endpoint rather than an ill-formed state. This is what makes the public safety
+chain consume `State.ControlWellFormed`, through `reachable_control`. -/
 def Semantics (program : Kernel.Program) (host : Foreign.Model) (function : Function) (inputs : List InvocationInput) :
     TransitionSystem PublicEvent Result where
   State := State
   initial := Contracts.InitialInvocation program host function inputs
   step before event after := ∃ internal, Execution.Step program host before internal after ∧ event = internal.bind publicEvent
   final := Finished program function
-  invalid state := ¬ Typing.WorldTyped program state.world
+  invalid state := ¬ (Typing.WorldTyped program state.world ∧
+    (state.ControlWellFormed ∨ state.task = .fatal .resource))
 
 inductive Rejection where
   | source (reason : Failure) (span : Option Span)
@@ -173,13 +179,20 @@ structure CompilerContract (implementation : Implementation) : Prop where
       (implementation.vm artifact host function inputs) (implementation.native artifact host function inputs)
   mandatoryTail : ∀ budget input artifact host function inputs,
     implementation.compile budget input = .ok artifact →
+    (implementation.vm artifact host function inputs).program = implementation.source artifact ∧
+    (implementation.native artifact host function inputs).program = implementation.source artifact ∧
     ∃ vmSites : List (ABI.TailEvidence (implementation.vm artifact host function inputs)),
       ∃ nativeSites : List (ABI.TailEvidence (implementation.native artifact host function inputs)),
-        vmSites.map (·.site) = nativeSites.map (·.site)
+        vmSites.map (·.site) = Kernel.TailSites (implementation.source artifact) ∧
+        nativeSites.map (·.site) = Kernel.TailSites (implementation.source artifact)
   labelErasure : ∀ budget input artifact host function inputs,
     implementation.compile budget input = .ok artifact →
-      Nonempty (ABI.LabelFusion (implementation.vm artifact host function inputs)) ∧
-      Nonempty (ABI.LabelFusion (implementation.native artifact host function inputs))
+    (implementation.vm artifact host function inputs).program = implementation.source artifact ∧
+    (implementation.native artifact host function inputs).program = implementation.source artifact ∧
+    ∃ vmFusion : ABI.LabelFusion (implementation.vm artifact host function inputs),
+      ∃ nativeFusion : ABI.LabelFusion (implementation.native artifact host function inputs),
+        vmFusion.sites = Kernel.LabelSites (implementation.source artifact) ∧
+        nativeFusion.sites = Kernel.LabelSites (implementation.source artifact)
 
 theorem always_rejecting_not_complete {implementation : Implementation} {input : Language.Input}
     (valid : ValidInput input)

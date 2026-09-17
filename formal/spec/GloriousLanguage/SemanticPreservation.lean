@@ -132,12 +132,5 @@ theorem reachable_worldTyped {program : Kernel.Program} {host : Foreign.Model}
   obtain ⟨start,trace,initial,run⟩ := reachable_execution_iff.mp reachable
   exact initial.run_worldTyped valid inventory lawful run
 
-theorem WellFormed.no_invalid_reachable {program : Kernel.Program} (well : WellFormed program)
-    {host : Foreign.Model} {function : Kernel.Function} {inputs : List Kernel.InvocationInput}
-    (lawful : host.Lawful program) (state : Execution.State)
-    (reachable : (Semantics program host function inputs).Reachable state) :
-    ¬ (Semantics program host function inputs).invalid state := by
-  exact fun invalid => invalid (reachable_worldTyped well.declarations well.inventory lawful reachable)
-
 end Specification
 end Glorious.Language

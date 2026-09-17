@@ -1,3 +1,5 @@
+import GloriousLanguage.CleanupDrain
+import GloriousLanguage.CleanupRunProgress
 import GloriousLanguage.DropHandle
 import GloriousLanguage.DropInvocation
 import GloriousLanguage.PrivatePreservation
@@ -5,7 +7,34 @@ import GloriousLanguage.PrivatePreservation
 /-! Actual destructor dispatch and ordinary owned-input entry produce the
 private stack/slot invariant consumed by complete-machine preservation.
 The actual selected Drop contract supplies interval control restrictions; the
-caller stack and host exposure are retained throughout. -/
+caller stack and host exposure are retained throughout.
+
+The destructor interval splits at the hook boundary. Its hook-free branches are
+machine code — a vacant slot is consumed by `destroyVacant`, a disposable
+hook-free shell by `destroyStructural`, its child field loop, the emptied
+shell's clear and its custody's pending-return drain, and a reference head by
+`destroyReference` with the loan release it schedules — so the interval progress
+those branches need is read off their own actual steps
+(`CleanupRun.destroy_structural_interval`,
+`CleanupRun.destroy_vacant_private_progress`, both consuming the interval
+vocabulary of `CleanupRunProgress`). The one admitted progress that remains is
+the hook body itself, arbitrary user code entered by `destroyHook`:
+`LocalStep.hook_body_admitted_private` consumes there exactly the selected Drop
+contract's `Contracts.ResourceAdmission` for the hook function, and no other
+`StateProgress` is consumed anywhere in this module. -/
+namespace Glorious.Language
+
+/-- A retained private slot is a vacant address: its root is live, so the
+generation-checked root lookup succeeds there, and its value is none. This is
+what the machine's `destroyVacant` rule consumes when the private handle itself
+is dropped. -/
+theorem World.PrivateSlot.vacantAt {world : World} {id : Identity} {root : Root}
+    (slot : world.PrivateSlot id root) (live : root.live = true) :
+    world.Vacant ⟨id,root.generation,[]⟩ :=
+  ⟨root,by simp [World.root,slot.found,live],Or.inl ⟨rfl,slot.vacant⟩⟩
+
+end Glorious.Language
+
 namespace Glorious.Language.Execution
 
 open _root_.Glorious.Language.Kernel Contracts
@@ -63,7 +92,11 @@ theorem LocalStep.hook_body_private {program : Kernel.Program} {host : Foreign.M
 /-- Every prefix of the actual admitted hook interval preserves the allocated
 private handle and its guard. Restrictions come from the selected declaration's
 Drop contract, not a caller-supplied trace-safety premise. Internally handled
-operations, including terminal operations, use the real routing relation. -/
+operations, including terminal operations, use the real routing relation.
+The interval's endpoint progress is the hook body's own and stays admitted: the
+selected Drop contract's `ResourceAdmission` supplies it, because the body is
+arbitrary user code no machine step can be read off. This is the only
+`StateProgress` this module consumes. -/
 theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : Foreign.Model}
     {before entering body : State} {address : Address} {hook : DeclId}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
@@ -118,9 +151,13 @@ theorem LocalStep.hook_body_admitted_private {program : Kernel.Program} {host : 
   by_cases handoff : (InvocationBoundary.caller { caller with unsafeAllowed := false }
       (.hook caller address authority handle loan next :: before.frames)).Handoff after
   · apply Or.inr
-    have progress := (contract.2.2.2 host _ _ entering trace after lawful initial
+    -- The one admitted interval progress in this module. The hook body is
+    -- arbitrary user code, so no machine step exists to derive it from: the
+    -- producer is the selected Drop contract's `ResourceAdmission` for the hook
+    -- function, evaluated on the actual interval that starts at `entering`.
+    have hookBodyProgress := (contract.2.2.2 host _ _ entering trace after lawful initial
       (by intro input member _; cases List.mem_singleton.mp member; rfl) interval).1
-    exact progress.handoff_normal handoff
+    exact hookBodyProgress.handoff_normal handoff
   · refine Or.inl ⟨⟨remaining,afterFrames⟩,handoff,?_,?_⟩
     · intro context operation arguments payload pending
       exact contract.interval_perform_internal lawful initial interval pending
@@ -170,5 +207,64 @@ theorem LocalStep.hook_body_private_until_return {program : Kernel.Program} {hos
   rcases exit with outside | ⟨_,same⟩
   · exact closed.elim (fun inside => False.elim (outside inside)) Or.inr
   · exact Or.inl same
+
+/-! ## The hook-free structural destructor interval
+
+The dispatcher's hook-free branches are machine code. A vacant slot is consumed
+by `destroyVacant`; a disposable hook-free shell by `destroyStructural`, its
+child field loop, the emptied shell's clear and the resident custody's
+pending-return drain (the recursive `World.Destroys` inventory, run by
+`recursive_cleanup_correct`); a reference head by `destroyReference` and the
+loan release it schedules. Their intervals therefore progress by their own
+actual steps, and this module reads that progress for the private drop instead
+of consuming it from the receiver's run-quantified resource admission. The
+state-by-state interval vocabulary itself (`CleanupRun.Chain`,
+`CleanupRun.StepProgress`, `CleanupRun.recursive_progress` and the
+`Contracts.StateProgress` consumption lemmas) is stated once in
+`CleanupRunProgress` and consumed here, never restated. -/
+
+/-- The hook-free structural destructor interval of a resident receiver is an
+actual machine interval. From the owning `.destroy` schedule of a recursive
+`World.Destroys` inventory the machine runs its own structural steps — the
+dispatcher's structural branch, the child field loop, the emptied shell's clear
+and the resident custody's pending-return drain — to the caller's continuation,
+leaving the receiver's root vacant inside the destruction frame. The interval's
+progress is read off those steps: its first state is `StateProgress` by the very
+`destroyStructural` step the run takes, and every later state is the start of
+one of the run's own suffixes. Nothing on this path consumes the receiver's
+run-quantified resource admission. -/
+theorem CleanupRun.destroy_structural_interval {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {address : Address} {next : Task} {value : Value}
+    (function : Kernel.Function) (task : before.task = .destroy context address .owner next)
+    (stored : before.world.Stores address value)
+    (tree : World.Destroys program before.world address) :
+    ∃ (trace : List Event) (after : World),
+      Run program host before trace { before with world := after, task := next } ∧
+      StateProgress program host function before .isolated ∧
+      after.Vacant address ∧ World.DestroyFrame before.world after address := by
+  obtain ⟨trace,after,cleanup,vacant,frame,_⟩ :=
+    -- `recursive_cleanup_correct` is declared in the doubled tail namespace of `CleanupDrain`.
+    _root_.Glorious.Language.Execution.Glorious.Language.Execution.CleanupRun.recursive_cleanup_correct
+      (sizeOf value) before context address next value (Nat.le_refl (sizeOf value)) task stored tree
+  exact ⟨trace,after,cleanup.run,
+    StateProgress.destroy (boundary := .isolated) trivial task stored tree,vacant,frame⟩
+
+/-- The private handle's own structural drop. A retained private slot is vacant,
+so the machine consumes it with its own `destroyVacant` step: the interval to the
+continuation is that single actual step, and its progress is derived from it
+rather than admitted. -/
+theorem CleanupRun.destroy_vacant_private_progress {program : Kernel.Program} {host : Foreign.Model}
+    {before : State} {context : Context} {id : Identity} {root : Root} {authority : Authority}
+    {next : Task} (function : Kernel.Function) (slot : before.world.PrivateSlot id root)
+    (live : root.live = true)
+    (task : before.task = .destroy context ⟨id,root.generation,[]⟩ authority next) :
+    ∃ (trace : List Event) (after : World),
+      CleanupRun program host before trace { before with world := after, task := next } ∧
+      StateProgress program host function before .isolated := by
+  have vacant : before.world.Vacant ⟨id,root.generation,[]⟩ := slot.vacantAt live
+  have step : Step program host before none ({ before with task := next }) :=
+    Or.inl (LocalStep.destroyVacant task vacant)
+  exact ⟨[],before.world,CleanupRun.destroy_vacant task vacant,
+    Or.inr (Or.inr (Or.inr (Or.inr ⟨none,_,⟨trivial,step⟩⟩)))⟩
 
 end Glorious.Language.Execution
