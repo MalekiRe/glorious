@@ -410,6 +410,29 @@ end Glorious.Language
 
 namespace Glorious.Language.Execution
 
+/-- Requesting storage-borrow returns leaves owning rows unchanged, including
+the successor that witnesses each custody handoff. -/
+theorem World.CustodyHandedOff.requestReturns {world : World} {custody : ClaimCustody}
+    (handed : world.CustodyHandedOff custody) (requested : ClaimCustody) :
+    (world.RequestReturns requested).CustodyHandedOff custody := by
+  intro id loan found live kind held
+  rw [World.RequestReturns.get_eq] at found
+  obtain ⟨original,selected,same⟩ := Option.map_eq_some_iff.mp found
+  have originalKind : original.kind = .owning := by
+    simpa only [← same,World.restamp_kind] using kind
+  have unchanged : World.restamp requested original = original := by
+    simp [World.restamp,originalKind]
+  have equal : original = loan := unchanged.symm.trans same
+  subst loan
+  simp only [unchanged] at live held ⊢
+  obtain ⟨child,successor,childFound,parent,active,owning,referent,recipient,recipientEq,different⟩ :=
+    handed id original selected live originalKind held
+  have successorUnchanged : World.restamp requested successor = successor := by
+    simp [World.restamp,owning]
+  refine ⟨child,successor,?_,parent,active,owning,referent,recipient,recipientEq,different⟩
+  rw [World.RequestReturns.get_eq,childFound]
+  exact congrArg some successorUnchanged
+
 /-- The pending-return queue drains to the task the relinquishment scheduled.
 Every step is one of the machine's own `releaseLoan` rules: a silent rule
 consumes its head, an ending rule ends the loan and re-inserts the recorded
@@ -471,7 +494,7 @@ theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Mode
                   | true => exact absurd ⟨child,selected,related,active⟩ dependent
                 let ended : World := { before.world with loans := before.world.loans.set id { loan with live := false } }
                 let pushed := loan.parent.toList ++ loan.guards
-                have finish (step : LocalStep program before (some (.loanEnd id))
+                have finish (notOwning : loan.kind ≠ .owning) (step : LocalStep program before (some (.loanEnd id))
                     { before with world := ended, task := ReleaseLoans pushed (ReleaseQueue rest next) }) :
                     ∃ (after : World) (trace : List Event),
                       CleanupRun program host before trace { before with world := after, task := next } ∧
@@ -490,7 +513,7 @@ theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Mode
                       ((ReleaseLoans_eq_queue pushed (ReleaseQueue rest next)).trans
                         (ReleaseQueue_append pushed.eraseDups rest next)) afterReady
                   exact ⟨after,.loanEnd id :: trace,.visible cleanup (Or.inl step) run,
-                    Nat.le_trans counted (Nat.le_of_lt decreased),(World.loanReleaseFrame_set_dead found).trans frame⟩
+                    Nat.le_trans counted (Nat.le_of_lt decreased),(World.loanReleaseFrame_set_dead found notOwning).trans frame⟩
                 have ordinary (kind : loan.kind = .restoring ∨ loan.kind = .destructor) :
                     ∃ (after : World) (trace : List Event),
                       CleanupRun program host before trace { before with world := after, task := next } ∧
@@ -500,11 +523,11 @@ theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Mode
                     .restored found live kind initialized closed referenced resourced children
                   cases parent : loan.parent with
                   | none =>
-                      apply finish
+                      apply finish (by rcases kind with kind | kind <;> simp [kind])
                       simpa only [pushed,parent,Option.toList_none,List.nil_append] using
                         (LocalStep.releaseRoot head found parent ending)
                   | some parentId =>
-                      apply finish
+                      apply finish (by rcases kind with kind | kind <;> simp [kind])
                       simpa only [pushed,parent,Option.toList_some,List.singleton_append] using
                         (LocalStep.releaseChild head found parent ending)
                 cases kind : loan.kind with
@@ -513,7 +536,7 @@ theorem CleanupRun.release_queue {program : Kernel.Program} {host : Foreign.Mode
                 | destructor => exact ordinary (Or.inr kind)
                 | storageBorrow =>
                     by_cases requested : loan.returnRequested = true
-                    · exact finish (.releaseStorageReturned head found
+                    · exact finish (by simp [kind]) (.releaseStorageReturned head found
                         (.returned found live kind requested referenced resourced children))
                     · have retained : loan.returnRequested = false := by
                         cases held : loan.returnRequested with
@@ -677,9 +700,11 @@ theorem Address.Prefix.comparable {first second probe : Address}
 
 /-- The recursive destructor's tree inventory: a stored disposable shell (no
 pending drop hook, no continuation/reference/available head, owning permission at
-its own address, and the pending-return readiness the drain reads for the custody
-its relinquishment marks) whose fields are each either a hole or a further
-destructible resident. -/
+its own address, the custody hand-off its relinquishment must preserve, and the
+whole-table loan kind/ancestry admission its endings and drain read) whose fields
+are each either a hole or a further destructible resident. The custody clause is
+the pre-state admission of the node's own owner: no tree can derive it, because
+the owning successor that witnesses it lives outside the destroyed subtree. -/
 inductive World.Destroys (program : RuntimeProgram) (world : World) : Address → Prop where
   | resident {address value} : world.Stores address value →
       MayDispose program.declarations value → value.shellLive = false →
@@ -691,6 +716,7 @@ inductive World.Destroys (program : RuntimeProgram) (world : World) : Address �
       (∀ id loan, world.loans.get id = some loan →
         (∀ parent, loan.parent = some parent → world.loans.get parent ≠ none) ∧
         (∀ guard ∈ loan.guards, world.loans.get guard ≠ none)) →
+      world.CustodyHandedOff (.resident value.owner) →
       (∀ (index : Nat) (child : Value), value.fields[index]? = some (some child) →
         World.Destroys program world (address.child index)) →
       World.Destroys program world address
@@ -700,6 +726,15 @@ end Glorious.Language
 namespace Glorious.Language
 
 open Kernel
+
+/-- A loan-table equality transports a custody hand-off: only the witness lookup
+moves. This is the write case of every custody transport below. -/
+theorem World.CustodyHandedOff.of_loans {before after : World} {custody : ClaimCustody}
+    (handed : before.CustodyHandedOff custody) (same : after.loans = before.loans) :
+    after.CustodyHandedOff custody := by
+  intro identity loan found live kind held
+  rw [same] at found
+  simpa only [same] using handed identity loan found live kind held
 
 /-- A write that is apart from a destructible resident leaves that resident
 destructible: its stored shell, its owning permission, its custody's
@@ -712,7 +747,7 @@ theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World}
     World.Destroys program after address := by
   revert deep
   induction tree with
-  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry custody children ih =>
     intro deep
     have framed := World.write_disjoint written (deep address ⟨rfl,rfl,⟨[],by simp⟩⟩)
     have storedAfter : after.Stores address value := by
@@ -723,7 +758,7 @@ theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World}
     have permissionAfter : Permitted after .owner .owned address :=
       ⟨located,fun id loan found live overlap conflict =>
         permission.2 id loan (by simpa only [loansAfter] using found) live overlap conflict⟩
-    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_
+    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_ ?_
     · intro id loan found live
       exact kinds id loan (by simpa only [loansAfter] using found) live
     · intro id loan found
@@ -732,6 +767,7 @@ theorem World.Destroys.write_disjoint {program : RuntimeProgram} {world : World}
         simpa only [loansAfter] using held
       · have held := (ancestry id loan (by simpa only [loansAfter] using found)).2 guard member
         simpa only [loansAfter] using held
+    · exact World.CustodyHandedOff.of_loans custody loansAfter
     · intro index child selected
       exact ih index child selected
         (fun probe included => deep probe (Address.Prefix.trans (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included))
@@ -823,6 +859,35 @@ namespace Glorious.Language
 
 open Kernel
 
+/-- Ending a row that is not an owning claim preserves the custody hand-off: every
+successor witness is a live owning row, so the killed row is not one of them and
+every other row keeps its parent, referent and custodian. -/
+theorem World.CustodyHandedOff.set_dead {world : World} {custody : ClaimCustody} {id : Identity} {loan : Loan}
+    (handed : world.CustodyHandedOff custody) (found : world.loans.get id = some loan)
+    (notOwning : loan.kind ≠ .owning) :
+    ({ world with loans := world.loans.set id { loan with live := false } }).CustodyHandedOff custody := by
+  intro identity current selected live kind held
+  have different : identity ≠ id := by
+    intro same
+    subst identity
+    have equal : ({ loan with live := false } : Loan) = current :=
+      Option.some.inj ((Table.get_set world.loans id { loan with live := false }).symm.trans selected)
+    apply notOwning
+    simpa only [← equal] using kind
+  have previous : world.loans.get identity = some current := by
+    rw [Table.get_set_other world.loans id identity { loan with live := false } different] at selected
+    exact selected
+  obtain ⟨child, successor, childFound, parent, active, owning, referent, recipient, recipientEq, recipientNe⟩ :=
+    handed identity current previous live kind held
+  have successorDifferent : child ≠ id := by
+    intro same
+    subst child
+    have equal : successor = loan := Option.some.inj (childFound.symm.trans found)
+    exact notOwning (equal ▸ owning)
+  refine ⟨child, successor, ?_, parent, active, owning, referent, recipient, recipientEq, recipientNe⟩
+  rw [Table.get_set_other world.loans id child { loan with live := false } successorDifferent]
+  exact childFound
+
 end Glorious.Language
 
 namespace Glorious.Language
@@ -834,18 +899,18 @@ kills a row, so the owning permission's exclusion and the pending-return clauses
 both read from the raw loan table, still hold. -/
 theorem World.Destroys.end_loan {program : RuntimeProgram} {world : World} {address : Address}
     (tree : World.Destroys program world address) {id : Identity} {loan : Loan}
-    (found : world.loans.get id = some loan) :
+    (found : world.loans.get id = some loan) (notOwning : loan.kind ≠ .owning) :
     World.Destroys program { world with loans := world.loans.set id { loan with live := false } } address := by
   revert found
   induction tree with
-  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry custody children ih =>
     intro found
     have kept {key : Identity} {row : Loan} (different : key ≠ id)
         (selected : (world.loans.set id { loan with live := false }).get key = some row) :
         world.loans.get key = some row := by
       rw [Table.get_set_other _ _ _ _ different] at selected
       exact selected
-    refine .resident stored disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_
+    refine .resident stored disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_ ?_
     · refine ⟨permission.1,fun key row selected live overlap conflict => ?_⟩
       by_cases same : key = id
       · have dead : (world.loans.set id { loan with live := false }).get key = some row := selected
@@ -897,6 +962,7 @@ theorem World.Destroys.end_loan {program : RuntimeProgram} {world : World} {addr
           · rw [guardIs,Table.get_set] at missing
             cases missing
           · exact held (by simpa only [Table.get_set_other _ _ _ _ guardIs] using missing)
+    · exact World.CustodyHandedOff.set_dead custody found notOwning
     · intro index child selected
       exact ih index child selected found
 
@@ -906,47 +972,250 @@ namespace Glorious.Language
 
 open Kernel
 
-namespace Glorious.Language
+/-- A replacement at a non-empty path keeps the resident's owner, type, head,
+liveness flag, resources and arity and changes only the first slot's subtree.
+This is the value-level fact every write below a cell needs. -/
+theorem Value.replace_shape {before after : Value} {first : Nat} {rest : List Nat} {replacement : Option Value}
+    (written : before.replace (first :: rest) replacement = some after) :
+    after.owner = before.owner ∧ after.type = before.type ∧ after.head = before.head ∧
+      after.shellLive = before.shellLive ∧ after.resources = before.resources ∧
+      after.fields.length = before.fields.length ∧
+      (∀ other, other ≠ first → after.fields[other]? = before.fields[other]?) := by
+  obtain ⟨field, found, shape⟩ := Value.replace_cons_shape written
+  obtain ⟨choice, afterEq⟩ : ∃ choice, after = before.withFields (before.fields.set first choice) := by
+    rcases shape with ⟨_, same⟩ | ⟨child, changed, _, _, same⟩
+    · exact ⟨replacement, same⟩
+    · exact ⟨some changed, same⟩
+  subst afterEq
+  dsimp only [Value.withFields, Value.fields] at *
+  refine ⟨rfl, rfl, rfl, rfl, rfl, ?_, ?_⟩
+  · rw [List.length_set]
+  · intro other different
+    rw [List.getElem?_set_ne (Ne.symm different)]
 
-open Kernel
+/-- A write anywhere inside a cell's slot subtree re-reads the cell as its old
+shell with that subtree replaced. This is the general form of
+`World.Stores.write_child_none`'s derivation, for an arbitrary path. -/
+theorem World.Stores.write_below {before after : World} {cell target : Address} {first : Nat} {rest : List Nat}
+    {replacement : Option Value}
+    (rootEq : target.root = cell.root) (genEq : target.generation = cell.generation)
+    (fieldsEq : target.fields = cell.fields ++ (first :: rest))
+    (written : before.write target replacement = some after) :
+    ∃ shell changed, before.Stores cell shell ∧ shell.replace (first :: rest) replacement = some changed ∧
+      after.Stores cell changed := by
+  have addressEq : target = { cell with fields := cell.fields ++ (first :: rest) } := by
+    cases target with
+    | mk targetRoot targetGeneration targetFields =>
+      cases cell with
+      | mk cellRoot cellGeneration cellFields =>
+        simp only [Address.mk.injEq]
+        exact ⟨rootEq, genEq, fieldsEq⟩
+  rw [addressEq] at written
+  unfold World.write at written
+  cases selected : before.root { cell with fields := cell.fields ++ (first :: rest) } with
+  | none => simp [selected] at written
+  | some root =>
+      have cellRoot : before.root cell = some root := selected
+      have fieldsNonempty :
+          ({ cell with fields := cell.fields ++ (first :: rest) } : Address).fields.isEmpty = false := by simp
+      simp only [selected,fieldsNonempty,Bool.false_eq_true,↓reduceIte] at written
+      dsimp at written
+      cases resident : root.value with
+      | none => simp [resident] at written
+      | some whole =>
+          simp only [resident] at written
+          dsimp at written
+          cases replaced : whole.replace (cell.fields ++ (first :: rest)) replacement with
+          | none => simp [replaced] at written
+          | some changed =>
+              have result : after = { before with roots := before.roots.set cell.root { root with value := some changed } } := by
+                simpa [replaced] using written.symm
+              obtain ⟨shell,newCell,located,rewritten,outer⟩ := Value.replace_append_shape replaced (by simp)
+              have writeEq : before.write cell (some newCell) = some after := by
+                rw [result]
+                simp only [World.write,cellRoot]
+                dsimp
+                split
+                next emptyPath =>
+                  have pathEq : cell.fields = [] := List.isEmpty_iff.mp emptyPath
+                  have changedEq : changed = newCell := by simpa [pathEq,Value.replace] using outer.symm
+                  rw [changedEq]
+                next => simp [resident, outer]
+              refine ⟨shell,newCell,?_,rewritten,?_⟩
+              · simp [World.Stores,World.read,cellRoot,resident,located]
+              · change after.read cell = some newCell
+                simpa [Value.atPath] using World.write_read_inside writeEq []
 
-/-- The footprint a node's destruction leaves: outside its own subtree no stored
-value and no root row changes, the loan table keeps every row it had, and every
-live row of the result is a live row of the original with the same kind, mode and
-referent. -/
+/-- Destruction preserves reads at non-overlapping addresses. Ancestor reads
+may change when a descendant slot is cleared; root presence is unchanged
+everywhere. Loan rows remain present, live output rows retain their original
+kind, mode and referent, and every custody hand-off of the input world is
+carried to the output world. -/
 structure World.DestroyFrame (before after : World) (outside : Address) : Prop where
-  reads : ∀ probe, ¬ outside.Prefix probe → after.read probe = before.read probe
-  roots : ∀ probe, ¬ outside.Prefix probe → (after.root probe).isSome = (before.root probe).isSome
+  reads : ∀ probe, ¬ outside.Overlaps probe → after.read probe = before.read probe
+  roots : ∀ probe, (after.root probe).isSome = (before.root probe).isSome
   rows : ∀ key row, after.loans.get key = some row → ∃ original, before.loans.get key = some original ∧
     original.parent = row.parent ∧ original.guards = row.guards
   present : ∀ key original, before.loans.get key = some original → ∃ row, after.loans.get key = some row
   liveness : ∀ key row, after.loans.get key = some row → row.live = true →
     ∃ original, before.loans.get key = some original ∧ original.live = true ∧
       original.kind = row.kind ∧ original.mode = row.mode ∧ original.referent = row.referent
+  custody : ∀ custody, before.CustodyHandedOff custody → after.CustodyHandedOff custody
+  /-- Every ancestor cell of the sphere re-reads with only the sphere's own slot
+  subtree replaced: a run that changes only inside `outside`'s subtree cannot
+  touch an ancestor's head data, arity or other slots. This is what carries the
+  pending original child inventories past a sibling's destruction. -/
+  ancestor : ∀ (cell : Address) (first : Nat) (rest : List Nat) (shell : Value),
+      outside = { cell with fields := cell.fields ++ (first :: rest) } → before.Stores cell shell →
+      ∃ changed, after.Stores cell changed ∧
+        changed.owner = shell.owner ∧ changed.type = shell.type ∧ changed.head = shell.head ∧
+        changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+        changed.fields.length = shell.fields.length ∧
+        (∀ other, other ≠ first → changed.fields[other]? = shell.fields[other]?)
+
+/-- The identity frame: no destruction, no change. -/
+theorem World.DestroyFrame.refl (world : World) (outside : Address) :
+    World.DestroyFrame world world outside where
+  reads := fun _ _ => rfl
+  roots := fun _ => rfl
+  rows := fun _ row found => ⟨row,found,rfl,rfl⟩
+  present := fun _ original found => ⟨original,found⟩
+  liveness := fun _ row found live => ⟨row,found,live,rfl,rfl,rfl⟩
+  custody := fun _ handed => handed
+  ancestor := fun _ _ _ shell _ stored =>
+    ⟨shell,stored,rfl,rfl,rfl,rfl,rfl,rfl,fun _ _ => rfl⟩
+
+/-- A frame indexed on an inner sphere is a frame on any outer address that
+contains it: fewer probes are excluded, and an ancestor of the outer sphere is an
+ancestor of the inner one at a longer path. -/
+theorem World.DestroyFrame.inside {before after : World} {inner outer : Address}
+    (frame : World.DestroyFrame before after inner) (included : outer.Prefix inner) :
+    World.DestroyFrame before after outer where
+  reads := fun probe apart => frame.reads probe (by
+    intro overlap
+    apply apart
+    refine ⟨included.1.trans overlap.1, included.2.1.trans overlap.2.1, ?_⟩
+    obtain ⟨suffix, suffixEq⟩ := included.2.2
+    rcases overlap.2.2 with ⟨more, shape⟩ | ⟨more, shape⟩
+    · have split : outer.fields ++ suffix = probe.fields ++ more := by rw [← suffixEq]; exact shape
+      rcases List.append_eq_append_iff.mp split with ⟨gap, outerEq, _⟩ | ⟨gap, probeEq, _⟩
+      · exact Or.inr ⟨gap, outerEq⟩
+      · exact Or.inl ⟨gap, probeEq⟩
+    · have fieldsEq : probe.fields = outer.fields ++ (suffix ++ more) := by
+        rw [shape, suffixEq, List.append_assoc]
+      exact Or.inr ⟨suffix ++ more, fieldsEq⟩)
+  roots := frame.roots
+  rows := frame.rows
+  present := frame.present
+  liveness := frame.liveness
+  custody := frame.custody
+  ancestor := fun cell first rest shell outsideEq stored => by
+    obtain ⟨suffix, suffixEq⟩ := included.2.2
+    have innerShape : inner.fields = cell.fields ++ (first :: (rest ++ suffix)) := by
+      rw [suffixEq, outsideEq]
+      simp [List.append_assoc, List.cons_append]
+    have innerRoot : inner.root = cell.root := by rw [← included.1, outsideEq]
+    have innerGeneration : inner.generation = cell.generation := by rw [← included.2.1, outsideEq]
+    have addrEq : inner = { cell with fields := cell.fields ++ (first :: (rest ++ suffix)) } := by
+      cases inner with
+      | mk innerRoot' innerGeneration' innerFields' =>
+        cases cell with
+        | mk cellRoot' cellGeneration' cellFields' =>
+          simp only [Address.mk.injEq]
+          exact ⟨innerRoot, innerGeneration, innerShape⟩
+    obtain ⟨changed, changedStored, ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩ :=
+      frame.ancestor cell first (rest ++ suffix) shell addrEq stored
+    exact ⟨changed, changedStored, ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩
+
+/-- The destructor's field schedule for a shell: the reverse index range. -/
+def World.schedule (value : Value) : List Nat := (List.range value.fields.length).reverse
+
+theorem World.mem_schedule {value : Value} {field : Nat} :
+    field ∈ World.schedule value ↔ field < value.fields.length := by
+  simp [World.schedule]
+
+/-- A destruction frame transports the whole-table live-kind restriction. -/
+theorem World.DestroyFrame.kinds {before after : World} {outside : Address}
+    (frame : World.DestroyFrame before after outside)
+    (kinds : ∀ id loan, before.loans.get id = some loan → loan.live = true →
+      loan.kind = .owning ∨ loan.kind = .storageBorrow) :
+    ∀ id loan, after.loans.get id = some loan → loan.live = true →
+      loan.kind = .owning ∨ loan.kind = .storageBorrow := by
+  intro id loan found live
+  obtain ⟨original, originalFound, originalLive, sameKind, _, _⟩ := frame.liveness id loan found live
+  rw [← sameKind]
+  exact kinds id original originalFound originalLive
+
+/-- A destruction frame transports the ancestry obligation. -/
+theorem World.DestroyFrame.ancestry {before after : World} {outside : Address}
+    (frame : World.DestroyFrame before after outside)
+    (ancestry : ∀ key row, before.loans.get key = some row →
+      (∀ parent, row.parent = some parent → before.loans.get parent ≠ none) ∧
+      (∀ guard ∈ row.guards, before.loans.get guard ≠ none)) :
+    ∀ key row, after.loans.get key = some row →
+      (∀ parent, row.parent = some parent → after.loans.get parent ≠ none) ∧
+      (∀ guard ∈ row.guards, after.loans.get guard ≠ none) := by
+  intro key row found
+  obtain ⟨original, originalFound, sameParent, sameGuards⟩ := frame.rows key row found
+  refine ⟨fun parent link => ?_, fun guard member => ?_⟩
+  · have held := (ancestry key original originalFound).1 parent (by rw [sameParent]; exact link)
+    intro missing
+    obtain ⟨beforeRow, beforeFound⟩ := Option.ne_none_iff_exists'.mp held
+    obtain ⟨afterRow, afterFound⟩ := frame.present parent beforeRow beforeFound
+    rw [afterFound] at missing
+    cases missing
+  · have held := (ancestry key original originalFound).2 guard (by rw [sameGuards]; exact member)
+    intro missing
+    obtain ⟨beforeRow, beforeFound⟩ := Option.ne_none_iff_exists'.mp held
+    obtain ⟨afterRow, afterFound⟩ := frame.present guard beforeRow beforeFound
+    rw [afterFound] at missing
+    cases missing
+
+/-- A destruction frame transports the ownership permission at the sphere. -/
+theorem World.DestroyFrame.permitted {before after : World} {outside : Address} {requested : Access}
+    (frame : World.DestroyFrame before after outside)
+    (permission : Permitted before .owner requested outside) :
+    Permitted after .owner requested outside := by
+  refine ⟨?_, ?_⟩
+  · obtain ⟨root, rootFound⟩ := permission.1
+    exact Option.isSome_iff_exists.mp (by simpa [rootFound] using frame.roots outside)
+  · intro id loan found live overlap conflict
+    obtain ⟨original, originalFound, originalLive, _, sameMode, sameReferent⟩ := frame.liveness id loan found live
+    exact permission.2 id original originalFound originalLive (by simpa [sameReferent] using overlap)
+      (by simpa [sameMode] using conflict)
+
+/-- The parent cell's update produced by destroying the child at `cell.child index`:
+the cell keeps its head data and every other slot, and the child's slot is a hole. -/
+def World.CellUpdate (after : World) (cell : Address) (index : Nat) (shell changed : Value) : Prop :=
+  after.Stores cell changed ∧ changed.fields[index]? = some none ∧
+    changed.owner = shell.owner ∧ changed.type = shell.type ∧ changed.head = shell.head ∧
+    changed.shellLive = shell.shellLive ∧ changed.resources = shell.resources ∧
+    changed.fields.length = shell.fields.length ∧
+    (∀ other, other ≠ index → changed.fields[other]? = shell.fields[other]?)
 
 /-- A subtree whose slots all lie outside a destruction frame's sphere keeps its
 whole inventory in the produced world. -/
 theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after : World}
     {address outside : Address} (tree : World.Destroys program before address)
     (frame : World.DestroyFrame before after outside)
-    (excluded : ∀ probe, address.Prefix probe → ¬ outside.Prefix probe) :
+    (excluded : ∀ probe, address.Prefix probe → ¬ outside.Overlaps probe) :
     World.Destroys program after address := by
   revert frame excluded
   induction tree with
-  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+  | @resident addr value stored disposable shell noCont noRef noAvail permission kinds ancestry custody children ih =>
     intro frame excluded
-    have atRoot : ¬ outside.Prefix addr := excluded addr ⟨rfl,rfl,⟨[],by simp⟩⟩
+    have atRoot : ¬ outside.Overlaps addr := excluded addr ⟨rfl,rfl,⟨[],by simp⟩⟩
     have childExcluded (index : Nat) :
-        ∀ probe, (addr.child index).Prefix probe → ¬ outside.Prefix probe :=
+        ∀ probe, (addr.child index).Prefix probe → ¬ outside.Overlaps probe :=
       fun probe included => excluded probe
         (Address.Prefix.not_outer (Address.Prefix.child ⟨rfl,rfl,⟨[],by simp⟩⟩ index).1 included)
-    refine .resident ?_ disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_
+    refine .resident ?_ disposable shell noCont noRef noAvail ?_ ?_ ?_ ?_ ?_
     · show after.read addr = some value
       rw [frame.reads addr atRoot]
       exact stored
     · refine ⟨?_,fun key row selected live overlap conflict => ?_⟩
       · obtain ⟨root,rootFound⟩ := permission.1
-        have same := frame.roots addr atRoot
+        have same := frame.roots addr
         rw [rootFound] at same
         exact Option.isSome_iff_exists.mp (by simpa using same)
       · obtain ⟨original,originalFound,originalLive,_,sameMode,sameReferent⟩ :=
@@ -976,6 +1245,7 @@ theorem World.Destroys.of_destroy_frame {program : RuntimeProgram} {before after
         obtain ⟨afterRow,afterFound⟩ := frame.present guard beforeRow beforeFound
         rw [afterFound] at missing
         cases missing
+    · exact frame.custody (.resident value.owner) custody
     · intro index child selected
       exact ih index child selected frame (childExcluded index)
 
@@ -990,7 +1260,7 @@ theorem World.DestroyFrame.trans {before middle after : World} {outside : Addres
     (first : World.DestroyFrame before middle outside) (second : World.DestroyFrame middle after outside) :
     World.DestroyFrame before after outside where
   reads := fun probe outside' => (second.reads probe outside').trans (first.reads probe outside')
-  roots := fun probe outside' => (second.roots probe outside').trans (first.roots probe outside')
+  roots := fun probe => (second.roots probe).trans (first.roots probe)
   rows := fun key row found => by
     obtain ⟨middleRow, middleFound, middleParent, middleGuards⟩ := second.rows key row found
     obtain ⟨original, originalFound, originalParent, originalGuards⟩ := first.rows key middleRow middleFound
@@ -1006,6 +1276,15 @@ theorem World.DestroyFrame.trans {before middle after : World} {outside : Addres
       first.liveness key middleRow middleFound middleLive
     exact ⟨original, originalFound, originalLive, originalKind.trans sameKind, originalMode.trans sameMode,
       originalReferent.trans sameReferent⟩
+  custody := fun custody handed => second.custody custody (first.custody custody handed)
+  ancestor := fun cell up rest shell outsideEq stored => by
+    obtain ⟨middleShell, middleStored, ownerOne, typeOne, headOne, liveOne, resOne, lenOne, slotsOne⟩ :=
+      first.ancestor cell up rest shell outsideEq stored
+    obtain ⟨finalShell, finalStored, ownerTwo, typeTwo, headTwo, liveTwo, resTwo, lenTwo, slotsTwo⟩ :=
+      second.ancestor cell up rest middleShell outsideEq middleStored
+    exact ⟨finalShell, finalStored, ownerTwo.trans ownerOne, typeTwo.trans typeOne, headTwo.trans headOne,
+      liveTwo.trans liveOne, resTwo.trans resOne, lenTwo.trans lenOne,
+      fun other different => (slotsTwo other different).trans (slotsOne other different)⟩
 
 end Glorious.Language
 
@@ -1018,10 +1297,19 @@ loan table is untouched, the resolved root is read from live and generation
 (which the update keeps), and outside the sphere the read does not move. -/
 theorem World.DestroyFrame.of_write {before after : World} {outside target : Address}
     {replacement : Option Value} (written : before.write target replacement = some after)
-    (deep : ∀ probe, ¬ outside.Prefix probe → ¬ target.Overlaps probe) :
+    (inside : outside.Prefix target) :
     World.DestroyFrame before after outside where
-  reads := fun probe outside' => World.write_disjoint written (deep probe outside')
-  roots := fun probe outside' => by
+  reads := fun probe apart => World.write_disjoint written (by
+    intro overlap
+    apply apart
+    rcases overlap.2.2 with above | below
+    · have probeInside : probe.Prefix target :=
+        ⟨overlap.1.symm,overlap.2.1.symm,above⟩
+      rcases inside.comparable probeInside with first | second
+      · exact first.overlaps
+      · exact second.overlaps.symm
+    · exact (inside.trans ⟨overlap.1,overlap.2.1,below⟩).overlaps)
+  roots := fun probe => by
     obtain ⟨root, replacement', found, shape⟩ := World.write_value_update written
     rw [shape]
     simp only [World.root]
@@ -1039,6 +1327,20 @@ theorem World.DestroyFrame.of_write {before after : World} {outside target : Add
     refine ⟨row,?_,live,rfl,rfl,rfl⟩
     rw [World.write_rest written] at found
     exact found
+  custody := fun claimed handed => World.CustodyHandedOff.of_loans handed (by rw [World.write_rest written])
+  ancestor := fun cell first rest shell outsideEq stored => by
+    obtain ⟨more, moreEq⟩ := inside.2.2
+    have rootEq : target.root = cell.root := by rw [← inside.1, outsideEq]
+    have genEq : target.generation = cell.generation := by rw [← inside.2.1, outsideEq]
+    have fieldsEq : target.fields = cell.fields ++ (first :: (rest ++ more)) := by
+      rw [moreEq, outsideEq]
+      simp [List.append_assoc, List.cons_append]
+    obtain ⟨shell', changed, stored', replaced, afterStored⟩ :=
+      World.Stores.write_below rootEq genEq fieldsEq written
+    have shellSame : shell' = shell := Option.some.inj (stored'.symm.trans stored)
+    rw [shellSame] at replaced
+    obtain ⟨ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩ := Value.replace_shape replaced
+    exact ⟨changed, afterStored, ownerEq, typeEq, headEq, liveEq, resEq, lenEq, slotsEq⟩
 
 end Glorious.Language
 
@@ -1052,7 +1354,7 @@ every live row, while the reads and the resolved roots do not move at all. -/
 theorem World.DestroyFrame.of_requestReturns {before : World} {custody : ClaimCustody} {outside : Address} :
     World.DestroyFrame before (before.RequestReturns custody) outside where
   reads := fun probe outside' => rfl
-  roots := fun probe outside' => rfl
+  roots := fun probe => rfl
   rows := fun key row found => by
     rw [World.RequestReturns.get_eq] at found
     obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
@@ -1072,6 +1374,9 @@ theorem World.DestroyFrame.of_requestReturns {before : World} {custody : ClaimCu
     · rw [← same,World.restamp_kind]
     · rw [← same,World.restamp_mode]
     · rw [← same,World.restamp_referent]
+  custody := fun claimed handed => Execution.World.CustodyHandedOff.requestReturns handed custody
+  ancestor := fun _ _ _ shell _ stored =>
+    ⟨shell, stored, rfl, rfl, rfl, rfl, rfl, rfl, fun _ _ => rfl⟩
 
 end Glorious.Language
 
@@ -1088,7 +1393,7 @@ theorem World.Destroys.requestReturns {program : RuntimeProgram} {world : World}
     (tree : World.Destroys program world address) (custody : ClaimCustody) :
     World.Destroys program (world.RequestReturns custody) address := by
   induction tree with
-  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry children ih =>
+  | @resident address value stored disposable shell noCont noRef noAvail permission kinds ancestry treeCustody children ih =>
     have storedAfter : (world.RequestReturns custody).Stores address value := by
       show (world.RequestReturns custody).read address = some value
       rw [show (world.RequestReturns custody).read address = world.read address from rfl]
@@ -1103,7 +1408,7 @@ theorem World.Destroys.requestReturns {program : RuntimeProgram} {world : World}
         rw [← same,World.restamp_referent] at overlap
         rw [← same,World.restamp_mode] at conflict
         exact permission.2 id original originalFound live overlap conflict⟩
-    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_
+    refine .resident storedAfter disposable shell noCont noRef noAvail permissionAfter ?_ ?_ ?_ ?_
     · intro id loan found live
       rw [World.RequestReturns.get_eq] at found
       obtain ⟨original,originalFound,same⟩ := Option.map_eq_some_iff.mp found
@@ -1126,6 +1431,7 @@ theorem World.Destroys.requestReturns {program : RuntimeProgram} {world : World}
         intro missing
         rw [World.RequestReturns.get_eq] at missing
         exact held (Option.map_eq_none_iff.mp missing)
+    · exact Execution.World.CustodyHandedOff.requestReturns treeCustody custody
     · intro index child selected
       exact ih index child selected
 
@@ -1139,11 +1445,11 @@ open Kernel
 killed row is not live afterwards so the live-row facts carry over, and neither
 the reads nor the resolved roots move. -/
 theorem World.DestroyFrame.of_kill {before : World} {id : Identity} {loan : Loan} {outside : Address}
-    (found : before.loans.get id = some loan) :
+    (found : before.loans.get id = some loan) (notOwning : loan.kind ≠ .owning) :
     World.DestroyFrame before { before with loans := before.loans.set id { loan with live := false } }
       outside where
   reads := fun probe outside' => rfl
-  roots := fun probe outside' => rfl
+  roots := fun probe => rfl
   rows := fun key row selected => by
     dsimp only [] at selected
     by_cases same : key = id
@@ -1174,8 +1480,9 @@ theorem World.DestroyFrame.of_kill {before : World} {id : Identity} {loan : Loan
     · have beforeFound : before.loans.get key = some row := by
         rwa [Table.get_set_other _ _ _ _ same] at selected
       exact ⟨row, beforeFound, live, rfl, rfl, rfl⟩
-
-end Glorious.Language
+  custody := fun custody handed => World.CustodyHandedOff.set_dead handed found notOwning
+  ancestor := fun _ _ _ shell _ stored =>
+    ⟨shell, stored, rfl, rfl, rfl, rfl, rfl, rfl, fun _ _ => rfl⟩
 
 end Glorious.Language
 
@@ -1244,17 +1551,19 @@ theorem CleanupRun.destroy_child {program : Kernel.Program} {host : Foreign.Mode
     (tree : World.Destroys program before.world (address.child index))
     (parent : before.world.Stores address value)
     (stored : before.world.Stores (address.child index) shell)
-    (holes : ∀ i, i < shell.fields.length → shell.fields[i]? = some none)
-    (handed : before.world.CustodyHandedOff (.resident shell.owner)) :
+    (holes : ∀ i, i < shell.fields.length → shell.fields[i]? = some none) :
     ∃ trace final changed, CleanupRun program host before trace final ∧
       final.task = .destroyFields context address authority rest next ∧
       final.world.Stores address changed ∧ changed.head = value.head ∧ changed.owner = value.owner ∧
       changed.type = value.type ∧ changed.shellLive = value.shellLive ∧ changed.resources = value.resources ∧
       changed.fields[index]? = some none ∧
-      ∀ other, other ≠ index → changed.fields[other]? = value.fields[other]? := by
+      (∀ other, other ≠ index → changed.fields[other]? = value.fields[other]?) ∧
+      ∀ custody, before.world.CustodyHandedOff custody → final.world.CustodyHandedOff custody := by
   cases tree with
-  | resident treeStored treeDisposable treeShell treeNoContinuation treeNoReference treeNoAvailable permission kinds ancestry children =>
+  | resident treeStored treeDisposable treeShell treeNoContinuation treeNoReference treeNoAvailable permission kinds ancestry treeCustody children =>
     have valueEq : shell = _ := Option.some.inj (stored.symm.trans treeStored)
+    have handed : before.world.CustodyHandedOff (.resident shell.owner) := by
+      simpa only [← valueEq] using treeCustody
     obtain ⟨mid, cleared, run, midWorld, midTask, written⟩ := CleanupRun.destroy_shell (before := before)
       (context := context) (address := address.child index) (authority := .owner)
       (next := .destroyFields context address authority rest next)
@@ -1313,7 +1622,14 @@ theorem CleanupRun.destroy_child {program : Kernel.Program} {host : Foreign.Mode
       exact changedStored
     exact ⟨_,{ mid with world := drained, task := .destroyFields context address authority rest next },changed,
       run.append drainedRun,rfl,World.Stores.loanReleaseFrame changedAtMid frame,
-      head,owner,type,live,resources,slotHole,others⟩
+      head,owner,type,live,resources,slotHole,others,fun custody admitted => by
+        have shifted := World.CustodyHandedOff.requestReturns admitted (.resident shell.owner)
+        have atMid : mid.world.CustodyHandedOff custody := by
+          have written : mid.world.loans = (before.world.RequestReturns (.resident shell.owner)).loans := by
+            rw [midLoans]
+          unfold World.CustodyHandedOff at shifted ⊢
+          simpa only [written] using shifted
+        exact atMid.loanReleaseFrame frame⟩
 
 end Glorious.Language.Execution
 
@@ -1499,7 +1815,7 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
           (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none))) :
     ∃ trace after, CleanupRun program host before trace after ∧ after.task = next := by
   cases tree with
-  | resident treeStored disposable shellLive noContinuation noReference noAvailable _ kinds ancestry children =>
+  | resident treeStored disposable shellLive noContinuation noReference noAvailable _ kinds ancestry _ children =>
     have valueEq : value = _ := Option.some.inj (stored.symm.trans treeStored)
     have structural : Step program host before none
         { before with task := .destroyFields context address .owner ((List.range value.fields.length).reverse) next } :=
@@ -1584,6 +1900,122 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
       (.silent (by simp [Task.Cleanup,task]) structural (fieldsRun.append finishRun |>.append drainedRun)),rfl⟩
 
 end Glorious.Language.Execution
+
+namespace Glorious.Language
+
+open Kernel
+
+/-- Release framing is destruction framing: the drain moves no read, no root and
+no row identity, so every `World.DestroyFrame` obligation follows from the
+after-to-before row origin `LoanReleaseFrame.origin`. -/
+theorem World.LoanReleaseFrame.destroyFrame {before after : World} {outside : Address}
+    (frame : before.LoanReleaseFrame after) : World.DestroyFrame before after outside where
+  reads := fun _ _ => by rw [frame.rest]; rfl
+  roots := fun _ => by rw [frame.rest]; rfl
+  rows := fun key row found => by
+    obtain ⟨original, originalFound, shape⟩ := frame.origin key row found
+    have parentEq : original.parent = row.parent := by rcases shape with rfl | rfl <;> rfl
+    have guardsEq : original.guards = row.guards := by rcases shape with rfl | rfl <;> rfl
+    exact ⟨original, originalFound, parentEq, guardsEq⟩
+  present := fun key original found => by
+    obtain ⟨current, selected, _⟩ := frame.rows key original found
+    exact ⟨current, selected⟩
+  liveness := fun key row found live => by
+    obtain ⟨original, originalFound, shape⟩ := frame.origin key row found
+    refine ⟨original, originalFound, ?_, ?_, ?_, ?_⟩
+    · rcases shape with rfl | rfl
+      · exact live
+      · cases live
+    · rcases shape with rfl | rfl <;> rfl
+    · rcases shape with rfl | rfl <;> rfl
+    · rcases shape with rfl | rfl <;> rfl
+  custody := fun claimed handed => World.CustodyHandedOff.loanReleaseFrame handed frame
+  ancestor := fun cell first rest shell _ stored => by
+    have readEq : after.read cell = before.read cell := by rw [frame.rest]; rfl
+    exact ⟨shell, by simpa [World.Stores] using readEq.trans stored, rfl, rfl, rfl, rfl, rfl, rfl,
+      fun _ _ => rfl⟩
+
+/-- A probe apart from an address is apart from every descendant of it. -/
+theorem Address.child_outside {address probe : Address} {index : Nat}
+    (apart : ¬ address.Overlaps probe) : ¬ (address.child index).Overlaps probe := by
+  intro overlap
+  apply apart
+  refine ⟨overlap.1, overlap.2.1, ?_⟩
+  rcases overlap.2.2 with ⟨suffix, shape⟩ | ⟨suffix, shape⟩
+  · have split : address.fields ++ [index] = probe.fields ++ suffix := by
+      simpa only [Address.child] using shape
+    rcases List.append_eq_append_iff.mp split with ⟨tail, headEq, _⟩ | ⟨tail, probeEq, _⟩
+    · exact Or.inr ⟨tail, headEq⟩
+    · exact Or.inl ⟨tail, probeEq⟩
+  · have split : probe.fields = (address.fields ++ [index]) ++ suffix := by
+      simpa only [Address.child] using shape
+    exact Or.inr ⟨[index] ++ suffix, by rw [split, List.append_assoc]⟩
+
+/-- A sibling child's stored subtree is apart from a destroyed child's sphere. -/
+theorem World.Destroys.sibling_outside {address : Address} {other first : Nat} (different : other ≠ first) :
+    ∀ probe, (address.child other).Prefix probe → ¬ (address.child first).Overlaps probe := by
+  intro probe included overlap
+  have both : (address.child first).Overlaps (address.child other) := by
+    rcases overlap.2.2 with ⟨suffix, shape⟩ | ⟨suffix, shape⟩
+    · have probeFirst : probe.Prefix (address.child first) :=
+        ⟨overlap.1.symm, overlap.2.1.symm, ⟨suffix, shape⟩⟩
+      exact (Address.Prefix.trans included probeFirst).overlaps.symm
+    · have firstProbe : (address.child first).Prefix probe :=
+        ⟨overlap.1, overlap.2.1, ⟨suffix, shape⟩⟩
+      rcases Address.Prefix.comparable firstProbe included with left | right
+      · exact left.overlaps
+      · exact right.overlaps.symm
+  exact Address.child_not_overlaps (Ne.symm different) both
+
+/-- A clear at one child slot re-reads the parent shell as the parent with that
+slot a hole: the same shape `World.Stores.write_child_none` reports, stated as
+the equality a caller can carry forward. -/
+theorem World.Stores.write_child_none_eq {before after : World} {address : Address} {index : Nat}
+    {shell : Value} (stored : before.Stores address shell)
+    (written : before.write (address.child index) none = some after) :
+    after.Stores address (Value.withFields shell (shell.fields.set index none)) := by
+  obtain ⟨parent, slot, parentStored, slotFound, rewritten⟩ := World.write_child_shape written
+  have same : parent = shell := Option.some.inj (parentStored.symm.trans stored)
+  rw [same] at rewritten
+  change after.read address = some (Value.withFields shell (shell.fields.set index none))
+  simpa [Value.atPath] using World.write_read_inside rewritten []
+
+/-- A write strictly inside one child's slot re-reads the parent cell as its old
+shell whose child slot carries the write result. -/
+theorem World.Stores.write_child_child {before after : World} {address : Address} {index inner : Nat}
+    {parent child : Value} {replacement : Option Value}
+    (stored : before.Stores address parent) (slot : parent.fields[index]? = some (some child))
+    (written : before.write ((address.child index).child inner) replacement = some after) :
+    ∃ child', after.Stores (address.child index) child' ∧
+      after.Stores address (Value.withFields parent (parent.fields.set index (some child'))) := by
+  obtain ⟨middle, slotMiddle, middleStored, slotFound, rewritten⟩ := World.write_child_shape written
+  have same : middle = child := Option.some.inj (middleStored.symm.trans (World.Stores.child stored slot))
+  rw [same] at rewritten
+  obtain ⟨outer, slotOuter, outerStored, slotOuterFound, rewrittenOuter⟩ := World.write_child_shape rewritten
+  have outerSame : outer = parent := Option.some.inj (outerStored.symm.trans stored)
+  rw [outerSame] at rewrittenOuter
+  refine ⟨Value.withFields child (child.fields.set inner replacement), ?_, ?_⟩
+  · change after.read (address.child index) =
+      some (Value.withFields child (child.fields.set inner replacement))
+    simpa [Value.atPath] using World.write_read_inside rewritten []
+  · change after.read address =
+      some (Value.withFields parent (parent.fields.set index (some (Value.withFields child (child.fields.set inner replacement)))))
+    simpa [Value.atPath] using World.write_read_inside rewrittenOuter []
+
+/-- The pending child inventory of a field loop: every index still scheduled has
+its own destructible tree at the current world, keyed on the value the node
+started from. Indexing the inventory on that value rather than on the evolving
+shell is what lets the measure be the original `Value` the schedule came from. -/
+def World.FieldPending (program : RuntimeProgram) (address : Address) (value : Value)
+    (world : World) (indices : List Nat) : Prop :=
+  ∀ field ∈ indices, ∀ child, value.fields[field]? = some (some child) →
+    World.Destroys program world (address.child field)
+
+end Glorious.Language
+
+namespace Glorious.Language.Execution
+
+open Glorious.Language.Kernel
 
 namespace Glorious.Language.Execution
 

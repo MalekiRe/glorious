@@ -31,14 +31,20 @@ structure World.LoanReleaseFrame (before after : World) : Prop where
   live_origin : ∀ id loan, after.loans.get id = some loan → loan.live = true → before.loans.get id = some loan
   rows : ∀ id loan, before.loans.get id = some loan →
     ∃ current, after.loans.get id = some current ∧ (current = loan ∨ current = { loan with live := false })
+  owning : ∀ id loan, before.loans.get id = some loan → loan.kind = .owning →
+    after.loans.get id = some loan
+  origin : ∀ id row, after.loans.get id = some row →
+    ∃ original, before.loans.get id = some original ∧
+      (row = original ∨ row = { original with live := false })
 
 theorem World.LoanReleaseFrame.refl (world : World) : world.LoanReleaseFrame world :=
-  ⟨rfl,fun _ _ found _ => found,fun _ loan found => ⟨loan,found,Or.inl rfl⟩⟩
+  ⟨rfl,fun _ _ found _ => found,fun _ loan found => ⟨loan,found,Or.inl rfl⟩,
+    fun _ _ found _ => found,fun _ row found => ⟨row,found,Or.inl rfl⟩⟩
 
 theorem World.LoanReleaseFrame.trans {before middle after : World}
     (first : before.LoanReleaseFrame middle) (last : middle.LoanReleaseFrame after) :
     before.LoanReleaseFrame after := by
-  refine ⟨?_,fun _ _ found live => first.live_origin _ _ (last.live_origin _ _ found live) live,?_⟩
+  refine ⟨?_,fun _ _ found live => first.live_origin _ _ (last.live_origin _ _ found live) live,?_,?_,?_⟩
   · calc
       after = { middle with loans := after.loans } := last.rest
       _ = { before with loans := after.loans } := by rw [first.rest]
@@ -49,11 +55,20 @@ theorem World.LoanReleaseFrame.trans {before middle after : World}
     rcases changed with rfl | rfl <;> rcases ending with rfl | rfl
     · exact Or.inl rfl
     all_goals exact Or.inr rfl
+  · intro id loan found kind
+    exact last.owning id loan (first.owning id loan found kind) kind
+  · intro id row found
+    obtain ⟨middleRow,middleFound,changed⟩ := last.origin id row found
+    obtain ⟨original,originalFound,prior⟩ := first.origin id middleRow middleFound
+    refine ⟨original,originalFound,?_⟩
+    rcases changed with rfl | rfl <;> rcases prior with rfl | rfl
+    · exact Or.inl rfl
+    all_goals exact Or.inr rfl
 
 theorem World.loanReleaseFrame_set_dead {world : World} {id : Identity} {loan : Loan}
-    (found : world.loans.get id = some loan) :
+    (found : world.loans.get id = some loan) (notOwning : loan.kind ≠ .owning) :
     world.LoanReleaseFrame { world with loans := world.loans.set id { loan with live := false } } := by
-  refine ⟨rfl,?_,?_⟩
+  refine ⟨rfl,?_,?_,?_,?_⟩
   · intro other row selected live
     by_cases same : other = id
     · subst other
@@ -68,11 +83,28 @@ theorem World.loanReleaseFrame_set_dead {world : World} {id : Identity} {loan : 
       subst row
       exact ⟨_,Table.get_set _ _ _,Or.inr rfl⟩
     · exact ⟨row,(Table.get_set_other _ _ _ _ same).trans selected,Or.inl rfl⟩
+  · intro other row selected kind
+    have different : other ≠ id := by
+      intro same
+      subst other
+      have equal := Option.some.inj (selected.symm.trans found)
+      exact notOwning (equal ▸ kind)
+    exact (Table.get_set_other _ _ _ _ different).trans selected
+  · intro other row selected
+    by_cases same : other = id
+    · subst other
+      have equal : ({ loan with live := false } : Loan) = row :=
+        Option.some.inj ((Table.get_set _ _ _).symm.trans selected)
+      exact ⟨loan, found, Or.inr equal.symm⟩
+    · have beforeFound : world.loans.get other = some row := by
+        rwa [Table.get_set_other world.loans id other { loan with live := false } same] at selected
+      exact ⟨row, beforeFound, Or.inl rfl⟩
 
 theorem EndsLoan.releaseFrame {program : RuntimeProgram} {before after : World} {id : Identity}
     (ended : EndsLoan program before id after) : before.LoanReleaseFrame after := by
   cases ended with
-  | restored found _ _ _ _ _ _ _ => exact World.loanReleaseFrame_set_dead found
+  | restored found _ kind _ _ _ _ _ =>
+    exact World.loanReleaseFrame_set_dead found (by rcases kind with kind | kind <;> simp [kind])
 
 theorem World.LoanReleaseFrame.dead_retained {before after : World} {id : Identity} {loan : Loan}
     (frame : before.LoanReleaseFrame after) (found : before.loans.get id = some loan) (dead : loan.live = false) :
@@ -81,6 +113,17 @@ theorem World.LoanReleaseFrame.dead_retained {before after : World} {id : Identi
   · exact unchanged ▸ selected
   · have same : { loan with live := false } = loan := by cases loan; simp_all
     exact (ended.trans same) ▸ selected
+
+/-- Release retries do not discharge allocation ownership. In particular, the
+owning successor witnessing an earlier custody handoff remains live. -/
+theorem World.CustodyHandedOff.loanReleaseFrame {before after : World} {custody : ClaimCustody}
+    (handed : before.CustodyHandedOff custody) (frame : before.LoanReleaseFrame after) :
+    after.CustodyHandedOff custody := by
+  intro id loan found live kind held
+  obtain ⟨child,successor,selected,parent,active,owning,referent,recipient,recipientEq,different⟩ :=
+    handed id loan (frame.live_origin id loan found live) live kind held
+  exact ⟨child,successor,frame.owning child successor selected owning,parent,active,owning,
+    referent,recipient,recipientEq,different⟩
 
 theorem AncestorLoan.loanReleaseFrame {before after : World} {parent child : Identity}
     (related : AncestorLoan before parent child) (frame : before.LoanReleaseFrame after) :

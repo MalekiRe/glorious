@@ -37,9 +37,9 @@ example : ¬ holed.Initialized := by
   have complete := (initialized [] holed .root).2 none (by simp [holed, Value.fields])
   cases complete
 
-example {before after : World} {id loan}
+example {program : RuntimeProgram} {before after : World} {id loan}
     (found : before.loans.get id = some loan) (hole : ¬ before.Initialized loan.referent) :
-    ¬ EndsLoan before id after := hole_cannot_end found hole
+    ¬ EndsLoan program before id after := hole_cannot_end found hole
 
 example {program : Language.Program} {world : World} {integer address type} :
     ¬ Memory.PointsTo program world (Memory.AddressOnly integer) address type := Memory.address_integer_has_no_provenance
