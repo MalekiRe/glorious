@@ -1,8 +1,20 @@
 import GloriousLanguage.Storage
+import GloriousLanguage.LayoutValidity
 
 /-! Positive allocation requests have exactly the actual physical alternatives.
 No missing static proof is interpreted as an exhausted runtime resource. -/
 namespace Glorious.Language
+
+/-- Reference storage uses the declared pointer layout, not a supplied
+allocation result. The target's object-size limit remains explicit admission. -/
+theorem AllocationRequest.reference {program : Program} {world : World}
+    {region : Identity} {mode : Mutability} {loanRegion referent : Term}
+    (target : program.input.target.Valid) (live : region ∈ world.liveRegions)
+    (supported : (Term.reference mode loanRegion referent).RuntimeRegionsBelow world.nextRegion)
+    (capacity : program.input.target.pointerBits / 8 ≤ program.input.target.maximumObjectBytes) :
+    AllocationRequest program world region (.reference mode loanRegion referent)
+      ⟨program.input.target.pointerBits / 8,program.input.target.pointerBits / 8,[],0,0,[]⟩ :=
+  ⟨live,supported,target.pointer_layout,capacity,⟨default,false,.reference⟩⟩
 
 theorem Allocates.request {program : Program} {before after : World}
     {home region type layout mutable address}

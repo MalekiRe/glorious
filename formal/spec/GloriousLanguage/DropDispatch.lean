@@ -5,6 +5,7 @@ import GloriousLanguage.LocalPreservation
 import GloriousLanguage.ResumptionPreservation
 import GloriousLanguage.DropHandle
 import GloriousLanguage.InputBindingProgress
+import GloriousLanguage.SnapshotTyping
 
 /-! Admitted destructor declarations dispatch through the ordinary function
 instance and machine hook-entry rules. Neither an executable body, a zero-arg
@@ -153,7 +154,7 @@ theorem StateProgress.destroyHook {program : Kernel.Program} {host : Foreign.Mod
     {before : Execution.State} {context : Execution.Context}
     {address : Address} {authority : Authority} {next : Execution.Task} {value : Value}
     {id : DeclId} {data : DataDefinition} {hook : DeclId} {arguments : List Term}
-    {substitution : Substitution} {layout : Layout}
+    {substitution : Substitution}
     (valid : Specification.WellFormed program) (typed : Typing.WorldTyped program before.world)
     (inside : boundary.Inside program before)
     (task : before.task = .destroy context address authority next)
@@ -167,9 +168,24 @@ theorem StateProgress.destroyHook {program : Kernel.Program} {host : Foreign.Mod
     (requirements : ConstraintsHold program.declarations ⟨[],[],0,data.header.module,false,{}⟩ substitution data.requirements)
     (sourceType : AddressType program.declarations before.world address value.type)
     (permission : Permitted before.world authority .unique address)
-    (request : AllocationRequest program.declarations before.world context.region
-      (.reference .unique (.runtimeRegion context.region) value.type) layout) :
+    (live : context.region ∈ before.world.liveRegions)
+    (capacity : program.declarations.input.target.pointerBits / 8 ≤
+      program.declarations.input.target.maximumObjectBytes) :
     StateProgress program host function before boundary := by
+  have referentSupported := typed.address_runtimeRegionsBelow valid.declarations sourceType
+  have supported : (Term.reference .unique (.runtimeRegion context.region) value.type).RuntimeRegionsBelow
+      before.world.nextRegion := by
+    intro id occurs
+    cases occurs with
+    | child member nested =>
+      simp only [Term.children,List.mem_cons,List.not_mem_nil,or_false] at member
+      rcases member with rfl | rfl
+      · cases nested with
+        | here => exact World.region_bound typed.1 live
+        | child member _ => cases member
+      · exact referentSupported id nested
+  have request := AllocationRequest.reference (valid.declarations.1.1.2.2.2.2.1)
+    live supported capacity
   have outcome := Execution.destroyHook_progress valid typed task stored initialized ready compatible
     nominal selected drops instantiated kinded requirements sourceType permission request
   apply Or.inr ∘ Or.inr ∘ Or.inr ∘ Or.inr

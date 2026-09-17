@@ -11,6 +11,13 @@ constructs `LocalStep.destroyHookExhausted`, a fatal resource transition with
 unchanged storage. `Contracts.StateProgress.destroyHook` consumes both outcomes
 as actual invocation progress inside the caller boundary.
 
+`AllocationRequest.reference` constructs the fixed reference-layout request
+from target validity, runtime-region support, region liveness and the target's
+explicit pointer-size capacity bound. `StateProgress.destroyHook` now uses this
+producer rather than assuming an opaque request: it derives referent support
+from world/address typing and the loan-region bound from world well-formedness.
+The target contract is unchanged; pointer-size capacity is not silently assumed.
+
 Cleanup classification and invocation lending cover the new transition.
 Callback runtime preservation tracks inclusion of retained dependencies:
 fatal termination can abandon a task continuation, but every retained callback
@@ -19,8 +26,10 @@ pass focused strict Lean checking.
 
 This closes hook dispatch, not execution or termination of arbitrary destructor
 bodies. Source production and preservation of the pre-state permissions,
-resource compatibility, live region and layout request remain obligations of
-general source admission; `ResourceAdmissionAt` is not thereby discharged.
+resource compatibility, region liveness and pointer-size capacity remain
+obligations of general source admission; `ResourceAdmissionAt` is not thereby
+discharged. The derived-request chain and downstream `DropPrivate`,
+`CleanupRunProgress` and `PublicValues` pass focused strict Lean checking.
 
 ## Current ABI inventory and transfer checkpoint
 
