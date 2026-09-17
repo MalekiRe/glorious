@@ -538,8 +538,11 @@ witness handoff readiness and availability-consumption authority. Authority now
 passes direct strict checking with graph-derived construction readiness and
 owned-permission refutations for successful/exhausted handoffs. Its corrected
 resume claim excludes successful replay, not a prior snapshot resource fault.
-Preservation remains stale; no aggregate pass or full source-admitted soundness
-is claimed.
+Preservation now passes direct strict checking too: whole-root and nested
+move/restore consume derived handoff readiness and current loan/physical-layout
+invariants while retaining the unique-reference witnesses. The fixed eight-byte
+reference fixtures explicitly require 64-bit pointers. No fresh aggregate pass
+or full source-admitted soundness is claimed.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over

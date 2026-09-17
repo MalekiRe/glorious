@@ -254,7 +254,11 @@ or a dependency of this project.
   `AuthorityChecks` now passes direct strict checking with actual construction
   readiness and success/exhaustion handoff refutations. Its replay refutation
   excludes successful replay, not an earlier blocked-snapshot resource fault.
-  Preservation checks remain unrepaired; whole-language soundness remains open.
+  `PreservationChecks` now passes direct strict Lean checking. Whole-root and
+  nested move/restore retain the unique-reference witnesses, derive unit handoff
+  readiness from the reachable graph, and discharge current loan/physical-layout
+  invariants. The eight-byte reference fixtures explicitly require a 64-bit
+  pointer target. This consumer migration does not establish whole-language soundness.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

@@ -201,7 +201,11 @@ checking: construction readiness follows the reachable graph, and both successfu
 and exhausted handoff paths retain their owned-permission requirement. The old
 universal no-resume-step claim was false because blocked snapshot placement can
 fault before argument transfer; the corrected claim excludes successful replay.
-`PreservationChecks` remains stale. No general source soundness is established.
+`PreservationChecks` now passes direct strict Lean checking, including whole-root
+and nested move/restore, reference survival across a vacant referent, and rejection
+of the forged ancestor graph. Handoff readiness is derived; current loan-kind,
+guard and physical-layout obligations are discharged. The eight-byte reference
+fixtures require a 64-bit pointer target. No general source soundness is established.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the
