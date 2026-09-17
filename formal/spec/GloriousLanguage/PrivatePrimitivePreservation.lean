@@ -82,6 +82,34 @@ theorem RawBorrow.private_slot {program : RuntimeProgram} {before after : World}
   cases borrowed with
   | borrow _ _ _ _ formed => exact formed.private_slot slot outside
 
+theorem InstallsResidents.private_slot {program : Program} {before after : World}
+    {addresses : List Address} {values : List (Option Value)} {id : Identity} {root : Root}
+    (installed : InstallsResidents program before addresses values after)
+    (slot : before.PrivateSlot id root) (outside : ∀ address ∈ addresses, address.root ≠ id) :
+    after.PrivateSlot id root := by
+  induction installed with
+  | nil => exact slot
+  | hole _ _ ih =>
+    exact ih slot (fun address member => outside address (List.mem_cons_of_mem _ member))
+  | resident _ _ written _ ih =>
+    exact ih (slot.write written (outside _ List.mem_cons_self))
+      (fun address member => outside address (List.mem_cons_of_mem _ member))
+
+theorem BulkMove.private_slot {program : RuntimeProgram} {before after : World}
+    {sources destinations : List ResolvedPlace} {id : Identity} {root : Root}
+    (moved : BulkMove program before sources destinations after)
+    (slot : before.PrivateSlot id root)
+    (outside : ∀ place ∈ sources ++ destinations, place.address.root ≠ id) :
+    after.PrivateSlot id root := by
+  obtain ⟨_,_,_,_,_,_,_,_,cleared,installed⟩ := moved
+  apply installed.private_slot (cleared.private_slot slot ?_) ?_
+  · intro address member
+    obtain ⟨place,present,rfl⟩ := List.mem_map.mp member
+    exact outside place (List.mem_append_left _ present)
+  · intro address member
+    obtain ⟨place,present,rfl⟩ := List.mem_map.mp member
+    exact outside place (List.mem_append_right _ present)
+
 end Memory
 
 namespace Execution
@@ -101,6 +129,10 @@ theorem PrimitiveStep.private_slot {program : Kernel.Program} {before after : St
   case reallocate allocated stored => exact stored.2.private_slot (allocated.private_slot well slot) (Ne.symm outside.2.1)
   case rawRead read | rawCopy read => exact read.private_slot slot (Ne.symm outside.2.1)
   case rawWrite written stored => exact stored.2.private_slot (written.private_slot slot) (Ne.symm outside.2.1)
+  case rawMove resources moved stored =>
+    apply stored.2.private_slot (moved.private_slot slot ?_) (Ne.symm outside.2.1)
+    intro place member
+    exact (resources place (List.mem_append.mp member)).avoids_root (Context.bindings_avoid_root outside.1) slot.safe
   case rawBorrow borrowed => exact borrowed.private_slot slot (Ne.symm outside.2.1)
   case pointerOffset stored | pointerWithAddress stored => exact stored.2.private_slot slot (Ne.symm outside.2.1)
   case layout written _ =>
