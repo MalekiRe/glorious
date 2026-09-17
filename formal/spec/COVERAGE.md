@@ -23,6 +23,16 @@ to a constructive static-data rule is the declared next obligation; the
 obstruction theorems above are then replaced by positive constructibility
 statements, since they quantify over all derivations.
 
+The retirement prerequisite is now enforced by the existing `CanEndStorage`
+guard: neither suspended nor static homes admit ordinary retirement.
+`Retires.static_root` proves that every actual retirement preserves the whole
+record of every static root, even a vacant one. Cleanup's `RootClear`, fresh
+private-slot admission, and suspension consumers use that same strengthened
+guard. The focused private/cleanup/drop/buffer preservation closure passes
+(249 jobs). The retention theorem uses only Lean's standard `propext`,
+`Classical.choice`, and `Quot.sound`. This does not establish static write
+protection, static-image installation, or nominal literal construction.
+
 ## Produced invocation-entry lifetime
 
 `EnterWorldAttempt.region_live` derives the callee's live region from actual

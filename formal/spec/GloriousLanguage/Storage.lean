@@ -1649,9 +1649,10 @@ def CanEndStorage (world : World) (rootId : Identity) : Prop :=
   (∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ≠ rootId) ∧
   (∀ id available, world.availability.get id = some available → available.active = true →
     ∀ place ∈ available.reserved, place.address.root ≠ rootId) ∧
-  /- Captured storage remains owned by its active suspension. Final replay
-  and cancellation must restore that ownership before ordinary retirement. -/
-  (∀ root, world.roots.get rootId = some root → ∀ suspension, root.home ≠ .suspended suspension)
+  /- Captured storage must first be restored; static storage has program
+  lifetime and is never retired by ordinary cleanup. -/
+  (∀ root, world.roots.get rootId = some root → ∀ identity,
+    root.home ≠ .suspended identity ∧ root.home ≠ .staticData identity)
 
 theorem CanEndStorage.sameHomes {before after : World} {id : Identity}
     (safe : CanEndStorage before id)
@@ -1668,6 +1669,19 @@ inductive Retires : World → Identity → World → Prop where
   | vacant {before id root} : before.roots.get id = some root → root.live = true → root.value = none →
       CanEndStorage before id →
       Retires before id { before with roots := before.roots.set id { root with live := false, generation := root.generation+1 } }
+
+/-- Ordinary retirement leaves every static root completely unchanged. -/
+theorem Retires.static_root {before after : World} {retired id segment : Identity} {root : Root}
+    (step : Retires before retired after) (found : before.roots.get id = some root)
+    (home : root.home = .staticData segment) : after.roots.get id = some root := by
+  cases step with
+  | vacant selected _ _ safe =>
+    have separate : id ≠ retired := by
+      intro same
+      subst id
+      exact (safe.2.2 root found segment).2 home
+    rw [Table.get_set_other _ _ _ _ separate]
+    exact found
 
 def RawRange (program : Program) (world : World) (pointer : RawPointer) (length alignment : Nat) : Prop :=
   ∃ id root domain,

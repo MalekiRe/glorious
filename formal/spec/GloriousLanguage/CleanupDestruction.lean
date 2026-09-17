@@ -85,7 +85,8 @@ structure World.RootClear (world : World) (rootId : Identity) : Prop where
   loans : ∀ id loan, world.loans.get id = some loan → loan.live = true → loan.referent.root ≠ rootId
   reservations : ∀ id available, world.availability.get id = some available → available.active = true →
     ∀ place ∈ available.reserved, place.address.root ≠ rootId
-  home : ∀ root, world.roots.get rootId = some root → ∀ suspension, root.home ≠ .suspended suspension
+  home : ∀ root, world.roots.get rootId = some root → ∀ identity,
+    root.home ≠ .suspended identity ∧ root.home ≠ .staticData identity
 
 theorem World.RootClear.canEndStorage {world : World} {rootId : Identity}
     (clear : world.RootClear rootId) : CanEndStorage world rootId :=
@@ -111,7 +112,8 @@ theorem World.RootClear.of_ended_loan {before after : World} {rootId id : Identi
       row.referent.root = rootId → other = id)
     (reservations : ∀ availableId available, after.availability.get availableId = some available →
       available.active = true → ∀ place ∈ available.reserved, place.address.root ≠ rootId)
-    (home : ∀ root, after.roots.get rootId = some root → ∀ suspension, root.home ≠ .suspended suspension) :
+    (home : ∀ root, after.roots.get rootId = some root → ∀ identity,
+      root.home ≠ .suspended identity ∧ root.home ≠ .staticData identity) :
     after.RootClear rootId := by
   refine ⟨?_,reservations,home⟩
   intro other row rowFound rowLive sameRoot

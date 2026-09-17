@@ -58,10 +58,10 @@ theorem World.PrivateSlot.retain {before after : World} {id : Identity} {root : 
     (reservations : ∀ key available, after.availability.get key = some available → available.active = true →
       ∀ place ∈ available.reserved, place.address.root ≠ id) : after.PrivateSlot id root := by
   refine ⟨found,slot.vacant,⟨loans,reservations,?_⟩,slot.internalHome⟩
-  intro actual selected key home
+  intro actual selected key
   have same := Option.some.inj (selected.symm.trans found)
   subst actual
-  exact slot.safe.2.2 root slot.found key home
+  exact slot.safe.2.2 root slot.found key
 
 theorem World.PrivateSlot.stable {before after : World} {id : Identity} {root : Root}
     (slot : before.PrivateSlot id root) (roots : after.roots.get id = before.roots.get id)
@@ -139,7 +139,7 @@ theorem TransfersStorageLoan.private_slot {recipient : ClaimCustody} {before aft
 theorem Allocates.canEndStorage {program : Program} {before after : World}
     {home region type layout mutable address}
     (well : before.WellFormed) (allocated : Allocates program before home region type layout mutable address after)
-    (released : ∀ suspension, home ≠ .suspended suspension) :
+    (released : ∀ identity, home ≠ .suspended identity ∧ home ≠ .staticData identity) :
     CanEndStorage after address.root := by
   cases allocated
   refine ⟨fun _ _ found live => Nat.ne_of_lt (World.live_loan_root_bound well found live),

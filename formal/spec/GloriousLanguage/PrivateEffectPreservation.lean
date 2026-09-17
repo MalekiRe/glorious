@@ -148,7 +148,7 @@ theorem State.SuspensionsWellFormed.private_excluded {state : State} {id key : I
     (active : suspension.active = true) : id ∉ suspension.roots := by
   intro member
   obtain ⟨actual,selected,_,suspended⟩ := (valid.active key suspension found active id).mp member
-  exact slot.safe.2.2 actual selected key suspended
+  exact (slot.safe.2.2 actual selected key).1 suspended
 
 theorem State.SuspensionsWellFormed.restore_private {state : State} {id key : Identity}
     {root : Root} {suspension : Suspension} (valid : state.SuspensionsWellFormed)

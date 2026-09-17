@@ -119,7 +119,7 @@ theorem Retires.suspended_location {before after : World} {retiredId id suspensi
     intro same
     subst retiredId
     cases retired with
-    | vacant _ _ _ safe => exact safe.2.2 root selected suspension home
+    | vacant _ _ _ safe => exact (safe.2.2 root selected suspension).1 home
   simpa only [selected,Option.map_some] using congrArg (Option.map Root.location) (retired.roots_other separate)
 
 /-- Location-preserving producers cannot introduce an unaccounted root. This
@@ -168,7 +168,7 @@ theorem Retires.suspended_origin {before after : World} {retiredId id suspension
     by_cases same : id = retiredId
     · subst id
       simp only [Table.get_set,Option.some.injEq] at selected
-      exact False.elim (safe.2.2 _ found suspension (by simpa only [← selected] using suspended))
+      exact False.elim ((safe.2.2 _ found suspension).1 (by simpa only [← selected] using suspended))
     · exact ⟨root,by simpa only [Table.get_set_other _ _ _ _ same] using selected,rfl⟩
 
 /-- A release leaves the complete location of a suspended root untouched: the
