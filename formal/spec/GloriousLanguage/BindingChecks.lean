@@ -49,14 +49,64 @@ private theorem readable (access : Access) : Permitted world .owner access sourc
   intro id loan found
   simp [world, Table.get] at found
 
-private theorem transferResult (program : Language.Program) : Transfers program world .owner source destination moved := by
-  refine .move (value := resultValue) (cleared := cleared) rfl resultInitialized (readable .owned)
+private theorem transferResult (program : RuntimeProgram) : Transfers program world .owner source destination moved := by
+  let Plain (value : Value) : Prop := value.resources = [] ∧ value.InvariantClosed program world ∧
+    ∀ id, value.head ≠ .reference id
+  have fieldPlain : ∀ path value, ResidentAt fieldValue path value → Plain value := by
+    intro path value location
+    cases location with
+    | root => simp [Plain,fieldValue,Value.resources,Value.InvariantClosed,Value.type,Value.head]
+    | field member _ => simp [fieldValue,Value.fields] at member
+  have packPlain : ∀ path value, ResidentAt packValue path value → Plain value := by
+    intro path value location
+    cases location with
+    | root => simp [Plain,packValue,packType,Value.resources,Value.InvariantClosed,Value.type,Value.head]
+    | @field _ index child path _ member nested =>
+      cases index with
+      | zero => simp [packValue,Value.fields] at member; subst child; exact fieldPlain _ _ nested
+      | succ index => simp [packValue,Value.fields] at member
+  have resultPlain : ∀ path value, ResidentAt resultValue path value → Plain value := by
+    intro path value location
+    cases location with
+    | root => simp [Plain,resultValue,Value.resources,Value.InvariantClosed,Value.type,Value.head]
+    | @field _ index child path _ member nested =>
+      cases index with
+      | zero => simp [resultValue,Value.fields] at member; subst child; exact packPlain _ _ nested
+      | succ index => simp [resultValue,Value.fields] at member
+  have reachedPlain : ∀ {authority incoming value current access},
+      resultValue.ReachableResident world authority incoming value current access → Plain value := by
+    intro authority incoming value current access reached
+    induction reached with
+    | resident located => exact resultPlain _ _ located
+    | referent _ head _ _ _ ih => exact False.elim (ih.2.2 _ head)
+    | resource _ member _ _ ih => simp [ih.1] at member
+  have noReference : ∀ {authority incoming id current access},
+      ¬ resultValue.ReachableReference world authority incoming id current access := by
+    rintro authority incoming id current access ⟨value,reached,head⟩
+    exact (reachedPlain reached).2.2 id head
+  have ready : resultValue.MoveReady program world [source,destination] := by
+    refine ⟨⟨?_,?_,?_,?_⟩,?_⟩
+    · intro value authority access reached
+      exact ⟨by simp [(reachedPlain reached).1],(reachedPlain reached).2.1⟩
+    · intro id authority access reached
+      exact False.elim (noReference reached)
+    · intro id authority access reached
+      exact False.elim (noReference reached)
+    · intro value authority access reached binding member
+      simp [(reachedPlain reached).1] at member
+    · intro mutation _ address support
+      rcases support with ⟨value,authority,access,reached,reference | resource⟩
+      · obtain ⟨id,loan,head,_⟩ := reference
+        exact False.elim ((reachedPlain reached).2.2 id head)
+      · obtain ⟨binding,member,_⟩ := resource
+        simp [(reachedPlain reached).1] at member
+  refine .move (value := resultValue) (cleared := cleared) rfl resultInitialized ready (readable .owned)
     ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ?_ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩ rfl rfl
   simp [source, destination, Address.Overlaps]
 
 /-- The pack's field is at the new carrier's child path. No address metadata
 needs rewriting, and the old field address no longer reads a resident. -/
-example (program : Language.Program) : Transfers program world .owner source destination moved ∧
+example (program : RuntimeProgram) : Transfers program world .owner source destination moved ∧
     moved.Stores ((destination.child 0).child 0) fieldValue ∧
     moved.read ((source.child 0).child 0) = none := ⟨transferResult program,rfl,rfl⟩
 
