@@ -105,6 +105,9 @@ theorem PrimitiveStep.homes_activationsBelow {program : Kernel.Program} {before 
   case layout written _ =>
     have actual := World.write_activationsBelow written bounded
     exact actual
+  case literalText _ _ _ _ _ written | literalBytes _ _ _ _ _ written =>
+    have actual := World.write_activationsBelow written bounded
+    exact actual
 
 
 end Execution

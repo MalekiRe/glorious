@@ -268,6 +268,35 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
         allocated size → DestinationType before.world destination size.type →
       before.world.write destination (some size) = some after → alignment = allocated →
       PrimitiveStep program before none { before with world := { after with nextOwner := alignment }, task := .run context next }
+  /-- A manifest-bound literal view materializes immutable static data: the
+  constant octet tuple the elaborator already emits as this atom's argument
+  (`Elaboration.literalView`), built from the ordinary constant-scalar machine
+  leaves. The manifest binding stays authoritative — its identity says the
+  declaration is the text view and its result type is the type of the data
+  written — and the write consumes the vacant typed destination, so no root,
+  region or loan is created. -/
+  | literalText {before context destination binding} {bytes : List Nat} {next finish value after} :
+      before.task = .primitive context destination binding
+        [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next →
+      binding.primitive = some .literalText →
+      ConstantValue program.declarations context.static before.world.nextOwner
+        (.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))) finish value →
+      binding.signature.result = value.type → DestinationType before.world destination value.type →
+      before.world.write destination (some value) = some after →
+      PrimitiveStep program before none
+        { before with world := { after with nextOwner := finish }, task := .run context next }
+  /-- The octet view is the same static-data materialization under its own
+  manifest identity; only the elaborator's validity obligation differs. -/
+  | literalBytes {before context destination binding} {bytes : List Nat} {next finish value after} :
+      before.task = .primitive context destination binding
+        [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next →
+      binding.primitive = some .literalBytes →
+      ConstantValue program.declarations context.static before.world.nextOwner
+        (.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))) finish value →
+      binding.signature.result = value.type → DestinationType before.world destination value.type →
+      before.world.write destination (some value) = some after →
+      PrimitiveStep program before none
+        { before with world := { after with nextOwner := finish }, task := .run context next }
   | abort {before context destination binding arguments operands next} :
       before.task = .primitive context destination binding arguments operands next → binding.primitive = some .abort →
       PrimitiveStep program before (some (.fatal .abort)) { before with task := .fatal .abort }
