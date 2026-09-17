@@ -1,5 +1,24 @@
 # Specification audit
 
+## Current ABI inventory and transfer checkpoint
+
+`ABISiteAdmission.Code.mem_tailSites` proves declaring-function identity and
+tail-node shape for every member of the mutual syntax traversal, including
+handler completions and operation arms. Its induction generalizes the selected
+site through all four syntax families; no membership premise is fabricated.
+`Code.tailSites_self` and `TailSites_ne_nil` establish the direct-tail inventory
+boundary. `TailEvidence.transfer` now spans the actual pending-tail request,
+callable-selection step and retiring step, rather than requiring one state to
+be both pending syntax and a retirement source. The canonical source engine
+constructs all three transitions and derives the endpoint activation-frame bound.
+
+The focused ABI and `Specification` gate passes with strict Lean settings. This
+is not full ABI soundness: source progress, the complete cleanup/control-space
+bound, target-state coverage beyond tail entries, and label brand instantiation
+and direct-transfer correspondence still require proof. Conditional `realizes`
+alone does not exclude an empty engine/source relation. The full specification
+goal remains open.
+
 Initial draft only. The entries below locate the proposed formal meaning;
 they are not a table of passed conformance gates.
 

@@ -1,5 +1,6 @@
 import GloriousLanguage.Origins
 import GloriousLanguage.ABI
+import GloriousLanguage.ABISiteAdmission
 
 /-! The language contract and the future compiler obligation. This module
 does not provide a compiler and does not import the earlier compiler draft.

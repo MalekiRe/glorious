@@ -101,15 +101,28 @@ def Represents (program : Kernel.Program) (runtime : RuntimeAddresses) (world : 
   (∀ address value physical, world.Resident address value → PhysicalAddress program.declarations world address value.type physical →
     ∃ root, world.root address = some root ∧ physical = root.base + injection.offset address)
 
+/-- An engine carries the source program it executes. `sourceState` relates
+engine states to source states; `realizes` preserves an existing correspondence
+through source steps. It does not establish that any source state is covered:
+coverage must be supplied by the admission clauses that use the engine. -/
 structure Engine (Event Result : Type) where
+  program : Kernel.Program
+  host : Foreign.Model
   semantics : TransitionSystem Event Result
+  /-- The source event observed by one engine step. Internal machine events
+  without an observable counterpart map to none. -/
+  observe : Execution.Event → Option Event
   descriptor : Descriptor
   backing : semantics.State → Backing
   home : semantics.State → Address → Option (Identity × Nat)
   administrativeControl : semantics.State → Nat
-  activationRetained : semantics.State → Identity → Prop
   directTransfer : semantics.State → Identity → semantics.State → Prop
   sourceState : semantics.State → State → Prop
+  /-- Every actual source step from a represented state is realized by one
+  engine step. This conditional law alone permits an empty `sourceState`. -/
+  realizes : ∀ before event after, Execution.Step program host before event after →
+    ∀ implementing, sourceState implementing before →
+      ∃ target, semantics.step implementing (event.bind observe) target ∧ sourceState target after
 
 variable {Event Result : Type}
 
@@ -137,40 +150,95 @@ def ZeroMarshalling (sourceSide to : Engine Event Result)
   sourceSide.backing before = to.backing after ∧
   ∀ input ∈ arguments, sourceSide.home before input.storage = to.home after input.storage
 
+/-- The declaration a running context executes: the innermost resource contract
+installed at its entry. Entry installs the running function's contract first and
+proper-tail entry appends the caller's retained contracts, so the head of the
+table is always the currently executing declaration. -/
+def ExecutingDeclaration (context : Execution.Context) : Option DeclId :=
+  context.resourceContracts.head?.map (fun entry => entry.declaration)
+
+/-- A proper-tail site of a program: the declaring function and the syntactic
+`tail` node itself. The activation a transfer retires is an execution fact, so
+`TailSite.Entry` yields it from the source state instead of fixing it
+statically. -/
 structure TailSite where
   function : DeclId
-  syntaxNode : Identity
-  sourceActivation : Identity
-  destination : Identity
+  node : Code
   deriving Repr, Inhabited
 
-structure TailEvidence (engine : Engine Event Result) where
-  site : TailSite
-  entry : engine.semantics.State → Prop
-  landed : engine.semantics.State → Prop
-  bound : Nat
-  transfer : ∀ before, entry before → ∃ trace after,
-    engine.semantics.Steps before trace after ∧ landed after ∧
-    ¬ engine.activationRetained after site.sourceActivation ∧ engine.administrativeControl after ≤ bound
-  repeated : ∀ states : Nat → engine.semantics.State,
-    (∀ n, entry (states n) ∧ landed (states (n+1))) →
-    ∀ n, engine.administrativeControl (states n) ≤ bound
+/-- The source machine is at a real tail site: the next task is this exact
+`tail` node, evaluated by the site's declaration in this activation. -/
+def TailSite.Entry (state : Execution.State) (site : TailSite) (activation : Identity) : Prop :=
+  ∃ context call, state.task = .run context (.tail call) ∧ site.node = .tail call ∧
+    context.activation = activation ∧ ExecutingDeclaration context = some site.function
 
+/-- The source machine landed a proper-tail transfer: `state` is the actual
+successor of the machine's own step that retired `activation`. The transition
+relation is the only producer. -/
+def TailSite.Landed (program : Kernel.Program) (state : Execution.State) (activation : Identity) : Prop :=
+  ∃ before destination, Execution.LocalStep program before (some (.tail activation destination)) state
+
+/-- A label site of a program: the declaring function, the lexical brand that
+must erase, and the enclosing activation region the direct leave returns to. -/
 structure LabelSite where
   function : DeclId
-  syntaxNode : Identity
   brand : Identity
   destination : Identity
   deriving Repr, Inhabited
 
+/-- The source machine is leaving directly to this destination along a route to
+the runtime image of the site's lexical brand. The runtime brand is read from
+the actual instantiation of the label frame's context, so the site's lexical
+brand is tied to the resident value that carries it. -/
+def LabelSite.Leaves (state : Execution.State) (site : LabelSite) (destination : Identity) : Prop :=
+  ∃ context runtime argument inner outerContext region type outer,
+    state.task = .leave context runtime argument ∧
+    LabelRoute state.frames runtime inner outerContext region type outer ∧
+    outerContext.instantiation.brands.get site.brand = some (.label runtime) ∧
+    outerContext.activation = destination
+
+/-- Every engine state implementing a source state at the site performs the real
+transfer. Entry and landed are the source machine's predicates, not predicates an
+implementation may falsify; the trace is the engine's own, and administrative
+control must not grow across the transfer, so iteration count cannot buy live
+call storage. The `covered` field rejects an engine whose source relation is
+empty, which is how the previous bare existential was satisfied.
+
+Source facts come from the engine's own `program`; the compiler contract pins
+that program to the artifact's source and pins the evidence list to the actual
+site inventory. -/
+structure TailEvidence (engine : Engine Event Result) where
+  site : TailSite
+  /-- Every actual entry into the site is implemented by some engine state. -/
+  covered : ∀ source activation, site.Entry source activation →
+    ∃ implementing, engine.sourceState implementing source
+  /-- The request, callable selection and retirement are distinct machine
+  states. The target must realize their composition within entry live control;
+  requiring retirement directly from the pending syntax would be vacuous. -/
+  transfer : ∀ implementing source context call declaration inputs entering activation destination landed,
+    engine.sourceState implementing source → site.Entry source activation →
+    source.task = .run context (.tail call) →
+    Execution.LocalStep engine.program
+      { source with task := .apply context (context.invocation call) true }
+      (some (.call declaration inputs)) entering →
+    Execution.LocalStep engine.program entering (some (.tail activation destination)) landed →
+    ∃ trace target, engine.semantics.Steps implementing trace target ∧
+      engine.sourceState target landed ∧
+      engine.administrativeControl target ≤ engine.administrativeControl implementing
+
+/-- The label clause: the proof-only brands of the program's actual label sites
+obtain no target home, and every actual direct leave is realized by the engine's
+own direct transfer to the destination the source route selected. -/
 structure LabelFusion (engine : Engine Event Result) where
   sites : List LabelSite
-  target : engine.semantics.State → LabelSite → Prop
-  noRuntimeAddress : ∀ state site, target state site →
-    ∀ address value source, engine.sourceState state source → source.world.Resident address value → value.head = .label site.brand →
-      engine.home state address = none
-  direct : ∀ before site, target before site → ∃ after, engine.directTransfer before site.destination after
-  unique : ∀ state a b, target state a → target state b → a.syntaxNode = b.syntaxNode → a.destination = b.destination
+  noRuntimeAddress : ∀ implementing source site,
+    site ∈ sites → engine.sourceState implementing source →
+    ∀ address value, source.world.Resident address value → value.head = .label site.brand →
+      engine.home implementing address = none
+  direct : ∀ implementing source site destination after,
+    site ∈ sites → engine.sourceState implementing source → site.Leaves source destination →
+    Execution.Step engine.program engine.host source none after →
+    ∃ target, engine.directTransfer implementing destination target
 
 inductive WireScalar where
   | integer (signed : Bool) (width : Width) (magnitude : List Nat)
