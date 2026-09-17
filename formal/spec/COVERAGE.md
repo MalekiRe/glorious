@@ -196,8 +196,12 @@ The binding migration derives move/copy handoff readiness from actual reachable
 residents and composite capabilities through canonical equation composition;
 it does not assume readiness or a capability model. `ControlChecks` also passes
 direct strict checking with derived witness handoff readiness and explicit
-availability-consumption authority. Remaining stale modules are `AuthorityChecks`
-and `PreservationChecks`.
+availability-consumption authority. `AuthorityChecks` now passes direct strict
+checking: construction readiness follows the reachable graph, and both successful
+and exhausted handoff paths retain their owned-permission requirement. The old
+universal no-resume-step claim was false because blocked snapshot placement can
+fault before argument transfer; the corrected claim excludes successful replay.
+`PreservationChecks` remains stale. No general source soundness is established.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the

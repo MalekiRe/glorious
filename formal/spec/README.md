@@ -251,8 +251,10 @@ or a dependency of this project.
   use canonical equation composition, without an assumed capability model.
   `ControlChecks` also passes direct strict checking after deriving actual
   witness handoff readiness and retaining availability-consumption authority.
-  Authority and Preservation checks remain unrepaired; whole-language soundness
-  remains open.
+  `AuthorityChecks` now passes direct strict checking with actual construction
+  readiness and success/exhaustion handoff refutations. Its replay refutation
+  excludes successful replay, not an earlier blocked-snapshot resource fault.
+  Preservation checks remain unrepaired; whole-language soundness remains open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.
