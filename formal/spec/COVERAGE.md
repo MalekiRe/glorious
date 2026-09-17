@@ -179,6 +179,12 @@ admission and proves exact destination snapshot and resource accessibility
 through unit installation. The 249-job integration gate and eight general
 axiom audits pass. Source-derived admission and the other missing non-raw
 primitive dispatch cases remain open.
+The private preservation closure also passes (184 jobs): resolved raw-move
+resources exclude the saved slot throughout clears, installation, and the
+result write. Scalar construction determinism now uses the actual runtime
+handoff contract, restoring `ScalarExecution` (104 jobs). The repaired
+bulk/privacy/scalar-progress theorems use only standard Lean axioms.
+Remaining stale Checks modules still prevent a verified root-module build.
 
 
 `UnsafeInvariantContract.copyResources` is added as an admission law of the

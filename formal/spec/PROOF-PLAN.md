@@ -519,6 +519,13 @@ suspension, invocation-lending and Drop consumers. Eight general axiom audits
 report only standard axioms. Remaining non-raw dispatch and compositional
 source/task admission remain open. Current run-wide `ResourceAdmissionAt`
 is still an assumption, not a soundness theorem.
+The raw-move private-slot consumer is now repaired and its full private
+preservation closure passes 184 jobs. Scalar empty-construction determinism
+has been migrated to `RuntimeProgram` and `ResidentHandoffReady`; the actual
+`ScalarExecution` consumer passes 104 jobs. Axiom audits for the repaired
+bulk/privacy/scalar-progress chain report only standard Lean axioms.
+These supersede the corresponding stale-consumer reports below, not the
+remaining failing Checks modules or the source-admission obligation.
 
 
 These recovered boundaries pass a fresh source-only strict 205-job gate over

@@ -230,6 +230,14 @@ or a dependency of this project.
   semantic, activation, control-authority, suspension, lending and Drop consumers;
   eight general axiom audits use only standard Lean axioms. Source/task admission
   and remaining non-raw primitive dispatch are not established by this theorem.
+  The subsequent private-consumer repair proves raw-move slot exclusion from
+  actual resource resolution and transports it through clearing, installation,
+  and the unit write; the private preservation closure passes 184 jobs.
+  `ScalarMachine` now consumes `RuntimeProgram` and `ResidentHandoffReady`;
+  its general unique-progress consumer `ScalarExecution` passes 104 jobs.
+  The repaired bulk/privacy/scalar-progress axiom audit reports only standard
+  Lean axioms. These focused repairs do not repair the remaining stale Checks
+  modules or establish a passing root-module build.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

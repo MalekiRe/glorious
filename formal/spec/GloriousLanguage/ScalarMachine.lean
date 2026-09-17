@@ -5,17 +5,17 @@ import GloriousLanguage.MemoryPreservation
 calculation outcomes and unique result installation with storage preservation. -/
 namespace Glorious.Language
 
-theorem NewValue.empty_deterministic {program : Program} {before left right : World}
+theorem NewValue.empty_deterministic {program : RuntimeProgram} {before left right : World}
     {destination : Address} {type : Term} {head : ValueHead}
     (first : NewValue program before destination type head [] left)
     (second : NewValue program before destination type head [] right) : left = right := by
   cases first with
-  | construct vacant typed sources initialized distinct permitted clears written =>
-      cases sources
+  | construct vacant typed ready distinct clears written =>
+      cases ready.1
       cases clears
       cases second with
-      | construct vacant typed sources initialized distinct permitted clears rewritten =>
-          cases sources
+      | construct vacant typed ready distinct clears rewritten =>
+          cases ready.1
           cases clears
           have same := Option.some.inj (written.symm.trans rewritten)
           subst_vars
