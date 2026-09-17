@@ -173,7 +173,7 @@ example (program : Kernel.Program) (binding : RuntimeBinding) (backing : Authori
 comes from a fresh allocation, while an exhausted attempt is returned with
 its own readiness and permission obligation intact. -/
 example {program : Kernel.Program} {context : Execution.Context} {before : World}
-    {source address : Address} {authority : Authority}
+    {_source address : Address} {authority : Authority}
     (exhausted : ProtectExhausted program context before address authority) :
     ∃ value, before.Stores address value ∧ value.Initialized ∧
       value.MoveReady program before [address] ∧ Permitted before authority .owned address := by
