@@ -191,7 +191,10 @@ well-formedness where conversion separation needs it. Its strict direct check
 and 82-job gate pass; the capability/Copy/Drop/preservation gate passes 181 jobs.
 Three capability axiom audits report only standard Lean axioms.
 `ExecutionChecks` and `SourceChecks` also pass (120-job combined gate).
-The five remaining failing modules are `BorrowChecks`, `BindingChecks`,
+`BorrowChecks` and `BindingChecks` subsequently pass direct strict Lean checking.
+The binding migration derives move/copy handoff readiness from actual reachable
+residents and composite capabilities through canonical equation composition;
+it does not assume readiness or a capability model. Remaining stale modules are
 `ControlChecks`, `AuthorityChecks`, and `PreservationChecks`.
 
 

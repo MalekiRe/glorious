@@ -245,8 +245,12 @@ or a dependency of this project.
   model-equation interface. Its 82-job gate and direct strict check pass;
   the capability/Copy/Drop/preservation gate passes 181 jobs and the three
   capability axiom audits report only standard Lean axioms. `ExecutionChecks`
-  and `SourceChecks` also pass their combined 120-job gate. Five other stale
-  Checks modules remain unrepaired; whole-language soundness remains open.
+  and `SourceChecks` also pass their combined 120-job gate. `BorrowChecks` and
+  `BindingChecks` now pass direct strict Lean checking. Binding moves and copies
+  share derived reachable-resource handoff readiness; composite Copy principals
+  use canonical equation composition, without an assumed capability model.
+  Control, Authority, and Preservation checks remain unrepaired; whole-language
+  soundness remains open.
 - `LoanPreservation`, `CopyResourcePreservation`: all owning loans are unique,
   owning/storage-borrow rows retain custody, and actual loan mutations preserve
   that common invariant. Ordinary copies retain their shared resource closure.

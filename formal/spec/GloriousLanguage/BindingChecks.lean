@@ -49,7 +49,12 @@ private theorem readable (access : Access) : Permitted world .owner access sourc
   intro id loan found
   simp [world, Table.get] at found
 
-private theorem transferResult (program : RuntimeProgram) : Transfers program world .owner source destination moved := by
+/-- The nested result genuinely has no resource and no reference handle, so
+its actual reachable graph is already handoff-ready. The argument is
+generalized over the access and the pending write footprint because the same
+derived fact is consumed by both the move and the copy boundary. -/
+private theorem resultHandoffReady (program : RuntimeProgram) (readAccess : Access) (pending : List Address) :
+    resultValue.HandoffReady program world readAccess pending := by
   let Plain (value : Value) : Prop := value.resources = [] ∧ value.InvariantClosed program world ∧
     ∀ id, value.head ≠ .reference id
   have fieldPlain : ∀ path value, ResidentAt fieldValue path value → Plain value := by
@@ -84,22 +89,25 @@ private theorem transferResult (program : RuntimeProgram) : Transfers program wo
       ¬ resultValue.ReachableReference world authority incoming id current access := by
     rintro authority incoming id current access ⟨value,reached,head⟩
     exact (reachedPlain reached).2.2 id head
-  have ready : resultValue.MoveReady program world [source,destination] := by
-    refine ⟨⟨?_,?_,?_,?_⟩,?_⟩
-    · intro value authority access reached
-      exact ⟨by simp [(reachedPlain reached).1],(reachedPlain reached).2.1⟩
-    · intro id authority access reached
-      exact False.elim (noReference reached)
-    · intro id authority access reached
-      exact False.elim (noReference reached)
-    · intro value authority access reached binding member
+  refine ⟨⟨?_,?_,?_,?_⟩,?_⟩
+  · intro value authority access reached
+    exact ⟨by simp [(reachedPlain reached).1],(reachedPlain reached).2.1⟩
+  · intro id authority access reached
+    exact False.elim (noReference reached)
+  · intro id authority access reached
+    exact False.elim (noReference reached)
+  · intro value authority access reached binding member
+    simp [(reachedPlain reached).1] at member
+  · intro mutation _ address support
+    rcases support with ⟨value,authority,access,reached,reference | resource⟩
+    · obtain ⟨id,loan,head,_⟩ := reference
+      exact False.elim ((reachedPlain reached).2.2 id head)
+    · obtain ⟨binding,member,_⟩ := resource
       simp [(reachedPlain reached).1] at member
-    · intro mutation _ address support
-      rcases support with ⟨value,authority,access,reached,reference | resource⟩
-      · obtain ⟨id,loan,head,_⟩ := reference
-        exact False.elim ((reachedPlain reached).2.2 id head)
-      · obtain ⟨binding,member,_⟩ := resource
-        simp [(reachedPlain reached).1] at member
+
+private theorem transferResult (program : RuntimeProgram) : Transfers program world .owner source destination moved := by
+  have ready : resultValue.MoveReady program world [source,destination] :=
+    resultHandoffReady program .owned [source,destination]
   refine .move (value := resultValue) (cleared := cleared) rfl resultInitialized ready (readable .owned)
     ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ?_ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩ rfl rfl
   simp [source, destination, Address.Overlaps]
@@ -126,31 +134,65 @@ private def copiedResult : Value := .resident 20 resultValue.type .tuple true [s
 private def copiedWorld : World :=
   { world with roots := world.roots.set 1 { vacant with value := some copiedResult }, nextOwner := 23 }
 
-private theorem capabilities {program : Language.Program} (model : CapabilityModel program) :
+/-- The actual composite value types are certified by the canonical
+producers: the unit leaf, then the one-field binding set and the one-field
+tuple that inherit its duplicable class through finite equation composition.
+No capability model is assumed, and the derived principals are the greatest
+certified classes rather than a requested bound. -/
+private theorem capabilities (program : Language.Program) :
     PrincipalOf program .unit .duplicable ∧ PrincipalOf program packType .duplicable ∧
     PrincipalOf program resultValue.type .duplicable := by
-  have unit := (model.equations .unit .duplicable).mpr .unit
-  have pack := (model.equations packType .duplicable).mpr (.bindings (.cons unit .nil))
-  exact ⟨⟨model,unit⟩,⟨model,pack⟩,⟨model,(model.equations _ _).mpr (.tuple (.cons pack .nil))⟩⟩
+  classical
+  have unitEvidence : CapabilityEvidence program { module := default } .unit .duplicable :=
+    CapabilityEquation.unit.closedEvidence (program := program) (context := { module := default })
+  have packEvidence : CapabilityEvidence program { module := default } packType .duplicable := by
+    let assignment : Term → Option Principal := fun term => if term = .unit then some .duplicable else none
+    have equation : CapabilityEquation program assignment packType .duplicable :=
+      .bindings (fields := [.unit]) (principals := [.duplicable]) (.cons (by simp [assignment]) .nil)
+    exact equation.realize (fun term claimed found => by
+      by_cases unit : term = .unit
+      · rw [unit] at found
+        have pair : some .duplicable = some claimed := by simpa [assignment] using found
+        have same : claimed = .duplicable := (Option.some.inj pair).symm
+        rw [unit, same]
+        exact unitEvidence
+      · simp [assignment, unit] at found)
+  have resultEvidence : CapabilityEvidence program { module := default } resultValue.type .duplicable := by
+    let assignment : Term → Option Principal := fun term => if term = packType then some .duplicable else none
+    have equation : CapabilityEquation program assignment resultValue.type .duplicable :=
+      .tuple (fields := [packType]) (principals := [.duplicable]) (.cons (by simp [assignment]) .nil)
+    exact equation.realize (fun term claimed found => by
+      by_cases pack : term = packType
+      · rw [pack] at found
+        have pair : some .duplicable = some claimed := by simpa [assignment] using found
+        have same : claimed = .duplicable := (Option.some.inj pair).symm
+        rw [pack, same]
+        exact packEvidence
+      · simp [assignment, pack] at found)
+  exact ⟨PrincipalOf.unit program,(packEvidence.support rfl).duplicable,(resultEvidence.support rfl).duplicable⟩
 
-private theorem copyResult {program : Language.Program} (model : CapabilityModel program) :
+private theorem copyResult {program : Language.Program} :
     CopyValue program 20 resultValue 23 copiedResult := by
-  obtain ⟨unit,pack,result⟩ := capabilities model
+  obtain ⟨unit,pack,result⟩ := capabilities program
   have tree : CopyTree program 20 resultValue 23
       (.resident 20 resultValue.type .tuple true
         [some (.resident 21 packType (.bindings metadata) true [some copiedField])])
       [(10,20),(11,21),(12,22)] :=
-    .resident result (.cons (.resident pack (.cons (.resident unit .nil) .nil)) .nil)
+    .resident (resources := []) result (by intro resource member; simp at member)
+      (.cons (.resident (resources := []) pack (by intro resource member; simp at member)
+        (.cons (.resident (resources := []) unit (by intro resource member; simp at member) .nil) .nil)) .nil)
   simpa [copiedResult, copiedPack, copiedMetadata, copiedField, metadata, Value.mapBindingOrigins,
     Value.mapFieldOrigins, BindingPack.mapOrigins, Table.get] using CopyValue.copy tree (by simp [Table.Unique])
 
 /-- Copying the complete result changes both its owner and the nested pack's
 reference to that owner. The brand and resident type stay exactly the same. -/
-example {program : Language.Program} (model : CapabilityModel program) :
+example {program : RuntimeProgram} :
     Copies program world .owner source destination copiedWorld := by
   exact .copy (before := world) (source := source) (destination := destination)
-    (value := resultValue) (cloned := copiedResult) rfl resultInitialized (readable .shared)
-    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩ (copyResult model) rfl
+    (value := resultValue) (cloned := copiedResult) rfl resultInitialized
+    (resultHandoffReady program .shared [destination]) (readable .shared)
+    ⟨vacant,rfl,Or.inl ⟨rfl,rfl⟩⟩ ⟨0,.root (root := vacant) (id := 1) rfl rfl⟩
+    (copyResult (program := program.declarations)) rfl
 
 example : Contracts.Guard.Holds copiedWorld (.pattern 20 50 true) := by
   refine ⟨destination.child 0,copiedPack,copiedMetadata,?_,rfl,rfl,by simp [copiedMetadata]⟩
@@ -161,13 +203,15 @@ example (program : Kernel.Program) : Typing.ValueTyped program copiedWorld copie
 
 /-- A separately copied pack still describes the originating result outside
 that copied subtree; it does not invent a new result guard for its own owner. -/
-example {program : Language.Program} (model : CapabilityModel program) :
+example {program : Language.Program} :
     CopyValue program 30 packValue 32
       (.resident 30 packType (.bindings metadata) true [some (.resident 31 .unit .unit true [])]) := by
-  obtain ⟨unit,pack,_⟩ := capabilities model
+  obtain ⟨unit,pack,_⟩ := capabilities program
   have tree : CopyTree program 30 packValue 32
       (.resident 30 packType (.bindings metadata) true [some (.resident 31 .unit .unit true [])])
-      [(11,30),(12,31)] := .resident pack (.cons (.resident unit .nil) .nil)
+      [(11,30),(12,31)] :=
+    .resident (resources := []) pack (by intro resource member; simp at member)
+      (.cons (.resident (resources := []) unit (by intro resource member; simp at member) .nil) .nil)
   simpa [metadata, Value.mapBindingOrigins, Value.mapFieldOrigins, BindingPack.mapOrigins, Table.get]
     using CopyValue.copy tree (by simp [Table.Unique])
 
