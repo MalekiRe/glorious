@@ -131,7 +131,7 @@ theorem PrimitiveStep.suspensionExtension {program : Kernel.Program} {before aft
   | layout _ _ _ _ _ written _ =>
     have changed := World.write_suspensionExtension written
     exact ⟨⟨changed.counter,changed.homes⟩,changed.retained,changed.origin,changed.recorded⟩
-  | literalText _ _ _ _ _ written | literalBytes _ _ _ _ _ written =>
+  | literalText _ _ _ _ _ _ written | literalBytes _ _ _ _ _ _ written =>
     have changed := World.write_suspensionExtension written
     exact ⟨⟨changed.counter,changed.homes⟩,changed.retained,changed.origin,changed.recorded⟩
   | abort => exact .refl _

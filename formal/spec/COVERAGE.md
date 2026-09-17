@@ -1,5 +1,28 @@
 # Specification audit
 
+## Literal execution and the nominal-view boundary
+
+`LiteralExecution.PrimitiveStep.literal_typed_progress` materializes a
+manifest-admitted literal view as the octet tuple the elaborator emits:
+typed destination write, world typing, octet leaves, unchanged root/region/
+loan frontiers. `PrimitiveStep.literal_nominal_impossible` proves the
+constant-value vocabulary cannot produce a nominal library value from an
+octet tuple; `Execution.Step.literal_nominal_impossible` extends the
+exclusion across every `Execution.Step` family, including foreign entry,
+and `Contracts.StateProgress.literal_nominal_impossible` and
+`Contracts.ResourceAdmissionAt.no_nominal_literal` carry it to the real
+progress/admission obligations. Axiom audit: propext, Quot.sound only.
+
+Honest scope: these are obstruction results. The normative §3.3 contract —
+immutable static UTF-8/octet data through an ordinary manifest-selected
+library view (normally nominal `Str<'static>`/`Slice<'static,u8>`) with no
+forgeable static-segment descriptor — is not yet implemented in this model:
+`Home.staticData` is never installed by any rule, and no construction
+recipe ties a root's byte image to a nominal value. Extending the machine
+to a constructive static-data rule is the declared next obligation; the
+obstruction theorems above are then replaced by positive constructibility
+statements, since they quantify over all derivations.
+
 ## Produced invocation-entry lifetime
 
 `EnterWorldAttempt.region_live` derives the callee's live region from actual

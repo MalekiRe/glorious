@@ -36,6 +36,25 @@ inductive Decodes : List Nat → Text → Prop where
   | cons {bytes more scalar rest} : Encodes scalar bytes → Decodes more rest →
       Decodes (bytes ++ more) (scalar :: rest)
 
+/-- Every byte in a shortest-form UTF-8 scalar encoding is an octet. -/
+theorem Encodes.octets {scalar : Nat} {bytes : List Nat}
+    (encoded : Encodes scalar bytes) : ∀ byte ∈ bytes, byte < 256 := by
+  intro byte member
+  cases encoded <;> simp only [List.mem_cons, List.not_mem_nil, or_false] at member <;>
+    omega
+
+/-- Text literal decoding supplies the same octet bound required by byte
+literal admission and by the actual u8 materialization. -/
+theorem Decodes.octets {bytes : List Nat} {scalars : Text}
+    (decoded : Decodes bytes scalars) : ∀ byte ∈ bytes, byte < 256 := by
+  induction decoded with
+  | nil => simp
+  | cons encoded _ rest =>
+    intro byte member
+    rcases List.mem_append.mp member with first | later
+    · exact encoded.octets byte first
+    · exact rest byte later
+
 inductive Digit : Nat → Nat → Prop where
   | decimal {n} : n < 10 → Digit (48 + n) n
   | lower {n} : n < 6 → Digit (97 + n) (10 + n)

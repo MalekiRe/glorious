@@ -145,15 +145,14 @@ itself is determined by the binding's identity, its declared result type, the
 octets and the destination contract. -/
 theorem PrimitiveStep.literal_typed_progress {program : Kernel.Program} {before : State}
     {context : Context} {destination : Address} {binding : RuntimeBinding}
-    {bytes : List Nat} {next : Kernel.Code} {primitive : Primitive}
+    {bytes : List Nat} {next : Kernel.Code} {primitive : Primitive} {source : Source.Literal}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
     (task : before.task = .primitive context destination binding
       [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next)
     (_admitted : binding ∈ program.declarations.input.manifest.bindings)
     (identity : binding.primitive = some primitive)
-    (view : primitive = .literalText ∨ primitive = .literalBytes)
-    (octets : ∀ byte ∈ bytes, byte < 256)
+    (data : LiteralData source primitive bytes)
     (resultType : binding.signature.result = OctetType bytes)
     (destinationType : DestinationType before.world destination binding.signature.result) :
     ∃ after value, PrimitiveStep program before none after ∧ after.task = .run context next ∧
@@ -165,7 +164,7 @@ theorem PrimitiveStep.literal_typed_progress {program : Kernel.Program} {before 
       after.world.nextRegion = before.world.nextRegion ∧
       after.world.liveRegions = before.world.liveRegions ∧ after.world.loans = before.world.loans := by
   obtain ⟨finish,value,constructed,valueType,valueLeaves⟩ :=
-    octet_materialization (program := program) (context := context.static) octets before.world.nextOwner
+    octet_materialization (program := program) (context := context.static) data.octets before.world.nextOwner
   have materialized : DestinationType before.world destination value.type := by
     rw [valueType]
     exact resultType ▸ destinationType
@@ -199,10 +198,10 @@ theorem PrimitiveStep.literal_typed_progress {program : Kernel.Program} {before 
         exact Table.get_set_other _ _ _ _ same
       rw [show (({written with nextOwner := finish} : World).roots.get id) = written.roots.get id from rfl,
         retained]
-  rcases view with rfl | rfl
-  · exact ⟨_,value,.literalText task identity constructed (resultType.trans valueType.symm) materialized write,
+  rcases data.primitive with rfl | rfl
+  · exact ⟨_,value,.literalText task identity ⟨source,data⟩ constructed (resultType.trans valueType.symm) materialized write,
       rfl,typedAfter,storedAfter,valueTyped,valueType,valueLeaves,nextRoot,presence,frontiers.2,frontiers.1,loans⟩
-  · exact ⟨_,value,.literalBytes task identity constructed (resultType.trans valueType.symm) materialized write,
+  · exact ⟨_,value,.literalBytes task identity ⟨source,data⟩ constructed (resultType.trans valueType.symm) materialized write,
       rfl,typedAfter,storedAfter,valueTyped,valueType,valueLeaves,nextRoot,presence,frontiers.2,frontiers.1,loans⟩
 
 /-- Octet constants cannot produce a nominal library value. This is a
@@ -218,6 +217,48 @@ private theorem calculation_not_literal {target : TargetProfile} {primitive : Pr
     (calculated : PrimitiveCalculation target primitive arguments values outcome)
     (literal : Primitive.literalText = primitive ∨ Primitive.literalBytes = primitive) : False := by
   cases calculated <;> rcases literal with literal | literal <;> cases literal
+
+private theorem octet_injective : Function.Injective (fun bytes : List Nat =>
+    bytes.map (fun byte => Term.constant (.integer false (.fixed 8) (Int.ofNat byte)))) := by
+  intro left right same
+  have recovered := congrArg (List.map (fun term => match term with
+    | .constant (.integer _ _ n) => n.toNat
+    | _ => 0)) same
+  simpa [List.map_map, Function.comp_def, Int.toNat] using recovered
+
+private theorem not_calculated {target : TargetProfile} {primitive : Primitive}
+    {arguments : List Term} {values : List ScalarValue} {outcome : Except Fatal ScalarValue}
+    (calculated : PrimitiveCalculation target primitive arguments values outcome)
+    (literal : Primitive.literalText = primitive) : False := by
+  cases calculated <;> cases literal
+
+/-- A literalText machine request cannot bypass the source UTF-8 contract:
+every actual step admits only data whose octets decode as text. -/
+theorem PrimitiveStep.literal_text_decodes {program : Kernel.Program} {before after : State}
+    {event : Option Event} {context : Context} {destination : Address} {binding : RuntimeBinding}
+    {bytes : List Nat} {next : Kernel.Code}
+    (task : before.task = .primitive context destination binding
+      [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next)
+    (literal : binding.primitive = some .literalText)
+    (step : PrimitiveStep program before event after) : ∃ scalars, Source.Decodes bytes scalars := by
+  have selected : ∀ c d b a o n, before.task = .primitive c d b a o n →
+      b = binding ∧ a = [.constantTuple (bytes.map (fun byte =>
+        .constant (.integer false (.fixed 8) (Int.ofNat byte))))] := by
+    intro c d b a o n running
+    have same := Task.primitive.inj (running.symm.trans task)
+    exact ⟨same.2.2.1,same.2.2.2.1⟩
+  clear task
+  cases step
+  all_goals obtain ⟨same,args⟩ := selected _ _ _ _ _ _ (by assumption)
+  all_goals cases same
+  all_goals clear selected
+  all_goals try (exfalso; apply not_calculated; assumption; simpa only [literal,Option.some.injEq] using (show binding.primitive = some _ from by assumption))
+  all_goals try (exfalso; have bad : some Primitive.literalText = some _ := literal.symm.trans (by assumption); contradiction)
+  have equal := octet_injective (Term.constantTuple.inj (List.cons.inj args).1)
+  cases equal
+  obtain ⟨source,data⟩ : ∃ source, LiteralData source .literalText bytes := by assumption
+  cases data with
+  | text decoded => exact ⟨_,decoded⟩
 
 /-- The current literal rules have no step at a nominal manifest result,
 including the ordinary Str and Slice representations required by §3.3.

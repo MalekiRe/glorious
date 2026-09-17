@@ -115,25 +115,20 @@ invocation boundary; static library-view realization is a separate obligation. -
 theorem Contracts.StateProgress.literal {program : Kernel.Program} {host : Foreign.Model}
     {function : Kernel.Function} {before : Execution.State} {boundary : Contracts.InvocationBoundary}
     {context : Execution.Context} {destination : Address} {binding : RuntimeBinding}
-    {bytes : List Nat} {next : Kernel.Code}
+    {bytes : List Nat} {next : Kernel.Code} {source : Source.Literal} {primitive : Primitive}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
     (inside : boundary.Inside program before)
     (task : before.task = .primitive context destination binding
       [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next)
     (admitted : binding ∈ program.declarations.input.manifest.bindings)
-    (literal : binding.primitive = some .literalText ∨ binding.primitive = some .literalBytes)
-    (octets : ∀ byte ∈ bytes, byte < 256)
+    (identity : binding.primitive = some primitive)
+    (data : LiteralData source primitive bytes)
     (result : binding.signature.result = Execution.OctetType bytes)
     (destinationType : Execution.DestinationType before.world destination binding.signature.result) :
     Contracts.StateProgress program host function before boundary := by
-  obtain ⟨primitive,identity,view⟩ : ∃ primitive, binding.primitive = some primitive ∧
-      (primitive = .literalText ∨ primitive = .literalBytes) := by
-    rcases literal with text | bytes
-    · exact ⟨.literalText,text,Or.inl rfl⟩
-    · exact ⟨.literalBytes,bytes,Or.inr rfl⟩
   obtain ⟨after,_,step,_⟩ := Execution.PrimitiveStep.literal_typed_progress valid inventory typed
-    task admitted identity view octets result destinationType
+    task admitted identity data result destinationType
   exact Or.inr (Or.inr (Or.inr (Or.inr ⟨none,after,inside,
     Or.inr (Or.inr (Or.inr (Or.inr (Or.inl step))))⟩)))
 

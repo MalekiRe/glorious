@@ -138,7 +138,7 @@ theorem PrimitiveStep.private_slot {program : Kernel.Program} {before after : St
   case layout written _ =>
     have current := slot.write written (Ne.symm outside.2.1)
     exact ⟨current.found,current.vacant,current.safe,current.internalHome⟩
-  case literalText _ _ _ _ _ written | literalBytes _ _ _ _ _ written =>
+  case literalText _ _ _ _ _ _ written | literalBytes _ _ _ _ _ _ written =>
     have current := slot.write written (Ne.symm outside.2.1)
     exact ⟨current.found,current.vacant,current.safe,current.internalHome⟩
 

@@ -364,9 +364,8 @@ mutual
         Fresh context localSlot → localSlot.type = type → Expression program context (.literal literal) type (AtomCode localSlot (.constant value))
     | defaultScalar {context literal type value localSlot} : LiteralConstant program.declarations.input.target literal none value type →
         Fresh context localSlot → localSlot.type = type → Expression program context (.literal literal) type (AtomCode localSlot (.constant value))
-    | literalView {context literal scalars bytes primitive binding localSlot} :
-        ((literal = .string scalars ∧ Source.Decodes bytes scalars ∧ primitive = .literalText) ∨
-          (literal = .bytes bytes ∧ primitive = .literalBytes)) →
+    | literalView {context literal bytes primitive binding localSlot} :
+        LiteralData literal primitive bytes →
         binding ∈ program.declarations.input.manifest.bindings → binding.primitive = some primitive →
         Fresh context localSlot → localSlot.type = binding.signature.result →
         Expression program context (.literal literal) localSlot.type
@@ -845,6 +844,7 @@ mutual
     | inferred {context argumentTuple output effects} : Kinding program.declarations context.typed.static output .type →
         Kinding program.declarations context.typed.static effects .row → FnArguments program context [argumentTuple] argumentTuple output effects
 end
+
 
 theorem Parameters.formals {program : Kernel.Program} {context sources locals names plans}
     (checked : Parameters program context sources locals names plans) : plans.map Prod.fst = locals := by

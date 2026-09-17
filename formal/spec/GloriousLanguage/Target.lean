@@ -458,6 +458,29 @@ inductive Primitive where
   | availableClose | bindingProject | bindingCombine | abort
   deriving DecidableEq, BEq, Repr, Inhabited
 
+/-- Source literals and machine literal requests share one data contract.
+Text is shortest-form UTF-8; byte strings need only contain octets. This
+admits data, not a library representation or a completed storage operation. -/
+inductive LiteralData : Source.Literal → Primitive → List Nat → Prop where
+  | text {bytes scalars} : Source.Decodes bytes scalars →
+      LiteralData (.string scalars) .literalText bytes
+  | bytes {bytes} : (∀ byte ∈ bytes, byte < 256) →
+      LiteralData (.bytes bytes) .literalBytes bytes
+
+theorem LiteralData.octets {source : Source.Literal} {primitive : Primitive}
+    {bytes : List Nat} (data : LiteralData source primitive bytes) :
+    ∀ byte ∈ bytes, byte < 256 := by
+  cases data with
+  | text decoded => exact decoded.octets
+  | bytes bounded => exact bounded
+
+theorem LiteralData.primitive {source : Source.Literal} {primitive : Primitive}
+    {bytes : List Nat} (data : LiteralData source primitive bytes) :
+    primitive = .literalText ∨ primitive = .literalBytes := by
+  cases data
+  · exact Or.inl rfl
+  · exact Or.inr rfl
+
 structure RuntimeBinding where
   declaration : DeclId
   signature : Signature

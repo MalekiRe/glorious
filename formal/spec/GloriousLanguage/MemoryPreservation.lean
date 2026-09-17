@@ -91,9 +91,9 @@ theorem PrimitiveStep.worldTyped {program : Kernel.Program} {before after : Stat
   | layout task primitive layout constant destination written counter =>
     subst counter
     exact constant.install_worldTyped valid inventory typed destination.vacant destination.addressType written
-  | literalText task primitive constant result destination written =>
+  | literalText task primitive data constant result destination written =>
     exact constant.install_worldTyped valid inventory typed destination.vacant destination.addressType written
-  | literalBytes task primitive constant result destination written =>
+  | literalBytes task primitive data constant result destination written =>
     exact constant.install_worldTyped valid inventory typed destination.vacant destination.addressType written
   | abort => exact typed
 

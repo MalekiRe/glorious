@@ -279,6 +279,7 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       before.task = .primitive context destination binding
         [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next →
       binding.primitive = some .literalText →
+      (∃ source, LiteralData source .literalText bytes) →
       ConstantValue program.declarations context.static before.world.nextOwner
         (.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))) finish value →
       binding.signature.result = value.type → DestinationType before.world destination value.type →
@@ -291,6 +292,7 @@ inductive PrimitiveStep (program : Kernel.Program) : State → Option Event → 
       before.task = .primitive context destination binding
         [.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))] [] next →
       binding.primitive = some .literalBytes →
+      (∃ source, LiteralData source .literalBytes bytes) →
       ConstantValue program.declarations context.static before.world.nextOwner
         (.constantTuple (bytes.map (fun byte => .constant (.integer false (.fixed 8) (Int.ofNat byte))))) finish value →
       binding.signature.result = value.type → DestinationType before.world destination value.type →
