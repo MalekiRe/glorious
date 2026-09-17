@@ -370,17 +370,16 @@ theorem CleanupRun.destroy_fields_loop {program : Kernel.Program} {host : Foreig
     (task : before.task = .destroyFields context address authority indices next)
     (step : ∀ (field : Nat) (rest : List Nat) (state : State),
       state.task = .destroy context (address.child field) authority (.destroyFields context address authority rest next) →
-      ∃ middle, CleanupRun program host state [] middle ∧
-        middle.task = .destroyFields context address authority rest next ∧
-        (∀ other ∈ rest, middle.world.Vacant (address.child other))) :
-    ∃ after, CleanupRun program host before [] after ∧ after.task = .finishShell address authority next := by
+      ∃ trace middle, CleanupRun program host state trace middle ∧
+        middle.task = .destroyFields context address authority rest next) :
+    ∃ trace after, CleanupRun program host before trace after ∧ after.task = .finishShell address authority next := by
   induction indices generalizing before with
-  | nil => exact ⟨_, CleanupRun.fields_done task, rfl⟩
+  | nil => exact ⟨[], _, CleanupRun.fields_done task, rfl⟩
   | cons field rest ih =>
-      obtain ⟨middle, run, running, vacant⟩ :=
+      obtain ⟨first, middle, run, running⟩ :=
         step field rest ({ before with task := .destroy context (address.child field) authority (.destroyFields context address authority rest next) }) rfl
-      obtain ⟨after, restRun, finished⟩ := ih running
-      exact ⟨after, (CleanupRun.field_next task).append run |>.append restRun, finished⟩
+      obtain ⟨last, after, restRun, finished⟩ := ih running
+      exact ⟨first ++ last, after, (CleanupRun.field_next task).append run |>.append restRun, finished⟩
 
 /-- The nested node's shell destruction, with every write derived: the shell is
 structurally destroyed, its already-empty slots are disposed by the two real
@@ -438,7 +437,7 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
       (ancestry : ∀ id loan, state.world.loans.get id = some loan →
         (∀ parent, loan.parent = some parent → state.world.loans.get parent ≠ none) ∧
         (∀ guard ∈ loan.guards, state.world.loans.get guard ≠ none)) →
-      ∃ after parent', CleanupRun program host state [] after ∧
+      ∃ trace after parent', CleanupRun program host state trace after ∧
         after.task = .destroyFields context address .owner rest next ∧
         after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
         (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
@@ -451,8 +450,7 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
           loan.kind = .owning ∨ loan.kind = .storageBorrow) ∧
         (∀ id loan, after.world.loans.get id = some loan →
           (∀ parent, loan.parent = some parent → after.world.loans.get parent ≠ none) ∧
-          (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none)) ∧
-        (∀ other ∈ rest, after.world.Vacant (address.child other))) :
+          (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none))) :
     ∀ (before : State) (parent : Value), before.task = .destroyFields context address .owner indices next →
       indices.Nodup → before.world.Stores address parent →
       (permission : Permitted before.world .owner .owned address) →
@@ -490,13 +488,13 @@ theorem CleanupRun.destroy_fields_tree {program : Kernel.Program} {host : Foreig
       obtain ⟨scheduled, movedRun, schedTask, schedWorld⟩ : ∃ scheduled, CleanupRun program host before [] scheduled ∧
           scheduled.task = .destroy context (address.child field) .owner (.destroyFields context address .owner rest next) ∧
           scheduled.world = before.world := ⟨_,moved,rfl,rfl⟩
-      obtain ⟨middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, midLen, midPermission, midHanded, midKinds, midAncestry, vacant⟩ :=
+      obtain ⟨runTrace, middle, middleParent, run, running, midStored, slotHole, others, midOwner, midHead, midType, midLive, midRes, midLen, midPermission, midHanded, midKinds, midAncestry⟩ :=
         step field rest scheduled (parent := parent) schedTask (by rw [schedWorld]; exact stored)
           (by rw [schedWorld]; exact permission) (by rw [schedWorld]; exact handed)
           (by rw [schedWorld]; exact kinds) (by rw [schedWorld]; exact ancestry)
-      obtain ⟨_, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, lenEq, finalPermission, finalHanded, finalKinds, finalAncestry⟩ :=
+      obtain ⟨restTrace, after, finalParent, restRun, finished, finalStored, holes, untouched, ownerEq, headEq, typeEq, liveEq, resEq, lenEq, finalPermission, finalHanded, finalKinds, finalAncestry⟩ :=
         ih middle middleParent running nodupRest midStored midPermission (by rw [← midOwner] at midHanded; exact midHanded) midKinds midAncestry
-      refine ⟨_,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_,
+      refine ⟨runTrace ++ restTrace,after,finalParent,movedRun.append run |>.append restRun,finished,finalStored,?_,?_,
         ownerEq.trans midOwner,headEq.trans midHead,typeEq.trans midType,liveEq.trans midLive,resEq.trans midRes,
         lenEq.trans midLen,
         finalPermission,(by rw [midOwner] at finalHanded; exact finalHanded),finalKinds,finalAncestry⟩

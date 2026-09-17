@@ -1483,7 +1483,7 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
       (ancestry : ∀ id loan, state.world.loans.get id = some loan →
         (∀ parent, loan.parent = some parent → state.world.loans.get parent ≠ none) ∧
         (∀ guard ∈ loan.guards, state.world.loans.get guard ≠ none)) →
-      ∃ after parent', CleanupRun program host state [] after ∧
+      ∃ trace after parent', CleanupRun program host state trace after ∧
         after.task = .destroyFields context address .owner rest next ∧
         after.world.Stores address parent' ∧ parent'.fields[field]? = some none ∧
         (∀ other, other ≠ field → parent'.fields[other]? = parent.fields[other]?) ∧
@@ -1496,8 +1496,7 @@ theorem CleanupRun.destroy_node {program : Kernel.Program} {host : Foreign.Model
           loan.kind = .owning ∨ loan.kind = .storageBorrow) ∧
         (∀ id loan, after.world.loans.get id = some loan →
           (∀ parent, loan.parent = some parent → after.world.loans.get parent ≠ none) ∧
-          (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none)) ∧
-        (∀ other ∈ rest, after.world.Vacant (address.child other))) :
+          (∀ guard ∈ loan.guards, after.world.loans.get guard ≠ none))) :
     ∃ trace after, CleanupRun program host before trace after ∧ after.task = next := by
   cases tree with
   | resident treeStored disposable shellLive noContinuation noReference noAvailable _ kinds ancestry children =>
