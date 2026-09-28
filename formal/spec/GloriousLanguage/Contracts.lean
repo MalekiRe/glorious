@@ -6,6 +6,7 @@
  import GloriousLanguage.TailEntryProgress
  import GloriousLanguage.CopyProgress
 import GloriousLanguage.ProjectionResolution
+import GloriousLanguage.ContextTyping
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
 The meaning below is intentionally semantic; it does not claim that an
@@ -356,10 +357,12 @@ is the existing fatal transition of that same allocation request. -/
 theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.Model}
     {function : Function} {before : State} {context : Execution.Context} {lexical : Local}
     {place : Place} {next : Code} {layout : Layout} {force : Bool} {principal : Principal}
+    {sourceContext : Typing.Context}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before.world)
     (task : before.task = .run context (.bind lexical (.acquire place force) next))
-    (fresh : ∀ binding ∈ context.environment, binding.key ≠ .localSlot lexical.id)
+    (contextTyped : Typing.ContextBindingsTyped program before.world sourceContext context)
+    (fresh : ∀ old ∈ sourceContext.locals, old.id ≠ lexical.id)
     (capability : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
       before.world.Stores source value → PrincipalOf program.declarations value.type principal)
     (sourceType : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
@@ -387,7 +390,7 @@ theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.M
   · have selection : ∀ id binding, context.environment.Selects id binding →
         (context.bind (context.local lexical) address).environment.Selects id binding := by
       intro id binding selected
-      exact SourceAssertion.bind_preserves_selection fresh selected
+      exact SourceAssertion.bind_preserves_selection (contextTyped.no_local_key_of_fresh fresh) selected
     have resolution := resolved.transport selection
       (fun address _ stored => (allocation.read typed.1 address).trans stored) allocation.loans
     let middle : State := {before with world := allocated, task := .atom (context.bind (context.local lexical) address) address (.acquire place force) next}

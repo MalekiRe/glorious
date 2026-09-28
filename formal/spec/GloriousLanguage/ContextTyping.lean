@@ -212,6 +212,27 @@ theorem ContextBindingsTyped.entails {program : Kernel.Program} {world : World}
     (fun _ _ kinded => runtime.kinding_pullback kinded) typed.predicates
 
 
+theorem ContextBindingsTyped.no_local_key_of_fresh
+    {program : Kernel.Program} {world : World} {source : Context}
+    {runtime : Execution.Context} {localSlot : Kernel.Local}
+    (typed : ContextBindingsTyped program world source runtime)
+    (fresh : ∀ old ∈ source.locals, old.id ≠ localSlot.id) :
+    ∀ binding ∈ runtime.environment, binding.key ≠ .localSlot localSlot.id := by
+  intro binding member same
+  have present : binding ∈ runtime.environment.locals :=
+    Kernel.Environment.mem_locals.mpr ⟨member, localSlot.id, same⟩
+  have paired := typed.bindings
+  generalize source.locals = locals at paired fresh
+  generalize runtime.environment.locals = bindings at paired present
+  induction paired with
+  | nil => cases present
+  | @cons old current olds currents head tail ih =>
+    rcases List.mem_cons.mp present with rfl | inTail
+    · exact fresh old List.mem_cons_self
+        (BindingKey.localSlot.inj (head.1.symm.trans same))
+    · exact ih (fun old member => fresh old (List.mem_cons_of_mem _ member)) inTail
+
+
 end Typing
 
 theorem Typing.ContextBindingsTyped.selects {program : Kernel.Program} {world : World}
