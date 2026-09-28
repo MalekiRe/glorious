@@ -846,6 +846,89 @@ mutual
 end
 
 
+private theorem sequence_bind_iff (bindings : List BindingCode) (body : Code)
+    (localSlot : Local) (atom : Atom) (next : Code) :
+    sequence bindings body = .bind localSlot atom next ↔
+      bindings = [] ∧ body = .bind localSlot atom next := by
+  cases bindings <;> simp [sequence]
+
+theorem Expression.bind_fresh {program : Kernel.Program} {context : Context}
+    {source : Source.Expr} {type : Term} {code : Code}
+    (expression : Expression program context source type code)
+    {localSlot : Local} {atom : Atom} {next : Code}
+    (shape : code = .bind localSlot atom next) : Fresh context localSlot := by
+  revert localSlot atom next
+  apply Expression.rec
+    (motive_1 := fun context _ _ code _ => ∀ localSlot atom next,
+      code = .bind localSlot atom next → Fresh context localSlot)
+    (motive_2 := fun _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ _ _ _ => True)
+    (motive_5 := fun _ _ _ _ _ _ => True)
+    (motive_6 := fun _ _ _ _ _ _ => True)
+    (motive_7 := fun _ _ _ _ _ => True)
+    (motive_8 := fun _ _ _ _ _ _ _ => True)
+    (motive_9 := fun _ _ _ _ => True)
+    (motive_10 := fun _ _ _ _ _ _ => True)
+    (motive_11 := fun _ _ _ _ _ => True)
+    (motive_12 := fun _ _ _ _ => True)
+    (motive_13 := fun _ _ _ _ => True)
+    (motive_14 := fun _ _ _ => True)
+    (motive_15 := fun _ _ _ _ => True)
+    (motive_16 := fun _ _ _ _ => True)
+    (motive_17 := fun _ _ _ _ => True)
+    (motive_18 := fun _ _ _ _ => True)
+    (motive_19 := fun _ _ _ _ => True)
+    (motive_20 := fun _ _ _ _ => True)
+    (motive_21 := fun _ _ _ => True)
+    (motive_22 := fun _ _ _ _ _ => True)
+    (motive_23 := fun _ _ _ _ _ => True)
+    (motive_24 := fun _ _ _ _ _ => True)
+    (motive_25 := fun _ _ _ _ _ _ => True)
+  all_goals intros
+  all_goals try trivial
+  all_goals try solve_by_elim
+  all_goals try simp_all [AtomCode]
+  all_goals simp_all [sequence_bind_iff]
+
+
+/-- The actual expression derivation supplies lexical freshness. Resource,
+capability and exact physical-type obligations remain explicit pre-state inputs. -/
+theorem Expression.acquire_execution {program : Kernel.Program} {host : Foreign.Model}
+    {sourceContext : Context} {source : Source.Expr} {type : Term}
+    {function : Function} {before : Execution.State} {runtime : Execution.Context}
+    {lexical : Local} {place : Place} {next : Code} {layout : Layout}
+    {force : Bool} {principal : Principal}
+    (expression : Expression program sourceContext source type (.bind lexical (.acquire place force) next))
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (contextTyped : Typing.ContextBindingsTyped program before.world sourceContext.typed runtime)
+    (task : before.task = .run runtime (.bind lexical (.acquire place force) next))
+    (capability : ∀ address authority value, ResolvesPlace before.world runtime.environment place address authority →
+      before.world.Stores address value → PrincipalOf program.declarations value.type principal)
+    (sourceType : ∀ address authority value, ResolvesPlace before.world runtime.environment place address authority →
+      before.world.Stores address value → value.type = (runtime.local lexical).type)
+    (copyFacts : force = false → principal = .duplicable →
+      Contracts.SourceAssertion.Holds program function runtime.region before.world runtime.environment
+        (.compatible (.resources place .shared) (.permission place .shared)))
+    (moveFacts : force = true ∨ principal ≠ .duplicable →
+      Contracts.SourceAssertion.Holds program function runtime.region before.world runtime.environment
+        (.compatible (.resources place .owned)
+          (.compatible (.permission place .owned) (.selfSeparated place))))
+    (request : AllocationRequest program.declarations before.world runtime.region (runtime.local lexical).type layout) :
+    (∃ address event after, Execution.Run program host before [.allocate address,event] after ∧
+      after.task = .run (runtime.bind (runtime.local lexical) address) next ∧
+      after.frames = before.frames ∧ Typing.WorldTyped program after.world ∧
+      Contracts.SourceAssertion.Holds program function runtime.region after.world
+        (runtime.bind (runtime.local lexical) address).environment
+        (.compatible (.resources ⟨lexical.id,[]⟩ .owned)
+          (.compatible (.permission ⟨lexical.id,[]⟩ .owned) (.selfSeparated ⟨lexical.id,[]⟩)))) ∨
+    Execution.Run program host before [.fatal .resource] {before with task := .fatal .resource} :=
+  Contracts.SourceAssertion.bindAcquire valid inventory typed task contextTyped
+    (expression.bind_fresh rfl) capability sourceType copyFacts moveFacts request
+
+
+
 theorem Parameters.formals {program : Kernel.Program} {context sources locals names plans}
     (checked : Parameters program context sources locals names plans) : plans.map Prod.fst = locals := by
   induction sources generalizing context locals names plans <;> cases checked <;> simp_all

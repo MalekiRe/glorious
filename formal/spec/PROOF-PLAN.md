@@ -54,7 +54,7 @@ typing has been removed from that admission and proved separately. Projecting
 the remaining requirements out of admission is not the missing soundness
 proof. Moving the same assumption into a certificate is not a repair either.
 
-Source-admission worktree checkpoint: `SourceAssertion.bindAcquire` now composes
+Integrated source-acquisition checkpoint: `SourceAssertion.bindAcquire` composes
 the actual local allocation and acquisition transitions into a two-event `Run`,
 with the bound continuation, unchanged frames, world typing, initialized owned
 resources, owned destination permission, and self-separated output support.
@@ -64,13 +64,17 @@ Permission and graph separation follow from the actual Copy/transfer producer.
 The alternative is the existing fatal resource transition for the same allocation
 request. General projection transport preserves dynamic indices and exact
 reference views through the allocation and fresh binding.
-Freshness is now stated over the source locals and interpreted by the actual
-`ContextBindingsTyped.bindings` relation: `no_local_key_of_fresh` excludes the
-destination key from the whole runtime environment, including resource and
-obligation entries. `bindAcquire` consumes this producer rather than assuming
-runtime-key absence separately. The exact `sourceType` equality premise remains
-open: source definitional conversion alone does not establish physical tag
-identity. No allocation-success assumption or new context field was added.
+`Elaboration.Expression.bind_fresh` now derives lexical freshness from the
+actual expression derivation, including operator grouping, prefix desugaring,
+coercions and constructor sequencing. `Expression.acquire_execution` consumes
+this producer and the entry-produced `ContextBindingsTyped` relation to run
+allocation and acquisition, or the same request's resource-exhaustion step.
+The context relation excludes the destination key from the whole runtime
+environment, including resource and obligation entries. Neither lexical nor
+runtime-key freshness is a separate premise of that expression theorem.
+The exact `sourceType` equality premise remains open: source definitional
+conversion alone does not establish physical tag identity. No allocation-success
+assumption or new context field was added.
 The proof consumes pre-state source assertions; it does not yet derive them from
 a complete syntax-directed body judgment. The three `Elaboration.Closure`
 `ResourceAdmission` premises and aggregate admission assumptions remain open.
