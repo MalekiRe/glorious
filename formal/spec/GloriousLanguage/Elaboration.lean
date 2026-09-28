@@ -904,7 +904,7 @@ theorem Expression.acquire_execution {program : Kernel.Program} {host : Foreign.
     (typed : Typing.WorldTyped program before.world)
     (contextTyped : Typing.ContextBindingsTyped program before.world sourceContext.typed runtime)
     (task : before.task = .run runtime (.bind lexical (.acquire place force) next))
-    (capability : ∀ address authority value, ResolvesPlace before.world runtime.environment place address authority →
+    (capability : force = false → ∀ address authority value, ResolvesPlace before.world runtime.environment place address authority →
       before.world.Stores address value → PrincipalOf program.declarations value.type principal)
     (sourceType : ∀ address authority value, ResolvesPlace before.world runtime.environment place address authority →
       before.world.Stores address value → value.type = (runtime.local lexical).type)

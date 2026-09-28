@@ -234,7 +234,7 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
     {type : Term} {layout : Layout} {mutable : Bool} {force : Bool} {principal : Principal}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before)
-    (capability : ∀ source authority value, ResolvesPlace before environment place source authority →
+    (capability : force = false → ∀ source authority value, ResolvesPlace before environment place source authority →
       before.Stores source value → PrincipalOf program.declarations value.type principal)
     (sourceType : ∀ source authority value, ResolvesPlace before environment place source authority →
       before.Stores source value → value.type = type)
@@ -249,7 +249,7 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
     (∃ destination allocated after,
       Allocates program.declarations before home region type layout mutable destination allocated ∧
       ∃ source authority value, ResolvesPlace before environment place source authority ∧
-        before.Stores source value ∧ PrincipalOf program.declarations value.type principal ∧
+        before.Stores source value ∧
         Acquires program allocated authority force source destination after ∧ Typing.WorldTyped program after ∧
         ∃ result, after.Stores destination result ∧ result.Initialized ∧
           result.ResourcesAccessible program after .owned) ∨
@@ -258,7 +258,7 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
   · obtain ⟨rfl,rfl⟩ := copying
     obtain ⟨source,authority,value,resolved,stored,initialized,accessible,permission⟩ :=
       SourceAssertion.resourcePermission (copyFacts rfl rfl)
-    have capability := capability source authority value resolved stored
+    have capability := capability rfl source authority value resolved stored
     have valueType := sourceType source authority value resolved stored
     subst type
     have copyReady : false = false → Principal.duplicable = .duplicable →
@@ -271,9 +271,9 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
       rcases impossible with forceTrue | nonduplicable
       · cases forceTrue
       · exact False.elim (nonduplicable rfl)
-    rcases Acquires.allocate_success_or_exhausted valid inventory typed stored initialized capability
+    rcases Acquires.allocate_success_or_exhausted valid inventory typed stored initialized (fun _ => capability)
       copyReady moveReady request with ⟨destination,allocated,after,allocation,acquired,afterTyped,result⟩ | exhausted
-    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,capability,acquired,afterTyped,result⟩
+    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,acquired,afterTyped,result⟩
     · exact Or.inr exhausted
   · have moving : force = true ∨ principal ≠ .duplicable := by
       cases force with
@@ -281,7 +281,7 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
       | false => exact Or.inr (fun same => copying ⟨rfl,same⟩)
     obtain ⟨source,authority,value,resolved,stored,initialized,accessible,permission,supportOutside⟩ :=
       SourceAssertion.resourceMoveFacts (moveFacts moving)
-    have capability := capability source authority value resolved stored
+    have capability := fun forced => capability forced source authority value resolved stored
     have valueType := sourceType source authority value resolved stored
     subst type
     have copyReady : force = false → principal = .duplicable →
@@ -301,7 +301,7 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
       exact ⟨ready,permission⟩
     rcases Acquires.allocate_success_or_exhausted valid inventory typed stored initialized capability
       copyReady moveReady request with ⟨destination,allocated,after,allocation,acquired,afterTyped,result⟩ | exhausted
-    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,capability,acquired,afterTyped,result⟩
+    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,acquired,afterTyped,result⟩
     · exact Or.inr exhausted
 /-- The allocation/acquisition post-value is visible through the actual
 shadowing local binding installed by Core's `.bind` step. -/
@@ -363,7 +363,7 @@ theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.M
     (task : before.task = .run context (.bind lexical (.acquire place force) next))
     (contextTyped : Typing.ContextBindingsTyped program before.world sourceContext context)
     (fresh : ∀ old ∈ sourceContext.locals, old.id ≠ lexical.id)
-    (capability : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
+    (capability : force = false → ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
       before.world.Stores source value → PrincipalOf program.declarations value.type principal)
     (sourceType : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
       before.world.Stores source value → value.type = (context.local lexical).type)
@@ -386,7 +386,7 @@ theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.M
   rcases SourceAssertion.acquireAllocation
     (home := .localSlot context.activation context.scope) (mutable := (context.local lexical).mutable)
     valid inventory typed capability sourceType copyFacts moveFacts request with
-    ⟨address,allocated,after,allocation,source,authority,value,resolved,stored,capable,acquired,afterTyped,result⟩ | exhausted
+    ⟨address,allocated,after,allocation,source,authority,value,resolved,stored,acquired,afterTyped,result⟩ | exhausted
   · have selection : ∀ id binding, context.environment.Selects id binding →
         (context.bind (context.local lexical) address).environment.Selects id binding := by
       intro id binding selected

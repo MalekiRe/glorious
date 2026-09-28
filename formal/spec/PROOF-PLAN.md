@@ -75,6 +75,13 @@ runtime-key freshness is a separate premise of that expression theorem.
 The exact `sourceType` equality premise remains open: source definitional
 conversion alone does not establish physical tag identity. No allocation-success
 assumption or new context field was added.
+Capability classification is now required only for implicit acquisition, through
+`Acquires.exists`, allocation progress, atom/machine progress and both source
+consumers. Explicit `move` uses the existing transfer constructor without a
+principal-classification premise, as required by the normative ownership rule.
+The unused unconditional classification output was removed from acquisition
+allocation; permission, initialized resources, separation and typed execution
+guarantees are unchanged.
 The proof consumes pre-state source assertions; it does not yet derive them from
 a complete syntax-directed body judgment. The three `Elaboration.Closure`
 `ResourceAdmission` premises and aggregate admission assumptions remain open.

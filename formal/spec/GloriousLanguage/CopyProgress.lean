@@ -295,14 +295,15 @@ theorem Acquires.implicit_copy {program : RuntimeProgram} {before after : World}
       have principalEq := Option.some.inj ((principalOf_canonical.mp actual).symm.trans (principalOf_canonical.mp capability))
       exact False.elim (noncopy principalEq)
 
-/-- The source's force flag and semantic principal choose the real Copy or
-move branch. Only the selected branch's source permission/readiness is
-required. No completed acquisition or storage write is assumed. -/
+/-- The force flag selects explicit transfer without capability classification;
+only implicit acquisition consults the semantic principal. Only the selected
+branch's permission/readiness is required. No completed acquisition or storage
+write is assumed. -/
 theorem Acquires.exists {program : Kernel.Program} {before : World} {authority : Authority}
     {force : Bool} {principal : Principal} {source destination : Address} {value : Value}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before) (stored : before.Stores source value) (initialized : value.Initialized)
-    (capability : PrincipalOf program.declarations value.type principal)
+    (capability : force = false → PrincipalOf program.declarations value.type principal)
     (copyReady : force = false → principal = .duplicable →
       value.HandoffReady program before .shared [destination] ∧ Permitted before authority .shared source)
     (moveReady : force = true ∨ principal ≠ .duplicable →
@@ -313,7 +314,7 @@ theorem Acquires.exists {program : Kernel.Program} {before : World} {authority :
   by_cases copying : force = false ∧ principal = .duplicable
   · obtain ⟨rfl,rfl⟩ := copying
     obtain ⟨ready,permission⟩ := copyReady rfl rfl
-    obtain ⟨after,copied,afterTyped⟩ := Copies.exists valid inventory typed stored initialized ready capability permission vacant type
+    obtain ⟨after,copied,afterTyped⟩ := Copies.exists valid inventory typed stored initialized ready (capability rfl) permission vacant type
     exact ⟨after,.copy copied,afterTyped,copied.handed_off_ready valid typed⟩
   · have moving : force = true ∨ principal ≠ .duplicable := by
       cases force with
@@ -324,7 +325,7 @@ theorem Acquires.exists {program : Kernel.Program} {before : World} {authority :
     have acquired : Acquires program before authority force source destination after := by
       cases force with
       | true => exact .explicitMove moved
-      | false => exact .move stored capability (fun same => copying ⟨rfl,same⟩) moved
+      | false => exact .move stored (capability rfl) (fun same => copying ⟨rfl,same⟩) moved
     exact ⟨after,acquired,moved.worldTyped valid inventory typed,⟨value,moved.handed_off_ready stored⟩⟩
 
 /-- Copy itself does not consume a physical allocation. When the destination
@@ -335,7 +336,7 @@ theorem Acquires.allocate_success_or_exhausted {program : Kernel.Program} {befor
     {home : Home} {region : Identity} {layout : Layout} {mutable : Bool}
     (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
     (typed : Typing.WorldTyped program before) (stored : before.Stores source value) (initialized : value.Initialized)
-    (capability : PrincipalOf program.declarations value.type principal)
+    (capability : force = false → PrincipalOf program.declarations value.type principal)
     (copyReady : force = false → principal = .duplicable →
       value.ResourcesAccessible program before .shared ∧ Permitted before authority .shared source)
     (moveReady : force = true ∨ principal ≠ .duplicable →
@@ -399,7 +400,7 @@ theorem Copies.allocate_success_or_exhausted {program : Kernel.Program} {before 
     rintro (impossible | impossible)
     · cases impossible
     · exact False.elim (impossible rfl)
-  rcases Acquires.allocate_success_or_exhausted (home := home) (mutable := mutable) valid inventory typed stored initialized capability
+  rcases Acquires.allocate_success_or_exhausted (home := home) (mutable := mutable) valid inventory typed stored initialized (fun _ => capability)
       (fun _ _ => ⟨ready,permission⟩) movement request with ⟨destination,allocated,after,allocation,acquired,afterTyped,result⟩ | exhausted
   · exact Or.inl ⟨destination,allocated,after,allocation,
       acquired.implicit_copy ((allocation.read typed.1 source).trans stored) capability,afterTyped,result⟩
@@ -446,7 +447,7 @@ theorem AtomStep.acquire_progress {program : Kernel.Program} {before : State}
     (task : before.task = .atom context destination (.acquire place force) next)
     (resolved : ResolvesPlace before.world context.environment place source authority)
     (stored : before.world.Stores source value) (initialized : value.Initialized)
-    (capability : PrincipalOf program.declarations value.type principal)
+    (capability : force = false → PrincipalOf program.declarations value.type principal)
     (copyReady : force = false → principal = .duplicable →
       value.HandoffReady program before.world .shared [destination] ∧ Permitted before.world authority .shared source)
     (moveReady : force = true ∨ principal ≠ .duplicable →
@@ -481,7 +482,7 @@ theorem Step.acquire_progress {program : Kernel.Program} {host : Foreign.Model} 
     (task : before.task = .atom context destination (.acquire place force) next)
     (resolved : ResolvesPlace before.world context.environment place source authority)
     (stored : before.world.Stores source value) (initialized : value.Initialized)
-    (capability : PrincipalOf program.declarations value.type principal)
+    (capability : force = false → PrincipalOf program.declarations value.type principal)
     (copyReady : force = false → principal = .duplicable →
       value.HandoffReady program before.world .shared [destination] ∧ Permitted before.world authority .shared source)
     (moveReady : force = true ∨ principal ≠ .duplicable →
