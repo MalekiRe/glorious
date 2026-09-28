@@ -206,6 +206,67 @@ theorem Copies.exists {program : Kernel.Program} {before : World} {authority : A
   have copied := Copies.copy stored initialized ready permission vacant type copy written
   exact ⟨_,copied,copied.worldTyped valid inventory typed⟩
 
+theorem Acquires.loans {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {force : Bool} {source destination : Address}
+    (acquired : Acquires program before authority force source destination after) :
+    after.loans = before.loans := by
+  cases acquired with
+  | explicitMove moved => exact moved.loans
+  | move _ _ _ moved => exact moved.loans
+  | copy copied =>
+      cases copied with
+      | copy _ _ _ _ _ _ _ written =>
+          have loans := World.write_loans written
+          exact loans
+
+theorem Acquires.locations {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {force : Bool} {source destination : Address}
+    (acquired : Acquires program before authority force source destination after) (id : Identity) :
+    (after.roots.get id).map Root.location = (before.roots.get id).map Root.location := by
+  cases acquired with
+  | explicitMove moved => exact moved.locations id
+  | move _ _ _ moved => exact moved.locations id
+  | copy copied => exact copied.locations id
+
+theorem Transfers.destination_supportOutside {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {source destination : Address} {value : Value}
+    (moved : Transfers program before authority source destination after)
+    (stored : after.Stores destination value) : value.SupportOutside after destination := by
+  obtain ⟨original,selected⟩ : ∃ original, before.Stores source original := by
+    cases moved with
+    | move selected _ _ _ _ _ _ _ _ => exact ⟨_,selected⟩
+  have same := Option.some.inj (stored.symm.trans (moved.handed_off_ready selected).1)
+  subst value
+  have ready := (moved.moveReady selected).frame (.of_locations moved.locations) moved.loans (moved.supportFramed selected)
+  exact ready.2 destination (by simp)
+
+theorem Acquires.destination_supportOutside {program : RuntimeProgram} {before after : World}
+    {authority : Authority} {force : Bool} {source destination : Address} {value : Value}
+    (acquired : Acquires program before authority force source destination after)
+    (stored : after.Stores destination value) : value.SupportOutside after destination := by
+  cases acquired with
+  | explicitMove moved => exact moved.destination_supportOutside stored
+  | move _ _ _ moved => exact moved.destination_supportOutside stored
+  | copy copied =>
+      cases copied with
+      | copy selected initialized ready permission vacant located copy written =>
+          rename_i original cloned next installed
+          have installedValue := World.write_read_inside written []
+          simp only [List.append_nil] at installedValue
+          have same : value = cloned := Option.some.inj (stored.symm.trans installedValue)
+          subst value
+          have clonedReady := ready.copy copy
+          have framed : cloned.SupportFramed before {installed with nextOwner := next} := by
+            intro address supported
+            refine ⟨?_,World.write_locations written address.root⟩
+            change installed.read address = before.read address
+            exact World.write_disjoint written (clonedReady.2 destination (by simp) address supported)
+          have loans := World.write_loans written
+          have locations := World.write_locations written
+          have preserved := clonedReady.frame (after := {installed with nextOwner := next})
+            (.of_locations locations) loans framed
+          exact preserved.2 destination (by simp)
+
 theorem Acquires.handed_off_ready {program : Kernel.Program} {before after : World}
     {authority : Authority} {force : Bool} {source destination : Address}
     (valid : ProgramWellFormed program.declarations) (typed : Typing.WorldTyped program before)
