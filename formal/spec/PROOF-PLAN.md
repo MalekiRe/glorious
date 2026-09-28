@@ -13,6 +13,40 @@ remains necessary. Work in large, dependency-coherent chunks that close difficul
 general semantic obligations; helper lemmas are intermediate steps, not the
 default deliverable. Do not substitute example coverage for general proofs.
 
+## Completion-driven Luna programme
+
+The active programme assigns implementation, integration and independent
+semantic review to GPT-6 Luna workers; the lead owns contracts, dependency
+ordering and acceptance decisions. At most ten workers execute concurrently.
+An assignment is accepted only after its real consumers are integrated and
+independently checked. An audit finding returns to its responsible owner;
+finishing a fixed number of assignments is not the stopping condition.
+
+The first six assignments audit normative coverage, source admission,
+task/frame invariants, replay/cancellation/cleanup, primitives/static literals,
+and proof trust plus the compiler-correctness contract. Their evidence must
+distinguish existing conditional results from source-derived guarantees.
+They produce the requirement ledger and exact repair contracts before
+overlapping semantic definitions are edited.
+
+Implementation then closes admission, complete execution invariants, static
+storage and nominal views, replay, cancellation, primitives and runtime
+consumers. The composition wave proves entry establishment, ordinary/effect/
+foreign preservation and progress, and the general source-admitted result.
+Independent auditors check circularity, normative fidelity, storage/lifetimes,
+runtime outcomes and nonvacuity. Integration and clean-source verification
+must refer to the same final revision.
+
+Final acceptance requires every normative requirement to name its authoritative
+definition, admission producer, constructive execution result where applicable,
+safety proof, general composition consumer, explicit external assumptions and
+independent evidence. No missing supported cases, assumed progress/completion,
+unjustified post-state premises, silent scope reductions or proof escapes are
+accepted. Finite and unbounded observations and the future compiler refinement
+contract are included; implementing a compiler or verifying library algorithms
+is not part of this phase. Existing unfinished obligations remain unfinished
+until this evidence closes them.
+
 ## 1. Nonvacuous semantic soundness — active
 
 Establish preservation, progress, ownership/lifetime safety and lawful resource
