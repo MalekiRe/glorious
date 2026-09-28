@@ -64,6 +64,13 @@ Permission and graph separation follow from the actual Copy/transfer producer.
 The alternative is the existing fatal resource transition for the same allocation
 request. General projection transport preserves dynamic indices and exact
 reference views through the allocation and fresh binding.
+Freshness is now stated over the source locals and interpreted by the actual
+`ContextBindingsTyped.bindings` relation: `no_local_key_of_fresh` excludes the
+destination key from the whole runtime environment, including resource and
+obligation entries. `bindAcquire` consumes this producer rather than assuming
+runtime-key absence separately. The exact `sourceType` equality premise remains
+open: source definitional conversion alone does not establish physical tag
+identity. No allocation-success assumption or new context field was added.
 The proof consumes pre-state source assertions; it does not yet derive them from
 a complete syntax-directed body judgment. The three `Elaboration.Closure`
 `ResourceAdmission` premises and aggregate admission assumptions remain open.
