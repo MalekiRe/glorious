@@ -15,9 +15,10 @@ default deliverable. Do not substitute example coverage for general proofs.
 
 ## Completion-driven Luna programme
 
-The active programme assigns implementation, integration and independent
-semantic review to GPT-6 Luna workers; the lead owns contracts, dependency
-ordering and acceptance decisions. At most ten workers execute concurrently.
+The active programme assigns bounded implementation and independent semantic
+review to GPT-6 Luna workers. The lead owns contracts, integration, and direct
+implementation of repeatedly stalled boundaries, beginning with source admission.
+At most ten workers execute concurrently.
 An assignment is accepted only after its real consumers are integrated and
 independently checked. An audit finding returns to its responsible owner;
 finishing a fixed number of assignments is not the stopping condition.
@@ -55,6 +56,17 @@ quantifies over runs and requires progress and resource completion. Storage
 typing has been removed from that admission and proved separately. Projecting
 the remaining requirements out of admission is not the missing soundness
 proof. Moving the same assumption into a certificate is not a repair either.
+
+Source-admission worktree checkpoint: `SourceAssertion.bindAcquire` now composes
+the actual local allocation and acquisition transitions into a two-event `Run`,
+with the bound continuation, unchanged frames, world typing, and initialized
+owned-resource output assertion. The alternative is the existing fatal resource
+transition for the same allocation request. General projection transport preserves
+dynamic indices and exact reference views through the allocation and fresh binding.
+The proof consumes pre-state source assertions; it does not yet derive them from
+a complete syntax-directed body judgment. The three `Elaboration.Closure`
+`ResourceAdmission` premises and aggregate admission assumptions remain open.
+This checkpoint is not whole-body or whole-language soundness.
 
 Work outward from the required invariant and its proof failures:
 

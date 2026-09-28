@@ -1,9 +1,11 @@
-import GloriousLanguage.Typing
-import GloriousLanguage.ControlOrigin
-import GloriousLanguage.InvocationInputs
-import GloriousLanguage.LabelBoundary
-import GloriousLanguage.ForeignRuntimeSupport
-import GloriousLanguage.TailEntryProgress
+ import GloriousLanguage.Typing
+ import GloriousLanguage.ControlOrigin
+ import GloriousLanguage.InvocationInputs
+ import GloriousLanguage.LabelBoundary
+ import GloriousLanguage.ForeignRuntimeSupport
+ import GloriousLanguage.TailEntryProgress
+ import GloriousLanguage.CopyProgress
+import GloriousLanguage.ProjectionResolution
 
 /-! Checked interfaces are abstractions of execution, not trusted annotations.
 The meaning below is intentionally semantic; it does not claim that an
@@ -104,6 +106,338 @@ def InvocationStart (program : Kernel.Program) (host : Foreign.Model) (function 
     (function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) ∧
     source.Admitted program state.world caller.region function ∧
     (tail = true → ∃ roots, source.CleanupAdmitted program state.world function caller.activation roots)
+/-- A source operand before runtime resolution. This retains the Core `Place` identity and the callee's formal coordinate; it does not invent an address or authority. -/
+structure SourceInput where
+  place : Place
+  formal : InputFormal
+  origin : InvocationOrigin
+  access : Access
+  deriving Repr, Inhabited
+
+/-- Realize a source operand through the same environment lookup and permission graph consumed by machine operand preparation. -/
+def SourceInput.Resolves (world : World) (environment : Environment) (source : SourceInput) (input : InvocationInput) : Prop :=
+  ∃ address authority, ResolvesPlace world environment source.place address authority ∧
+    input = ⟨source.origin,source.formal,address,authority,source.access⟩
+
+/-- Complete ordered input batches are checked on one pre-state. -/
+def SourceInputsCompatible (program : Kernel.Program) (function : Function) (region : Identity)
+    (world : World) (environment : Environment) (sources : List SourceInput) : Prop :=
+  ∃ inputs, ListRel (SourceInput.Resolves world environment) sources inputs ∧
+    FunctionInputs function inputs ∧
+    InvocationInputsCompatible program (inputs.flatMap InvocationInput.clearedStorage) region world inputs ∧
+    IncomingResources program function world inputs ∧
+    ∃ declaration, program.declarations.function function.declaration = some declaration
+
+/-- Finite source assertions name resolved semantic places, never a second
+string-keyed resource ledger. The `freshLoan` binder denotes a genuinely absent
+loan identity in the interpreted pre-state. -/
+inductive SourceAssertion where
+  | initialized (place : Place)
+  | resources (place : Place) (access : Access)
+  | permission (place : Place) (access : Access)
+  | selfSeparated (place : Place)
+  | custody (place : Place) (kind : ClaimCustody)
+  | inputBatch (operands : List SourceInput)
+  | ownersOutside (active : List Place) (capturedRoots : List Address)
+  | compatible (left right : SourceAssertion)
+  | separating (left right : SourceAssertion)
+  | guarded (guard : Guard) (assertion : SourceAssertion)
+  | freshLoan (continuation : Identity → SourceAssertion)
+
+def SourceAssertion.places : SourceAssertion → List Place
+  | .inputBatch operands => operands.map SourceInput.place
+  | .initialized place | .permission place _ | .resources place _ | .custody place _ => [place]
+  | .selfSeparated place => [place]
+  | .ownersOutside active _ => active
+  | .compatible left right | .separating left right => left.places ++ right.places
+  | .guarded _ assertion => assertion.places
+  | .freshLoan _ => []
+
+/-- Interpret source assertions against the actual resolving environment and
+loan/resource graph. Compatible conjunction permits shared places when the
+underlying permissions do; separating conjunction additionally requires
+distinct resolved addresses. Guarded and fresh-identity alternatives remain
+finite syntax and retain their actual semantic branch premise. -/
+def SourceAssertion.Holds (program : Kernel.Program) (function : Function) (region : Identity)
+    (world : World) (environment : Environment) : SourceAssertion → Prop
+  | .initialized place => ∃ address authority value,
+      ResolvesPlace world environment place address authority ∧ world.Stores address value ∧ value.Initialized
+  | .permission place access => ∃ address authority,
+      ResolvesPlace world environment place address authority ∧ Permitted world authority access address
+  | .custody place kind => ∃ address authority, ResolvesPlace world environment place address authority ∧
+      authority.Custodied world kind
+  | .inputBatch operands => SourceInputsCompatible program function region world environment operands
+  | .resources place access => ∃ address authority value,
+      ResolvesPlace world environment place address authority ∧ world.Stores address value ∧ value.Initialized ∧
+      value.ResourcesAccessible program world access
+  | .selfSeparated place => ∃ address authority value,
+      ResolvesPlace world environment place address authority ∧ world.Stores address value ∧
+      value.SupportOutside world address
+  | .compatible left right => left.Holds program function region world environment ∧
+      right.Holds program function region world environment
+  | .separating left right => left.Holds program function region world environment ∧
+      right.Holds program function region world environment ∧
+      (∀ first ∈ left.places, ∀ second ∈ right.places, ∀ address authority other otherAuthority,
+        ResolvesPlace world environment first address authority →
+        ResolvesPlace world environment second other otherAuthority → address ≠ other)
+  | .guarded guard assertion => guard.Holds world → assertion.Holds program function region world environment
+  | .freshLoan continuation => ∃ identity, world.loans.get identity = none ∧
+      (continuation identity).Holds program function region world environment
+  | .ownersOutside active capturedRoots => ∀ place ∈ active, ∀ address authority,
+      ResolvesPlace world environment place address authority → authority = .owner →
+        ∀ captured ∈ capturedRoots, address.root ≠ captured.root
+
+
+/-- Compatible resource and permission facts for one Core place recover one
+actual value/address/authority witness. -/
+theorem SourceAssertion.resourcePermission {program : Kernel.Program} {function : Function} {region : Identity}
+    {world : World} {environment : Environment} {place : Place} {access : Access}
+    (facts : SourceAssertion.Holds program function region world environment
+      (.compatible (.resources place access) (.permission place access))) :
+    ∃ source authority value, ResolvesPlace world environment place source authority ∧
+      world.Stores source value ∧ value.Initialized ∧ value.ResourcesAccessible program world access ∧
+      Permitted world authority access source := by
+  rcases facts with ⟨⟨source,authority,value,resolved,stored,initialized,resources⟩,
+    ⟨target,targetAuthority,targetResolved,permission⟩⟩
+  obtain ⟨rfl,rfl⟩ := ResolvesPlace.deterministic resolved targetResolved
+  exact ⟨source,authority,value,resolved,stored,initialized,resources,permission⟩
+
+/-- Owned movement additionally requires that the current value's support graph
+does not point back into its own source storage. -/
+theorem SourceAssertion.resourceMoveFacts {program : Kernel.Program} {function : Function} {region : Identity}
+    {world : World} {environment : Environment} {place : Place}
+    (facts : SourceAssertion.Holds program function region world environment
+      (.compatible (.resources place .owned)
+        (.compatible (.permission place .owned) (.selfSeparated place)))) :
+    ∃ source authority value, ResolvesPlace world environment place source authority ∧
+      world.Stores source value ∧ value.Initialized ∧ value.ResourcesAccessible program world .owned ∧
+      Permitted world authority .owned source ∧ value.SupportOutside world source := by
+  rcases facts with ⟨resourceFacts,⟨permissionFacts,separationFacts⟩⟩
+  have combined : SourceAssertion.Holds program function region world environment
+      (.compatible (.resources place .owned) (.permission place .owned)) :=
+    ⟨resourceFacts,permissionFacts⟩
+  rcases SourceAssertion.resourcePermission combined with
+    ⟨source,authority,value,resolved,stored,initialized,accessible,permission⟩
+  rcases separationFacts with ⟨separated,separatedAuthority,separatedValue,separatedResolved,separatedStored,supportOutside⟩
+  obtain ⟨rfl,rfl⟩ := ResolvesPlace.deterministic resolved separatedResolved
+  have sameValue : value = separatedValue := by
+    exact Option.some.inj (stored.symm.trans separatedStored)
+  subst sameValue
+  exact ⟨source,authority,value,resolved,stored,initialized,accessible,permission,supportOutside⟩
+
+/-- The source acquisition rule derives the selected copy/move premises from
+the prior initialized resource, permission and provenance assertions. The
+actual destination is chosen only by the positive allocation request. -/
+theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function : Function} {region : Identity}
+    {before : World} {environment : Environment} {place : Place} {home : Home}
+    {type : Term} {layout : Layout} {mutable : Bool} {force : Bool} {principal : Principal}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before)
+    (capability : ∀ source authority value, ResolvesPlace before environment place source authority →
+      before.Stores source value → PrincipalOf program.declarations value.type principal)
+    (sourceType : ∀ source authority value, ResolvesPlace before environment place source authority →
+      before.Stores source value → value.type = type)
+    (copyFacts : force = false → principal = .duplicable →
+      SourceAssertion.Holds program function region before environment
+        (.compatible (.resources place .shared) (.permission place .shared)))
+    (moveFacts : force = true ∨ principal ≠ .duplicable →
+      SourceAssertion.Holds program function region before environment
+        (.compatible (.resources place .owned)
+          (.compatible (.permission place .owned) (.selfSeparated place))))
+    (request : AllocationRequest program.declarations before region type layout) :
+    (∃ destination allocated after,
+      Allocates program.declarations before home region type layout mutable destination allocated ∧
+      ∃ source authority value, ResolvesPlace before environment place source authority ∧
+        before.Stores source value ∧ PrincipalOf program.declarations value.type principal ∧
+        Acquires program allocated authority force source destination after ∧ Typing.WorldTyped program after ∧
+        ∃ result, after.Stores destination result ∧ result.Initialized ∧
+          result.ResourcesAccessible program after .owned) ∨
+      AllocationExhausted program.declarations before region type layout := by
+  by_cases copying : force = false ∧ principal = .duplicable
+  · obtain ⟨rfl,rfl⟩ := copying
+    obtain ⟨source,authority,value,resolved,stored,initialized,accessible,permission⟩ :=
+      SourceAssertion.resourcePermission (copyFacts rfl rfl)
+    have capability := capability source authority value resolved stored
+    have valueType := sourceType source authority value resolved stored
+    subst type
+    have copyReady : false = false → Principal.duplicable = .duplicable →
+        value.ResourcesAccessible program before .shared ∧ Permitted before authority .shared source := by
+      intro _ _
+      exact ⟨accessible,permission⟩
+    have moveReady : false = true ∨ Principal.duplicable ≠ .duplicable →
+        value.MoveReady program before [source] ∧ Permitted before authority .owned source := by
+      intro impossible
+      rcases impossible with forceTrue | nonduplicable
+      · cases forceTrue
+      · exact False.elim (nonduplicable rfl)
+    rcases Acquires.allocate_success_or_exhausted valid inventory typed stored initialized capability
+      copyReady moveReady request with ⟨destination,allocated,after,allocation,acquired,afterTyped,result⟩ | exhausted
+    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,capability,acquired,afterTyped,result⟩
+    · exact Or.inr exhausted
+  · have moving : force = true ∨ principal ≠ .duplicable := by
+      cases force with
+      | true => exact Or.inl rfl
+      | false => exact Or.inr (fun same => copying ⟨rfl,same⟩)
+    obtain ⟨source,authority,value,resolved,stored,initialized,accessible,permission,supportOutside⟩ :=
+      SourceAssertion.resourceMoveFacts (moveFacts moving)
+    have capability := capability source authority value resolved stored
+    have valueType := sourceType source authority value resolved stored
+    subst type
+    have copyReady : force = false → principal = .duplicable →
+        value.ResourcesAccessible program before .shared ∧ Permitted before authority .shared source := by
+      intro forced duplicate
+      exact False.elim (copying ⟨forced,duplicate⟩)
+    have moveReady : force = true ∨ principal ≠ .duplicable →
+        value.MoveReady program before [source] ∧ Permitted before authority .owned source := by
+      intro _
+      have ready : value.MoveReady program before [source] := by
+        change value.HandoffReady program before .owned [source]
+        refine ⟨accessible,?_⟩
+        intro target member
+        have same := List.mem_singleton.mp member
+        subst target
+        exact supportOutside
+      exact ⟨ready,permission⟩
+    rcases Acquires.allocate_success_or_exhausted valid inventory typed stored initialized capability
+      copyReady moveReady request with ⟨destination,allocated,after,allocation,acquired,afterTyped,result⟩ | exhausted
+    · exact Or.inl ⟨destination,allocated,after,allocation,source,authority,value,resolved,stored,capability,acquired,afterTyped,result⟩
+    · exact Or.inr exhausted
+/-- The allocation/acquisition post-value is visible through the actual
+shadowing local binding installed by Core's `.bind` step. -/
+theorem SourceAssertion.boundDestination {program : Kernel.Program} {function : Function} {region : Identity}
+    {context : Execution.Context} {localSlot : Local} {world : World} {address : Address} {value : Value}
+    (stored : world.Stores address value) (initialized : value.Initialized)
+    (resources : value.ResourcesAccessible program world .owned) :
+    SourceAssertion.Holds program function region world
+      (context.bind localSlot address).environment (.resources ⟨localSlot.id,[]⟩ .owned) := by
+  refine ⟨address,.owner,value,?_,stored,initialized,resources⟩
+  apply ResolvesPlace.localSlot
+  · change (context.bind localSlot address).environment.Selects localSlot.id
+      ⟨.localSlot localSlot.id,address,.owner⟩
+    simp [Execution.Context.bind,Environment.Selects,Environment.SelectsKey]
+    intro other member notKey selectedKey
+    change (!(other.key == BindingKey.localSlot localSlot.id)) = true at notKey
+    have keyEqual : (other.key == BindingKey.localSlot localSlot.id) = true := by
+      rw [selectedKey]
+      change (localSlot.id == localSlot.id) = true
+      exact BEq.rfl
+    rw [keyEqual] at notKey
+    cases notKey
+  · change ResolvesProjections world (context.bind localSlot address).environment address .owner [] address .owner
+    exact .nil
+theorem SourceAssertion.bind_preserves_selection {context : Execution.Context} {localSlot : Local}
+    {address : Address} {id : Identity} {binding : Binding}
+    (fresh : ∀ previous ∈ context.environment, previous.key ≠ .localSlot localSlot.id)
+    (selected : context.environment.Selects id binding) :
+    (context.bind localSlot address).environment.Selects id binding := by
+  have different := fresh binding selected.1
+  have ids : id ≠ localSlot.id := by
+    intro same
+    exact different (selected.2.1.trans (congrArg BindingKey.localSlot same))
+  refine ⟨?_,selected.2.1,?_⟩
+  · simp only [Execution.Context.bind, List.mem_cons, List.mem_filter]
+    refine Or.inr ⟨selected.1,?_⟩
+    rw [selected.2.1]
+    change (!(id == localSlot.id)) = true
+    simp [ids]
+  · intro other member key
+    change other ∈ _ :: _ at member
+    rcases List.mem_cons.mp member with rfl | old
+    · exact False.elim (ids (BindingKey.localSlot.inj key).symm)
+    · exact selected.2.2 other (List.mem_filter.mp old).1 key
+
+/-- A source acquisition binding executes allocation and acquisition in order,
+then interprets its output in the actual continuation environment. Exhaustion
+is the existing fatal transition of that same allocation request. -/
+theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.Model}
+    {function : Function} {before : State} {context : Execution.Context} {lexical : Local}
+    {place : Place} {next : Code} {layout : Layout} {force : Bool} {principal : Principal}
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program before.world)
+    (task : before.task = .run context (.bind lexical (.acquire place force) next))
+    (fresh : ∀ binding ∈ context.environment, binding.key ≠ .localSlot lexical.id)
+    (capability : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
+      before.world.Stores source value → PrincipalOf program.declarations value.type principal)
+    (sourceType : ∀ source authority value, ResolvesPlace before.world context.environment place source authority →
+      before.world.Stores source value → value.type = (context.local lexical).type)
+    (copyFacts : force = false → principal = .duplicable →
+      SourceAssertion.Holds program function context.region before.world context.environment
+        (.compatible (.resources place .shared) (.permission place .shared)))
+    (moveFacts : force = true ∨ principal ≠ .duplicable →
+      SourceAssertion.Holds program function context.region before.world context.environment
+        (.compatible (.resources place .owned)
+          (.compatible (.permission place .owned) (.selfSeparated place))))
+    (request : AllocationRequest program.declarations before.world context.region (context.local lexical).type layout) :
+    (∃ address event after, Run program host before [.allocate address,event] after ∧
+      after.task = .run (context.bind (context.local lexical) address) next ∧
+      after.frames = before.frames ∧ Typing.WorldTyped program after.world ∧
+      SourceAssertion.Holds program function context.region after.world
+        (context.bind (context.local lexical) address).environment (.resources ⟨lexical.id,[]⟩ .owned)) ∨
+    Run program host before [.fatal .resource] {before with task := .fatal .resource} := by
+  rcases SourceAssertion.acquireAllocation
+    (home := .localSlot context.activation context.scope) (mutable := (context.local lexical).mutable)
+    valid inventory typed capability sourceType copyFacts moveFacts request with
+    ⟨address,allocated,after,allocation,source,authority,value,resolved,stored,capable,acquired,afterTyped,result⟩ | exhausted
+  · have selection : ∀ id binding, context.environment.Selects id binding →
+        (context.bind (context.local lexical) address).environment.Selects id binding := by
+      intro id binding selected
+      exact SourceAssertion.bind_preserves_selection fresh selected
+    have resolution := resolved.transport selection
+      (fun address _ stored => (allocation.read typed.1 address).trans stored) allocation.loans
+    let middle : State := {before with world := allocated, task := .atom (context.bind (context.local lexical) address) address (.acquire place force) next}
+    have allocatedStep : LocalStep program before (some (.allocate address)) middle :=
+      LocalStep.bind task rfl allocation
+    have acquiredStep := AtomStep.acquire (before := middle) rfl resolution acquired
+    obtain ⟨output,outputStored,initialized,resources⟩ := result
+    refine Or.inl ⟨address,_,_,.visible (Or.inl allocatedStep)
+      (.visible (Or.inr (Or.inl acquiredStep)) .refl),rfl,rfl,afterTyped,?_⟩
+    exact SourceAssertion.boundDestination outputStored initialized resources
+  · exact Or.inr (.visible (Or.inl (LocalStep.bindExhausted task rfl exhausted)) .refl)
+
+theorem SourceInputsCompatible.supplied {program : Kernel.Program} {function : Function}
+    {region : Identity} {world : World} {environment : Environment} {sources : List SourceInput}
+    (compatible : SourceInputsCompatible program function region world environment sources) :
+    ∃ inputs, ListRel (SourceInput.Resolves world environment) sources inputs ∧
+      FunctionInputs function inputs ∧
+      (Execution.EntrySource.supplied inputs).Admitted program world region function := by
+  obtain ⟨inputs,resolves,formals,product,incoming,declared⟩ := compatible
+  exact ⟨inputs,resolves,formals,Execution.EntrySource.Admitted.supplied product incoming declared⟩
+
+/-- A checked source input batch drives the actual ordered callee-region and
+binding attempt from the current world; it is not an admitted successful entry. -/
+theorem SourceInputsCompatible.enterWorldAttempt {program : Kernel.Program}
+    {function : Function} {region : Identity} {world : World} {environment : Environment}
+    {sources : List SourceInput} {state : State} {caller : Execution.Context}
+    (compatible : SourceInputsCompatible program function region world environment sources)
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program world) (sameWorld : state.world = world)
+    (sameRegion : region = caller.region)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ inputs, ListRel (SourceInput.Resolves world environment) sources inputs ∧
+      FunctionInputs function inputs ∧
+      ∃ context after outcome, EnterWorldAttempt program state caller function
+        (.supplied inputs) context after outcome := by
+  obtain ⟨inputs,resolves,formals,product,incoming,declared⟩ := compatible
+  subst sameWorld
+  subst sameRegion
+  let admitted := Execution.EntrySource.Admitted.supplied product incoming declared
+  exact ⟨inputs,resolves,formals,Execution.EntrySource.Admitted.enterWorldAttempt valid inventory typed admitted callerUnsafe⟩
+/-- The input-batch source assertion is consumed by the actual checked entry
+producer. The result exposes resolved formal rows and an ordered real
+preparation attempt, not a post-entry success assumption. -/
+theorem SourceAssertion.inputBatch.enterWorldAttempt {program : Kernel.Program}
+    {function : Function} {region : Identity} {world : World} {environment : Environment}
+    {sources : List SourceInput} {state : State} {caller : Execution.Context}
+    (holds : SourceAssertion.Holds program function region world environment (.inputBatch sources))
+    (valid : ProgramWellFormed program.declarations) (inventory : Kernel.BodyInventory program)
+    (typed : Typing.WorldTyped program world) (sameWorld : state.world = world)
+    (sameRegion : region = caller.region)
+    (callerUnsafe : function.signature.unsafeAllowed = true → caller.unsafeAllowed = true) :
+    ∃ inputs, ListRel (SourceInput.Resolves world environment) sources inputs ∧
+      FunctionInputs function inputs ∧
+      ∃ context after outcome, EnterWorldAttempt program state caller function
+        (.supplied inputs) context after outcome := by
+  exact SourceInputsCompatible.enterWorldAttempt holds valid inventory typed sameWorld sameRegion callerUnsafe
 
 /-- Whole-program invocation is the isolated specialization of the same
 admission relation. It retains the original supplied-input entry convention. -/
