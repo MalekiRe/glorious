@@ -54,6 +54,17 @@ typing has been removed from that admission and proved separately. Projecting
 the remaining requirements out of admission is not the missing soundness
 proof. Moving the same assumption into a certificate is not a repair either.
 
+Source-admission worktree checkpoint: `SourceAssertion.bindAcquire` now composes
+the actual local allocation and acquisition transitions into a two-event `Run`,
+with the bound continuation, unchanged frames, world typing, and initialized
+owned-resource output assertion. The alternative is the existing fatal resource
+transition for the same allocation request. General projection transport preserves
+dynamic indices and exact reference views through the allocation and fresh binding.
+The proof consumes pre-state source assertions; it does not yet derive them from
+a complete syntax-directed body judgment. The three `Elaboration.Closure`
+`ResourceAdmission` premises and aggregate admission assumptions remain open.
+This checkpoint is not whole-body or whole-language soundness.
+
 Work outward from the required invariant and its proof failures:
 
 Current integrated checkpoint: actual operation execution composes with the
