@@ -564,6 +564,16 @@ or a dependency of this project.
   capability and Drop agreement from concrete type agreement; accepted layouts
   supply the real layout query's storage-safe unique progress. Code, relocation
   and complete concrete-site coverage remain separate open obligations.
+- `ABI`, `Specification`: engine `realizes`/`reflects` produce the invocation
+  weak refinement, with well-founded silent stuttering, two-way initial coverage,
+  weak terminal closure and local invalid reflection. `WeakRefinement.preserves`
+  derives finite observations/results, both infinite-execution directions with
+  `SameObservations`, and source-safe-to-target-safe. Positive finite segments
+  are flattened into actual infinite runs; no divergence certificate is assumed.
+  `BehaviorCorrect.preserves` consumes this result for both VM and native engines.
+  Reachable source states yield related VM/native states and a shared ABI
+  representation witness. Source progress and complete ABI-site obligations
+  remain separate: this is not whole-language or implemented-compiler soundness.
 - `Specification`, `Checks`: aggregate language/implementation obligations
   and foundational positive/negative regression propositions.
 
