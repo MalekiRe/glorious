@@ -56,10 +56,14 @@ proof. Moving the same assumption into a certificate is not a repair either.
 
 Source-admission worktree checkpoint: `SourceAssertion.bindAcquire` now composes
 the actual local allocation and acquisition transitions into a two-event `Run`,
-with the bound continuation, unchanged frames, world typing, and initialized
-owned-resource output assertion. The alternative is the existing fatal resource
-transition for the same allocation request. General projection transport preserves
-dynamic indices and exact reference views through the allocation and fresh binding.
+with the bound continuation, unchanged frames, world typing, initialized owned
+resources, owned destination permission, and self-separated output support.
+The output now establishes the same resource/permission/separation conjunction
+consumed by the next source move rather than only an initialized-value fact.
+Permission and graph separation follow from the actual Copy/transfer producer.
+The alternative is the existing fatal resource transition for the same allocation
+request. General projection transport preserves dynamic indices and exact
+reference views through the allocation and fresh binding.
 The proof consumes pre-state source assertions; it does not yet derive them from
 a complete syntax-directed body judgment. The three `Elaboration.Closure`
 `ResourceAdmission` premises and aggregate admission assumptions remain open.

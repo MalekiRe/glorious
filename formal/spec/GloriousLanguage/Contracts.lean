@@ -304,13 +304,9 @@ theorem SourceAssertion.acquireAllocation {program : Kernel.Program} {function :
     · exact Or.inr exhausted
 /-- The allocation/acquisition post-value is visible through the actual
 shadowing local binding installed by Core's `.bind` step. -/
-theorem SourceAssertion.boundDestination {program : Kernel.Program} {function : Function} {region : Identity}
-    {context : Execution.Context} {localSlot : Local} {world : World} {address : Address} {value : Value}
-    (stored : world.Stores address value) (initialized : value.Initialized)
-    (resources : value.ResourcesAccessible program world .owned) :
-    SourceAssertion.Holds program function region world
-      (context.bind localSlot address).environment (.resources ⟨localSlot.id,[]⟩ .owned) := by
-  refine ⟨address,.owner,value,?_,stored,initialized,resources⟩
+theorem SourceAssertion.boundResolution {context : Execution.Context} {localSlot : Local}
+    {world : World} {address : Address} :
+    ResolvesPlace world (context.bind localSlot address).environment ⟨localSlot.id,[]⟩ address .owner := by
   apply ResolvesPlace.localSlot
   · change (context.bind localSlot address).environment.Selects localSlot.id
       ⟨.localSlot localSlot.id,address,.owner⟩
@@ -325,6 +321,14 @@ theorem SourceAssertion.boundDestination {program : Kernel.Program} {function : 
     cases notKey
   · change ResolvesProjections world (context.bind localSlot address).environment address .owner [] address .owner
     exact .nil
+theorem SourceAssertion.boundDestination {program : Kernel.Program} {function : Function} {region : Identity}
+    {context : Execution.Context} {localSlot : Local} {world : World} {address : Address} {value : Value}
+    (stored : world.Stores address value) (initialized : value.Initialized)
+    (resources : value.ResourcesAccessible program world .owned) :
+    SourceAssertion.Holds program function region world
+      (context.bind localSlot address).environment (.resources ⟨localSlot.id,[]⟩ .owned) :=
+  ⟨address,.owner,value,SourceAssertion.boundResolution,stored,initialized,resources⟩
+
 theorem SourceAssertion.bind_preserves_selection {context : Execution.Context} {localSlot : Local}
     {address : Address} {id : Identity} {binding : Binding}
     (fresh : ∀ previous ∈ context.environment, previous.key ≠ .localSlot localSlot.id)
@@ -372,7 +376,9 @@ theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.M
       after.task = .run (context.bind (context.local lexical) address) next ∧
       after.frames = before.frames ∧ Typing.WorldTyped program after.world ∧
       SourceAssertion.Holds program function context.region after.world
-        (context.bind (context.local lexical) address).environment (.resources ⟨lexical.id,[]⟩ .owned)) ∨
+        (context.bind (context.local lexical) address).environment
+        (.compatible (.resources ⟨lexical.id,[]⟩ .owned)
+          (.compatible (.permission ⟨lexical.id,[]⟩ .owned) (.selfSeparated ⟨lexical.id,[]⟩)))) ∨
     Run program host before [.fatal .resource] {before with task := .fatal .resource} := by
   rcases SourceAssertion.acquireAllocation
     (home := .localSlot context.activation context.scope) (mutable := (context.local lexical).mutable)
@@ -391,7 +397,13 @@ theorem SourceAssertion.bindAcquire {program : Kernel.Program} {host : Foreign.M
     obtain ⟨output,outputStored,initialized,resources⟩ := result
     refine Or.inl ⟨address,_,_,.visible (Or.inl allocatedStep)
       (.visible (Or.inr (Or.inl acquiredStep)) .refl),rfl,rfl,afterTyped,?_⟩
-    exact SourceAssertion.boundDestination outputStored initialized resources
+    have bound : ResolvesPlace after (context.bind (context.local lexical) address).environment
+        ⟨lexical.id,[]⟩ address .owner := SourceAssertion.boundResolution
+    have permitted := (allocation.owner_permitted typed.1).locationExtension
+      (.of_locations acquired.locations) acquired.loans
+    exact ⟨SourceAssertion.boundDestination outputStored initialized resources,
+      ⟨address,.owner,bound,permitted⟩,
+      ⟨address,.owner,output,bound,outputStored,acquired.destination_supportOutside outputStored⟩⟩
   · exact Or.inr (.visible (Or.inl (LocalStep.bindExhausted task rfl exhausted)) .refl)
 
 theorem SourceInputsCompatible.supplied {program : Kernel.Program} {function : Function}
