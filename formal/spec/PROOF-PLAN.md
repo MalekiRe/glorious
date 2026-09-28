@@ -13,21 +13,19 @@ remains necessary. Work in large, dependency-coherent chunks that close difficul
 general semantic obligations; helper lemmas are intermediate steps, not the
 default deliverable. Do not substitute example coverage for general proofs.
 
-## Completion-driven Luna programme
+## Completion-driven serial programme
 
-The active programme assigns implementation, integration and independent
-semantic review to GPT-6 Luna workers; the lead owns contracts, dependency
-ordering and acceptance decisions. At most ten workers execute concurrently.
-An assignment is accepted only after its real consumers are integrated and
-independently checked. An audit finding returns to its responsible owner;
-finishing a fixed number of assignments is not the stopping condition.
+Implementation, integration, proof checking and semantic review now proceed
+serially with the lead. The user ended the Luna-worker workflow; no subagents
+are to be launched or resumed. Existing worker workspaces and handoffs are
+preserved as unfinished source material, not accepted proof releases.
 
-The first six assignments audit normative coverage, source admission,
-task/frame invariants, replay/cancellation/cleanup, primitives/static literals,
-and proof trust plus the compiler-correctness contract. Their evidence must
-distinguish existing conditional results from source-derived guarantees.
-They produce the requirement ledger and exact repair contracts before
-overlapping semantic definitions are edited.
+A repair is accepted only after its authoritative producers and real consumers
+are integrated and checked. The earlier audits of normative coverage, source
+admission, task/frame invariants, replay/cancellation/cleanup, primitives/static
+literals and compiler correctness remain inputs to the requirement ledger.
+Their conditional results must remain distinct from source-derived guarantees.
+Finishing a fixed number of repairs is not the stopping condition.
 
 Implementation then closes admission, complete execution invariants, static
 storage and nominal views, replay, cancellation, primitives and runtime
