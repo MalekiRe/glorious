@@ -100,12 +100,26 @@ callable-selection step and retiring step, rather than requiring one state to
 be both pending syntax and a retirement source. The canonical source engine
 constructs all three transitions and derives the endpoint activation-frame bound.
 
-The focused ABI and `Specification` gate passes with strict Lean settings. This
-is not full ABI soundness: source progress, the complete cleanup/control-space
-bound, target-state coverage beyond tail entries, and label brand instantiation
-and direct-transfer correspondence still require proof. Conditional `realizes`
-alone does not exclude an empty engine/source relation. The full specification
-goal remains open.
+The compiler behavior boundary derives invocation `WeakRefinement` from the
+same engine `realizes`/`reflects` transition laws, with two-way initial coverage,
+weak terminal closure and target-invalid-to-source-invalid reflection. Empty
+matches strictly decrease an arbitrary well-founded rank; positive matches
+retain actual finite paths, including their silent transitions.
+
+`WeakRefinement.preserves` proves finite prefix/result agreement, both
+infinite-execution directions with `SameObservations`, and source-safe to
+target-safe. The infinite proof finds positive matches by well-founded descent,
+flattens their paths into an actual infinite execution, and proves cofinal
+observable-prefix equality. It covers silent divergence without adding an
+infinite-behavior assumption. `BehaviorCorrect.preserves` derives the complete
+`Preserves` contract for both engines. `CompilerContract.sharedAtReachable`
+also derives reachable VM/native states and a common representation witness
+for every source-reachable invocation state. The focused `Specification` gate
+passes; these three general consumers use only standard Lean axioms.
+
+Source progress, cleanup/control-space bounds, target-state coverage beyond
+the derived reachable-state ABI witnesses, and label brand/direct-transfer
+correspondence remain open. This checkpoint is not full ABI or compiler soundness.
 
 Initial draft only. The entries below locate the proposed formal meaning;
 they are not a table of passed conformance gates.

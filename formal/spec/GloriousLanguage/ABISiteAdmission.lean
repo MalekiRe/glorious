@@ -325,16 +325,8 @@ theorem TailSite.run_to_landed {program : Kernel.Program} {host : Foreign.Model}
       (Run.visible (Or.inl invoked) (Run.visible (Or.inl tail) Run.refl)),
     ⟨context,call,pending,node,rfl,declared⟩,⟨entering,destination,tail⟩⟩
 
-/-- The canonical source engine: its states are the machine's own states, its
-steps are the one executable relation, and `sourceState` is equality. -/
-def SourceSemantics (program : Kernel.Program) (host : Foreign.Model) :
-    TransitionSystem Execution.Event Unit where
-  State := Execution.State
-  initial _ := False
-  step before event after := Execution.Step program host before event after
-  final _ _ := False
-  invalid _ := False
-
+/- The canonical source engine uses `ABI.SourceSemantics`, so the exact machine
+transition relation used by the refinement contract has one authoritative producer. -/
 /-- The engine an implementation must agree with at the step level: it *is* the
 source machine. -/
 def SourceEngine (program : Kernel.Program) (host : Foreign.Model) : Engine Execution.Event Unit where
@@ -352,13 +344,31 @@ def SourceEngine (program : Kernel.Program) (host : Foreign.Model) : Engine Exec
       LabelRoute state.frames runtime inner outerContext region type outer ∧
       outerContext.activation = destination ∧
       Execution.Step program host state none after
+  Rank := Nat
+  rankDecrease := (· < ·)
+  rankWellFounded := Nat.lt_wfRel.wf
+  stutterRank _ _ := 0
   sourceState first second := first = second
   realizes := by
     intro before event after step implementing same
     subst same
+    left
     refine ⟨after,?_,rfl⟩
-    cases event <;> simpa [SourceSemantics] using step
-
+    refine ⟨event,after,[],?_,TransitionSystem.Steps.refl,?_⟩
+    · simpa [SourceSemantics] using step
+    · simp
+  reflects := by
+    intro implementing event target step source same
+    subst same
+    cases event with
+    | none =>
+      left
+      refine ⟨target,[],?_,by simp,rfl⟩
+      exact ⟨none,target,[],by simpa [SourceSemantics] using step,TransitionSystem.Steps.refl,by simp⟩
+    | some observed =>
+      left
+      refine ⟨target,[observed],?_,by simp,rfl⟩
+      exact ⟨some observed,target,[],by simpa [SourceSemantics] using step,TransitionSystem.Steps.refl,by simp⟩
 /-- Every actual proper-tail site is discharged by the canonical engine through
 the request, callable selection and retiring steps. The first two preserve the
 frames; the last replaces the activation without increasing live call frames. -/

@@ -6,6 +6,8 @@ import GloriousLanguage.ABISiteAdmission
 does not provide a compiler and does not import the earlier compiler draft.
 All executable clauses use `Execution.Step`; all source clauses use the
 AST-indexed grammar and elaboration relation. -/
+universe u
+
 namespace Glorious.Language.Specification
 
 open Kernel Execution
@@ -137,6 +139,117 @@ def Semantics (program : Kernel.Program) (host : Foreign.Model) (function : Func
   final := Finished program function
   invalid state := ¬ (Typing.WorldTyped program state.world ∧
     (state.ControlWellFormed ∨ state.task = .fatal .resource))
+theorem rawStepsToInvocation (program : Kernel.Program) (host : Foreign.Model)
+    (function : Function) (inputs : List InvocationInput)
+    {start finish : State} {trace : List Execution.Event}
+    (path : (ABI.SourceSemantics program host).Steps start trace finish) :
+    (Semantics program host function inputs).Steps start (trace.filterMap publicEvent) finish := by
+  refine TransitionSystem.Steps.rec (system := ABI.SourceSemantics program host)
+    (motive := fun (start : State) (trace : List Execution.Event) (finish : State) _ =>
+      (Semantics program host function inputs).Steps start (trace.filterMap publicEvent) finish)
+    ?_ ?_ ?_ path
+  · exact .refl
+  · intro start middle finish trace step rest ih
+    have mapped : (Semantics program host function inputs).step start none middle := by
+      refine ⟨none,?_,rfl⟩
+      simpa [ABI.SourceSemantics] using step
+    exact .silent mapped ih
+  · intro start middle finish event trace step rest ih
+    change Execution.Step program host start (some event) middle at step
+    cases observed : publicEvent event with
+    | none =>
+        have mapped : (Semantics program host function inputs).step start none middle :=
+          ⟨some event,step,by simp [observed]⟩
+        apply TransitionSystem.Steps.silent mapped
+        simpa [observed] using ih
+    | some publicValue =>
+        have mapped : (Semantics program host function inputs).step start (some publicValue) middle :=
+          ⟨some event,step,by simp [observed]⟩
+        simpa [observed] using (TransitionSystem.Steps.visible mapped ih)
+
+structure EngineInvocationBoundary (engine : ABI.Engine PublicEvent Result)
+    (source : TransitionSystem PublicEvent Result) (project : source.State → State) : Prop where
+  initialForward : ∀ sourceStart, source.initial sourceStart →
+    ∃ targetStart, engine.semantics.initial targetStart ∧ engine.sourceState targetStart (project sourceStart)
+  initialBackward : ∀ targetStart, engine.semantics.initial targetStart →
+    ∃ sourceStart, source.initial sourceStart ∧ engine.sourceState targetStart (project sourceStart)
+  finalForward : ∀ {sourceEnd targetStart result},
+    engine.sourceState targetStart (project sourceEnd) → source.final sourceEnd result →
+    ∃ targetEnd, engine.semantics.Steps targetStart [] targetEnd ∧
+      engine.sourceState targetEnd (project sourceEnd) ∧ engine.semantics.final targetEnd result
+  finalBackward : ∀ {sourceStart targetEnd result},
+    engine.sourceState targetEnd (project sourceStart) → engine.semantics.final targetEnd result →
+    ∃ sourceEnd, source.Steps sourceStart [] sourceEnd ∧
+      engine.sourceState targetEnd (project sourceEnd) ∧ source.final sourceEnd result
+  invalidReflection : ∀ {sourceState targetState},
+    engine.sourceState targetState (project sourceState) →
+    engine.semantics.invalid targetState → source.invalid sourceState
+
+noncomputable def engineInvocationRefinement (engine : ABI.Engine PublicEvent Result)
+    (program : Kernel.Program) (host : Foreign.Model) (function : Function)
+    (inputs : List InvocationInput)
+    (programEq : engine.program = program) (hostEq : engine.host = host)
+    (observation : ∀ event, engine.observe event = publicEvent event)
+    (boundary : EngineInvocationBoundary engine
+      (Semantics program host function inputs) (fun state => state)) :
+    WeakRefinement.{u} (Semantics program host function inputs) engine.semantics
+      (fun sourceState targetState => engine.sourceState targetState sourceState) := by
+  refine {
+    Rank := engine.Rank
+    decrease := engine.rankDecrease
+    wellFounded := engine.rankWellFounded
+    rank := fun sourceState targetState => engine.stutterRank targetState sourceState
+    initialForward := boundary.initialForward
+    initialBackward := boundary.initialBackward
+    finalForward := boundary.finalForward
+    finalBackward := boundary.finalBackward
+    invalidReflection := boundary.invalidReflection
+    forwardStep := ?_
+    backwardStep := ?_
+  }
+  · intro sourceStart event sourceNext targetStart related sourceStep
+    rcases sourceStep with ⟨internal,rawStep,eventEq⟩
+    rw [← programEq,← hostEq] at rawStep
+    have mappedEvent : internal.bind engine.observe = event := by
+      calc
+        internal.bind engine.observe = internal.bind publicEvent := by
+          cases internal with
+          | none => rfl
+          | some raw => simp [observation raw]
+        _ = event := eventEq.symm
+    rcases engine.realizes sourceStart internal sourceNext rawStep targetStart related with
+      matched | stutter
+    · obtain ⟨targetNext,path,nextRelated⟩ := matched
+      left
+      exact ⟨targetNext,by simpa [mappedEvent] using path,nextRelated⟩
+    · right
+      have eventNone : event = none := by rw [← mappedEvent]; exact stutter.1
+      exact ⟨eventNone,stutter.2.1,stutter.2.2⟩
+  · intro sourceStart targetStart event targetNext related targetStep
+    rcases engine.reflects targetStart event targetNext targetStep sourceStart related with
+      matched | stutter
+    · obtain ⟨sourceNext,trace,rawPath,traceObservation,nextRelated⟩ := matched
+      have rawPath' := rawPath
+      rw [programEq,hostEq] at rawPath'
+      rcases rawPath' with ⟨rawEvent,middle,suffix,rawStep,rawRest,traceEq⟩
+      have mappedStep : (Semantics program host function inputs).step sourceStart
+          (rawEvent.bind publicEvent) middle := ⟨rawEvent,rawStep,rfl⟩
+      have mappedPath : (Semantics program host function inputs).PositiveSteps sourceStart
+          (trace.filterMap publicEvent) sourceNext := by
+        refine ⟨rawEvent.bind publicEvent,middle,suffix.filterMap publicEvent,
+          mappedStep,rawStepsToInvocation program host function inputs rawRest,?_⟩
+        rw [traceEq, List.filterMap_append]
+        cases rawEvent with
+        | none => rfl
+        | some raw => cases publicEvent raw <;> rfl
+      have mappedObservation : trace.filterMap publicEvent = event.toList := by
+        have equalMaps : trace.filterMap engine.observe = trace.filterMap publicEvent := by
+          rw [funext observation]
+        exact equalMaps.symm.trans traceObservation
+      left
+      exact ⟨sourceNext,by simpa [mappedObservation] using mappedPath,nextRelated⟩
+    · right
+      exact ⟨stutter.1,stutter.2.1,stutter.2.2⟩
 
 inductive Rejection where
   | source (reason : Failure) (span : Option Span)
@@ -162,9 +275,38 @@ def BehaviorCorrect (implementation : Implementation) : Prop :=
   ∀ budget input artifact host id arguments function inputs,
     implementation.compile budget input = .ok artifact →
     Instance (implementation.source artifact) id arguments function → Foreign.Model.Lawful (implementation.source artifact) host →
-    Preserves (Semantics (implementation.source artifact) host function inputs) (implementation.vm artifact host function inputs).semantics ∧
-    Preserves (Semantics (implementation.source artifact) host function inputs) (implementation.native artifact host function inputs).semantics
-
+    ((implementation.vm artifact host function inputs).program = implementation.source artifact ∧
+      (implementation.vm artifact host function inputs).host = host) ∧
+    (∀ event, (implementation.vm artifact host function inputs).observe event = publicEvent event) ∧
+      Nonempty (EngineInvocationBoundary (implementation.vm artifact host function inputs)
+        (Semantics (implementation.source artifact) host function inputs) (fun state => state)) ∧
+    ((implementation.native artifact host function inputs).program = implementation.source artifact ∧
+      (implementation.native artifact host function inputs).host = host) ∧
+    (∀ event, (implementation.native artifact host function inputs).observe event = publicEvent event) ∧
+      Nonempty (EngineInvocationBoundary (implementation.native artifact host function inputs)
+        (Semantics (implementation.source artifact) host function inputs) (fun state => state))
+theorem BehaviorCorrect.preserves {implementation : Implementation}
+    (behavior : BehaviorCorrect implementation)
+    {budget : Nat} {input : Language.Input} {artifact : implementation.Artifact}
+    {host : Foreign.Model} {id : DeclId} {arguments : List Term}
+    {function : Function} {inputs : List InvocationInput}
+    (compiled : implementation.compile budget input = .ok artifact)
+    (instanceProof : Instance (implementation.source artifact) id arguments function)
+    (lawful : Foreign.Model.Lawful (implementation.source artifact) host) :
+    Preserves (Semantics (implementation.source artifact) host function inputs)
+      (implementation.vm artifact host function inputs).semantics ∧
+    Preserves (Semantics (implementation.source artifact) host function inputs)
+      (implementation.native artifact host function inputs).semantics := by
+  have contract := behavior budget input artifact host id arguments function inputs compiled instanceProof lawful
+  rcases contract.2.2.1 with ⟨vmBoundary⟩
+  rcases contract.2.2.2.2.2 with ⟨nativeBoundary⟩
+  let vmRefinement := engineInvocationRefinement
+    (implementation.vm artifact host function inputs) (implementation.source artifact) host function inputs
+    contract.1.1 contract.1.2 contract.2.1 vmBoundary
+  let nativeRefinement := engineInvocationRefinement
+    (implementation.native artifact host function inputs) (implementation.source artifact) host function inputs
+    contract.2.2.2.1.1 contract.2.2.2.1.2 contract.2.2.2.2.1 nativeBoundary
+  exact ⟨vmRefinement.preserves,nativeRefinement.preserves⟩
 def CompleteWithinDeclaredLimits (implementation : Implementation) : Prop :=
   ∀ input, ValidInput input → ∃ budget artifact, implementation.compile budget input = .ok artifact
 
@@ -193,7 +335,45 @@ structure CompilerContract (implementation : Implementation) : Prop where
       ∃ nativeFusion : ABI.LabelFusion (implementation.native artifact host function inputs),
         vmFusion.sites = Kernel.LabelSites (implementation.source artifact) ∧
         nativeFusion.sites = Kernel.LabelSites (implementation.source artifact)
-
+theorem CompilerContract.sharedAtReachable {implementation : Implementation}
+    (contract : CompilerContract implementation)
+    {budget : Nat} {input : Language.Input} {artifact : implementation.Artifact}
+    {host : Foreign.Model} {id : DeclId} {arguments : List Term}
+    {function : Function} {inputs : List InvocationInput}
+    (compiled : implementation.compile budget input = .ok artifact)
+    (instanceProof : Instance (implementation.source artifact) id arguments function)
+    (lawful : Foreign.Model.Lawful (implementation.source artifact) host)
+    {sourceState : State}
+    (reachable : (Semantics (implementation.source artifact) host function inputs).Reachable sourceState) :
+    ∃ runtime vmState nativeState injection,
+      (implementation.vm artifact host function inputs).semantics.Reachable vmState ∧
+      (implementation.native artifact host function inputs).semantics.Reachable nativeState ∧
+      (implementation.vm artifact host function inputs).sourceState vmState sourceState ∧
+      (implementation.native artifact host function inputs).sourceState nativeState sourceState ∧
+      ABI.Represents (implementation.source artifact) runtime sourceState.world
+        ((implementation.vm artifact host function inputs).backing vmState) injection ∧
+      ABI.Represents (implementation.source artifact) runtime sourceState.world
+        ((implementation.native artifact host function inputs).backing nativeState) injection := by
+  obtain ⟨runtime,abi⟩ := contract.shared budget input artifact host id arguments function inputs
+    compiled instanceProof lawful
+  have behavior := contract.behavior budget input artifact host id arguments function inputs
+    compiled instanceProof lawful
+  rcases behavior.2.2.1 with ⟨vmBoundary⟩
+  rcases behavior.2.2.2.2.2 with ⟨nativeBoundary⟩
+  let vmRefinement := engineInvocationRefinement
+    (implementation.vm artifact host function inputs) (implementation.source artifact) host function inputs
+    behavior.1.1 behavior.1.2 behavior.2.1 vmBoundary
+  let nativeRefinement := engineInvocationRefinement
+    (implementation.native artifact host function inputs) (implementation.source artifact) host function inputs
+    behavior.2.2.2.1.1 behavior.2.2.2.1.2 behavior.2.2.2.2.1 nativeBoundary
+  obtain ⟨vmState,vmReachable,vmRelation⟩ :=
+    WeakRefinement.reachableForward vmRefinement reachable
+  obtain ⟨nativeState,nativeReachable,nativeRelation⟩ :=
+    WeakRefinement.reachableForward nativeRefinement reachable
+  obtain ⟨injection,vmRepresentation,nativeRepresentation,_⟩ :=
+    abi.2.2.2 sourceState vmState nativeState vmRelation nativeRelation
+  exact ⟨runtime,vmState,nativeState,injection,vmReachable,nativeReachable,
+    vmRelation,nativeRelation,vmRepresentation,nativeRepresentation⟩
 theorem always_rejecting_not_complete {implementation : Implementation} {input : Language.Input}
     (valid : ValidInput input)
     (rejects : ∀ budget artifact, implementation.compile budget input ≠ .ok artifact) :

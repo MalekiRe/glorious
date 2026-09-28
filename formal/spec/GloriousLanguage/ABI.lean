@@ -5,6 +5,8 @@ particular, source labels may use mathematical delimiters in the semantics,
 but an admitted target must erase them through a checked direct-control map.
 Shared backing, mandatory tail transfer and loader admission are independent
 of ordinary observational equivalence. -/
+universe u
+
 namespace Glorious.Language.ABI
 
 open Kernel Execution Memory
@@ -101,11 +103,23 @@ def Represents (program : Kernel.Program) (runtime : RuntimeAddresses) (world : 
   (∀ address value physical, world.Resident address value → PhysicalAddress program.declarations world address value.type physical →
     ∃ root, world.root address = some root ∧ physical = root.base + injection.offset address)
 
-/-- An engine carries the source program it executes. `sourceState` relates
-engine states to source states; `realizes` preserves an existing correspondence
-through source steps. It does not establish that any source state is covered:
-coverage must be supplied by the admission clauses that use the engine. -/
-structure Engine (Event Result : Type) where
+/-- The source operational system is the actual execution relation. Each engine
+relates its states to these source states; invocation-specific initial, final,
+and invalid predicates are supplied by the actual source semantics consumer. -/
+def SourceSemantics (program : Kernel.Program) (host : Foreign.Model) :
+    TransitionSystem Execution.Event Unit where
+  State := State
+  initial _ := False
+  step before event after := Execution.Step program host before event after
+  final _ _ := False
+  invalid _ := False
+
+/-- A represented engine is tied to the source machine by a weak two-way step
+relation. Steps may stutter or expand into finite paths; well-founded zero matches
+prevent infinite mismatched stuttering while permitting genuine silent divergence.
+Initial-state coverage and invocation terminal correspondence are stated at the
+compiler boundary, where the concrete invocation is known. -/
+structure Engine (Event Result : Type) : Type (u + 1) where
   program : Kernel.Program
   host : Foreign.Model
   semantics : TransitionSystem Event Result
@@ -118,13 +132,31 @@ structure Engine (Event Result : Type) where
   administrativeControl : semantics.State → Nat
   directTransfer : semantics.State → Identity → semantics.State → Prop
   sourceState : semantics.State → State → Prop
-  /-- Every actual source step from a represented state is realized by one
-  engine step. This conditional law alone permits an empty `sourceState`. -/
+  Rank : Type u
+  rankDecrease : Rank → Rank → Prop
+  rankWellFounded : WellFounded rankDecrease
+  /-- A variant for pairs related by `sourceState`; every empty transition match
+  must strictly decrease it in the side that stutters. -/
+  stutterRank : semantics.State → State → Rank
+  /-- A source step either has a genuinely nonempty engine path with exactly its
+  observed event, or stutters at the same engine state with a tied rank decrease. -/
   realizes : ∀ before event after, Execution.Step program host before event after →
     ∀ implementing, sourceState implementing before →
-      ∃ target, semantics.step implementing (event.bind observe) target ∧ sourceState target after
+      (∃ target, semantics.PositiveSteps implementing (event.bind observe).toList target ∧
+        sourceState target after) ∨
+      (event.bind observe = none ∧ sourceState implementing after ∧
+        rankDecrease (stutterRank implementing after) (stutterRank implementing before))
+  /-- Every target transition is reflected by a finite nonempty source path with
+  the same mapped observations, or by zero source steps with a tied rank decrease. -/
+  reflects : ∀ implementing event target, semantics.step implementing event target →
+    ∀ source, sourceState implementing source →
+      (∃ after trace, (SourceSemantics program host).PositiveSteps source trace after ∧
+        trace.filterMap observe = event.toList ∧ sourceState target after) ∨
+      (event = none ∧ sourceState target source ∧
+        rankDecrease (stutterRank target source) (stutterRank implementing source))
 
 variable {Event Result : Type}
+
 
 def SharedHome (vm : Engine Event Result) (native : Engine Event Result)
     (vmState : vm.semantics.State) (nativeState : native.semantics.State) (address : Address) : Prop :=
