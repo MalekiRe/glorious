@@ -16,8 +16,26 @@ namespace Glorious.Language.Execution
 
 open Kernel
 
-/-- Ending a region leaves the roots, loans and reservations of the world
-unchanged, so every other region can still end. -/
+/-- Every transition out of a nonempty root-cleanup state destroys a non-static
+root: the constructor guard is enforced across the whole `Step` family, not
+just `LocalStep.cleanupRoot`. The selected root is live and not static, so the
+cleanup entry cannot destroy program-lifetime storage. -/
+theorem Step.cleanup_root_nonstatic {program : Kernel.Program} {host : Foreign.Model}
+    {before after : State} {event : Option Event} {context : Context}
+    {id : Identity} {roots : List Identity} {next : Task}
+    (task : before.task = .cleanup context (id :: roots) next)
+    (step : Step program host before event after) :
+    ∃ root, before.world.roots.get id = some root ∧ root.live = true ∧
+      ∀ segment, root.home ≠ .staticData segment := by
+  rcases step with localStep | atom | effect | control | primitive | foreign
+  · cases localStep <;> simp_all
+  · cases atom <;> simp_all
+  · cases effect <;> simp_all
+  · cases control <;> simp_all
+  · cases primitive <;> simp_all
+  · cases foreign <;> simp_all
+
+/-- Ending a region leaves roots, loans and reservations unchanged. -/
 theorem RegionCanEnd.of_regionEnd {before after : World} {closed region : Identity}
     (safe : RegionCanEnd before region) (ended : RegionEnds before closed after) :
     RegionCanEnd after region := by
@@ -82,7 +100,8 @@ theorem CleanupRun.retire_vacant {program : Kernel.Program} {host : Foreign.Mode
     Retires.vacant found live empty safe
   have vacant : before.world.Vacant ⟨id,root.generation,[]⟩ :=
     ⟨root,by simp [World.root,found,live],Or.inl ⟨rfl,empty⟩⟩
-  refine CleanupRun.silent (by simp [Task.Cleanup,task]) (Or.inl (LocalStep.cleanupRoot task found live)) ?_
+  refine CleanupRun.silent (by simp [Task.Cleanup,task])
+    (Or.inl (LocalStep.cleanupRoot task found live (fun segment => (safe.2.2 root found segment).2))) ?_
   refine CleanupRun.silent (by simp [Task.Cleanup]) (Or.inl (LocalStep.destroyVacant (by rfl) vacant)) ?_
   exact CleanupRun.visible (by simp [Task.Cleanup]) (Or.inl (LocalStep.retire (by rfl) retired)) CleanupRun.refl
 

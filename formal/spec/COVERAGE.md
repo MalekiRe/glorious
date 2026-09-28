@@ -33,6 +33,14 @@ guard. The focused private/cleanup/drop/buffer preservation closure passes
 `Classical.choice`, and `Quot.sound`. This does not establish static write
 protection, static-image installation, or nominal literal construction.
 
+`Step.cleanup_root_nonstatic` additionally derives a live non-static selected
+root from every actual transition out of a nonempty root-cleanup task.
+The `cleanupRoot` guard is consumed by vacant and structural cleanup producers.
+The cleanup execution file passes strict Lean checking; the focused cleanup
+destruction/private/semantic preservation closure passes (189 jobs). This is
+an exclusion result, not construction of static literal storage or a proof
+that arbitrary root lists admit cleanup.
+
 ## Produced invocation-entry lifetime
 
 `EnterWorldAttempt.region_live` derives the callee's live region from actual

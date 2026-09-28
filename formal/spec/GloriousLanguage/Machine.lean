@@ -992,6 +992,7 @@ inductive LocalStep (program : Kernel.Program) : State → Option Event → Stat
       LocalStep program before none { before with task := next }
   | cleanupRoot {before context id roots next root} : before.task = .cleanup context (id :: roots) next →
       before.world.roots.get id = some root → root.live = true →
+      (∀ segment, root.home ≠ .staticData segment) →
       LocalStep program before none { before with task := .destroy context ⟨id,root.generation,[]⟩ .owner (.retire id (.cleanup context roots next)) }
   | destroyVacant {before context address authority next} : before.task = .destroy context address authority next →
       before.world.Vacant address → LocalStep program before none { before with task := next }

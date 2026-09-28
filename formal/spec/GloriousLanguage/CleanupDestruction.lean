@@ -537,7 +537,7 @@ theorem CleanupRun.cleanup_root_shell {program : Kernel.Program} {host : Foreign
   have permission : Permitted before.world .owner .owned rootAddress := clear.owner_permission found live
   have whole : root.value = some value := World.root_value_of_stores found stored
   have start : Step program host before none { before with task := .destroy context rootAddress .owner retireTask } :=
-    Or.inl (LocalStep.cleanupRoot task found live)
+    Or.inl (LocalStep.cleanupRoot task found live (fun segment => (clear.home root found segment).2))
   have structural : Step program host { before with task := .destroy context rootAddress .owner retireTask } none { before with task := .destroyFields context rootAddress .owner fieldTasks retireTask } :=
     Or.inl (LocalStep.destroyStructural rfl stored disposable permission shell noContinuation noReference noAvailable)
   have vacant : ∀ field ∈ fieldTasks, before.world.Vacant (rootAddress.child field) := by
