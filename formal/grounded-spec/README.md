@@ -148,11 +148,12 @@ explicit semantic-fidelity and proof-assumption audit.
 ## Current boundary
 
 **Completed subset: unit, explicitly typed fixed-width nonnegative integer and
-decoded character literals, grouping, lexical reads, sequencing, and immutable
-bindings over duplicable values.** The boundary is decoded expression AST to
-logical value; names use nearest-binder lookup. Normative basis: §§2.3, 3.2–3.4,
-4.1, 5.1, 5.3 and 7.2. No previous proof modules are imported. The objective is
-the full specification, not a percentage of features.
+decoded character literals, grouping, lexical reads, sequencing, immutable
+bindings, arbitrary-arity tuples, and numeric tuple projection over duplicable
+values.** The boundary is decoded expression AST to logical value; names use
+nearest-binder lookup. Normative basis: §§2.3, 3.2–3.4, 4.1–4.2, 5.1, 5.3 and
+7.2–7.3. No previous proof modules are imported. The objective is the full
+specification, not a percentage of features.
 
 `Grounded.correctness` proves finite evaluation, result typing and uniqueness
 for every admitted expression in a typed environment. Initializers execute in
@@ -163,11 +164,19 @@ the empty environment rather than assuming it. Admission has no execution
 premise. Exact scalar admission theorems and `unit_agreement` remain connected
 to this general result. No intermediate machine-state theorem is claimed.
 
+Tuple arity is preserved: unit is the empty tuple; grouping and a singleton
+tuple are distinct. Constituent evaluation and positional value typing are
+proved inside the connected theorem, not left as separate prerequisites.
+Projection derives its actual resident and typing from the evaluated tuple;
+an in-range runtime selection is not separately assumed. Out-of-range tuple
+projections cannot be admitted. Physical evaluation traces remain outside this
+pure big-step boundary.
+
 Integer types include signed and unsigned 8/16/32/64/128-bit families. Range
 checking uses mathematical integers with no wrapping. Characters exclude
 surrogates and values above U+10FFFF. Parsing, type inference, prefix negation,
-target-size integers, floating conversion, static strings, aggregates, calls,
-mutation, moves, loans, effects and the remaining language constructs are open.
+target-size integers, floating conversion, static strings, nominal aggregates,
+arrays, calls, mutation, moves, loans, effects and remaining constructs are open.
 There is no physical-storage, allocation-failure, package-admission or compiler-
 realization claim. Big-step total evaluation is not a small-step machine theorem.
 
@@ -187,7 +196,7 @@ import Grounded
 LEAN
 ```
 
-Next: structural aggregates and their ordered constituent evaluation, extending
-the same admission-to-result proof. No primitive booleans: §4.1 excludes them;
-truth and branching must use ordinary library declarations. No standalone
-prerequisite programme is authorized.
+Next: connect source admission constructively to the existing execution theorem,
+then grow callable and nominal-value semantics without primitive booleans:
+§4.1 excludes them; truth and branching use ordinary library declarations.
+No standalone prerequisite programme is authorized.
