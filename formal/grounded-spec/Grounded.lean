@@ -519,8 +519,30 @@ inductive UsePermission (data : DataDeclarations) : Ty → Principal → Prop wh
 abbrev Duplicable (data : DataDeclarations) (type : Ty) := UsePermission data type .duplicable
 abbrev MayDiscard (data : DataDeclarations) (type : Ty) := UsePermission data type .affine
 
-def BindingType.Disposable (data : DataDeclarations) (slot : BindingType) : Prop :=
-  slot.initialization = .vacant ∨ MayDiscard data slot.type
+def Initialization.Hole (program : Program) (state : Initialization) (type : Ty) : Prop :=
+  ∃ home keys indices target, PathType program home type keys indices target ∧ state.Access indices .vacant
+
+mutual
+inductive StorageDisposition (program : Program) : Initialization → Ty → Prop where
+  | vacant {type : Ty} : StorageDisposition program .vacant type
+  | whole {state : Initialization} {type : Ty} (permission : MayDiscard program.data type) : StorageDisposition program state type
+  | tuple {state : Initialization} {first : Ty} {rest : List Ty}
+      (hole : state.Hole program (.tuple first rest)) (fields : StorageDispositions program state.child (first :: rest)) :
+      StorageDisposition program state (.tuple first rest)
+  | nominal {state : Initialization} {identity : Nat} {declaration : DataDecl} {schema : Fields}
+      (declared : program.data identity = some declaration) (structureOnly : declaration.shape = .structure schema)
+      (hole : state.Hole program (.nominal identity))
+      (fields : StorageDispositions program state.child (schema.residents.map Field.type)) :
+      StorageDisposition program state (.nominal identity)
+inductive StorageDispositions (program : Program) : (Nat → Initialization) → List Ty → Prop where
+  | nil {states : Nat → Initialization} : StorageDispositions program states []
+  | cons {states : Nat → Initialization} {first : Ty} {rest : List Ty}
+      (head : StorageDisposition program (states 0) first)
+      (tail : StorageDispositions program (fun index => states (index + 1)) rest) : StorageDispositions program states (first :: rest)
+end
+
+def BindingType.Disposable (program : Program) (slot : BindingType) : Prop :=
+  StorageDisposition program slot.initialization slot.type
 
 /-- Nearest lexical binding wins, including in shadowing initializers. -/
 def lookup {α : Type} (name : String) : List (String × α) → Option α
@@ -638,42 +660,21 @@ theorem ResidentTyped.vacant_value {program : Program} {value : Value} {type : T
     (typed : ResidentTyped program .vacant value type) : value = .vacant := by
   cases typed <;> simp_all
 
-theorem SlotTyped.disposition {program : Program} {value : Value} {slot : BindingType}
-    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data) :
-    value = .vacant ∨ MayDiscard program.data slot.type := by
-  rcases allowed with vacant | discard
-  · left
-    exact ResidentTyped.vacant_value (by simpa [SlotTyped, vacant] using typed)
-  · exact Or.inr discard
-
-theorem SlotTyped.must_transfer {program : Program} {value : Value} {slot : BindingType}
-    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data)
-    (required : ¬ MayDiscard program.data slot.type) : value = .vacant :=
-  (typed.disposition allowed).resolve_right required
-
-def Value.Disposable (program : Program) (value : Value) : Prop :=
-  value = .vacant ∨ ∃ state type, ResidentTyped program state value type ∧ MayDiscard program.data type
+inductive Value.Disposable (program : Program) : Value → Prop where
+  | vacant : Value.Disposable program .vacant
+  | owned {state : Initialization} {value : Value} {type : Ty}
+      (typed : ResidentTyped program state value type) (permission : MayDiscard program.data type) : Value.Disposable program value
+  | tuple {head : Value} {tail : List Value} (incomplete : (Value.tuple head tail).initialized = false)
+      (first : Value.Disposable program head) (rest : ∀ value ∈ tail, Value.Disposable program value) :
+      Value.Disposable program (.tuple head tail)
+  | nominal {identity : Nat} {declaration : DataDecl} {schema : Fields} {values : List Value}
+      (declared : program.data identity = some declaration) (structureOnly : declaration.shape = .structure schema)
+      (incomplete : (Value.nominal identity none values).initialized = false)
+      (fields : ∀ value ∈ values, Value.Disposable program value) : Value.Disposable program (.nominal identity none values)
 
 theorem ResidentTyped.disposable {state : Initialization} {value : Value} {type : Ty}
     (typed : ResidentTyped program state value type) (allowed : MayDiscard program.data type) : value.Disposable program :=
-  Or.inr ⟨state, type, typed, allowed⟩
-
-theorem SlotTyped.disposable {value : Value} {slot : BindingType}
-    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data) : value.Disposable program := by
-  rcases typed.disposition allowed with vacant | permitted
-  · exact Or.inl vacant
-  · exact ResidentTyped.disposable typed permitted
-
-theorem EnvironmentTyped.disposable {environment : Environment} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) :
-    (∀ entry ∈ context, entry.2.Disposable program.data) → ∀ entry ∈ environment, entry.2.Disposable program := by
-  induction typed with
-  | nil => intro _ entry included; cases included
-  | cons head tail ih =>
-    intro allowed entry included
-    rcases List.mem_cons.mp included with rfl | member
-    · exact SlotTyped.disposable head (allowed _ (List.mem_cons_self ..))
-    · exact ih (fun binding member => allowed binding (List.mem_cons_of_mem _ member)) entry member
+  .owned typed allowed
 
 theorem EnvironmentTyped.take {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) (count : Nat) :
@@ -685,14 +686,16 @@ theorem EnvironmentTyped.take {environment : Environment} {context : List (Strin
     | nil => exact .nil
     | cons head tail => exact .cons head (ih tail)
 
-theorem Value.Disposable.not_exact_nominal {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl}
-    (declared : program.data identity = some declaration) (restriction : declaration.restriction = some .exact) :
-    ¬ (Value.nominal identity tag fields).Disposable program := by
-  rintro (impossible | ⟨state, type, typed, permitted⟩)
-  · cases impossible
-  · cases typed with
-    | nominal found chosen finite residents present =>
-      exact permitted.nominal_restriction declared restriction
+theorem Value.Disposable.not_live_exact_nominal {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl}
+    (declared : program.data identity = some declaration) (restriction : declaration.restriction = some .exact)
+    (live : (Value.nominal identity tag fields).initialized = true) :
+    ¬ Value.Disposable program (.nominal identity tag fields) := by
+  intro disposable
+  cases disposable with
+  | owned typed permitted =>
+    cases typed with
+    | nominal found chosen finite residents present => exact permitted.nominal_restriction declared restriction
+  | nominal found structureOnly incomplete fields => simp [live] at incomplete
 
 def Value.head : Value → Head
   | .vacant => .vacant
@@ -1000,7 +1003,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
   | bind {home : Module} {context middle after : List (String × BindingType)} {mutable : Bool} {remaining : Initialization}
       {name : String} {annotation : Option TypeExpr} {initial body : Expr} {localType type : Ty}
       (initialized : HasType program home context initial localType middle)
-      (drop : BindingType.Disposable program.data ⟨localType, mutable, remaining⟩) (annotated : Annotation program.aliases annotation localType)
+      (drop : BindingType.Disposable program ⟨localType, mutable, remaining⟩) (annotated : Annotation program.aliases annotation localType)
       (continued : HasType program home ((name, ⟨localType, mutable, .full⟩) :: middle) body type
         ((name, ⟨localType, mutable, remaining⟩) :: after)) :
       HasType program home context (.bind mutable name annotation initial body) type after
@@ -1034,7 +1037,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       {arguments : List Expr} {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
       (visible : declaration.visibility.Allows declaration.home home) (distinct : (declaration.parameters.map Prod.fst).Nodup)
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
-      (discard : ∀ binding ∈ bodyAfter, binding.2.Disposable program.data)
+      (discard : ∀ binding ∈ bodyAfter, binding.2.Disposable program)
       (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type)) after)
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result bodyAfter) :
       HasType program home context (.call identity arguments) declaration.result after
@@ -1043,7 +1046,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (resident : HasType program home context value target middle)
       (selected : lookup place.root middle = some slot) (writable : slot.mutable = true)
       (available : slot.initialization.Access indices state) (path : PathType program home slot.type place.fields indices target)
-      (discard : state ≠ .vacant → MayDiscard program.data target)
+      (discard : StorageDisposition program state target)
       (written : replaceBinding place.root { slot with initialization := slot.initialization.write indices .full } middle = some updated)
       (continued : HasType program home updated rest result after) :
       HasType program home context (.assign place value rest) result after
@@ -1073,7 +1076,7 @@ inductive ArmsType (program : Program) :
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (bindings ++ context) body result (afterBindings ++ after))
       (lengths : afterBindings.length = bindings.length)
-      (discard : ∀ binding ∈ afterBindings, binding.2.Disposable program.data)
+      (discard : ∀ binding ∈ afterBindings, binding.2.Disposable program)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest after) :
       ArmsType program home context subject result previous ((pattern, body) :: rest) after
 /-- These source rules check constant initializers before pattern normalization.
@@ -1385,6 +1388,106 @@ theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : Lis
   obtain ⟨resident, found, residentTyped⟩ := path.resident typed access
   exact ⟨resident, found, (residentTyped.complete initialized).1⟩
 
+theorem ResidentTyped.fully_initialized {state : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) (live : value.initialized = true) : ValueHasType program value type := by
+  induction typed using ResidentTyped.rec
+    (motive_2 := fun states values types _ => valuesInitialized values = true → ValuesHaveTypes program values types) with
+  | vacant => simp [Value.initialized] at live
+  | unit => exact .unit
+  | integer fits => exact .integer fits
+  | character valid => exact .character valid
+  | tuple head tail present headIH tailIH =>
+    simp only [Value.initialized, Bool.and_eq_true] at live
+    exact .tuple (headIH live.1) (tailIH live.2)
+  | array residents finite size present ih => exact .array (ih (by simpa [Value.initialized] using live)) finite size
+  | nominal declared chosen finite residents present ih => exact .nominal declared chosen finite (ih (by simpa [Value.initialized] using live))
+  | nil => exact .nil
+  | cons head tail headIH tailIH =>
+    rename_i live
+    simp only [valuesInitialized, Bool.and_eq_true] at live
+    exact .cons (headIH live.1) (tailIH live.2)
+
+theorem Initialization.Access.full (indices : List Nat) : Initialization.Access .full indices .full := by
+  induction indices with
+  | nil => exact .here .full
+  | cons index indices ih => exact .child (by intro h; cases h) ih
+
+theorem ResidentTyped.hole_uninitialized {state : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) (hole : state.Hole program type) : value.initialized = false := by
+  obtain ⟨home, keys, indices, target, path, access⟩ := hole
+  obtain ⟨vacancy, selected, vacantTyped⟩ := path.resident typed access
+  have absent := ResidentTyped.vacant_value vacantTyped
+  subst vacancy
+  cases live : value.initialized with
+  | false => rfl
+  | true =>
+    obtain ⟨resident, found, residentTyped⟩ := path.read (typed.fully_initialized live) (Initialization.Access.full indices) .full
+    have same := Option.some.inj (selected.symm.trans found)
+    subst resident
+    have impossible := residentTyped.initialized
+    simp [Value.initialized] at impossible
+theorem StorageDisposition.realized {state : Initialization} {type : Ty} {value : Value}
+    (disposition : StorageDisposition program state type) (typed : ResidentTyped program state value type) : Value.Disposable program value := by
+  induction disposition using StorageDisposition.rec
+    (motive_2 := fun states types _ => ∀ values, ResidentsTyped program states values types → ∀ value ∈ values, Value.Disposable program value)
+    generalizing value with
+  | vacant => have same := ResidentTyped.vacant_value typed; subst value; exact .vacant
+  | whole permission => exact .owned typed permission
+  | tuple hole fields ih =>
+    have incomplete := typed.hole_uninitialized hole
+    cases typed with
+    | vacant => exact .vacant
+    | tuple head tail present =>
+      have children := ih _ (.cons head tail)
+      exact .tuple incomplete (children _ (List.mem_cons_self ..)) (fun value member => children value (List.mem_cons_of_mem _ member))
+  | @nominal state identity declaration schema declared structureOnly hole fields ih =>
+    have incomplete := typed.hole_uninitialized hole
+    cases typed with
+    | vacant => exact .vacant
+    | @nominal _ _ tag otherDeclaration otherSchema values found chosen finite residents present =>
+      have same := Option.some.inj (found.symm.trans declared)
+      subst otherDeclaration
+      cases tag with
+      | some tag => simp [DataDecl.constructor, structureOnly] at chosen
+      | none =>
+        have sameSchema : otherSchema = schema := by simpa [DataDecl.constructor, structureOnly] using chosen.symm
+        subst otherSchema
+        exact .nominal declared structureOnly incomplete (ih _ residents)
+  | nil =>
+    rename_i values typed value included
+    cases typed
+    cases included
+  | cons head tail headIH tailIH =>
+    rename_i values typed value included
+    cases typed with
+    | cons first rest =>
+      rcases List.mem_cons.mp included with rfl | member
+      · exact headIH first
+      · exact tailIH _ rest value member
+theorem StorageDisposition.live_requires_discard {state : Initialization} {type : Ty} {value : Value}
+    (disposition : StorageDisposition program state type) (typed : ResidentTyped program state value type)
+    (live : value.initialized = true) : MayDiscard program.data type := by
+  cases disposition with
+  | vacant => have same := ResidentTyped.vacant_value typed; subst value; simp [Value.initialized] at live
+  | whole permission => exact permission
+  | tuple hole fields => have absent := typed.hole_uninitialized hole; simp [live] at absent
+  | nominal declared structureOnly hole fields => have absent := typed.hole_uninitialized hole; simp [live] at absent
+
+theorem SlotTyped.disposable {value : Value} {slot : BindingType}
+    (typed : SlotTyped program value slot) (allowed : slot.Disposable program) : value.Disposable program :=
+  StorageDisposition.realized allowed typed
+
+theorem EnvironmentTyped.disposable {environment : Environment} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) :
+    (∀ entry ∈ context, entry.2.Disposable program) → ∀ entry ∈ environment, entry.2.Disposable program := by
+  induction typed with
+  | nil => intro _ entry included; cases included
+  | cons head tail ih =>
+    intro allowed entry included
+    rcases List.mem_cons.mp included with rfl | member
+    · exact SlotTyped.disposable head (allowed _ (List.mem_cons_self ..))
+    · exact ih (fun binding member => allowed binding (List.mem_cons_of_mem _ member)) entry member
+
 theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected next : Initialization}
     (path : PathType program home source keys indices target) {value replacement : Value}
     (typed : ResidentTyped program state value source) (access : state.Access indices selected)
@@ -1474,14 +1577,11 @@ theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (
 theorem EnvironmentTyped.place_disposable {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state : Initialization}
     (selected : Grounded.lookup place.root context = some slot) (access : slot.initialization.Access indices state)
-    (path : PathType program home slot.type place.fields indices target) (allowed : state ≠ .vacant → MayDiscard program.data target) :
+    (path : PathType program home slot.type place.fields indices target) (allowed : StorageDisposition program state target) :
     ∃ parent resident, Grounded.lookup place.root environment = some parent ∧ parent.readPath program place.fields = some resident ∧ resident.Disposable program := by
   obtain ⟨parent, found, parentTyped⟩ := typed.lookup selected
   obtain ⟨resident, read, residentTyped⟩ := path.resident parentTyped access
-  refine ⟨parent, resident, found, read, ?_⟩
-  cases state with
-  | vacant => exact Or.inl (ResidentTyped.vacant_value residentTyped)
-  | full | fields _ => exact residentTyped.disposable (allowed (by intro h; cases h))
+  exact ⟨parent, resident, found, read, StorageDisposition.realized allowed residentTyped⟩
 
 theorem EnvironmentTyped.writePlace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state next : Initialization}

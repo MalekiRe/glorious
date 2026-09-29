@@ -265,10 +265,10 @@ cannot widen structural capability. Empty arrays remain resident-free.
 `UsePermission.nominal_restriction` proves fidelity to the selected declaration.
 
 Local bindings, function parameters and pattern binders are checked at their
-final initialization state. A transferred owner leaves a vacant slot; a live
-slot requires `MayDiscard`. Pattern binding itself no longer requires copying
-or discardability. Coherent nonduplicable nominal construction and whole-owner
-transfer are admitted through the same general correctness theorem.
+final initialization state. `StorageDisposition` permits vacancy, whole-type
+`MayDiscard`, or an incomplete tuple/structure whose remaining fields are
+individually eligible. Pattern binding itself requires neither copying nor
+discardability. These cases feed the same general correctness theorem.
 
 `Value.Disposable` states zero-use eligibility for an actual resident. Evaluation
 consumes this evidence when discarding a sequencing result, removing lexical or
@@ -278,16 +278,21 @@ typed environment. `EnvironmentTyped.place_disposable` derives overwrite
 evidence for the actual selected resident after RHS evaluation, including
 vacancy restoration. `correctness` constructs these permissions; source
 admission does not assume successful runtime cleanup.
-`Value.Disposable.not_exact_nominal` excludes live manually exact-linear owners
-even when fieldless. `SlotTyped.must_transfer` proves that a slot eligible for
-removal must actually be vacant when its type forbids zero use.
+`ResidentTyped.hole_uninitialized` proves that a source-valid vacant path is an
+actual resident vacancy: an unused initialization-mask entry cannot authorize
+discarding a live fieldless owner. `StorageDisposition.realized` derives actual
+residual-shell eligibility, including surviving nested fields.
+`StorageDisposition.live_requires_discard` proves that a fully restored resident
+again requires whole-type zero-use permission.
+`Value.Disposable.not_live_exact_nominal` excludes fully initialized manually
+exact-linear owners, including fieldless owners.
 
-This is logical zero-use eligibility, not a proof of ordered destructor
-execution. Partial exact-linear residual-shell cleanup, conditional joins,
-custom hooks and their possible divergence, and physical storage release remain
-open. Those require their actual cleanup transitions, not more eligibility
-assumptions. Strict checking and the connected correctness and disposition
-axiom audits passed with only `propext` and `Quot.sound`.
+This is logical zero-use eligibility, not ordered destructor execution.
+Residual exact-linear shells are connected to actual scope removal and
+overwrites; ordered cleanup transitions, conditional joins, custom hooks and
+their possible divergence, and physical storage release remain open. Strict
+checking and the connected correctness and disposition axiom audits passed
+with only `propext` and `Quot.sound`.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -404,8 +409,8 @@ Proceed serially, closing each extension through the same end-to-end theorem:
    nested tuple/structure moves, partial restoration, sibling access and
    incomplete-aggregate rejection are connected through the general theorem.
 5. Affine/exact-linear ownership, destruction and scope cleanup: shared use
-   permissions and final-state zero-use eligibility are connected above; ordered
-   destruction, residual exact-linear shells and conditional joins remain open.
+   permissions, final-state zero-use eligibility and residual exact-linear
+   shells are connected above; ordered destruction and conditional joins remain open.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;
