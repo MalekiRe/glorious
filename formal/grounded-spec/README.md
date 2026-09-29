@@ -150,9 +150,11 @@ explicit semantic-fidelity and proof-assumption audit.
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, lexical reads, sequencing, immutable
 bindings with optional type annotations, tuples/projection, fixed-array
-construction, non-generic transparent aliases, and structural constant references
-over duplicable values.** The boundary is decoded declarations/expressions to
-logical values. Normative basis: §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
+construction, non-generic transparent aliases, structural constants, and
+non-generic finite-inline nominal data over duplicable fields.** Records, tuple
+structs and enum variants retain declaration identity; struct projections check
+field visibility. The boundary is decoded declarations/expressions to logical
+values. Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
 and 13.1. No previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
@@ -184,15 +186,32 @@ Alias bodies resolve finitely to existing types, including nested tuple/array
 types; binding annotations consume that resolution. No alias identity is added
 to runtime values. Constant references select declared structural initializers,
 check their declared types, and evaluate them in an empty local environment.
+Their bodies are admitted in the declaring module, not the caller’s module;
+the caller must have access to the constant itself.
 The existing evaluation relation and correctness induction perform the work;
 there is no separate constant evaluator or assumed evaluated-value table.
 Declaration lookup is supplied as decoded maps; whole-package validation,
 duplicate-name rejection, generic schemes and source name resolution remain open.
 
-Parsing, inference, prefix negation, floating conversion, static strings, nominal
-data, calls, mutation, moves, loans, effects and remaining constructs are open.
-There is no physical-storage, allocation-failure, package-admission or compiler-
-realization claim. Big-step total evaluation is not a small-step machine theorem.
+Nominal construction consumes the existing ordered constituent relation and
+produces tagged nominal values, never structural tuples masquerading as owners.
+One declaration supplies constructor schemas, projection indices and field
+types. Private access includes descendants; package/parent/public visibility
+is explicit. Aliases cannot change a nominal field’s access rule. Numeric
+tuple-struct access and named record access remain distinct; enum payloads
+cannot be projected without matching. Copyability checks every variant and
+respects manual principal restrictions. Inline type expansion checks every
+field and rejects direct recursive layouts and duplicate record field names.
+Empty arrays remain resident-free but must have valid element types. This also
+repairs the previously unchecked malformed element type of an empty array.
+
+Nominal scope excludes generic instances, indirections, hooks, nonduplicable
+owners and non-exhaustive-enum deconstruction. Constructor arguments are
+already ordered decoded expressions; source record-initializer elaboration
+and name resolution are not proved. Parsing, inference, prefix negation,
+floating conversion, static strings, calls, mutation, moves, loans and effects
+remain open. There is no physical-storage, allocation-failure, package-admission
+or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict `lake build` passed. All exported proofs report only Lean
 standard `propext`. No bypass axioms or admitted proofs. Reproduce here:
@@ -206,6 +225,7 @@ import Grounded
 #print axioms Grounded.integer_admission
 #print axioms Grounded.character_admission
 #print axioms Grounded.unit_agreement
+#print axioms Grounded.ValuesHaveTypes.select
 LEAN
 ```
 
@@ -214,7 +234,7 @@ LEAN
 Proceed serially, closing each extension through the same end-to-end theorem:
 
 1. Ordinary values, non-generic constants and aliases: connected as described above.
-2. Nominal data, constructors, visibility and projection.
+2. Nominal data, constructors, visibility and projection: connected for the subset above.
 3. Nonrecursive first-order calls, then structural patterns and branching.
 4. Mutable places, initialization, assignment and explicit moves.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
@@ -236,7 +256,9 @@ booleans: truth and branching use ordinary library declarations.
 
 At verified checkpoints, review size, duplicated reasoning and unused concepts.
 Simplify where meaning and guarantees are preserved; do not introduce a generic
-framework merely to shorten local proof plumbing. Latest review: 461 Lean lines
-including comments/blanks in one module. Arrays reuse constituent evaluation;
-constants reuse ordinary evaluation; aliases exist only in the static path.
-No speculative helper theorem or standalone checker was added.
+framework merely to shorten local proof plumbing. Nominal integration keeps one
+module and groups shared declaration inputs in `Program`, replacing repeated
+parameters. Tuple and nominal projection now consume one positional typing
+lemma; it was extracted only when the second actual consumer needed it. Arrays
+and constructors reuse constituent evaluation; constants reuse ordinary
+evaluation; aliases exist only in the static path.
