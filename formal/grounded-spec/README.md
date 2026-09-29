@@ -149,9 +149,10 @@ explicit semantic-fidelity and proof-assumption audit.
 
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, lexical reads, sequencing, immutable
-bindings, arbitrary-arity tuples, numeric tuple projection, and fixed-array
-construction over duplicable values.** The boundary is decoded expression AST
-to logical value. Normative basis: §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
+bindings with optional type annotations, tuples/projection, fixed-array
+construction, non-generic transparent aliases, and structural constant references
+over duplicable values.** The boundary is decoded declarations/expressions to
+logical values. Normative basis: §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
 and 13.1. No previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
@@ -179,6 +180,15 @@ exclude surrogates and values above U+10FFFF. Array construction reuses the
 existing constituent relations; admission enforces homogeneous residents,
 exact arity and target-representable length. Known-empty arrays are resident-free.
 
+Alias bodies resolve finitely to existing types, including nested tuple/array
+types; binding annotations consume that resolution. No alias identity is added
+to runtime values. Constant references select declared structural initializers,
+check their declared types, and evaluate them in an empty local environment.
+The existing evaluation relation and correctness induction perform the work;
+there is no separate constant evaluator or assumed evaluated-value table.
+Declaration lookup is supplied as decoded maps; whole-package validation,
+duplicate-name rejection, generic schemes and source name resolution remain open.
+
 Parsing, inference, prefix negation, floating conversion, static strings, nominal
 data, calls, mutation, moves, loans, effects and remaining constructs are open.
 There is no physical-storage, allocation-failure, package-admission or compiler-
@@ -203,7 +213,7 @@ LEAN
 
 Proceed serially, closing each extension through the same end-to-end theorem:
 
-1. Structural constants and transparent aliases (remaining ordinary values).
+1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection.
 3. Nonrecursive first-order calls, then structural patterns and branching.
 4. Mutable places, initialization, assignment and explicit moves.
@@ -226,6 +236,7 @@ booleans: truth and branching use ordinary library declarations.
 
 At verified checkpoints, review size, duplicated reasoning and unused concepts.
 Simplify where meaning and guarantees are preserved; do not introduce a generic
-framework merely to shorten local proof plumbing. Latest review: target widths
-and arrays reuse the existing relations and proof, growing Lean from 350 to 386
-lines including comments/blanks. No extra analysis or proof module was needed.
+framework merely to shorten local proof plumbing. Latest review: 461 Lean lines
+including comments/blanks in one module. Arrays reuse constituent evaluation;
+constants reuse ordinary evaluation; aliases exist only in the static path.
+No speculative helper theorem or standalone checker was added.
