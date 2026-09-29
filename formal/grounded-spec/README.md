@@ -147,43 +147,47 @@ explicit semantic-fidelity and proof-assumption audit.
 
 ## Current boundary
 
-**Completed subset: closed unit, explicitly typed fixed-width nonnegative integer
-literals, and decoded character literals, from source AST to logical value.**
-`Grounded.lean` defines their syntax, normative ranges, admission, value typing,
-and big-step evaluation. Normative basis: §§3.2–3.4, 4.1 and 7.2. No previous
-proof modules are imported. The objective is the full specification, not a
-percentage of features; this subset is an intermediate completed boundary.
+**Completed subset: unit, explicitly typed fixed-width nonnegative integer and
+decoded character literals, grouping, lexical reads, sequencing, and immutable
+bindings over duplicable values.** The boundary is decoded expression AST to
+logical value; names use nearest-binder lookup. Normative basis: §§2.3, 3.2–3.4,
+4.1, 5.1, 5.3 and 7.2. No previous proof modules are imported. The objective is
+the full specification, not a percentage of features.
 
 `Grounded.correctness` proves finite evaluation, result typing and uniqueness
-for every admitted expression. `integer_admission` and `character_admission`
-characterize admission exactly: all valid magnitudes/scalars are admitted and
-all invalid ones are rejected. Admission has no execution premise.
-`unit_agreement` consumes the extended correctness theorem and preserves the
-original unit admission and evaluation meaning.
+for every admitted expression in a typed environment. Initializers execute in
+the old environment; their proved result typing constructs the extended body
+environment. Sequencing and binding scope do not leak local names. Copy/discard
+sites require explicit duplicability evidence. `closed_correctness` constructs
+the empty environment rather than assuming it. Admission has no execution
+premise. Exact scalar admission theorems and `unit_agreement` remain connected
+to this general result. No intermediate machine-state theorem is claimed.
 
 Integer types include signed and unsigned 8/16/32/64/128-bit families. Range
 checking uses mathematical integers with no wrapping. Characters exclude
 surrogates and values above U+10FFFF. Parsing, type inference, prefix negation,
-target-size integers, floating conversion, static strings, grouping, sequencing,
-bindings and all other constructs remain outside this subset. There is no
-physical storage, allocation-failure, package-admission or compiler-realization
-claim. Big-step total evaluation is not a small-step machine theorem.
+target-size integers, floating conversion, static strings, aggregates, calls,
+mutation, moves, loans, effects and the remaining language constructs are open.
+There is no physical-storage, allocation-failure, package-admission or compiler-
+realization claim. Big-step total evaluation is not a small-step machine theorem.
 
-Verification: strict `lake build` passed; all four exported theorems report no
-axiom dependencies. Reproduce from this directory:
+Verification: strict `lake build` passed. The connected correctness and unit
+agreement proofs use only Lean's `propext`; scalar admission proofs use no axioms.
+Reproduce from this directory:
 
 ```sh
 lake build
 lake env lean -DwarningAsError=true -DautoImplicit=false --stdin <<'LEAN'
 import Grounded
 #print axioms Grounded.correctness
+#print axioms Grounded.closed_correctness
 #print axioms Grounded.integer_admission
 #print axioms Grounded.character_admission
 #print axioms Grounded.unit_agreement
 LEAN
 ```
 
-Next: extend the same chain through sequencing and immutable bindings of these
-duplicable values. No primitive booleans: §4.1 explicitly excludes them. Truth
-and branching must use ordinary library declarations when those are supported.
-No standalone prerequisite programme is authorized.
+Next: structural aggregates and their ordered constituent evaluation, extending
+the same admission-to-result proof. No primitive booleans: §4.1 excludes them;
+truth and branching must use ordinary library declarations. No standalone
+prerequisite programme is authorized.
