@@ -183,6 +183,10 @@ elision: distinct lifetime parameters, variance and outlives constraints are not
 represented by this `Ty` model. `correctness_return_cleanup` connects general
 body execution, actual cleanup, returned usability and runtime ancestry at every
 nested returned occurrence; cleanup does not auto-end the returned handles.
+Every active target after cleanup is backed by storage already present before
+body evaluation and lies outside the retired parameter roots. This is derived
+from actual execution, canonical target addressability and retirement, not an
+assumed owner-survival or declared-region contract.
 
 Executable referent views are immutable lenses, not owner allocations or mask
 caches. `ContextMeaning.noOpaqueCells` forbids opaque referent cells in every
@@ -225,9 +229,10 @@ consumers include:
   entry; closed evaluation retires cells without resetting supplies/history.
 - `correctness_referenceFree`: conservation and agreement for the same evaluator
   under reference-free syntax/declarations and empty initial loan histories.
-- `correctness_noDangling`: addressable typed active targets with actual masks;
-  universal readability is asserted for shared targets, not arbitrary unique
-  targets with temporary holes.
+- `correctness_noDangling`: addressable typed active targets with actual masks,
+  backed by roots already present at expression entry. Fresh scoped roots and
+  resurrected vacancies cannot escape. Universal readability is asserted for
+  shared targets, not arbitrary unique targets with temporary holes.
 - `correctness_canonicalTargets`: exact root-to-target paths, masks and actual
   resident typing for all active targets, including hidden external roots.
 - `correctness_targetClosure`: every nested leaf of an active target retains
@@ -235,7 +240,8 @@ consumers include:
 - `checked_correctness`: an executable source-rule realization must erase to the
   particular chosen checking derivation, not only agree in type/plan indices.
 - `correctness_return_cleanup`: occurrence-wise returned origin and protection
-  through actual ordered cleanup.
+  through actual ordered cleanup, excluding retired parameter roots from every
+  surviving active target.
 - Expected-read and ordinary-choice consumers: compulsory requested-mode
   reborrow and positive-evidence default Copy/transfer selection.
 
@@ -270,7 +276,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **6,682
+warnings as errors. The exhaustive defining-module audit covered **6,684
 declarations, including 245 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
@@ -308,6 +314,7 @@ run_cmd do
       if !used.contains axiomName then used := used.push axiomName
   logInfo m!"AUDIT_DECLARATIONS={names.size}; PRIVATE={privateCount}; AXIOMS={used.qsort Name.quickLt}"
 #print axioms Grounded.Elaboration.correctness
+#print axioms Grounded.Elaboration.correctness_noDangling
 #print axioms Grounded.Elaboration.checked_correctness
 #print axioms Grounded.Elaboration.correctness_targetClosure
 #print axioms Grounded.Elaboration.correctness_return_cleanup

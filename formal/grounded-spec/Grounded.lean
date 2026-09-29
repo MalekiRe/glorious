@@ -1239,6 +1239,19 @@ theorem absent {before after : Environment} (evolved : Evolution before after)
   · exact evolved.vacancies root old missing
   · exact evolved.fresh root (Nat.le_of_not_gt old)
 
+/-- A scoped computation cannot publish a resident in a fresh or resurrected
+root. This follows from retirement, not from an input-origin assumption. -/
+theorem resident_origin {before after : Environment} (evolved : Evolution before after)
+    {root : Root} {value : Value} (stored : after.store root = some value) :
+    (∃ original, before.store root = some original) ∧ root < before.nextRoot := by
+  constructor
+  · cases original : before.store root with
+    | none => simp [evolved.absent root original] at stored
+    | some value => exact ⟨value, rfl⟩
+  · by_cases old : root < before.nextRoot
+    · exact old
+    · simp [evolved.fresh root (Nat.le_of_not_gt old)] at stored
+
 theorem refl (environment : Environment) (valid : environment.Valid) : Evolution environment environment := by
   refine ⟨rfl, Nat.le_refl _, fun _ _ => rfl, fun _ live => .inl (.inr live), fun _ _ missing => missing, ?_⟩
   intro root fresh
@@ -1960,6 +1973,13 @@ def resolvePlace (program : Program) (place : Place) (environment : Environment)
 def «at» (address : Address) (environment : Environment) : Option Value := do
   let parent ← environment.store address.root
   parent.readIndices address.fields
+
+theorem at_root {environment : Environment} {address : Address} {value : Value}
+    (selected : environment.at address = some value) :
+    ∃ root, environment.store address.root = some root := by
+  cases stored : environment.store address.root with
+  | none => simp [Environment.at, stored] at selected
+  | some root => exact ⟨root, rfl⟩
 
 /-- Owned access additionally requires the entire selected subtree initialized. -/
 def readAddress (address : Address) (environment : Environment) : Option Value := do
@@ -18218,10 +18238,10 @@ theorem ReturnStep.runtime_origins {before after : Point program .executable}
     (SourcePayload.mem_nodes_iff.mpr ⟨path, selected⟩)
   exact ⟨input, singleton, equal.symm ▸ stored.derived (history.derived derived)⟩
 
-/-- General execution followed by the actual ordered cleanup keeps every nested
-returned handle owned/restored, and retains its admitted input ancestry. The
-argument-origin rule is deliberately the bounded singleton rule, not a model of
-arbitrary declared lifetimes. -/
+/-- General execution followed by actual ordered cleanup keeps every nested
+returned handle owned/restored and retains its admitted input ancestry. Every
+active target is backed by an entry root outside the retired parameter roots.
+The singleton ancestry rule still does not model arbitrary declared lifetimes. -/
 theorem correctness_return_cleanup {home : Module} {before after cleaned : Point program .executable}
     {held : List (Payload .executable)} {expression : Expr} {result : Result .executable}
     {arguments : List (Result .executable)} {plan : CorePlan} {expected : Option Ty} {count : Nat}
@@ -18236,6 +18256,10 @@ theorem correctness_return_cleanup {home : Module} {before after cleaned : Point
       StateTyped program last (cleaned.source rfl)
         (sourcePayloads held rfl ++ [result.payload.source rfl]) final (values ++ [value]) ∧
       final.ResultUsable value ∧
+      (∀ (node : Nat) (loan : Loan), final.loans[node]? = some loan → loan.own = true →
+        loan.target.root ∉ (localAfter.bindings.take count).map Prod.snd ∧
+        (∃ original, environment.store loan.target.root = some original) ∧
+        loan.target.root < environment.nextRoot) ∧
       ∀ path node, value.readIndices path = some (.reference node) →
         ∃ input, payloadNodes ((sourceResults arguments rfl).map ResultType.payload) = [input] ∧
           final.Derived node (last.node input) := by
@@ -18247,9 +18271,18 @@ theorem correctness_return_cleanup {home : Module} {before after cleaned : Point
     simpa only [sourcePayloads_append, sourcePayloads_singleton] using finalState
   have history := Context.History.cleanup (after.source rfl) count
   rw [← (cleanup.source rfl).2] at history
-  exact ⟨value, localAfter, final, last, trace, evaluated, cleanedEval, pending,
-    pendingResultUsable pending, fun _ _ occurrence =>
+  refine ⟨value, localAfter, final, last, trace, evaluated, cleanedEval, pending,
+    pendingResultUsable pending, ?_, fun _ _ occurrence =>
       returns.runtime_origins history pending.toStoreTyped resident.corresponds occurrence⟩
+  intro node loan found own
+  obtain ⟨target, _, _, readable, _⟩ := pending.toStoreTyped.noDangling found own
+  obtain ⟨root, stored⟩ := Environment.at_root readable
+  have retained : loan.target.root ∉ (localAfter.bindings.take count).map Prod.snd := by
+    intro retired
+    simp [cleanedEval.retired _ retired] at stored
+  have localStored : localAfter.store loan.target.root = some root :=
+    (cleanedEval.frame _ retained).symm.trans stored
+  exact ⟨retained, ((evaluated.storage state.residents.valid).2).resident_origin localStored⟩
 
 end Elaboration
 end Grounded
@@ -18367,9 +18400,9 @@ theorem correctness_referenceFree {home : Module} {before after : Point program 
   cases stored.unique first
   exact ⟨finalSame.rightValid, residents, second, typedResidents⟩
 
-/-- Every active target remains addressable with its initialization mask. Only
-shared targets are asserted readable; arbitrary unique targets may be vacant.
-The returned value and all exact pending residents separately retain custody. -/
+/-- Every active target remains addressable with its initialization mask and
+is backed by a root already present at entry, never a scoped fresh allocation.
+Only shared targets are asserted readable; unique targets may have holes. -/
 theorem correctness_noDangling {home : Module} {before after : Point program .executable}
     {held : List (Payload .executable)} {expression : Expr} {result : Result .executable}
     {plan : CorePlan} {expected : Option Ty}
@@ -18383,10 +18416,15 @@ theorem correctness_noDangling {home : Module} {before after : Point program .ex
       ∀ (node : Nat) (loan : Loan), final.loans[node]? = some loan → loan.own = true →
         ∃ target type mask, final.at loan.target = some target ∧ ResidentTyped program mask target type ∧
           FiniteLayout program.target program.data type ∧
-          (loan.mode = .shared → final.readAddress loan.target = some target ∧ ValueHasType program target type) := by
-  obtain ⟨value, final, last, evaluated, resident, finalTyped, _, _, usable, _⟩ := correctness admitted state
-  exact ⟨value, final, last, evaluated, resident, finalTyped, usable,
-    fun _ _ found own => finalTyped.toStoreTyped.noDangling found own⟩
+          (loan.mode = .shared → final.readAddress loan.target = some target ∧ ValueHasType program target type) ∧
+          (∃ original, environment.store loan.target.root = some original) ∧
+          loan.target.root < environment.nextRoot := by
+  obtain ⟨value, final, last, evaluated, resident, finalTyped, _, evolution, usable, _⟩ := correctness admitted state
+  refine ⟨value, final, last, evaluated, resident, finalTyped, usable, ?_⟩
+  intro node loan found own
+  obtain ⟨target, type, mask, selected, typed, finite, shared⟩ := finalTyped.toStoreTyped.noDangling found own
+  obtain ⟨root, stored⟩ := Environment.at_root selected
+  exact ⟨target, type, mask, selected, typed, finite, shared, evolution.resident_origin stored⟩
 
 /-- Canonical root-to-referent paths cover every active target, including hidden
 external roots and masked unique targets. -/
