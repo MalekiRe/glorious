@@ -1,14 +1,14 @@
 /-!
 Target-indexed expressions, immutable composition, structural and nominal data.
-Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.5, 7.7 and 13.1.
+Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7 and 13.1.
 Declarations, field types, identities and lexical names are already decoded.
 Constructors consume argument expressions in their recorded order. Literal
 magnitudes and Unicode numbers are decoded; source elaboration is not proved.
 Direct named calls and immediate pattern-callable application share correctness.
 Finite-inline nominal owners have checked structural use bounds and manual
-restrictions. Actual zero-use boundaries consume derived disposal permission.
+restrictions. Actual zero-use boundaries construct ordered logical destruction.
 Affine arm joins retain branch residents under conservative initialization.
-Hooks, ordered destruction, physical representation and exhaustion remain open.
+Custom hooks, physical storage release, representation and exhaustion remain open.
 Admission supplies no successful execution or normalization witness.
 Constant-normal-form checks are consumed only after normalization is derived.
 No prior specification modules are imported.
@@ -761,10 +761,315 @@ def Value.head : Value → Head
   | .array _ => .array
   | .nominal identity tag _ => .nominal identity tag
 
+/-- Children remain in declaration order. -/
 def Value.children : Value → List Value
   | .tuple head tail => head :: tail
   | .array values | .nominal _ _ values => values
   | _ => []
+
+mutual
+/-- Logical finish events use relative field paths, never physical addresses. -/
+def Value.destructionTrace : Value → List (List Nat)
+  | .vacant => []
+  | .unit | .integer _ _ | .character _ => [[]]
+  | .tuple head tail => destructionFields 0 (head :: tail) ++ [[]]
+  | .array values | .nominal _ _ values => destructionFields 0 values ++ [[]]
+def destructionFields (index : Nat) : List Value → List (List Nat)
+  | [] => []
+  | value :: values => destructionFields (index + 1) values ++ value.destructionTrace.map (index :: ·)
+end
+
+mutual
+/-- Finite no-hook logical destruction: vacant slots are skipped, children
+execute right to left, and only then does the enclosing resident finish. -/
+inductive Value.Destroys (program : Program) : Value → List (List Nat) → Value → Prop where
+  | vacant : Value.Destroys program .vacant [] .vacant
+  | resident {value : Value} {trace : List (List Nat)}
+      (present : value ≠ .vacant) (allowed : value.Disposable program)
+      (children : DestroysFields program 0 value.children trace) :
+      Value.Destroys program value (trace ++ [[]]) .vacant
+inductive DestroysFields (program : Program) : Nat → List Value → List (List Nat) → Prop where
+  | nil (index : Nat) : DestroysFields program index [] []
+  | cons {index : Nat} {value : Value} {values : List Value} {first rest : List (List Nat)}
+      (tail : DestroysFields program (index + 1) values rest)
+      (head : value.Destroys program first .vacant) :
+      DestroysFields program index (value :: values) (rest ++ first.map (index :: ·))
+end
+
+theorem Value.Destroys.result_order {value after : Value} {trace : List (List Nat)}
+    (executed : value.Destroys program trace after) :
+    after = .vacant ∧ trace = value.destructionTrace := by
+  induction executed using Value.Destroys.rec
+    (motive_2 := fun index values trace _ => trace = destructionFields index values) with
+  | vacant => simp [Value.destructionTrace]
+  | @resident value trace present allowed children ih =>
+    refine ⟨rfl, ?_⟩
+    rw [ih]
+    cases value <;> simp_all [destructionTrace, Value.children, destructionFields]
+  | nil => simp [destructionFields]
+  | cons tail head tailIH headIH => simp [destructionFields, tailIH, headIH.2]
+
+theorem ResidentTyped.children_disposable {state : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) (allowed : MayDiscard program.data type) :
+    ∀ child ∈ value.children, child.Disposable program := by
+  have residents : ∀ {states : Nat → Initialization} {values : List Value} {types : List Ty},
+      ResidentsTyped program states values types → (∀ type ∈ types, MayDiscard program.data type) →
+      ∀ value ∈ values, value.Disposable program := by
+    intro states values
+    induction values generalizing states with
+    | nil => intro types typed permissions value member; cases member
+    | cons head tail ih =>
+      intro types typed permissions value member
+      cases typed with
+      | cons first rest =>
+        rcases List.mem_cons.mp member with rfl | member
+        · exact .owned first (permissions _ (by simp))
+        · exact ih rest (fun type member => permissions type (List.mem_cons_of_mem _ member)) value member
+  induction typed using ResidentTyped.rec (motive_2 := fun _ _ _ _ => True) with
+  | uncertain actual permission ih => exact ih allowed
+  | vacant | unit | integer | character => simp [Value.children]
+  | tuple head tail present headIH tailIH =>
+    cases allowed with
+    | tuple first rest => exact residents (.cons head tail) (by simpa using And.intro first rest)
+  | array typed finite size present ih =>
+    cases allowed with
+    | array length resident => exact residents typed (by intro type member; have same := List.eq_of_mem_replicate member; subst type; exact resident)
+    | emptyArray element => cases typed; simp [Value.children]
+  | @nominal state identity tag declaration schema values declared chosen finite typed present ih =>
+    have member : schema ∈ declaration.schemas := by
+      cases declaration with
+      | mk home visibility shape restriction =>
+        cases shape <;> cases tag <;> simp_all [DataDecl.constructor, DataDecl.schemas]
+        exact List.mem_of_getElem? chosen
+    have fields : ∀ field ∈ schema.residents, MayDiscard program.data field.type := by
+      cases allowed with
+      | inferred found unrestricted fields =>
+        cases Option.some.inj (found.symm.trans declared)
+        exact fields schema member
+      | restricted found restriction fields permitted =>
+        cases Option.some.inj (found.symm.trans declared)
+        exact fun field included => (fields schema member field included).weaken permitted
+    exact residents typed (by simpa using fields)
+  | nil => trivial
+  | cons head tail headIH tailIH => trivial
+
+theorem Value.Disposable.children {value : Value} (allowed : value.Disposable program) :
+    ∀ child ∈ value.children, child.Disposable program := by
+  cases allowed with
+  | vacant => simp [Value.children]
+  | owned typed permission => exact typed.children_disposable permission
+  | tuple incomplete first rest => simpa [Value.children] using And.intro first rest
+  | nominal declared structureOnly incomplete fields => exact fields
+
+/-- Runtime permission constructs execution rather than assuming its success. -/
+theorem Value.Disposable.destroys {value : Value} (allowed : value.Disposable program) :
+    value.Destroys program value.destructionTrace .vacant := by
+  induction value using Value.rec
+    (motive_2 := fun values => (∀ child ∈ values, child.Disposable program) →
+      ∀ index, DestroysFields program index values (destructionFields index values)) with
+  | vacant => simpa only [Value.destructionTrace] using (Value.Destroys.vacant (program := program))
+  | unit => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
+  | integer type number => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
+  | character number => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
+  | tuple head tail headIH tailIH =>
+    have permitted := allowed.children
+    simp only [Value.children, List.mem_cons, forall_eq_or_imp] at permitted
+    simpa only [Value.destructionTrace, destructionFields] using
+      Value.Destroys.resident (by simp) allowed (.cons (tailIH permitted.2 1) (headIH permitted.1))
+  | array values ih =>
+    simpa only [Value.destructionTrace] using Value.Destroys.resident (by simp) allowed (ih allowed.children 0)
+  | nominal identity tag values ih =>
+    simpa only [Value.destructionTrace] using Value.Destroys.resident (by simp) allowed (ih allowed.children 0)
+  | nil => rename_i permitted index; simpa only [destructionFields] using DestroysFields.nil (program := program) index
+  | cons head tail headIH tailIH =>
+    rename_i permitted index
+    simpa only [destructionFields] using DestroysFields.cons
+      (tailIH (fun v m => permitted v (List.mem_cons_of_mem _ m)) (index + 1))
+      (headIH (permitted head (List.mem_cons_self ..)))
+
+theorem destructionFields.lower_bound {index : Nat} {values : List Value} {path : List Nat}
+    (member : path ∈ destructionFields index values) :
+    ∃ field suffix, path = field :: suffix ∧ index ≤ field := by
+  induction values generalizing index with
+  | nil => simp [destructionFields] at member
+  | cons value values ih =>
+    simp only [destructionFields, List.mem_append] at member
+    rcases member with tail | head
+    · obtain ⟨field, suffix, rfl, bound⟩ := ih tail
+      exact ⟨field, suffix, rfl, by omega⟩
+    · obtain ⟨suffix, _, rfl⟩ := List.mem_map.mp head
+      exact ⟨index, suffix, rfl, Nat.le_refl _⟩
+
+/-- Relative field coordinates identify each active resident exactly once. -/
+theorem Value.destructionTrace_nodup (value : Value) : value.destructionTrace.Nodup := by
+  have finish : ∀ values, (destructionFields 0 values).Nodup → (destructionFields 0 values ++ [[]]).Nodup := by
+    intro values unique
+    refine List.nodup_append.mpr ⟨unique, by simp, ?_⟩
+    intro path member other singleton same
+    have empty : other = [] := by simpa using singleton
+    obtain ⟨field, suffix, shape, _⟩ := destructionFields.lower_bound member
+    simp [empty, same] at shape
+  have prefixUnique : ∀ (index : Nat) (trace : List (List Nat)), trace.Nodup → (trace.map (index :: ·)).Nodup := by
+    intro index trace unique
+    simpa only [List.Nodup, List.pairwise_map, ne_eq, List.cons.injEq, true_and] using unique
+  induction value using Value.rec
+    (motive_2 := fun values => ∀ index, (destructionFields index values).Nodup) with
+  | vacant | unit | integer | character => simp [Value.destructionTrace]
+  | tuple head tail headIH tailIH =>
+    simp only [Value.destructionTrace]
+    apply finish
+    simp only [destructionFields]
+    refine List.nodup_append.mpr ⟨tailIH 1, prefixUnique 0 _ headIH, ?_⟩
+    intro path member other mapped same
+    obtain ⟨field, suffix, shape, bound⟩ := destructionFields.lower_bound member
+    obtain ⟨rest, _, rfl⟩ := List.mem_map.mp mapped
+    have equal := List.cons.inj (shape.symm.trans same)
+    omega
+  | array values ih => simpa only [Value.destructionTrace] using finish values (ih 0)
+  | nominal identity tag values ih => simpa only [Value.destructionTrace] using finish values (ih 0)
+  | nil => rename_i index; simp [destructionFields]
+  | cons head tail headIH tailIH =>
+    rename_i index
+    simp only [destructionFields]
+    refine List.nodup_append.mpr ⟨tailIH (index + 1), prefixUnique index _ headIH, ?_⟩
+    intro path member other mapped same
+    obtain ⟨field, suffix, shape, bound⟩ := destructionFields.lower_bound member
+    obtain ⟨rest, _, rfl⟩ := List.mem_map.mp mapped
+    have equal := List.cons.inj (shape.symm.trans same)
+    omega
+
+theorem destructionFields.vacant_slot {values : List Value} {slot : Nat}
+    (vacant : values[slot]? = some .vacant) (index : Nat) (suffix : List Nat) :
+    (index + slot) :: suffix ∉ destructionFields index values := by
+  induction values generalizing slot index with
+  | nil => simp at vacant
+  | cons value values ih =>
+    cases slot with
+    | zero =>
+      simp only [List.getElem?_cons_zero, Option.some.injEq] at vacant
+      subst value
+      simp only [destructionFields, Value.destructionTrace, List.map_nil, List.append_nil, Nat.add_zero]
+      intro member
+      obtain ⟨field, rest, shape, bound⟩ := destructionFields.lower_bound member
+      have same := (List.cons.inj shape).1
+      omega
+    | succ slot =>
+      simp only [List.getElem?_cons_succ] at vacant
+      simp only [destructionFields, List.mem_append, not_or]
+      constructor
+      · simpa [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using ih vacant (index + 1)
+      · intro member
+        obtain ⟨rest, _, equal⟩ := List.mem_map.mp member
+        have same := (List.cons.inj equal).1
+        omega
+
+theorem Value.Destroys.exactly_once {value after : Value} {trace : List (List Nat)}
+    (executed : value.Destroys program trace after) : trace.Nodup := by
+  rw [executed.result_order.2]
+  exact value.destructionTrace_nodup
+
+theorem Value.Destroys.vacant_trace {trace : List (List Nat)} {after : Value}
+    (executed : Value.Destroys program .vacant trace after) : trace = [] ∧ after = .vacant := by
+  have result := executed.result_order
+  simpa only [Value.destructionTrace] using And.intro result.2 result.1
+
+theorem Value.Destroys.skips_vacant_field {value after : Value} {trace : List (List Nat)}
+    (executed : value.Destroys program trace after) {index : Nat}
+    (vacant : value.children[index]? = some .vacant) (suffix : List Nat) :
+    index :: suffix ∉ trace := by
+  rw [executed.result_order.2]
+  have absent := destructionFields.vacant_slot vacant 0 suffix
+  cases value <;> simp_all [Value.children, Value.destructionTrace]
+
+def cleanupTrace : Nat → Environment → List (List Nat)
+  | 0, _ | _, [] => []
+  | count + 1, (_, value) :: rest =>
+      value.destructionTrace.map (0 :: ·) ++
+        (cleanupTrace count rest).map (fun path => match path with | [] => [] | i :: p => (i + 1) :: p)
+
+/-- Scope owners are newest first; the suffix is never traversed. -/
+inductive Cleans (program : Program) : Nat → Environment → List (List Nat) → Environment → Prop where
+  | zero (environment : Environment) : Cleans program 0 environment [] environment
+  | nil (count : Nat) : Cleans program count [] [] []
+  | cons {count : Nat} {name : String} {value : Value} {before after : Environment}
+      {first rest : List (List Nat)} (head : value.Destroys program first .vacant)
+      (tail : Cleans program count before rest after) :
+      Cleans program (count + 1) ((name, value) :: before)
+        (first.map (0 :: ·) ++ rest.map (fun path => match path with | [] => [] | i :: p => (i + 1) :: p)) after
+
+theorem Cleans.suffix {count : Nat} {before after : Environment} {trace : List (List Nat)}
+    (executed : Cleans program count before trace after) : after = before.drop count := by
+  induction executed with
+  | zero => rfl
+  | nil => simp
+  | cons head tail ih => simpa using ih
+
+/-- Every scope trace follows newest-owner order, independently of names or
+shadowing; child traces still obey reverse field order. -/
+theorem Cleans.order {count : Nat} {before after : Environment} {trace : List (List Nat)}
+    (executed : Cleans program count before trace after) : trace = cleanupTrace count before := by
+  induction executed with
+  | zero => rfl
+  | nil count => cases count <;> rfl
+  | cons head tail ih => simp only [cleanupTrace, head.result_order.2, ih]
+
+theorem Cleans.trace_scoped {count : Nat} {before after : Environment} {trace : List (List Nat)}
+    (executed : Cleans program count before trace after) :
+    ∀ path ∈ trace, ∃ index suffix, path = index :: suffix ∧ index < count ∧ index < before.length := by
+  induction executed with
+  | zero | nil => intro path member; cases member
+  | @cons count name value before after first rest head tail ih =>
+    intro path member
+    simp only [List.mem_append, List.mem_map] at member
+    rcases member with ⟨suffix, _, rfl⟩ | ⟨path, included, rfl⟩
+    · exact ⟨0, suffix, rfl, Nat.zero_lt_succ _, by simp⟩
+    · obtain ⟨index, suffix, rfl, within, bound⟩ := ih path included
+      exact ⟨index + 1, suffix, rfl, Nat.succ_lt_succ within, by simpa using Nat.succ_lt_succ bound⟩
+
+theorem Cleans.exactly_once {count : Nat} {before after : Environment} {trace : List (List Nat)}
+    (executed : Cleans program count before trace after) : trace.Nodup := by
+  induction executed with
+  | zero | nil => exact List.Pairwise.nil
+  | @cons count name value before after first rest head tail ih =>
+    let shift : List Nat → List Nat := fun path => match path with | [] => [] | i :: p => (i + 1) :: p
+    have injective : ∀ a b, shift a = shift b → a = b := by
+      intro a b same
+      cases a with
+      | nil => cases b with
+        | nil => rfl
+        | cons b bs => cases same
+      | cons a leftTail => cases b with
+        | nil => cases same
+        | cons b rightTail =>
+          have parts := List.cons.inj same
+          have equal := Nat.add_right_cancel parts.1
+          cases equal
+          cases parts.2
+          rfl
+    refine List.nodup_append.mpr ⟨?_, ?_, ?_⟩
+    · simpa only [List.Nodup, List.pairwise_map, ne_eq, List.cons.injEq, true_and] using head.exactly_once
+    · change (rest.map shift).Nodup
+      simp only [List.Nodup, List.pairwise_map]
+      exact ih.imp (fun {a b} different same => different (injective a b same))
+    · intro a firstMember b restMember same
+      obtain ⟨left, _, rfl⟩ := List.mem_map.mp firstMember
+      obtain ⟨right, _, rfl⟩ := List.mem_map.mp restMember
+      cases right with
+      | nil => cases same
+      | cons index suffix => exact Nat.noConfusion (List.cons.inj same).1
+
+
+theorem Cleans.exists {environment : Environment} (count : Nat)
+    (allowed : ∀ entry ∈ environment.take count, entry.2.Disposable program) :
+    ∃ trace, Cleans program count environment trace (environment.drop count) := by
+  induction count generalizing environment with
+  | zero => exact ⟨[], .zero _⟩
+  | succ count ih =>
+    cases environment with
+    | nil => exact ⟨[], .nil _⟩
+    | cons entry rest =>
+      obtain ⟨trace, tail⟩ := ih (environment := rest) (fun e member => allowed e (by simp [member]))
+      exact ⟨_, .cons (allowed entry (by simp)).destroys tail⟩
 
 /-- Resolve one actual tuple/structure field; enum payloads and array indexing are not field projection. -/
 def Value.fieldIndex (program : Program) (value : Value) (key : FieldKey) : Option Nat :=
@@ -904,6 +1209,49 @@ def selectArm (value : Value) : List (Pattern × Expr) → Option (List (String 
       | some bindings => some (bindings, body)
       | none => selectArm value rest
 
+mutual
+/-- Matching remains nondestructive. Only the selected pattern consumes its
+subject: binders transfer their complete payload, wildcard/literal leaves run
+ordered destruction, and deconstruction consumes its shell without copying. -/
+inductive Pattern.Consumes (program : Program) : Pattern → Value → Environment → List (List Nat) → Prop where
+  | wildcard {value : Value} {trace : List (List Nat)} (destroyed : value.Destroys program trace .vacant) :
+      Pattern.Consumes program .wildcard value [] trace
+  | binder (name : String) (value : Value) : Pattern.Consumes program (.binder name) value [(name, value)] []
+  | literal {type : Option Ty} {value : Value} {trace : List (List Nat)} (destroyed : value.Destroys program trace .vacant) :
+      Pattern.Consumes program (.literal type value) value [] trace
+  | node {head : Head} {patterns : List Pattern} {value : Value} {bindings : Environment} {trace : List (List Nat)}
+      (same : head = value.head) (fields : ConsumesPatterns program 0 patterns value.children bindings trace) :
+      Pattern.Consumes program (.node head patterns) value bindings trace
+inductive ConsumesPatterns (program : Program) : Nat → List Pattern → List Value → Environment → List (List Nat) → Prop where
+  | nil (index : Nat) : ConsumesPatterns program index [] [] [] []
+  | cons {index : Nat} {pattern : Pattern} {patterns : List Pattern} {value : Value} {values : List Value}
+      {front back : Environment} {first rest : List (List Nat)}
+      (tail : ConsumesPatterns program (index + 1) patterns values back rest)
+      (head : Pattern.Consumes program pattern value front first) :
+      ConsumesPatterns program index (pattern :: patterns) (value :: values) (front ++ back)
+        (rest ++ first.map (index :: ·))
+end
+
+/-- A failed candidate performs no consumption; successful selection consumes
+exactly the same first-match subject selected by the authoritative matcher. -/
+inductive ConsumesArm (program : Program) (value : Value) : List (Pattern × Expr) → Environment → Expr → Prop where
+  | hit {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)} {bindings : Environment} {trace : List (List Nat)}
+      (matched : pattern.matchValue value = some bindings) (consumed : Pattern.Consumes program pattern value bindings trace) :
+      ConsumesArm program value ((pattern, body) :: rest) bindings body
+  | miss {pattern : Pattern} {body result : Expr} {rest : List (Pattern × Expr)} {bindings : Environment}
+      (missed : pattern.matchValue value = none) (selected : ConsumesArm program value rest bindings result) :
+      ConsumesArm program value ((pattern, body) :: rest) bindings result
+
+theorem Pattern.Consumes.binder_result {name : String} {value : Value} {bindings : Environment} {trace : List (List Nat)}
+    (consumed : Pattern.Consumes program (.binder name) value bindings trace) :
+    bindings = [(name, value)] ∧ trace = [] := by cases consumed; exact ⟨rfl, rfl⟩
+
+theorem ConsumesArm.matches {value : Value} {arms : List (Pattern × Expr)} {bindings : Environment} {body : Expr}
+    (consumed : ConsumesArm program value arms bindings body) : selectArm value arms = some (bindings, body) := by
+  induction consumed with
+  | hit matched consumed => simp [selectArm, matched]
+  | miss missed selected ih => simp [selectArm, missed, ih]
+
 /-- A static witness distinguishes each clause from its source-order predecessors.
 It is a typed datum, not an assumed result of the subject expression. -/
 def Useful (program : Program) (type : Ty) (previous : List Pattern) (pattern : Pattern) : Prop :=
@@ -952,18 +1300,19 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       Evaluates program environment (.move place) value after
   | sequence {environment middle after : Environment} {first rest : Expr}
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
-      (tail : Evaluates program middle rest value after) (dispose : discarded.Disposable program) :
+      (dispose : ∃ trace, discarded.Destroys program trace .vacant)
+      (tail : Evaluates program middle rest value after) :
       Evaluates program environment (.sequence first rest) value after
   | bind {environment middle after : Environment} {mutable : Bool} {name : String}
       {annotation : Option TypeExpr} {initial body : Expr} {resident value : Value}
       (initialized : Evaluates program environment initial resident middle)
       (continued : Evaluates program ((name, resident) :: middle) body value after)
-      (cleanup : ∀ entry ∈ after.take 1, entry.2.Disposable program) :
+      (cleanup : ∃ trace, Cleans program 1 after trace (after.drop 1)) :
       Evaluates program environment (.bind mutable name annotation initial body) value (after.drop 1)
   | assign {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value}
       (evaluated : Evaluates program environment expression resident middle)
-      (dispose : ∃ parent old, lookup place.root middle = some parent ∧ parent.readPath program place.fields = some old ∧ old.Disposable program)
+      (dispose : ∃ parent old, lookup place.root middle = some parent ∧ parent.readPath program place.fields = some old ∧ ∃ trace, old.Destroys program trace .vacant)
       (written : writePlace program place resident middle = some updated)
       (continued : Evaluates program updated rest value after) :
       Evaluates program environment (.assign place expression rest) value after
@@ -981,25 +1330,27 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
   | construct {environment after : Environment} {identity : Nat} {tag : Option Nat}
       {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values after) :
       Evaluates program environment (.construct identity tag fields) (.nominal identity tag values) after
-  | field {environment after : Environment} {body : Expr} {key : FieldKey} {parent value : Value}
+  | field {environment after : Environment} {body : Expr} {key : FieldKey} {parent value residual : Value}
       (source : Evaluates program environment body parent after)
-      (selected : parent.readField program key = some value) (dispose : parent.Disposable program) :
+      (selected : parent.readField program key = some value)
+      (extracted : parent.writePath program [key] .vacant = some residual)
+      (dispose : ∃ trace, residual.Destroys program trace .vacant) :
       Evaluates program environment (.field body key) value after
   | call {environment middle localAfter : Environment} {identity : Nat} {arguments : List Expr}
       {declaration : FunctionDecl} {values : List Value} {value : Value}
       (declared : program.functions identity = some declaration)
       (inputs : EvaluatesMany program environment arguments values middle)
-      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter)
-      (cleanup : ∀ entry ∈ localAfter, entry.2.Disposable program) :
+      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values).reverse declaration.body value localAfter)
+      (cleanup : ∃ trace, Cleans program localAfter.length localAfter trace []) :
       Evaluates program environment (.call identity arguments) value middle
   | applyPatterns {environment middle after : Environment} {inputs : List Ty} {arguments : List Expr}
       {arms : List (PatternSource × Expr)} {normalized : List (Pattern × Expr)} {values : List Value}
       {bindings : List (String × Value)} {body : Expr} {value : Value}
       (normalization : NormalizesArms program arms normalized)
       (argumentsEval : EvaluatesMany program environment arguments values middle)
-      (selected : selectArm (argumentValue values) normalized = some (bindings, body))
-      (bodyEval : Evaluates program (bindings ++ middle) body value after)
-      (cleanup : ∀ entry ∈ after.take bindings.length, entry.2.Disposable program) :
+      (selected : ConsumesArm program (argumentValue values) normalized bindings body)
+      (bodyEval : Evaluates program (bindings.reverse ++ middle) body value after)
+      (cleanup : ∃ trace, Cleans program bindings.length after trace (after.drop bindings.length)) :
       Evaluates program environment (.applyPatterns inputs arguments arms) value (after.drop bindings.length)
 
 inductive EvaluatesMany (program : Program) : Environment → List Expr → List Value → Environment → Prop where
@@ -1094,7 +1445,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
       (discard : ∀ binding ∈ bodyAfter, binding.2.Disposable program)
       (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type)) after)
-      (body : HasType program declaration.home declaration.parameters declaration.body declaration.result bodyAfter) :
+      (body : HasType program declaration.home declaration.parameters.reverse declaration.body declaration.result bodyAfter) :
       HasType program home context (.call identity arguments) declaration.result after
   | assign {home : Module} {context middle updated after : List (String × BindingType)} {place : Place}
       {value rest : Expr} {slot : BindingType} {target result : Ty} {indices : List Nat} {state : Initialization}
@@ -1129,7 +1480,7 @@ inductive ArmsType (program : Program) :
       {previous : List Pattern} {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)}
       {bindings afterBindings : List (String × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
-      (bodyTyped : HasType program home (bindings ++ context) body result (afterBindings ++ branchAfter))
+      (bodyTyped : HasType program home (bindings.reverse ++ context) body result (afterBindings ++ branchAfter))
       (joined : ContextJoins program branchAfter after)
       (lengths : afterBindings.length = bindings.length)
       (discard : ∀ binding ∈ afterBindings, binding.2.Disposable program)
@@ -1235,6 +1586,25 @@ theorem Evaluates.move_invalidates {place : Place} {before after : Environment} 
     readPlace program place after = none := by
   cases evaluated with
   | move taken => exact takePlace_invalidates taken
+
+/-- Owned projection transfers its child before cleanup. No event can target
+that child's former slot or descendants, even when its type is not Copy. -/
+theorem Evaluates.field_protects_result {before after : Environment} {body : Expr} {key : FieldKey} {value : Value}
+    (evaluated : Evaluates program before (.field body key) value after) :
+    ∃ (parent residual : Value) (index : Nat) (trace : List (List Nat)), Evaluates program before body parent after ∧
+      parent.readField program key = some value ∧ parent.fieldIndex program key = some index ∧
+      residual.children[index]? = some .vacant ∧ residual.Destroys program trace .vacant ∧
+      ∀ suffix, index :: suffix ∉ trace := by
+  cases evaluated with
+  | @field _ _ _ _ parent _ residual source selected extracted dispose =>
+    obtain ⟨trace, destroyed⟩ := dispose
+    change (parent.fieldIndex program key).bind (fun index =>
+      (parent.children[index]?).bind (fun _ => parent.replaceChild index .vacant)) = some residual at extracted
+    simp only [Option.bind_eq_some_iff] at extracted
+    obtain ⟨index, indexed, child, found, written⟩ := extracted
+    have vacant := (Value.replaceChild_readback (program := program) written).2
+    exact ⟨_, _, index, trace, source, selected, indexed, vacant, destroyed,
+      fun suffix => destroyed.skips_vacant_field vacant suffix⟩
 
 theorem Value.replaceChild_inverse {value resident replacement updated : Value} {index : Nat}
     (found : value.children[index]? = some resident)
@@ -1585,6 +1955,14 @@ theorem EnvironmentTyped.append {left right : Environment} {first rest : List (S
   | nil => exact back
   | cons resident tail ih => exact .cons resident ih
 
+/-- Runtime and static scope introduction use the same newest-first order. -/
+theorem EnvironmentTyped.reverse {environment : Environment} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) :
+    EnvironmentTyped program environment.reverse context.reverse := by
+  induction typed with
+  | nil => exact .nil
+  | cons resident tail ih => simpa using ih.append (.cons resident .nil)
+
 theorem EnvironmentTyped.drop {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) (count : Nat) :
     EnvironmentTyped program (environment.drop count) (context.drop count) := by
@@ -1702,29 +2080,32 @@ theorem ValuesHaveTypes.argument {values : List Value} {types : List Ty}
     | nil => exact head
     | cons next rest => exact .tuple head (.cons next rest)
 
-theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (String × BindingType)}
+theorem PatternType.consume {pattern : Pattern} {type : Ty} {context : List (String × BindingType)}
     (typed : PatternType program home pattern type context) {value : Value}
     (valueTyped : ValueHasType program value type) {bindings : List (String × Value)}
-    (matched : pattern.matchValue value = some bindings) : EnvironmentTyped program bindings context := by
+    (matched : pattern.matchValue value = some bindings) :
+    EnvironmentTyped program bindings context ∧ ∃ trace, Pattern.Consumes program pattern value bindings trace := by
   induction typed using PatternType.rec
     (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
-      ∀ bindings, matchPatterns patterns values = some bindings → EnvironmentTyped program bindings context)
+      ∀ bindings, matchPatterns patterns values = some bindings →
+        EnvironmentTyped program bindings context ∧ ∀ index, ∃ trace, ConsumesPatterns program index patterns values bindings trace)
     generalizing value bindings with
   | wildcard discard =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
-    exact .nil
+    exact ⟨.nil, _, .wildcard (valueTyped.disposable discard).destroys⟩
   | binder name =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
-    exact .cons valueTyped .nil
+    exact ⟨.cons valueTyped .nil, [], .binder name value⟩
   | literal typed discard =>
     simp only [Pattern.matchValue] at matched
     split at matched
     next equal =>
       have empty := Option.some.inj matched
       subst bindings
-      exact .nil
+      subst value
+      exact ⟨.nil, _, .literal (typed.disposable discard).destroys⟩
     next different => contradiction
   | @node head patterns type fields context shape access fieldsTyped fieldsIH =>
     simp only [Pattern.matchValue] at matched
@@ -1735,14 +2116,16 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
       have aligned : fields = types := by
         cases shape <;> cases actual <;> simp_all
       subst types
-      exact fieldsIH _ children bindings matched
+      obtain ⟨bindingsTyped, fields⟩ := fieldsIH _ children bindings matched
+      obtain ⟨trace, consumed⟩ := fields 0
+      exact ⟨bindingsTyped, trace, .node same consumed⟩
     next different => contradiction
   | nil =>
     rename_i values valuesTyped bindings matched
     cases valuesTyped
     simp only [matchPatterns, Option.some.injEq] at matched
     subst bindings
-    exact .nil
+    exact ⟨.nil, fun index => ⟨[], .nil index⟩⟩
   | @cons pattern patterns type types frontContext backContext head tail headIH tailIH =>
     rename_i values valuesTyped bindings matched
     cases valuesTyped with
@@ -1756,7 +2139,12 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
         | some back =>
           simp [headMatch, tailMatch] at matched
           subst bindings
-          exact EnvironmentTyped.append (headIH first headMatch) (tailIH _ rest _ tailMatch)
+          obtain ⟨frontTyped, firstTrace, firstConsumed⟩ := headIH first headMatch
+          obtain ⟨backTyped, restConsumed⟩ := tailIH _ rest _ tailMatch
+          refine ⟨EnvironmentTyped.append frontTyped backTyped, ?_⟩
+          intro index
+          obtain ⟨restTrace, consumed⟩ := restConsumed (index + 1)
+          exact ⟨_, .cons consumed firstConsumed⟩
 
 /-- Constructor-space coverage constructs an actual first matching clause. No
 post-evaluation match result occurs among the admission premises. -/
@@ -1947,10 +2335,11 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       ∀ environment, EnvironmentTyped program environment context →
       ∀ value, ValueHasType program value subject → ∀ bindings body,
         selectArm value arms = some (bindings, body) →
-        ∃ resultValue after, Evaluates program (bindings ++ environment) body resultValue after ∧
+        ∃ resultValue after, Evaluates program (bindings.reverse ++ environment) body resultValue after ∧
           ValueHasType program resultValue result ∧ EnvironmentTyped program (after.drop bindings.length) afterContext ∧
-          (∀ entry ∈ after.take bindings.length, entry.2.Disposable program) ∧
-          ∀ other otherAfter, Evaluates program (bindings ++ environment) body other otherAfter → other = resultValue ∧ otherAfter = after)
+          (∃ trace, Cleans program bindings.length after trace (after.drop bindings.length)) ∧
+          ConsumesArm program value arms bindings body ∧
+          ∀ other otherAfter, Evaluates program (bindings.reverse ++ environment) body other otherAfter → other = resultValue ∧ otherAfter = after)
     (motive_4 := fun home source _ => ∃ normalized, NormalizesPattern program source normalized ∧
       ∀ other, NormalizesPattern program source other → other = normalized)
     (motive_5 := fun home sources _ => ∃ normalized, NormalizesPatterns program sources normalized ∧
@@ -1999,8 +2388,8 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
           exact .cons (by simpa [SlotTyped, initialized parameter (by simp)] using headTyped)
             (ih _ tailTyped (fun p included => initialized p (List.mem_cons_of_mem _ included)))
     obtain ⟨value, localAfter, bodyEval, valueTyped, localTyped, bodyUnique⟩ :=
-      bodyIH (bindParameters declaration.parameters values inputsTyped initialized)
-    refine ⟨value, middle, .call declared inputsEval bodyEval (localTyped.disposable discard), valueTyped, middleTyped, ?_⟩
+      bodyIH (bindParameters declaration.parameters values inputsTyped initialized).reverse
+    refine ⟨value, middle, .call declared inputsEval bodyEval (by simpa using Cleans.exists (environment := localAfter) localAfter.length (by simpa using localTyped.disposable discard)), valueTyped, middleTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
     | call otherDeclared otherInputs otherBody otherCleanup =>
@@ -2014,16 +2403,16 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     obtain ⟨values, middle, argumentsEval, valuesTyped, middleTyped, argumentsUnique⟩ := argumentsIH environment environmentTyped
     have subjectTyped := valuesTyped.argument
     obtain ⟨bindings, body, selected⟩ := coverage.selectArm subjectTyped
-    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, cleanup, unique⟩ :=
+    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, cleanup, consumed, unique⟩ :=
       bodiesIH normalized normalization middle middleTyped _ subjectTyped bindings body selected
-    refine ⟨value, after.drop bindings.length, .applyPatterns normalization argumentsEval selected bodyEval cleanup, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after.drop bindings.length, .applyPatterns normalization argumentsEval consumed bodyEval cleanup, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
     | applyPatterns otherNormalization otherArguments otherSelected otherBody otherCleanup =>
       have sameNormalization := normalizationUnique _ otherNormalization
       subst sameNormalization
       obtain ⟨rfl, rfl⟩ := argumentsUnique _ _ otherArguments
-      have sameSelection := Option.some.inj (otherSelected.symm.trans selected)
+      have sameSelection := Option.some.inj (otherSelected.matches.symm.trans selected)
       cases sameSelection
       obtain ⟨rfl, rfl⟩ := unique _ _ otherBody
       exact ⟨rfl, rfl⟩
@@ -2048,10 +2437,10 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
   | sequence head drop tail headIH tailIH =>
     obtain ⟨discarded, middle, headEval, discardedTyped, middleTyped, headUnique⟩ := headIH environmentTyped
     obtain ⟨value, after, tailEval, valueTyped, afterTyped, unique⟩ := tailIH middleTyped
-    refine ⟨value, after, .sequence headEval tailEval (ResidentTyped.disposable discardedTyped drop), valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .sequence headEval ⟨_, (ResidentTyped.disposable discardedTyped drop).destroys⟩ tailEval, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
-    | sequence otherHead otherTail otherDispose =>
+    | sequence otherHead otherDispose otherTail =>
       obtain ⟨rfl, rfl⟩ := headUnique _ _ otherHead
       exact unique _ _ otherTail
   | bind initialized drop annotated continued initialIH bodyIH =>
@@ -2063,7 +2452,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       simp at included
       subst entry
       exact drop
-    refine ⟨value, after.drop 1, .bind initialEval bodyEval cleanup, valueTyped, afterTyped.drop 1, ?_⟩
+    refine ⟨value, after.drop 1, .bind initialEval bodyEval (Cleans.exists 1 cleanup), valueTyped, afterTyped.drop 1, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
     | bind otherInitial otherBody otherCleanup =>
@@ -2072,10 +2461,10 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       exact ⟨rfl, rfl⟩
   | assign resident selected writable available path discard written continued residentIH bodyIH =>
     obtain ⟨replacement, middle, evaluated, residentTyped, middleTyped, residentUnique⟩ := residentIH environmentTyped
-    have disposal := middleTyped.place_disposable selected available path discard
+    obtain ⟨parent, old, found, read, allowed⟩ := middleTyped.place_disposable selected available path discard
     obtain ⟨updated, written, updatedTyped, _⟩ := middleTyped.writePlace selected available path written residentTyped
     obtain ⟨value, after, bodyEval, valueTyped, afterTyped, bodyUnique⟩ := bodyIH updatedTyped
-    refine ⟨value, after, .assign evaluated disposal written bodyEval, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .assign evaluated ⟨parent, old, found, read, old.destructionTrace, allowed.destroys⟩ written bodyEval, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
     | assign otherEval otherDisposal otherWritten otherBody =>
@@ -2111,12 +2500,15 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       exact ⟨rfl, rfl⟩
   | @field home context afterContext body key parentType type index source discard selected ih =>
     obtain ⟨parent, after, evaluated, parentTyped, afterTyped, unique⟩ := ih environmentTyped
-    obtain ⟨value, indexed, found, valueTyped, _⟩ := selected.access parentTyped
+    obtain ⟨value, indexed, found, valueTyped, replace⟩ := selected.access parentTyped
     have selectedValue : parent.readField program key = some value := by simp [Value.readField, indexed, found]
-    refine ⟨value, after, .field evaluated selectedValue (ResidentTyped.disposable parentTyped discard), valueTyped, afterTyped, ?_⟩
+    obtain ⟨residual, cleared, residualTyped⟩ := replace .vacant .vacant .vacant
+    have extracted : parent.writePath program [key] .vacant = some residual := by
+      simp [Value.writePath, indexed, found, cleared]
+    refine ⟨value, after, .field evaluated selectedValue extracted ⟨_, (residualTyped.disposable discard).destroys⟩, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
-    | field otherSource otherSelected otherDispose =>
+    | field otherSource otherSelected otherExtracted otherDispose =>
       obtain ⟨rfl, rfl⟩ := unique _ _ otherSource
       exact ⟨Option.some.inj (otherSelected.symm.trans selectedValue), rfl⟩
   | nil =>
@@ -2146,16 +2538,20 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     next matched found =>
       have same := Option.some.inj selected
       cases same
-      have bindingsTyped := patternTyped.bindings valueTyped found
+      obtain ⟨bindingsTyped, trace, consumed⟩ := patternTyped.consume valueTyped found
       obtain ⟨result, after, evaluated, resultTyped, afterTyped, unique⟩ :=
-        bodyIH (EnvironmentTyped.append bindingsTyped environmentTyped)
-      refine ⟨result, after, evaluated, resultTyped, ?_, ?_, unique⟩
+        bodyIH (EnvironmentTyped.append bindingsTyped.reverse environmentTyped)
+      refine ⟨result, after, evaluated, resultTyped, ?_, ?_, .hit found consumed, unique⟩
       · rw [bindingsTyped.length, ← lengths]
         exact (by simpa using afterTyped.drop afterBindings.length : EnvironmentTyped program (after.drop afterBindings.length) branchAfter).join joined
       · rw [bindingsTyped.length, ← lengths]
+        apply Cleans.exists
         apply (afterTyped.take afterBindings.length).disposable
         simpa using discard
-    next missed => exact tailIH environment environmentTyped value valueTyped bindings body selected
+    next missed found =>
+      obtain ⟨result, after, evaluated, resultTyped, afterTyped, cleanup, consumed, unique⟩ :=
+        tailIH environment environmentTyped value valueTyped bindings body selected
+      exact ⟨result, after, evaluated, resultTyped, afterTyped, cleanup, .miss found consumed, unique⟩
 
   | patternWildcard =>
     refine ⟨.wildcard, .wildcard, ?_⟩

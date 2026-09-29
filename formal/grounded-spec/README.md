@@ -157,7 +157,7 @@ application with conservative affine conditional initialization joins.** Records
 tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
 is decoded declarations/expressions to logical values and lexical post-states. Normative basis:
-§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.5, 7.7 and 13.1. No
+§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7 and 13.1. No
 previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
@@ -248,8 +248,7 @@ complete before extraction. These laws accompany the existing exact physical
 move/restore round trip.
 Strict Lean checking and the connected correctness, nested take/write, sibling
 framing, restoration and whole-read rejection axiom audits passed with only
-`propext` and `Quot.sound`. Ordered destruction of
-surviving fields, custom hooks, and reference-mediated mutation remain open;
+`propext` and `Quot.sound`. Custom hooks and reference-mediated mutation remain open;
 this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
@@ -281,8 +280,8 @@ resident through `EnvironmentTyped.place_disposable`, and writes an initialized
 replacement through the same `PathType`/`Initialization.write` contract. Thus
 restoration establishes definite initialization without assuming old vacancy.
 Scope and overwrite eligibility likewise use the actual branch resident; a
-vacancy never becomes a fabricated owner. Ordered execution is a separate
-cleanup boundary, not a premise of join soundness.
+vacancy never becomes a fabricated owner. The ordered cleanup relation below
+consumes these derived permissions; successful cleanup is not a join premise.
 
 Positive-lower owners cannot use the affine widening rule, regardless of
 whether a particular partial residual could be discarded.
@@ -311,9 +310,12 @@ final initialization state. `StorageDisposition` permits vacancy, whole-type
 individually eligible. Pattern binding itself requires neither copying nor
 discardability. These cases feed the same general correctness theorem.
 
-`Value.Disposable` states zero-use eligibility for an actual resident. Evaluation
-consumes this evidence when discarding a sequencing result, removing lexical or
-parameter bindings, projecting an owned expression, or overwriting storage.
+`Value.Disposable` states zero-use eligibility for an actual resident.
+`Value.Disposable.destroys` constructs an actual `Value.Destroys` derivation:
+children execute in reverse declaration order, the enclosing resident finishes
+afterward, and vacant slots are skipped. `ResidentTyped.children_disposable`
+derives child permissions from the existing structural use producer, including
+uncertain affine residents. No execution witness is supplied by admission.
 `EnvironmentTyped.disposable` derives scope evidence from the actual final
 typed environment. `EnvironmentTyped.place_disposable` derives overwrite
 evidence for the actual selected resident after RHS evaluation, including
@@ -328,12 +330,37 @@ again requires whole-type zero-use permission.
 `Value.Disposable.not_live_exact_nominal` excludes fully initialized manually
 exact-linear owners, including fieldless owners.
 
-This is logical zero-use eligibility, not ordered destructor execution.
-Residual exact-linear shells are connected to actual scope removal and
-overwrites; ordered cleanup transitions, custom hooks and
-their possible divergence, and physical storage release remain open. Strict
-checking and the connected correctness and disposition axiom audits passed
-with only `propext` and `Quot.sound`.
+Evaluation now consumes destruction executions at sequencing and overwrite
+boundaries. Scope removal consumes `Cleans` executions, not permission-only
+guards. Parameter and pattern-binding prefixes are introduced in reverse source
+order, matching newest-owner-first scope cleanup; arguments still evaluate
+left to right. `Cleans.suffix` preserves the exact outer environment,
+`Cleans.trace_scoped` excludes every retained-suffix occurrence from cleanup,
+and `Cleans.exactly_once` proves that cleanup never revisits a resident
+occurrence. Field paths distinguish equal-valued residents.
+
+Owned-expression projection extracts the selected child and clears its slot
+before destroying the residual parent. `Evaluates.field_protects_result`
+proves that no cleanup event targets that slot or any descendant; no extra Copy
+requirement is introduced. Selected patterns use `Pattern.Consumes` and
+`ConsumesArm`: binders transfer their complete payload without destruction,
+wildcard/literal leaves execute destruction, and deconstruction processes field
+discards in reverse order. Failed candidate patterns remain non-consuming.
+`PatternType.consume` produces typed bindings and the actual selected-pattern
+execution together; the old binding-only theorem is removed.
+
+`Value.Destroys.result_order` identifies every execution's result and reverse
+field/postorder trace; `exactly_once` and `skips_vacant_field` prove
+uniqueness and vacancy exclusion. The connected `correctness` theorem retains
+its result, post-context and determinism contract while constructing these
+stronger executions, including after affine joins. Strict checking and the
+connected cleanup, join and correctness axiom audits passed with only
+`propext` and `Quot.sound`.
+
+This is finite logical destruction of the no-hooks owned-value subset. Finish
+events are not physical releases or addresses. Custom hooks and their possible
+divergence, reference-mediated cleanup, nonlocal exits, cancellation, physical
+release and exact-linear control islands remain open.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -414,7 +441,7 @@ Nominal scope excludes generic instances, indirections, hooks and
 non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, residual-shell destruction, loans and
+floating conversion, static strings, custom destruction hooks, loans and
 effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
@@ -433,7 +460,10 @@ import Grounded
 #print axioms Grounded.unit_agreement
 #print axioms Grounded.ValuesHaveTypes.select
 #print axioms Grounded.Covers.selectArm
-#print axioms Grounded.PatternType.bindings
+#print axioms Grounded.PatternType.consume
+#print axioms Grounded.Value.Destroys.result_order
+#print axioms Grounded.Cleans.exactly_once
+#print axioms Grounded.Evaluates.field_protects_result
 #print axioms Grounded.PathType.write
 #print axioms Grounded.EnvironmentTyped.writePlace
 LEAN
@@ -451,8 +481,8 @@ Proceed serially, closing each extension through the same end-to-end theorem:
    incomplete-aggregate rejection are connected through the general theorem.
 5. Affine/exact-linear ownership, destruction and scope cleanup: shared use
    permissions, final-state zero-use eligibility and residual exact-linear
-   shells and conservative affine joins are connected above; ordered destruction
-   and correlation-preserving exact-linear control islands remain open.
+   shells, conservative affine joins and ordered logical destruction are connected
+   above; hooks and correlation-preserving exact-linear control islands remain open.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;
