@@ -150,13 +150,14 @@ explicit semantic-fidelity and proof-assumption audit.
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, lexical reads, sequencing, immutable
 bindings with optional type annotations, tuples/projection, fixed-array
-construction, non-generic transparent aliases, structural constants, and
-non-generic finite-inline nominal data over duplicable fields, and direct
-nonrecursive first-order function calls.** Records, tuple structs and enum
-variants retain declaration identity; struct projections check
-field visibility. The boundary is decoded declarations/expressions to logical
-values. Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
-and 13.1. No previous proof modules are imported. The objective is the full
+construction, non-generic transparent aliases, structural constants,
+non-generic finite-inline nominal data over duplicable fields, direct
+nonrecursive first-order calls, and immediate structural pattern-callable
+application.** Records, tuple structs and enum variants retain declaration
+identity; projection and deconstruction check field visibility. The boundary
+is decoded declarations/expressions to logical values. Normative basis:
+§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.3 and 13.1. No
+previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
 `Grounded.correctness` proves finite evaluation, result typing and uniqueness
@@ -217,6 +218,25 @@ admission derivation in this subset. Structural constants still exclude calls.
 Computed callees, first-class function values, captures, effects, recursion and
 named-label exits are not included in this direct-call boundary.
 
+Immediate pattern-callable application supports binders, wildcards and nested
+scalar/tuple/array/nominal constructor patterns. It retains the callable’s
+argument list: one tuple argument is not two arguments. Source-ordered selection
+executes just the first matching body; bindings remain clause-local. Each body
+uses the same incoming lexical environment and declared result type.
+`Covers` is an inductive constructor-space specialization, not a future-match
+assumption. Its proof constructs actual successful dispatch for every typed
+subject. Pattern binding preservation then constructs the body’s typed
+environment; both results are consumed by `correctness`. Duplicate binders
+are rejected. Every clause needs a static typed datum distinguishing it from
+previous clauses, excluding unreachable clauses without assuming a result
+for the subject expression. There is no primitive Boolean or library-name
+dispatch rule.
+
+This pattern boundary is decoded immediate application, not stored callables
+or a proof of library `match`. Named constant-pattern normalization, source
+record/remainder expansion, borrowed patterns, first-class callable identity
+and captured-storage semantics remain open.
+
 Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
@@ -225,8 +245,9 @@ floating conversion, static strings, mutation, moves, loans and effects
 remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
-Verification: strict `lake build` passed. All exported proofs report only Lean
-standard `propext`. No bypass axioms or admitted proofs. Reproduce here:
+Verification: strict `lake build` passed. The connected theorem reports Lean’s
+standard `propext` and `Quot.sound` (the recursive matcher and its equations
+introduce the latter dependency). No bypass axioms or admitted proofs. Reproduce:
 
 ```sh
 lake build
@@ -238,6 +259,8 @@ import Grounded
 #print axioms Grounded.character_admission
 #print axioms Grounded.unit_agreement
 #print axioms Grounded.ValuesHaveTypes.select
+#print axioms Grounded.Covers.selectArm
+#print axioms Grounded.PatternType.bindings
 LEAN
 ```
 
@@ -247,7 +270,7 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 
 1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
-3. Direct nonrecursive first-order calls: connected; structural patterns and branching next.
+3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
 4. Mutable places, initialization, assignment and explicit moves.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references.
@@ -268,9 +291,9 @@ booleans: truth and branching use ordinary library declarations.
 
 At verified checkpoints, review size, duplicated reasoning and unused concepts.
 Simplify where meaning and guarantees are preserved; do not introduce a generic
-framework merely to shorten local proof plumbing. The current 688-line Lean
-module groups shared declaration inputs in `Program`, replacing repeated
-parameters. Tuple and nominal projection now consume one positional typing
-lemma; it was extracted only when the second actual consumer needed it. Arrays
-and constructors reuse constituent evaluation; constants reuse ordinary
-evaluation; aliases exist only in the static path.
+framework merely to shorten local proof plumbing. Pattern coverage and binding
+preservation are connected immediately to the same expression theorem. Runtime
+typing supplies one constructor decomposition to both proofs. Tuple and nominal
+projection share positional typing; arrays and constructors share constituent
+evaluation; constants reuse ordinary evaluation. The development remains one
+Lean module; no standalone admission checker or speculative proof module is added.

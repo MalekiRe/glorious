@@ -1,9 +1,10 @@
 /-!
 Target-indexed expressions, immutable composition, structural and nominal data.
-Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3 and 13.1.
+Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.3 and 13.1.
 Declarations, field types, identities and lexical names are already decoded.
 Constructors consume argument expressions in their recorded order. Literal
 magnitudes and Unicode numbers are decoded; source elaboration is not proved.
+Direct named calls and immediate pattern-callable application share correctness.
 Only duplicable nominal owners without hooks or indirections are admitted.
 Physical representation, exhaustion and nonduplicable ownership remain outside
 this logical AST-to-value boundary.
@@ -21,6 +22,7 @@ structure Target where
 inductive Width where
   | w8 | w16 | w32 | w64 | w128
   | pointer
+  deriving DecidableEq
 
 def Width.bits (target : Target) : Width → Nat
   | .w8 => 8
@@ -33,6 +35,7 @@ def Width.bits (target : Target) : Width → Nat
 structure IntegerType where
   signed : Bool
   width : Width
+  deriving DecidableEq
 
 /-- Mathematical scalar range; there is no implicit wrapping of literals. -/
 def IntegerType.Contains (target : Target) (type : IntegerType) (value : Int) : Prop :=
@@ -172,6 +175,21 @@ inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop
       (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
         FiniteLayout target data field.type) : FiniteLayout target data (.nominal identity)
 
+/-- Constructor identity for structural matching; tuples remain distinct from nominal data. -/
+inductive Head where
+  | unit
+  | integer (type : IntegerType) (number : Int)
+  | character (number : Nat)
+  | tuple | array
+  | nominal (identity : Nat) (tag : Option Nat)
+  deriving DecidableEq
+
+inductive Pattern where
+  | wildcard
+  | binder (name : String)
+  | node (head : Head) (fields : List Pattern)
+
+
 inductive Expr where
   | unit
   | integer (type : IntegerType) (magnitude : Nat)
@@ -187,6 +205,7 @@ inductive Expr where
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
   | field (body : Expr) (key : FieldKey)
   | call (identity : Nat) (arguments : List Expr)
+  | applyPatterns (inputs : List Ty) (arguments : List Expr) (arms : List (Pattern × Expr))
 /-- This restricts constant syntax, not a second evaluator. Constant dependencies
 are checked by the same typing derivation and use the same evaluation relation. -/
 inductive Structural : Expr → Prop where
@@ -259,6 +278,156 @@ def lookup {α : Type} (name : String) : List (String × α) → Option α
   | (key, value) :: rest => if name = key then some value else lookup name rest
 
 mutual
+inductive ValueHasType (program : Program) : Value → Ty → Prop where
+  | unit : ValueHasType program .unit .unit
+  | integer {type : IntegerType} {number : Int}
+      (fits : type.Contains program.target number) :
+      ValueHasType program (.integer type number) (.integer type)
+  | character {number : Nat} (valid : UnicodeScalar number) :
+      ValueHasType program (.character number) .character
+  | tuple {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
+      (headTyped : ValueHasType program head first) (tailTyped : ValuesHaveTypes program tail rest) :
+      ValueHasType program (.tuple head tail) (.tuple first rest)
+  | array {values : List Value} {element : Ty} {length : Nat}
+      (residents : ValuesHaveTypes program values (List.replicate length element))
+      (elementValid : FiniteLayout program.target program.data element)
+      (size : length < 2 ^ program.target.pointerBits) :
+      ValueHasType program (.array values) (.array element length)
+  | nominal {identity : Nat} {tag : Option Nat} {declaration : DataDecl} {schema : Fields}
+      {values : List Value} (declared : program.data identity = some declaration)
+      (chosen : declaration.constructor tag = some schema)
+      (finite : FiniteLayout program.target program.data (.nominal identity))
+      (residents : ValuesHaveTypes program values (schema.residents.map Field.type)) :
+      ValueHasType program (.nominal identity tag values) (.nominal identity)
+inductive ValuesHaveTypes (program : Program) : List Value → List Ty → Prop where
+  | nil : ValuesHaveTypes program [] []
+  | cons {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
+      (headTyped : ValueHasType program head first) (tailTyped : ValuesHaveTypes program tail rest) :
+      ValuesHaveTypes program (head :: tail) (first :: rest)
+end
+
+inductive EnvironmentTyped (program : Program) : List (String × Value) → List (String × Ty) → Prop where
+  | nil : EnvironmentTyped program [] []
+  | cons {name : String} {value : Value} {type : Ty}
+      {environment : List (String × Value)} {context : List (String × Ty)}
+      (resident : ValueHasType program value type) (rest : EnvironmentTyped program environment context) :
+      EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
+
+
+def Value.head : Value → Head
+  | .unit => .unit
+  | .integer type number => .integer type number
+  | .character number => .character number
+  | .tuple _ _ => .tuple
+  | .array _ => .array
+  | .nominal identity tag _ => .nominal identity tag
+
+def Value.children : Value → List Value
+  | .tuple head tail => head :: tail
+  | .array values | .nominal _ _ values => values
+  | _ => []
+
+mutual
+def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (String × Value)) :=
+  match pattern with
+  | .wildcard => some []
+  | .binder name => some [(name, value)]
+  | .node head fields =>
+      if head = value.head then matchPatterns fields value.children else none
+termination_by sizeOf pattern
+
+def matchPatterns (patterns : List Pattern) (values : List Value) : Option (List (String × Value)) :=
+  match patterns, values with
+  | [], [] => some []
+  | pattern :: patterns, value :: values => do
+      let first ← pattern.matchValue value
+      let rest ← matchPatterns patterns values
+      pure (first ++ rest)
+  | _, _ => none
+termination_by sizeOf patterns
+end
+
+/-- Constructor signatures are shared by pattern typing and coverage specialization. -/
+inductive HeadType (program : Program) : Head → Ty → List Ty → Prop where
+  | unit : HeadType program .unit .unit []
+  | integer {type : IntegerType} {number : Int} (fits : type.Contains program.target number) :
+      HeadType program (.integer type number) (.integer type) []
+  | character {number : Nat} (valid : UnicodeScalar number) :
+      HeadType program (.character number) .character []
+  | tuple (first : Ty) (rest : List Ty) : HeadType program .tuple (.tuple first rest) (first :: rest)
+  | array (element : Ty) (length : Nat) : HeadType program .array (.array element length) (List.replicate length element)
+  | nominal {identity : Nat} {tag : Option Nat} {declaration : DataDecl} {schema : Fields}
+      (declared : program.data identity = some declaration)
+      (chosen : declaration.constructor tag = some schema) :
+      HeadType program (.nominal identity tag) (.nominal identity) (schema.residents.map Field.type)
+
+def Head.Accessible (program : Program) (home : Module) : Head → Prop
+  | .nominal identity tag => ∃ declaration schema,
+      program.data identity = some declaration ∧ declaration.constructor tag = some schema ∧
+      declaration.visibility.Allows declaration.home home ∧
+      ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home
+  | _ => True
+
+mutual
+inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (String × Ty) → Prop where
+  | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
+  | binder (name : String) {type : Ty} (discard : Duplicable program.data type) :
+      PatternType program home (.binder name) type [(name, type)]
+  | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (String × Ty)}
+      (shape : HeadType program head type fields) (access : head.Accessible program home)
+      (fieldsTyped : PatternsType program home patterns fields bindings) :
+      PatternType program home (.node head patterns) type bindings
+inductive PatternsType (program : Program) (home : Module) : List Pattern → List Ty → List (String × Ty) → Prop where
+  | nil : PatternsType program home [] [] []
+  | cons {pattern : Pattern} {patterns : List Pattern} {type : Ty} {types : List Ty}
+      {first rest : List (String × Ty)} (headTyped : PatternType program home pattern type first)
+      (tailTyped : PatternsType program home patterns types rest) :
+      PatternsType program home (pattern :: patterns) (type :: types) (first ++ rest)
+end
+
+/-- Static matrix specialization, not an assumption that an execution will match. -/
+def Pattern.specialize (head : Head) (arity : Nat) : Pattern → Option (List Pattern)
+  | .wildcard | .binder _ => some (List.replicate arity .wildcard)
+  | .node selected fields => if selected = head ∧ fields.length = arity then some fields else none
+
+def specializeRow (head : Head) (arity : Nat) : List Pattern → Option (List Pattern)
+  | [] => none
+  | pattern :: tail => (pattern.specialize head arity).map (· ++ tail)
+
+inductive Covers (program : Program) : List Ty → List (List Pattern) → Prop where
+  | done {rows : List (List Pattern)} (empty : [] ∈ rows) : Covers program [] rows
+  | split {type : Ty} {types : List Ty} {rows : List (List Pattern)}
+      (branches : ∀ head fields, HeadType program head type fields →
+        Covers program (fields ++ types) (rows.filterMap (specializeRow head fields.length))) :
+      Covers program (type :: types) rows
+
+/-- The callable's argument list is retained; only pattern interpretation unwraps
+one argument. A singleton tuple argument is not two arguments (§6.1). -/
+def argumentType : List Ty → Ty
+  | [] => .unit
+  | [type] => type
+  | head :: next :: tail => .tuple head (next :: tail)
+
+def argumentValue : List Value → Value
+  | [] => .unit
+  | [value] => value
+  | head :: next :: tail => .tuple head (next :: tail)
+
+def selectArm (value : Value) : List (Pattern × Expr) → Option (List (String × Value) × Expr)
+  | [] => none
+  | (pattern, body) :: rest =>
+      match pattern.matchValue value with
+      | some bindings => some (bindings, body)
+      | none => selectArm value rest
+
+/-- A static witness distinguishes each clause from its source-order predecessors.
+It is a typed datum, not an assumed result of the subject expression. -/
+def Useful (program : Program) (type : Ty) (previous : List Pattern) (pattern : Pattern) : Prop :=
+  ∃ value, ValueHasType program value type ∧ pattern.matchValue value ≠ none ∧
+    ∀ earlier ∈ previous, earlier.matchValue value = none
+
+
+mutual
 inductive HasType (program : Program) : Module → List (String × Ty) → Expr → Ty → Prop where
   | unit {home : Module} {context : List (String × Ty)} : HasType program home context .unit .unit
   | integer {home : Module} {context : List (String × Ty)} {type : IntegerType} {magnitude : Nat}
@@ -327,6 +496,13 @@ inductive HasType (program : Program) : Module → List (String × Ty) → Expr 
       (inputs : HasTypes program home context arguments (declaration.parameters.map Prod.snd))
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
       HasType program home context (.call identity arguments) declaration.result
+  | applyPatterns {home : Module} {context : List (String × Ty)} {inputs : List Ty}
+      {arguments : List Expr} {arms : List (Pattern × Expr)} {result : Ty}
+      (argumentsTyped : HasTypes program home context arguments inputs)
+      (nonempty : arms ≠ [])
+      (covered : Covers program [argumentType inputs] (arms.map (fun arm => [arm.1])))
+      (bodies : ArmsType program home context (argumentType inputs) result [] arms) :
+      HasType program home context (.applyPatterns inputs arguments arms) result
 
 inductive HasTypes (program : Program) : Module → List (String × Ty) → List Expr → List Ty → Prop where
   | nil {home : Module} {context : List (String × Ty)} : HasTypes program home context [] []
@@ -334,43 +510,18 @@ inductive HasTypes (program : Program) : Module → List (String × Ty) → List
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
       (tailTyped : HasTypes program home context tail rest) :
       HasTypes program home context (head :: tail) (first :: rest)
+inductive ArmsType (program : Program) :
+    Module → List (String × Ty) → Ty → Ty → List Pattern → List (Pattern × Expr) → Prop where
+  | empty {home : Module} {context : List (String × Ty)} {subject result : Ty} {previous : List Pattern} :
+      ArmsType program home context subject result previous []
+  | clause {home : Module} {context : List (String × Ty)} {subject result : Ty}
+      {previous : List Pattern} {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)}
+      {bindings : List (String × Ty)} (patternTyped : PatternType program home pattern subject bindings)
+      (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
+      (bodyTyped : HasType program home (bindings ++ context) body result)
+      (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest) :
+      ArmsType program home context subject result previous ((pattern, body) :: rest)
 end
-
-mutual
-inductive ValueHasType (program : Program) : Value → Ty → Prop where
-  | unit : ValueHasType program .unit .unit
-  | integer {type : IntegerType} {number : Int}
-      (fits : type.Contains program.target number) :
-      ValueHasType program (.integer type number) (.integer type)
-  | character {number : Nat} (valid : UnicodeScalar number) :
-      ValueHasType program (.character number) .character
-  | tuple {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
-      (headTyped : ValueHasType program head first) (tailTyped : ValuesHaveTypes program tail rest) :
-      ValueHasType program (.tuple head tail) (.tuple first rest)
-  | array {values : List Value} {element : Ty} {length : Nat}
-      (residents : ValuesHaveTypes program values (List.replicate length element))
-      (elementValid : FiniteLayout program.target program.data element)
-      (size : length < 2 ^ program.target.pointerBits) :
-      ValueHasType program (.array values) (.array element length)
-  | nominal {identity : Nat} {tag : Option Nat} {declaration : DataDecl} {schema : Fields}
-      {values : List Value} (declared : program.data identity = some declaration)
-      (chosen : declaration.constructor tag = some schema)
-      (finite : FiniteLayout program.target program.data (.nominal identity))
-      (residents : ValuesHaveTypes program values (schema.residents.map Field.type)) :
-      ValueHasType program (.nominal identity tag values) (.nominal identity)
-inductive ValuesHaveTypes (program : Program) : List Value → List Ty → Prop where
-  | nil : ValuesHaveTypes program [] []
-  | cons {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
-      (headTyped : ValueHasType program head first) (tailTyped : ValuesHaveTypes program tail rest) :
-      ValuesHaveTypes program (head :: tail) (first :: rest)
-end
-
-inductive EnvironmentTyped (program : Program) : List (String × Value) → List (String × Ty) → Prop where
-  | nil : EnvironmentTyped program [] []
-  | cons {name : String} {value : Value} {type : Ty}
-      {environment : List (String × Value)} {context : List (String × Ty)}
-      (resident : ValueHasType program value type) (rest : EnvironmentTyped program environment context) :
-      EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
 
 mutual
 inductive Evaluates (program : Program) : List (String × Value) → Expr → Value → Prop where
@@ -427,6 +578,12 @@ inductive Evaluates (program : Program) : List (String × Value) → Expr → Va
       (inputs : EvaluatesMany program environment arguments values)
       (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value) :
       Evaluates program environment (.call identity arguments) value
+  | applyPatterns {environment : List (String × Value)} {inputs : List Ty} {arguments : List Expr}
+      {arms : List (Pattern × Expr)} {values : List Value} {bindings : List (String × Value)} {body : Expr} {value : Value}
+      (argumentsEval : EvaluatesMany program environment arguments values)
+      (selected : selectArm (argumentValue values) arms = some (bindings, body))
+      (bodyEval : Evaluates program (bindings ++ environment) body value) :
+      Evaluates program environment (.applyPatterns inputs arguments arms) value
 
 inductive EvaluatesMany (program : Program) : List (String × Value) → List Expr → List Value → Prop where
   | nil {environment : List (String × Value)} : EvaluatesMany program environment [] []
@@ -453,6 +610,208 @@ theorem ValuesHaveTypes.select {types : List Ty} {values : List Value}
         exact ⟨_, rfl, headTyped⟩
       | succ index => exact ih tailTyped index selection
 
+theorem EnvironmentTyped.append {left right : List (String × Value)} {first rest : List (String × Ty)}
+    (front : EnvironmentTyped program left first) (back : EnvironmentTyped program right rest) :
+    EnvironmentTyped program (left ++ right) (first ++ rest) := by
+  induction front with
+  | nil => exact back
+  | cons resident tail ih => exact .cons resident ih
+
+/-- Runtime typing produces the constructor signature consumed by both pattern
+binding and exhaustive dispatch; neither consumer guesses resident types. -/
+theorem ValueHasType.decompose {value : Value} {type : Ty} (typed : ValueHasType program value type) :
+    ∃ fields, HeadType program value.head type fields ∧ ValuesHaveTypes program value.children fields := by
+  cases typed with
+  | unit => exact ⟨[], .unit, .nil⟩
+  | integer fits => exact ⟨[], .integer fits, .nil⟩
+  | character valid => exact ⟨[], .character valid, .nil⟩
+  | tuple first rest => exact ⟨_, .tuple _ _, .cons first rest⟩
+  | array residents _ _ => exact ⟨_, .array _ _, residents⟩
+  | nominal declared chosen _ residents => exact ⟨_, .nominal declared chosen, residents⟩
+
+theorem ValuesHaveTypes.argument {values : List Value} {types : List Ty}
+    (typed : ValuesHaveTypes program values types) :
+    ValueHasType program (argumentValue values) (argumentType types) := by
+  cases typed with
+  | nil => exact .unit
+  | cons head tail =>
+    cases tail with
+    | nil => exact head
+    | cons next rest => exact .tuple head (.cons next rest)
+
+theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (String × Ty)}
+    (typed : PatternType program home pattern type context) {value : Value}
+    (valueTyped : ValueHasType program value type) {bindings : List (String × Value)}
+    (matched : pattern.matchValue value = some bindings) : EnvironmentTyped program bindings context := by
+  induction typed using PatternType.rec
+    (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
+      ∀ bindings, matchPatterns patterns values = some bindings → EnvironmentTyped program bindings context)
+    generalizing value bindings with
+  | wildcard discard =>
+    simp only [Pattern.matchValue, Option.some.injEq] at matched
+    subst bindings
+    exact .nil
+  | binder name discard =>
+    simp only [Pattern.matchValue, Option.some.injEq] at matched
+    subst bindings
+    exact .cons valueTyped .nil
+  | @node head patterns type fields context shape access fieldsTyped fieldsIH =>
+    simp only [Pattern.matchValue] at matched
+    split at matched
+    next same =>
+      obtain ⟨types, actual, children⟩ := valueTyped.decompose
+      rw [← same] at actual
+      have aligned : fields = types := by
+        cases shape <;> cases actual <;> simp_all
+      subst types
+      exact fieldsIH _ children bindings matched
+    next different => contradiction
+  | nil =>
+    rename_i values valuesTyped bindings matched
+    cases valuesTyped
+    simp only [matchPatterns, Option.some.injEq] at matched
+    subst bindings
+    exact .nil
+  | @cons pattern patterns type types frontContext backContext head tail headIH tailIH =>
+    rename_i values valuesTyped bindings matched
+    cases valuesTyped with
+    | @cons value values type types first rest =>
+      simp only [matchPatterns] at matched
+      cases headMatch : pattern.matchValue value with
+      | none => simp [headMatch] at matched
+      | some front =>
+        cases tailMatch : matchPatterns patterns values with
+        | none => simp [headMatch, tailMatch] at matched
+        | some back =>
+          simp [headMatch, tailMatch] at matched
+          subst bindings
+          exact EnvironmentTyped.append (headIH first headMatch) (tailIH _ rest _ tailMatch)
+
+/-- Constructor-space coverage constructs an actual first matching clause. No
+post-evaluation match result occurs among the admission premises. -/
+theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Value}
+    (covered : Covers program [type] (arms.map (fun arm => [arm.1])))
+    (typed : ValueHasType program value type) :
+    ∃ bindings body, selectArm value arms = some (bindings, body) := by
+  have lengths : ∀ {values : List Value} {types : List Ty},
+      ValuesHaveTypes program values types → values.length = types.length := by
+    intro values
+    induction values with
+    | nil => intro types typed; cases typed; rfl
+    | cons value values ih =>
+      intro types typed
+      cases typed with
+      | cons first rest => exact congrArg Nat.succ (ih rest)
+  have appendTyped : ∀ {first second : List Value} {front back : List Ty},
+      ValuesHaveTypes program first front → ValuesHaveTypes program second back →
+      ValuesHaveTypes program (first ++ second) (front ++ back) := by
+    intro first
+    induction first with
+    | nil => intro second front back typed rest; cases typed; exact rest
+    | cons value values ih =>
+      intro second front back typed rest
+      cases typed with
+      | cons head tail => exact .cons head (ih tail rest)
+  have appendMatching : ∀ (patterns : List Pattern) (values : List Value),
+      patterns.length = values.length → ∀ tail rest,
+      matchPatterns (patterns ++ tail) (values ++ rest) =
+        ((matchPatterns patterns values).bind fun first =>
+          (matchPatterns tail rest).bind fun second => some (first ++ second)) := by
+    intro patterns
+    induction patterns with
+    | nil =>
+      intro values equal tail rest
+      have empty : values = [] := by simpa using equal.symm
+      subst values
+      simp [matchPatterns]
+    | cons pattern patterns ih =>
+      intro values equal tail rest
+      cases values with
+      | nil => simp at equal
+      | cons value values =>
+        have lengths : patterns.length = values.length := by simpa using equal
+        simp only [List.cons_append, matchPatterns]
+        rw [ih values lengths]
+        cases head : pattern.matchValue value <;>
+          cases front : matchPatterns patterns values <;>
+          cases back : matchPatterns tail rest <;>
+          simp [List.append_assoc]
+  have matrixSound : ∀ {types : List Ty} {rows : List (List Pattern)}, Covers program types rows →
+      ∀ values, ValuesHaveTypes program values types →
+      ∃ row ∈ rows, ∃ bindings, matchPatterns row values = some bindings := by
+    intro types rows coverage
+    induction coverage with
+    | done contained =>
+      intro values typed
+      cases typed
+      exact ⟨[], contained, [], by simp [matchPatterns]⟩
+    | @split type types rows branches ih =>
+      intro values typed
+      cases typed with
+      | @cons value values _ _ first rest =>
+        obtain ⟨fields, headTyped, childrenTyped⟩ := first.decompose
+        obtain ⟨row, included, bindings, matched⟩ :=
+          ih _ fields headTyped _ (appendTyped childrenTyped rest)
+        obtain ⟨original, originalIncluded, specialized⟩ := List.mem_filterMap.mp included
+        cases original with
+        | nil => simp [specializeRow] at specialized
+        | cons pattern patterns =>
+          simp only [specializeRow, Option.map_eq_some_iff] at specialized
+          obtain ⟨front, frontSelected, sameRow⟩ := specialized
+          subst row
+          have frontLength : front.length = value.children.length := by
+            have normalized : front.length = fields.length := by
+              cases pattern with
+              | wildcard => simp [Pattern.specialize] at frontSelected; subst front; simp
+              | binder name => simp [Pattern.specialize] at frontSelected; subst front; simp
+              | node head children =>
+                simp only [Pattern.specialize] at frontSelected
+                split at frontSelected <;> simp_all
+            exact normalized.trans (lengths childrenTyped).symm
+          rw [appendMatching front value.children frontLength] at matched
+          simp only [Option.bind_eq_some_iff] at matched
+          obtain ⟨firstBindings, firstMatched, restBindings, restMatched, _⟩ := matched
+          have originalMatches : ∃ result, pattern.matchValue value = some result := by
+            cases pattern with
+            | wildcard => exact ⟨[], by simp [Pattern.matchValue]⟩
+            | binder name => exact ⟨[(name, value)], by simp [Pattern.matchValue]⟩
+            | node head children =>
+              simp only [Pattern.specialize] at frontSelected
+              split at frontSelected
+              next selected =>
+                have sameChildren := Option.some.inj frontSelected
+                subst front
+                exact ⟨firstBindings, by simpa [Pattern.matchValue, selected.1] using firstMatched⟩
+              next impossible => contradiction
+          obtain ⟨headBindings, headMatched⟩ := originalMatches
+          exact ⟨pattern :: patterns, originalIncluded, headBindings ++ restBindings,
+            by simp [matchPatterns, headMatched, restMatched]⟩
+  obtain ⟨row, included, bindings, matched⟩ := matrixSound covered [value] (.cons typed .nil)
+  obtain ⟨arm, armIncluded, sameRow⟩ := List.mem_map.mp included
+  subst row
+  have armMatches : arm.1.matchValue value ≠ none := by
+    intro missing
+    simp [matchPatterns, missing] at matched
+  have noneMeansMissing : ∀ (arms : List (Pattern × Expr)), Grounded.selectArm value arms = none →
+      ∀ arm ∈ arms, arm.1.matchValue value = none := by
+    intro arms
+    induction arms with
+    | nil => simp
+    | cons first rest ih =>
+      intro missing arm included
+      simp only [Grounded.selectArm] at missing
+      cases selected : first.1.matchValue value with
+      | some found => simp [selected] at missing
+      | none =>
+        simp only [selected] at missing
+        rcases List.mem_cons.mp included with same | later
+        · subst arm; exact selected
+        · exact ih missing arm later
+  cases selected : Grounded.selectArm value arms with
+  | none => exact False.elim (armMatches (noneMeansMissing arms selected arm armIncluded))
+  | some result => exact ⟨result.1, result.2, rfl⟩
+
+
 /-- Every admitted expression in a typed lexical environment terminates with a
 correctly typed, unique result. Binding constructs its body's typed environment;
 no continuation-readiness or successful-evaluation premise is assumed. -/
@@ -466,6 +825,13 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       ∀ environment, EnvironmentTyped program environment context →
         ∃ values, EvaluatesMany program environment expressions values ∧ ValuesHaveTypes program values types ∧
           ∀ other, EvaluatesMany program environment expressions other → other = values)
+    (motive_3 := fun home context subject result previous arms _ =>
+      ∀ environment, EnvironmentTyped program environment context →
+      ∀ value, ValueHasType program value subject → ∀ bindings body,
+        selectArm value arms = some (bindings, body) →
+        ∃ resultValue, Evaluates program (bindings ++ environment) body resultValue ∧
+          ValueHasType program resultValue result ∧
+          ∀ other, Evaluates program (bindings ++ environment) body other → other = resultValue)
     generalizing environment with
   | unit =>
     refine ⟨.unit, .unit, .unit, ?_⟩
@@ -517,6 +883,20 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       have sameInputs := inputsUnique _ otherInputs
       subst sameInputs
       exact bodyUnique other otherBody
+  | applyPatterns argumentsTyped nonempty covered bodies argumentsIH bodiesIH =>
+    obtain ⟨values, argumentsEval, valuesTyped, argumentsUnique⟩ := argumentsIH environment environmentTyped
+    have subjectTyped := valuesTyped.argument
+    obtain ⟨bindings, body, selected⟩ := covered.selectArm subjectTyped
+    obtain ⟨value, bodyEval, valueTyped, unique⟩ := bodiesIH environment environmentTyped _ subjectTyped bindings body selected
+    refine ⟨value, .applyPatterns argumentsEval selected bodyEval, valueTyped, ?_⟩
+    intro other evaluation
+    cases evaluation with
+    | applyPatterns otherArguments otherSelected otherBody =>
+      have sameArguments := argumentsUnique _ otherArguments
+      subst sameArguments
+      have sameSelection := Option.some.inj (otherSelected.symm.trans selected)
+      cases sameSelection
+      exact unique other otherBody
   | group typed ih =>
     obtain ⟨value, evaluated, valueTyped, unique⟩ := ih environmentTyped
     refine ⟨value, .group evaluated, valueTyped, ?_⟩
@@ -647,7 +1027,20 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       subst sameTail
       rfl
 
-/-- Empty source environments are realized, not assumed. -/
+  | empty =>
+    rename_i environment environmentTyped value valueTyped bindings body selected
+    simp [selectArm] at selected
+  | clause patternTyped distinct useful bodyTyped tailTyped bodyIH tailIH =>
+    rename_i environment environmentTyped value valueTyped bindings body selected
+    simp only [selectArm] at selected
+    split at selected
+    next matched found =>
+      have same := Option.some.inj selected
+      cases same
+      exact bodyIH (EnvironmentTyped.append (patternTyped.bindings valueTyped found) environmentTyped)
+    next missed => exact tailIH environment environmentTyped value valueTyped bindings body selected
+
+
 theorem closed_correctness {expression : Expr} {type : Ty}
     (admitted : HasType program home [] expression type) :
     ∃ value, Evaluates program [] expression value ∧ ValueHasType program value type ∧
