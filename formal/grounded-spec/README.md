@@ -156,21 +156,27 @@ nonrecursive first-order calls, and immediate structural pattern-callable
 application with conservative affine conditional initialization joins.** Records,
 tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
-is decoded declarations/expressions to logical values and lexical post-states. Normative basis:
+is decoded declarations/expressions to logical values and stable-root storage post-states. Normative basis:
 §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7 and 13.1. No
 previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
 `Grounded.correctness` proves finite evaluation, result typing, lexical-state
-preservation and uniqueness of both result and final environment. Every
-constituent consumes its predecessor’s actual post-state. Initializers execute
-before their binding is introduced; their result and post-state construct the
-body environment. Scope exit removes its own binding prefix and retains
-changes to surrounding locals. Copying requires duplicability; zero-use sites
-require the distinct affine-bound permission `MayDiscard`. `closed_correctness` constructs
-the empty environment rather than assuming it. Admission supplies no successful
-execution or normalization witness. Exact scalar admission theorems and `unit_agreement` remain connected
-to this general result. This is lexical-state preservation, not physical-machine preservation.
+preservation, stable-root storage evolution and uniqueness of both result and
+final environment. Every constituent consumes its predecessor’s actual post-state.
+Initializers execute before their binding receives a fresh root; their result
+and post-store construct the body environment. Scope exit retires its own root
+prefix and retains changes to surrounding locals. Copying requires duplicability;
+zero-use sites require the distinct affine-bound permission `MayDiscard`.
+`closed_correctness` derives empty visible bindings and no occupied store cells
+from actual evolution starting at `Environment.empty`. It preserves the advanced
+identity supply rather than falsely equating the final environment to the initial
+empty environment. Admission supplies no successful execution, normalization or
+allocation-success witness. Exact scalar admission theorems and `unit_agreement`
+remain connected to this general result. This is logical storage preservation,
+not physical-machine preservation.
+
+
 
 Tuple arity is preserved: unit is the empty tuple; grouping and a singleton
 tuple are distinct. Constituent evaluation and positional value typing are
@@ -207,9 +213,10 @@ moves require the selected subtree to be complete; later arguments and bodies
 consume the preceding initialization context. Assignment restores a vacant
 subtree of a mutable root after evaluating its RHS. Function
 parameters and pattern binders start initialized; scope exit removes only its
-own prefix and preserves changes to outer slots. Vacancies now reside directly
-in the resident tree; the separate optional-root wrapper and pattern-binding
-conversion are removed. `ValueHasType.initialized` proves that every typed owned
+own prefix and preserves changes to outer slots. Vacancies reside directly
+in the resident tree. The authoritative store distinguishes a still-live moved-out
+cell (`some .vacant`) from a retired or nonexistent cell (`none`); absence never
+projects to a fabricated vacancy. `ValueHasType.initialized` proves that every typed owned
 result contains no vacancy at any depth. Reads check the selected subtree, and
 extraction uses the same path write as restoration, replacing the selected
 resident with a vacancy rather than retaining its payload elsewhere.
@@ -252,6 +259,47 @@ framing, restoration and whole-read rejection axiom audits passed with only
 this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
+
+### Authoritative logical storage identity
+
+`Environment` contains lexical `(name, Root)` bindings, one authoritative
+`Root → Option Value` store, and a monotone `nextRoot : Nat` supply.
+`Environment.Valid` bounds every occupied cell, including hidden caller cells,
+and every visible root below the supply, with distinct visible roots.
+`Valid.fresh` derives availability from that invariant. Roots are unbounded
+logical identities, not physical addresses, allocation requests or a model of
+allocation exhaustion. Shadowing creates a fresh root rather than changing the
+identity of the older binding. Retirement never rewinds the supply.
+
+`get`, `replace`, place reads/moves/writes, binding creation and source-order
+parameter/pattern preparation all consume this store. `StoredBindings` is a
+read-only relational projection requiring an actual `some resident` for every
+binding; typing consumes it, and no missing cell receives a default value.
+`BindingValues` denotes transferred inputs before fresh-root introduction, not a
+second runtime environment. `prepare` introduces these inputs left to right,
+producing the reversed newest-first lexical prefix used by cleanup.
+
+Calls hide caller names, not caller cells. Fresh parameter roots and body
+execution use the same store; return restores caller visibility while retaining
+the actual post-store and advanced supply. `Evaluates.call_frame` proves that
+all old roots remain outside the callee’s lexical bindings at entry and that
+its fully cleaned post-store equals the caller store after argument evaluation.
+`Evaluates.storage` and `correctness` prove `Environment.Evolution`: incoming
+lexical identities remain unchanged, the supply is monotone, and every cell
+outside the incoming lexical roots is exactly framed. This is the no-reference
+owned-value subset’s frame theorem; future indirect reference writes must
+account for their referents, not inherit this lexical-only footprint. Hidden
+cells may be opaque to local typing, but remain globally bounded and framed.
+
+`Cleans.retired` proves that actual cleanup removes every selected root cell;
+`Cleans.frame` and `Environment.retire_retained` preserve all other cells and
+retained lexical roots exactly. `Cleans.retired_stays_absent` proves that actual
+continuation execution cannot make a retired identity resolve again.
+`Environment.Agrees` compares checked lexical logical-value observations across
+different root names, supplies and hidden cells. `Evaluates.agrees`, consumed by
+`correctness`, transports the same logical result and final observation through
+every current operation. No duplicate old evaluator or executable projected
+store is retained. References, loans and custom hooks are not added by this cutover.
 
 ### Affine conditional initialization joins
 
@@ -316,8 +364,8 @@ children execute in reverse declaration order, the enclosing resident finishes
 afterward, and vacant slots are skipped. `ResidentTyped.children_disposable`
 derives child permissions from the existing structural use producer, including
 uncertain affine residents. No execution witness is supplied by admission.
-`EnvironmentTyped.disposable` derives scope evidence from the actual final
-typed environment. `EnvironmentTyped.place_disposable` derives overwrite
+`EnvironmentTyped.cleanup` derives ordered scope destruction and retirement
+from the actual final typed store. `EnvironmentTyped.place_disposable` derives overwrite
 evidence for the actual selected resident after RHS evaluation, including
 vacancy restoration. `correctness` constructs these permissions; source
 admission does not assume successful runtime cleanup.
@@ -332,12 +380,14 @@ exact-linear owners, including fieldless owners.
 
 Evaluation now consumes destruction executions at sequencing and overwrite
 boundaries. Scope removal consumes `Cleans` executions, not permission-only
-guards. Parameter and pattern-binding prefixes are introduced in reverse source
-order, matching newest-owner-first scope cleanup; arguments still evaluate
-left to right. `Cleans.suffix` preserves the exact outer environment,
-`Cleans.trace_scoped` excludes every retained-suffix occurrence from cleanup,
-and `Cleans.exactly_once` proves that cleanup never revisits a resident
-occurrence. Field paths distinguish equal-valued residents.
+guards. Parameter and pattern owners receive fresh roots in source order and
+are exposed in reverse order, matching newest-owner-first scope cleanup;
+arguments still evaluate left to right. `Cleans.suffix` identifies the actual
+retired post-state; `Cleans.frame` preserves every cell outside the cleanup
+prefix. In valid environments, `Cleans.trace_scoped` and distinct roots exclude
+retained owners from cleanup, and `Cleans.exactly_once` rules out repeated
+resident occurrences. Traces use stable roots paired with relative field paths,
+not shifting lexical indices; distinct roots distinguish equal-valued owners.
 
 Owned-expression projection checks `StorageDisposition` for the statically
 computed residual mask, not whole-parent discardability. This admits extracting
@@ -346,6 +396,7 @@ Evaluation extracts the selected child and clears its slot before destroying
 the residual parent. `Evaluates.field_protects_result` proves that no cleanup
 event targets that slot or any descendant; no extra Copy requirement is
 introduced. Selected patterns use `Pattern.Consumes` and
+`ConsumesArm`: binders transfer their complete payload without destruction,
 wildcard/literal leaves execute destruction, and deconstruction processes field
 discards in reverse order. Failed candidate patterns remain non-consuming.
 `PatternType.consume` produces typed bindings and the actual selected-pattern
@@ -374,7 +425,8 @@ exact arity and target-representable length. Known-empty arrays are resident-fre
 Alias bodies resolve finitely to existing types, including nested tuple/array
 types; binding annotations consume that resolution. No alias identity is added
 to runtime values. Constant references select declared structural initializers,
-check their declared types, and evaluate them in an empty local environment.
+check their declared types, and evaluate them with caller names hidden while
+retaining the same root store and supply.
 Their bodies are admitted in the declaring module, not the caller’s module;
 the caller must have access to the constant itself.
 The existing evaluation relation and correctness induction perform the work;
@@ -398,8 +450,8 @@ repairs the previously unchecked malformed element type of an empty array.
 Direct calls select a resolved function identity, check visibility, exact
 argument arity/types and distinct parameter names, and admit the actual body
 in its declaring module. Arguments evaluate in order. Their proved value
-typing constructs the isolated parameter environment; caller locals cannot
-leak into the body. Body admission is a recursive static derivation, not a
+typing constructs fresh parameter roots over the caller store with caller
+names hidden; caller cells persist but their names cannot leak into the body. Body admission is a recursive static derivation, not a
 promise of execution: correctness carries both argument and body induction
 hypotheses through actual invocation. Recursive call cycles have no finite
 admission derivation in this subset. Structural constants still exclude calls.
@@ -447,9 +499,13 @@ floating conversion, static strings, custom destruction hooks, loans and
 effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
-Verification: strict `lake build` passed. The connected theorem reports Lean’s
-standard `propext` and `Quot.sound` (the recursive matcher and its equations
-introduce the latter dependency). No bypass axioms or admitted proofs. Reproduce:
+Verification: strict checking of `Grounded.lean` with warnings as errors and
+auto-implicit variables disabled passed after the storage cutover. An exhaustive
+audit of all 2,145 Grounded kernel declarations, including private and generated
+constants, found only Lean’s standard `propext` and `Quot.sound`,
+including connected correctness, storage evolution, retirement persistence,
+caller framing and logical-value agreement. No bypass axioms, admitted proofs
+or `Classical.choice` dependency. Reproduce:
 
 ```sh
 lake build
@@ -468,6 +524,14 @@ import Grounded
 #print axioms Grounded.Evaluates.field_protects_result
 #print axioms Grounded.PathType.write
 #print axioms Grounded.EnvironmentTyped.writePlace
+#print axioms Grounded.Environment.Valid.fresh
+#print axioms Grounded.Environment.retire_retained
+#print axioms Grounded.Evaluates.storage
+#print axioms Grounded.Evaluates.call_frame
+#print axioms Grounded.Cleans.retired
+#print axioms Grounded.Cleans.frame
+#print axioms Grounded.Cleans.retired_stays_absent
+#print axioms Grounded.Evaluates.agrees
 LEAN
 ```
 
@@ -485,7 +549,9 @@ Proceed serially, closing each extension through the same end-to-end theorem:
    permissions, final-state zero-use eligibility and residual exact-linear
    shells, conservative affine joins and ordered logical destruction are connected
    above; hooks and correlation-preserving exact-linear control islands remain open.
-6. Borrowing, provenance, lifetimes and returned references, including required
+6. Stable logical roots, authoritative storage, non-reused supply, actual
+   retirement and retained-root framing are connected prerequisites, as above.
+   Borrowing, provenance, lifetimes and returned references remain next, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;
    unconstrained generic owned inputs do not automatically reborrow. Preserve
