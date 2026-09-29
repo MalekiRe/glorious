@@ -148,9 +148,9 @@ explicit semantic-fidelity and proof-assumption audit.
 ## Current boundary
 
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
-decoded character literals, grouping, lexical reads, sequencing, immutable and
-mutable initialized bindings, whole-local assignment, optional type annotations, tuples/projection, fixed-array
-construction, non-generic transparent aliases, structural constants,
+decoded character literals, grouping, place reads, sequencing, immutable and
+mutable initialized bindings, whole-local and nested tuple/structure assignment,
+optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data over duplicable fields, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
 application.** Records, tuple structs and enum variants retain declaration
@@ -178,6 +178,18 @@ Projection derives its actual resident and typing from the evaluated tuple;
 an in-range runtime selection is not separately assumed. Out-of-range tuple
 projections cannot be admitted. Physical evaluation traces remain outside this
 logical big-step boundary.
+
+`Place` selects the nearest lexical root and a field path. `ProjectionType`
+supplies tuple bounds and nominal-field visibility to both reads and writes;
+the old separate tuple-expression projection rule is removed. Assignment
+evaluates the RHS first, then updates the selected place in that actual
+post-state. It requires a mutable root and a legally discardable old resident
+(currently duplicable, without hooks). Nested writes preserve aggregate typing.
+`PathType.write` and `EnvironmentTyped.writePlace` also prove that an actual
+read of the updated path returns the replacement, not merely some well-typed
+value. These are the same operations consumed by expression correctness.
+Array indexing, enum payload writes and writes through references are not
+silently treated as ordinary field projection.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -257,8 +269,8 @@ Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, projected assignment, uninitialized places,
-moves, loans and effects remain open. There is no physical-storage, allocation-failure, package-admission
+floating conversion, static strings, uninitialized places, moves, loans and
+effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict `lake build` passed. The connected theorem reports Lean’s
@@ -277,6 +289,8 @@ import Grounded
 #print axioms Grounded.ValuesHaveTypes.select
 #print axioms Grounded.Covers.selectArm
 #print axioms Grounded.PatternType.bindings
+#print axioms Grounded.PathType.write
+#print axioms Grounded.EnvironmentTyped.writePlace
 LEAN
 ```
 
@@ -288,7 +302,7 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
 3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
 4. Mutable places, initialization, assignment and explicit moves: initialized
-   mutable locals and whole-local assignment are connected; projected writes,
+   mutable locals and nested tuple/structure assignment are connected;
    uninitialized storage and move transitions remain open.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references, including required
@@ -318,7 +332,9 @@ At verified checkpoints, review size, duplicated reasoning and unused concepts.
 Simplify where meaning and guarantees are preserved; do not introduce a generic
 framework merely to shorten local proof plumbing. Pattern coverage and binding
 preservation are connected immediately to the same expression theorem. Runtime
-typing supplies one constructor decomposition to both proofs. Tuple and nominal
-projection share positional typing; arrays and constructors share constituent
-evaluation; constants reuse ordinary evaluation. The development remains one
-Lean module; no standalone admission checker or speculative proof module is added.
+typing supplies one constructor decomposition to both proofs. Place and
+expression projections share field selection; tuple and nominal updates share
+positional typing. Arrays and constructors share constituent evaluation;
+constants reuse ordinary evaluation. Current size: 1,565 Lean lines including
+comments and blanks. The development remains one Lean module; no standalone
+admission checker or speculative proof module is added.
