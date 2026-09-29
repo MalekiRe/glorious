@@ -1,5 +1,5 @@
 /-!
-Target-indexed expressions, structural/nominal data, and first-class shared references.
+Target-indexed expressions, structural/nominal data, and first-class shared/unique references.
 Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7, 9.1–9.2 and 13.1.
 Declarations, field types, identities and lexical names are already decoded.
 Constructors consume argument expressions in their recorded order. Literal
@@ -11,9 +11,13 @@ Affine arm joins retain branch residents under conservative initialization.
 Lexical names select non-reused logical roots in one authoritative optional-resident
 store. Calls retain caller cells; scope cleanup retires only its own roots.
 These identities are not physical addresses or successful allocation requests.
-Shared loans, canonical borrowed subaddresses and checked own-ending metadata
-are connected to the same source producer and correctness theorem. Unique
-references, custom hooks, physical release, representation and exhaustion remain open.
+Mode-sensitive loans, canonical borrowed subaddresses and checked own-ending
+metadata are connected to the same source producer and correctness theorem.
+Explicit unique/shared borrowing and reborrowing preserve immutable modes;
+canonical referent mutation and restoration consume the same storage invariants.
+Default owned reads copy Duplicable data/handles or transfer from positive static
+noncopy evidence; reference expectations compel fresh reborrowing instead.
+Custom hooks, physical realization and exhaustion remain open.
 Admission supplies no successful execution or normalization witness.
 Constant-normal-form checks are consumed only after normalization is derived.
 No prior specification modules are imported.
@@ -53,6 +57,10 @@ def IntegerType.Contains (target : Target) (type : IntegerType) (value : Int) : 
 def UnicodeScalar (number : Nat) : Prop :=
   number < 0x110000 ∧ (number < 0xd800 ∨ 0xe000 ≤ number)
 
+inductive BorrowMode where
+  | shared | unique
+  deriving DecidableEq
+
 inductive Ty where
   | unit
   | integer (type : IntegerType)
@@ -60,13 +68,13 @@ inductive Ty where
   | tuple (head : Ty) (tail : List Ty)
   | array (element : Ty) (length : Nat)
   | nominal (identity : Nat)
-  | shared (referent : Ty)
+  | reference (referent : Ty) (mode : BorrowMode := .shared)
 
 mutual
 /-- Syntactic supported-data shape, not a claim about unknown nominal layouts.
 A non-vacant nominal resident separately supplies its checked FiniteLayout. -/
 def Ty.DataShape : Ty → Prop
-  | .shared _ => False
+  | .reference _ _ => False
   | .tuple head tail => head.DataShape ∧ typesDataShape tail
   | .array element _ => element.DataShape
   | _ => True
@@ -211,17 +219,17 @@ theorem FiniteLayout.dataShape {target : Target} {data : DataDeclarations} {type
   | tuple first rest firstIH restIH => exact ⟨firstIH, (typesDataShape_iff _).mpr restIH⟩
   | array resident size ih => exact ih
 
-/-- Unknown nominal identities remain admissible in vacant old slots. Only direct
-shared handles require a finite referent; shared aggregates are outside this slice. -/
+/-- Unknown nominal identities remain admissible in vacant old slots. Direct
+reference handles require a finite referent; reference aggregates are outside this slice. -/
 inductive StorageType (target : Target) (data : DataDeclarations) : Ty → Prop where
   | data {type : Ty} (shape : type.DataShape) : StorageType target data type
-  | shared {referent : Ty} (finite : FiniteLayout target data referent) : StorageType target data (.shared referent)
+  | reference {referent : Ty} {mode : BorrowMode} (finite : FiniteLayout target data referent) : StorageType target data (.reference referent mode)
 
 
 /-- Constructor identity for structural matching; tuples remain distinct from nominal data. -/
 inductive Head where
   | vacant
-  | shared (node : Nat)
+  | reference (node : Nat)
   | unit
   | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
@@ -231,12 +239,12 @@ inductive Head where
 
 /-- Runtime reference observations are not source constructor patterns. -/
 def Head.Source : Head → Prop
-  | .shared _ => False
+  | .reference _ => False
   | _ => True
 
 inductive Value where
   | vacant
-  | shared (node : Nat)
+  | reference (node : Nat)
   | unit
   | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
@@ -264,7 +272,7 @@ mutual
 def Value.equal (left right : Value) : Bool :=
   match left, right with
   | .vacant, .vacant => true
-  | .shared node, .shared other => decide (node = other)
+  | .reference node, .reference other => decide (node = other)
   | .unit, .unit => true
   | .integer type number, .integer otherType otherNumber => decide (type = otherType) && decide (number = otherNumber)
   | .character number, .character other => decide (number = other)
@@ -291,7 +299,7 @@ instance : LawfulBEq Value := by
     induction left using Value.rec
       (motive_2 := fun values => ∀ others, valuesEqual values others = true ↔ values = others) with
     | vacant => intro right; cases right <;> simp [Value.equal]
-    | shared node => intro right; cases right <;> simp [Value.equal]
+    | reference node => intro right; cases right <;> simp [Value.equal]
     | unit => intro right; cases right <;> simp [Value.equal]
     | integer type number => intro right; cases right <;> simp [Value.equal]
     | character number => intro right; cases right <;> simp [Value.equal]
@@ -382,6 +390,39 @@ inductive Initialization.Access : Initialization → List Nat → Initialization
   | here (state : Initialization) : Access state [] state
   | child {state selected : Initialization} {index : Nat} {indices : List Nat}
       (present : state.Present) (access : Access (state.child index) indices selected) : Access state (index :: indices) selected
+
+theorem Initialization.Access.append {state middle selected : Initialization} {first second : List Nat}
+    (front : state.Access first middle) (back : middle.Access second selected) :
+    state.Access (first ++ second) selected := by
+  induction front with
+  | here => exact back
+  | child present _ ih => exact .child present (ih back)
+
+theorem Initialization.Access.deterministic {state first second : Initialization} {indices : List Nat}
+    (left : state.Access indices first) (right : state.Access indices second) : first = second := by
+  induction left with
+  | here => cases right; rfl
+  | child _ _ ih => cases right with | child _ rest => exact ih rest
+
+theorem Initialization.Access.split {state selected : Initialization} {first second : List Nat}
+    (access : state.Access (first ++ second) selected) :
+    ∃ middle, state.Access first middle ∧ middle.Access second selected := by
+  induction first generalizing state with
+  | nil => exact ⟨state, .here _, access⟩
+  | cons index indices ih =>
+    cases access with
+    | child present rest =>
+      obtain ⟨middle, front, back⟩ := ih rest
+      exact ⟨middle, .child present front, back⟩
+
+theorem Initialization.Complete.access_all {state : Initialization} (complete : state.Complete)
+    (indices : List Nat) : ∃ selected, state.Access indices selected ∧ selected.Complete := by
+  induction indices generalizing state with
+  | nil => exact ⟨state, .here _, complete⟩
+  | cons index indices ih =>
+    obtain ⟨selected, access, ready⟩ := ih (complete.child index)
+    exact ⟨selected, .child (by cases complete <;> trivial) access, ready⟩
+
 
 /-- Unknown presence permits replacing the whole root, never descending into it. -/
 theorem Initialization.Access.maybe_iff {indices : List Nat} {selected : Initialization} :
@@ -496,17 +537,28 @@ structure SourceLoan where
   referent : Ty
   parent : Option Nat
   own : Bool
+  mode : BorrowMode := .shared
 
 /-- Declaration metadata is separate from the identities produced at introduction. -/
 structure Slot extends BindingType where
   binder : Nat
   reference : Option Nat
 
+def Slot.metadata (slot : Slot) : Ty × Bool × Nat × Option Nat :=
+  (slot.type, slot.mutable, slot.binder, slot.reference)
+
 structure Context where
-  bindings : List (String × Slot)
+  names : List (String × Nat)
+  storage : OriginBase → Option Slot
   loans : List SourceLoan
   nextBinder : Nat
   inputCount : Nat
+
+/-- Lexical lookup is a view of authoritative source storage. Hiding names does
+not hide, duplicate, or roll back the initialization of the named storage. -/
+def Context.bindings (context : Context) : List (String × Slot) :=
+  context.names.filterMap fun entry =>
+    (context.storage (.binder entry.2)).map fun slot => (entry.1, slot)
 
 structure ResultType where
   type : Ty
@@ -525,8 +577,10 @@ inductive Expr where
   | group (body : Expr)
   | read (place : Place)
   | move (place : Place)
-  | borrow (place : AccessPlace)
+  | borrow (mode : BorrowMode) (place : AccessPlace)
   | dereference (reference : Place) (fields : List FieldKey)
+  | moveIndirect (reference : Place) (fields : List FieldKey)
+  | assignIndirect (reference : Place) (fields : List FieldKey) (value rest : Expr)
   | sequence (first rest : Expr)
   | bind (mutable : Bool) (name : String) (annotation : Option TypeExpr) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
@@ -543,6 +597,8 @@ mutual
 an exact lexical slot, not a source node interpreted as a runtime allocation ID. -/
 inductive CorePlan where
   | leaf
+  | implicitMove
+  | reborrow (mode : BorrowMode)
   | unary (body : CorePlan)
   | binary (first rest : CorePlan)
   | batch (elements : List CorePlan)
@@ -623,6 +679,41 @@ inductive PathType (program : Program) (home : Module) : Ty → List FieldKey �
       (head : ProjectionType program home source key index middle) (tail : PathType program home middle keys indices target) :
       PathType program home source (key :: keys) (index :: indices) target
 
+/-- Canonical paths retain checked projection facts, including the module which
+ authorized each step. Reborrowing can cross module boundaries. -/
+inductive CanonicalPath (program : Program) : Ty → List Nat → Ty → Prop where
+  | nil (type : Ty) : CanonicalPath program type [] type
+  | cons {source middle target : Ty} {index : Nat} {indices : List Nat}
+      {home : Module} {key : FieldKey}
+      (head : ProjectionType program home source key index middle)
+      (tail : CanonicalPath program middle indices target) :
+      CanonicalPath program source (index :: indices) target
+
+theorem PathType.canonical {source target : Ty} {keys : List FieldKey} {indices : List Nat}
+    (path : PathType program home source keys indices target) : CanonicalPath program source indices target := by
+  induction path with
+  | nil => exact .nil _
+  | cons head _ ih => exact .cons head ih
+
+theorem CanonicalPath.append {source middle target : Ty} {first second : List Nat}
+    (front : CanonicalPath program source first middle) (back : CanonicalPath program middle second target) :
+    CanonicalPath program source (first ++ second) target := by
+  induction front with
+  | nil => exact back
+  | cons head _ ih => exact .cons head (ih back)
+
+theorem CanonicalPath.dataShape {source target : Ty} {indices : List Nat}
+    (path : CanonicalPath program source indices target)
+    (supported : StorageType program.target program.data source) (shape : target.DataShape) : source.DataShape := by
+  cases supported with
+  | data data => exact data
+  | reference finite =>
+    cases path with
+    | nil => exact False.elim shape
+    | cons head tail => cases head
+
+
+
 /-- A requested interval must be contained in the owner's principal interval. -/
 def Principal.Accepts : Principal → Principal → Prop
   | .duplicable, _ => True
@@ -637,7 +728,9 @@ inductive UsePermission (data : DataDeclarations) : Ty → Principal → Prop wh
   | unit {bound : Principal} : UsePermission data .unit bound
   | integer (type : IntegerType) {bound : Principal} : UsePermission data (.integer type) bound
   | character {bound : Principal} : UsePermission data .character bound
-  | shared (referent : Ty) {bound : Principal} : UsePermission data (.shared referent) bound
+  | reference (referent : Ty) {bound : Principal} : UsePermission data (.reference referent) bound
+  | unique (referent : Ty) {bound : Principal} (allowed : Principal.affine.Accepts bound) :
+      UsePermission data (.reference referent .unique) bound
   | tuple {head : Ty} {tail : List Ty} {bound : Principal} (first : UsePermission data head bound)
       (rest : ∀ type ∈ tail, UsePermission data type bound) : UsePermission data (.tuple head tail) bound
   | array {element : Ty} {bound : Principal} (length : Nat) (resident : UsePermission data element bound) :
@@ -654,6 +747,113 @@ inductive UsePermission (data : DataDeclarations) : Ty → Principal → Prop wh
 
 abbrev Duplicable (data : DataDeclarations) (type : Ty) := UsePermission data type .duplicable
 abbrev MayDiscard (data : DataDeclarations) (type : Ty) := UsePermission data type .affine
+
+/-- Positive structural/declaration evidence, never failure to find Copy.
+An empty concrete array has no resident witness and remains duplicable. -/
+inductive Nonduplicable (data : DataDeclarations) : Ty → Prop where
+  | unique (referent : Ty) : Nonduplicable data (.reference referent .unique)
+  | tupleHead {head : Ty} {tail : List Ty} (resident : Nonduplicable data head) :
+      Nonduplicable data (.tuple head tail)
+  | tupleTail {head type : Ty} {tail : List Ty} (member : type ∈ tail)
+      (resident : Nonduplicable data type) : Nonduplicable data (.tuple head tail)
+  | array {element : Ty} {length : Nat} (positive : 0 < length)
+      (resident : Nonduplicable data element) : Nonduplicable data (.array element length)
+  | restricted {identity : Nat} {declaration : DataDecl} {principal : Principal}
+      (declared : data identity = some declaration) (restriction : declaration.restriction = some principal)
+      (noncopy : principal = .affine ∨ principal = .exact) : Nonduplicable data (.nominal identity)
+  | field {identity : Nat} {declaration : DataDecl} {schema : Fields} {field : Field}
+      (declared : data identity = some declaration) (schemaMember : schema ∈ declaration.schemas)
+      (fieldMember : field ∈ schema.residents) (resident : Nonduplicable data field.type) :
+      Nonduplicable data (.nominal identity)
+
+theorem Nonduplicable.not_duplicable {data : DataDeclarations} {type : Ty}
+    (noncopy : Nonduplicable data type) : ¬ Duplicable data type := by
+  induction noncopy with
+  | unique => intro copy; cases copy with | unique _ allowed => exact allowed
+  | tupleHead resident ih => intro copy; cases copy with | tuple first rest => exact ih first
+  | tupleTail member resident ih => intro copy; cases copy with | tuple first rest => exact ih (rest _ member)
+  | array positive resident ih =>
+    intro copy
+    cases copy with
+    | array _ resident => exact ih resident
+    | emptyArray => exact Nat.not_lt_zero _ positive
+  | restricted declared restriction noncopy =>
+    intro copy
+    cases copy with
+    | inferred other unrestricted fields =>
+      cases Option.some.inj (declared.symm.trans other)
+      simp_all
+    | restricted other restricted fields permitted =>
+      cases Option.some.inj (declared.symm.trans other)
+      cases Option.some.inj (restriction.symm.trans restricted)
+      rcases noncopy with same | same <;> cases same <;> exact permitted
+  | field declared schemaMember fieldMember resident ih =>
+    intro copy
+    cases copy with
+    | inferred other unrestricted fields =>
+      cases Option.some.inj (declared.symm.trans other)
+      exact ih (fields _ schemaMember _ fieldMember)
+    | restricted other restricted fields permitted =>
+      cases Option.some.inj (declared.symm.trans other)
+      have accepts : ∀ p : Principal, p.Accepts .duplicable → p = .duplicable := by
+        intro p; cases p <;> simp [Principal.Accepts]
+      cases accepts _ permitted
+      exact ih (fields _ schemaMember _ fieldMember)
+
+/-- Shared-handle copying uses the same capability evidence as owned data. -/
+theorem UsePermission.duplicable_reference_shared {data : DataDeclarations} {referent : Ty} {mode : BorrowMode}
+    (copy : Duplicable data (.reference referent mode)) : mode = .shared := by
+  cases mode with
+  | shared => rfl
+  | unique => exact False.elim ((Nonduplicable.unique referent).not_duplicable copy)
+
+private theorem ownedChoice_list {α : Type} {copy noncopy : α → Prop} {values : List α}
+    (choices : ∀ value ∈ values, copy value ∨ noncopy value) :
+    (∀ value ∈ values, copy value) ∨ ∃ value ∈ values, noncopy value := by
+  induction values with
+  | nil => exact .inl (by simp)
+  | cons head tail ih =>
+    rcases choices head (by simp) with first | first
+    · rcases ih (fun value member => choices value (by simp [member])) with rest | rest
+      · exact .inl (by intro value member; rcases List.mem_cons.mp member with rfl | member; exact first; exact rest _ member)
+      · obtain ⟨value, member, witness⟩ := rest
+        exact .inr ⟨value, by simp [member], witness⟩
+    · exact .inr ⟨head, by simp, first⟩
+
+/-- Every finite data layout has an evidence-backed owned-use choice. Restriction
+checks and resident witnesses, not proof-search failure, select transfer. -/
+theorem FiniteLayout.owned_choice {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) : Duplicable data type ∨ Nonduplicable data type := by
+  induction finite with
+  | unit => exact .inl .unit
+  | integer type => exact .inl (.integer type)
+  | character => exact .inl .character
+  | tuple first rest firstIH restIH =>
+    rcases firstIH with copy | noncopy
+    · rcases ownedChoice_list restIH with copies | witness
+      · exact .inl (.tuple copy copies)
+      · obtain ⟨type, member, noncopy⟩ := witness
+        exact .inr (.tupleTail member noncopy)
+    · exact .inr (.tupleHead noncopy)
+  | @array element length resident size ih =>
+    cases length with
+    | zero => exact .inl (.emptyArray element)
+    | succ length =>
+      rcases ih with copy | noncopy
+      · exact .inl (.array _ copy)
+      · exact .inr (.array (Nat.zero_lt_succ _) noncopy)
+  | @nominal identity declaration declared schemas fields ih =>
+    have classified := ownedChoice_list (fun schema member => ownedChoice_list (ih schema member))
+    rcases classified with copies | witness
+    · cases restriction : declaration.restriction with
+      | none => exact .inl (.inferred declared restriction copies)
+      | some principal =>
+        cases principal with
+        | duplicable => exact .inl (.restricted declared restriction copies trivial)
+        | affine => exact .inr (.restricted declared restriction (.inl rfl))
+        | exact => exact .inr (.restricted declared restriction (.inr rfl))
+    · obtain ⟨schema, schemaMember, field, fieldMember, noncopy⟩ := witness
+      exact .inr (.field declared schemaMember fieldMember noncopy)
 
 /-- A branch may preserve its exact mask, or forget an affine slot's state.
 No resident is destroyed and no runtime choice is supplied by this rule. -/
@@ -718,8 +918,8 @@ inductive ResidentTyped (program : Program) : Initialization → Value → Ty �
       ResidentTyped program .full (.integer type number) (.integer type)
   | character {number : Nat} (valid : UnicodeScalar number) : ResidentTyped program .full (.character number) .character
   /-- This is inert handle shape, not usable reference validity. -/
-  | shared {referent : Ty} (node : Nat) (finite : FiniteLayout program.target program.data referent) :
-      ResidentTyped program .full (.shared node) (.shared referent)
+  | reference {referent : Ty} {mode : BorrowMode} (node : Nat) (finite : FiniteLayout program.target program.data referent) :
+      ResidentTyped program .full (.reference node) (.reference referent mode)
   | tuple {state : Initialization} {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
       (headTyped : ResidentTyped program (state.child 0) head first)
       (tailTyped : ResidentsTyped program (fun index => state.child (index + 1)) tail rest)
@@ -761,7 +961,7 @@ theorem ResidentTyped.complete {program : Program} {state : Initialization} {val
   | unit => exact ⟨.unit, by simp [Value.initialized]⟩
   | integer fits => exact ⟨.integer fits, by simp [Value.initialized]⟩
   | character valid => exact ⟨.character valid, by simp [Value.initialized]⟩
-  | shared node finite => exact ⟨.shared node finite, by simp [Value.initialized]⟩
+  | reference node finite => exact ⟨.reference node finite, by simp [Value.initialized]⟩
   | tuple head tail present headIH tailIH =>
     obtain ⟨headTyped, headLive⟩ := headIH (complete.child 0)
     obtain ⟨tailTyped, tailLive⟩ := tailIH (fun index => complete.child (index + 1))
@@ -801,6 +1001,7 @@ structure Loan where
   target : Address
   parent : Option Nat
   own : Bool
+  mode : BorrowMode := .shared
 
 
 structure Environment where
@@ -813,6 +1014,15 @@ namespace Environment
 
 def empty : Environment := ⟨[], fun _ => none, 0, []⟩
 def roots (environment : Environment) := environment.bindings.map Prod.snd
+
+/-- Coarse mutation framing is not access authorization. Own permission and
+mode select live unique targets; inactive history may name retired cells. -/
+def UniqueRoot (environment : Environment) (root : Root) : Prop :=
+  ∃ (node : Nat) (loan : Loan), environment.loans[node]? = some loan ∧ loan.own = true ∧
+    loan.mode = .unique ∧ loan.target.root = root
+
+def MutationRoot (environment : Environment) (root : Root) : Prop :=
+  root ∈ environment.roots ∨ environment.UniqueRoot root
 
 /-- Hidden cells, as well as visible roots, precede the never-rewound supply.
 Distinct lexical roots prevent two owned bindings from aliasing one resident. -/
@@ -945,33 +1155,57 @@ theorem retire_retained {environment : Environment} (valid : environment.Valid) 
 
 end Environment
 
-/-- Stable lexical identities, non-reused supply, and exact framing of every
-cell outside the incoming lexical owners (including hidden callers). This frame
-characterizes the owned-value subset; future indirect reference writes must
-account for their referents rather than inherit this lexical-only footprint. -/
+/-- Actual execution preserves names and frames cells outside incoming owners
+and unique targets. Newly introduced authority originates in that footprint or
+the fresh supply. Scoped fresh cells are retired; old vacancies never resurrect. -/
 structure Environment.Evolution (before after : Environment) : Prop where
   bindings : after.bindings = before.bindings
   supply : before.nextRoot ≤ after.nextRoot
-  frame : ∀ root, root ∉ before.roots → after.store root = before.store root
+  frame : ∀ root, ¬ before.MutationRoot root → after.store root = before.store root
+  authority : ∀ root, after.UniqueRoot root → before.MutationRoot root ∨ before.nextRoot ≤ root
+  vacancies : ∀ root, root < before.nextRoot → before.store root = none → after.store root = none
+  fresh : ∀ root, before.nextRoot ≤ root → after.store root = none
 
 namespace Environment.Evolution
 
-theorem refl (environment : Environment) : Evolution environment environment :=
-  ⟨rfl, Nat.le_refl _, fun _ _ => rfl⟩
+theorem absent {before after : Environment} (evolved : Evolution before after)
+    (root : Root) (missing : before.store root = none) : after.store root = none := by
+  by_cases old : root < before.nextRoot
+  · exact evolved.vacancies root old missing
+  · exact evolved.fresh root (Nat.le_of_not_gt old)
+
+theorem refl (environment : Environment) (valid : environment.Valid) : Evolution environment environment := by
+  refine ⟨rfl, Nat.le_refl _, fun _ _ => rfl, fun _ live => .inl (.inr live), fun _ _ missing => missing, ?_⟩
+  intro root fresh
+  cases found : environment.store root with
+  | none => rfl
+  | some value => exact False.elim (Nat.not_lt_of_ge fresh (valid.bounded root value found))
 
 theorem trans {before middle after : Environment} (first : Evolution before middle)
     (rest : Evolution middle after) : Evolution before after := by
-  refine ⟨rest.bindings.trans first.bindings, Nat.le_trans first.supply rest.supply, ?_⟩
-  intro root outside
-  exact (rest.frame root (by simpa only [Environment.roots, first.bindings] using outside)).trans (first.frame root outside)
-
-theorem put {environment : Environment} {root : Root} (member : root ∈ environment.roots) (value : Value) :
-    Evolution environment (environment.put root value) := by
-  refine ⟨rfl, Nat.le_refl _, ?_⟩
-  intro other outside
-  have different : other ≠ root := fun same => outside (same ▸ member)
-  simp only [Environment.put, if_neg different]
-
+  refine ⟨rest.bindings.trans first.bindings, Nat.le_trans first.supply rest.supply, ?_, ?_, ?_, ?_⟩
+  · intro root outside
+    by_cases old : root < before.nextRoot
+    · have hidden : ¬ middle.MutationRoot root := by
+        intro member
+        rcases member with named | live
+        · exact outside (.inl (by simpa only [Environment.roots, first.bindings] using named))
+        · rcases first.authority root live with member | fresh
+          · exact outside member
+          · exact Nat.not_lt_of_ge fresh old
+      exact (rest.frame root hidden).trans (first.frame root outside)
+    · have missing := first.fresh root (Nat.le_of_not_gt old)
+      exact (rest.absent root missing).trans (missing.symm.trans (first.frame root outside))
+  · intro root live
+    rcases rest.authority root live with member | fresh
+    · rcases member with named | live
+      · exact .inl (.inl (by simpa only [Environment.roots, first.bindings] using named))
+      · exact first.authority root live
+    · exact .inr (Nat.le_trans first.supply fresh)
+  · intro root old missing
+    exact rest.absent root (first.vacancies root old missing)
+  · intro root fresh
+    exact rest.absent root (first.fresh root fresh)
 end Environment.Evolution
 
 namespace Environment
@@ -1006,15 +1240,35 @@ theorem retire_add (environment : Environment) (first rest : Nat) :
 
 theorem Evolution.unbind {before after : Environment} (valid : before.Valid) {name : String} {value : Value}
     (evolved : Evolution (before.bind name value) after) : Evolution before (after.retire 1) := by
-  refine ⟨by simp [retire, evolved.bindings, bind], Nat.le_trans (Nat.le_succ _) evolved.supply, ?_⟩
-  intro root outside
-  by_cases same : root = before.nextRoot
-  · subst root
-    rw [show (after.retire 1).store before.nextRoot = none by simp [retire, evolved.bindings, bind]]
-    exact valid.fresh.symm
-  · have hidden : root ∉ (before.bind name value).roots := by simpa [roots, bind, same] using outside
-    have framed := evolved.frame root hidden
-    simpa [retire, evolved.bindings, bind, same] using framed
+  refine ⟨by simp [retire, evolved.bindings, bind], Nat.le_trans (Nat.le_succ _) evolved.supply, ?_, ?_, ?_, ?_⟩
+  · intro root outside
+    by_cases same : root = before.nextRoot
+    · subst root
+      rw [show (after.retire 1).store before.nextRoot = none by simp [retire, evolved.bindings, bind]]
+      exact valid.fresh.symm
+    · have hidden : ¬ (before.bind name value).MutationRoot root := by
+        simpa [MutationRoot, UniqueRoot, roots, bind, same] using outside
+      have framed := evolved.frame root hidden
+      simpa [retire, evolved.bindings, bind, same] using framed
+  · intro root live
+    rcases evolved.authority root live with member | fresh
+    · rcases member with named | live
+      · have included : root = before.nextRoot ∨ root ∈ before.roots := by simpa [roots, bind] using named
+        rcases included with same | named
+        · exact .inr (Nat.le_of_eq same.symm)
+        · exact .inl (.inl named)
+      · exact .inl (.inr live)
+    · exact .inr (Nat.le_trans (Nat.le_succ _) fresh)
+  · intro root old missing
+    have different := Nat.ne_of_lt old
+    have still := evolved.vacancies root (Nat.lt_succ_of_lt old) (by simpa [bind, different] using missing)
+    simpa [retire, evolved.bindings, bind, different] using still
+  · intro root fresh
+    by_cases same : root = before.nextRoot
+    · subst root; simp [retire, evolved.bindings, bind]
+    · have later : before.nextRoot + 1 ≤ root := Nat.succ_le_of_lt (Nat.lt_of_le_of_ne fresh (Ne.symm same))
+      have missing := evolved.fresh root later
+      simpa [retire, evolved.bindings, bind, same] using missing
 
 theorem Evolution.scope {before after : Environment} (valid : before.Valid) (values : BindingValues)
     (evolved : Evolution (before.prepare values) after) : Evolution before (after.retire values.length) := by
@@ -1027,7 +1281,15 @@ theorem Evolution.scope {before after : Environment} (valid : before.Valid) (val
 
 theorem Evolution.resume {caller after : Environment} (evolved : Evolution caller.hide after) :
     Evolution caller (caller.resume after) := by
-  exact ⟨rfl, evolved.supply, fun root _ => evolved.frame root (by simp [roots, hide])⟩
+  refine ⟨rfl, evolved.supply, ?_, ?_, evolved.vacancies, evolved.fresh⟩
+  · intro root outside
+    exact evolved.frame root (by simpa [MutationRoot, UniqueRoot, roots, hide] using (fun live => outside (.inr live)))
+  · intro root live
+    rcases evolved.authority root live with member | fresh
+    · rcases member with named | live
+      · simp [roots, hide] at named
+      · exact .inl (.inr live)
+    · exact .inr fresh
 
 theorem Valid.resume {caller after : Environment} (valid : caller.Valid) (afterValid : after.Valid)
     (supply : caller.nextRoot ≤ after.nextRoot) : (caller.resume after).Valid :=
@@ -1125,7 +1387,8 @@ theorem UsePermission.weaken {data : DataDeclarations} {type : Ty} {bound reques
   | unit => exact .unit
   | integer type => exact .integer type
   | character => exact .character
-  | shared referent => exact .shared referent
+  | reference referent => exact .reference referent
+  | unique referent allowed => exact .unique referent (allowed.trans accepted)
   | tuple first rest firstIH restIH => exact .tuple (firstIH accepted) (fun type included => restIH type included accepted)
   | array length resident ih => exact .array length (ih accepted)
   | emptyArray element => exact .emptyArray element
@@ -1181,7 +1444,7 @@ theorem ValuesBindingsTyped.take {environment : BindingValues} {context : List (
 
 def Value.head : Value → Head
   | .vacant => .vacant
-  | .shared node => .shared node
+  | .reference node => .reference node
   | .unit => .unit
   | .integer type number => .integer type number
   | .character number => .character number
@@ -1199,7 +1462,7 @@ mutual
 /-- Logical finish events use relative field paths, never physical addresses. -/
 def Value.destructionTrace : Value → List (List Nat)
   | .vacant => []
-  | .unit | .integer _ _ | .character _ | .shared _ => [[]]
+  | .unit | .integer _ _ | .character _ | .reference _ => [[]]
   | .tuple head tail => destructionFields 0 (head :: tail) ++ [[]]
   | .array values | .nominal _ _ values => destructionFields 0 values ++ [[]]
 def destructionFields (index : Nat) : List Value → List (List Nat)
@@ -1255,7 +1518,7 @@ theorem ResidentTyped.children_disposable {state : Initialization} {value : Valu
         · exact ih rest (fun type member => permissions type (List.mem_cons_of_mem _ member)) value member
   induction typed using ResidentTyped.rec (motive_2 := fun _ _ _ _ => True) with
   | uncertain actual permission ih => exact ih allowed
-  | vacant | unit | integer | character | shared => simp [Value.children]
+  | vacant | unit | integer | character | reference => simp [Value.children]
   | tuple head tail present headIH tailIH =>
     cases allowed with
     | tuple first rest => exact residents (.cons head tail) (by simpa using And.intro first rest)
@@ -1299,7 +1562,7 @@ theorem Value.Disposable.destroys {value : Value} (allowed : value.Disposable pr
   | unit => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
   | integer type number => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
   | character number => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
-  | shared node => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
+  | reference node => simpa only [Value.destructionTrace, List.nil_append] using (Value.Destroys.resident (by simp) allowed (.nil 0))
   | tuple head tail headIH tailIH =>
     have permitted := allowed.children
     simp only [Value.children, List.mem_cons, forall_eq_or_imp] at permitted
@@ -1343,7 +1606,7 @@ theorem Value.destructionTrace_nodup (value : Value) : value.destructionTrace.No
     simpa only [List.Nodup, List.pairwise_map, ne_eq, List.cons.injEq, true_and] using unique
   induction value using Value.rec
     (motive_2 := fun values => ∀ index, (destructionFields index values).Nodup) with
-  | vacant | unit | integer | character | shared => simp [Value.destructionTrace]
+  | vacant | unit | integer | character | reference => simp [Value.destructionTrace]
   | tuple head tail headIH tailIH =>
     simp only [Value.destructionTrace]
     apply finish
@@ -1549,7 +1812,7 @@ inductive HeadType (program : Program) : Head → Ty → List Ty → Prop where
       HeadType program (.integer type number) (.integer type) []
   | character {number : Nat} (valid : UnicodeScalar number) :
       HeadType program (.character number) .character []
-  | shared (node : Nat) (referent : Ty) : HeadType program (.shared node) (.shared referent) []
+  | reference (node : Nat) (referent : Ty) {mode : BorrowMode} : HeadType program (.reference node) (.reference referent mode) []
   | tuple (first : Ty) (rest : List Ty) : HeadType program .tuple (.tuple first rest) (first :: rest)
   | array (element : Ty) (length : Nat) : HeadType program .array (.array element length) (List.replicate length element)
   | nominal {identity : Nat} {tag : Option Nat} {declaration : DataDecl} {schema : Fields}
@@ -1712,7 +1975,7 @@ end Environment
 mutual
 /-- No reference bits at any aggregate depth. -/
 def Value.ReferenceFree : Value → Prop
-  | .shared _ => False
+  | .reference _ => False
   | .tuple head tail => head.ReferenceFree ∧ valuesReferenceFree tail
   | .array values | .nominal _ _ values => valuesReferenceFree values
   | _ => True
@@ -1730,7 +1993,7 @@ theorem ResidentTyped.referenceFree {state : Initialization} {value : Value} {ty
     (motive_2 := fun states values types _ => typesDataShape types → valuesReferenceFree values) with
   | vacant | unit | integer | character => trivial
   | uncertain actual permission ih => exact ih shape
-  | shared node finite => exact False.elim shape
+  | reference node finite => exact False.elim shape
   | tuple head tail present headIH tailIH => exact ⟨headIH shape.1, tailIH shape.2⟩
   | @array state values element length residents elementValid size present ih =>
     apply ih
@@ -1777,22 +2040,49 @@ inductive Supported (loans : List Loan) : Nat → Prop where
       (subaddress : ancestor.target.fields.IsPrefix loan.target.fields)
       (support : Supported loans parent) : Supported loans node
 
+inductive Derived (environment : Environment) : Nat → Nat → Prop where
+  | same (node : Nat) : Derived environment node node
+  | child {node parent ancestor : Nat} {loan : Loan}
+      (found : environment.loans[node]? = some loan) (derived : loan.parent = some parent)
+      (rest : Derived environment parent ancestor) : Derived environment node ancestor
+
+/-- Shared/shared overlap is permitted. Selected ancestry conveys authority;
+overlapping descendants or independent unique permissions exclude the access. -/
+def Permits (mode : BorrowMode) (parent : Option Nat) (address : Address) (environment : Environment) : Prop :=
+  ∀ (node : Nat) (loan : Loan), environment.loans[node]? = some loan → loan.own = true →
+    (mode = .shared ∧ loan.mode = .shared) ∨
+    (∃ selected, parent = some selected ∧ environment.Derived selected node) ∨ address.Apart loan.target
+
 def Usable (node : Nat) (environment : Environment) : Prop :=
   ∃ loan, environment.loans[node]? = some loan ∧ loan.own = true ∧ Supported environment.loans node
 
-def Authorizes (access : ResolvedAccess) (environment : Environment) : Prop :=
+def Authorizes (mode : BorrowMode) (access : ResolvedAccess) (environment : Environment) : Prop :=
   match access.parent with
-  | none => True
-  | some node => environment.Usable node
+  | none => access.address.root ∈ environment.roots
+  | some node => ∃ loan, environment.loans[node]? = some loan ∧ loan.own = true ∧
+      Supported environment.loans node ∧ access.address.root = loan.target.root ∧
+      loan.target.fields.IsPrefix access.address.fields ∧ (mode = .unique → loan.mode = .unique)
+
+/-- Reading or borrowing through a handle requires its whole target restored.
+Masked address resolution itself deliberately does not impose this condition. -/
+def AccessReady (access : ResolvedAccess) (environment : Environment) : Prop :=
+  ∀ node loan, access.parent = some node → environment.loans[node]? = some loan →
+    ∃ value, environment.readAddress loan.target = some value
 
 /-- Shared descendants reserve their own exact targets. Broader inactive parent
 regions impose no additional reservation; their address/ancestry records remain. -/
 def OwnerFree (address : Address) (environment : Environment) : Prop :=
   ∀ (node : Nat) (loan : Loan), environment.loans[node]? = some loan → loan.own = true → address.Apart loan.target
 
+/-- Normal use and ending require the authoritative referent to be restored.
+Low-level access authority stays separate so a unique handle can fill its hole. -/
+def Restored (node : Nat) (environment : Environment) : Prop :=
+  ∀ loan, environment.loans[node]? = some loan → loan.own = true →
+    ∃ value, environment.readAddress loan.target = some value
+
 def ResultUsable (value : Value) (environment : Environment) : Prop :=
   match value with
-  | .shared node => environment.Usable node
+  | .reference node => environment.Usable node ∧ environment.Restored node
   | value => value.ReferenceFree
 
 /-- Reuse the owner resolver for the handle, then the same canonical field
@@ -1804,41 +2094,63 @@ def resolveAccess (program : Program) (place : AccessPlace) (environment : Envir
       some ⟨address, none⟩
   | .dereference reference fields =>
       let carrier ← environment.resolvePlace program reference
-      let .shared node ← environment.readAddress carrier | none
+      let .reference node ← environment.readAddress carrier | none
       let loan ← environment.loans[node]?
       if loan.own then
-        let resident ← environment.readAddress loan.target
+        let resident ← environment.at loan.target
         let indices ← resident.resolvePath program fields
         some ⟨⟨loan.target.root, loan.target.fields ++ indices⟩, some node⟩
       else none
 
-def addLoan (access : ResolvedAccess) (environment : Environment) : Environment :=
-  { environment with loans := environment.loans ++ [⟨access.address, access.parent, true⟩] }
+def addLoan (access : ResolvedAccess) (mode : BorrowMode) (environment : Environment) : Environment :=
+  { environment with loans := environment.loans ++ [⟨access.address, access.parent, true, mode⟩] }
 
-/-- Ending retains both the record and all carrier bits and never reads a target. -/
+/-- Low-level loan-table transition. Ordinary ending uses checked endSlot or
+Disposes.reference; this operation alone does not authorize ending a handle. -/
 def endOwn (node : Nat) (environment : Environment) : Option Environment := do
   let _ ← environment.loans[node]?
   some { environment with loans := environment.loans.modify node fun loan => { loan with own := false } }
 
-/-- Slot indices are checked by the source producer and survive source shadowing. -/
+/-- Ordinary slot ending checks the authoritative target before changing own.
+Slot indices are checked by the source producer and survive source shadowing. -/
 def endSlot (slot : Nat) (environment : Environment) : Option Environment := do
   let binding ← environment.bindings[slot]?
-  let .shared node ← environment.store binding.2 | none
-  environment.endOwn node
+  let .reference node ← environment.store binding.2 | none
+  let loan ← environment.loans[node]?
+  if loan.own && !(environment.readAddress loan.target).isSome then none
+  else environment.endOwn node
 
-/-- Primitive zero use of a direct handle; it never traverses the referent. -/
-def disposeHandle (value : Value) (environment : Environment) : Option Environment :=
-  match value with
-  | .shared node => environment.endOwn node
-  | _ => some environment
+/-- Successful ordinary ending consumes restored-target evidence from the pre-state. -/
+theorem endSlot_checked {before after : Environment} {slot : Nat}
+    (ended : before.endSlot slot = some after) :
+    ∃ binding node, before.bindings[slot]? = some binding ∧
+      before.store binding.2 = some (.reference node) ∧
+      before.Restored node ∧ before.endOwn node = some after := by
+  simp only [endSlot, Bind.bind, Option.bind_eq_some_iff] at ended
+  obtain ⟨binding, selected, value, stored, ended⟩ := ended
+  cases value <;> try cases ended
+  case reference node =>
+    simp only [Option.bind_eq_some_iff] at ended
+    obtain ⟨loan, found, ended⟩ := ended
+    split at ended
+    · cases ended
+    · rename_i permitted
+      refine ⟨binding, node, selected, stored, ?_, ended⟩
+      intro actual actualFound own
+      have same := Option.some.inj (found.symm.trans actualFound)
+      subst actual
+      cases read : before.readAddress loan.target with
+      | none => simp [own, read] at permitted
+      | some resident => exact ⟨resident, rfl⟩
 
 inductive Copies : Environment → Value → Value → Environment → Prop where
   | data {environment : Environment} {value : Value} (plain : value.ReferenceFree) :
       Copies environment value value environment
-  | shared {environment : Environment} {node : Nat} {loan : Loan}
-      (found : environment.loans[node]? = some loan) (allowed : environment.Usable node) :
-      Copies environment (.shared node) (.shared environment.loans.length)
-        (environment.addLoan ⟨loan.target, some node⟩)
+  | reference {environment : Environment} {node : Nat} {loan : Loan}
+      (found : environment.loans[node]? = some loan) (shared : loan.mode = .shared)
+      (allowed : environment.Usable node) :
+      Copies environment (.reference node) (.reference environment.loans.length)
+        (environment.addLoan ⟨loan.target, some node⟩ .shared)
 
 /-- Disposition changes the real node table as well as producing logical trace.
 Pure structural destruction is used only for reference-free owned data. -/
@@ -1846,9 +2158,10 @@ inductive Disposes (program : Program) : Environment → Value → Environment �
   | data {environment : Environment} {value : Value} {trace : List (List Nat)}
       (plain : value.ReferenceFree) (destroyed : value.Destroys program trace .vacant) :
       Disposes program environment value environment
-  | shared {environment after : Environment} {node : Nat}
+  | reference {environment after : Environment} {node : Nat}
+      (ready : environment.Restored node)
       (ended : environment.endOwn node = some after) :
-      Disposes program environment (.shared node) after
+      Disposes program environment (.reference node) after
 
 
 end Environment
@@ -1863,7 +2176,7 @@ theorem Environment.Disposes.storage {before after : Environment} {value : Value
     (disposed : Disposes program before value after) : before.SameStorage after := by
   cases disposed with
   | data => exact ⟨rfl, rfl, rfl⟩
-  | shared ended =>
+  | reference _ ended =>
     simp only [Environment.endOwn, Bind.bind, Option.bind_eq_some_iff, Option.some.injEq] at ended
     obtain ⟨_, _, rfl⟩ := ended
     exact ⟨rfl, rfl, rfl⟩
@@ -1874,10 +2187,10 @@ theorem Environment.Disposes.logical {before after : Environment} {value : Value
     (disposed : Disposes program before value after) : value.Destroys program value.destructionTrace .vacant := by
   cases disposed with
   | data plain destroyed => simpa only [destroyed.result_order.2] using destroyed
-  | @shared after node ended =>
+  | @reference after node _ ended =>
     simpa only [Value.destructionTrace, List.nil_append] using
       (Value.Destroys.resident (program := program) (by intro impossible; cases impossible)
-        (.owned (.shared node (referent := .unit) .unit) (.shared .unit)) (.nil 0))
+        (.owned (.reference node (referent := .unit) .unit) (.reference .unit)) (.nil 0))
 
 inductive DisposesRoots (program : Program) : Environment → List Root → List (Root × List Nat) → Environment → Prop where
   | nil {environment : Environment} : DisposesRoots program environment [] [] environment
@@ -1984,22 +2297,97 @@ def Origin.Bounded (origin : Origin) (context : Context) : Prop :=
 
 namespace Context
 
-def empty : Context := ⟨[], [], 0, 0⟩
+def empty : Context := ⟨[], fun _ => none, [], 0, 0⟩
 def erase (context : Context) : List (String × BindingType) :=
   context.bindings.map fun binding => (binding.1, binding.2.toBindingType)
+
+/-- Update the one authoritative mask at a canonical target. Type, mutability,
+binder identity and carrier metadata remain the storage root's metadata. -/
+def writeTarget (context : Context) (origin : Origin) (next : Initialization) : Context :=
+  { context with storage := fun base => if base = origin.base then
+      (context.storage base).map (fun slot => { slot with initialization := slot.initialization.write origin.fields next })
+    else context.storage base }
+
+theorem writeTarget_metadata (context : Context) (origin : Origin) (next : Initialization)
+    {slot : Slot} (stored : context.storage origin.base = some slot) :
+    ∃ updated, (context.writeTarget origin next).storage origin.base = some updated ∧ updated.metadata = slot.metadata :=
+  ⟨{ slot with initialization := slot.initialization.write origin.fields next }, by simp [writeTarget, stored], rfl⟩
+
+
+/-- Commit an owner operation back to stable storage identities. The lexical
+view is consumed once; hidden storage is retained. -/
+def withSlots (context : Context) (slots : List (String × Slot)) : Context :=
+  { context with
+    names := slots.map (fun binding => (binding.1, binding.2.binder))
+    storage := fun origin =>
+      match origin with
+      | .binder binder =>
+          match slots.find? (fun binding => binding.2.binder == binder) with
+          | some binding => some binding.2
+          | none => context.storage origin
+      | .input _ => context.storage origin }
 
 /-- Finite semantic support of the proof interpretation. Gaps below nextBinder
 need no runtime root, so source supply joins never fabricate allocations. -/
 def MentionsBinder (context : Context) (binder : Nat) : Prop :=
-  (∃ binding ∈ context.bindings, binding.2.binder = binder) ∨
+  (∃ slot, context.storage (.binder binder) = some slot) ∨
     ∃ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan ∧ loan.target.base = .binder binder
 
+
+/-- Ancestry comes from actual retained source loan records, not type equality. -/
+inductive Derived (context : Context) : Nat → Nat → Prop where
+  | same (node : Nat) : context.Derived node node
+  | child {node parent origin : Nat} {loan : SourceLoan}
+      (found : context.loans[node]? = some loan) (derived : loan.parent = some parent)
+      (ancestor : context.Derived parent origin) : context.Derived node origin
+
+def Permits (context : Context) (mode : BorrowMode) (parent : Option Nat) (origin : Origin) : Prop :=
+  ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
+    (mode = .shared ∧ loan.mode = .shared) ∨
+    (∃ selected, parent = some selected ∧ context.Derived selected node) ∨ origin.Apart loan.target
+/-- A canonical binder target is typed from authoritative root storage. The selected
+mask is obtained by Access, never retained in a loan record. Inputs remain external. -/
+def Target (program : Program) (context : Context) (origin : Origin) (referent : Ty) : Prop :=
+  match origin.base with
+  | .binder binder => ∃ slot, context.storage (.binder binder) = some slot ∧
+      CanonicalPath program slot.type origin.fields referent ∧
+      ∃ state, slot.initialization.Access origin.fields state
+  | .input _ => True
+
+/-- Readiness is a query of root storage, not a per-reference initialization mask.
+External inputs are accounted for separately by runtime input correspondence. -/
+def Ready (context : Context) (origin : Origin) : Prop :=
+  match origin.base with
+  | .binder binder => ∃ slot state, context.storage (.binder binder) = some slot ∧
+      slot.initialization.Access origin.fields state ∧ state.Complete
+  | .input _ => True
+
+def SourceTarget (program : Program) (context : Context) (loan : SourceLoan) : Prop :=
+  context.Target program loan.target loan.referent ∧
+  (loan.mode = .shared → context.Ready loan.target) ∧
+  (∀ input, loan.target.base = .input input → loan.mode = .shared)
+
+/-- Reads and borrows require the entire parent target, not merely a complete child.
+Restoration uses masked access without this operation-specific prerequisite. -/
+def AccessReady (context : Context) (target : Origin) (parent : Option Nat) : Prop :=
+  context.Ready target ∧ ∀ node loan, parent = some node → context.loans[node]? = some loan →
+    context.Ready loan.target
+
+theorem SourceTarget.storage_congr {before after : Context} {loan : SourceLoan}
+    (target : before.SourceTarget program loan)
+    (same : after.storage loan.target.base = before.storage loan.target.base) : after.SourceTarget program loan := by
+  rcases loan with ⟨⟨base, fields⟩, referent, parent, own, mode⟩
+  cases base <;> simpa only [Context.SourceTarget, Context.Target, Context.Ready, same] using target
 
 def Free (context : Context) (origin : Origin) : Prop :=
   ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true → origin.Apart loan.target
 
 def Own (context : Context) (node : Nat) : Prop :=
   ∃ loan, context.loans[node]? = some loan ∧ loan.own = true
+
+
+def Restored (context : Context) (node : Nat) : Prop :=
+  ∀ loan, context.loans[node]? = some loan → loan.own = true → context.Ready loan.target
 
 def endOwn (context : Context) (node : Nat) : Context :=
   { context with loans := context.loans.modify node fun loan => { loan with own := false } }
@@ -2009,18 +2397,25 @@ def dispose (context : Context) (reference : Option Nat) : Context :=
   | none => context
   | some node => context.endOwn node
 
-def borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) : Context :=
-  { context with loans := context.loans ++ [⟨target, referent, parent, true⟩] }
+def borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) : Context :=
+  { context with loans := context.loans ++ [⟨target, referent, parent, true, mode⟩] }
 
 def bind (context : Context) (name : String) (mutable : Bool) (result : ResultType) : Context :=
   { context with
-    bindings := (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.reference⟩) :: context.bindings
+    names := (name, context.nextBinder) :: context.names
+    storage := fun origin => if origin = .binder context.nextBinder then
+      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.reference⟩
+      else context.storage origin
     nextBinder := context.nextBinder + 1 }
 
-def hide (context : Context) : Context := { context with bindings := [] }
+def hide (context : Context) : Context := { context with names := [] }
 
 def retire (context : Context) (count : Nat) : Context :=
-  { context with bindings := context.bindings.drop count }
+  { context with
+    names := context.names.drop count
+    storage := fun origin => match origin with
+      | .binder binder => if binder ∈ (context.names.take count).map Prod.snd then none else context.storage origin
+      | .input _ => context.storage origin }
 
 /-- Node history and binder supplies are never rewound at scope exit. -/
 def disposeSlots (context : Context) (slots : List (String × Slot)) : Context :=
@@ -2034,12 +2429,79 @@ structure WellFormed (program : Program) (context : Context) : Prop where
   supported : ∀ binding ∈ context.bindings, StorageType program.target program.data binding.2.type
   slots : ∀ binding ∈ context.bindings, binding.2.binder < context.nextBinder ∧
     ∀ node, binding.2.reference = some node → ∃ loan, context.loans[node]? = some loan ∧
-      binding.2.type = .shared loan.referent
+      binding.2.type = .reference loan.referent loan.mode
   targets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan →
     loan.target.Bounded context ∧ FiniteLayout program.target program.data loan.referent
   parents : ∀ (node : Nat) (loan : SourceLoan) (parent : Nat), context.loans[node]? = some loan →
     loan.parent = some parent → parent < node ∧ ∃ ancestor, context.loans[parent]? = some ancestor ∧
       loan.target.Within ancestor.target
+  named : ∀ entry ∈ context.names, ∃ slot, context.storage (.binder entry.2) = some slot
+  allocated : ∀ binder slot, context.storage (.binder binder) = some slot →
+    slot.binder = binder ∧ binder < context.nextBinder ∧
+    StorageType program.target program.data slot.type ∧
+    ∀ node, slot.reference = some node → ∃ loan, context.loans[node]? = some loan ∧
+      slot.type = .reference loan.referent loan.mode
+  parentModes : ∀ (node : Nat) (loan : SourceLoan) (parent : Nat) (ancestor : SourceLoan),
+    context.loans[node]? = some loan → loan.parent = some parent → context.loans[parent]? = some ancestor →
+    loan.mode = .unique → ancestor.mode = .unique
+
+theorem WellFormed.member_stored {context : Context} (valid : context.WellFormed program)
+    (binding : String × Slot) (member : binding ∈ context.bindings) :
+    context.storage (.binder binding.2.binder) = some binding.2 := by
+  obtain ⟨entry, _, found⟩ := List.mem_filterMap.mp member
+  obtain ⟨slot, stored, same⟩ := Option.map_eq_some_iff.mp found
+  cases same
+  rw [(valid.allocated entry.2 slot stored).1]
+  exact stored
+
+theorem WellFormed.member_known {context : Context} (valid : context.WellFormed program)
+    (binding : String × Slot) (member : binding ∈ context.bindings) :
+    context.MentionsBinder binding.2.binder :=
+  .inl ⟨binding.2, valid.member_stored binding member⟩
+
+private theorem filterMap_congr_mem {α β : Type} (entries : List α) (left right : α → Option β)
+    (same : ∀ entry ∈ entries, left entry = right entry) :
+    entries.filterMap left = entries.filterMap right := by
+  induction entries with
+  | nil => rfl
+  | cons entry entries ih =>
+      simp only [List.filterMap_cons, same entry (by simp), ih (fun other member => same other (by simp [member]))]
+
+theorem WellFormed.bindings_binders {context : Context} (valid : context.WellFormed program) :
+    context.bindings.map (fun binding => binding.2.binder) = context.names.map Prod.snd := by
+  unfold Context.bindings
+  rw [List.map_filterMap]
+  rw [← List.filterMap_eq_map]
+  apply filterMap_congr_mem
+  intro entry member
+  obtain ⟨slot, found⟩ := valid.named entry member
+  simp [found, (valid.allocated entry.2 slot found).1]
+
+theorem WellFormed.bindings_bind {context : Context} (valid : context.WellFormed program)
+    (name : String) (mutable : Bool) (result : ResultType) :
+    (context.bind name mutable result).bindings =
+      (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.reference⟩) :: context.bindings := by
+  simp only [Context.bindings, Context.bind, List.filterMap_cons, ↓reduceIte, Option.map_some]
+  congr 1
+  apply filterMap_congr_mem
+  intro entry member
+  obtain ⟨slot, found⟩ := valid.named entry member
+  have different : OriginBase.binder entry.2 ≠ .binder context.nextBinder := by
+    intro equal
+    have same := OriginBase.binder.inj equal
+    exact Nat.ne_of_lt (valid.allocated entry.2 slot found).2.1 same
+  simp [different]
+
+theorem Derived.unique {context : Context} {node ancestor : Nat} {loan parentLoan : SourceLoan}
+    (derived : context.Derived node ancestor) (valid : context.WellFormed program)
+    (found : context.loans[node]? = some loan) (ancestorFound : context.loans[ancestor]? = some parentLoan)
+    (unique : loan.mode = .unique) : parentLoan.mode = .unique := by
+  induction derived generalizing loan with
+  | same => cases Option.some.inj (found.symm.trans ancestorFound); exact unique
+  | @child node parent ancestor current currentFound parentEq rest ih =>
+    cases Option.some.inj (currentFound.symm.trans found)
+    obtain ⟨_, parentRecord, parentFound, _⟩ := valid.parents node current parent currentFound parentEq
+    exact ih parentFound ancestorFound (valid.parentModes node current parent parentRecord currentFound parentEq parentFound unique)
 
 end Context
 
@@ -2089,7 +2551,7 @@ theorem endOwn_mentions (context : Context) (ended binder : Nat) :
 
 theorem WellFormed.endOwn {context : Context} (valid : context.WellFormed program) (ended : Nat) :
     (context.endOwn ended).WellFormed program := by
-  refine { valid with slots := ?_, targets := ?_, parents := ?_ }
+  refine { valid with slots := ?_, targets := ?_, parents := ?_, allocated := ?_, parentModes := ?_ }
   · intro binding member
     obtain ⟨bound, reference⟩ := valid.slots binding member
     refine ⟨bound, ?_⟩
@@ -2103,23 +2565,33 @@ theorem WellFormed.endOwn {context : Context} (valid : context.WellFormed progra
     obtain ⟨original, originalFound, rfl⟩ := endOwn_original found
     obtain ⟨older, ancestor, parentFound, within⟩ := valid.parents _ _ _ originalFound derived
     exact ⟨older, _, context.endOwn_found ended parentFound, within⟩
+  · intro binder slot stored
+    obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder slot stored
+    refine ⟨identity, bound, supported, ?_⟩
+    intro node selected
+    obtain ⟨loan, found, type⟩ := reference node selected
+    exact ⟨_, context.endOwn_found ended found, type⟩
+  · intro node loan parent ancestor found derived parentFound unique
+    obtain ⟨old, oldFound, rfl⟩ := endOwn_original found
+    obtain ⟨oldParent, oldParentFound, rfl⟩ := endOwn_original parentFound
+    exact valid.parentModes node old parent oldParent oldFound derived oldParentFound unique
 
 end Context
 
 namespace Context
 
-theorem borrow_found {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat}
+theorem borrow_found {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
     {node : Nat} {loan : SourceLoan} (found : context.loans[node]? = some loan) :
-    (context.borrow target referent parent).loans[node]? = some loan := by
+    (context.borrow target referent parent mode).loans[node]? = some loan := by
   exact List.getElem?_append_left ((List.getElem?_eq_some_iff.mp found).1) |>.trans found
 
-theorem borrow_last (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) :
-    (context.borrow target referent parent).loans[context.loans.length]? = some ⟨target, referent, parent, true⟩ := by
+theorem borrow_last (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) :
+    (context.borrow target referent parent mode).loans[context.loans.length]? = some ⟨target, referent, parent, true, mode⟩ := by
   simp [borrow]
 
-theorem borrow_cases {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat}
-    {node : Nat} {loan : SourceLoan} (found : (context.borrow target referent parent).loans[node]? = some loan) :
-    context.loans[node]? = some loan ∨ (node = context.loans.length ∧ loan = ⟨target, referent, parent, true⟩) := by
+theorem borrow_cases {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    {node : Nat} {loan : SourceLoan} (found : (context.borrow target referent parent mode).loans[node]? = some loan) :
+    context.loans[node]? = some loan ∨ (node = context.loans.length ∧ loan = ⟨target, referent, parent, true, mode⟩) := by
   by_cases bound : node < context.loans.length
   · exact .inl (by simpa only [borrow, List.getElem?_append_left bound] using found)
   · simp only [borrow, List.getElem?_append_right (Nat.le_of_not_lt bound)] at found
@@ -2129,9 +2601,9 @@ theorem borrow_cases {context : Context} {target : Origin} {referent : Ty} {pare
         by simpa only [difference, List.getElem?_cons_zero, Option.some.injEq] using found.symm⟩
     | succ rest => simp [difference] at found
 
-theorem borrow_mentions {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat}
+theorem borrow_mentions {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
     (known : target.Known context) (binder : Nat) :
-    (context.borrow target referent parent).MentionsBinder binder ↔ context.MentionsBinder binder := by
+    (context.borrow target referent parent mode).MentionsBinder binder ↔ context.MentionsBinder binder := by
   constructor
   · intro mentioned
     rcases mentioned with slot | ⟨node, loan, found, base⟩
@@ -2146,11 +2618,12 @@ theorem borrow_mentions {context : Context} {target : Origin} {referent : Ty} {p
     · exact .inr ⟨node, loan, borrow_found found, base⟩
 
 theorem WellFormed.borrow {context : Context} (valid : context.WellFormed program)
-    {target : Origin} {referent : Ty} {parent : Option Nat}
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
     (bounded : target.Bounded context) (finite : FiniteLayout program.target program.data referent)
-    (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target) :
-    (context.borrow target referent parent).WellFormed program := by
-  refine ⟨valid.distinct, valid.supported, ?_, ?_, ?_⟩
+    (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
+    (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique) :
+    (context.borrow target referent parent mode).WellFormed program := by
+  refine ⟨valid.distinct, valid.supported, ?_, ?_, ?_, valid.named, ?_, ?_⟩
   · intro binding member
     obtain ⟨bound, reference⟩ := valid.slots binding member
     refine ⟨bound, ?_⟩
@@ -2167,6 +2640,22 @@ theorem WellFormed.borrow {context : Context} (valid : context.WellFormed progra
       exact ⟨older, ancestor, borrow_found ancestorFound, within⟩
     · obtain ⟨ancestor, ancestorFound, within⟩ := ancestor parentNode derived
       exact ⟨(List.getElem?_eq_some_iff.mp ancestorFound).1, ancestor, borrow_found ancestorFound, within⟩
+  · intro binder slot stored
+    obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder slot stored
+    refine ⟨identity, bound, supported, ?_⟩
+    intro node selected
+    obtain ⟨loan, found, type⟩ := reference node selected
+    exact ⟨loan, borrow_found found, type⟩
+  · intro node loan parentNode parentLoan found derived parentFound unique
+    rcases borrow_cases found with old | ⟨rfl, rfl⟩
+    · obtain ⟨_, original, originalFound, _⟩ := valid.parents node loan parentNode old derived
+      have same := Option.some.inj ((borrow_found originalFound).symm.trans parentFound)
+      subst parentLoan
+      exact valid.parentModes node loan parentNode original old derived originalFound unique
+    · obtain ⟨original, originalFound, _⟩ := ancestor parentNode derived
+      have same := Option.some.inj ((borrow_found originalFound).symm.trans parentFound)
+      subst parentLoan
+      exact parentMode parentNode original derived originalFound unique
 
 end Context
 
@@ -2188,7 +2677,7 @@ def Interpretation.origin (interpretation : Interpretation) (origin : Origin) : 
 def Slot.Corresponds (interpretation : Interpretation) (slot : Slot) (value : Value) : Prop :=
   match slot.reference with
   | none => value.ReferenceFree
-  | some node => value = .shared (interpretation.node node)
+  | some node => value = .reference (interpretation.node node)
 
 inductive SlotsCorrespond (interpretation : Interpretation) (store : Store) :
     List (String × Root) → List (String × Slot) → Prop where
@@ -2231,8 +2720,8 @@ inductive Carrier where
   | held (index : Nat)
 
 def Carries (environment : Environment) (held : List Value) (node : Nat) : Carrier → Prop
-  | .stored root => environment.store root = some (.shared node)
-  | .held index => held[index]? = some (.shared node)
+  | .stored root => environment.store root = some (.reference node)
+  | .held index => held[index]? = some (.reference node)
 
 /-- The concrete held values are evaluated argument prefixes or protected return
 payloads, not a future-use oracle. Inactive carrier bits are deliberately inert. -/
@@ -2241,6 +2730,122 @@ def Custody (environment : Environment) (held : List Value) : Prop :=
     ∃ location, Carries environment held node location ∧
       ∀ other, Carries environment held node other → other = location
 
+/-- Both structural and nominal projections consume the same positional typing fact. -/
+theorem ResidentsTyped.select {types : List Ty} {values : List Value} {states : Nat → Initialization}
+    (typed : ResidentsTyped program states values types) (index : Nat) (type : Ty)
+    (selection : types[index]? = some type) :
+    ∃ value, values[index]? = some value ∧ ResidentTyped program (states index) value type := by
+  induction types generalizing values index states with
+  | nil => cases typed; simp at selection
+  | cons head tail ih =>
+    cases typed with
+    | cons headTyped tailTyped =>
+      cases index with
+      | zero =>
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at selection
+        subst type
+        exact ⟨_, rfl, headTyped⟩
+      | succ index => exact ih tailTyped index selection
+
+theorem ResidentsTyped.set {program : Program} {types : List Ty} {values : List Value} {states : Nat → Initialization}
+    (typed : ResidentsTyped program states values types) (index : Nat) {type : Ty}
+    (selected : types[index]? = some type) {replacement : Value} {next : Initialization}
+    (resident : ResidentTyped program next replacement type) :
+    ResidentsTyped program (fun other => if other = index then next else states other) (values.set index replacement) types := by
+  induction types generalizing values index states with
+  | nil => cases typed; simp at selected
+  | cons first rest ih =>
+    cases typed with
+    | cons head tail =>
+      cases index with
+      | zero =>
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
+        cases selected
+        exact .cons (by simpa only [↓reduceIte] using resident) (by simpa only [Nat.add_one_ne_zero, ↓reduceIte] using tail)
+      | succ index =>
+        exact .cons (by simpa only [Nat.zero_ne_add_one, ↓reduceIte] using head) (by simpa only [Nat.add_right_cancel_iff] using ih tail index selected)
+
+/-- The selected resident and lawful replacement are derived from the same field contract. -/
+theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat} {state : Initialization}
+    (projection : ProjectionType program home source key index target) {value : Value}
+    (typed : ResidentTyped program state value source) (present : state.Present := by trivial) :
+    ∃ resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
+      ResidentTyped program (state.child index) resident target ∧
+      ∀ replacement next, ResidentTyped program next replacement target →
+        ∃ updated, value.replaceChild index replacement = some updated ∧
+          ResidentTyped program (state.setChild index next) updated source := by
+  cases projection with
+  | @tuple first type rest index selected =>
+    cases typed with
+    | vacant => exact False.elim present
+    | uncertain typed permission => exact False.elim present
+    | @tuple state head tail _ _ headTyped tailTyped _ =>
+      obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select (states := state.child) (.cons headTyped tailTyped) index target selected
+      refine ⟨resident, rfl, found, residentTyped, ?_⟩
+      intro replacement next replacementTyped
+      have changed : ResidentsTyped program (state.setChild index next).child ((head :: tail).set index replacement) (first :: rest) := by
+        rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
+        exact ResidentsTyped.set (.cons headTyped tailTyped) index selected replacementTyped
+      cases index with
+      | zero =>
+        cases changed with
+        | cons firstChanged restChanged => exact ⟨_, rfl, .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
+      | succ index =>
+        change tail[index]? = some resident at found
+        cases changed with
+        | cons firstChanged restChanged =>
+          exact ⟨_, by simp [Value.replaceChild, found], .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
+  | @nominal identity index key declaration schema field declared structureOnly indexed selected visible =>
+    cases typed with
+    | vacant => exact False.elim present
+    | uncertain typed permission => exact False.elim present
+    | @nominal state _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents _ =>
+      have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
+      subst otherDeclaration
+      cases tag with
+      | some tag => simp [DataDecl.constructor, structureOnly] at chosen
+      | none =>
+        have sameSchema : otherSchema = schema := by simpa [DataDecl.constructor, structureOnly] using chosen.symm
+        subst otherSchema
+        have selectedType : (schema.residents.map Field.type)[index]? = some field.type := by simp [List.getElem?_map, selected]
+        obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select residents index field.type selectedType
+        refine ⟨resident, ?_, found, residentTyped, ?_⟩
+        · simp [Value.fieldIndex, declared, structureOnly, indexed]
+        · intro replacement next replacementTyped
+          have changed : ResidentsTyped program (state.setChild index next).child (values.set index replacement) (schema.residents.map Field.type) := by
+            rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
+            exact residents.set index selectedType replacementTyped
+          exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite changed (by simp [Initialization.setChild])⟩
+
+/-- Runtime resolution agrees with the sole source index derivation. -/
+theorem PathType.resident {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
+    (path : PathType program home source keys indices target) {value : Value}
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected) :
+    value.resolvePath program keys = some indices ∧
+      ∃ resident, value.readIndices indices = some resident ∧ ResidentTyped program selected resident target := by
+  induction path generalizing value state selected with
+  | nil => cases access; exact ⟨rfl, value, rfl, typed⟩
+  | @cons source middle target key keys index indices head tail ih =>
+    cases access with
+    | child present childAccess =>
+      obtain ⟨child, indexed, found, childTyped, _⟩ := head.access typed present
+      obtain ⟨resolved, resident, selected, residentTyped⟩ := ih childTyped childAccess
+      exact ⟨by simp [Value.resolvePath, indexed, found, resolved], resident,
+        by simp [Value.readIndices, found, selected], residentTyped⟩
+
+theorem CanonicalPath.resident {source target : Ty} {indices : List Nat} {state selected : Initialization}
+    (path : CanonicalPath program source indices target) {value : Value}
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected) :
+    ∃ resident, value.readIndices indices = some resident ∧ ResidentTyped program selected resident target := by
+  induction path generalizing value state selected with
+  | nil => cases access; exact ⟨value, rfl, typed⟩
+  | cons head _ ih =>
+    cases access with
+    | child present childAccess =>
+      obtain ⟨child, _, found, childTyped, _⟩ := head.access typed present
+      obtain ⟨resident, selected, residentTyped⟩ := ih childTyped childAccess
+      exact ⟨resident, by simp [Value.readIndices, found, selected], residentTyped⟩
+
 /-- Componentwise source/runtime state correspondence. Target initialization is
 an invariant proved across real transitions; source admission never assumes it. -/
 structure StoreTyped (program : Program) (interpretation : Interpretation) (context : Context)
@@ -2248,6 +2853,9 @@ structure StoreTyped (program : Program) (interpretation : Interpretation) (cont
   source : context.WellFormed program
   residents : EnvironmentTyped program environment context.erase
   slots : SlotsCorrespond interpretation environment.store environment.bindings context.bindings
+  cells : ∀ binder slot, context.storage (.binder binder) = some slot →
+    ∃ value, environment.store (interpretation.binder binder) = some value ∧
+      SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value
   binderBound : ∀ binder, context.MentionsBinder binder → interpretation.binder binder < environment.nextRoot
   binderDistinct : ∀ first second, context.MentionsBinder first → context.MentionsBinder second →
     interpretation.binder first = interpretation.binder second → first = second
@@ -2258,22 +2866,118 @@ structure StoreTyped (program : Program) (interpretation : Interpretation) (cont
     interpretation.node first < interpretation.node second
   records : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan →
     environment.loans[interpretation.node node]? =
-      some ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own⟩
+      some ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩
   activeCoverage : ∀ (node : Nat) (loan : Loan), environment.loans[node]? = some loan → loan.own = true →
     ∃ sourceNode sourceLoan, context.loans[sourceNode]? = some sourceLoan ∧ interpretation.node sourceNode = node
-  targets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
+  sourceTargets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
+    context.SourceTarget program loan
+  inputTargets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
+    ∀ input, loan.target.base = .input input →
     ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧
       ValueHasType program value loan.referent
   storeShape : ∀ root value, environment.store root = some value →
-    value.ReferenceFree ∨ ∃ node, value = .shared node ∧ node < environment.loans.length
+    value.ReferenceFree ∨ ∃ node, value = .reference node ∧ node < environment.loans.length
+
+/-- The masked target theorem consumes global cell correspondence and the canonical
+source path. A vacant selected resident is allowed; no successful read is assumed. -/
+theorem StoreTyped.targetResident {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder) :
+    ∃ state value, environment.at (interpretation.origin origin) = some value ∧
+      ResidentTyped program state value referent := by
+  obtain ⟨slot, stored, path, state, access⟩ := (by simpa [Context.Target, base] using target)
+  obtain ⟨root, found, rootTyped, _⟩ := typed.cells binder slot stored
+  obtain ⟨value, selected, resident⟩ := path.resident rootTyped access
+  exact ⟨state, value, by simp [Environment.at, Interpretation.origin, base, found, selected], resident⟩
+
+theorem StoreTyped.targetReady {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) (ready : context.Ready origin)
+    {binder : Nat} (base : origin.base = .binder binder) :
+    ∃ value, environment.readAddress (interpretation.origin origin) = some value ∧ ValueHasType program value referent := by
+  obtain ⟨slot, stored, path, _, _⟩ := (by simpa [Context.Target, base] using target)
+  simp only [Context.Ready, base] at ready
+  obtain ⟨readySlot, state, readyStored, access, complete⟩ := ready
+  have same := Option.some.inj (stored.symm.trans readyStored)
+  subst readySlot
+  obtain ⟨root, found, rootTyped, _⟩ := typed.cells binder slot stored
+  obtain ⟨value, selected, resident⟩ := path.resident rootTyped access
+  obtain ⟨full, initialized⟩ := resident.complete complete
+  exact ⟨value, by simp [Environment.readAddress, Environment.at, Interpretation.origin, base, found, selected, initialized], full⟩
+
+theorem StoreTyped.targetsReady {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) (node : Nat) (loan : SourceLoan)
+    (found : context.loans[node]? = some loan) (own : loan.own = true) (ready : context.Ready loan.target) :
+    ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧ ValueHasType program value loan.referent := by
+  cases base : loan.target.base with
+  | binder binder => exact typed.targetReady (typed.sourceTargets node loan found own).1 ready base
+  | input input => exact typed.inputTargets node loan found own input base
+
+theorem StoreTyped.targets {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) (node : Nat) (loan : SourceLoan)
+    (found : context.loans[node]? = some loan) (own : loan.own = true) (shared : loan.mode = .shared) :
+    ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧ ValueHasType program value loan.referent :=
+  typed.targetsReady node loan found own ((typed.sourceTargets node loan found own).2.1 shared)
+
+theorem StoreTyped.restored {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {node : Nat} {loan : SourceLoan}
+    (found : context.loans[node]? = some loan) (ready : context.Restored node) :
+    environment.Restored (interpretation.node node) := by
+  intro actual selected own
+  have equal := Option.some.inj ((typed.records node loan found).symm.trans selected)
+  subst actual
+  obtain ⟨value, read, _⟩ := typed.targetsReady node loan found own (ready loan found own)
+  exact ⟨value, read⟩
+
+theorem Context.Ready.storage_congr {before after : Context} {origin : Origin}
+    (ready : before.Ready origin) (same : after.storage origin.base = before.storage origin.base) : after.Ready origin := by
+  cases origin with
+  | mk base fields => cases base <;> simp_all only [Context.Ready]
+
+theorem Context.Restored.endOwn {context : Context} {node : Nat} (ready : context.Restored node) (ended : Nat) :
+    (context.endOwn ended).Restored node := by
+  intro loan found own
+  obtain ⟨original, old, rfl⟩ := Context.endOwn_original found
+  have different : ended ≠ node := by intro equal; simp [equal] at own
+  exact ready original old (by simpa [different] using own)
+
+theorem Context.Restored.borrow {context : Context} {node : Nat} (ready : context.Restored node)
+    (bound : node < context.loans.length) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) :
+    (context.borrow target referent parent mode).Restored node := by
+  intro loan found own
+  rcases Context.borrow_cases found with old | ⟨same, rfl⟩
+  · exact ready loan old own
+  · exact False.elim ((Nat.ne_of_lt bound) same)
+
+
+/-- Every active binder-backed loan, including a unique loan with a hole, retains
+exact canonical typing from its authoritative storage root. Dead history is excluded. -/
+theorem StoreTyped.canonicalTargets {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {node : Nat} {loan : SourceLoan}
+    (found : context.loans[node]? = some loan) (own : loan.own = true)
+    {binder : Nat} (base : loan.target.base = .binder binder) :
+    ∃ slot state value, context.storage (.binder binder) = some slot ∧
+      CanonicalPath program slot.type loan.target.fields loan.referent ∧
+      slot.initialization.Access loan.target.fields state ∧
+      environment.at (interpretation.origin loan.target) = some value ∧ ResidentTyped program state value loan.referent := by
+  have target := (typed.sourceTargets node loan found own).1
+  simp only [Context.Target, base] at target
+  obtain ⟨slot, stored, path, state, access⟩ := target
+  obtain ⟨root, rootStored, rootTyped, _⟩ := typed.cells binder slot stored
+  obtain ⟨value, selected, resident⟩ := path.resident rootTyped access
+  exact ⟨slot, state, value, stored, path, access,
+    by simp [Environment.at, Interpretation.origin, base, rootStored, selected], resident⟩
+
+
 
 /-- Concrete continuation resources extend stored correspondence; they are not
 part of the runtime store and cannot be forgotten by argument or return cleanup. -/
 structure StateTyped (program : Program) (interpretation : Interpretation) (context : Context)
     (heldNodes : List Nat) (environment : Environment) (held : List Value) : Prop
     extends StoreTyped program interpretation context environment where
-  heldShape : held = heldNodes.map (fun node => Value.shared (interpretation.node node))
+  heldShape : held = heldNodes.map (fun node => Value.reference (interpretation.node node))
   heldOwn : ∀ node ∈ heldNodes, context.Own node
+  heldReady : ∀ node ∈ heldNodes, context.Restored node
   custody : Custody environment held
 
 private theorem CoordinatesApart.prepend (stem : List Nat) {left right : List Nat}
@@ -2379,6 +3083,7 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
            residents := ⟨⟨typed.residents.valid.bounded, typed.residents.valid.named, typed.residents.valid.distinct⟩,
              typed.residents.residents⟩
            slots := typed.slots
+           cells := typed.cells
            binderBound := ?_
            binderDistinct := ?_
            inputBound := typed.inputBound
@@ -2386,7 +3091,13 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
            nodeOrder := ?_
            records := ?_
            activeCoverage := ?_
-           targets := ?_
+           sourceTargets := by
+             intro node loan selected available
+             obtain ⟨original, old, rfl⟩ := Context.endOwn_original selected
+             have different : ended ≠ node := by intro same; simp [same] at available
+             have own : original.own = true := by simpa [different] using available
+             exact typed.sourceTargets node original old own
+           inputTargets := ?_
            storeShape := ?_ }
   · intro binder included
     exact typed.binderBound binder ((context.endOwn_mentions ended binder).mp included)
@@ -2419,12 +3130,34 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
     obtain ⟨original, old, rfl⟩ := Context.endOwn_original selected
     have different : ended ≠ node := by intro same; simp [same] at available
     have own : original.own = true := by simpa [different] using available
-    exact typed.targets node original old own
+    exact typed.inputTargets node original old own
   · intro root value stored
     rcases typed.storeShape root value stored with plain | ⟨node, rfl, bound⟩
     · exact .inl plain
     · exact .inr ⟨node, rfl, by simpa [after] using bound⟩
 
+
+theorem derived (typed : StoreTyped program interpretation context environment)
+    {node ancestor : Nat} (source : context.Derived node ancestor) :
+    environment.Derived (interpretation.node node) (interpretation.node ancestor) := by
+  induction source with
+  | same node => exact .same _
+  | child found parent rest ih => exact .child (typed.records _ _ found) (by simp [parent]) ih
+
+theorem permits (typed : StoreTyped program interpretation context environment)
+    {mode : BorrowMode} {parent : Option Nat} {origin : Origin}
+    (known : origin.Known context) (allowed : context.Permits mode parent origin) :
+    environment.Permits mode (parent.map interpretation.node) (interpretation.origin origin) := by
+  intro runtimeNode runtimeLoan runtimeFound runtimeOwn
+  obtain ⟨node, loan, found, same⟩ := typed.activeCoverage runtimeNode runtimeLoan runtimeFound runtimeOwn
+  have record := typed.records node loan found
+  rw [same, runtimeFound] at record
+  cases Option.some.inj record.symm
+  rcases allowed node loan found runtimeOwn with shared | ancestral | apart
+  · exact .inl shared
+  · obtain ⟨selected, parent, path⟩ := ancestral
+    exact .inr (.inl ⟨interpretation.node selected, by simp [parent], by rw [← same]; exact typed.derived path⟩)
+  · exact .inr (.inr (typed.apart known (typed.source.loanKnown found) apart))
 
 /-- Owner-mutation permission is a conclusion, not an admission callback. -/
 theorem ownerFree (typed : StoreTyped program interpretation context environment)
@@ -2437,18 +3170,29 @@ theorem ownerFree (typed : StoreTyped program interpretation context environment
   cases Option.some.inj record
   exact typed.apart bound (typed.source.loanKnown found) (free node loan found runtimeOwn)
 
-/-- Every usable runtime node has an actual initialized typed target, even when
-its parent handle has ended or resides in hidden caller storage. -/
+/-- Every active runtime node has an addressable typed target. Unique targets may
+be masked; shared targets are initialized even under ended or hidden ancestors. -/
 theorem noDangling (typed : StoreTyped program interpretation context environment)
     {node : Nat} {loan : Loan} (found : environment.loans[node]? = some loan) (own : loan.own = true) :
-    ∃ value type, environment.readAddress loan.target = some value ∧ ValueHasType program value type ∧
-      FiniteLayout program.target program.data type := by
+    ∃ value type state, environment.at loan.target = some value ∧ ResidentTyped program state value type ∧
+      FiniteLayout program.target program.data type ∧
+      (loan.mode = .shared → environment.readAddress loan.target = some value ∧ ValueHasType program value type) := by
   obtain ⟨sourceNode, sourceLoan, sourceFound, sameNode⟩ := typed.activeCoverage _ _ found own
   have record := typed.records sourceNode sourceLoan sourceFound
   rw [sameNode, found] at record
   cases Option.some.inj record
-  obtain ⟨value, read, typedValue⟩ := typed.targets _ _ sourceFound own
-  exact ⟨value, sourceLoan.referent, read, typedValue, (typed.source.targets _ _ sourceFound).2⟩
+  by_cases shared : sourceLoan.mode = .shared
+  · obtain ⟨value, read, typedValue⟩ := typed.targets _ _ sourceFound own shared
+    have raw : environment.at (interpretation.origin sourceLoan.target) = some value := by
+      simp only [Environment.readAddress, Bind.bind, Option.bind_eq_some_iff] at read
+      obtain ⟨resident, raw, live⟩ := read
+      split at live <;> simp_all
+    exact ⟨value, sourceLoan.referent, .full, raw, typedValue, (typed.source.targets _ _ sourceFound).2, fun _ => ⟨read, typedValue⟩⟩
+  · cases base : sourceLoan.target.base with
+    | binder binder =>
+      obtain ⟨state, value, raw, resident⟩ := typed.targetResident (typed.sourceTargets _ _ sourceFound own).1 base
+      exact ⟨value, sourceLoan.referent, state, raw, resident, (typed.source.targets _ _ sourceFound).2, fun same => False.elim (shared same)⟩
+    | input input => exact False.elim (shared ((typed.sourceTargets _ _ sourceFound own).2.2 input base))
 
 
 /-- Widening a static identity supply allocates nothing. Only the existing finite
@@ -2457,7 +3201,7 @@ theorem raiseSupply (typed : StoreTyped program interpretation context environme
     {supply : Nat} (larger : context.nextBinder ≤ supply) :
     StoreTyped program interpretation { context with nextBinder := supply } environment := by
   have source : Context.WellFormed program { context with nextBinder := supply } := by
-    refine { typed.source with slots := ?_, targets := ?_ }
+    refine { typed.source with slots := ?_, targets := ?_, allocated := ?_ }
     · intro binding member
       have old := typed.source.slots binding member
       exact ⟨Nat.lt_of_lt_of_le old.1 larger, old.2⟩
@@ -2469,19 +3213,24 @@ theorem raiseSupply (typed : StoreTyped program interpretation context environme
         have old : identity < context.nextBinder := by simpa [Origin.Bounded, base] using bound
         simpa [Origin.Bounded, base] using Nat.lt_of_lt_of_le old larger
       | input identity => simpa [Origin.Bounded, base] using bound
+    · intro binder slot stored
+      obtain ⟨identity, bound, supported, reference⟩ := typed.source.allocated binder slot stored
+      exact ⟨identity, Nat.lt_of_lt_of_le bound larger, supported, reference⟩
   exact { typed with source := source }
 theorem borrow (typed : StoreTyped program interpretation context environment)
-    {target : Origin} {referent : Ty} {parent : Option Nat} {value : Value}
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} {value : Value}
     (known : target.Known context) (bounded : target.Bounded context)
     (finite : FiniteLayout program.target program.data referent)
     (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
+    (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique)
+    (sourceTarget : context.SourceTarget program ⟨target, referent, parent, true, mode⟩)
     (selected : environment.readAddress (interpretation.origin target) = some value)
     (valueTyped : ValueHasType program value referent) :
     StoreTyped program (interpretation.addNode context.loans.length environment.loans.length)
-      (context.borrow target referent parent)
-      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩) := by
+      (context.borrow target referent parent mode)
+      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode) := by
   let next := interpretation.addNode context.loans.length environment.loans.length
-  let after := environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩
+  let after := environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode
   have oldNode : ∀ node, node < context.loans.length → next.node node = interpretation.node node := by
     intro node bound
     exact interpretation.addNode_old bound
@@ -2495,10 +3244,22 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
     | some node =>
       obtain ⟨loan, found, _⟩ := ancestor node shape
       simp only [Option.map_some, oldNode node (List.getElem?_eq_some_iff.mp found).1]
-  refine { source := typed.source.borrow bounded finite ancestor
+  refine { source := typed.source.borrow bounded finite ancestor parentMode
            residents := ⟨⟨typed.residents.valid.bounded, typed.residents.valid.named, typed.residents.valid.distinct⟩,
              typed.residents.residents⟩
            slots := typed.slots.node_congr (fun _ => rfl) ?_
+           cells := by
+             intro binder slot stored
+             obtain ⟨resident, found, residentTyped, corresponds⟩ := typed.cells binder slot stored
+             refine ⟨resident, found, residentTyped, ?_⟩
+             cases reference : slot.reference with
+             | none => simpa only [Slot.Corresponds, reference] using corresponds
+             | some node =>
+               obtain ⟨loan, present, _⟩ := (typed.source.allocated binder slot stored).2.2.2 node reference
+               simp only [Slot.Corresponds, reference]
+               change resident = Value.reference (next.node node)
+               rw [oldNode node (List.getElem?_eq_some_iff.mp present).1]
+               simpa only [Slot.Corresponds, reference] using corresponds
            binderBound := ?_
            binderDistinct := ?_
            inputBound := typed.inputBound
@@ -2506,7 +3267,12 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
            nodeOrder := ?_
            records := ?_
            activeCoverage := ?_
-           targets := ?_
+           sourceTargets := by
+             intro node loan found own
+             rcases Context.borrow_cases found with old | ⟨_, rfl⟩
+             · exact typed.sourceTargets node loan old own
+             · exact sourceTarget
+           inputTargets := ?_
            storeShape := ?_ }
   · intro binding member node reference
     obtain ⟨loan, found, _⟩ := (typed.source.slots binding member).2 node reference
@@ -2535,11 +3301,11 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
         | some parentNode =>
           have older := (typed.source.parents node loan parentNode old shape).1
           simp only [Option.map_some, oldNode parentNode (Nat.lt_trans older bound)]
-      change after.loans[next.node node]? = some ⟨next.origin loan.target, loan.parent.map next.node, loan.own⟩
+      change after.loans[next.node node]? = some ⟨next.origin loan.target, loan.parent.map next.node, loan.own, loan.mode⟩
       rw [oldNode node bound, oldParent]
       exact (List.getElem?_append_left (nodeBound node bound)).trans (typed.records node loan old)
     · change after.loans[next.node context.loans.length]? =
-        some ⟨next.origin target, parent.map next.node, true⟩
+        some ⟨next.origin target, parent.map next.node, true, mode⟩
       rw [parentSame]
       simp [after, next, Environment.addLoan, Interpretation.addNode, Interpretation.origin]
   · intro node loan found own
@@ -2555,12 +3321,12 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
       | zero =>
         have same : node = environment.loans.length :=
           Nat.le_antisymm (Nat.sub_eq_zero_iff_le.mp difference) (Nat.le_of_not_lt bound)
-        exact ⟨context.loans.length, ⟨target, referent, parent, true⟩,
-          Context.borrow_last context target referent parent, by simp [Interpretation.addNode, same]⟩
+        exact ⟨context.loans.length, ⟨target, referent, parent, true, mode⟩,
+          Context.borrow_last context target referent parent mode, by simp [Interpretation.addNode, same]⟩
       | succ rest => simp [difference] at found
-  · intro node loan found own
+  · intro node loan found own input base
     rcases Context.borrow_cases found with old | ⟨_, rfl⟩
-    · exact typed.targets node loan old own
+    · exact typed.inputTargets node loan old own input base
     · exact ⟨value, selected, valueTyped⟩
   · intro root resident stored
     rcases typed.storeShape root resident stored with plain | ⟨node, rfl, bound⟩
@@ -2595,16 +3361,16 @@ end Environment
 theorem Custody.borrow {environment : Environment} {held : List Value}
     (custody : Custody environment held)
     (bounded : ∀ node location, Carries environment held node location → node < environment.loans.length)
-    (access : Environment.ResolvedAccess) :
-    Custody (environment.addLoan access) (held ++ [.shared environment.loans.length]) := by
-  let after := environment.addLoan access
-  let values := held ++ [Value.shared environment.loans.length]
+    (access : Environment.ResolvedAccess) (mode : BorrowMode) :
+    Custody (environment.addLoan access mode) (held ++ [.reference environment.loans.length]) := by
+  let after := environment.addLoan access mode
+  let values := held ++ [Value.reference environment.loans.length]
   have lift : ∀ node location, Carries environment held node location → Carries after values node location := by
     intro node location carrier
     cases location with
     | stored root => exact carrier
     | held index =>
-      change values[index]? = some (.shared node)
+      change values[index]? = some (.reference node)
       exact (List.getElem?_append_left (List.getElem?_eq_some_iff.mp carrier).1).trans carrier
   have lower : ∀ node, node < environment.loans.length → ∀ location,
       Carries after values node location → Carries environment held node location := by
@@ -2612,14 +3378,14 @@ theorem Custody.borrow {environment : Environment} {held : List Value}
     cases location with
     | stored root => exact carrier
     | held index =>
-      change values[index]? = some (.shared node) at carrier
+      change values[index]? = some (.reference node) at carrier
       by_cases bound : index < held.length
       · exact (List.getElem?_append_left bound).symm.trans carrier
       · simp only [values, List.getElem?_append_right (Nat.le_of_not_lt bound)] at carrier
         cases difference : index - held.length with
         | zero =>
           have same : environment.loans.length = node := by
-            simpa only [difference, List.getElem?_cons_zero, Option.some.injEq, Value.shared.injEq] using carrier
+            simpa only [difference, List.getElem?_cons_zero, Option.some.injEq, Value.reference.injEq] using carrier
           exact False.elim ((Nat.ne_of_lt older) same.symm)
         | succ rest => simp [difference] at carrier
   intro node loan found own
@@ -2640,9 +3406,9 @@ theorem Custody.borrow {environment : Environment} {held : List Value}
       cases location with
       | stored root => exact False.elim (Nat.lt_irrefl _ (bounded _ (.stored root) carrier))
       | held index =>
-        change values[index]? = some (.shared environment.loans.length) at carrier
+        change values[index]? = some (.reference environment.loans.length) at carrier
         by_cases bound : index < held.length
-        · have old : held[index]? = some (.shared environment.loans.length) :=
+        · have old : held[index]? = some (.reference environment.loans.length) :=
             (List.getElem?_append_left bound).symm.trans carrier
           exact False.elim (Nat.lt_irrefl _ (bounded _ (.held index) old))
         · simp only [values, List.getElem?_append_right (Nat.le_of_not_lt bound)] at carrier
@@ -2661,34 +3427,38 @@ theorem carrierBound (typed : StateTyped program interpretation context heldNode
     node < environment.loans.length := by
   cases location with
   | stored root =>
-    rcases typed.storeShape root (.shared node) carrier with plain | ⟨other, same, bound⟩
+    rcases typed.storeShape root (.reference node) carrier with plain | ⟨other, same, bound⟩
     · exact False.elim plain
-    · cases Value.shared.inj same
+    · cases Value.reference.inj same
       exact bound
   | held index =>
-    change held[index]? = some (.shared node) at carrier
+    change held[index]? = some (.reference node) at carrier
     rw [typed.heldShape, List.getElem?_map] at carrier
     obtain ⟨sourceNode, found, same⟩ := Option.map_eq_some_iff.mp carrier
     obtain ⟨loan, loanFound, _⟩ := typed.heldOwn sourceNode (List.mem_of_getElem? found)
-    cases Value.shared.inj same
+    cases Value.reference.inj same
     exact (List.getElem?_eq_some_iff.mp (typed.records sourceNode loan loanFound)).1
 
 theorem borrow (typed : StateTyped program interpretation context heldNodes environment held)
-    {target : Origin} {referent : Ty} {parent : Option Nat} {value : Value}
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} {value : Value}
     (known : target.Known context) (bounded : target.Bounded context)
     (finite : FiniteLayout program.target program.data referent)
     (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
+    (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique)
+    (sourceTarget : context.SourceTarget program ⟨target, referent, parent, true, mode⟩)
+    (ready : context.Ready target)
     (selected : environment.readAddress (interpretation.origin target) = some value)
     (valueTyped : ValueHasType program value referent) :
     StateTyped program (interpretation.addNode context.loans.length environment.loans.length)
-      (context.borrow target referent parent) (heldNodes ++ [context.loans.length])
-      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩)
-      (held ++ [.shared environment.loans.length]) := by
-  refine { toStoreTyped := typed.toStoreTyped.borrow known bounded finite ancestor selected valueTyped
+      (context.borrow target referent parent mode) (heldNodes ++ [context.loans.length])
+      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
+      (held ++ [.reference environment.loans.length]) := by
+  refine { toStoreTyped := typed.toStoreTyped.borrow known bounded finite ancestor parentMode sourceTarget selected valueTyped
            heldShape := ?_
            heldOwn := ?_
-           custody := typed.custody.borrow (fun _ _ carrier => typed.carrierBound carrier) _ }
-  · have same : heldNodes.map (fun node => Value.shared
+           heldReady := ?_
+           custody := typed.custody.borrow (fun _ _ carrier => typed.carrierBound carrier) _ _ }
+  · have same : heldNodes.map (fun node => Value.reference
           ((interpretation.addNode context.loans.length environment.loans.length).node node)) = held := by
       rw [typed.heldShape]
       apply List.map_congr_left
@@ -2703,7 +3473,16 @@ theorem borrow (typed : StateTyped program interpretation context heldNodes envi
       exact ⟨loan, Context.borrow_found found, own⟩
     · have same : node = context.loans.length := by simpa using fresh
       subst node
-      exact ⟨_, Context.borrow_last context target referent parent, rfl⟩
+      exact ⟨_, Context.borrow_last context target referent parent mode, rfl⟩
+  · intro node member loan found own
+    rcases List.mem_append.mp member with old | fresh
+    · obtain ⟨oldLoan, oldFound, _⟩ := typed.heldOwn node old
+      exact (typed.heldReady node old).borrow (List.getElem?_eq_some_iff.mp oldFound).1 target referent parent mode loan found own
+    · have same : node = context.loans.length := by simpa using fresh
+      subst node
+      have equal := Option.some.inj ((Context.borrow_last context target referent parent mode).symm.trans found)
+      subst loan
+      exact ready
 
 /-- Resident last-use ending retains the actual pending handles and their own
 permissions. The source end action must select a non-protected resident carrier. -/
@@ -2712,11 +3491,12 @@ theorem endOwn (typed : StateTyped program interpretation context heldNodes envi
     ∃ after, environment.endOwn (interpretation.node node) = some after ∧
       StateTyped program interpretation (context.endOwn node) heldNodes after held := by
   obtain ⟨after, step, stored⟩ := typed.toStoreTyped.endOwn found
-  refine ⟨after, step, stored, typed.heldShape, ?_, ?_⟩
+  refine ⟨after, step, stored, typed.heldShape, ?_, ?_, ?_⟩
   · intro other included
     obtain ⟨otherLoan, old, own⟩ := typed.heldOwn other included
     have different : node ≠ other := fun same => unprotected (same ▸ included)
     exact ⟨_, context.endOwn_found node old, by simpa [different] using own⟩
+  · exact fun other included => (typed.heldReady other included).endOwn node
   · intro other actual selected own
     have previous := (Environment.endOwn_active step selected own).1
     have equality := Environment.endOwn_state step
@@ -2726,25 +3506,26 @@ theorem endOwn (typed : StateTyped program interpretation context heldNodes envi
 theorem raiseSupply (typed : StateTyped program interpretation context heldNodes environment held)
     {supply : Nat} (larger : context.nextBinder ≤ supply) :
     StateTyped program interpretation { context with nextBinder := supply } heldNodes environment held :=
-  ⟨typed.toStoreTyped.raiseSupply larger, typed.heldShape, typed.heldOwn, typed.custody⟩
+  ⟨typed.toStoreTyped.raiseSupply larger, typed.heldShape, typed.heldOwn, typed.heldReady, typed.custody⟩
 
 /-- A discarded evaluated reference is removed from the concrete pending suffix
 while only that handle's own permission ends. Earlier evaluated handles remain. -/
 theorem consume {node : Nat} (typed : StateTyped program interpretation context (heldNodes ++ [node]) environment
-      (held ++ [Value.shared (interpretation.node node)]))
+      (held ++ [Value.reference (interpretation.node node)]))
     (unprotected : node ∉ heldNodes) :
     ∃ after, environment.endOwn (interpretation.node node) = some after ∧
       StateTyped program interpretation (context.endOwn node) heldNodes after held := by
   obtain ⟨loan, found, _⟩ := typed.heldOwn node (by simp)
   obtain ⟨after, step, stored⟩ := typed.toStoreTyped.endOwn found
-  have heldShape : held = heldNodes.map (fun node => Value.shared (interpretation.node node)) := by
+  have heldShape : held = heldNodes.map (fun node => Value.reference (interpretation.node node)) := by
     apply List.append_cancel_right
     simpa only [List.map_append, List.map_cons, List.map_nil] using typed.heldShape
-  refine ⟨after, step, stored, heldShape, ?_, ?_⟩
+  refine ⟨after, step, stored, heldShape, ?_, ?_, ?_⟩
   · intro other included
     obtain ⟨otherLoan, old, own⟩ := typed.heldOwn other (List.mem_append_left _ included)
     have different : node ≠ other := fun same => unprotected (same ▸ included)
     exact ⟨_, context.endOwn_found node old, by simpa [different] using own⟩
+  · exact fun other included => (typed.heldReady other (List.mem_append_left _ included)).endOwn node
   · intro other actual selected own
     obtain ⟨previous, different⟩ := Environment.endOwn_active step selected own
     obtain ⟨location, carrier, unique⟩ := typed.custody other actual previous own
@@ -2754,13 +3535,13 @@ theorem consume {node : Nat} (typed : StateTyped program interpretation context 
       cases location with
       | stored root => exact carrier
       | held index =>
-        change (held ++ [Value.shared (interpretation.node node)])[index]? = some (.shared other) at carrier
+        change (held ++ [Value.reference (interpretation.node node)])[index]? = some (.reference other) at carrier
         by_cases bound : index < held.length
         · simpa only [Carries, List.getElem?_append_left bound] using carrier
         · rw [List.getElem?_append_right (Nat.le_of_not_lt bound)] at carrier
           cases difference : index - held.length with
           | zero =>
-            simp only [difference, List.getElem?_cons_zero, Option.some.injEq, Value.shared.injEq] at carrier
+            simp only [difference, List.getElem?_cons_zero, Option.some.injEq, Value.reference.injEq] at carrier
             exact False.elim (different carrier)
           | succ rest => simp [difference] at carrier
     refine ⟨location, retained, ?_⟩
@@ -2769,7 +3550,7 @@ theorem consume {node : Nat} (typed : StateTyped program interpretation context 
     cases otherLocation with
     | stored root => exact otherCarrier
     | held index =>
-      change held[index]? = some (.shared other) at otherCarrier
+      change held[index]? = some (.reference other) at otherCarrier
       have bound := (List.getElem?_eq_some_iff.mp otherCarrier).1
       simpa only [Carries, List.getElem?_append_left bound] using otherCarrier
 
@@ -2792,6 +3573,7 @@ inductive Evaluates (program : Program) : Environment → Core → Value → Env
   | read {environment after : Environment} {place : Place} {address : Address} {resident value : Value}
       (resolved : environment.resolvePlace program place = some address)
       (selected : environment.readAddress address = some resident)
+      (permitted : environment.Permits .shared none address)
       (copied : Environment.Copies environment resident value after) :
       Evaluates program environment ⟨.read place, .leaf⟩ value after
   | move {environment after : Environment} {place : Place} {address : Address} {value : Value}
@@ -2799,18 +3581,55 @@ inductive Evaluates (program : Program) : Environment → Core → Value → Env
       (free : environment.OwnerFree address) (allowed : environment.ResultUsable value)
       (taken : environment.takeAddress address = some (value, after)) :
       Evaluates program environment ⟨.move place, .leaf⟩ value after
+  | implicitMove {environment after : Environment} {place : Place} {value : Value}
+      (moved : Evaluates program environment ⟨.move place, .leaf⟩ value after) :
+      Evaluates program environment ⟨.read place, .implicitMove⟩ value after
   | borrow {environment : Environment} {place : AccessPlace} {access : Environment.ResolvedAccess} {value : Value}
+      {mode : BorrowMode}
       (resolved : environment.resolveAccess program place = some access)
-      (allowed : environment.Authorizes access)
+      (allowed : environment.Authorizes mode access)
+      (permitted : environment.Permits mode access.parent access.address)
+      (ready : environment.AccessReady access)
       (selected : environment.readAddress access.address = some value) (plain : value.ReferenceFree) :
-      Evaluates program environment ⟨.borrow place, .leaf⟩ (.shared environment.loans.length)
-        (environment.addLoan access)
+      Evaluates program environment ⟨.borrow mode place, .leaf⟩ (.reference environment.loans.length)
+        (environment.addLoan access mode)
+  | reborrow {environment : Environment} {place : Place} {access : Environment.ResolvedAccess} {value : Value}
+      {mode : BorrowMode}
+      (resolved : environment.resolveAccess program (.dereference place []) = some access)
+      (allowed : environment.Authorizes mode access)
+      (permitted : environment.Permits mode access.parent access.address)
+      (ready : environment.AccessReady access)
+      (selected : environment.readAddress access.address = some value) (plain : value.ReferenceFree) :
+      Evaluates program environment ⟨.read place, .reborrow mode⟩ (.reference environment.loans.length)
+        (environment.addLoan access mode)
   | dereference {environment : Environment} {reference : Place} {fields : List FieldKey}
       {access : Environment.ResolvedAccess} {value : Value}
       (resolved : environment.resolveAccess program (.dereference reference fields) = some access)
-      (allowed : environment.Authorizes access)
+      (allowed : environment.Authorizes .shared access)
+      (permitted : environment.Permits .shared access.parent access.address)
+      (ready : environment.AccessReady access)
       (selected : environment.readAddress access.address = some value) (plain : value.ReferenceFree) :
       Evaluates program environment ⟨.dereference reference fields, .leaf⟩ value environment
+  | moveIndirect {environment after : Environment} {reference : Place} {fields : List FieldKey}
+      {access : Environment.ResolvedAccess} {value : Value}
+      (resolved : environment.resolveAccess program (.dereference reference fields) = some access)
+      (allowed : environment.Authorizes .unique access)
+      (permitted : environment.Permits .unique access.parent access.address)
+      (ready : environment.AccessReady access) (plain : value.ReferenceFree)
+      (taken : environment.takeAddress access.address = some (value, after)) :
+      Evaluates program environment ⟨.moveIndirect reference fields, .leaf⟩ value after
+  | assignIndirect {environment middle updated after : Environment} {reference : Place} {fields : List FieldKey}
+      {expression rest : Expr} {expressionPlan restPlan : CorePlan} {access : Environment.ResolvedAccess}
+      {resident old value : Value} {trace : List (List Nat)}
+      (evaluated : Evaluates program environment ⟨expression, expressionPlan⟩ resident middle)
+      (resolved : middle.resolveAccess program (.dereference reference fields) = some access)
+      (allowed : middle.Authorizes .unique access)
+      (permitted : middle.Permits .unique access.parent access.address)
+      (previous : middle.at access.address = some old) (plain : old.ReferenceFree)
+      (destroyed : old.Destroys program trace .vacant)
+      (written : middle.writeAddress access.address resident = some updated)
+      (continued : Evaluates program updated ⟨rest, restPlan⟩ value after) :
+      Evaluates program environment ⟨.assignIndirect reference fields expression rest, .binary expressionPlan restPlan⟩ value after
   | endOwn {environment ended after : Environment} {expression : Expr} {plan : CorePlan} {slot : Nat} {value : Value}
       (endedOwn : environment.endSlot slot = some ended)
       (continued : Evaluates program ended ⟨expression, plan⟩ value after) :
@@ -2922,7 +3741,7 @@ def resultNodes (results : List ResultType) : List Nat := results.flatMap Result
 def Context.prepare (parameters : List (String × BindingType)) (arguments : List ResultType) (context : Context) : Context :=
   (parameters.zip arguments).foldl (fun current entry => current.bind entry.1.1 entry.1.2.mutable entry.2) context
 
-def Context.resume (caller after : Context) : Context := { after with bindings := caller.bindings }
+def Context.resume (caller after : Context) : Context := { after with names := caller.names }
 
 /-- Cleanup checks current source permissions in the same youngest-first order as
 runtime destruction. It does not assume that an execution or target lookup succeeds. -/
@@ -2931,6 +3750,7 @@ def Context.Cleanable (program : Program) (heldNodes : List Nat) : Context → L
   | context, (_, slot) :: slots =>
       slot.toBindingType.Disposable program ∧ context.Free ⟨.binder slot.binder, []⟩ ∧
       (∀ node, slot.reference = some node → node ∉ heldNodes) ∧
+      (∀ node, slot.reference = some node → context.Restored node) ∧
       Context.Cleanable program heldNodes (context.dispose slot.reference) slots
 
 inductive SlotsJoin (program : Program) : List (String × Slot) → List (String × Slot) → Prop where
@@ -2941,35 +3761,82 @@ inductive SlotsJoin (program : Program) : List (String × Slot) → List (String
       SlotsJoin program ((name, ⟨⟨type, mutable, before⟩, binder, reference⟩) :: slots)
         ((name, ⟨⟨type, mutable, after⟩, binder, reference⟩) :: joined)
 
+/-- A join changes only the authoritative initialization mask. Storage presence
+and its immutable identity, type, and carrier metadata are preserved. -/
+inductive CellJoin (program : Program) : Option Slot → Option Slot → Prop where
+  | absent : CellJoin program none none
+  | resident {type : Ty} {mutable : Bool} {before after : Initialization}
+      {binder : Nat} {reference : Option Nat}
+      (state : Initialization.Joins program.data type before after) :
+      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, reference⟩)
+        (some ⟨⟨type, mutable, after⟩, binder, reference⟩)
+
+theorem CellJoin.forward {before after : Option Slot} (joined : CellJoin program before after)
+    {slot : Slot} (found : before = some slot) :
+    ∃ current, after = some current ∧ current.metadata = slot.metadata ∧
+      Initialization.Joins program.data slot.type slot.initialization current.initialization := by
+  cases joined with
+  | absent => cases found
+  | resident state => cases found; exact ⟨_, rfl, rfl, state⟩
+
+theorem CellJoin.backward {before after : Option Slot} (joined : CellJoin program before after)
+    {slot : Slot} (found : after = some slot) :
+    ∃ original, before = some original ∧ slot.metadata = original.metadata ∧
+      Initialization.Joins program.data original.type original.initialization slot.initialization := by
+  cases joined with
+  | absent => cases found
+  | resident state => cases found; exact ⟨_, rfl, rfl, state⟩
+
 /-- Branch joins must preserve exact loan history, origins, handle identities and
 input interpretation. Only supported initialization and fresh-ID supply may weaken. -/
 structure Context.Joins (program : Program) (before after : Context) : Prop where
-  slots : SlotsJoin program before.bindings after.bindings
+  names : after.names = before.names
+  storage : ∀ origin, CellJoin program (before.storage origin) (after.storage origin)
   loans : after.loans = before.loans
   inputs : after.inputCount = before.inputCount
   supply : before.nextBinder ≤ after.nextBinder
+  targetMasks : ∀ (node : Nat) (loan : SourceLoan), before.loans[node]? = some loan → loan.own = true →
+    ∀ (binder : Nat) (old current : Slot) (state : Initialization), loan.target.base = .binder binder →
+      before.storage (.binder binder) = some old → after.storage (.binder binder) = some current →
+      old.initialization.Access loan.target.fields state →
+      ∃ next, current.initialization.Access loan.target.fields next ∧ (state.Complete → next.Complete)
 
-inductive AccessType (program : Program) (home : Module) (context : Context) : AccessPlace → Origin → Ty → Option Nat → Prop where
+theorem Context.Joins.slots {before after : Context} (joined : Context.Joins program before after) :
+    SlotsJoin program before.bindings after.bindings := by
+  unfold Context.bindings
+  rw [joined.names]
+  have view (names : List (String × Nat)) :
+      SlotsJoin program
+        (names.filterMap fun entry => (before.storage (.binder entry.2)).map fun slot => (entry.1, slot))
+        (names.filterMap fun entry => (after.storage (.binder entry.2)).map fun slot => (entry.1, slot)) := by
+    induction names with
+    | nil => exact .nil
+    | cons entry names ih =>
+        simp only [List.filterMap_cons]
+        have cells := joined.storage (.binder entry.2)
+        generalize before.storage (.binder entry.2) = old at cells ⊢
+        generalize after.storage (.binder entry.2) = current at cells ⊢
+        cases cells with
+        | absent => exact ih
+        | resident state => exact SlotsJoin.cons state ih
+  exact view before.names
+
+inductive AccessType (program : Program) (home : Module) (context : Context) (mode : BorrowMode) : AccessPlace → Origin → Ty → Option Nat → Prop where
   | owner {place : Place} {slot : Slot} {indices : List Nat} {state : Initialization} {type : Ty}
       (selected : lookup place.root context.bindings = some slot)
-      (access : slot.initialization.Access indices state) (initialized : state.Complete)
-      (path : PathType program home slot.type place.fields indices type) :
-      AccessType program home context (.owner place) ⟨.binder slot.binder, indices⟩ type none
+      (access : slot.initialization.Access indices state)
+      (path : PathType program home slot.type place.fields indices type)
+      (authority : mode = .unique → slot.mutable = true) :
+      AccessType program home context mode (.owner place) ⟨.binder slot.binder, indices⟩ type none
   | dereference {reference : Place} {fields : List FieldKey} {slot : Slot} {node : Nat}
       {loan : SourceLoan} {indices : List Nat} {type : Ty}
       (selected : lookup reference.root context.bindings = some slot) (direct : reference.fields = [])
-      (handle : slot.reference = some node) (shape : slot.type = .shared loan.referent)
+      (handle : slot.reference = some node) (shape : slot.type = .reference loan.referent loan.mode)
       (initialized : slot.initialization.Complete) (found : context.loans[node]? = some loan) (own : loan.own = true)
-      (path : PathType program home loan.referent fields indices type) :
-      AccessType program home context (.dereference reference fields) (loan.target.extend indices) type (some node)
-
-/-- A checked input-source relation, not merely equality of referent types or
-an invented non-aliasing input origin. Ended ancestors remain in this relation. -/
-inductive Context.Derived (context : Context) : Nat → Nat → Prop where
-  | same (node : Nat) : context.Derived node node
-  | child {node parent origin : Nat} {loan : SourceLoan}
-      (found : context.loans[node]? = some loan) (derived : loan.parent = some parent)
-      (ancestor : context.Derived parent origin) : context.Derived node origin
+      (path : PathType program home loan.referent fields indices type)
+      (target : context.Target program (loan.target.extend indices) type)
+      (authority : mode = .unique → loan.mode = .unique) :
+      AccessType program home context mode (.dereference reference fields) (loan.target.extend indices) type (some node)
 
 /-- Only unambiguous single-reference-input result elision is admitted. Multiple
 reference inputs may alias, but cannot yield a reference without an explicit source contract. -/
@@ -2978,7 +3845,7 @@ def Context.Returns (context : Context) (arguments : List ResultType) (result : 
   | none => True
   | some node => ∃ input, resultNodes arguments = [input] ∧ context.Derived node input
 mutual
-inductive HasType (program : Program) : Module → Context → List Nat → Expr → ResultType → Context → CorePlan → Prop where
+inductive HasType (program : Program) : Module → Context → List Nat → Expr → ResultType → Context → CorePlan → (expected : Option Ty := none) → Prop where
   | unit {home : Module} {context : Context} {held : List Nat} :
       HasType program home context held .unit (.data .unit) context .leaf
   | integer {home : Module} {context : Context} {held : List Nat} {type : IntegerType} {magnitude : Nat}
@@ -2986,22 +3853,26 @@ inductive HasType (program : Program) : Module → Context → List Nat → Expr
       HasType program home context held (.integer type magnitude) (.data (.integer type)) context .leaf
   | character {home : Module} {context : Context} {held : List Nat} {number : Nat} (valid : UnicodeScalar number) :
       HasType program home context held (.character number) (.data .character) context .leaf
-  | group {home : Module} {context after : Context} {held : List Nat} {body : Expr} {result : ResultType} {plan : CorePlan}
-      (typed : HasType program home context held body result after plan) :
-      HasType program home context held (.group body) result after (.unary plan)
+  | group {expected : Option Ty} {home : Module} {context after : Context} {held : List Nat} {body : Expr} {result : ResultType} {plan : CorePlan}
+      (typed : HasType program home context held body result after plan expected) :
+      HasType program home context held (.group body) result after (.unary plan) expected
+
   | read {home : Module} {context : Context} {held : List Nat} {place : Place} {slot : Slot}
       {type : Ty} {indices : List Nat} {state : Initialization}
       (selected : lookup place.root context.bindings = some slot) (access : slot.initialization.Access indices state)
       (initialized : state.Complete) (path : PathType program home slot.type place.fields indices type)
-      (shape : type.DataShape) (copyable : Duplicable program.data type) :
+      (shape : type.DataShape) (copyable : Duplicable program.data type)
+      (permitted : context.Permits .shared none ⟨.binder slot.binder, indices⟩) :
       HasType program home context held (.read place) (.data type) context .leaf
   | copyShared {home : Module} {context : Context} {held : List Nat} {place : Place} {slot : Slot}
       {node : Nat} {loan : SourceLoan}
       (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-      (handle : slot.reference = some node) (shape : slot.type = .shared loan.referent)
-      (initialized : slot.initialization.Complete) (found : context.loans[node]? = some loan) (own : loan.own = true) :
-      HasType program home context held (.read place) ⟨.shared loan.referent, some context.loans.length⟩
-        (context.borrow loan.target loan.referent (some node)) .leaf
+      (handle : slot.reference = some node) (shape : slot.type = .reference loan.referent loan.mode)
+      (initialized : slot.initialization.Complete) (found : context.loans[node]? = some loan) (own : loan.own = true)
+      (copyable : Duplicable program.data (.reference loan.referent loan.mode))
+      (permitted : context.Permits .shared none ⟨.binder slot.binder, []⟩) :
+      HasType program home context held (.read place) ⟨.reference loan.referent, some context.loans.length⟩
+        (context.borrow loan.target loan.referent (some node) .shared) .leaf
   | move {home : Module} {context : Context} {held : List Nat} {place : Place} {slot : Slot}
       {type : Ty} {indices : List Nat} {state : Initialization} {slots : List (String × Slot)}
       (selected : lookup place.root context.bindings = some slot) (access : slot.initialization.Access indices state)
@@ -3009,56 +3880,89 @@ inductive HasType (program : Program) : Module → Context → List Nat → Expr
       (shape : type.DataShape) (data : slot.reference = none) (free : context.Free ⟨.binder slot.binder, indices⟩)
       (cleared : replaceBinding place.root { slot with initialization := slot.initialization.write indices .vacant }
         context.bindings = some slots) :
-      HasType program home context held (.move place) (.data type) { context with bindings := slots } .leaf
-  | moveShared {home : Module} {context : Context} {held : List Nat} {place : Place} {slot : Slot}
-      {node : Nat} {referent : Ty} {slots : List (String × Slot)}
+      HasType program home context held (.move place) (.data type) (context.withSlots slots) .leaf
+  /-- Default owned use shares the explicit transfer contract for data and handles.
+  Reference expectations cannot enter this rule: they require a fresh reborrow. -/
+  | implicitMove {home : Module} {context after : Context} {held : List Nat} {place : Place} {result : ResultType}
+      (noncopy : Nonduplicable program.data result.type)
+      (moved : HasType program home context held (.move place) result after .leaf) :
+      HasType program home context held (.read place) result after .implicitMove
+  | moveReference {home : Module} {context : Context} {held : List Nat} {place : Place} {slot : Slot}
+      {node : Nat} {referent : Ty} {mode : BorrowMode} {slots : List (String × Slot)}
       (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-      (handle : slot.reference = some node) (shape : slot.type = .shared referent)
+      (handle : slot.reference = some node) (shape : slot.type = .reference referent mode)
       (initialized : slot.initialization.Complete) (own : context.Own node)
+      (ready : context.Restored node)
       (free : context.Free ⟨.binder slot.binder, []⟩)
       (cleared : replaceBinding place.root { slot with initialization := .vacant, reference := none }
         context.bindings = some slots) :
-      HasType program home context held (.move place) ⟨.shared referent, some node⟩ { context with bindings := slots } .leaf
+      HasType program home context held (.move place) ⟨.reference referent mode, some node⟩ (context.withSlots slots) .leaf
   | borrow {home : Module} {context : Context} {held : List Nat} {place : AccessPlace}
-      {target : Origin} {referent : Ty} {parent : Option Nat}
-      (access : AccessType program home context place target referent parent)
+      {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+      (access : AccessType program home context mode place target referent parent)
+      (ready : context.AccessReady target parent)
+      (permitted : context.Permits mode parent target)
       (finite : FiniteLayout program.target program.data referent) :
-      HasType program home context held (.borrow place) ⟨.shared referent, some context.loans.length⟩
-        (context.borrow target referent parent) .leaf
+      HasType program home context held (.borrow mode place) ⟨.reference referent mode, some context.loans.length⟩
+        (context.borrow target referent parent mode) .leaf
   | dereference {home : Module} {context : Context} {held : List Nat} {reference : Place} {fields : List FieldKey}
       {target : Origin} {type : Ty} {parent : Option Nat}
-      (access : AccessType program home context (.dereference reference fields) target type parent)
+      (access : AccessType program home context .shared (.dereference reference fields) target type parent)
+      (ready : context.AccessReady target parent)
+      (permitted : context.Permits .shared parent target)
       (copyable : Duplicable program.data type) (shape : type.DataShape) :
       HasType program home context held (.dereference reference fields) (.data type) context .leaf
-  | endOwn {home : Module} {context after : Context} {held : List Nat} {expression : Expr} {result : ResultType}
+  | moveIndirect {home : Module} {context : Context} {held : List Nat} {reference : Place} {fields : List FieldKey}
+      {target : Origin} {type : Ty} {node : Nat}
+      (access : AccessType program home context .unique (.dereference reference fields) target type (some node))
+      (ready : context.AccessReady target (some node))
+      (permitted : context.Permits .unique (some node) target) (shape : type.DataShape)
+      (pending : ∀ heldNode ∈ held, ∀ loan, context.loans[heldNode]? = some loan → loan.own = true → target.Apart loan.target) :
+      HasType program home context held (.moveIndirect reference fields) (.data type) (context.writeTarget target .vacant) .leaf
+  | assignIndirect {expected : Option Ty} {home : Module} {context middle after : Context} {held : List Nat}
+      {reference : Place} {fields : List FieldKey} {value rest : Expr} {target : Origin} {type : Ty} {node : Nat}
+      {result : ResultType} {valuePlan restPlan : CorePlan} {slot : Slot} {state : Initialization}
+      (resident : HasType program home context held value (.data type) middle valuePlan)
+      (access : AccessType program home middle .unique (.dereference reference fields) target type (some node))
+      (permitted : middle.Permits .unique (some node) target) (shape : type.DataShape)
+      (stored : middle.storage target.base = some slot) (selected : slot.initialization.Access target.fields state)
+      (discard : StorageDisposition program state type)
+      (continued : HasType program home (middle.writeTarget target .full) held rest result after restPlan expected) :
+      HasType program home context held (.assignIndirect reference fields value rest) result after (.binary valuePlan restPlan) expected
+  | endOwn {expected : Option Ty} {home : Module} {context after : Context} {held : List Nat} {expression : Expr} {result : ResultType}
       {slotIndex node : Nat} {binding : String × Slot} {plan : CorePlan}
       (selected : context.bindings[slotIndex]? = some binding) (handle : binding.2.reference = some node)
-      (unprotected : node ∉ held)
-      (continued : HasType program home (context.endOwn node) held expression result after plan) :
-      HasType program home context held expression result after (.endOwn slotIndex plan)
-  | endAfter {home : Module} {context middle : Context} {held : List Nat} {expression : Expr} {result : ResultType}
+      (unprotected : node ∉ held) (ready : context.Restored node)
+      (continued : HasType program home (context.endOwn node) held expression result after plan expected) :
+      HasType program home context held expression result after (.endOwn slotIndex plan) expected
+
+  | endAfter {expected : Option Ty} {home : Module} {context middle : Context} {held : List Nat} {expression : Expr} {result : ResultType}
       {slotIndex node : Nat} {binding : String × Slot} {plan : CorePlan}
-      (evaluated : HasType program home context held expression result middle plan)
+      (evaluated : HasType program home context held expression result middle plan expected)
       (selected : middle.bindings[slotIndex]? = some binding) (handle : binding.2.reference = some node)
-      (unprotected : node ∉ held ++ result.nodes) :
-      HasType program home context held expression result (middle.endOwn node) (.endAfter slotIndex plan)
-  | raiseSupply {home : Module} {context after : Context} {held : List Nat} {expression : Expr}
+      (unprotected : node ∉ held ++ result.nodes) (ready : middle.Restored node) :
+      HasType program home context held expression result (middle.endOwn node) (.endAfter slotIndex plan) expected
+
+  | raiseSupply {expected : Option Ty} {home : Module} {context after : Context} {held : List Nat} {expression : Expr}
       {result : ResultType} {plan : CorePlan} {supply : Nat}
-      (typed : HasType program home context held expression result after plan) (larger : after.nextBinder ≤ supply) :
-      HasType program home context held expression result { after with nextBinder := supply } plan
-  | sequence {home : Module} {context middle after : Context} {held : List Nat} {first rest : Expr}
+      (typed : HasType program home context held expression result after plan expected) (larger : after.nextBinder ≤ supply) :
+      HasType program home context held expression result { after with nextBinder := supply } plan expected
+
+  | sequence {expected : Option Ty} {home : Module} {context middle after : Context} {held : List Nat} {first rest : Expr}
       {discarded result : ResultType} {firstPlan restPlan : CorePlan}
       (head : HasType program home context held first discarded middle firstPlan) (drop : MayDiscard program.data discarded.type)
-      (tail : HasType program home (middle.dispose discarded.reference) held rest result after restPlan) :
-      HasType program home context held (.sequence first rest) result after (.binary firstPlan restPlan)
-  | bind {home : Module} {context middle bodyAfter : Context} {held : List Nat} {mutable : Bool} {name : String}
+      (tail : HasType program home (middle.dispose discarded.reference) held rest result after restPlan expected) :
+      HasType program home context held (.sequence first rest) result after (.binary firstPlan restPlan) expected
+
+  | bind {expected : Option Ty} {home : Module} {context middle bodyAfter : Context} {held : List Nat} {mutable : Bool} {name : String}
       {annotation : Option TypeExpr} {initial body : Expr} {localType result : ResultType} {initialPlan bodyPlan : CorePlan}
-      (initialized : HasType program home context held initial localType middle initialPlan)
+      (initialized : HasType program home context held initial localType middle initialPlan (annotation.map (fun _ => localType.type)))
       (annotated : Annotation program.aliases annotation localType.type)
-      (continued : HasType program home (middle.bind name mutable localType) held body result bodyAfter bodyPlan)
+      (continued : HasType program home (middle.bind name mutable localType) held body result bodyAfter bodyPlan expected)
       (cleanup : bodyAfter.Cleanable program (held ++ result.nodes) (bodyAfter.bindings.take 1)) :
       HasType program home context held (.bind mutable name annotation initial body) result
-        (bodyAfter.cleanup 1) (.binary initialPlan bodyPlan)
+        (bodyAfter.cleanup 1) (.binary initialPlan bodyPlan) expected
+
   | tuple {home : Module} {context middle after : Context} {held : List Nat} {head : Expr} {tail : List Expr}
       {first : Ty} {rest : List Ty} {headPlan : CorePlan} {tailPlans : List CorePlan}
       (headTyped : HasType program home context held head (.data first) middle headPlan)
@@ -3096,15 +4000,15 @@ inductive HasType (program : Program) : Module → Context → List Nat → Expr
       (declared : program.functions identity = some declaration) (visible : declaration.visibility.Allows declaration.home home)
       (distinct : (declaration.parameters.map Prod.fst).Nodup)
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
-      (types : argumentTypes.map ResultType.type = declaration.parameters.map (fun parameter => parameter.2.type))
-      (inputs : HasTypes program home context held arguments argumentTypes middle argumentPlans)
+      (inputs : HasTypes program home context held arguments argumentTypes middle argumentPlans
+        (some (declaration.parameters.map (fun parameter => parameter.2.type))))
       (body : HasType program declaration.home (middle.hide.prepare declaration.parameters argumentTypes) held
-        declaration.body result bodyAfter bodyPlan)
+        declaration.body result bodyAfter bodyPlan (some declaration.result))
       (resultType : result.type = declaration.result) (origin : bodyAfter.Returns argumentTypes result)
       (cleanup : bodyAfter.Cleanable program (held ++ result.nodes) (bodyAfter.bindings.take declaration.parameters.length)) :
       HasType program home context held (.call identity arguments) result
         (middle.resume (bodyAfter.cleanup declaration.parameters.length)) (.call argumentPlans bodyPlan)
-  | assign {home : Module} {context middle after : Context} {held : List Nat} {place : Place}
+  | assign {expected : Option Ty} {home : Module} {context middle after : Context} {held : List Nat} {place : Place}
       {value rest : Expr} {slot : Slot} {target : Ty} {result : ResultType} {valuePlan restPlan : CorePlan}
       {indices : List Nat} {state : Initialization} {slots : List (String × Slot)}
       (resident : HasType program home context held value (.data target) middle valuePlan)
@@ -3114,21 +4018,25 @@ inductive HasType (program : Program) : Module → Context → List Nat → Expr
       (free : middle.Free ⟨.binder slot.binder, indices⟩)
       (written : replaceBinding place.root { slot with initialization := slot.initialization.write indices .full }
         middle.bindings = some slots)
-      (continued : HasType program home { middle with bindings := slots } held rest result after restPlan) :
-      HasType program home context held (.assign place value rest) result after (.binary valuePlan restPlan)
-  | assignShared {home : Module} {context middle after : Context} {held : List Nat} {place : Place}
-      {value rest : Expr} {slot : Slot} {referent : Ty} {node : Nat} {result : ResultType}
+      (continued : HasType program home (middle.withSlots slots) held rest result after restPlan expected) :
+      HasType program home context held (.assign place value rest) result after (.binary valuePlan restPlan) expected
+
+  | assignReference {expected : Option Ty} {home : Module} {context middle after : Context} {held : List Nat} {place : Place}
+      {value rest : Expr} {slot : Slot} {referent : Ty} {mode : BorrowMode} {node : Nat} {result : ResultType}
       {valuePlan restPlan : CorePlan} {slots : List (String × Slot)}
-      (resident : HasType program home context held value ⟨.shared referent, some node⟩ middle valuePlan)
+      (resident : HasType program home context held value ⟨.reference referent mode, some node⟩ middle valuePlan
+        (some (.reference referent mode)))
       (selected : lookup place.root middle.bindings = some slot) (writable : slot.mutable = true)
-      (direct : place.fields = []) (shape : slot.type = .shared referent)
+      (direct : place.fields = []) (shape : slot.type = .reference referent mode)
       (free : middle.Free ⟨.binder slot.binder, []⟩)
       (unprotected : ∀ old, slot.reference = some old → old ∉ held ++ [node])
+      (ready : ∀ old, slot.reference = some old → middle.Restored old)
       (written : replaceBinding place.root { slot with initialization := .full, reference := some node }
         middle.bindings = some slots)
-      (continued : HasType program home { middle.dispose slot.reference with bindings := slots } held rest result after restPlan) :
-      HasType program home context held (.assign place value rest) result after (.binary valuePlan restPlan)
-  | applyPatterns {home : Module} {context middle after : Context} {held : List Nat} {inputs : List Ty}
+      (continued : HasType program home ((middle.dispose slot.reference).withSlots slots) held rest result after restPlan expected) :
+      HasType program home context held (.assign place value rest) result after (.binary valuePlan restPlan) expected
+
+  | applyPatterns {expected : Option Ty} {home : Module} {context middle after : Context} {held : List Nat} {inputs : List Ty}
       {arguments : List Expr} {arms : List (PatternSource × Expr)} {result : ResultType}
       {argumentPlans : List CorePlan} {armPlans : List (PatternPlan × CorePlan)}
       (argumentsTyped : HasTypes program home context held arguments (inputs.map ResultType.data) middle argumentPlans)
@@ -3136,30 +4044,61 @@ inductive HasType (program : Program) : Module → Context → List Nat → Expr
       (covered : ∀ normalized, NormalizesArms program arms armPlans normalized →
         Covers program [argumentType inputs] (normalized.map (fun arm => [arm.1])))
       (bodies : ∀ normalized, NormalizesArms program arms armPlans normalized →
-        ArmsType program home middle held (argumentType inputs) result [] normalized after) :
-      HasType program home context held (.applyPatterns inputs arguments arms) result after (.patterns argumentPlans armPlans)
+        ArmsType program home middle held (argumentType inputs) result [] normalized after expected) :
+      HasType program home context held (.applyPatterns inputs arguments arms) result after (.patterns argumentPlans armPlans) expected
 
-inductive HasTypes (program : Program) : Module → Context → List Nat → List Expr → List ResultType → Context → List CorePlan → Prop where
+  | expectedData {home : Module} {context after : Context} {held : List Nat} {expression : Expr}
+      {result : ResultType} {plan : CorePlan}
+      (typed : HasType program home context held expression result after plan) (shape : result.type.DataShape) :
+      HasType program home context held expression result after plan (some result.type)
+  | expectedMove {home : Module} {context after : Context} {held : List Nat} {place : Place}
+      {result : ResultType} {plan : CorePlan}
+      (typed : HasType program home context held (.move place) result after plan) :
+      HasType program home context held (.move place) result after plan (some result.type)
+  | expectedBorrow {home : Module} {context after : Context} {held : List Nat} {place : AccessPlace}
+      {mode : BorrowMode} {result : ResultType} {plan : CorePlan}
+      (typed : HasType program home context held (.borrow mode place) result after plan) :
+      HasType program home context held (.borrow mode place) result after plan (some result.type)
+  | expectedCall {home : Module} {context after : Context} {held : List Nat} {identity : Nat} {arguments : List Expr}
+      {result : ResultType} {plan : CorePlan}
+      (typed : HasType program home context held (.call identity arguments) result after plan) :
+      HasType program home context held (.call identity arguments) result after plan (some result.type)
+  | reborrow {home : Module} {context : Context} {held : List Nat} {place : Place}
+      {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+      (access : AccessType program home context mode (.dereference place []) target referent parent)
+      (ready : context.AccessReady target parent) (permitted : context.Permits mode parent target)
+      (finite : FiniteLayout program.target program.data referent) :
+      HasType program home context held (.read place) ⟨.reference referent mode, some context.loans.length⟩
+        (context.borrow target referent parent mode) (.reborrow mode) (some (.reference referent mode))
+
+inductive HasTypes (program : Program) : Module → Context → List Nat → List Expr → List ResultType → Context → List CorePlan → (expected : Option (List Ty) := none) → Prop where
   | nil {home : Module} {context : Context} {held : List Nat} : HasTypes program home context held [] [] context []
   | cons {home : Module} {context middle after : Context} {held : List Nat} {head : Expr} {tail : List Expr}
       {first : ResultType} {rest : List ResultType} {headPlan : CorePlan} {tailPlans : List CorePlan}
       (headTyped : HasType program home context held head first middle headPlan)
       (tailTyped : HasTypes program home middle (held ++ first.nodes) tail rest after tailPlans) :
       HasTypes program home context held (head :: tail) (first :: rest) after (headPlan :: tailPlans)
+  | expectedNil {home : Module} {context : Context} {held : List Nat} :
+      HasTypes program home context held [] [] context [] (some [])
+  | expectedCons {home : Module} {context middle after : Context} {held : List Nat} {head : Expr} {tail : List Expr}
+      {first : ResultType} {rest : List ResultType} {headPlan : CorePlan} {tailPlans : List CorePlan} {types : List Ty}
+      (headTyped : HasType program home context held head first middle headPlan (some first.type))
+      (tailTyped : HasTypes program home middle (held ++ first.nodes) tail rest after tailPlans (some types)) :
+      HasTypes program home context held (head :: tail) (first :: rest) after (headPlan :: tailPlans) (some (first.type :: types))
 inductive ArmsType (program : Program) :
-    Module → Context → List Nat → Ty → ResultType → List Pattern → List (Pattern × Core) → Context → Prop where
-  | empty {home : Module} {context after : Context} {held : List Nat} {subject : Ty} {result : ResultType} {previous : List Pattern} :
-      ArmsType program home context held subject result previous [] after
-  | clause {home : Module} {context bodyAfter after : Context} {held : List Nat} {subject : Ty} {result : ResultType}
+    Module → Context → List Nat → Ty → ResultType → List Pattern → List (Pattern × Core) → Context → (expected : Option Ty := none) → Prop where
+  | empty {expected : Option Ty} {home : Module} {context after : Context} {held : List Nat} {subject : Ty} {result : ResultType} {previous : List Pattern} :
+      ArmsType program home context held subject result previous [] after expected
+  | clause {expected : Option Ty} {home : Module} {context bodyAfter after : Context} {held : List Nat} {subject : Ty} {result : ResultType}
       {previous : List Pattern} {pattern : Pattern} {body : Core} {rest : List (Pattern × Core)}
       {bindings : List (String × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (context.prepare bindings (bindings.map (fun binding => ResultType.data binding.2.type)))
-        held body.source result bodyAfter body.plan)
+        held body.source result bodyAfter body.plan expected)
       (cleanup : bodyAfter.Cleanable program (held ++ result.nodes) (bodyAfter.bindings.take bindings.length))
       (joined : (bodyAfter.cleanup bindings.length).Joins program after)
-      (tailTyped : ArmsType program home context held subject result (previous ++ [pattern]) rest after) :
-      ArmsType program home context held subject result previous ((pattern, body) :: rest) after
+      (tailTyped : ArmsType program home context held subject result (previous ++ [pattern]) rest after expected) :
+      ArmsType program home context held subject result previous ((pattern, body) :: rest) after expected
 /-- Constant plans are emitted by the same producer before normalization; no
 successful normalization, transition or future-world witness is an admission input. -/
 inductive PatternConstantsTyped (program : Program) : Module → PatternSource → PatternPlan → Prop where
@@ -3190,7 +4129,7 @@ theorem Value.replaceChild_readback {value replacement updated : Value} {index :
     (written : value.replaceChild index replacement = some updated) :
     updated.children[index]? = some replacement := by
   cases value with
-  | vacant | unit | integer | character | array | shared => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array | reference => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero => cases Option.some.inj written; rfl
@@ -3209,7 +4148,7 @@ theorem Value.replaceChild_fieldIndex {value replacement updated : Value} {index
     (written : value.replaceChild index replacement = some updated) :
     ∀ key, updated.fieldIndex program key = value.fieldIndex program key := by
   cases value with
-  | vacant | unit | integer | character | array | shared => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array | reference => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero => cases Option.some.inj written; intro key; cases key <;> rfl
@@ -3226,7 +4165,7 @@ theorem Value.replaceChild_frame {value replacement updated : Value} {index othe
     (written : value.replaceChild index replacement = some updated) (different : other ≠ index) :
     updated.children[other]? = value.children[other]? := by
   cases value with
-  | vacant | unit | integer | character | array | shared => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array | reference => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero =>
@@ -3369,6 +4308,14 @@ theorem Evaluates.move_invalidates {place : Place} {before after : Environment} 
       Environment.resolvePlace_write resolved (Environment.takeAddress_eq_some.mp taken).2,
       Environment.takeAddress_invalidates taken⟩
 
+/-- Default transfer invalidates exactly the same source resident as explicit move. -/
+theorem Evaluates.implicitMove_invalidates {place : Place} {before after : Environment} {value : Value}
+    (evaluated : Evaluates program before ⟨.read place, .implicitMove⟩ value after) :
+    ∃ address, before.resolvePlace program place = some address ∧
+      after.resolvePlace program place = some address ∧ after.readAddress address = none := by
+  cases evaluated with
+  | implicitMove moved => exact moved.move_invalidates
+
 /-- Owned projection transfers its child before cleanup. No event can target
 that child's former slot or descendants, even when its type is not Copy. -/
 theorem Evaluates.field_protects_result {before after : Environment} {body : Expr} {plan : CorePlan} {key : FieldKey} {value : Value}
@@ -3391,7 +4338,7 @@ theorem Value.replaceChild_inverse {value resident replacement updated : Value} 
     (written : value.replaceChild index replacement = some updated) :
     updated.replaceChild index resident = some value := by
   cases value with
-  | vacant | unit | integer | character | array | shared => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array | reference => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero =>
@@ -3465,112 +4412,28 @@ theorem Evaluates.move_restore {place : Place} {before after : Environment} {val
       exact ⟨_, resolved, Environment.resolvePlace_write resolved written, Environment.writeAddress_inverse found written⟩
     · cases live
 
+/-- Indirect extraction creates a real canonical vacancy; writing the extracted
+resident back recovers the entire original store, including hidden cells. -/
+theorem Evaluates.moveIndirect_restore {reference : Place} {fields : List FieldKey}
+    {before after : Environment} {value : Value}
+    (evaluated : Evaluates program before ⟨.moveIndirect reference fields, .leaf⟩ value after) :
+    ∃ access, before.resolveAccess program (.dereference reference fields) = some access ∧
+      after.at access.address = some .vacant ∧ after.readAddress access.address = none ∧
+      after.writeAddress access.address value = some before := by
+  cases evaluated with
+  | moveIndirect resolved _ _ _ _ taken =>
+    obtain ⟨read, written⟩ := Environment.takeAddress_eq_some.mp taken
+    simp only [Environment.readAddress, Bind.bind, Option.bind_eq_some_iff] at read
+    obtain ⟨resident, found, live⟩ := read
+    split at live
+    · cases Option.some.inj live
+      exact ⟨_, resolved, Environment.writeAddress_readback written,
+        Environment.takeAddress_invalidates taken, Environment.writeAddress_inverse found written⟩
+    · cases live
+
 theorem ValueHasType.initialized {value : Value} {type : Ty}
     (typed : ValueHasType program value type) : value.initialized = true := by
   exact (typed.complete .full).2
-
-/-- Both structural and nominal projections consume the same positional typing fact. -/
-theorem ResidentsTyped.select {types : List Ty} {values : List Value} {states : Nat → Initialization}
-    (typed : ResidentsTyped program states values types) (index : Nat) (type : Ty)
-    (selection : types[index]? = some type) :
-    ∃ value, values[index]? = some value ∧ ResidentTyped program (states index) value type := by
-  induction types generalizing values index states with
-  | nil => cases typed; simp at selection
-  | cons head tail ih =>
-    cases typed with
-    | cons headTyped tailTyped =>
-      cases index with
-      | zero =>
-        simp only [List.getElem?_cons_zero, Option.some.injEq] at selection
-        subst type
-        exact ⟨_, rfl, headTyped⟩
-      | succ index => exact ih tailTyped index selection
-
-theorem ResidentsTyped.set {program : Program} {types : List Ty} {values : List Value} {states : Nat → Initialization}
-    (typed : ResidentsTyped program states values types) (index : Nat) {type : Ty}
-    (selected : types[index]? = some type) {replacement : Value} {next : Initialization}
-    (resident : ResidentTyped program next replacement type) :
-    ResidentsTyped program (fun other => if other = index then next else states other) (values.set index replacement) types := by
-  induction types generalizing values index states with
-  | nil => cases typed; simp at selected
-  | cons first rest ih =>
-    cases typed with
-    | cons head tail =>
-      cases index with
-      | zero =>
-        simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
-        cases selected
-        exact .cons (by simpa only [↓reduceIte] using resident) (by simpa only [Nat.add_one_ne_zero, ↓reduceIte] using tail)
-      | succ index =>
-        exact .cons (by simpa only [Nat.zero_ne_add_one, ↓reduceIte] using head) (by simpa only [Nat.add_right_cancel_iff] using ih tail index selected)
-
-/-- The selected resident and lawful replacement are derived from the same field contract. -/
-theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat} {state : Initialization}
-    (projection : ProjectionType program home source key index target) {value : Value}
-    (typed : ResidentTyped program state value source) (present : state.Present := by trivial) :
-    ∃ resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
-      ResidentTyped program (state.child index) resident target ∧
-      ∀ replacement next, ResidentTyped program next replacement target →
-        ∃ updated, value.replaceChild index replacement = some updated ∧
-          ResidentTyped program (state.setChild index next) updated source := by
-  cases projection with
-  | @tuple first type rest index selected =>
-    cases typed with
-    | vacant => exact False.elim present
-    | uncertain typed permission => exact False.elim present
-    | @tuple state head tail _ _ headTyped tailTyped _ =>
-      obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select (states := state.child) (.cons headTyped tailTyped) index target selected
-      refine ⟨resident, rfl, found, residentTyped, ?_⟩
-      intro replacement next replacementTyped
-      have changed : ResidentsTyped program (state.setChild index next).child ((head :: tail).set index replacement) (first :: rest) := by
-        rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
-        exact ResidentsTyped.set (.cons headTyped tailTyped) index selected replacementTyped
-      cases index with
-      | zero =>
-        cases changed with
-        | cons firstChanged restChanged => exact ⟨_, rfl, .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
-      | succ index =>
-        change tail[index]? = some resident at found
-        cases changed with
-        | cons firstChanged restChanged =>
-          exact ⟨_, by simp [Value.replaceChild, found], .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
-  | @nominal identity index key declaration schema field declared structureOnly indexed selected visible =>
-    cases typed with
-    | vacant => exact False.elim present
-    | uncertain typed permission => exact False.elim present
-    | @nominal state _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents _ =>
-      have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
-      subst otherDeclaration
-      cases tag with
-      | some tag => simp [DataDecl.constructor, structureOnly] at chosen
-      | none =>
-        have sameSchema : otherSchema = schema := by simpa [DataDecl.constructor, structureOnly] using chosen.symm
-        subst otherSchema
-        have selectedType : (schema.residents.map Field.type)[index]? = some field.type := by simp [List.getElem?_map, selected]
-        obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select residents index field.type selectedType
-        refine ⟨resident, ?_, found, residentTyped, ?_⟩
-        · simp [Value.fieldIndex, declared, structureOnly, indexed]
-        · intro replacement next replacementTyped
-          have changed : ResidentsTyped program (state.setChild index next).child (values.set index replacement) (schema.residents.map Field.type) := by
-            rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
-            exact residents.set index selectedType replacementTyped
-          exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite changed (by simp [Initialization.setChild])⟩
-
-/-- Runtime resolution agrees with the sole source index derivation. -/
-theorem PathType.resident {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
-    (path : PathType program home source keys indices target) {value : Value}
-    (typed : ResidentTyped program state value source) (access : state.Access indices selected) :
-    value.resolvePath program keys = some indices ∧
-      ∃ resident, value.readIndices indices = some resident ∧ ResidentTyped program selected resident target := by
-  induction path generalizing value state selected with
-  | nil => cases access; exact ⟨rfl, value, rfl, typed⟩
-  | @cons source middle target key keys index indices head tail ih =>
-    cases access with
-    | child present childAccess =>
-      obtain ⟨child, indexed, found, childTyped, _⟩ := head.access typed present
-      obtain ⟨resolved, resident, selected, residentTyped⟩ := ih childTyped childAccess
-      exact ⟨by simp [Value.resolvePath, indexed, found, resolved], resident,
-        by simp [Value.readIndices, found, selected], residentTyped⟩
 
 theorem ResidentTyped.fully_initialized {state : Initialization} {value : Value} {type : Ty}
     (typed : ResidentTyped program state value type) (live : value.initialized = true) : ValueHasType program value type := by
@@ -3581,7 +4444,7 @@ theorem ResidentTyped.fully_initialized {state : Initialization} {value : Value}
   | unit => exact .unit
   | integer fits => exact .integer fits
   | character valid => exact .character valid
-  | shared node finite => exact .shared node finite
+  | reference node finite => exact .reference node finite
   | tuple head tail present headIH tailIH =>
     simp only [Value.initialized, Bool.and_eq_true] at live
     exact .tuple (headIH live.1) (tailIH live.2)
@@ -3687,15 +4550,15 @@ theorem ValuesBindingsTyped.disposable {environment : BindingValues} {context : 
     · exact SlotTyped.disposable head (allowed _ (List.mem_cons_self ..))
     · exact ih (fun binding member => allowed binding (List.mem_cons_of_mem _ member)) entry member
 
-theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected next : Initialization}
-    (path : PathType program home source keys indices target) {value replacement : Value}
+theorem CanonicalPath.write {source target : Ty} {indices : List Nat} {state selected next : Initialization}
+    (path : CanonicalPath program source indices target) {value replacement : Value}
     (typed : ResidentTyped program state value source) (access : state.Access indices selected)
     (resident : ResidentTyped program next replacement target) :
     ∃ updated, value.writeIndices indices replacement = some updated ∧
       ResidentTyped program (state.write indices next) updated source ∧ updated.readIndices indices = some replacement := by
   induction path generalizing value state selected with
   | nil => exact ⟨replacement, rfl, resident, rfl⟩
-  | @cons source middle target key keys index indices head tail ih =>
+  | @cons source middle target index indices home key head tail ih =>
     cases access with
     | child present childAccess =>
       obtain ⟨child, _, found, childTyped, replace⟩ := head.access typed present
@@ -3704,6 +4567,72 @@ theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : Li
       have pathWritten : value.writeIndices (index :: indices) replacement = some updated := by
         simp [Value.writeIndices, found, written, replaced]
       exact ⟨updated, pathWritten, updatedTyped, Value.writeIndices_readback pathWritten⟩
+
+theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected next : Initialization}
+    (path : PathType program home source keys indices target) {value replacement : Value}
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected)
+    (resident : ResidentTyped program next replacement target) :
+    ∃ updated, value.writeIndices indices replacement = some updated ∧
+      ResidentTyped program (state.write indices next) updated source ∧ updated.readIndices indices = some replacement :=
+  path.canonical.write typed access resident
+
+/-- One root-update proof serves lexical owners and canonical indirect targets.
+The root type is derived from storage and the checked path, never from post-write admission. -/
+theorem StoreTyped.writeCanonical {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {binder : Nat} {slot : Slot}
+    {indices : List Nat} {state next : Initialization} {target : Ty} {replacement : Value}
+    (stored : context.storage (.binder binder) = some slot)
+    (path : CanonicalPath program slot.type indices target) (access : slot.initialization.Access indices state)
+    (resident : ResidentTyped program next replacement target) :
+    ∃ parent updated, environment.store (interpretation.binder binder) = some parent ∧
+      parent.writeIndices indices replacement = some updated ∧
+      ResidentTyped program (slot.initialization.write indices next) updated slot.type ∧
+      environment.writeAddress ⟨interpretation.binder binder, indices⟩ replacement =
+        some (environment.put (interpretation.binder binder) updated) := by
+  obtain ⟨parent, found, rootTyped, _⟩ := typed.cells binder slot stored
+  obtain ⟨updated, written, updatedTyped, _⟩ := path.write rootTyped access resident
+  exact ⟨parent, updated, found, written, updatedTyped, by simp [Environment.writeAddress, found, written]⟩
+
+/-- A data target update reconstructs root typing and global cell correspondence
+from the same canonical path used by owner writes; no post-write typing premise. -/
+theorem StoreTyped.writeTarget_cells {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    {next : Initialization} {replacement : Value} (shape : referent.DataShape)
+    (resident : ResidentTyped program next replacement referent) :
+    ∃ after, environment.writeAddress (interpretation.origin origin) replacement = some after ∧
+      ∀ binder slot, (context.writeTarget origin next).storage (.binder binder) = some slot →
+        ∃ value, after.store (interpretation.binder binder) = some value ∧
+          SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value := by
+  simp only [Context.Target, base] at target
+  obtain ⟨slot, stored, path, state, access⟩ := target
+  have rootShape := path.dataShape (typed.source.allocated binder slot stored).2.2.1 shape
+  have noReference : slot.reference = none := by
+    cases reference : slot.reference with
+    | none => rfl
+    | some node =>
+      obtain ⟨loan, _, type⟩ := (typed.source.allocated binder slot stored).2.2.2 node reference
+      rw [type] at rootShape
+      exact False.elim rootShape
+  obtain ⟨parent, updated, _, _, updatedTyped, written⟩ := typed.writeCanonical stored path access resident
+  refine ⟨environment.put (interpretation.binder binder) updated, ?_, ?_⟩
+  · simpa only [Interpretation.origin, base] using written
+  · intro other current selected
+    by_cases same : other = binder
+    · subst other
+      simp only [Context.writeTarget, base, ↓reduceIte, stored, Option.map_some, Option.some.injEq] at selected
+      subst current
+      exact ⟨updated, by simp [Environment.put], updatedTyped,
+        by simpa only [Slot.Corresponds, noReference] using updatedTyped.referenceFree rootShape⟩
+    · have oldStored : context.storage (.binder other) = some current := by
+        simpa [Context.writeTarget, base, same] using selected
+      obtain ⟨value, found, valueTyped, corresponds⟩ := typed.cells other current oldStored
+      have different : interpretation.binder other ≠ interpretation.binder binder := by
+        intro equal
+        exact same (typed.binderDistinct other binder (.inl ⟨current, oldStored⟩) (.inl ⟨slot, stored⟩) equal)
+      exact ⟨value, by simpa [Environment.put, different] using found, valueTyped, corresponds⟩
+
+
 
 theorem ValuesBindingsTyped.append {left right : BindingValues} {first rest : List (String × BindingType)}
     (front : ValuesBindingsTyped program left first) (back : ValuesBindingsTyped program right rest) :
@@ -3874,14 +4803,6 @@ theorem join {environment : Environment} {context joined : List (String × Bindi
   obtain ⟨values, stored, residents⟩ := typed.residents
   exact ⟨typed.valid, values, stored, residents.join join⟩
 
-theorem resume {caller after : Environment} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program caller context) (valid : after.Valid)
-    (evolved : Environment.Evolution caller.hide after) :
-    EnvironmentTyped program (caller.resume after) context := by
-  obtain ⟨values, stored, residents⟩ := typed.residents
-  refine ⟨typed.valid.resume valid evolved.supply, values, ?_, residents⟩
-  exact stored.frame (fun root _ => evolved.frame root (by simp [Environment.roots, Environment.hide]))
-
 theorem cleanup {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) (count : Nat)
     (allowed : ∀ entry ∈ context.take count, entry.2.Disposable program)
@@ -3971,7 +4892,7 @@ theorem ValueHasType.decompose {value : Value} {type : Ty} (typed : ValueHasType
   | unit => exact ⟨[], .unit, .nil⟩
   | integer fits => exact ⟨[], .integer fits, .nil⟩
   | character valid => exact ⟨[], .character valid, .nil⟩
-  | shared node finite => exact ⟨[], .shared node _, .nil⟩
+  | reference node finite => exact ⟨[], .reference node _, .nil⟩
   | tuple first rest => exact ⟨_, .tuple _ _, .cons first rest⟩
   | array residents _ _ => exact ⟨_, .array _ _, residents⟩
   | nominal declared chosen _ residents => exact ⟨_, .nominal declared chosen, residents⟩
@@ -4258,12 +5179,13 @@ theorem retire {left right : Environment} (same : left.Agrees right) (count : Na
 
 theorem resume {left right first last : Environment} (same : left.Agrees right)
     (firstValid : first.Valid) (lastValid : last.Valid)
-    (leftFrame : left.hide.Evolution first) (rightFrame : right.hide.Evolution last) :
+    (leftFrame : left.hide.Evolution first) (rightFrame : right.hide.Evolution last)
+    (leftShared : ∀ root, ¬ left.UniqueRoot root) (rightShared : ∀ root, ¬ right.UniqueRoot root) :
     (left.resume first).Agrees (right.resume last) := by
   obtain ⟨values, leftStored, rightStored⟩ := same.values
   exact ⟨same.leftValid.resume firstValid leftFrame.supply, same.rightValid.resume lastValid rightFrame.supply, values,
-    leftStored.frame (fun root _ => leftFrame.frame root (by simp [Environment.roots, Environment.hide])),
-    rightStored.frame (fun root _ => rightFrame.frame root (by simp [Environment.roots, Environment.hide]))⟩
+    leftStored.frame (fun root _ => leftFrame.frame root (by simpa [Environment.MutationRoot, Environment.UniqueRoot, Environment.roots, Environment.hide] using leftShared root)),
+    rightStored.frame (fun root _ => rightFrame.frame root (by simpa [Environment.MutationRoot, Environment.UniqueRoot, Environment.roots, Environment.hide] using rightShared root))⟩
 
 theorem put {left right : Environment} (same : left.Agrees right) {name : String} {value : Value} {first last : Root}
     (leftName : Grounded.lookup name left.bindings = some first)
@@ -4371,6 +5293,26 @@ theorem Cleans.agrees {left right after : Environment} {count : Nat} {trace : Li
     obtain ⟨otherTrace, otherDestroyed⟩ := DestroysRoots.exists (second.take count) (destroyed.logical.allowed (first.take count))
     exact ⟨otherTrace, .retire (DisposesRoots.of_data otherDestroyed plain free)⟩
 
+theorem Environment.writeAddress_evolution {address : Address} {value : Value} {before after : Environment}
+    (authority : before.MutationRoot address.root)
+    (written : before.writeAddress address value = some after) (valid : before.Valid) :
+    after.Valid ∧ before.Evolution after := by
+  simp only [Environment.writeAddress, Bind.bind, Option.bind_eq_some_iff] at written
+  obtain ⟨parent, found, updated, _, equal⟩ := written
+  cases equal
+  have bound := valid.bounded address.root parent found
+  refine ⟨valid.put bound updated, rfl, Nat.le_refl _, ?_, fun _ live => .inl (.inr live), ?_, ?_⟩
+  · intro root outside
+    have different : root ≠ address.root := fun same => outside (same ▸ authority)
+    simp only [Environment.put, if_neg different]
+  · intro root _ missing
+    have different : root ≠ address.root := by
+      intro same; subst root; rw [found] at missing; cases missing
+    simpa only [Environment.put, if_neg different] using missing
+  · intro root fresh
+    have different : root ≠ address.root := fun same => Nat.not_lt_of_ge fresh (same ▸ bound)
+    simpa only [Environment.put, if_neg different] using (Environment.Evolution.refl before valid).fresh root fresh
+
 theorem Environment.writeAddress_storage {place : Place} {address : Address} {value : Value} {before after : Environment}
     (resolved : before.resolvePlace program place = some address)
     (written : before.writeAddress address value = some after) (valid : before.Valid) :
@@ -4380,17 +5322,8 @@ theorem Environment.writeAddress_storage {place : Place} {address : Address} {va
     obtain ⟨root, named, parent, _, indices, _, equal⟩ := resolved
     cases equal
     exact named
-  have update := Environment.writeAddress_update written
-  have preserved : before.Evolution after := by
-    refine ⟨update.bindings, Nat.le_of_eq update.supply.symm, ?_⟩
-    intro root outside
-    have different : address.root ≠ root := fun equal => outside (equal ▸ Environment.lookup_mem named)
-    simpa [Environment.at, Value.readIndices] using update.frame ⟨root, []⟩ (.inl different)
-  refine ⟨?_, preserved⟩
-  simp only [Environment.writeAddress, Bind.bind, Option.bind_eq_some_iff] at written
-  obtain ⟨parent, found, updated, _, equal⟩ := written
-  cases equal
-  exact valid.put (valid.bounded _ _ found) updated
+  exact Environment.writeAddress_evolution (.inl (Environment.lookup_mem named)) written valid
+
 theorem Environment.SameStorage.valid {before after : Environment} (same : before.SameStorage after)
     (valid : before.Valid) : after.Valid := by
   refine ⟨?_, ?_, ?_⟩
@@ -4401,8 +5334,13 @@ theorem Environment.SameStorage.valid {before after : Environment} (same : befor
   · simpa [Environment.roots, same.bindings, same.supply] using valid.named
   · simpa [Environment.roots, same.bindings] using valid.distinct
 
-theorem Environment.SameStorage.evolution {before after : Environment} (same : before.SameStorage after) : before.Evolution after :=
-  ⟨same.bindings, Nat.le_of_eq same.supply.symm, fun root _ => congrFun same.store root⟩
+theorem Environment.SameStorage.evolution {before after : Environment} (same : before.SameStorage after)
+    (valid : before.Valid)
+    (authority : ∀ root, after.UniqueRoot root → before.MutationRoot root ∨ before.nextRoot ≤ root) :
+    before.Evolution after := by
+  refine ⟨same.bindings, Nat.le_of_eq same.supply.symm, fun root _ => congrFun same.store root, authority, ?_, ?_⟩
+  · intro root _ missing; simpa only [same.store] using missing
+  · intro root fresh; simpa only [same.store] using (Environment.Evolution.refl before valid).fresh root fresh
 
 theorem Environment.SameStorage.resolvePlace {before after : Environment} (same : before.SameStorage after) (place : Place) :
     after.resolvePlace program place = before.resolvePlace program place := by
@@ -4414,12 +5352,85 @@ theorem Environment.Copies.storage {before after : Environment} {resident value 
 
 theorem Environment.endSlot_storage {before after : Environment} {slot : Nat}
     (ended : before.endSlot slot = some after) : before.SameStorage after := by
-  simp only [endSlot, Bind.bind, Option.bind_eq_some_iff] at ended
-  obtain ⟨binding, _, value, _, ended⟩ := ended
-  cases value <;> try cases ended
-  case shared node =>
-    cases Environment.endOwn_state ended
-    exact ⟨rfl, rfl, rfl⟩
+  obtain ⟨_, _, _, _, _, transition⟩ := endSlot_checked ended
+  cases Environment.endOwn_state transition
+  exact ⟨rfl, rfl, rfl⟩
+
+/-- New unique authority must come from the actual canonical access. -/
+theorem Environment.Authorizes.mutationRoot {environment : Environment} {access : Environment.ResolvedAccess}
+    (allowed : environment.Authorizes .unique access) : environment.MutationRoot access.address.root := by
+  cases parent : access.parent with
+  | none => exact .inl (by simpa [Environment.Authorizes, parent] using allowed)
+  | some node =>
+    obtain ⟨loan, found, own, _, root, _, mode⟩ := (by simpa [Environment.Authorizes, parent] using allowed)
+    exact .inr ⟨node, loan, found, own, mode, root.symm⟩
+
+theorem Environment.addLoan_unique {environment : Environment} {access : Environment.ResolvedAccess}
+    {root : Root} {mode : BorrowMode} (live : (environment.addLoan access mode).UniqueRoot root) :
+    environment.UniqueRoot root ∨ (mode = .unique ∧ access.address.root = root) := by
+  obtain ⟨node, loan, found, own, unique, target⟩ := live
+  by_cases old : node < environment.loans.length
+  · exact .inl ⟨node, loan, by simpa only [Environment.addLoan, List.getElem?_append_left old] using found, own, unique, target⟩
+  · simp only [Environment.addLoan, List.getElem?_append_right (Nat.le_of_not_lt old)] at found
+    cases offset : node - environment.loans.length with
+    | zero =>
+      simp only [offset, List.getElem?_cons_zero, Option.some.injEq] at found
+      cases found
+      exact .inr ⟨unique, target⟩
+    | succ index => simp [offset] at found
+theorem Environment.endOwn_unique {before after : Environment} {node root : Nat}
+    (ended : before.endOwn node = some after) (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  obtain ⟨other, loan, found, own, mode, target⟩ := live
+  exact ⟨other, loan, (Environment.endOwn_active ended found own).1, own, mode, target⟩
+
+theorem Environment.endSlot_unique {before after : Environment} {slot root : Nat}
+    (ended : before.endSlot slot = some after) (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  obtain ⟨_, _, _, _, _, transition⟩ := endSlot_checked ended
+  exact Environment.endOwn_unique transition live
+
+theorem Environment.endSlot_evolution {before after : Environment} {slot : Nat}
+    (ended : before.endSlot slot = some after) (valid : before.Valid) : before.Evolution after :=
+  (Environment.endSlot_storage ended).evolution valid
+    (fun _ live => .inl (.inr (Environment.endSlot_unique ended live)))
+
+theorem Environment.Copies.uniqueRoots {before after : Environment} {resident value : Value}
+    (copied : Copies before resident value after) {root : Root} (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  cases copied with
+  | data => exact live
+  | reference found shared allowed =>
+    rcases Environment.addLoan_unique live with old | ⟨impossible, _⟩
+    · exact old
+    · cases impossible
+
+theorem Environment.Copies.evolution {before after : Environment} {resident value : Value}
+    (copied : Copies before resident value after) (valid : before.Valid) : before.Evolution after :=
+  copied.storage.evolution valid (fun _ live => .inl (.inr (copied.uniqueRoots live)))
+
+theorem Environment.Disposes.uniqueRoots {before after : Environment} {value : Value}
+    (disposed : Disposes program before value after) {root : Root} (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  cases disposed with
+  | data => exact live
+  | reference _ ended => exact Environment.endOwn_unique ended live
+
+theorem Environment.Disposes.evolution {before after : Environment} {value : Value}
+    (disposed : Disposes program before value after) (valid : before.Valid) : before.Evolution after :=
+  disposed.storage.evolution valid (fun _ live => .inl (.inr (disposed.uniqueRoots live)))
+
+theorem DisposesRoots.uniqueRoots {before after : Environment} {roots : List Root} {trace : List (Root × List Nat)}
+    (disposed : DisposesRoots program before roots trace after) {root : Root} (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  induction disposed with
+  | nil => exact live
+  | cons found free head tail ih => exact head.uniqueRoots (ih live)
+
+theorem Cleans.uniqueRoots {before after : Environment} {count : Nat} {trace : List (Root × List Nat)}
+    (cleaned : Cleans program count before trace after) {root : Root} (live : after.UniqueRoot root) : before.UniqueRoot root := by
+  cases cleaned with
+  | retire disposed => exact disposed.uniqueRoots live
+
+theorem Cleans.suffix_evolution {before after : Environment} {count : Nat} {trace : List (Root × List Nat)}
+    (cleaned : Cleans program count before trace after) (valid : before.Valid) :
+    (before.retire count).Evolution after :=
+  cleaned.suffix.evolution (valid.retire count) (fun _ live => .inl (.inr (cleaned.uniqueRoots live)))
 
 theorem Cleans.valid {before after : Environment} {count : Nat} {trace : List (Root × List Nat)}
     (cleaned : Cleans program count before trace after) (valid : before.Valid) : after.Valid :=
@@ -4434,43 +5445,58 @@ theorem Evaluates.storage {before after : Environment} {core : Core} {value : Va
   induction evaluated using Evaluates.rec
     (motive_2 := fun before _ _ _ after _ => before.Valid → after.Valid ∧ before.Evolution after)
     (motive_3 := fun _ _ _ _ => True) (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) with
-  | unit | integer | character | dereference => exact fun valid => ⟨valid, .refl _⟩
-  | read _ _ copied => exact fun valid => ⟨copied.storage.valid valid, copied.storage.evolution⟩
-  | @borrow environment place access resident resolved allowed selected plain =>
+  | unit | integer | character | dereference => exact fun valid => ⟨valid, .refl _ valid⟩
+  | read _ _ _ copied => exact fun valid => ⟨copied.storage.valid valid, copied.evolution valid⟩
+  | @borrow environment place access resident mode resolved allowed permitted ready selected plain
+  | @reborrow environment place access resident mode resolved allowed permitted ready selected plain =>
     intro valid
-    have same : environment.SameStorage (environment.addLoan access) := ⟨rfl, rfl, rfl⟩
-    exact ⟨same.valid valid, same.evolution⟩
-  | group _ ih => exact ih
+    have same : environment.SameStorage (environment.addLoan access mode) := ⟨rfl, rfl, rfl⟩
+    refine ⟨same.valid valid, same.evolution valid ?_⟩
+    intro root live
+    rcases Environment.addLoan_unique live with old | ⟨unique, target⟩
+    · exact .inl (.inr old)
+    · subst mode
+      rw [← target]
+      exact .inl allowed.mutationRoot
+  | group _ ih | implicitMove _ ih => exact ih
   | move resolved free allowed taken =>
     exact Environment.writeAddress_storage resolved (Environment.takeAddress_eq_some.mp taken).2
+  | moveIndirect _ allowed _ _ _ taken =>
+    exact Environment.writeAddress_evolution allowed.mutationRoot (Environment.takeAddress_eq_some.mp taken).2
+  | assignIndirect _ _ allowed _ _ _ _ written _ initialIH bodyIH =>
+    intro valid
+    obtain ⟨middleValid, initial⟩ := initialIH valid
+    obtain ⟨updatedValid, update⟩ := Environment.writeAddress_evolution allowed.mutationRoot written middleValid
+    obtain ⟨afterValid, body⟩ := bodyIH updatedValid
+    exact ⟨afterValid, initial.trans (update.trans body)⟩
   | endOwn ended _ ih =>
     intro valid
     have same := Environment.endSlot_storage ended
     obtain ⟨afterValid, evolved⟩ := ih (same.valid valid)
-    exact ⟨afterValid, same.evolution.trans evolved⟩
+    exact ⟨afterValid, (Environment.endSlot_evolution ended valid).trans evolved⟩
   | endAfter _ ended _ ih =>
     intro valid
     obtain ⟨middleValid, evolved⟩ := ih valid
     have same := Environment.endSlot_storage ended
-    exact ⟨same.valid middleValid, evolved.trans same.evolution⟩
+    exact ⟨same.valid middleValid, evolved.trans (Environment.endSlot_evolution ended middleValid)⟩
   | sequence _ dispose _ headIH tailIH =>
     intro valid
     obtain ⟨middleValid, first⟩ := headIH valid
     obtain ⟨afterValid, rest⟩ := tailIH (dispose.storage.valid middleValid)
-    exact ⟨afterValid, first.trans (dispose.storage.evolution.trans rest)⟩
+    exact ⟨afterValid, first.trans ((dispose.evolution middleValid).trans rest)⟩
   | bind _ _ _ cleanup _ initialIH bodyIH =>
     intro valid
     obtain ⟨middleValid, initial⟩ := initialIH valid
     obtain ⟨afterValid, body⟩ := bodyIH (middleValid.bind _ _)
     obtain ⟨_, cleaned⟩ := cleanup
-    exact ⟨cleaned.valid afterValid, initial.trans ((body.unbind middleValid).trans cleaned.suffix.evolution)⟩
+    exact ⟨cleaned.valid afterValid, initial.trans ((body.unbind middleValid).trans (cleaned.suffix_evolution afterValid))⟩
   | assign _ resolved _ _ dispose _ written _ initialIH bodyIH =>
     intro valid
     obtain ⟨middleValid, initial⟩ := initialIH valid
     have resolvedAfter := (dispose.storage.resolvePlace _).trans resolved
     obtain ⟨updatedValid, update⟩ := Environment.writeAddress_storage resolvedAfter written (dispose.storage.valid middleValid)
     obtain ⟨afterValid, body⟩ := bodyIH updatedValid
-    exact ⟨afterValid, initial.trans (dispose.storage.evolution.trans (update.trans body))⟩
+    exact ⟨afterValid, initial.trans ((dispose.evolution middleValid).trans (update.trans body))⟩
   | tuple _ _ _ headIH tailIH =>
     intro valid
     obtain ⟨middleValid, first⟩ := headIH valid
@@ -4484,21 +5510,21 @@ theorem Evaluates.storage {before after : Environment} {core : Core} {value : Va
   | field _ _ _ dispose _ ih =>
     intro valid
     obtain ⟨middleValid, body⟩ := ih valid
-    exact ⟨dispose.storage.valid middleValid, body.trans dispose.storage.evolution⟩
+    exact ⟨dispose.storage.valid middleValid, body.trans (dispose.evolution middleValid)⟩
   | call _ _ _ cleanup _ inputsIH bodyIH =>
     intro valid
     obtain ⟨middleValid, inputs⟩ := inputsIH valid
     obtain ⟨afterValid, body⟩ := bodyIH (middleValid.hide.prepare _)
     obtain ⟨_, cleaned⟩ := cleanup
-    have returned := (body.scope middleValid.hide _).trans cleaned.suffix.evolution
+    have returned := (body.scope middleValid.hide _).trans (cleaned.suffix_evolution afterValid)
     exact ⟨middleValid.resume (cleaned.valid afterValid) returned.supply, inputs.trans returned.resume⟩
   | applyPatterns _ _ _ _ _ cleanup _ _ argumentsIH bodyIH =>
     intro valid
     obtain ⟨middleValid, arguments⟩ := argumentsIH valid
     obtain ⟨afterValid, body⟩ := bodyIH (middleValid.prepare _)
     obtain ⟨_, cleaned⟩ := cleanup
-    exact ⟨cleaned.valid afterValid, arguments.trans ((body.scope middleValid _).trans cleaned.suffix.evolution)⟩
-  | nil => exact ⟨by assumption, .refl _⟩
+    exact ⟨cleaned.valid afterValid, arguments.trans ((body.scope middleValid _).trans (cleaned.suffix_evolution afterValid))⟩
+  | nil => exact ⟨by assumption, .refl _ (by assumption)⟩
   | cons _ _ _ headIH tailIH =>
     rename_i valid
     obtain ⟨middleValid, first⟩ := headIH valid
@@ -4520,12 +5546,7 @@ theorem Cleans.retired_stays_absent {before after final : Environment} {count : 
   intro root retired
   have inPrefix : root ∈ before.roots.take count := by simpa [Environment.roots, List.map_take] using retired
   have bound := valid.named root (List.mem_of_mem_take inPrefix)
-  have distinct : (before.roots.take count ++ before.roots.drop count).Nodup := by simpa using valid.distinct
-  have outside : root ∉ after.roots := by
-    intro retained
-    exact (List.nodup_append.mp distinct).2.2 root (by simpa [Environment.roots, List.map_take] using retired)
-      root (by simpa [Environment.roots, returned.bindings, Environment.retire, List.map_drop] using retained) rfl
-  exact ⟨(evolved.frame root outside).trans (cleaned.retired root retired),
+  exact ⟨evolved.absent root (cleaned.retired root retired),
     Nat.lt_of_lt_of_le (by simpa only [returned.supply, Environment.retire] using bound) evolved.supply⟩
 
 theorem Environment.prepare_old (environment : Environment) (inputs : BindingValues) {root : Root}
@@ -4545,19 +5566,30 @@ theorem EvaluatesMany.storage {before after : Environment} {expressions : List E
   induction evaluated using EvaluatesMany.rec
     (motive_1 := fun _ _ _ _ _ => True)
     (motive_3 := fun _ _ _ _ => True) (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) with
-  | nil => exact fun valid => ⟨valid, .refl _⟩
+  | nil => exact fun valid => ⟨valid, .refl _ valid⟩
   | cons head tail usable _ ih =>
     intro valid
     obtain ⟨middleValid, first⟩ := head.storage valid
     obtain ⟨afterValid, rest⟩ := ih middleValid
     exact ⟨afterValid, first.trans rest⟩
-  | unit | integer | character | group | read | move | borrow | dereference | endOwn | endAfter
+  | unit | integer | character | group | implicitMove | read | move | borrow | reborrow | dereference | moveIndirect | assignIndirect | endOwn | endAfter
   | sequence | bind | assign | tuple | array | constant | construct | field | call | applyPatterns
   | wildcard | binder | node | constantValue | patternsNil | patternsCons | armsNil | armsCons => trivial
 
-/-- A call preserves the caller's entire post-argument store, not merely names.
-Caller roots remain in that same authoritative store while callee names are
-isolated, and the returned state keeps the advanced callee supply. -/
+/-- Implicit reborrowing allocates a fresh child without changing any existing
+handle cell, binding, or owner storage. Loan readiness and authority are supplied
+by the same runtime access contract as explicit borrowing. -/
+theorem Evaluates.reborrow_preserves_storage {before after : Environment} {place : Place}
+    {mode : BorrowMode} {value : Value}
+    (evaluated : Evaluates program before ⟨.read place, .reborrow mode⟩ value after) :
+    before.SameStorage after ∧ value = .reference before.loans.length ∧
+      after.loans.length = before.loans.length + 1 := by
+  cases evaluated with
+  | reborrow => exact ⟨⟨rfl, rfl, rfl⟩, rfl, by simp [Environment.addLoan]⟩
+
+/-- A call preserves post-argument caller cells outside incoming unique-target
+roots. Shared-only calls retain the entire store. Actual callee writes remain
+in the authoritative store when caller names are restored. -/
 theorem Evaluates.call_frame {before after : Environment} {identity : Nat} {arguments : List Expr} {value : Value}
     {argumentPlans : List CorePlan} {bodyPlan : CorePlan}
     (evaluated : Evaluates program before ⟨.call identity arguments, .call argumentPlans bodyPlan⟩ value after) (valid : before.Valid) :
@@ -4567,12 +5599,14 @@ theorem Evaluates.call_frame {before after : Environment} {identity : Nat} {argu
       (∀ root, root < middle.nextRoot →
         (middle.hide.prepare (List.zip (declaration.parameters.map Prod.fst) values)).store root = middle.store root ∧
         root ∉ (middle.hide.prepare (List.zip (declaration.parameters.map Prod.fst) values)).roots) ∧
-      after.bindings = middle.bindings ∧ after.store = middle.store ∧ middle.nextRoot ≤ after.nextRoot := by
+      after.bindings = middle.bindings ∧
+      (∀ root, ¬ middle.UniqueRoot root → after.store root = middle.store root) ∧ middle.nextRoot ≤ after.nextRoot := by
   cases evaluated with
   | call declared inputs body cleanup usable =>
     have middleValid := (inputs.storage valid).1
     obtain ⟨_, cleaned⟩ := cleanup
-    have returned := ((body.storage (middleValid.hide.prepare _)).2.scope middleValid.hide _).trans cleaned.suffix.evolution
+    have returned := ((body.storage (middleValid.hide.prepare _)).2.scope middleValid.hide _).trans
+      (cleaned.suffix_evolution (body.storage (middleValid.hide.prepare _)).1)
     refine ⟨_, _, _, _, declared, inputs, body, ?_, rfl, ?_, returned.supply⟩
     · intro root older
       constructor
@@ -4580,8 +5614,8 @@ theorem Evaluates.call_frame {before after : Environment} {identity : Nat} {argu
       · intro retained
         have membership := (Environment.prepare_old (Environment.hide _) _ older).2.mp retained
         simp [Environment.roots, Environment.hide] at membership
-    · funext root
-      exact returned.frame root (by simp [Environment.roots, Environment.hide])
+    · intro root shared
+      exact returned.frame root (by simpa [Environment.MutationRoot, Environment.UniqueRoot, Environment.roots, Environment.hide] using shared)
 
 
 /-- A result has either reference-free data shape or exactly one direct source
@@ -4591,11 +5625,11 @@ structure ResultTyped (program : Program) (interpretation : Interpretation) (con
   resident : ValueHasType program value result.type
   shape : match result.reference with
     | none => result.type.DataShape ∧ value.ReferenceFree
-    | some node => value = .shared (interpretation.node node) ∧
-        ∃ loan, context.loans[node]? = some loan ∧ result.type = .shared loan.referent
+    | some node => value = .reference (interpretation.node node) ∧
+        ∃ loan, context.loans[node]? = some loan ∧ result.type = .reference loan.referent loan.mode
 
 def Value.referenceValues : Value → List Value
-  | .shared node => [.shared node]
+  | .reference node => [.reference node]
   | _ => []
 
 def referenceValues (values : List Value) : List Value := values.flatMap Value.referenceValues
@@ -4606,7 +5640,7 @@ theorem Value.ReferenceFree.referenceValues {value : Value} (plain : value.Refer
 
 theorem ResultTyped.referenceValues {interpretation : Interpretation} {context : Context}
     {value : Value} {result : ResultType} (typed : ResultTyped program interpretation context value result) :
-    value.referenceValues = result.nodes.map (fun node => Value.shared (interpretation.node node)) := by
+    value.referenceValues = result.nodes.map (fun node => Value.reference (interpretation.node node)) := by
   cases reference : result.reference with
   | none =>
     have shape := typed.shape
@@ -4621,7 +5655,8 @@ theorem ResultTyped.usable {interpretation : Interpretation} {context : Context}
     {environment : Environment} {value : Value} {result : ResultType}
     (typed : ResultTyped program interpretation context value result)
     (store : StoreTyped program interpretation context environment)
-    (own : ∀ node ∈ result.nodes, context.Own node) : environment.ResultUsable value := by
+    (own : ∀ node ∈ result.nodes, context.Own node)
+    (ready : ∀ node ∈ result.nodes, context.Restored node) : environment.ResultUsable value := by
   cases reference : result.reference with
   | none =>
     have shape := typed.shape
@@ -4632,7 +5667,9 @@ theorem ResultTyped.usable {interpretation : Interpretation} {context : Context}
     have shape := typed.shape
     rw [reference] at shape
     rw [shape.1]
-    exact store.usable (own node (by simp [ResultType.nodes, reference]))
+    have member : node ∈ result.nodes := by simp [ResultType.nodes, reference]
+    obtain ⟨loan, found, _⟩ := own node member
+    exact ⟨store.usable (own node member), store.restored found (ready node member)⟩
 
 theorem lookup_mapValue {α β : Type} (f : α → β) {bindings : List (String × α)} {name : String} {value : α}
     (found : lookup name bindings = some value) :
@@ -4726,7 +5763,8 @@ theorem SlotsCorrespond.index {interpretation : Interpretation} {store : Store}
 
 theorem StoreTyped.endSlot {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) {index node : Nat} {binding : String × Slot}
-    (selected : context.bindings[index]? = some binding) (handle : binding.2.reference = some node) :
+    (selected : context.bindings[index]? = some binding) (handle : binding.2.reference = some node)
+    (ready : context.Restored node) :
     environment.endSlot index = environment.endOwn (interpretation.node node) := by
   obtain ⟨indexed, correspondence⟩ := typed.slots.index selected
   obtain ⟨values, stored, _⟩ := typed.residents.residents
@@ -4734,7 +5772,17 @@ theorem StoreTyped.endSlot {interpretation : Interpretation} {context : Context}
   have shape := correspondence value found
   simp only [Slot.Corresponds, handle] at shape
   cases shape
-  simp [Environment.endSlot, indexed, found]
+  obtain ⟨loan, sourceFound, _⟩ := (typed.source.slots binding (List.mem_of_getElem? selected)).2 node handle
+  have runtimeFound := typed.records node loan sourceFound
+  have restored := typed.restored sourceFound ready
+  simp only [Environment.endSlot, indexed, Bind.bind, Option.bind_some, found]
+  rw [runtimeFound]
+  simp only [Option.bind_some]
+  by_cases own : loan.own = true
+  · obtain ⟨resident, read⟩ := restored _ runtimeFound own
+    simp [read]
+  · have off : loan.own = false := Bool.eq_false_iff.mpr own
+    simp [off]
 
 theorem Value.readIndices_append (value : Value) (first second : List Nat) :
     value.readIndices (first ++ second) = (value.readIndices first >>= fun value => value.readIndices second) := by
@@ -4743,6 +5791,22 @@ theorem Value.readIndices_append (value : Value) (first second : List Nat) :
   | cons index rest ih =>
     simp only [List.cons_append, Value.readIndices]
     cases value.children[index]? <;> simp [ih]
+
+theorem Environment.readAddress_at {environment : Environment} {address : Address} {value : Value}
+    (read : environment.readAddress address = some value) : environment.at address = some value := by
+  simp only [Environment.readAddress, Bind.bind, Option.bind_eq_some_iff] at read
+  obtain ⟨actual, found, selected⟩ := read
+  split at selected
+  · cases Option.some.inj selected; exact found
+  · cases selected
+
+theorem Environment.at_subaddress {environment : Environment} {address : Address} {parent value : Value}
+    (read : environment.at address = some parent) {indices : List Nat}
+    (selected : parent.readIndices indices = some value) :
+    environment.at ⟨address.root, address.fields ++ indices⟩ = some value := by
+  simp only [Environment.at, Bind.bind, Option.bind_eq_some_iff] at read
+  obtain ⟨rootValue, stored, path⟩ := read
+  simp [Environment.at, stored, Value.readIndices_append, path, selected]
 
 theorem Environment.readAddress_subaddress {environment : Environment} {address : Address} {parent value : Value}
     (read : environment.readAddress address = some parent) {indices : List Nat}
@@ -4763,65 +5827,217 @@ theorem Interpretation.origin_extend (interpretation : Interpretation) (origin :
   cases origin with
   | mk base fields => cases base <;> simp [Interpretation.origin, Origin.extend, List.append_assoc]
 
-theorem StoreTyped.resolveAccess {interpretation : Interpretation} {context : Context} {environment : Environment}
+/-- Canonical target typing is independent of operation readiness. -/
+theorem AccessType.canonicalTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
-    {referent : Ty} {parent : Option Nat} (access : AccessType program home context place target referent parent) :
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent) :
+    context.Target program target referent := by
+  cases access with
+  | owner selected available path _ =>
+    exact ⟨_, typed.source.member_stored _ (lookup_member selected), path.canonical, _, available⟩
+  | dereference _ _ _ _ _ _ _ _ target _ => exact target
+
+/-- Positive unique authority is distinct from conflict exclusion and readiness. -/
+theorem AccessType.uniqueAuthority {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat}
+    (access : AccessType program home context .unique place target referent parent) :
+    (parent = none ∧ ∃ slot, context.storage target.base = some slot ∧ slot.mutable = true) ∨
+    ∃ node loan, parent = some node ∧ context.loans[node]? = some loan ∧ loan.own = true ∧
+      loan.mode = .unique ∧ target.Within loan.target := by
+  cases access with
+  | owner selected _ _ authority =>
+    exact .inl ⟨rfl, _, typed.source.member_stored _ (lookup_member selected), authority rfl⟩
+  | @dereference reference fields slot node loan indices type _ _ _ _ _ found own _ _ authority =>
+    exact .inr ⟨node, loan, rfl, found, own, authority rfl, rfl, indices, rfl⟩
+
+theorem AccessType.uniqueTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {node : Nat}
+    (access : AccessType program home context .unique place target referent (some node)) :
+    ∃ loan binder, context.loans[node]? = some loan ∧ loan.own = true ∧ loan.mode = .unique ∧
+      target.Within loan.target ∧ target.base = .binder binder := by
+  rcases access.uniqueAuthority typed with ⟨impossible, _⟩ | ⟨selected, loan, same, found, own, unique, within⟩
+  · cases impossible
+  · cases Option.some.inj same
+    cases base : target.base with
+    | binder binder => exact ⟨loan, binder, found, own, unique, within, rfl⟩
+    | input input =>
+      have shared := (typed.sourceTargets node loan found own).2.2 input (within.1.symm.trans base)
+      cases unique.symm.trans shared
+
+theorem AccessType.parentMode {context : Context} {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent) :
+    ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique := by
+  cases access with
+  | owner => intro node loan impossible; cases impossible
+  | dereference _ _ _ _ _ found _ _ _ authority =>
+    intro node loan same other unique
+    cases Option.some.inj same
+    cases Option.some.inj (found.symm.trans other)
+    exact authority unique
+
+theorem AccessType.sourceTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent)
+    (ready : context.AccessReady target parent) :
+    context.SourceTarget program ⟨target, referent, parent, true, mode⟩ := by
+  refine ⟨access.canonicalTarget typed, fun _ => ready.1, ?_⟩
+  cases access with
+  | owner => intro input impossible; cases impossible
+  | dereference _ _ _ _ _ found own _ _ authority =>
+    intro input base
+    have shared := (typed.sourceTargets _ _ found own).2.2 input base
+    cases mode with
+    | shared => rfl
+    | unique => cases shared.symm.trans (authority rfl)
+
+/-- Readiness-free positive capability: conflict exclusion is a separate check. -/
+theorem StoreTyped.accessAuthority {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent) :
+    environment.Authorizes mode ⟨interpretation.origin target, parent.map interpretation.node⟩ := by
+  cases access with
+  | owner selected _ _ _ =>
+    exact List.mem_map.mpr ⟨_, lookup_member (typed.slots.lookup selected).1, rfl⟩
+  | @dereference reference fields slot node loan indices type _ _ _ _ _ found own _ _ authority =>
+    have record := typed.records node loan found
+    obtain ⟨actual, actualFound, _, support⟩ := typed.usable (show context.Own node from ⟨loan, found, own⟩)
+    cases Option.some.inj (actualFound.symm.trans record)
+    exact ⟨_, record, own, support, by simp [Interpretation.origin_extend],
+      by simp [Interpretation.origin_extend], authority⟩
+
+private theorem Context.ready_complete {context : Context} {origin : Origin} {binder : Nat}
+    {slot : Slot} {state : Initialization} (base : origin.base = .binder binder)
+    (stored : context.storage (.binder binder) = some slot)
+    (access : slot.initialization.Access origin.fields state) (ready : context.Ready origin) : state.Complete := by
+  simp only [Context.Ready, base] at ready
+  obtain ⟨actual, selected, actualStored, actualAccess, complete⟩ := ready
+  cases Option.some.inj (actualStored.symm.trans stored)
+  exact (actualAccess.deterministic access) ▸ complete
+
+/-- The one canonical field producer resolves a masked parent. Only ancestors of
+its selected child need be present; the child itself may be vacant. -/
+private theorem StoreTyped.projectAccess {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {node : Nat} {loan : SourceLoan}
+    {fields : List FieldKey} {indices : List Nat} {referent : Ty}
+    (found : context.loans[node]? = some loan) (own : loan.own = true)
+    (path : PathType program home loan.referent fields indices referent)
+    (target : context.Target program (loan.target.extend indices) referent) :
+    ∃ state resident value, environment.at (interpretation.origin loan.target) = some resident ∧
+      resident.resolvePath program fields = some indices ∧
+      environment.at (interpretation.origin (loan.target.extend indices)) = some value ∧
+      ResidentTyped program state value referent ∧ (context.Ready (loan.target.extend indices) → state.Complete) := by
+  cases base : loan.target.base with
+  | binder binder =>
+    obtain ⟨slot, stored, parentPath, _, _⟩ := (by simpa [Context.Target, base] using (typed.sourceTargets node loan found own).1)
+    obtain ⟨childSlot, childStored, _, state, access⟩ := (by simpa [Context.Target, Origin.extend, base] using target)
+    cases Option.some.inj (childStored.symm.trans stored)
+    obtain ⟨middle, front, back⟩ := access.split
+    obtain ⟨root, rootStored, rootTyped, _⟩ := typed.cells binder slot stored
+    obtain ⟨resident, parentRead, parentTyped⟩ := parentPath.resident rootTyped front
+    obtain ⟨resolved, value, selected, valueTyped⟩ := path.resident parentTyped back
+    have raw : environment.at (interpretation.origin loan.target) = some resident := by
+      simp [Environment.at, Interpretation.origin, base, rootStored, parentRead]
+    refine ⟨state, resident, value, raw, resolved, ?_, valueTyped, ?_⟩
+    · rw [Interpretation.origin_extend]
+      exact Environment.at_subaddress raw selected
+    · exact Context.ready_complete (by simpa [Origin.extend] using base) stored access
+  | input input =>
+    obtain ⟨resident, read, residentTyped⟩ := typed.inputTargets node loan found own input base
+    obtain ⟨resolved, value, selected, valueTyped⟩ := path.resident residentTyped (.full indices)
+    refine ⟨.full, resident, value, Environment.readAddress_at read, resolved, ?_, valueTyped, fun _ => .full⟩
+    rw [Interpretation.origin_extend]
+    exact Environment.at_subaddress (Environment.readAddress_at read) selected
+
+/-- Actual masked resolution and target typing, independent of whole-parent
+readiness. Restoration consumes this theorem rather than the read/borrow rule. -/
+theorem StoreTyped.resolveAccessMasked {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent) :
     target.Known context ∧ target.Bounded context ∧
     (∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target) ∧
-    ∃ value, environment.resolveAccess program place = some ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
-      environment.Authorizes ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
-      environment.readAddress (interpretation.origin target) = some value ∧ ValueHasType program value referent := by
+    environment.resolveAccess program place = some ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
+    environment.Authorizes mode ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
+    ∃ state value, environment.at (interpretation.origin target) = some value ∧
+      ResidentTyped program state value referent ∧ (context.Ready target → state.Complete) := by
+  have authority := typed.accessAuthority access
   cases access with
-  | @owner place slot indices state type selected available initialized path =>
+  | @owner place slot indices state type selected available path _ =>
     have member := lookup_member selected
-    have bounded := (typed.source.slots _ member).1
     obtain ⟨value, resolved, raw, resident⟩ := typed.resolvePlace selected available path
-    obtain ⟨valueTyped, live⟩ := resident.complete initialized
-    refine ⟨.inl ⟨_, member, rfl⟩, bounded, ?_, value, ?_, ?_, ?_, valueTyped⟩
-    · intro node impossible
-      cases impossible
+    refine ⟨typed.source.member_known _ member, (typed.source.slots _ member).1, ?_, ?_, authority, state, value,
+      raw, resident, ?_⟩
+    · intro node impossible; cases impossible
     · simp [Environment.resolveAccess, resolved, Interpretation.origin]
-    · trivial
-    · simp [Interpretation.origin, Environment.readAddress, raw, live]
-  | @dereference reference fields slot node loan indices type selected direct handle shape initialized found own path =>
+    · exact Context.ready_complete rfl (typed.source.member_stored _ member) available
+  | @dereference reference fields slot node loan indices type selected direct handle shape initialized found own path target _ =>
     have handlePath : PathType program home slot.type reference.fields [] slot.type := by rw [direct]; exact .nil _
-    obtain ⟨carrier, resolved, raw, resident⟩ := typed.resolvePlace selected (.here _) handlePath
-    have named := (typed.slots.lookup selected).1
+    obtain ⟨carrier, resolved, raw, _⟩ := typed.resolvePlace selected (.here _) handlePath
     have stored : environment.store (interpretation.binder slot.binder) = some carrier := by
       simpa [Environment.at, Value.readIndices] using raw
     have carrierShape := (typed.slots.lookup selected).2 carrier stored
     simp only [Slot.Corresponds, handle] at carrierShape
     cases carrierShape
     have readCarrier : environment.readAddress ⟨interpretation.binder slot.binder, []⟩ =
-        some (.shared (interpretation.node node)) := by
+        some (.reference (interpretation.node node)) := by
       simp [Environment.readAddress, raw, Value.initialized]
-    obtain ⟨resident, targetRead, residentTyped⟩ := typed.targets node loan found own
-    obtain ⟨resolvedFields, value, selectedValue, valueTyped⟩ := path.resident residentTyped (.full indices)
-    have record := typed.records node loan found
-    have usable := typed.usable (show context.Own node from ⟨loan, found, own⟩)
-    have known := typed.source.loanKnown found
-    have bounded := (typed.source.targets node loan found).1
-    refine ⟨?_, ?_, ?_, value, ?_, ?_, ?_, valueTyped⟩
-    · simpa [Origin.Known, Origin.extend] using known
-    · simpa [Origin.Bounded, Origin.extend] using bounded
+    obtain ⟨state, resident, value, parentAt, fieldsResolved, targetAt, valueTyped, complete⟩ :=
+      typed.projectAccess found own path target
+    refine ⟨?_, ?_, ?_, ?_, authority, state, value, targetAt, valueTyped, complete⟩
+    · simpa [Origin.Known, Origin.extend] using typed.source.loanKnown found
+    · simpa [Origin.Bounded, Origin.extend] using (typed.source.targets node loan found).1
     · intro parent same
       cases Option.some.inj same
       exact ⟨loan, found, rfl, indices, rfl⟩
-    · simp [Environment.resolveAccess, resolved, readCarrier, record, own, targetRead, resolvedFields,
-        Interpretation.origin_extend]
-    · exact usable
-    · rw [Interpretation.origin_extend]
-      exact Environment.readAddress_subaddress targetRead selectedValue (ValueHasType.initialized valueTyped)
+    · simp [Environment.resolveAccess, resolved, readCarrier, typed.records node loan found, own,
+        parentAt, fieldsResolved, Interpretation.origin_extend]
+
+theorem StoreTyped.accessReady {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent)
+    (ready : context.AccessReady target parent) :
+    environment.AccessReady ⟨interpretation.origin target, parent.map interpretation.node⟩ := by
+  cases access with
+  | owner => intro node loan impossible; cases impossible
+  | @dereference reference fields slot node loan indices type _ _ _ _ _ found own _ _ _ =>
+    intro actualNode actualLoan same actualFound
+    cases Option.some.inj same
+    have record := typed.records node loan found
+    cases Option.some.inj (actualFound.symm.trans record)
+    obtain ⟨value, read, _⟩ := typed.targetsReady node loan found own (ready.2 node loan rfl found)
+    exact ⟨value, read⟩
+
+theorem StoreTyped.resolveAccess {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {place : AccessPlace} {target : Origin}
+    {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (access : AccessType program home context mode place target referent parent)
+    (ready : context.AccessReady target parent) :
+    target.Known context ∧ target.Bounded context ∧
+    (∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target) ∧
+    ∃ value, environment.resolveAccess program place = some ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
+      environment.Authorizes mode ⟨interpretation.origin target, parent.map interpretation.node⟩ ∧
+      environment.readAddress (interpretation.origin target) = some value ∧ ValueHasType program value referent := by
+  obtain ⟨known, bounded, ancestor, resolved, authority, state, value, raw, resident, complete⟩ := typed.resolveAccessMasked access
+  obtain ⟨valueTyped, initialized⟩ := resident.complete (complete ready.1)
+  exact ⟨known, bounded, ancestor, value, resolved, authority, by simp [Environment.readAddress, raw, initialized], valueTyped⟩
+
 theorem Environment.Copies.deterministic {before firstAfter secondAfter : Environment} {value first second : Value}
     (left : Copies before value first firstAfter) (right : Copies before value second secondAfter) :
     first = second ∧ firstAfter = secondAfter := by
   cases left with
   | data plain => cases right with
     | data => exact ⟨rfl, rfl⟩
-    | shared => cases plain
-  | shared found allowed => cases right with
+    | reference => cases plain
+  | reference found allowed => cases right with
     | data plain => cases plain
-    | shared otherFound => cases Option.some.inj (found.symm.trans otherFound); exact ⟨rfl, rfl⟩
+    | reference otherFound => cases Option.some.inj (found.symm.trans otherFound); exact ⟨rfl, rfl⟩
 
 theorem Environment.Disposes.deterministic {before firstAfter secondAfter : Environment} {value : Value}
     (left : Disposes program before value firstAfter) (right : Disposes program before value secondAfter) :
@@ -4829,10 +6045,10 @@ theorem Environment.Disposes.deterministic {before firstAfter secondAfter : Envi
   cases left with
   | data plain destroyed => cases right with
     | data => rfl
-    | shared => cases plain
-  | shared ended => cases right with
+    | reference => cases plain
+  | reference _ ended => cases right with
     | data plain => cases plain
-    | shared otherEnded => exact Option.some.inj (ended.symm.trans otherEnded)
+    | reference _ otherEnded => exact Option.some.inj (ended.symm.trans otherEnded)
 
 theorem DisposesRoots.deterministic {before firstAfter secondAfter : Environment} {roots : List Root}
     {firstTrace secondTrace : List (Root × List Nat)}
@@ -4896,8 +6112,10 @@ theorem Evaluates.deterministic {before firstAfter secondAfter : Environment} {c
   | unit | integer | character => cases right; exact ⟨rfl, rfl⟩
   | group evaluated ih => cases right with
     | group other => exact ih other
-  | read resolved selected copied => cases right with
-    | read otherResolved otherSelected otherCopied =>
+  | implicitMove _ ih => cases right with
+    | implicitMove other => exact ih other
+  | read resolved selected _ copied => cases right with
+    | read otherResolved otherSelected _ otherCopied =>
       cases Option.some.inj (resolved.symm.trans otherResolved)
       cases Option.some.inj (selected.symm.trans otherSelected)
       exact copied.deterministic otherCopied
@@ -4905,14 +6123,28 @@ theorem Evaluates.deterministic {before firstAfter secondAfter : Environment} {c
     | move otherResolved otherFree otherAllowed otherTaken =>
       cases Option.some.inj (resolved.symm.trans otherResolved)
       exact Prod.mk.inj (Option.some.inj (taken.symm.trans otherTaken))
-  | borrow resolved allowed selected plain => cases right with
-    | borrow otherResolved otherAllowed otherSelected otherPlain =>
+  | borrow resolved allowed permitted ready selected plain => cases right with
+    | borrow otherResolved otherAllowed otherPermitted otherReady otherSelected otherPlain =>
       cases Option.some.inj (resolved.symm.trans otherResolved)
       exact ⟨rfl, rfl⟩
-  | dereference resolved allowed selected plain => cases right with
-    | dereference otherResolved otherAllowed otherSelected otherPlain =>
+  | reborrow resolved allowed permitted ready selected plain => cases right with
+    | reborrow otherResolved otherAllowed otherPermitted otherReady otherSelected otherPlain =>
+      cases Option.some.inj (resolved.symm.trans otherResolved)
+      exact ⟨rfl, rfl⟩
+  | dereference resolved allowed permitted ready selected plain => cases right with
+    | dereference otherResolved otherAllowed otherPermitted otherReady otherSelected otherPlain =>
       cases Option.some.inj (resolved.symm.trans otherResolved)
       exact ⟨Option.some.inj (selected.symm.trans otherSelected), rfl⟩
+  | moveIndirect resolved _ _ _ _ taken => cases right with
+    | moveIndirect otherResolved _ _ _ _ otherTaken =>
+      cases Option.some.inj (resolved.symm.trans otherResolved)
+      exact Prod.mk.inj (Option.some.inj (taken.symm.trans otherTaken))
+  | assignIndirect evaluated resolved _ _ _ _ _ written continued firstIH restIH => cases right with
+    | assignIndirect otherEvaluated otherResolved _ _ _ _ _ otherWritten otherContinued =>
+      obtain ⟨rfl, rfl⟩ := firstIH otherEvaluated
+      cases Option.some.inj (resolved.symm.trans otherResolved)
+      cases Option.some.inj (written.symm.trans otherWritten)
+      exact restIH otherContinued
   | endOwn ended continued ih => cases right with
     | endOwn otherEnded otherContinued =>
       cases Option.some.inj (ended.symm.trans otherEnded)
@@ -5089,16 +6321,14 @@ theorem Environment.endOwn_length {before after : Environment} {node : Nat}
 
 theorem Environment.endSlot_length {before after : Environment} {slot : Nat}
     (ended : before.endSlot slot = some after) : after.loans.length = before.loans.length := by
-  simp only [endSlot, Bind.bind, Option.bind_eq_some_iff] at ended
-  obtain ⟨binding, _, value, _, ended⟩ := ended
-  cases value <;> simp_all
-  exact endOwn_length ended
+  obtain ⟨_, _, _, _, _, transition⟩ := endSlot_checked ended
+  exact endOwn_length transition
 
 theorem Environment.Disposes.loans_length {before after : Environment} {value : Value}
     (disposed : Disposes program before value after) : after.loans.length = before.loans.length := by
   cases disposed with
   | data => rfl
-  | shared ended => exact endOwn_length ended
+  | reference _ ended => exact endOwn_length ended
 
 theorem DisposesRoots.loans_length {before after : Environment} {roots : List Root} {trace}
     (disposed : DisposesRoots program before roots trace after) : after.loans.length = before.loans.length := by
@@ -5130,11 +6360,16 @@ theorem Evaluates.loans_mono {before after : Environment} {core : Core} {value :
     (motive_4 := fun _ _ _ _ => True)
     (motive_5 := fun _ _ _ _ => True) with
   | unit | integer | character => exact Nat.le_refl _
-  | group _ ih => exact ih
-  | read _ _ copied => cases copied <;> simp [Environment.addLoan]
+  | group _ ih | implicitMove _ ih => exact ih
+  | read _ _ _ copied => cases copied <;> simp [Environment.addLoan]
   | move _ _ _ taken =>
     exact Nat.le_of_eq (congrArg List.length (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2)).symm
-  | borrow => simp [Environment.addLoan]
+  | moveIndirect _ _ _ _ _ taken =>
+    exact Nat.le_of_eq (congrArg List.length (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2)).symm
+  | assignIndirect _ _ _ _ _ _ _ written _ first rest =>
+    rw [Environment.writeAddress_loans written] at rest
+    exact Nat.le_trans first rest
+  | borrow | reborrow => simp [Environment.addLoan]
   | dereference => exact Nat.le_refl _
   | endOwn ended _ ih => simpa only [Environment.endSlot_length ended] using ih
   | endAfter _ ended _ ih => simpa only [Environment.endSlot_length ended] using ih
@@ -5194,10 +6429,8 @@ theorem Environment.empty_endOwn {before after : Environment} {node : Nat} (empt
 
 theorem Environment.empty_endSlot {before after : Environment} {slot : Nat} (empty : before.loans = [])
     (ended : before.endSlot slot = some after) : False := by
-  simp only [endSlot, Bind.bind, Option.bind_eq_some_iff] at ended
-  obtain ⟨binding, _, value, _, ended⟩ := ended
-  cases value <;> simp_all
-  exact empty_endOwn empty ended
+  obtain ⟨_, _, _, _, _, transition⟩ := endSlot_checked ended
+  exact empty_endOwn empty transition
 
 theorem Environment.empty_ownerFree {before : Environment} (empty : before.loans = []) (address : Address) :
     before.OwnerFree address := by
@@ -5217,7 +6450,7 @@ theorem Environment.Disposes.empty {before after : Environment} {value : Value}
     after = before ∧ value.ReferenceFree := by
   cases disposed with
   | data plain _ => exact ⟨rfl, plain⟩
-  | shared ended => exact False.elim (empty_endOwn empty ended)
+  | reference _ ended => exact False.elim (empty_endOwn empty ended)
 
 theorem DisposesRoots.empty {before after : Environment} {roots trace}
     (disposed : DisposesRoots program before roots trace after) (empty : before.loans = []) : after = before := by
@@ -5287,13 +6520,18 @@ theorem Evaluates.agrees {left after : Environment} {core : Core} {value : Value
     intro final right same empty
     obtain ⟨other, body, agreed, final⟩ := ih final right same empty
     exact ⟨other, .group body, agreed, final⟩
-  | read resolved selected copied =>
+  | implicitMove _ ih =>
+    intro final right same empty
+    obtain ⟨other, body, agreed, final⟩ := ih final right same empty
+    exact ⟨other, .implicitMove body, agreed, final⟩
+  | read resolved selected _ copied =>
     intro final right same empty
     cases copied with
     | data plain =>
       obtain ⟨address, otherResolved, _, atSame, _⟩ := same.resolvePlace resolved
-      exact ⟨right, .read otherResolved (by simpa only [Environment.readAddress, atSame] using selected) (.data plain), same, empty⟩
-    | shared => simp [Environment.addLoan] at final
+      exact ⟨right, .read otherResolved (by simpa only [Environment.readAddress, atSame] using selected)
+        (by intro node loan found; simp [empty] at found) (.data plain), same, empty⟩
+    | reference => simp [Environment.addLoan] at final
   | move resolved _ allowed taken =>
     intro final right same empty
     obtain ⟨read, written⟩ := Environment.takeAddress_eq_some.mp taken
@@ -5303,9 +6541,21 @@ theorem Evaluates.agrees {left after : Environment} {core : Core} {value : Value
     exact ⟨other, .move otherResolved (Environment.empty_ownerFree empty _) (.of_plain (allowed.plain initial))
       (Environment.takeAddress_eq_some.mpr ⟨by simpa only [Environment.readAddress, atSame] using read, written⟩),
       agreed, (Environment.writeAddress_loans written).trans empty⟩
-  | borrow => intro final; simp [Environment.addLoan] at final
+  | borrow | reborrow => intro final; simp [Environment.addLoan] at final
   | dereference resolved =>
     intro final
+    simp only [Environment.resolveAccess, Bind.bind, Option.bind_eq_some_iff] at resolved
+    obtain ⟨carrier, _, resident, _, resolved⟩ := resolved
+    cases resident <;> simp_all
+  | moveIndirect resolved _ _ _ _ taken =>
+    intro final
+    have empty := (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2).symm.trans final
+    simp only [Environment.resolveAccess, Bind.bind, Option.bind_eq_some_iff] at resolved
+    obtain ⟨carrier, _, resident, _, resolved⟩ := resolved
+    cases resident <;> simp_all
+  | assignIndirect _ resolved _ _ _ _ _ written continued _ _ =>
+    intro final
+    have empty := (Environment.writeAddress_loans written).symm.trans (continued.empty_before final)
     simp only [Environment.resolveAccess, Bind.bind, Option.bind_eq_some_iff] at resolved
     obtain ⟨carrier, _, resident, _, resolved⟩ := resolved
     cases resident <;> simp_all
@@ -5360,8 +6610,12 @@ theorem Evaluates.agrees {left after : Environment} {core : Core} {value : Value
   | constant declared initialized plain ih =>
     intro final right same empty
     obtain ⟨other, body, afterSame, otherEmpty⟩ := ih final right.hide same.hide empty
+    have initialEmpty := initialized.empty_before final
+    simp only [Environment.hide] at initialEmpty
     exact ⟨right.resume other, .constant declared body plain, same.resume afterSame.leftValid afterSame.rightValid
-      (initialized.storage same.leftValid.hide).2 (body.storage same.rightValid.hide).2, otherEmpty⟩
+      (initialized.storage same.leftValid.hide).2 (body.storage same.rightValid.hide).2
+      (fun root => by simp [Environment.UniqueRoot, initialEmpty])
+      (fun root => by simp [Environment.UniqueRoot, empty]), otherEmpty⟩
   | construct _ plain ih =>
     intro final right same empty
     obtain ⟨other, elements, afterSame, otherEmpty⟩ := ih final right same empty
@@ -5386,7 +6640,9 @@ theorem Evaluates.agrees {left after : Environment} {core : Core} {value : Value
     have rightFrame := (otherBody.storage (middleSame.rightValid.hide.prepare _)).2.scope middleSame.rightValid.hide _
     rw [← cleanedEq] at leftFrame
     exact ⟨_, .call declared inputs otherBody ⟨trace, otherCleaned⟩ (.of_plain (usable.plain final)),
-      middleSame.resume agreed.leftValid agreed.rightValid leftFrame rightFrame, otherEmpty⟩
+      middleSame.resume agreed.leftValid agreed.rightValid leftFrame rightFrame
+        (fun root => by simp [Environment.UniqueRoot, middleEmpty])
+        (fun root => by simp [Environment.UniqueRoot, middleEmpty']), otherEmpty⟩
   | applyPatterns normalization _ plain selected _ cleanup usable _ argumentsIH bodyIH =>
     intro final right same empty
     obtain ⟨trace, cleaned⟩ := cleanup
@@ -5418,17 +6674,19 @@ theorem Evaluates.referenceFree_of_empty {before after : Environment} {core : Co
     (motive_4 := fun _ _ _ _ => True)
     (motive_5 := fun _ _ _ _ => True) with
   | unit | integer | character => intro _; trivial
-  | group _ ih => exact ih
-  | read _ _ copied =>
+  | group _ ih | implicitMove _ ih => exact ih
+  | read _ _ _ copied =>
     intro empty
     cases copied with
     | data plain => exact plain
-    | shared => simp [Environment.addLoan] at empty
+    | reference => simp [Environment.addLoan] at empty
   | move _ _ usable taken =>
     intro empty
     exact usable.plain ((Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2).symm.trans empty)
-  | borrow => intro empty; simp [Environment.addLoan] at empty
-  | dereference _ _ _ plain => exact fun _ => plain
+  | borrow | reborrow => intro empty; simp [Environment.addLoan] at empty
+  | dereference _ _ _ _ _ plain => exact fun _ => plain
+  | moveIndirect _ _ _ _ plain _ => exact fun _ => plain
+  | assignIndirect _ _ _ _ _ _ _ _ _ _ ih => exact ih
   | endOwn _ _ ih => exact ih
   | endAfter _ _ usable _ => exact usable.plain
   | sequence _ _ _ _ ih => exact ih
@@ -5464,7 +6722,7 @@ execution, output state, or agreement conclusion occurs in its definition.
 Calls retain arbitrary recursion; their declaration bodies are covered separately
 by `Program.ReferenceFree`. Core plans are deliberately not reconstructed. -/
 def Expr.ReferenceFree : Expr → Prop
-  | .borrow _ | .dereference _ _ => False
+  | .borrow _ _ | .dereference _ _ | .moveIndirect _ _ | .assignIndirect _ _ _ _ => False
   | .group body | .field body _ => body.ReferenceFree
   | .sequence first rest | .assign _ first rest | .bind _ _ _ first rest =>
       first.ReferenceFree ∧ rest.ReferenceFree
@@ -5516,16 +6774,21 @@ theorem Evaluates.empty_of_referenceFree {before after : Environment} {core : Co
     (motive_4 := fun _ _ _ _ => True)
     (motive_5 := fun _ _ _ _ => True) with
   | unit | integer | character => exact fun _ empty => empty
-  | group _ ih => exact ih
-  | read _ _ copied =>
+  | group _ ih | implicitMove _ ih => exact ih
+  | read _ _ _ copied =>
     intro _ empty
     cases copied with
     | data => exact empty
-    | shared found => simp [empty] at found
+    | reference found => simp [empty] at found
   | move _ _ _ taken =>
     intro _ empty
     exact (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2).trans empty
-  | borrow | dereference => intro impossible; exact False.elim impossible
+  | borrow | dereference | moveIndirect | assignIndirect => intro impossible; exact False.elim impossible
+  | reborrow resolved =>
+    intro _ empty
+    simp only [Environment.resolveAccess, Bind.bind, Option.bind_eq_some_iff] at resolved
+    obtain ⟨carrier, _, resident, _, resolved⟩ := resolved
+    cases resident <;> simp_all
   | endOwn ended _ _ => intro _ empty; exact False.elim (Environment.empty_endSlot empty ended)
   | endAfter _ ended _ ih =>
     intro plain empty
@@ -5587,10 +6850,10 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     (name : String) (mutable : Bool) (result : ResultType)
     (supported : StorageType program.target program.data result.type)
     (reference : ∀ node, result.reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ result.type = .shared loan.referent) :
+      context.loans[node]? = some loan ∧ result.type = .reference loan.referent loan.mode) :
     (context.bind name mutable result).WellFormed program := by
-  refine ⟨?_, ?_, ?_, ?_, valid.parents⟩
-  · simp only [Context.bind, List.map_cons, List.nodup_cons]
+  refine ⟨?_, ?_, ?_, ?_, valid.parents, ?_, ?_, valid.parentModes⟩
+  · rw [valid.bindings_bind name mutable result, List.map_cons, List.nodup_cons]
     refine ⟨?_, valid.distinct⟩
     intro member
     obtain ⟨binding, member, same⟩ := List.mem_map.mp member
@@ -5598,10 +6861,12 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     change binding.2.binder = context.nextBinder at same
     omega
   · intro binding member
+    rw [valid.bindings_bind name mutable result] at member
     rcases List.mem_cons.mp member with rfl | member
     · exact supported
     · exact valid.supported binding member
   · intro binding member
+    rw [valid.bindings_bind name mutable result] at member
     rcases List.mem_cons.mp member with rfl | member
     · exact ⟨Nat.lt_succ_self _, reference⟩
     · obtain ⟨bound, references⟩ := valid.slots binding member
@@ -5611,21 +6876,87 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     refine ⟨?_, finite⟩
     cases base : loan.target.base <;> simp_all [Origin.Bounded, Context.bind]
     omega
+  · intro entry member
+    rcases List.mem_cons.mp member with rfl | member
+    · exact ⟨⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.reference⟩, by simp [Context.bind]⟩
+    · obtain ⟨slot, found⟩ := valid.named entry member
+      have different := Nat.ne_of_lt (valid.allocated entry.2 slot found).2.1
+      exact ⟨slot, by simpa [Context.bind, different] using found⟩
+  · intro binder slot stored
+    simp only [Context.bind] at stored
+    split at stored
+    · rename_i same
+      have identity := OriginBase.binder.inj same
+      cases stored
+      exact ⟨identity.symm, identity ▸ Nat.lt_succ_self _, supported, reference⟩
+    · obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder slot stored
+      exact ⟨identity, Nat.lt_succ_of_lt bound, supported, reference⟩
 
 theorem WellFormed.hide {context : Context} (valid : context.WellFormed program) :
     context.hide.WellFormed program := by
-  exact ⟨List.nodup_nil, by simp [Context.hide], by simp [Context.hide], valid.targets, valid.parents⟩
+  exact ⟨by simp [Context.hide, Context.bindings], by simp [Context.hide, Context.bindings],
+    by simp [Context.hide, Context.bindings], valid.targets, valid.parents,
+    by simp [Context.hide], valid.allocated, valid.parentModes⟩
+
+theorem WellFormed.retire_retained {context : Context} (valid : context.WellFormed program)
+    (count : Nat) {binder : Nat} (member : binder ∈ (context.names.drop count).map Prod.snd) :
+    (context.retire count).storage (.binder binder) = context.storage (.binder binder) := by
+  have distinct : ((context.names.map Prod.snd).take count ++ (context.names.map Prod.snd).drop count).Nodup := by
+    simpa [← valid.bindings_binders] using valid.distinct
+  have disjoint := (List.nodup_append.mp distinct).2.2
+  have absent : binder ∉ (context.names.take count).map Prod.snd := by
+    intro included
+    exact disjoint _ (by simpa only [List.map_take] using included) _
+      (by simpa only [List.map_drop] using member) rfl
+  simp only [Context.retire, if_neg absent]
+
+private theorem filterMap_drop_of_some {α β : Type} (entries : List α) (f : α → Option β)
+    (total : ∀ entry ∈ entries, ∃ value, f entry = some value) (count : Nat) :
+    (entries.drop count).filterMap f = (entries.filterMap f).drop count := by
+  induction count generalizing entries with
+  | zero => rfl
+  | succ count ih =>
+      cases entries with
+      | nil => rfl
+      | cons entry entries =>
+          obtain ⟨value, found⟩ := total entry (by simp)
+          simpa [List.filterMap_cons, found] using
+            ih entries (fun other member => total other (by simp [member]))
+
+theorem WellFormed.bindings_retire {context : Context} (valid : context.WellFormed program)
+    (count : Nat) : (context.retire count).bindings = context.bindings.drop count := by
+  unfold Context.bindings
+  change (context.names.drop count).filterMap _ = _
+  calc
+    _ = (context.names.drop count).filterMap (fun entry =>
+        (context.storage (.binder entry.2)).map fun slot => (entry.1, slot)) := by
+      apply filterMap_congr_mem
+      intro entry member
+      rw [valid.retire_retained count (List.mem_map.mpr ⟨entry, member, rfl⟩)]
+    _ = _ := filterMap_drop_of_some context.names _ (by
+      intro entry member
+      obtain ⟨slot, found⟩ := valid.named entry member
+      exact ⟨(entry.1, slot), by simp [found]⟩) count
 
 theorem WellFormed.retire {context : Context} (valid : context.WellFormed program) (count : Nat) :
     (context.retire count).WellFormed program := by
-  refine ⟨?_, ?_, ?_, valid.targets, valid.parents⟩
-  · change (context.bindings.drop count |>.map (fun binding => binding.2.binder)).Nodup
-    rw [List.map_drop]
+  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes⟩
+  · rw [valid.bindings_retire count, List.map_drop]
     exact valid.distinct.drop
   · intro binding member
+    rw [valid.bindings_retire count] at member
     exact valid.supported binding (List.mem_of_mem_drop member)
   · intro binding member
+    rw [valid.bindings_retire count] at member
     exact valid.slots binding (List.mem_of_mem_drop member)
+  · intro entry member
+    obtain ⟨slot, found⟩ := valid.named entry (List.mem_of_mem_drop member)
+    exact ⟨slot, (valid.retire_retained count (List.mem_map.mpr ⟨entry, member, rfl⟩)).trans found⟩
+  · intro binder slot stored
+    simp only [Context.retire] at stored
+    split at stored
+    · cases stored
+    · exact valid.allocated binder slot stored
 
 theorem WellFormed.dispose {context : Context} (valid : context.WellFormed program) (reference : Option Nat) :
     (context.dispose reference).WellFormed program := by
@@ -5674,7 +7005,7 @@ theorem WellFormed.prepare {context : Context} (valid : context.WellFormed progr
     (parameters : List (String × BindingType)) (arguments : List ResultType)
     (supported : ∀ result ∈ arguments, StorageType program.target program.data result.type)
     (reference : ∀ result ∈ arguments, ∀ node, result.reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ result.type = .shared loan.referent) :
+      context.loans[node]? = some loan ∧ result.type = .reference loan.referent loan.mode) :
     (Context.prepare parameters arguments context).WellFormed program := by
   induction parameters generalizing arguments context with
   | nil => exact valid
@@ -5694,30 +7025,44 @@ end Context
 structure Context.History (before after : Context) : Prop where
   records : ∀ (node : Nat) (loan : SourceLoan), before.loans[node]? = some loan → ∃ retained : SourceLoan,
     after.loans[node]? = some retained ∧ retained.target = loan.target ∧
-    retained.referent = loan.referent ∧ retained.parent = loan.parent ∧
+    retained.referent = loan.referent ∧ retained.parent = loan.parent ∧ retained.mode = loan.mode ∧
     (retained.own = true → loan.own = true)
   inputs : after.inputCount = before.inputCount
   supply : before.nextBinder ≤ after.nextBinder
+  visible : ∀ binder ∈ after.names.map Prod.snd, binder < before.nextBinder →
+    binder ∈ before.names.map Prod.snd
+  retained : ∀ binder slot, binder < before.nextBinder → before.storage (.binder binder) = some slot →
+    binder ∉ before.names.map Prod.snd → ∃ current, after.storage (.binder binder) = some current ∧
+      current.metadata = slot.metadata
 
 namespace Context
 namespace History
 
 theorem refl (context : Context) : History context context :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _⟩
+  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+    fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
 theorem trans {before middle after : Context} (first : History before middle)
     (second : History middle after) : History before after := by
-  refine ⟨?_, second.inputs.trans first.inputs, Nat.le_trans first.supply second.supply⟩
-  intro node loan found
-  obtain ⟨middleLoan, middleFound, target, referent, parent, own⟩ := first.records node loan found
-  obtain ⟨lastLoan, lastFound, lastTarget, lastReferent, lastParent, lastOwn⟩ := second.records node middleLoan middleFound
-  exact ⟨lastLoan, lastFound, lastTarget.trans target, lastReferent.trans referent,
-    lastParent.trans parent, fun live => own (lastOwn live)⟩
+  refine ⟨?_, second.inputs.trans first.inputs, Nat.le_trans first.supply second.supply, ?_, ?_⟩
+  · intro node loan found
+    obtain ⟨middleLoan, middleFound, target, referent, parent, mode, own⟩ := first.records node loan found
+    obtain ⟨lastLoan, lastFound, lastTarget, lastReferent, lastParent, lastMode, lastOwn⟩ := second.records node middleLoan middleFound
+    exact ⟨lastLoan, lastFound, lastTarget.trans target, lastReferent.trans referent,
+      lastParent.trans parent, lastMode.trans mode, fun live => own (lastOwn live)⟩
+  · intro binder member old
+    exact first.visible binder (second.visible binder member (Nat.lt_of_lt_of_le old first.supply)) old
+  · intro binder slot old stored hidden
+    obtain ⟨middleSlot, middleStored, middleMetadata⟩ := first.retained binder slot old stored hidden
+    have middleHidden : binder ∉ middle.names.map Prod.snd := fun member => hidden (first.visible binder member old)
+    obtain ⟨afterSlot, afterStored, afterMetadata⟩ := second.retained binder middleSlot
+      (Nat.lt_of_lt_of_le old first.supply) middleStored middleHidden
+    exact ⟨afterSlot, afterStored, afterMetadata.trans middleMetadata⟩
 
 theorem endOwn (context : Context) (node : Nat) : History context (context.endOwn node) := by
-  refine ⟨?_, rfl, Nat.le_refl _⟩
+  refine ⟨?_, rfl, Nat.le_refl _, fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
   intro old loan found
-  refine ⟨_, context.endOwn_found node found, rfl, rfl, rfl, ?_⟩
+  refine ⟨_, context.endOwn_found node found, rfl, rfl, rfl, rfl, ?_⟩
   split <;> simp_all
 
 theorem dispose (context : Context) (reference : Option Nat) : History context (context.dispose reference) := by
@@ -5732,21 +7077,36 @@ theorem disposeSlots (context : Context) (slots : List (String × Slot)) :
   | cons slot slots ih => exact (dispose context slot.2.reference).trans (ih _)
 
 theorem bind (context : Context) (name : String) (mutable : Bool) (result : ResultType) :
-    History context (context.bind name mutable result) :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, Nat.le_succ _⟩
+    History context (context.bind name mutable result) := by
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_succ _, ?_, ?_⟩
+  · intro binder member old
+    rcases List.mem_cons.mp member with same | member
+    · exact False.elim (Nat.ne_of_lt old same)
+    · exact member
+  · intro binder slot old stored _
+    exact ⟨slot, by simpa [Context.bind, Nat.ne_of_lt old] using stored, rfl⟩
 
 theorem hide (context : Context) : History context context.hide :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _⟩
+  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+    by simp [Context.hide], fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
-theorem retire (context : Context) (count : Nat) : History context (context.retire count) :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _⟩
+theorem retire (context : Context) (count : Nat) : History context (context.retire count) := by
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _, ?_, ?_⟩
+  · intro binder member _
+    exact List.mem_of_mem_drop (by simpa [Context.retire, List.map_drop] using member)
+  · intro binder slot _ stored hidden
+    have absent : binder ∉ (context.names.take count).map Prod.snd := by
+      intro member
+      exact hidden (List.mem_of_mem_take (by simpa only [List.map_take] using member))
+    exact ⟨slot, by simpa only [Context.retire, if_neg absent] using stored, rfl⟩
 
 theorem cleanup (context : Context) (count : Nat) : History context (context.cleanup count) :=
   (disposeSlots context (context.bindings.take count)).trans (retire _ count)
 
-theorem borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) :
-    History context (context.borrow target referent parent) :=
-  ⟨fun _ loan found => ⟨loan, borrow_found found, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _⟩
+theorem borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) :
+    History context (context.borrow target referent parent mode) :=
+  ⟨fun _ loan found => ⟨loan, borrow_found found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+    fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
 theorem prepare (context : Context) (parameters : List (String × BindingType)) (arguments : List ResultType) :
     History context (Context.prepare parameters arguments context) := by
@@ -5763,27 +7123,18 @@ end History
 theorem bind_mentions_old {context : Context} {name : String} {mutable : Bool} {result : ResultType}
     {binder : Nat} (old : binder < context.nextBinder) :
     (context.bind name mutable result).MentionsBinder binder ↔ context.MentionsBinder binder := by
-  constructor
-  · rintro (⟨binding, member, equal⟩ | loan)
-    · rcases List.mem_cons.mp member with rfl | member
-      · change context.nextBinder = binder at equal
-        omega
-      · exact .inl ⟨binding, member, equal⟩
-    · exact .inr loan
-  · rintro (⟨binding, member, equal⟩ | loan)
-    · exact .inl ⟨binding, List.mem_cons_of_mem _ member, equal⟩
-    · exact .inr loan
+  simp only [Context.MentionsBinder, Context.bind, OriginBase.binder.injEq, if_neg (Nat.ne_of_lt old)]
 
 theorem hide_mentions {context : Context} {binder : Nat} :
-    context.hide.MentionsBinder binder → context.MentionsBinder binder := by
-  rintro (⟨binding, member, _⟩ | loan)
-  · exact False.elim (List.not_mem_nil member)
-  · exact .inr loan
+    context.hide.MentionsBinder binder → context.MentionsBinder binder := id
 
 theorem retire_mentions {context : Context} {count binder : Nat} :
     (context.retire count).MentionsBinder binder → context.MentionsBinder binder := by
-  rintro (⟨binding, member, equal⟩ | loan)
-  · exact .inl ⟨binding, List.mem_of_mem_drop member, equal⟩
+  rintro (⟨slot, stored⟩ | loan)
+  · simp only [Context.retire] at stored
+    split at stored
+    · cases stored
+    · exact .inl ⟨slot, stored⟩
   · exact .inr loan
 
 theorem dispose_mentions (context : Context) (reference : Option Nat) (binder : Nat) :
@@ -5844,7 +7195,7 @@ namespace Context
 
 theorem Joins.wellFormed {before after : Context} (joined : Joins program before after)
     (valid : before.WellFormed program) : after.WellFormed program := by
-  refine ⟨?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [joined.slots.binders]
     exact valid.distinct
   · intro binding member
@@ -5871,18 +7222,41 @@ theorem Joins.wellFormed {before after : Context} (joined : Joins program before
   · intro node loan parent found derived
     obtain ⟨older, ancestor, ancestorFound, within⟩ := valid.parents node loan parent (joined.loans ▸ found) derived
     exact ⟨older, ancestor, joined.loans.symm ▸ ancestorFound, within⟩
+  · intro entry member
+    obtain ⟨slot, stored⟩ := valid.named entry (joined.names ▸ member)
+    obtain ⟨current, found, _, _⟩ := (joined.storage (.binder entry.2)).forward stored
+    exact ⟨current, found⟩
+  · intro binder slot stored
+    obtain ⟨original, found, metadata, _⟩ := (joined.storage (.binder binder)).backward stored
+    obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder original found
+    rcases (show slot.type = original.type ∧ slot.mutable = original.mutable ∧
+        slot.binder = original.binder ∧ slot.reference = original.reference from
+      by simpa only [Slot.metadata, Prod.mk.injEq] using metadata) with ⟨type, _, binderEq, referenceEq⟩
+    refine ⟨binderEq.trans identity, Nat.lt_of_lt_of_le bound joined.supply, type.symm ▸ supported, ?_⟩
+    intro node selected
+    obtain ⟨loan, found, shape⟩ := reference node (referenceEq ▸ selected)
+    exact ⟨loan, joined.loans.symm ▸ found, type.trans shape⟩
+  · intro node loan parent ancestor found derived parentFound unique
+    exact valid.parentModes node loan parent ancestor (joined.loans ▸ found) derived (joined.loans ▸ parentFound) unique
 
 theorem Joins.mentions {before after : Context} (joined : Joins program before after) (binder : Nat) :
     after.MentionsBinder binder ↔ before.MentionsBinder binder := by
-  have slots : (∃ binding ∈ after.bindings, binding.2.binder = binder) ↔
-      (∃ binding ∈ before.bindings, binding.2.binder = binder) := by
-    have equal := joined.slots.binders
-    simpa only [List.mem_map] using (show binder ∈ after.bindings.map (fun b => b.2.binder) ↔
-      binder ∈ before.bindings.map (fun b => b.2.binder) from equal ▸ Iff.rfl)
-  simp only [MentionsBinder, slots, joined.loans]
+  constructor
+  · rintro (⟨slot, stored⟩ | loan)
+    · obtain ⟨original, found, _, _⟩ := (joined.storage (.binder binder)).backward stored
+      exact .inl ⟨original, found⟩
+    · exact .inr (joined.loans ▸ loan)
+  · rintro (⟨slot, stored⟩ | loan)
+    · obtain ⟨current, found, _, _⟩ := (joined.storage (.binder binder)).forward stored
+      exact .inl ⟨current, found⟩
+    · exact .inr (joined.loans.symm ▸ loan)
 
-theorem Joins.history {before after : Context} (joined : Joins program before after) : History before after :=
-  ⟨fun _ loan found => ⟨loan, joined.loans.symm ▸ found, rfl, rfl, rfl, id⟩, joined.inputs, joined.supply⟩
+theorem Joins.history {before after : Context} (joined : Joins program before after) : History before after := by
+  refine ⟨fun _ loan found => ⟨loan, joined.loans.symm ▸ found, rfl, rfl, rfl, rfl, id⟩,
+    joined.inputs, joined.supply, fun _ member _ => joined.names ▸ member, ?_⟩
+  intro binder slot _ stored _
+  obtain ⟨current, found, metadata, _⟩ := (joined.storage (.binder binder)).forward stored
+  exact ⟨current, found, metadata⟩
 
 /-- Only support actually mentioned by slots or loan history is reflected. -/
 def ReflectsSupport (before after : Context) : Prop :=
@@ -5920,8 +7294,8 @@ theorem disposeSlots (context : Context) (slots : List (String × Slot)) :
 theorem cleanup (context : Context) (count : Nat) : ReflectsSupport context (context.cleanup count) :=
   fun _ mentioned _ => cleanup_mentions mentioned
 
-theorem borrow {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat}
-    (known : target.Known context) : ReflectsSupport context (context.borrow target referent parent) :=
+theorem borrow {context : Context} {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    (known : target.Known context) : ReflectsSupport context (context.borrow target referent parent mode) :=
   fun binder mentioned _ => (borrow_mentions known binder).mp mentioned
 
 theorem prepare (context : Context) (parameters : List (String × BindingType)) (arguments : List ResultType) :
@@ -5938,26 +7312,44 @@ namespace Context
 
 theorem History.resume {caller after : Context} (evolved : History caller.hide after) :
     History caller (caller.resume after) :=
-  ⟨evolved.records, evolved.inputs, evolved.supply⟩
+  ⟨evolved.records, evolved.inputs, evolved.supply, fun _ member _ => member,
+    fun binder slot old stored _ => evolved.retained binder slot old stored (by simp [Context.hide])⟩
 
 theorem WellFormed.resume {caller after : Context} (callerValid : caller.WellFormed program)
     (afterValid : after.WellFormed program) (evolved : History caller.hide after) :
     (caller.resume after).WellFormed program := by
-  refine ⟨callerValid.distinct, callerValid.supported, ?_, afterValid.targets, afterValid.parents⟩
-  intro binding member
-  obtain ⟨bound, references⟩ := callerValid.slots binding member
-  refine ⟨Nat.lt_of_lt_of_le bound evolved.supply, ?_⟩
-  intro node selected
-  obtain ⟨loan, found, shape⟩ := references node selected
-  obtain ⟨retained, retainedFound, _, referent, _, _⟩ := evolved.records node loan found
-  exact ⟨retained, retainedFound, shape.trans (congrArg Ty.shared referent.symm)⟩
+  have named : ∀ entry ∈ caller.names, ∃ slot, after.storage (.binder entry.2) = some slot := by
+    intro entry member
+    obtain ⟨slot, found⟩ := callerValid.named entry member
+    obtain ⟨current, stored, _⟩ := evolved.retained entry.2 slot
+      (callerValid.allocated entry.2 slot found).2.1 found (by simp [Context.hide])
+    exact ⟨current, stored⟩
+  have binders : (caller.resume after).bindings.map (fun binding => binding.2.binder) = caller.names.map Prod.snd := by
+    unfold Context.bindings
+    rw [List.map_filterMap, ← List.filterMap_eq_map]
+    apply filterMap_congr_mem
+    intro entry member
+    obtain ⟨slot, found⟩ := named entry member
+    simp [Context.resume, found, (afterValid.allocated entry.2 slot found).1]
+  refine ⟨?_, ?_, ?_, afterValid.targets, afterValid.parents, named, afterValid.allocated, afterValid.parentModes⟩
+  · rw [binders, ← callerValid.bindings_binders]
+    exact callerValid.distinct
+  · intro binding member
+    obtain ⟨entry, _, found⟩ := List.mem_filterMap.mp member
+    obtain ⟨slot, stored, same⟩ := Option.map_eq_some_iff.mp found
+    cases same
+    exact (afterValid.allocated entry.2 slot stored).2.2.1
+  · intro binding member
+    obtain ⟨entry, _, found⟩ := List.mem_filterMap.mp member
+    obtain ⟨slot, stored, same⟩ := Option.map_eq_some_iff.mp found
+    cases same
+    obtain ⟨identity, bound, _, reference⟩ := afterValid.allocated entry.2 slot stored
+    exact ⟨identity.symm ▸ bound, reference⟩
 
-/-- Restoring a hidden caller may restore its support, but creates no third source. -/
+/-- Visibility restoration does not change the authoritative storage support. -/
 theorem resume_mentions {caller after : Context} {binder : Nat} :
-    (caller.resume after).MentionsBinder binder → caller.MentionsBinder binder ∨ after.MentionsBinder binder := by
-  rintro (slot | loan)
-  · exact .inl (.inl slot)
-  · exact .inr (.inr loan)
+    (caller.resume after).MentionsBinder binder → caller.MentionsBinder binder ∨ after.MentionsBinder binder :=
+  fun mentioned => .inr mentioned
 
 theorem ReflectsSupport.resume {caller after : Context} (reflected : ReflectsSupport caller.hide after) :
     ReflectsSupport caller (caller.resume after) := by
@@ -5969,8 +7361,8 @@ theorem ReflectsSupport.resume {caller after : Context} (reflected : ReflectsSup
 end Context
 
 private theorem held_append_shared {held : List Value} {node other index : Nat} :
-    (held ++ [Value.shared node])[index]? = some (.shared other) ↔
-      held[index]? = some (.shared other) ∨ (index = held.length ∧ node = other) := by
+    (held ++ [Value.reference node])[index]? = some (.reference other) ↔
+      held[index]? = some (.reference other) ∨ (index = held.length ∧ node = other) := by
   by_cases bound : index < held.length
   · simp only [List.getElem?_append_left bound]
     simp [Nat.ne_of_lt bound]
@@ -5985,15 +7377,15 @@ private theorem held_append_shared {held : List Value} {node other index : Nat} 
       simp [absent, different]
 
 theorem Custody.install {environment : Environment} {held : List Value} {node root : Nat}
-    (custody : Custody environment (held ++ [.shared node]))
+    (custody : Custody environment (held ++ [.reference node]))
     (cleared : ∀ other loan, environment.loans[other]? = some loan → loan.own = true →
-      environment.store root ≠ some (.shared other)) :
-    Custody (environment.put root (.shared node)) held := by
+      environment.store root ≠ some (.reference other)) :
+    Custody (environment.put root (.reference node)) held := by
   intro other loan found own
   obtain ⟨location, carrier, unique⟩ := custody other loan found own
   by_cases same : node = other
   · subst other
-    have last : Carries environment (held ++ [.shared node]) node (.held held.length) := by
+    have last : Carries environment (held ++ [.reference node]) node (.held held.length) := by
       simp [Carries]
     refine ⟨.stored root, by simp [Carries, Environment.put], ?_⟩
     intro second carried
@@ -6001,19 +7393,19 @@ theorem Custody.install {environment : Environment} {held : List Value} {node ro
     | stored cell =>
       by_cases equal : cell = root
       · subst cell; rfl
-      · have old : Carries environment (held ++ [.shared node]) node (.stored cell) := by
+      · have old : Carries environment (held ++ [.reference node]) node (.stored cell) := by
           simpa [Carries, Environment.put, equal] using carried
         have impossible := (unique _ old).trans (unique _ last).symm
         cases impossible
     | held index =>
-      have old : Carries environment (held ++ [.shared node]) node (.held index) :=
+      have old : Carries environment (held ++ [.reference node]) node (.held index) :=
         held_append_shared.mpr (.inl carried)
       have equal := (unique _ old).trans (unique _ last).symm
       have indices := Carrier.held.inj equal
       have bound := (List.getElem?_eq_some_iff.mp carried).1
       omega
-  · have equivalent : ∀ place, Carries (environment.put root (.shared node)) held other place ↔
-        Carries environment (held ++ [.shared node]) other place := by
+  · have equivalent : ∀ place, Carries (environment.put root (.reference node)) held other place ↔
+        Carries environment (held ++ [.reference node]) other place := by
       intro place
       cases place with
       | stored cell =>
@@ -6027,8 +7419,8 @@ theorem Custody.install {environment : Environment} {held : List Value} {node ro
 
 theorem Custody.move {environment : Environment} {held : List Value} {node root : Nat}
     (custody : Custody environment held)
-    (stored : environment.store root = some (.shared node)) :
-    Custody (environment.put root .vacant) (held ++ [.shared node]) := by
+    (stored : environment.store root = some (.reference node)) :
+    Custody (environment.put root .vacant) (held ++ [.reference node]) := by
   intro other loan found own
   obtain ⟨location, carrier, unique⟩ := custody other loan found own
   by_cases same : node = other
@@ -6048,7 +7440,7 @@ theorem Custody.move {environment : Environment} {held : List Value} {node root 
       · have impossible := (unique (.held index) old).trans (unique (.stored root) stored).symm
         cases impossible
       · subst index; rfl
-  · have equivalent : ∀ place, Carries (environment.put root .vacant) (held ++ [.shared node]) other place ↔
+  · have equivalent : ∀ place, Carries (environment.put root .vacant) (held ++ [.reference node]) other place ↔
         Carries environment held other place := by
       intro place
       cases place with
@@ -6074,7 +7466,7 @@ theorem Custody.retire {environment : Environment} {held : List Value} {count : 
     (custody : Custody environment held)
     (cleared : ∀ root ∈ (environment.bindings.take count).map Prod.snd,
       ∀ node loan, environment.loans[node]? = some loan → loan.own = true →
-        environment.store root ≠ some (.shared node)) : Custody (environment.retire count) held := by
+        environment.store root ≠ some (.reference node)) : Custody (environment.retire count) held := by
   intro node loan found own
   obtain ⟨location, carrier, unique⟩ := custody node loan found own
   have equivalent : ∀ place, Carries (environment.retire count) held node place ↔ Carries environment held node place := by
@@ -6091,9 +7483,9 @@ theorem Custody.retire {environment : Environment} {held : List Value} {count : 
 
 variable {program : Program}
 
-theorem Custody.bindShared {environment : Environment} {held : List Value} {node : Nat}
-    (custody : Custody environment (held ++ [.shared node])) (valid : environment.Valid) (name : String) :
-    Custody (environment.bind name (.shared node)) held := by
+theorem Custody.bindReference {environment : Environment} {held : List Value} {node : Nat}
+    (custody : Custody environment (held ++ [.reference node])) (valid : environment.Valid) (name : String) :
+    Custody (environment.bind name (.reference node)) held := by
   have installed := custody.install (root := environment.nextRoot)
     (by intro other loan found own; simp [valid.fresh])
   exact installed
@@ -6101,35 +7493,35 @@ theorem Custody.bindShared {environment : Environment} {held : List Value} {node
 theorem Environment.Disposes.active {before after : Environment} {value : Value}
     (disposed : Environment.Disposes program before value after)
     {node : Nat} {loan : Loan} (found : after.loans[node]? = some loan) (own : loan.own = true) :
-    before.loans[node]? = some loan ∧ value ≠ .shared node := by
+    before.loans[node]? = some loan ∧ value ≠ .reference node := by
   cases disposed with
   | data plain =>
     refine ⟨found, ?_⟩
     intro equal; subst value; exact plain
-  | shared ended =>
+  | reference _ ended =>
     have active := Environment.endOwn_active ended found own
-    exact ⟨active.1, fun equal => active.2 (Value.shared.inj equal)⟩
+    exact ⟨active.1, fun equal => active.2 (Value.reference.inj equal)⟩
 
 theorem Custody.dispose {before after : Environment} {held : List Value} {value : Value}
     (custody : Custody before held) (disposed : Environment.Disposes program before value after) :
     Custody after held := by
   cases disposed with
   | data => exact custody
-  | shared ended => exact custody.endOwn ended
+  | reference _ ended => exact custody.endOwn ended
 
-theorem Custody.assignShared {before disposed : Environment} {held : List Value} {node root : Nat} {old : Value}
-    (custody : Custody before (held ++ [.shared node])) (stored : before.store root = some old)
+theorem Custody.assignReference {before disposed : Environment} {held : List Value} {node root : Nat} {old : Value}
+    (custody : Custody before (held ++ [.reference node])) (stored : before.store root = some old)
     (disposal : Environment.Disposes program before old disposed) :
-    Custody (disposed.put root (.shared node)) held := by
+    Custody (disposed.put root (.reference node)) held := by
   apply (custody.dispose disposal).install
   intro other loan found own carried
   rw [disposal.storage.store, stored] at carried
   exact (disposal.active found own).2 (Option.some.inj carried)
 
-theorem Custody.restoreShared {environment : Environment} {held : List Value} {node root : Nat}
-    (custody : Custody environment (held ++ [.shared node]))
+theorem Custody.restoreReference {environment : Environment} {held : List Value} {node root : Nat}
+    (custody : Custody environment (held ++ [.reference node]))
     (vacant : environment.store root = some .vacant) :
-    Custody (environment.put root (.shared node)) held := by
+    Custody (environment.put root (.reference node)) held := by
   apply custody.install
   intro other loan found own
   simp [vacant]
@@ -6138,7 +7530,7 @@ theorem DisposesRoots.active {before after : Environment} {roots : List Root}
     {trace : List (Root × List Nat)} (disposed : DisposesRoots program before roots trace after)
     {node : Nat} {loan : Loan} (found : after.loans[node]? = some loan) (own : loan.own = true) :
     before.loans[node]? = some loan ∧
-      ∀ root ∈ roots, after.store root ≠ some (.shared node) := by
+      ∀ root ∈ roots, after.store root ≠ some (.reference node) := by
   induction disposed with
   | nil => exact ⟨found, by simp⟩
   | @cons before middle after root roots value trace stored free head tail ih =>
@@ -6171,7 +7563,7 @@ theorem Custody.cleans {before after : Environment} {held : List Value} {count :
 
 private theorem Value.writeIndices_not_shared {value replacement updated : Value} {fields : List Nat}
     (plain : replacement.ReferenceFree) (written : value.writeIndices fields replacement = some updated)
-    (node : Nat) : updated ≠ .shared node := by
+    (node : Nat) : updated ≠ .reference node := by
   cases fields with
   | nil =>
     have equal : replacement = updated := by simpa [Value.writeIndices] using written
@@ -6202,7 +7594,7 @@ theorem Custody.writeAddress {before after : Environment} {held : List Value} {a
   obtain ⟨updated, update, rfl⟩ := written
   intro node loan found own
   obtain ⟨location, carrier, unique⟩ := custody node loan found own
-  have noOld : parent ≠ .shared node := by intro equal; subst parent; exact oldPlain
+  have noOld : parent ≠ .reference node := by intro equal; subst parent; exact oldPlain
   have noNew := Value.writeIndices_not_shared plain update node
   have equivalent : ∀ place, Carries (before.put address.root updated) held node place ↔
       Carries before held node place := by
@@ -6218,7 +7610,7 @@ theorem Custody.writeAddress {before after : Environment} {held : List Value} {a
 theorem Custody.writeAddress_selected {before after : Environment} {held : List Value} {address : Address}
     {replacement selected : Value} (custody : Custody before held)
     (shape : ∀ root value, before.store root = some value →
-      value.ReferenceFree ∨ ∃ node, value = .shared node ∧ node < before.loans.length)
+      value.ReferenceFree ∨ ∃ node, value = .reference node ∧ node < before.loans.length)
     (read : before.at address = some selected) (oldPlain : selected.ReferenceFree)
     (plain : replacement.ReferenceFree) (written : before.writeAddress address replacement = some after) :
     Custody after held := by
@@ -6229,14 +7621,14 @@ theorem Custody.writeAddress_selected {before after : Environment} {held : List 
   · exact free
   · cases fields : address.fields with
     | nil =>
-      have equal : Value.shared node = selected := by simpa [Value.readIndices, fields] using selectedAt
+      have equal : Value.reference node = selected := by simpa [Value.readIndices, fields] using selectedAt
       subst selected; exact False.elim oldPlain
     | cons index rest => simp [Value.readIndices, Value.children, fields] at selectedAt
 
-theorem Custody.takeShared {before after : Environment} {held : List Value} {root node : Nat}
+theorem Custody.takeReference {before after : Environment} {held : List Value} {root node : Nat}
     (custody : Custody before held)
-    (taken : before.takeAddress ⟨root, []⟩ = some (.shared node, after)) :
-    Custody after (held ++ [.shared node]) := by
+    (taken : before.takeAddress ⟨root, []⟩ = some (.reference node, after)) :
+    Custody after (held ++ [.reference node]) := by
   simp only [Environment.takeAddress, Bind.bind, Option.bind_eq_some_iff, Option.some.injEq] at taken
   obtain ⟨value, read, next, written, equal⟩ := taken
   cases equal
@@ -6245,7 +7637,7 @@ theorem Custody.takeShared {before after : Environment} {held : List Value} {roo
   obtain ⟨parent, ⟨resident, stored, equal⟩, read⟩ := read
   cases equal
   split at read
-  · have equal : parent = .shared node := Option.some.inj read
+  · have equal : parent = .reference node := Option.some.inj read
     subst parent
     have equal : before.put root .vacant = after := by
       simpa [Environment.writeAddress, Value.writeIndices, stored] using written
@@ -6256,21 +7648,21 @@ theorem Custody.takeShared {before after : Environment} {held : List Value} {roo
 
 variable {program : Program}
 
-theorem Custody.assignSharedAddress {before disposed : Environment} {held : List Value}
+theorem Custody.assignReferenceAddress {before disposed : Environment} {held : List Value}
     {node root : Nat} {old : Value}
-    (custody : Custody before (held ++ [.shared node])) (stored : before.store root = some old)
+    (custody : Custody before (held ++ [.reference node])) (stored : before.store root = some old)
     (disposal : Environment.Disposes program before old disposed) :
-    disposed.writeAddress ⟨root, []⟩ (.shared node) = some (disposed.put root (.shared node)) ∧
-      Custody (disposed.put root (.shared node)) held := by
-  refine ⟨?_, custody.assignShared stored disposal⟩
+    disposed.writeAddress ⟨root, []⟩ (.reference node) = some (disposed.put root (.reference node)) ∧
+      Custody (disposed.put root (.reference node)) held := by
+  refine ⟨?_, custody.assignReference stored disposal⟩
   simp [Environment.writeAddress, Value.writeIndices, disposal.storage.store, stored]
 
-theorem Custody.restoreSharedAddress {environment : Environment} {held : List Value} {node root : Nat}
-    (custody : Custody environment (held ++ [.shared node]))
+theorem Custody.restoreReferenceAddress {environment : Environment} {held : List Value} {node root : Nat}
+    (custody : Custody environment (held ++ [.reference node]))
     (vacant : environment.store root = some .vacant) :
-    environment.writeAddress ⟨root, []⟩ (.shared node) = some (environment.put root (.shared node)) ∧
-      Custody (environment.put root (.shared node)) held := by
-  exact ⟨by simp [Environment.writeAddress, Value.writeIndices, vacant], custody.restoreShared vacant⟩
+    environment.writeAddress ⟨root, []⟩ (.reference node) = some (environment.put root (.reference node)) ∧
+      Custody (environment.put root (.reference node)) held := by
+  exact ⟨by simp [Environment.writeAddress, Value.writeIndices, vacant], custody.restoreReference vacant⟩
 
 
 
@@ -6312,7 +7704,8 @@ theorem StateTyped.disposeSlot {interpretation : Interpretation} {context : Cont
     {environment : Environment} {held : List Value}
     (typed : StateTyped program interpretation context heldNodes environment held) {binding : String × Slot}
     (member : binding ∈ context.bindings) (allowed : binding.2.toBindingType.Disposable program)
-    (unprotected : ∀ node, binding.2.reference = some node → node ∉ heldNodes) :
+    (unprotected : ∀ node, binding.2.reference = some node → node ∉ heldNodes)
+    (ready : ∀ node, binding.2.reference = some node → context.Restored node) :
     ∃ value after, environment.store (interpretation.binder binding.2.binder) = some value ∧
       Environment.Disposes program environment value after ∧
       StateTyped program interpretation (context.dispose binding.2.reference) heldNodes after held := by
@@ -6322,11 +7715,11 @@ theorem StateTyped.disposeSlot {interpretation : Interpretation} {context : Cont
     have plain : value.ReferenceFree := by simpa [Slot.Corresponds, reference] using corresponds
     exact ⟨value, environment, stored, .data plain (StorageDisposition.realized allowed resident).destroys, typed⟩
   | some node =>
-    have shape : value = .shared (interpretation.node node) := by simpa [Slot.Corresponds, reference] using corresponds
+    have shape : value = .reference (interpretation.node node) := by simpa [Slot.Corresponds, reference] using corresponds
     cases shape
     obtain ⟨loan, found, _⟩ := (typed.source.slots binding member).2 node reference
     obtain ⟨after, ended, afterTyped⟩ := typed.endOwn found (unprotected node reference)
-    exact ⟨_, after, stored, .shared ended, by simpa [Context.dispose, reference] using afterTyped⟩
+    exact ⟨_, after, stored, .reference (typed.toStoreTyped.restored found (ready node reference)) ended, by simpa [Context.dispose, reference] using afterTyped⟩
 
 theorem Environment.Disposes.ownerFree {before after : Environment} {value : Value}
     (disposed : Disposes program before value after) {address : Address} (free : before.OwnerFree address) :
@@ -6370,11 +7763,11 @@ theorem StateTyped.disposeSlots {interpretation : Interpretation} {context : Con
   induction slots generalizing context environment with
   | nil => exact ⟨environment, [], .nil, typed⟩
   | cons binding slots ih =>
-    obtain ⟨drop, free, unprotected, rest⟩ := allowed
+    obtain ⟨drop, free, unprotected, ready, rest⟩ := allowed
     have member := members binding (by simp)
-    have known : (Origin.mk (.binder binding.2.binder) []).Known context := .inl ⟨binding, member, rfl⟩
+    have known : (Origin.mk (.binder binding.2.binder) []).Known context := typed.source.member_known binding member
     have runtimeFree := typed.toStoreTyped.ownerFree known free
-    obtain ⟨value, middle, found, disposed, middleTyped⟩ := typed.disposeSlot member drop unprotected
+    obtain ⟨value, middle, found, disposed, middleTyped⟩ := typed.disposeSlot member drop unprotected ready
     have tailMembers : ∀ slot ∈ slots, slot ∈ (context.dispose binding.2.reference).bindings := by
       intro slot included
       have old := members slot (by simp [included])
@@ -6415,13 +7808,50 @@ theorem StoreTyped.retire {interpretation : Interpretation} {context : Context} 
     source := typed.source.retire count
     residents := ?_
     slots := ?_
+    cells := by
+      intro binder slot stored
+      simp only [Context.retire] at stored
+      split at stored
+      · cases stored
+      · rename_i absent
+        obtain ⟨value, found, resident, corresponds⟩ := typed.cells binder slot stored
+        have outside : interpretation.binder binder ∉ (environment.bindings.take count).map Prod.snd := by
+          intro included
+          rw [List.map_take, typed.slots.roots, ← List.map_take] at included
+          obtain ⟨binding, member, equal⟩ := List.mem_map.mp included
+          have identity := typed.binderDistinct binding.2.binder binder
+            (typed.source.member_known binding (List.mem_of_mem_take member)) (.inl ⟨slot, stored⟩) equal
+          apply absent
+          rw [List.map_take, ← typed.source.bindings_binders, ← List.map_take]
+          exact List.mem_map.mpr ⟨binding, member, identity⟩
+        exact ⟨value, by simpa only [Environment.retire, if_neg outside] using found, resident, corresponds⟩
     binderBound := ?_
     binderDistinct := ?_
     inputApart := ?_
-    targets := ?_
+    sourceTargets := by
+      intro node loan found own
+      apply (typed.sourceTargets node loan found own).storage_congr
+      cases base : loan.target.base with
+      | input input => rfl
+      | binder binder =>
+        have outside : binder ∉ (context.names.take count).map Prod.snd := by
+          intro removed
+          have runtimeRemoved : interpretation.binder binder ∈ (environment.bindings.take count).map Prod.snd := by
+            rw [List.map_take, typed.slots.roots]
+            have included : interpretation.binder binder ∈ ((context.names.take count).map Prod.snd).map interpretation.binder :=
+              List.mem_map.mpr ⟨binder, removed, rfl⟩
+            simpa only [List.map_take, ← typed.source.bindings_binders, List.map_map, Function.comp_def] using included
+          have apart := free _ runtimeRemoved (interpretation.node node) _ (typed.records node loan found) own
+          simp only [Address.Apart, Interpretation.origin, base] at apart
+          rcases apart with different | fields
+          · exact different rfl
+          · cases fields
+        simp only [Context.retire, if_neg outside]
+    inputTargets := ?_
     storeShape := ?_ }
-  · simpa [Context.erase, Context.retire, List.map_drop] using typed.residents.retire count
-  · apply (typed.slots.drop count).frame
+  · simpa only [Context.erase, typed.source.bindings_retire count, List.map_drop] using typed.residents.retire count
+  · rw [typed.source.bindings_retire count]
+    apply (typed.slots.drop count).frame
     intro root retained
     apply Environment.retire_frame
     intro removed
@@ -6436,8 +7866,8 @@ theorem StoreTyped.retire {interpretation : Interpretation} {context : Context} 
     exact typed.binderDistinct first second (Context.retire_mentions firstKnown) (Context.retire_mentions secondKnown) same
   · intro binder input known bound
     exact typed.inputApart binder input (Context.retire_mentions known) bound
-  · intro node loan found own
-    obtain ⟨value, read, valueTyped⟩ := typed.targets node loan found own
+  · intro node loan found own input base
+    obtain ⟨value, read, valueTyped⟩ := typed.inputTargets node loan found own input base
     have outside : (interpretation.origin loan.target).root ∉ (environment.bindings.take count).map Prod.snd := by
       intro removed
       have apart := free _ removed (interpretation.node node) _ (typed.records node loan found) own
@@ -6451,6 +7881,33 @@ theorem StoreTyped.retire {interpretation : Interpretation} {context : Context} 
     split at stored
     · cases stored
     · exact typed.storeShape root value stored
+
+theorem Context.Ready.retire {context : Context} {origin : Origin} {referent : Ty} {count : Nat}
+    (ready : context.Ready origin) (target : (context.retire count).Target program origin referent) :
+    (context.retire count).Ready origin := by
+  apply ready.storage_congr
+  cases base : origin.base with
+  | input input => rfl
+  | binder binder =>
+    simp only [Context.Target, base] at target
+    obtain ⟨slot, stored, _⟩ := target
+    have outside : binder ∉ (context.names.take count).map Prod.snd := by
+      intro removed
+      simp only [Context.retire, if_pos removed] at stored
+      cases stored
+    simp only [Context.retire, if_neg outside]
+
+theorem Context.Restored.bind {context : Context} {node : Nat} (ready : context.Restored node)
+    (valid : context.WellFormed program) (name : String) (mutable : Bool) (result : ResultType) :
+    (context.bind name mutable result).Restored node := by
+  intro loan found own
+  apply (ready loan found own).storage_congr
+  cases base : loan.target.base with
+  | input input => simp [Context.bind]
+  | binder binder =>
+    have bound : binder < context.nextBinder := by
+      simpa [Origin.Bounded, base] using (valid.targets node loan found).1
+    simp [Context.bind, Nat.ne_of_lt bound]
 
 theorem StateTyped.cleanup {interpretation : Interpretation} {context : Context} {heldNodes : List Nat}
     {environment : Environment} {held : List Value}
@@ -6469,9 +7926,12 @@ theorem StateTyped.cleanup {interpretation : Interpretation} {context : Context}
   have free : ∀ root ∈ (disposed.bindings.take count).map Prod.snd, disposed.OwnerFree ⟨root, []⟩ := by
     simpa only [destroyed.storage.bindings, roots] using destroyed.freed
   refine ⟨disposed.retire count, trace, cleaned, ?_⟩
-  exact { disposedTyped.toStoreTyped.retire count free with
+  let stored := disposedTyped.toStoreTyped.retire count free
+  exact { stored with
     heldShape := disposedTyped.heldShape
     heldOwn := disposedTyped.heldOwn
+    heldReady := fun node member loan found own =>
+      (disposedTyped.heldReady node member loan found own).retire (stored.sourceTargets node loan found own).1
     custody := typed.custody.cleans cleaned }
 
 theorem StoreTyped.hide {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -6490,7 +7950,11 @@ theorem StateTyped.hide {interpretation : Interpretation} {context : Context} {h
     {environment : Environment} {held : List Value}
     (typed : StateTyped program interpretation context heldNodes environment held) :
     StateTyped program interpretation context.hide heldNodes environment.hide held :=
-  { typed.toStoreTyped.hide with heldShape := typed.heldShape, heldOwn := typed.heldOwn, custody := typed.custody }
+  { typed.toStoreTyped.hide with
+    heldShape := typed.heldShape
+    heldOwn := typed.heldOwn
+    heldReady := typed.heldReady
+    custody := typed.custody }
 
 /-- Frame facts concern the proof interpretation only, including skipped source
 IDs. Bounds remain restricted to semantic support, never invented allocations. -/
@@ -6518,9 +7982,9 @@ theorem ResultTyped.transport {before after : Context} {first last : Interpretat
     have shape := typed.shape
     rw [reference] at shape
     obtain ⟨valueShape, loan, found, typeShape⟩ := shape
-    obtain ⟨retained, kept, _, referent, _, _⟩ := history.records node loan found
-    exact ⟨valueShape.trans (congrArg Value.shared (same.nodes node (List.getElem?_eq_some_iff.mp found).1).symm),
-      retained, kept, typeShape.trans (congrArg Ty.shared referent.symm)⟩
+    obtain ⟨retained, kept, _, referent, _, mode, _⟩ := history.records node loan found
+    exact ⟨valueShape.trans (congrArg Value.reference (same.nodes node (List.getElem?_eq_some_iff.mp found).1).symm),
+      retained, kept, typeShape.trans (by rw [referent, mode])⟩
 
 theorem SlotsJoin.erased {before after : List (String × Slot)} (joined : SlotsJoin program before after) :
     ContextJoins program (before.map fun binding => (binding.1, binding.2.toBindingType))
@@ -6545,6 +8009,16 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
     source := joined.wellFormed typed.source
     residents := typed.residents.join joined.slots.erased
     slots := typed.slots.join joined.slots
+    cells := by
+      intro binder slot stored
+      obtain ⟨original, sourceStored, metadata, state⟩ := (joined.storage (.binder binder)).backward stored
+      obtain ⟨value, found, resident, corresponds⟩ := typed.cells binder original sourceStored
+      have equal : slot.type = original.type ∧ slot.mutable = original.mutable ∧
+          slot.binder = original.binder ∧ slot.reference = original.reference := by
+        simpa only [Slot.metadata, Prod.mk.injEq] using metadata
+      refine ⟨value, found, ?_, ?_⟩
+      · simpa only [SlotTyped, equal.1] using resident.join state
+      · simpa only [Slot.Corresponds, equal.2.2.2] using corresponds
     binderBound := ?_
     binderDistinct := ?_
     inputBound := ?_
@@ -6552,7 +8026,31 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
     nodeOrder := ?_
     records := ?_
     activeCoverage := ?_
-    targets := ?_ }
+    sourceTargets := by
+      intro node loan found own
+      have oldFound : context.loans[node]? = some loan := joined.loans ▸ found
+      obtain ⟨target, ready, inputShared⟩ := typed.sourceTargets node loan oldFound own
+      refine ⟨?_, ?_, inputShared⟩
+      · cases base : loan.target.base with
+        | input input => simp [Context.Target, base]
+        | binder binder =>
+          obtain ⟨slot, stored, path, state, access⟩ := (by simpa [Context.Target, base] using target)
+          obtain ⟨current, currentStored, metadata, _⟩ := (joined.storage (.binder binder)).forward stored
+          have type : current.type = slot.type := congrArg Prod.fst metadata
+          obtain ⟨next, nextAccess, _⟩ := joined.targetMasks node loan oldFound own binder slot current state base stored currentStored access
+          simp only [Context.Target, base]
+          exact ⟨current, currentStored, type ▸ path, next, nextAccess⟩
+      · intro shared
+        have oldReady := ready shared
+        cases base : loan.target.base with
+        | input input => simp [Context.Ready, base]
+        | binder binder =>
+          simp only [Context.Ready, base] at oldReady ⊢
+          obtain ⟨slot, state, stored, access, complete⟩ := oldReady
+          obtain ⟨current, currentStored, _, _⟩ := (joined.storage (.binder binder)).forward stored
+          obtain ⟨next, nextAccess, nextComplete⟩ := joined.targetMasks node loan oldFound own binder slot current state base stored currentStored access
+          exact ⟨current, next, currentStored, nextAccess, nextComplete complete⟩
+    inputTargets := ?_ }
   · intro binder known
     exact typed.binderBound binder ((joined.mentions binder).mp known)
   · intro first second firstKnown secondKnown same
@@ -6564,7 +8062,7 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
   · simpa only [joined.loans] using typed.nodeOrder
   · simpa only [joined.loans] using typed.records
   · simpa only [joined.loans] using typed.activeCoverage
-  · simpa only [joined.loans] using typed.targets
+  · simpa only [joined.loans] using typed.inputTargets
 
 theorem StateTyped.join {interpretation : Interpretation} {context afterContext : Context} {heldNodes : List Nat}
     {environment : Environment} {held : List Value}
@@ -6573,6 +8071,18 @@ theorem StateTyped.join {interpretation : Interpretation} {context afterContext 
   exact { typed.toStoreTyped.join joined with
     heldShape := typed.heldShape
     heldOwn := by simpa only [Context.Own, joined.loans] using typed.heldOwn
+    heldReady := by
+      intro node member loan found own
+      have oldFound : context.loans[node]? = some loan := joined.loans ▸ found
+      have ready := typed.heldReady node member loan oldFound own
+      cases base : loan.target.base with
+      | input input => simp [Context.Ready, base]
+      | binder binder =>
+        simp only [Context.Ready, base] at ready ⊢
+        obtain ⟨slot, state, stored, access, complete⟩ := ready
+        obtain ⟨current, currentStored, _, _⟩ := (joined.storage (.binder binder)).forward stored
+        obtain ⟨next, nextAccess, nextComplete⟩ := joined.targetMasks node loan oldFound own binder slot current state base stored currentStored access
+        exact ⟨current, next, currentStored, nextAccess, nextComplete complete⟩
     custody := typed.custody }
 
 def Interpretation.addBinder (interpretation : Interpretation) (source runtime : Nat) : Interpretation :=
@@ -6580,23 +8090,17 @@ def Interpretation.addBinder (interpretation : Interpretation) (source runtime :
 
 theorem Context.WellFormed.mentionedBound {context : Context} (valid : context.WellFormed program)
     {binder : Nat} (mentioned : context.MentionsBinder binder) : binder < context.nextBinder := by
-  rcases mentioned with ⟨binding, member, rfl⟩ | ⟨node, loan, found, base⟩
-  · exact (valid.slots binding member).1
+  rcases mentioned with ⟨slot, stored⟩ | ⟨node, loan, found, base⟩
+  · exact (valid.allocated binder slot stored).2.1
   · simpa [Origin.Bounded, base] using (valid.targets node loan found).1
 
 theorem Context.bind_mentions (context : Context) (name : String) (mutable : Bool) (result : ResultType)
     (binder : Nat) : (context.bind name mutable result).MentionsBinder binder ↔
       binder = context.nextBinder ∨ context.MentionsBinder binder := by
-  simp only [Context.MentionsBinder, Context.bind, List.mem_cons]
-  constructor
-  · rintro (⟨binding, equal | member, same⟩ | loan)
-    · subst binding; exact .inl same.symm
-    · exact .inr (.inl ⟨binding, member, same⟩)
-    · exact .inr (.inr loan)
-  · rintro (rfl | (⟨binding, member, same⟩ | loan))
-    · exact .inl ⟨_, .inl rfl, rfl⟩
-    · exact .inl ⟨binding, .inr member, same⟩
-    · exact .inr loan
+  by_cases same : binder = context.nextBinder
+  · subst binder
+    simp [Context.MentionsBinder, Context.bind]
+  · simp [Context.MentionsBinder, Context.bind, same]
 
 theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {environment : Environment}
     {value : Value} {result : ResultType}
@@ -6623,7 +8127,7 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
       apply typed.inputBound input
       simpa [Origin.Bounded, base] using (typed.source.targets node loan found).1
   have reference : ∀ node, result.reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ result.type = .shared loan.referent := by
+      context.loans[node]? = some loan ∧ result.type = .reference loan.referent loan.mode := by
     intro node equal
     have shape := valueTyped.shape
     rw [equal] at shape
@@ -6637,10 +8141,37 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
     | some node =>
       obtain ⟨loan, found, shape⟩ := reference node equal
       rw [shape]
-      exact .shared (typed.source.targets node loan found).2
+      exact .reference (typed.source.targets node loan found).2
   refine { source := typed.source.bind name mutable result supported reference
-           residents := typed.residents.bind valueTyped.resident
+           residents := by
+             simpa only [Context.erase, typed.source.bindings_bind name mutable result, List.map_cons] using
+               typed.residents.bind (name := name) (slot := ⟨result.type, mutable, .full⟩) valueTyped.resident
            slots := ?_
+           cells := by
+             intro binder slot stored
+             by_cases same : binder = context.nextBinder
+             · subst binder
+               simp only [Context.bind] at stored
+               cases stored
+               refine ⟨value, ?_, valueTyped.resident, ?_⟩
+               · simp [Environment.bind, Interpretation.addBinder]
+               · cases reference : result.reference with
+                 | none =>
+                   have shape := valueTyped.shape
+                   rw [reference] at shape
+                   exact shape.2
+                 | some node =>
+                   have shape := valueTyped.shape
+                   rw [reference] at shape
+                   exact shape.1
+             · have oldStored : context.storage (.binder binder) = some slot := by
+                 simpa [Context.bind, same] using stored
+               obtain ⟨resident, found, residentTyped, corresponds⟩ := typed.cells binder slot oldStored
+               have known : context.MentionsBinder binder := .inl ⟨slot, oldStored⟩
+               refine ⟨resident, ?_, residentTyped, corresponds⟩
+               change (environment.bind name value).store (next.binder binder) = some resident
+               rw [oldBinder binder known]
+               simpa [Environment.bind, Nat.ne_of_lt (typed.binderBound binder known)] using found
            binderBound := ?_
            binderDistinct := ?_
            inputBound := ?_
@@ -6648,9 +8179,19 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
            nodeOrder := typed.nodeOrder
            records := ?_
            activeCoverage := typed.activeCoverage
-           targets := ?_
+           sourceTargets := by
+             intro node loan found own
+             apply (typed.sourceTargets node loan found own).storage_congr
+             cases base : loan.target.base with
+             | input input => simp [Context.bind]
+             | binder binder =>
+               have bound : binder < context.nextBinder := by
+                 simpa [Origin.Bounded, base] using (typed.source.targets node loan found).1
+               simp [Context.bind, Nat.ne_of_lt bound]
+           inputTargets := ?_
            storeShape := ?_ }
-  · apply SlotsCorrespond.cons freshBinder.symm
+  · rw [typed.source.bindings_bind name mutable result]
+    apply SlotsCorrespond.cons freshBinder.symm
     · intro resident stored
       have equal : value = resident := by simpa [Environment.bind] using stored
       subst resident
@@ -6676,7 +8217,7 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
           refine .cons (identity.trans (oldBinder slot.binder mention).symm) ?_ (ih (fun binding member => members binding (by simp [member])))
           intro old stored
           exact resident old (by simpa [Environment.bind, Nat.ne_of_lt below] using stored)
-      exact preserve typed.slots (fun binding member => .inl ⟨binding, member, rfl⟩)
+      exact preserve typed.slots (fun binding member => typed.source.member_known binding member)
   · intro binder mentioned
     rcases (Context.bind_mentions _ _ _ _ _).mp mentioned with rfl | old
     · simp [Interpretation.addBinder, Environment.bind]
@@ -6709,11 +8250,11 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
       rw [oldBinder binder old]
       exact typed.inputApart binder input old bound
   · intro node loan found
-    change environment.loans[interpretation.node node]? = some ⟨next.origin loan.target, loan.parent.map interpretation.node, loan.own⟩
+    change environment.loans[interpretation.node node]? = some ⟨next.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩
     rw [oldOrigin node loan found]
     exact typed.records node loan found
-  · intro node loan found own
-    obtain ⟨resident, read, residentTyped⟩ := typed.targets node loan found own
+  · intro node loan found own input base
+    obtain ⟨resident, read, residentTyped⟩ := typed.inputTargets node loan found own input base
     refine ⟨resident, ?_, residentTyped⟩
     change (environment.bind name value).readAddress (next.origin loan.target) = some resident
     rw [oldOrigin node loan found]
@@ -6745,6 +8286,8 @@ theorem StateTyped.bind {interpretation : Interpretation} {context : Context} {e
   refine { toStoreTyped := typed.toStoreTyped.bind valueTyped name mutable
            heldShape := ?_
            heldOwn := ?_
+           heldReady := fun node member =>
+             (typed.heldReady node (List.mem_append_left _ member)).bind typed.source name mutable result
            custody := ?_ }
   · have shape := typed.heldShape
     rw [List.map_append, ← valueTyped.referenceValues] at shape
@@ -6755,9 +8298,9 @@ theorem StateTyped.bind {interpretation : Interpretation} {context : Context} {e
     | some node =>
       have shape := valueTyped.shape
       rw [reference] at shape
-      have custody : Custody environment (held ++ [.shared (interpretation.node node)]) := by
+      have custody : Custody environment (held ++ [.reference (interpretation.node node)]) := by
         simpa [shape.1, Value.referenceValues] using typed.custody
-      simpa [shape.1] using custody.bindShared typed.residents.valid name
+      simpa [shape.1] using custody.bindReference typed.residents.valid name
     | none =>
       have shape := valueTyped.shape
       rw [reference] at shape
@@ -6773,7 +8316,7 @@ theorem StateTyped.bind {interpretation : Interpretation} {context : Context} {e
         | stored root =>
           by_cases equal : root = environment.nextRoot
           · subst root
-            have notShared : value ≠ .shared node := by
+            have notShared : value ≠ .reference node := by
               intro same; subst value; exact shape.2
             simp [Carries, Environment.bind, typed.residents.valid.fresh, notShared]
           · simp [Carries, Environment.bind, equal]
@@ -6874,12 +8417,12 @@ theorem StateProgress.bind {interpretation : Interpretation} {context : Context}
     · exact False.elim (Nat.not_lt_of_ge large (valid.mentionedBound old))
 
 theorem StateProgress.borrow {interpretation : Interpretation} {context : Context} {environment : Environment}
-    {target : Origin} {referent : Ty} {parent : Option Nat} (valid : context.WellFormed program)
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} (valid : context.WellFormed program)
     (known : target.Known context) :
-    StateProgress context (context.borrow target referent parent) environment
-      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩)
+    StateProgress context (context.borrow target referent parent mode) environment
+      (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
       interpretation (interpretation.addNode context.loans.length environment.loans.length) := by
-  refine ⟨.borrow _ _ _ _, .borrow known, ?_, ?_, ?_⟩
+  refine ⟨.borrow _ _ _ _ _, .borrow known, ?_, ?_, ?_⟩
   · refine ⟨fun _ _ => rfl, ?_, rfl⟩
     intro node bound
     simp [Interpretation.addNode, Nat.ne_of_lt bound]
@@ -6899,7 +8442,8 @@ theorem StateProgress.join {interpretation : Interpretation} {context afterConte
 theorem StateProgress.raiseSupply {interpretation : Interpretation} {context : Context} {environment : Environment}
     (valid : context.WellFormed program) {supply : Nat} (larger : context.nextBinder ≤ supply) :
     StateProgress context {context with nextBinder := supply} environment environment interpretation interpretation := by
-  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, larger⟩,
+  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, larger,
+      fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩,
     fun _ mentioned _ => mentioned, .refl _ _, ?_, rfl⟩
   intro binder large known
   exact False.elim (Nat.not_lt_of_ge large (valid.mentionedBound known))
@@ -6961,20 +8505,83 @@ theorem replaceBinding_members {α : Type} {name : String} {value : α}
         · exact Or.inl same
         · exact Or.inr (List.mem_cons_of_mem _ old)
 
- theorem StoreTyped.write_targets {program : Program} {interpretation : Interpretation}
+ theorem StoreTyped.write_inputTargets {program : Program} {interpretation : Interpretation}
     {context : Context} {before after : Environment} (typed : StoreTyped program interpretation context before)
     {origin : Origin} {replacement : Value} (known : origin.Known context) (free : context.Free origin)
     (written : before.writeAddress (interpretation.origin origin) replacement = some after) :
     ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
+      ∀ input, loan.target.base = .input input →
       ∃ value, after.readAddress (interpretation.origin loan.target) = some value ∧
         ValueHasType program value loan.referent := by
-  intro node loan found own
-  obtain ⟨value, read, resident⟩ := typed.targets node loan found own
+  intro node loan found own input base
+  obtain ⟨value, read, resident⟩ := typed.inputTargets node loan found own input base
   have apart := typed.ownerFree known free (interpretation.node node)
-    ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own⟩
+    ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩
     (typed.records node loan found) own
   have frame := (Environment.writeAddress_update written).frame _ apart
   exact ⟨value, by simpa only [Environment.readAddress, frame] using read, resident⟩
+
+private theorem findSlot {slots : List (String × Slot)}
+    (distinct : (slots.map (fun binding => binding.2.binder)).Nodup)
+    {binding : String × Slot} (member : binding ∈ slots) :
+    slots.find? (fun entry => entry.2.binder == binding.2.binder) = some binding := by
+  induction slots with
+  | nil => cases member
+  | cons first rest ih =>
+      obtain ⟨absent, tailDistinct⟩ := List.nodup_cons.mp distinct
+      rcases List.mem_cons.mp member with rfl | member
+      · simp
+      · have different : first.2.binder ≠ binding.2.binder := by
+          intro same
+          exact absent (List.mem_map.mpr ⟨binding, member, same.symm⟩)
+        simpa [List.find?_cons, different] using ih tailDistinct member
+
+theorem Context.withSlots_bindings (context : Context) {slots : List (String × Slot)}
+    (distinct : (slots.map (fun binding => binding.2.binder)).Nodup) :
+    (context.withSlots slots).bindings = slots := by
+  simp only [Context.bindings, Context.withSlots, List.filterMap_map]
+  have equal := Context.filterMap_congr_mem slots
+    (fun binding => ((context.withSlots slots).storage (.binder binding.2.binder)).map fun slot => (binding.1, slot))
+    some (by
+      intro binding member
+      simp only [Context.withSlots, findSlot distinct member, Option.map_some])
+  simpa only [Context.withSlots, List.filterMap_some_fun, Function.comp_def, id_eq] using equal
+
+theorem Context.withSlots_storage_cases {context : Context} {slots : List (String × Slot)}
+    {binder : Nat} {slot : Slot} (stored : (context.withSlots slots).storage (.binder binder) = some slot) :
+    (∃ binding ∈ slots, binding.2 = slot ∧ binding.2.binder = binder) ∨
+      context.storage (.binder binder) = some slot := by
+  cases chosen : slots.find? (fun binding => binding.2.binder == binder) with
+  | none => exact .inr (by simpa only [Context.withSlots, chosen] using stored)
+  | some binding =>
+      have same : binding.2 = slot := by simpa only [Context.withSlots, chosen, Option.some.injEq] using stored
+      exact .inl ⟨binding, List.mem_of_find?_eq_some chosen, same, by simpa using List.find?_some chosen⟩
+
+theorem Context.WellFormed.replaceSlot_storage {context : Context} (valid : context.WellFormed program)
+    {name : String} {slot replacement : Slot} {slots : List (String × Slot)}
+    (selected : lookup name context.bindings = some slot)
+    (changed : replaceBinding name replacement context.bindings = some slots)
+    (sameBinder : replacement.binder = slot.binder) (binder : Nat) :
+    (context.withSlots slots).storage (.binder binder) =
+      if binder = slot.binder then some replacement else context.storage (.binder binder) := by
+  have distinct : (slots.map (fun binding => binding.2.binder)).Nodup := by
+    rw [replaceBinding_map_same Slot.binder selected changed sameBinder]
+    exact valid.distinct
+  by_cases same : binder = slot.binder
+  · subst binder
+    have found := findSlot distinct (lookup_member (replaceBinding_lookup changed))
+    have target : slots.find? (fun entry => entry.2.binder == slot.binder) = some (name, replacement) := by
+      simpa only [sameBinder] using found
+    simp [Context.withSlots, target]
+  · rw [if_neg same]
+    cases chosen : slots.find? (fun binding => binding.2.binder == binder) with
+    | none => simp only [Context.withSlots, chosen]
+    | some binding =>
+      have identity : binding.2.binder = binder := by simpa using List.find?_some chosen
+      rcases replaceBinding_members changed (List.mem_of_find?_eq_some chosen) with rfl | retained
+      · exact False.elim (same (sameBinder.symm.trans identity).symm)
+      · have stored := valid.member_stored binding retained
+        simpa only [Context.withSlots, chosen, identity] using stored.symm
 
 theorem Context.WellFormed.replaceSlot {program : Program} {context : Context}
     (valid : context.WellFormed program) {name : String} {slot replacement : Slot}
@@ -6982,32 +8589,49 @@ theorem Context.WellFormed.replaceSlot {program : Program} {context : Context}
     (changed : replaceBinding name replacement context.bindings = some slots)
     (binder : replacement.binder = slot.binder) (type : replacement.type = slot.type)
     (reference : ∀ node, replacement.reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ replacement.type = .shared loan.referent) :
-    ({ context with bindings := slots } : Context).WellFormed program := by
+      context.loans[node]? = some loan ∧ replacement.type = .reference loan.referent loan.mode) :
+    ((context.withSlots slots) : Context).WellFormed program := by
   have member := lookup_member selected
-  refine ⟨?_, ?_, ?_, valid.targets, valid.parents⟩
-  · rw [replaceBinding_map_same Slot.binder selected changed binder]
+  have distinct : (slots.map (fun binding => binding.2.binder)).Nodup := by
+    rw [replaceBinding_map_same Slot.binder selected changed binder]
     exact valid.distinct
-  · intro binding memberNew
+  have view := context.withSlots_bindings distinct
+  have properties : ∀ binding ∈ slots, StorageType program.target program.data binding.2.type ∧
+      binding.2.binder < context.nextBinder ∧
+      ∀ node, binding.2.reference = some node → ∃ loan, context.loans[node]? = some loan ∧
+        binding.2.type = .reference loan.referent loan.mode := by
+    intro binding memberNew
     rcases replaceBinding_members changed memberNew with rfl | retained
-    · simpa only [type] using valid.supported (name, slot) member
-    · exact valid.supported binding retained
+    · exact ⟨type.symm ▸ valid.supported (name, slot) member,
+        binder.symm ▸ (valid.slots (name, slot) member).1, reference⟩
+    · exact ⟨valid.supported binding retained, valid.slots binding retained⟩
+  refine ⟨by simpa only [view] using distinct, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes⟩
   · intro binding memberNew
-    rcases replaceBinding_members changed memberNew with rfl | retained
-    · exact ⟨binder ▸ (valid.slots (name, slot) member).1, reference⟩
-    · exact valid.slots binding retained
+    exact (properties binding (view ▸ memberNew)).1
+  · intro binding memberNew
+    exact (properties binding (view ▸ memberNew)).2
+  · intro entry memberNew
+    obtain ⟨binding, memberIn, rfl⟩ := List.mem_map.mp memberNew
+    exact ⟨binding.2, by simp only [Context.withSlots, findSlot distinct memberIn]⟩
+  · intro identity current stored
+    rcases Context.withSlots_storage_cases stored with ⟨binding, memberNew, rfl, equal⟩ | old
+    · obtain ⟨supported, bound, reference⟩ := properties binding memberNew
+      exact ⟨equal, equal ▸ bound, supported, reference⟩
+    · exact valid.allocated identity current old
 
-theorem Context.replaceSlot_mentions {context : Context} {name : String} {slot replacement : Slot}
-    {slots : List (String × Slot)} (selected : lookup name context.bindings = some slot)
+theorem Context.replaceSlot_mentions {context : Context} (valid : context.WellFormed program)
+    {name : String} {slot replacement : Slot} {slots : List (String × Slot)}
+    (selected : lookup name context.bindings = some slot)
     (changed : replaceBinding name replacement context.bindings = some slots)
     (binder : replacement.binder = slot.binder) {id : Nat}
-    (mentioned : ({ context with bindings := slots } : Context).MentionsBinder id) :
-    context.MentionsBinder id := by
-  rcases mentioned with ⟨binding, member, same⟩ | loan
-  · rcases replaceBinding_members changed member with rfl | retained
-    · exact Or.inl ⟨(name, slot), lookup_member selected, binder.symm.trans same⟩
-    · exact Or.inl ⟨binding, retained, same⟩
-  · exact Or.inr loan
+    (mentioned : (context.withSlots slots).MentionsBinder id) : context.MentionsBinder id := by
+  rcases mentioned with ⟨current, stored⟩ | loan
+  · rcases Context.withSlots_storage_cases stored with ⟨binding, member, _, same⟩ | old
+    · rcases replaceBinding_members changed member with rfl | retained
+      · exact (binder.symm.trans same) ▸ valid.member_known (name, slot) (lookup_member selected)
+      · exact same ▸ valid.member_known binding retained
+    · exact .inl ⟨current, old⟩
+  · exact .inr loan
 
 theorem SlotsCorrespond.store_frame {interpretation : Interpretation} {before after : Store}
     {bindings : List (String × Root)} {slots : List (String × Slot)}
@@ -7065,6 +8689,40 @@ theorem SlotsCorrespond.replace_put {interpretation : Interpretation} {store : S
       exact .cons identity (fun actual stored => resident actual (by simpa [rootDifferent] using stored))
         (ih distincts.2 selected tailChanged)
 
+theorem Context.Restored.writeSlot {context : Context} {node : Nat}
+    (ready : context.Restored node) (valid : context.WellFormed program)
+    {name : String} {slot nextSlot : Slot} {slots : List (String × Slot)}
+    {indices : List Nat} {state next : Initialization}
+    (selected : lookup name context.bindings = some slot)
+    (changed : replaceBinding name nextSlot context.bindings = some slots)
+    (sameBinder : nextSlot.binder = slot.binder)
+    (initialization : nextSlot.initialization = slot.initialization.write indices next)
+    (access : slot.initialization.Access indices state)
+    (free : context.Free ⟨.binder slot.binder, indices⟩) : (context.withSlots slots).Restored node := by
+  intro loan found own
+  have previous := ready loan found own
+  cases base : loan.target.base with
+  | input input => simp [Context.Ready, base]
+  | binder binder =>
+    by_cases same : binder = slot.binder
+    · subst binder
+      have apart : CoordinatesApart indices loan.target.fields := by
+        simpa [Origin.Apart, base] using free node loan found own
+      simp only [Context.Ready, base] at previous ⊢
+      obtain ⟨oldSlot, mask, stored, available, complete⟩ := previous
+      have equal := Option.some.inj (stored.symm.trans (valid.member_stored (name, slot) (lookup_member selected)))
+      subst oldSlot
+      refine ⟨nextSlot, mask, ?_, initialization.symm ▸ access.write_frame available apart next, complete⟩
+      rw [valid.replaceSlot_storage selected changed sameBinder]; simp
+    · apply previous.storage_congr
+      rw [base, valid.replaceSlot_storage selected changed sameBinder, if_neg same]
+
+theorem Context.Restored.dispose {context : Context} {node : Nat} (ready : context.Restored node)
+    (reference : Option Nat) : (context.dispose reference).Restored node := by
+  cases reference with
+  | none => exact ready
+  | some ended => exact ready.endOwn ended
+
 theorem StoreTyped.writeSlot {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
     {place : Place} {slot nextSlot : Slot} {slots : List (String × Slot)} {target : Ty}
@@ -7076,24 +8734,19 @@ theorem StoreTyped.writeSlot {program : Program} {home : Module} {interpretation
     (sameBinder : nextSlot.binder = slot.binder) (sameType : nextSlot.type = slot.type)
     (initialization : nextSlot.initialization = slot.initialization.write indices next)
     (reference : ∀ node, nextSlot.reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ nextSlot.type = .shared loan.referent)
+      context.loans[node]? = some loan ∧ nextSlot.type = .reference loan.referent loan.mode)
     (resident : ResidentTyped program next replacement target)
     (mode : (slot.type.DataShape ∧ nextSlot.reference = none) ∨
       (indices = [] ∧ nextSlot.Corresponds interpretation replacement))
     (free : context.Free ⟨.binder slot.binder, indices⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, indices⟩ ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, indices⟩ replacement = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after := by
+      StoreTyped program interpretation (context.withSlots slots) after := by
   have named := (typed.slots.lookup selected).1
-  have erased := lookup_mapValue Slot.toBindingType selected
-  obtain ⟨parent, found, parentTyped⟩ := typed.residents.lookup erased
-  have stored : environment.store (interpretation.binder slot.binder) = some parent := by
-    simpa [Environment.get, named] using found
-  obtain ⟨updated, written, updatedTyped, resolvedFields⟩ := path.write parentTyped access resident
+  have rootStored := typed.source.member_stored (place.root, slot) (lookup_member selected)
+  obtain ⟨parent, updated, stored, written, updatedTyped, write⟩ :=
+    typed.writeCanonical rootStored path.canonical access resident
   obtain ⟨old, resolved, raw, oldTyped⟩ := typed.resolvePlace selected access path
-  have write : environment.writeAddress ⟨interpretation.binder slot.binder, indices⟩ replacement =
-      some (environment.put (interpretation.binder slot.binder) updated) := by
-    simp [Environment.writeAddress, stored, written]
   have correspondence : nextSlot.Corresponds interpretation updated := by
     rcases mode with ⟨data, noReference⟩ | ⟨direct, shape⟩
     · simpa [Slot.Corresponds, noReference] using updatedTyped.referenceFree data
@@ -7102,14 +8755,35 @@ theorem StoreTyped.writeSlot {program : Program} {home : Module} {interpretation
       simpa [same] using shape
   have nextTyped : SlotTyped program updated nextSlot.toBindingType := by
     simpa only [SlotTyped, sameType, initialization] using updatedTyped
-  have bound : ∀ binder, ({ context with bindings := slots } : Context).MentionsBinder binder → context.MentionsBinder binder :=
-    fun _ => Context.replaceSlot_mentions selected changed sameBinder
+  have bound : ∀ binder, ((context.withSlots slots) : Context).MentionsBinder binder → context.MentionsBinder binder :=
+    fun _ => Context.replaceSlot_mentions typed.source selected changed sameBinder
   have known : (⟨.binder slot.binder, indices⟩ : Origin).Known context :=
-    Or.inl ⟨(place.root, slot), lookup_member selected, rfl⟩
+    typed.source.member_known (place.root, slot) (lookup_member selected)
+  have distinct : (slots.map (fun binding => binding.2.binder)).Nodup := by
+    rw [replaceBinding_map_same Slot.binder selected changed sameBinder]
+    exact typed.source.distinct
+  have view := context.withSlots_bindings distinct
   refine ⟨_, resolved, write, ?_⟩
   refine { source := typed.source.replaceSlot selected changed sameBinder sameType reference
-           residents := typed.residents.put named (replaceBinding_map Slot.toBindingType changed) nextTyped
-           slots := typed.slots.replace_put typed.residents.valid.distinct selected changed sameBinder correspondence
+           residents := by
+             simpa only [Context.erase, view] using
+               typed.residents.put named (replaceBinding_map Slot.toBindingType changed) nextTyped
+           slots := by
+             rw [view]
+             exact typed.slots.replace_put typed.residents.valid.distinct selected changed sameBinder correspondence
+           cells := by
+             intro binder actual storedCell
+             rw [typed.source.replaceSlot_storage selected changed sameBinder binder] at storedCell
+             by_cases same : binder = slot.binder
+             · subst binder
+               rw [if_pos rfl] at storedCell
+               cases storedCell
+               exact ⟨updated, by simp [Environment.put], nextTyped, correspondence⟩
+             · rw [if_neg same] at storedCell
+               obtain ⟨value, found, resident, shape⟩ := typed.cells binder actual storedCell
+               have different : interpretation.binder binder ≠ interpretation.binder slot.binder :=
+                 fun equal => same (typed.binderDistinct binder slot.binder (.inl ⟨actual, storedCell⟩) known equal)
+               exact ⟨value, by simpa [Environment.put, different] using found, resident, shape⟩
            binderBound := fun binder mention => typed.binderBound binder (bound binder mention)
            binderDistinct := fun first second a b => typed.binderDistinct first second (bound first a) (bound second b)
            inputBound := typed.inputBound
@@ -7117,7 +8791,40 @@ theorem StoreTyped.writeSlot {program : Program} {home : Module} {interpretation
            nodeOrder := typed.nodeOrder
            records := typed.records
            activeCoverage := typed.activeCoverage
-           targets := typed.write_targets known free write
+           sourceTargets := by
+             intro node loan found own
+             have old := typed.sourceTargets node loan found own
+             cases base : loan.target.base with
+             | input input => simpa [Context.SourceTarget, Context.Target, Context.Ready, base] using old
+             | binder binder =>
+               by_cases same : binder = slot.binder
+               · subst binder
+                 have apart : CoordinatesApart indices loan.target.fields := by
+                   have apart := free node loan found own
+                   simpa [Origin.Apart, base] using apart
+                 obtain ⟨target, ready, inputShared⟩ := old
+                 simp only [Context.Target, base] at target
+                 obtain ⟨targetSlot, targetStored, targetPath, targetState, targetAccess⟩ := target
+                 have rootStored := typed.source.member_stored (place.root, slot) (lookup_member selected)
+                 have equal := Option.some.inj (targetStored.symm.trans rootStored)
+                 subst targetSlot
+                 have newStored : (context.withSlots slots).storage (.binder slot.binder) = some nextSlot := by
+                   rw [typed.source.replaceSlot_storage selected changed sameBinder]; simp
+                 refine ⟨?_, ?_, inputShared⟩
+                 · simp only [Context.Target, base]
+                   exact ⟨nextSlot, newStored, sameType ▸ targetPath, targetState,
+                     initialization.symm ▸ access.write_frame targetAccess apart next⟩
+                 · intro shared
+                   have sourceReady := ready shared
+                   simp only [Context.Ready, base] at sourceReady ⊢
+                   obtain ⟨readySlot, readyState, readyStored, readyAccess, complete⟩ := sourceReady
+                   have equal := Option.some.inj (readyStored.symm.trans rootStored)
+                   subst readySlot
+                   exact ⟨nextSlot, readyState, newStored,
+                     initialization.symm ▸ access.write_frame readyAccess apart next, complete⟩
+               · apply old.storage_congr
+                 rw [base, typed.source.replaceSlot_storage selected changed sameBinder, if_neg same]
+           inputTargets := typed.write_inputTargets known free write
            storeShape := ?_ }
   intro root value found
   by_cases same : root = interpretation.binder slot.binder
@@ -7126,7 +8833,7 @@ theorem StoreTyped.writeSlot {program : Program} {home : Module} {interpretation
     cases referenceCase : nextSlot.reference with
     | none => exact Or.inl (by simpa [Slot.Corresponds, referenceCase] using correspondence)
     | some node =>
-      have shape : updated = .shared (interpretation.node node) := by
+      have shape : updated = .reference (interpretation.node node) := by
         simpa [Slot.Corresponds, referenceCase] using correspondence
       obtain ⟨loan, loanFound, _⟩ := reference node referenceCase
       exact Or.inr ⟨interpretation.node node, shape,
@@ -7147,19 +8854,9 @@ theorem StoreTyped.writeData {program : Program} {home : Module} {interpretation
     (free : context.Free ⟨.binder slot.binder, indices⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, indices⟩ ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, indices⟩ replacement = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after := by
-  have sourceShape : slot.type.DataShape := by
-    have supported := typed.source.supported (place.root, slot) (lookup_member selected)
-    have exclude : ∀ source target keys coordinates, StorageType program.target program.data source →
-        PathType program home source keys coordinates target → target.DataShape → source.DataShape := by
-      intro source target keys coordinates support path targetShape
-      cases support with
-      | data sourceShape => exact sourceShape
-      | shared finite =>
-        cases path with
-        | nil => exact False.elim targetShape
-        | cons head tail => cases head
-    exact exclude slot.type target place.fields indices supported path shape
+      StoreTyped program interpretation (context.withSlots slots) after := by
+  have sourceShape := path.canonical.dataShape
+    (typed.source.supported (place.root, slot) (lookup_member selected)) shape
   exact typed.writeSlot selected access path changed rfl rfl rfl
     (by intro node impossible; simp [data] at impossible) resident (Or.inl ⟨sourceShape, data⟩) free
 
@@ -7176,8 +8873,8 @@ theorem StoreTyped.takeData {program : Program} {home : Module} {interpretation 
     (free : context.Free ⟨.binder slot.binder, indices⟩) :
     ∃ value after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, indices⟩ ∧
       environment.takeAddress ⟨interpretation.binder slot.binder, indices⟩ = some (value, after) ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧
-      ResultTyped program interpretation { context with bindings := slots } value (.data target) := by
+      StoreTyped program interpretation (context.withSlots slots) after ∧
+      ResultTyped program interpretation (context.withSlots slots) value (.data target) := by
   obtain ⟨value, resolved, raw, resident⟩ := typed.resolvePlace selected access path
   obtain ⟨after, _, written, afterTyped⟩ := typed.writeData selected access path data shape changed .vacant free
   have complete := resident.complete initialized
@@ -7195,35 +8892,35 @@ theorem StoreTyped.writeWhole {program : Program} {home : Module} {interpretatio
     (resident : ResidentTyped program next replacement slot.type)
     (correspondence : ({ slot with initialization := next, reference := reference } : Slot).Corresponds interpretation replacement)
     (sourceReference : ∀ node, reference = some node → ∃ loan,
-      context.loans[node]? = some loan ∧ slot.type = .shared loan.referent)
+      context.loans[node]? = some loan ∧ slot.type = .reference loan.referent loan.mode)
     (free : context.Free ⟨.binder slot.binder, []⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, []⟩ replacement = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after := by
+      StoreTyped program interpretation (context.withSlots slots) after := by
   have path : PathType program home slot.type place.fields [] slot.type := by rw [direct]; exact .nil _
   exact typed.writeSlot selected (.here _) path changed rfl rfl rfl sourceReference resident
     (Or.inr ⟨rfl, correspondence⟩) free
 
-theorem StoreTyped.takeShared {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.takeReference {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty}
+    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {mode : BorrowMode}
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (handle : slot.reference = some node) (shape : slot.type = .shared referent)
+    (handle : slot.reference = some node) (shape : slot.type = .reference referent mode)
     (initialized : slot.initialization.Complete)
     (changed : replaceBinding place.root { slot with initialization := .vacant, reference := none }
       context.bindings = some slots)
     (free : context.Free ⟨.binder slot.binder, []⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
-      environment.takeAddress ⟨interpretation.binder slot.binder, []⟩ = some (.shared (interpretation.node node), after) ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧
-      ResultTyped program interpretation { context with bindings := slots } (.shared (interpretation.node node))
-        ⟨.shared referent, some node⟩ := by
+      environment.takeAddress ⟨interpretation.binder slot.binder, []⟩ = some (.reference (interpretation.node node), after) ∧
+      StoreTyped program interpretation (context.withSlots slots) after ∧
+      ResultTyped program interpretation (context.withSlots slots) (.reference (interpretation.node node))
+        ⟨.reference referent mode, some node⟩ := by
   have path : PathType program home slot.type place.fields [] slot.type := by rw [direct]; exact .nil _
   obtain ⟨value, resolved, raw, resident⟩ := typed.resolvePlace selected (.here _) path
   have stored : environment.store (interpretation.binder slot.binder) = some value := by
     simpa [Environment.at, Value.readIndices] using raw
   have correspondence := (typed.slots.lookup selected).2 value stored
-  have same : value = .shared (interpretation.node node) := by
+  have same : value = .reference (interpretation.node node) := by
     simpa [Slot.Corresponds, handle] using correspondence
   subst value
   obtain ⟨after, _, written, afterTyped⟩ := typed.writeWhole (home := home) selected direct changed .vacant
@@ -7235,39 +8932,40 @@ theorem StoreTyped.takeShared {program : Program} {home : Module} {interpretatio
     obtain ⟨loan, found, type⟩ := (typed.source.slots (place.root, slot) (lookup_member selected)).2 node handle
     exact ⟨loan, found, shape.symm.trans type⟩
 
-theorem StoreTyped.writeShared {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.writeReference {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {value : Value}
+    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {mode : BorrowMode} {value : Value}
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (shape : slot.type = .shared referent)
+    (shape : slot.type = .reference referent mode)
     (changed : replaceBinding place.root { slot with initialization := .full, reference := some node }
       context.bindings = some slots)
-    (result : ResultTyped program interpretation context value ⟨.shared referent, some node⟩)
+    (result : ResultTyped program interpretation context value ⟨.reference referent mode, some node⟩)
     (free : context.Free ⟨.binder slot.binder, []⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, []⟩ value = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after := by
+      StoreTyped program interpretation (context.withSlots slots) after := by
   have resultShape := result.shape
   obtain ⟨same, loan, found, loanType⟩ := resultShape
   exact typed.writeWhole (home := home) selected direct changed (by simpa [shape] using result.resident) same
     (by intro other equal; cases Option.some.inj equal; exact ⟨loan, found, shape.trans loanType⟩) free
 
-theorem ResidentTyped.shared_shape {program : Program} {state : Initialization} {value : Value} {type : Ty}
-    (typed : ResidentTyped program state value type) {referent : Ty} (shape : type = .shared referent) :
-    value = .vacant ∨ ∃ node, value = .shared node := by
+theorem ResidentTyped.reference_shape {program : Program} {state : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) {referent : Ty} {mode : BorrowMode} (shape : type = .reference referent mode) :
+    value = .vacant ∨ ∃ node, value = .reference node := by
   induction typed using ResidentTyped.rec
     (motive_2 := fun _ _ _ _ => True) with
   | vacant => exact Or.inl rfl
   | uncertain actual permission ih => exact ih shape
-  | shared node finite => exact Or.inr ⟨node, rfl⟩
+  | reference node finite => exact Or.inr ⟨node, rfl⟩
   | unit | integer | character | tuple | array | nominal => cases shape
   | nil | cons => trivial
 
-theorem StoreTyped.disposeSharedSlot {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.disposeReferenceSlot {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {referent : Ty}
+    {place : Place} {slot : Slot} {referent : Ty} {mode : BorrowMode}
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (shape : slot.type = .shared referent) :
+    (shape : slot.type = .reference referent mode)
+    (ready : ∀ node, slot.reference = some node → context.Restored node) :
     ∃ old disposed, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
       environment.at ⟨interpretation.binder slot.binder, []⟩ = some old ∧
       Environment.Disposes program environment old disposed ∧
@@ -7281,16 +8979,16 @@ theorem StoreTyped.disposeSharedSlot {program : Program} {home : Module} {interp
   | none =>
     have plain : old.ReferenceFree := by simpa [Slot.Corresponds, handle] using correspondence
     have vacancy : old = .vacant := by
-      rcases resident.shared_shape shape with vacant | ⟨node, rfl⟩
+      rcases resident.reference_shape shape with vacant | ⟨node, rfl⟩
       · exact vacant
       · exact False.elim plain
     subst old
     exact ⟨_, environment, resolved, raw, .data trivial .vacant, by simpa [Context.dispose, handle] using typed⟩
   | some node =>
-    have same : old = .shared (interpretation.node node) := by simpa [Slot.Corresponds, handle] using correspondence
+    have same : old = .reference (interpretation.node node) := by simpa [Slot.Corresponds, handle] using correspondence
     obtain ⟨loan, found, _⟩ := (typed.source.slots (place.root, slot) (lookup_member selected)).2 node handle
     obtain ⟨disposed, ended, afterTyped⟩ := typed.endOwn found
-    exact ⟨old, disposed, resolved, raw, by rw [same]; exact .shared ended,
+    exact ⟨old, disposed, resolved, raw, by rw [same]; exact .reference (typed.restored found (ready node handle)) ended,
       by simpa [Context.dispose, handle] using afterTyped⟩
 
 theorem Context.Free.dispose {context : Context} {origin : Origin} (free : context.Free origin)
@@ -7310,79 +9008,81 @@ theorem ResultTyped.dispose {program : Program} {interpretation : Interpretation
   cases handle : result.reference with
   | none => simpa [handle] using typed.shape
   | some node =>
-    obtain ⟨same, loan, found, type⟩ := (show value = .shared (interpretation.node node) ∧
-      ∃ loan, context.loans[node]? = some loan ∧ result.type = .shared loan.referent from by
+    obtain ⟨same, loan, found, type⟩ := (show value = .reference (interpretation.node node) ∧
+      ∃ loan, context.loans[node]? = some loan ∧ result.type = .reference loan.referent loan.mode from by
         simpa [handle] using typed.shape)
     cases reference with
     | none => exact ⟨same, loan, found, type⟩
     | some ended => exact ⟨same, _, context.endOwn_found ended found, type⟩
 
-theorem StoreTyped.assignShared {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.assignReference {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {value : Value}
+    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {mode : BorrowMode} {value : Value}
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (shape : slot.type = .shared referent)
+    (shape : slot.type = .reference referent mode)
     (changed : replaceBinding place.root { slot with initialization := .full, reference := some node }
       context.bindings = some slots)
-    (result : ResultTyped program interpretation context value ⟨.shared referent, some node⟩)
-    (free : context.Free ⟨.binder slot.binder, []⟩) :
+    (result : ResultTyped program interpretation context value ⟨.reference referent mode, some node⟩)
+    (free : context.Free ⟨.binder slot.binder, []⟩)
+    (ready : ∀ old, slot.reference = some old → context.Restored old) :
     ∃ old disposed after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
       environment.at ⟨interpretation.binder slot.binder, []⟩ = some old ∧
       Environment.Disposes program environment old disposed ∧
       disposed.writeAddress ⟨interpretation.binder slot.binder, []⟩ value = some after ∧
-      StoreTyped program interpretation { context.dispose slot.reference with bindings := slots } after := by
-  obtain ⟨old, disposed, resolved, raw, disposal, disposedTyped⟩ := typed.disposeSharedSlot (home := home) selected direct shape
+      StoreTyped program interpretation ((context.dispose slot.reference).withSlots slots) after := by
+  obtain ⟨old, disposed, resolved, raw, disposal, disposedTyped⟩ := typed.disposeReferenceSlot (home := home) selected direct shape ready
   have bindings : (context.dispose slot.reference).bindings = context.bindings := by
     cases slot.reference <;> rfl
-  obtain ⟨after, _, written, afterTyped⟩ := disposedTyped.writeShared (home := home)
+  obtain ⟨after, _, written, afterTyped⟩ := disposedTyped.writeReference (home := home)
     (by simpa [bindings] using selected) direct shape (by simpa [bindings] using changed)
     (result.dispose slot.reference) (free.dispose slot.reference)
   exact ⟨old, disposed, after, resolved, raw, disposal, written, afterTyped⟩
 
-theorem StoreTyped.assignShared_custody {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.assignReference_custody {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {value : Value}
+    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {mode : BorrowMode} {value : Value}
     {held : List Value} (custody : Custody environment (held ++ [value]))
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (shape : slot.type = .shared referent)
+    (shape : slot.type = .reference referent mode)
     (changed : replaceBinding place.root { slot with initialization := .full, reference := some node }
       context.bindings = some slots)
-    (result : ResultTyped program interpretation context value ⟨.shared referent, some node⟩)
-    (free : context.Free ⟨.binder slot.binder, []⟩) :
+    (result : ResultTyped program interpretation context value ⟨.reference referent mode, some node⟩)
+    (free : context.Free ⟨.binder slot.binder, []⟩)
+    (ready : ∀ old, slot.reference = some old → context.Restored old) :
     ∃ old disposed after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
       environment.at ⟨interpretation.binder slot.binder, []⟩ = some old ∧
       Environment.Disposes program environment old disposed ∧
       disposed.writeAddress ⟨interpretation.binder slot.binder, []⟩ value = some after ∧
-      StoreTyped program interpretation { context.dispose slot.reference with bindings := slots } after ∧
+      StoreTyped program interpretation ((context.dispose slot.reference).withSlots slots) after ∧
       Custody after held := by
   obtain ⟨old, disposed, after, resolved, raw, disposal, written, afterTyped⟩ :=
-    typed.assignShared (home := home) selected direct shape changed result free
+    typed.assignReference (home := home) selected direct shape changed result free ready
   have stored : environment.store (interpretation.binder slot.binder) = some old := by
     simpa [Environment.at, Value.readIndices] using raw
-  have same : value = .shared (interpretation.node node) := result.shape.1
+  have same : value = .reference (interpretation.node node) := result.shape.1
   subst value
-  obtain ⟨canonical, transferred⟩ := custody.assignSharedAddress stored disposal
+  obtain ⟨canonical, transferred⟩ := custody.assignReferenceAddress stored disposal
   have equal := Option.some.inj (written.symm.trans canonical)
   exact ⟨old, disposed, after, resolved, raw, disposal, written, afterTyped, equal ▸ transferred⟩
 
-theorem StoreTyped.takeShared_custody {program : Program} {home : Module} {interpretation : Interpretation}
+theorem StoreTyped.takeReference_custody {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
-    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty}
+    {place : Place} {slot : Slot} {slots : List (String × Slot)} {node : Nat} {referent : Ty} {mode : BorrowMode}
     {held : List Value} (custody : Custody environment held)
     (selected : lookup place.root context.bindings = some slot) (direct : place.fields = [])
-    (handle : slot.reference = some node) (shape : slot.type = .shared referent)
+    (handle : slot.reference = some node) (shape : slot.type = .reference referent mode)
     (initialized : slot.initialization.Complete)
     (changed : replaceBinding place.root { slot with initialization := .vacant, reference := none }
       context.bindings = some slots)
     (free : context.Free ⟨.binder slot.binder, []⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, []⟩ ∧
-      environment.takeAddress ⟨interpretation.binder slot.binder, []⟩ = some (.shared (interpretation.node node), after) ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧
-      ResultTyped program interpretation { context with bindings := slots } (.shared (interpretation.node node))
-        ⟨.shared referent, some node⟩ ∧ Custody after (held ++ [.shared (interpretation.node node)]) := by
+      environment.takeAddress ⟨interpretation.binder slot.binder, []⟩ = some (.reference (interpretation.node node), after) ∧
+      StoreTyped program interpretation (context.withSlots slots) after ∧
+      ResultTyped program interpretation (context.withSlots slots) (.reference (interpretation.node node))
+        ⟨.reference referent mode, some node⟩ ∧ Custody after (held ++ [.reference (interpretation.node node)]) := by
   obtain ⟨after, resolved, taken, afterTyped, result⟩ :=
-    typed.takeShared (home := home) selected direct handle shape initialized changed free
-  exact ⟨after, resolved, taken, afterTyped, result, custody.takeShared taken⟩
+    typed.takeReference (home := home) selected direct handle shape initialized changed free
+  exact ⟨after, resolved, taken, afterTyped, result, custody.takeReference taken⟩
 
 theorem StoreTyped.writeData_custody {program : Program} {home : Module} {interpretation : Interpretation}
     {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
@@ -7399,7 +9099,7 @@ theorem StoreTyped.writeData_custody {program : Program} {home : Module} {interp
     (free : context.Free ⟨.binder slot.binder, indices⟩) :
     ∃ after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, indices⟩ ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, indices⟩ replacement = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧ Custody after held := by
+      StoreTyped program interpretation (context.withSlots slots) after ∧ Custody after held := by
   obtain ⟨after, resolved, written, afterTyped⟩ := typed.writeData selected access path data shape changed resident free
   obtain ⟨old, _, raw, oldTyped⟩ := typed.resolvePlace selected access path
   exact ⟨after, resolved, written, afterTyped,
@@ -7418,8 +9118,8 @@ theorem StoreTyped.takeData_custody {program : Program} {home : Module} {interpr
     (free : context.Free ⟨.binder slot.binder, indices⟩) :
     ∃ value after, environment.resolvePlace program place = some ⟨interpretation.binder slot.binder, indices⟩ ∧
       environment.takeAddress ⟨interpretation.binder slot.binder, indices⟩ = some (value, after) ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧
-      ResultTyped program interpretation { context with bindings := slots } value (.data target) ∧ Custody after held := by
+      StoreTyped program interpretation (context.withSlots slots) after ∧
+      ResultTyped program interpretation (context.withSlots slots) value (.data target) ∧ Custody after held := by
   obtain ⟨value, after, resolved, taken, afterTyped, result⟩ := typed.takeData selected access initialized path data shape changed free
   obtain ⟨old, _, raw, oldTyped⟩ := typed.resolvePlace selected access path
   exact ⟨value, after, resolved, taken, afterTyped, result,
@@ -7443,7 +9143,7 @@ theorem StoreTyped.assignData {program : Program} {home : Module} {interpretatio
       environment.at ⟨interpretation.binder slot.binder, indices⟩ = some old ∧
       Environment.Disposes program environment old environment ∧
       environment.writeAddress ⟨interpretation.binder slot.binder, indices⟩ value = some after ∧
-      StoreTyped program interpretation { context with bindings := slots } after ∧ Custody after held := by
+      StoreTyped program interpretation (context.withSlots slots) after ∧ Custody after held := by
   obtain ⟨old, resolved, raw, oldTyped⟩ := typed.resolvePlace selected access path
   obtain ⟨after, _, written, afterTyped, afterCustody⟩ :=
     typed.writeData_custody custody selected access path data shape changed resident free
@@ -7456,21 +9156,21 @@ usable node has one actual carrier. This is derived, not a source restriction. -
 theorem StateTyped.finalUnprotected {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldNodes : List Nat} {held : List Value} {node : Nat}
     (typed : StateTyped program interpretation context (heldNodes ++ [node]) environment
-      (held ++ [.shared (interpretation.node node)])) : node ∉ heldNodes := by
+      (held ++ [.reference (interpretation.node node)])) : node ∉ heldNodes := by
   intro member
   obtain ⟨index, bound, selected⟩ := List.mem_iff_getElem.mp member
-  have shape : held = heldNodes.map (fun node => Value.shared (interpretation.node node)) := by
+  have shape : held = heldNodes.map (fun node => Value.reference (interpretation.node node)) := by
     apply List.append_cancel_right
     simpa only [List.map_append, List.map_cons, List.map_nil] using typed.heldShape
   have length : held.length = heldNodes.length := by rw [shape, List.length_map]
   obtain ⟨loan, found, own⟩ := typed.heldOwn node (by simp)
   obtain ⟨location, _, unique⟩ := typed.custody (interpretation.node node)
-    ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own⟩ (typed.records node loan found) own
-  have earlier : Carries environment (held ++ [.shared (interpretation.node node)]) (interpretation.node node) (.held index) := by
-    change (held ++ [.shared (interpretation.node node)])[index]? = _
+    ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩ (typed.records node loan found) own
+  have earlier : Carries environment (held ++ [.reference (interpretation.node node)]) (interpretation.node node) (.held index) := by
+    change (held ++ [.reference (interpretation.node node)])[index]? = _
     rw [List.getElem?_append_left (length ▸ bound), shape, List.getElem?_map, List.getElem?_eq_getElem bound, selected]
     rfl
-  have final : Carries environment (held ++ [.shared (interpretation.node node)]) (interpretation.node node) (.held held.length) := by
+  have final : Carries environment (held ++ [.reference (interpretation.node node)]) (interpretation.node node) (.held held.length) := by
     simp [Carries]
   have same := Carrier.held.inj ((unique _ earlier).trans (unique _ final).symm)
   omega
@@ -7491,10 +9191,12 @@ theorem StateTyped.disposeResult {interpretation : Interpretation} {context : Co
     have shape := valueTyped.shape
     rw [reference] at shape
     have pending : StateTyped program interpretation context (heldNodes ++ [node]) environment
-        (held ++ [.shared (interpretation.node node)]) := by
+        (held ++ [.reference (interpretation.node node)]) := by
       simpa [ResultType.nodes, reference, shape.1, Value.referenceValues] using typed
+    obtain ⟨loan, found, _⟩ := shape.2
+    have ready := pending.toStoreTyped.restored found (pending.heldReady node (by simp))
     obtain ⟨after, ended, afterTyped⟩ := pending.consume pending.finalUnprotected
-    exact ⟨after, by rw [shape.1]; exact .shared ended,
+    exact ⟨after, by rw [shape.1]; exact .reference ready ended,
       by simpa [Context.dispose, reference] using afterTyped⟩
 
 def Interpretation.empty : Interpretation := ⟨id, fun root => ⟨root, []⟩, id⟩
@@ -7504,6 +9206,7 @@ theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
     source := ?_
     residents := EnvironmentTyped.empty
     slots := .nil
+    cells := by intro binder slot stored; cases stored
     binderBound := ?_
     binderDistinct := ?_
     inputBound := ?_
@@ -7511,19 +9214,17 @@ theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
     nodeOrder := ?_
     records := ?_
     activeCoverage := ?_
-    targets := ?_
+    sourceTargets := by intro node loan found; simp [Context.empty] at found
+    inputTargets := ?_
     storeShape := ?_
     heldShape := rfl
     heldOwn := ?_
+    heldReady := by intro node member; cases member
     custody := ?_ }
-  · constructor
-    · simp [Context.empty]
-    · intro binding member; cases member
-    · intro binding member; cases member
-    · intro node loan found; simp [Context.empty] at found
-    · intro node loan parent found; simp [Context.empty] at found
-  · intro binder mentioned; rcases mentioned with ⟨binding, member, _⟩ | ⟨node, loan, found, _⟩
-    · cases member
+  · constructor <;> simp [Context.empty, Context.bindings]
+  · intro binder mentioned
+    rcases mentioned with ⟨slot, stored⟩ | ⟨node, loan, found, _⟩
+    · cases stored
     · simp [Context.empty] at found
   · intro first second _ _ same; exact same
   · intro input bound; exact False.elim (Nat.not_lt_zero _ bound)
@@ -7536,16 +9237,34 @@ theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
   · intro node member; cases member
   · intro node loan found; simp [Environment.empty] at found
 
+theorem Context.WellFormed.replaceSlot_history {context : Context} (valid : context.WellFormed program)
+    {name : String} {slot replacement : Slot} {slots : List (String × Slot)}
+    (selected : lookup name context.bindings = some slot)
+    (changed : replaceBinding name replacement context.bindings = some slots)
+    (sameBinder : replacement.binder = slot.binder) : context.History (context.withSlots slots) := by
+  have names : (context.withSlots slots).names.map Prod.snd = context.names.map Prod.snd := by
+    simp only [Context.withSlots, List.map_map, Function.comp_def]
+    rw [replaceBinding_map_same Slot.binder selected changed sameBinder, valid.bindings_binders]
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+    fun _ member _ => names ▸ member, ?_⟩
+  intro binder current _ stored hidden
+  have different : binder ≠ slot.binder := by
+    intro same
+    apply hidden
+    rw [← valid.bindings_binders]
+    exact List.mem_map.mpr ⟨(name, slot), lookup_member selected, same.symm⟩
+  exact ⟨current, by rw [valid.replaceSlot_storage selected changed sameBinder binder, if_neg different]; exact stored, rfl⟩
+
 theorem StateProgress.replaceSlot {interpretation : Interpretation} {context : Context} {before after : Environment}
     (valid : context.WellFormed program) {name : String} {slot replacement : Slot} {slots : List (String × Slot)}
     (selected : lookup name context.bindings = some slot) (changed : replaceBinding name replacement context.bindings = some slots)
     (binder : replacement.binder = slot.binder) (loans : after.loans.length = before.loans.length) :
-    StateProgress context {context with bindings := slots} before after interpretation interpretation := by
-  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _⟩,
-    fun _ mentioned _ => Context.replaceSlot_mentions selected changed binder mentioned, .refl _ _, ?_, ?_⟩
+    StateProgress context (context.withSlots slots) before after interpretation interpretation := by
+  refine ⟨valid.replaceSlot_history selected changed binder,
+    fun _ mentioned _ => Context.replaceSlot_mentions valid selected changed binder mentioned, .refl _ _, ?_, ?_⟩
   · intro id large known
-    exact False.elim (Nat.not_lt_of_ge large (valid.mentionedBound (Context.replaceSlot_mentions selected changed binder known)))
-  · rw [loans]
+    exact False.elim (Nat.not_lt_of_ge large (valid.mentionedBound (Context.replaceSlot_mentions valid selected changed binder known)))
+  · simp only [Context.withSlots, loans]
 
 theorem Context.Own.dispose {context : Context} {node : Nat} (own : context.Own node) (reference : Option Nat)
     (unprotected : ∀ ended, reference = some ended → ended ≠ node) : (context.dispose reference).Own node := by
@@ -7555,82 +9274,420 @@ theorem Context.Own.dispose {context : Context} {node : Nat} (own : context.Own 
     obtain ⟨loan, found, available⟩ := own
     exact ⟨_, context.endOwn_found ended found, by simpa [unprotected ended rfl] using available⟩
 
-theorem SlotsCorrespond.restore {first last : Interpretation} {before after : Store}
+theorem Context.WellFormed.bindings_names {context : Context} (valid : context.WellFormed program) :
+    context.bindings.map (fun binding => (binding.1, binding.2.binder)) = context.names := by
+  simp only [Context.bindings, List.map_filterMap]
+  have equal := Context.filterMap_congr_mem context.names
+    (fun entry => ((context.storage (.binder entry.2)).map (fun slot => (entry.1, slot))).map
+      (fun binding => (binding.1, binding.2.binder))) some (by
+        intro entry member
+        obtain ⟨slot, found⟩ := valid.named entry member
+        simp only [found, Option.map_some, (valid.allocated entry.2 slot found).1])
+  simpa only [List.filterMap_some_fun, id_eq] using equal
+
+theorem SlotsCorrespond.bindings {interpretation : Interpretation} {store : Store}
     {bindings : List (String × Root)} {slots : List (String × Slot)}
-    (typed : SlotsCorrespond first before bindings slots)
-    (frame : ∀ root, after root = before root)
-    (binders : ∀ binding ∈ slots, last.binder binding.2.binder = first.binder binding.2.binder)
-    (nodes : ∀ binding ∈ slots, ∀ node, binding.2.reference = some node → last.node node = first.node node) :
-    SlotsCorrespond last after bindings slots := by
+    (typed : SlotsCorrespond interpretation store bindings slots) :
+    bindings = slots.map (fun binding => (binding.1, interpretation.binder binding.2.binder)) := by
   induction typed with
-  | nil => exact .nil
-  | @cons name root slot bindings slots identity resident rest ih =>
-    refine .cons (identity.trans (binders (name, slot) (by simp)).symm) ?_
-      (ih (fun binding member => binders binding (by simp [member]))
-        (fun binding member => nodes binding (by simp [member])))
-    intro value found
-    have old := resident value ((frame root) ▸ found)
-    cases reference : slot.reference with
-    | none => simpa [Slot.Corresponds, reference] using old
-    | some node => simpa [Slot.Corresponds, reference, nodes (name, slot) (by simp) node reference] using old
+  | nil => rfl
+  | cons identity _ _ ih => simp only [List.map_cons, identity, ih]
+
+theorem Context.reconstruct {context : Context} {environment : Environment} {interpretation : Interpretation}
+    (valid : context.WellFormed program) (runtimeValid : environment.Valid)
+    (names : environment.bindings = context.names.map (fun entry => (entry.1, interpretation.binder entry.2)))
+    (cells : ∀ binder slot, context.storage (.binder binder) = some slot →
+      ∃ value, environment.store (interpretation.binder binder) = some value ∧
+        SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value) :
+    EnvironmentTyped program environment context.erase ∧
+      SlotsCorrespond interpretation environment.store environment.bindings context.bindings := by
+  let view (entries : List (String × Nat)) := entries.filterMap fun entry =>
+    (context.storage (.binder entry.2)).map fun slot => (entry.1, slot)
+  have assemble : ∀ entries : List (String × Nat),
+      (∀ entry ∈ entries, ∃ slot, context.storage (.binder entry.2) = some slot) →
+      ∃ values, StoredBindings environment.store (entries.map fun entry => (entry.1, interpretation.binder entry.2)) values ∧
+        ValuesBindingsTyped program values ((view entries).map fun binding => (binding.1, binding.2.toBindingType)) ∧
+        SlotsCorrespond interpretation environment.store
+          (entries.map fun entry => (entry.1, interpretation.binder entry.2)) (view entries) := by
+    intro entries
+    induction entries with
+    | nil => intro _; exact ⟨[], .nil, .nil, .nil⟩
+    | cons entry entries ih =>
+      intro present
+      obtain ⟨slot, found⟩ := present entry (by simp)
+      obtain ⟨value, stored, resident, corresponds⟩ := cells entry.2 slot found
+      obtain ⟨values, storedRest, residents, slots⟩ := ih (fun other member => present other (by simp [member]))
+      have identity := (valid.allocated entry.2 slot found).1
+      simp only [view, List.filterMap_cons, found, Option.map_some, List.map_cons]
+      refine ⟨(entry.1, value) :: values, .cons stored storedRest, .cons resident residents, ?_⟩
+      exact .cons (congrArg interpretation.binder identity.symm)
+        (fun actual read => (Option.some.inj (stored.symm.trans read)) ▸ corresponds) slots
+  obtain ⟨values, stored, residents, slots⟩ := assemble context.names valid.named
+  refine ⟨⟨runtimeValid, values, ?_, residents⟩, ?_⟩
+  · rw [names]; exact stored
+  · rw [names]; exact slots
+
+/-- Canonical mutation changes initialization only, including hidden storage. -/
+theorem Context.writeTarget_stored (context : Context) (origin : Origin) (next : Initialization)
+    {base : OriginBase} {slot : Slot} (stored : context.storage base = some slot) :
+    ∃ current, (context.writeTarget origin next).storage base = some current ∧ current.metadata = slot.metadata := by
+  by_cases same : base = origin.base
+  · subst base
+    exact context.writeTarget_metadata origin next stored
+  · exact ⟨slot, by simp [Context.writeTarget, same, stored], rfl⟩
+
+theorem Context.writeTarget_original {context : Context} {origin : Origin} {next : Initialization}
+    {base : OriginBase} {slot : Slot} (stored : (context.writeTarget origin next).storage base = some slot) :
+    ∃ original, context.storage base = some original ∧ slot.metadata = original.metadata := by
+  by_cases same : base = origin.base
+  · simp only [Context.writeTarget, if_pos same] at stored
+    obtain ⟨original, found, equal⟩ := Option.map_eq_some_iff.mp stored
+    cases equal
+    exact ⟨original, found, rfl⟩
+  · exact ⟨slot, by simpa [Context.writeTarget, same] using stored, rfl⟩
+
+theorem Context.writeTarget_mentions (context : Context) (origin : Origin) (next : Initialization) (binder : Nat) :
+    (context.writeTarget origin next).MentionsBinder binder ↔ context.MentionsBinder binder := by
+  constructor
+  · rintro (⟨slot, stored⟩ | loan)
+    · obtain ⟨original, found, _⟩ := Context.writeTarget_original stored
+      exact .inl ⟨original, found⟩
+    · exact .inr loan
+  · rintro (⟨slot, stored⟩ | loan)
+    · obtain ⟨current, found, _⟩ := context.writeTarget_stored origin next stored
+      exact .inl ⟨current, found⟩
+    · exact .inr loan
+
+theorem Context.WellFormed.writeTarget {context : Context} (valid : context.WellFormed program)
+    (origin : Origin) (next : Initialization) : (context.writeTarget origin next).WellFormed program := by
+  have allocated : ∀ binder slot, (context.writeTarget origin next).storage (.binder binder) = some slot →
+      slot.binder = binder ∧ binder < context.nextBinder ∧ StorageType program.target program.data slot.type ∧
+      ∀ node, slot.reference = some node → ∃ loan, context.loans[node]? = some loan ∧
+        slot.type = .reference loan.referent loan.mode := by
+    intro binder slot stored
+    obtain ⟨original, found, metadata⟩ := Context.writeTarget_original stored
+    have equal : slot.type = original.type ∧ slot.mutable = original.mutable ∧
+        slot.binder = original.binder ∧ slot.reference = original.reference := by
+      simpa only [Slot.metadata, Prod.mk.injEq] using metadata
+    simpa only [equal.1, equal.2.2.1, equal.2.2.2] using valid.allocated binder original found
+  have named : ∀ entry ∈ context.names, ∃ slot, (context.writeTarget origin next).storage (.binder entry.2) = some slot := by
+    intro entry member
+    obtain ⟨slot, stored⟩ := valid.named entry member
+    obtain ⟨current, found, _⟩ := context.writeTarget_stored origin next stored
+    exact ⟨current, found⟩
+  have bindingStored : ∀ binding ∈ (context.writeTarget origin next).bindings,
+      (context.writeTarget origin next).storage (.binder binding.2.binder) = some binding.2 := by
+    intro binding member
+    obtain ⟨entry, _, found⟩ := List.mem_filterMap.mp member
+    obtain ⟨slot, stored, equal⟩ := Option.map_eq_some_iff.mp found
+    cases equal
+    rw [(allocated entry.2 slot stored).1]
+    exact stored
+  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, named, allocated, valid.parentModes⟩
+  · have binders : (context.writeTarget origin next).bindings.map (fun binding => binding.2.binder) =
+        context.names.map Prod.snd := by
+      unfold Context.bindings
+      rw [List.map_filterMap, ← List.filterMap_eq_map]
+      apply Context.filterMap_congr_mem
+      intro entry member
+      obtain ⟨slot, stored⟩ := named entry member
+      simp [stored, (allocated entry.2 slot stored).1]
+    rw [binders, ← valid.bindings_binders]
+    exact valid.distinct
+  · intro binding member
+    exact (allocated _ _ (bindingStored binding member)).2.2.1
+  · intro binding member
+    have facts := allocated _ _ (bindingStored binding member)
+    exact ⟨facts.2.1, facts.2.2.2⟩
+
+/-- An ancestor remains addressable even when a nested resident becomes vacant. -/
+theorem Initialization.Access.write_prefix {state selected : Initialization} {indices observed : List Nat}
+    (access : state.Access indices selected) (initial : observed.IsPrefix indices) (next : Initialization) :
+    ∃ retained, (state.write indices next).Access observed retained := by
+  obtain ⟨suffix, rfl⟩ := initial
+  induction observed generalizing state with
+  | nil => exact ⟨_, .here _⟩
+  | cons index rest ih =>
+    cases access with
+    | child present access =>
+      obtain ⟨retained, kept⟩ := ih access
+      exact ⟨retained, .child (by simp [Initialization.write, Initialization.setChild])
+        (by simpa only [List.cons_append, Initialization.write, Initialization.child_setChild present, ↓reduceIte] using kept)⟩
+
+/-- A complete replacement restores the selected target even if it was a hole. -/
+theorem Context.Target.writeTarget_ready {context : Context} {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    {next : Initialization} (complete : next.Complete) : (context.writeTarget origin next).Ready origin := by
+  obtain ⟨slot, stored, _, state, access⟩ := (by simpa [Context.Target, base] using target)
+  simp only [Context.Ready, base]
+  exact ⟨{ slot with initialization := slot.initialization.write origin.fields next }, next,
+    by simp [Context.writeTarget, base, stored], access.write next, complete⟩
+
+
+
+theorem Context.Ready.writeTarget_apart {context : Context} {origin observed : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    (ready : context.Ready observed) (apart : origin.Apart observed) (next : Initialization) :
+    (context.writeTarget origin next).Ready observed := by
+  cases observedBase : observed.base with
+  | input input => simp [Context.Ready, observedBase]
+  | binder other =>
+    simp only [Context.Ready, observedBase] at ready ⊢
+    obtain ⟨slot, retained, stored, kept, complete⟩ := ready
+    by_cases same : other = binder
+    · subst other
+      obtain ⟨root, rootStored, _, selected, access⟩ := (by simpa [Context.Target, base] using target)
+      have equal := Option.some.inj (stored.symm.trans rootStored)
+      subst root
+      have fields : CoordinatesApart origin.fields observed.fields := by
+        simpa [Origin.Apart, base, observedBase] using apart
+      exact ⟨{ slot with initialization := slot.initialization.write origin.fields next }, retained,
+        by simp [Context.writeTarget, base, stored], access.write_frame kept fields next, complete⟩
+    · exact ⟨slot, retained, by simpa [Context.writeTarget, base, same] using stored, kept, complete⟩
+
+private theorem mutation_derived_within {context : Context} (valid : context.WellFormed program)
+    {node ancestor : Nat} {loan parentLoan : SourceLoan} (derived : context.Derived node ancestor)
+    (found : context.loans[node]? = some loan) (ancestorFound : context.loans[ancestor]? = some parentLoan) :
+    loan.target.Within parentLoan.target := by
+  induction derived generalizing loan with
+  | same =>
+    have equal := Option.some.inj (found.symm.trans ancestorFound)
+    subst loan
+    exact ⟨rfl, ⟨[], by simp⟩⟩
+  | child source parent earlier ih =>
+    have equal := Option.some.inj (source.symm.trans found)
+    subst loan
+    obtain ⟨_, middle, middleFound, front⟩ := valid.parents _ _ _ source parent
+    have back := ih middleFound ancestorFound
+    exact ⟨front.1.trans back.1, back.2.trans front.2⟩
+
+/-- Disjoint targets retain their exact masks; ancestors retain a canonical
+addressable mask, but only unique ancestors may become incomplete. -/
+theorem Context.SourceTarget.writeTarget {context : Context} {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    {loan : SourceLoan} (source : context.SourceTarget program loan)
+    (separated : (origin.Within loan.target ∧ loan.mode = .unique) ∨ origin.Apart loan.target)
+    (next : Initialization) : (context.writeTarget origin next).SourceTarget program loan := by
+  obtain ⟨oldTarget, oldReady, inputShared⟩ := source
+  refine ⟨?_, ?_, inputShared⟩
+  · cases observedBase : loan.target.base with
+    | input input => simp [Context.Target, observedBase]
+    | binder other =>
+      simp only [Context.Target, observedBase] at oldTarget ⊢
+      obtain ⟨slot, stored, path, retained, kept⟩ := oldTarget
+      by_cases same : other = binder
+      · subst other
+        obtain ⟨root, rootStored, _, selected, access⟩ := (by simpa [Context.Target, base] using target)
+        have equal := Option.some.inj (stored.symm.trans rootStored)
+        subst root
+        refine ⟨{ slot with initialization := slot.initialization.write origin.fields next },
+          by simp [Context.writeTarget, base, stored], path, ?_⟩
+        rcases separated with ⟨within, _⟩ | apart
+        · exact access.write_prefix within.2 next
+        · exact ⟨retained, access.write_frame kept (by simpa [Origin.Apart, base, observedBase] using apart) next⟩
+      · exact ⟨slot, by simpa [Context.writeTarget, base, same] using stored, path, retained, kept⟩
+  · intro shared
+    rcases separated with ⟨_, unique⟩ | apart
+    · simp [shared] at unique
+    · exact (oldReady shared).writeTarget_apart target base apart next
+
+theorem StateProgress.writeTarget {interpretation : Interpretation} {context : Context} {before after : Environment}
+    (valid : context.WellFormed program) {origin : Origin} {next : Initialization} {replacement : Value}
+    (written : before.writeAddress (interpretation.origin origin) replacement = some after) :
+    StateProgress context (context.writeTarget origin next) before after interpretation interpretation := by
+  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+    fun _ member _ => member, ?_⟩, ?_, .refl _ _, ?_, ?_⟩
+  · intro binder slot _ stored _
+    exact context.writeTarget_stored origin next stored
+  · intro binder known _
+    exact (context.writeTarget_mentions origin next binder).mp known
+  · intro binder large known
+    exact False.elim (Nat.not_lt_of_ge large
+      (valid.mentionedBound ((context.writeTarget_mentions origin next binder).mp known)))
+  · simp only [Context.writeTarget, Environment.writeAddress_loans written]
+
+/-- Authoritative canonical mutation. Positive unique authority and exclusion are
+separate premises; reconstruction includes hidden cells and arbitrarily aliased
+shared inputs. Ancestor mode monotonicity is derived from source well-formedness. -/
+theorem StoreTyped.writeTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
+    (typed : StoreTyped program interpretation context environment) {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    {next : Initialization} {replacement : Value} (shape : referent.DataShape)
+    (resident : ResidentTyped program next replacement referent)
+    {node : Nat} {loan : SourceLoan} (found : context.loans[node]? = some loan)
+    (own : loan.own = true) (unique : loan.mode = .unique) (within : origin.Within loan.target)
+    (permitted : context.Permits .unique (some node) origin) :
+    ∃ after, environment.writeAddress (interpretation.origin origin) replacement = some after ∧
+      StoreTyped program interpretation (context.writeTarget origin next) after ∧
+      StateProgress context (context.writeTarget origin next) environment after interpretation interpretation ∧
+      environment.Evolution after := by
+  obtain ⟨after, written, cells⟩ := typed.writeTarget_cells target base shape resident
+  have authority : environment.MutationRoot (interpretation.origin origin).root := by
+    exact .inr ⟨interpretation.node node, _, typed.records node loan found, own, unique,
+      (interpretation.within within).1.symm⟩
+  obtain ⟨runtimeValid, evolution⟩ := Environment.writeAddress_evolution authority written typed.residents.valid
+  have update := Environment.writeAddress_update written
+  have source := typed.source.writeTarget origin next
+  have names : after.bindings = (context.writeTarget origin next).names.map
+      (fun entry => (entry.1, interpretation.binder entry.2)) := by
+    change after.bindings = context.names.map _
+    rw [update.bindings, ← typed.source.bindings_names, List.map_map, typed.slots.bindings]
+    rfl
+  obtain ⟨residents, slots⟩ := Context.reconstruct source runtimeValid names cells
+  refine ⟨after, written, ?_, StateProgress.writeTarget typed.source written, evolution⟩
+  refine { source := source, residents := residents, slots := slots, cells := cells
+           binderBound := ?_, binderDistinct := ?_, inputBound := ?_, inputApart := ?_
+           nodeOrder := typed.nodeOrder, records := ?_, activeCoverage := ?_
+           sourceTargets := ?_, inputTargets := ?_, storeShape := ?_ }
+  · intro other known
+    rw [update.supply]
+    exact typed.binderBound other ((context.writeTarget_mentions origin next other).mp known)
+  · intro first second firstKnown secondKnown same
+    exact typed.binderDistinct first second ((context.writeTarget_mentions origin next first).mp firstKnown)
+      ((context.writeTarget_mentions origin next second).mp secondKnown) same
+  · intro input bound
+    rw [update.supply]
+    exact typed.inputBound input bound
+  · intro other input known bound
+    exact typed.inputApart other input ((context.writeTarget_mentions origin next other).mp known) bound
+  · intro other otherLoan selected
+    rw [Environment.writeAddress_loans written]
+    exact typed.records other otherLoan selected
+  · intro other otherLoan selected active
+    rw [Environment.writeAddress_loans written] at selected
+    exact typed.activeCoverage other otherLoan selected active
+  · intro other otherLoan selected active
+    apply (typed.sourceTargets other otherLoan selected active).writeTarget target base
+    rcases permitted other otherLoan selected active with impossible | ⟨parent, equal, derived⟩ | apart
+    · cases impossible.1
+    · have same := Option.some.inj equal
+      subst parent
+      have above := mutation_derived_within typed.source derived found selected
+      exact .inl ⟨⟨within.1.trans above.1, above.2.trans within.2⟩, derived.unique typed.source found selected unique⟩
+    · exact .inr apart
+  · intro other otherLoan selected active input inputBase
+    obtain ⟨value, read, valueTyped⟩ := typed.inputTargets other otherLoan selected active input inputBase
+    have known : origin.Known context := by
+      obtain ⟨slot, stored, _⟩ := (by simpa [Context.Target, base] using target)
+      simp only [Origin.Known, base]
+      exact .inl ⟨slot, stored⟩
+    have apart := typed.apart known (typed.source.loanKnown selected)
+      (by simp [Origin.Apart, base, inputBase] : origin.Apart otherLoan.target)
+    exact ⟨value, by simpa only [Environment.readAddress, update.frame _ apart] using read, valueTyped⟩
+  · intro root value storedAfter
+    obtain ⟨slot, stored, path, state, access⟩ := (by simpa [Context.Target, base] using target)
+    obtain ⟨parent, updated, oldStored, changed, updatedTyped, write⟩ := typed.writeCanonical stored path access resident
+    have same : after = environment.put (interpretation.binder binder) updated := by
+      have write' : environment.writeAddress (interpretation.origin origin) replacement =
+          some (environment.put (interpretation.binder binder) updated) := by
+        simpa only [Interpretation.origin, base] using write
+      exact Option.some.inj (written.symm.trans write')
+    rw [same] at storedAfter ⊢
+    by_cases equal : root = interpretation.binder binder
+    · simp only [Environment.put, equal, ↓reduceIte, Option.some.injEq] at storedAfter
+      subst value
+      exact .inl (updatedTyped.referenceFree (path.dataShape (typed.source.allocated binder slot stored).2.2.1 shape))
+    · exact typed.storeShape root value (by simpa [Environment.put, equal] using storedAfter)
+
+/-- Replacing one selected resident with a complete value preserves a complete
+ancestor, without imposing readiness on the resident being replaced. -/
+theorem Initialization.Complete.write {state selected next : Initialization} {indices : List Nat}
+    (complete : state.Complete) (access : state.Access indices selected) (ready : next.Complete) :
+    (state.write indices next).Complete := by
+  induction access with
+  | here => exact ready
+  | child present access ih =>
+    apply (Initialization.setChild_complete_iff present _).mpr
+    exact ⟨ih (complete.child _), fun other _ => complete.child other⟩
+
+theorem Initialization.Access.write_ready {state selected retained next : Initialization} {indices observed : List Nat}
+    (access : state.Access indices selected) (kept : state.Access observed retained)
+    (complete : retained.Complete) (ready : next.Complete) :
+    ∃ current, (state.write indices next).Access observed current ∧ current.Complete := by
+  induction access generalizing observed retained with
+  | here => exact ready.access_all observed
+  | @child state selected index indices present access ih =>
+    cases kept with
+    | here => exact ⟨_, .here _, complete.write (.child present access) ready⟩
+    | @child _ _ other observed keptPresent kept =>
+      by_cases same : other = index
+      · subst other
+        obtain ⟨current, currentAccess, currentComplete⟩ := ih kept complete
+        exact ⟨current, .child (by simp [Initialization.write, Initialization.setChild])
+          (by simpa only [Initialization.write, Initialization.child_setChild present, ↓reduceIte] using currentAccess),
+          currentComplete⟩
+      · exact ⟨retained, .child (by simp [Initialization.write, Initialization.setChild])
+          (by simpa only [Initialization.write, Initialization.child_setChild present, if_neg same] using kept), complete⟩
+
+theorem Context.Ready.writeTarget_initialized {context : Context} {origin observed : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    (ready : context.Ready observed) {next : Initialization} (complete : next.Complete) :
+    (context.writeTarget origin next).Ready observed := by
+  cases observedBase : observed.base with
+  | input input => simp [Context.Ready, observedBase]
+  | binder other =>
+    simp only [Context.Ready, observedBase] at ready ⊢
+    obtain ⟨slot, retained, stored, kept, initialized⟩ := ready
+    by_cases same : other = binder
+    · subst other
+      obtain ⟨root, rootStored, _, selected, access⟩ := (by simpa [Context.Target, base] using target)
+      have equal := Option.some.inj (stored.symm.trans rootStored)
+      subst root
+      obtain ⟨current, currentAccess, currentComplete⟩ := access.write_ready kept initialized complete
+      exact ⟨{ slot with initialization := slot.initialization.write origin.fields next }, current,
+        by simp [Context.writeTarget, base, stored], currentAccess, currentComplete⟩
+    · exact ⟨slot, retained, by simpa [Context.writeTarget, base, same] using stored, kept, initialized⟩
+
+/-- Pending carrier cells cannot be overwritten: the canonical data target and
+its typed storage root are reference-free. Pending target readiness is separate:
+a hole-producing move must exclude every held target; complete writes preserve it. -/
+theorem StateTyped.writeTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldNodes : List Nat} {held : List Value}
+    (typed : StateTyped program interpretation context heldNodes environment held) {origin : Origin} {referent : Ty}
+    (target : context.Target program origin referent) {binder : Nat} (base : origin.base = .binder binder)
+    {next : Initialization} {replacement : Value} (shape : referent.DataShape)
+    (resident : ResidentTyped program next replacement referent)
+    {node : Nat} {loan : SourceLoan} (found : context.loans[node]? = some loan)
+    (own : loan.own = true) (unique : loan.mode = .unique) (within : origin.Within loan.target)
+    (permitted : context.Permits .unique (some node) origin)
+    (heldSafe : ∀ heldNode ∈ heldNodes, ∀ heldLoan, context.loans[heldNode]? = some heldLoan →
+      heldLoan.own = true → next.Complete ∨ origin.Apart heldLoan.target) :
+    ∃ after, environment.writeAddress (interpretation.origin origin) replacement = some after ∧
+      StateTyped program interpretation (context.writeTarget origin next) heldNodes after held ∧
+      StateProgress context (context.writeTarget origin next) environment after interpretation interpretation ∧
+      environment.Evolution after := by
+  obtain ⟨after, written, store, progress, evolution⟩ := typed.toStoreTyped.writeTarget target base shape resident
+    found own unique within permitted
+  obtain ⟨state, selected, raw, selectedTyped⟩ := typed.toStoreTyped.targetResident target base
+  have custody := typed.custody.writeAddress_selected typed.storeShape raw
+    (selectedTyped.referenceFree shape) (resident.referenceFree shape) written
+  have ready : ∀ heldNode ∈ heldNodes, (context.writeTarget origin next).Restored heldNode := by
+    intro heldNode member heldLoan selected active
+    rcases heldSafe heldNode member heldLoan selected active with complete | apart
+    · exact (typed.heldReady heldNode member heldLoan selected active).writeTarget_initialized target base complete
+    · exact (typed.heldReady heldNode member heldLoan selected active).writeTarget_apart target base apart next
+  exact ⟨after, written, { store with heldShape := typed.heldShape, heldOwn := typed.heldOwn, heldReady := ready, custody := custody }, progress, evolution⟩
 
 theorem StateTyped.resume {first last : Interpretation} {callerContext afterContext : Context}
     {caller after : Environment} {heldNodes : List Nat} {held : List Value}
     (callerTyped : StoreTyped program first callerContext caller)
     (afterTyped : StateTyped program last afterContext heldNodes after held)
     (progress : StateProgress callerContext.hide afterContext caller.hide after first last)
-    (evolved : Environment.Evolution caller.hide after) :
+    (supply : caller.nextRoot ≤ after.nextRoot) :
     StateTyped program last (callerContext.resume afterContext) heldNodes (caller.resume after) held := by
-  have oldMap (binder : Nat) (known : callerContext.MentionsBinder binder) :
-      last.binder binder = first.binder binder :=
-    progress.interpretation.binders binder (callerTyped.source.mentionedBound known)
-  have oldBound (binder : Nat) (known : callerContext.MentionsBinder binder) :
-      last.binder binder < caller.nextRoot := by
-    rw [oldMap binder known]
-    exact callerTyped.binderBound binder known
-  have cross (old fresh : Nat) (oldKnown : callerContext.MentionsBinder old)
-      (freshKnown : afterContext.MentionsBinder fresh) (equal : last.binder old = last.binder fresh) : old = fresh := by
-    by_cases bound : fresh < callerContext.nextBinder
-    · have known := Context.hide_mentions (progress.support fresh freshKnown bound)
-      exact callerTyped.binderDistinct old fresh oldKnown known
-        ((oldMap old oldKnown).symm.trans (equal.trans (oldMap fresh known)))
-    · have lower := progress.fresh fresh (Nat.le_of_not_gt bound) freshKnown
-      have upper := oldBound old oldKnown
-      change caller.nextRoot ≤ last.binder fresh at lower
-      exact False.elim (Nat.not_lt_of_ge lower (equal ▸ upper))
-  refine { afterTyped with
-    source := callerTyped.source.resume afterTyped.source progress.history
-    residents := callerTyped.residents.resume afterTyped.residents.valid evolved
-    slots := ?_
-    binderBound := ?_
-    binderDistinct := ?_
-    inputApart := ?_ }
-  · exact callerTyped.slots.restore (fun root => evolved.frame root (by simp [Environment.roots, Environment.hide]))
-      (fun binding member => oldMap binding.2.binder (.inl ⟨binding, member, rfl⟩))
-      (by
-        intro binding member node reference
-        obtain ⟨loan, found, _⟩ := (callerTyped.source.slots binding member).2 node reference
-        exact progress.interpretation.nodes node (List.getElem?_eq_some_iff.mp found).1)
-  · intro binder mentioned
-    rcases Context.resume_mentions mentioned with old | new
-    · exact Nat.lt_of_lt_of_le (oldBound binder old) evolved.supply
-    · exact afterTyped.binderBound binder new
-  · intro left right leftKnown rightKnown equal
-    rcases Context.resume_mentions leftKnown with leftOld | leftNew <;>
-      rcases Context.resume_mentions rightKnown with rightOld | rightNew
-    · exact callerTyped.binderDistinct left right leftOld rightOld
-        ((oldMap left leftOld).symm.trans (equal.trans (oldMap right rightOld)))
-    · exact cross left right leftOld rightNew equal
-    · exact (cross right left rightOld leftNew equal.symm).symm
-    · exact afterTyped.binderDistinct left right leftNew rightNew equal
-  · intro binder input mentioned bound
-    rcases Context.resume_mentions mentioned with old | new
-    · change last.binder binder ≠ (last.input input).root
-      rw [oldMap binder old, progress.interpretation.inputs]
-      exact callerTyped.inputApart binder input old (by
-        change input < afterContext.inputCount at bound
-        simpa only [progress.history.inputs, Context.hide] using bound)
-    · exact afterTyped.inputApart binder input new bound
+  have source := callerTyped.source.resume afterTyped.source progress.history
+  have names : (caller.resume after).bindings = (callerContext.resume afterContext).names.map
+      (fun entry => (entry.1, last.binder entry.2)) := by
+    change caller.bindings = callerContext.names.map _
+    rw [← callerTyped.source.bindings_names, List.map_map, callerTyped.slots.bindings]
+    apply List.map_congr_left
+    intro binding member
+    have same := progress.interpretation.binders binding.2.binder
+      (callerTyped.source.mentionedBound (callerTyped.source.member_known binding member))
+    simp only [Function.comp_def, same]
+  obtain ⟨residents, slots⟩ := Context.reconstruct source
+    (callerTyped.residents.valid.resume afterTyped.residents.valid supply) names afterTyped.cells
+  exact { afterTyped with source := source, residents := residents, slots := slots }
 
 theorem ResultTyped.resume {interpretation : Interpretation} {caller after : Context}
     {value : Value} {result : ResultType}
@@ -7676,20 +9733,97 @@ theorem StateTyped.resultUsable {interpretation : Interpretation} {context : Con
     (typed : StateTyped program interpretation context (heldNodes ++ result.nodes) environment held)
     (valueTyped : ResultTyped program interpretation context value result) : environment.ResultUsable value :=
   valueTyped.usable typed.toStoreTyped (fun node member => typed.heldOwn node (List.mem_append_right _ member))
+    (fun node member => typed.heldReady node (List.mem_append_right _ member))
+
+/-- A reference-expected bare place cannot fall back to an ordinary leaf read
+(shared copying) or a leaf transfer. Its emitted reborrow plan is compulsory. -/
+theorem HasType.reference_read_not_leaf {context after : Context} {held : List Nat}
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected)
+    {place : Place} {referent : Ty} {mode : BorrowMode} :
+    expression = .read place → plan = .leaf → expected = some (.reference referent mode) → False := by
+  induction typed using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) with
+  | raiseSupply _ _ ih => exact ih
+  | expectedData typed shape ih =>
+    intro _ _ expected
+    have same := Option.some.inj expected
+    rw [same] at shape
+    exact shape
+  | _ => first | trivial | (intro source leaf expected; cases source <;> cases leaf <;> cases expected)
+
+/-- A compatible reference expectation cannot be bypassed by default transfer. -/
+theorem HasType.reference_read_not_implicitMove {context after : Context} {held : List Nat}
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected)
+    {place : Place} {referent : Ty} {mode : BorrowMode} :
+    expression = .read place → plan = .implicitMove → expected = some (.reference referent mode) → False := by
+  induction typed using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) with
+  | raiseSupply _ _ ih => exact ih
+  | expectedData typed shape ih =>
+    intro _ _ expected
+    have same := Option.some.inj expected
+    rw [same] at shape
+    exact shape
+  | _ => first | trivial | (intro source move expected; cases source <;> cases move <;> cases expected)
+
+/-- Emitted default-transfer plans carry positive noncopy evidence through the
+same admission derivation, including contextual data checking. -/
+theorem HasType.implicitMove_nonduplicable {context after : Context} {held : List Nat}
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected) :
+    plan = .implicitMove → Nonduplicable program.data result.type := by
+  induction typed using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) with
+  | implicitMove noncopy _ _ => exact fun _ => noncopy
+  | raiseSupply _ _ ih | expectedData _ _ ih | expectedMove _ ih => exact ih
+  | _ => first | trivial | (intro impossible; cases impossible)
+
+theorem HasType.implicitMove_not_copy {context after : Context} {held : List Nat}
+    {expression : Expr} {result : ResultType} {expected : Option Ty}
+    (typed : HasType program home context held expression result after .implicitMove expected) :
+    ¬ Duplicable program.data result.type := (typed.implicitMove_nonduplicable rfl).not_duplicable
+
+/-- Parameter expectations are consumed in order by the authoritative argument producer. -/
+theorem HasTypes.expected_types {context after : Context} {held : List Nat} {expressions : List Expr}
+    {results : List ResultType} {plans : List CorePlan} {expected : Option (List Ty)}
+    (typed : HasTypes program home context held expressions results after plans expected) :
+    ∀ types, expected = some types → results.map ResultType.type = types := by
+  induction typed using HasTypes.rec
+    (motive_1 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) with
+  | nil | cons => intro types impossible; cases impossible
+  | expectedNil => intro types same; cases same; rfl
+  | expectedCons head tail headIH tailIH =>
+    intro types same
+    cases same
+    simp only [List.map_cons]
+    rw [tailIH _ rfl]
+  | _ => trivial
+
 theorem HasType.constantDeclared {context after : Context} {held : List Nat} {name : String} {expression : Expr}
-    {result : ResultType} {plan : CorePlan}
-    (typed : HasType program home context held expression result after plan) (source : expression = .constant name) :
+    {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected) (source : expression = .constant name) :
     ∃ declaration, program.constants name = some declaration ∧ ResolvesType program.aliases declaration.type result.type := by
   induction typed using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
     (motive_4 := fun _ _ _ _ => True)
     (motive_5 := fun _ _ _ _ => True)
     (motive_6 := fun _ _ _ _ => True) generalizing name with
   | constant declared _ resolved => cases source; exact ⟨_, declared, resolved⟩
-  | endOwn _ _ _ _ ih => exact ih source
-  | endAfter _ _ _ _ ih => exact ih source
+  | endOwn _ _ _ _ _ ih => exact ih source
+  | endAfter _ _ _ _ _ ih => exact ih source
   | raiseSupply _ _ ih => exact ih source
+  | expectedData _ _ ih => exact ih source
   | _ => first | trivial | cases source
 
 theorem StateTyped.pendingNodup {interpretation : Interpretation} {context : Context}
@@ -7714,17 +9848,18 @@ theorem StateTyped.permPending {interpretation : Interpretation} {context : Cont
     {heldNodes otherNodes : List Nat} {environment : Environment} {held other : List Value}
     (typed : StateTyped program interpretation context heldNodes environment held)
     (nodes : heldNodes.Perm otherNodes) (values : held.Perm other)
-    (shape : other = otherNodes.map (fun node => Value.shared (interpretation.node node))) :
+    (shape : other = otherNodes.map (fun node => Value.reference (interpretation.node node))) :
     StateTyped program interpretation context otherNodes environment other := by
   refine { typed.toStoreTyped with
     heldShape := shape
     heldOwn := fun node member => typed.heldOwn node (nodes.mem_iff.mpr member)
+    heldReady := fun node member => typed.heldReady node (nodes.mem_iff.mpr member)
     custody := ?_ }
   have nodup := typed.pendingNodup.perm values
   intro node loan found own
   obtain ⟨location, carried, unique⟩ := typed.custody node loan found own
-  have oldHeld : ∀ index : Nat, other[index]? = some (Value.shared node) →
-      ∃ old : Nat, held[old]? = some (Value.shared node) := by
+  have oldHeld : ∀ index : Nat, other[index]? = some (Value.reference node) →
+      ∃ old : Nat, held[old]? = some (Value.reference node) := by
     intro index selected
     exact List.mem_iff_getElem?.mp (values.mem_iff.mpr (List.mem_of_getElem? selected))
   cases location with
@@ -7760,7 +9895,7 @@ inductive ResultsTyped (program : Program) (interpretation : Interpretation) (co
 theorem ResultsTyped.referenceValues {interpretation : Interpretation} {context : Context}
     {values : List Value} {results : List ResultType}
     (typed : ResultsTyped program interpretation context values results) :
-    Grounded.referenceValues values = (resultNodes results).map (fun node => Value.shared (interpretation.node node)) := by
+    Grounded.referenceValues values = (resultNodes results).map (fun node => Value.reference (interpretation.node node)) := by
   induction typed with
   | nil => rfl
   | cons head tail ih =>
@@ -7801,7 +9936,7 @@ theorem StateTyped.prepare {interpretation : Interpretation} {context : Context}
     | @cons value values result results head tail =>
       have align := List.cons.inj (by simpa only [List.map_cons] using aligned)
       have projection := (ResultsTyped.cons head tail).referenceValues
-      have prefixShape : held = heldNodes.map (fun node => Value.shared (interpretation.node node)) := by
+      have prefixShape : held = heldNodes.map (fun node => Value.reference (interpretation.node node)) := by
         apply List.append_cancel_right
         simpa only [List.map_append, ← projection] using typed.heldShape
       have reordered : StateTyped program interpretation context
@@ -7851,7 +9986,8 @@ theorem ResultsTyped.usable {interpretation : Interpretation} {context : Context
     {values : List Value} {results : List ResultType} {environment : Environment}
     (typed : ResultsTyped program interpretation context values results)
     (stored : StoreTyped program interpretation context environment)
-    (own : ∀ node ∈ resultNodes results, context.Own node) :
+    (own : ∀ node ∈ resultNodes results, context.Own node)
+    (ready : ∀ node ∈ resultNodes results, context.Restored node) :
     ∀ value ∈ values, environment.ResultUsable value := by
   induction typed with
   | nil => simp
@@ -7859,7 +9995,9 @@ theorem ResultsTyped.usable {interpretation : Interpretation} {context : Context
     intro value member
     rcases List.mem_cons.mp member with rfl | member
     · exact head.usable stored (fun node included => own node (List.mem_append_left _ included))
-    · exact ih (fun node included => own node (List.mem_append_right _ included)) value member
+        (fun node included => ready node (List.mem_append_left _ included))
+    · exact ih (fun node included => own node (List.mem_append_right _ included))
+        (fun node included => ready node (List.mem_append_right _ included)) value member
 
 theorem ResidentTyped.dataShape_of_plain {state : Initialization} {value : Value} {type : Ty}
     (typed : ResidentTyped program state value type) (complete : state.Complete)
@@ -7869,7 +10007,7 @@ theorem ResidentTyped.dataShape_of_plain {state : Initialization} {value : Value
       valuesReferenceFree values → typesDataShape types) with
   | vacant | uncertain => cases complete
   | unit | integer | character | nominal => trivial
-  | shared => exact False.elim plain
+  | reference => exact False.elim plain
   | tuple head tail present headIH tailIH =>
     exact ⟨headIH (complete.child 0) plain.1, tailIH (fun index => complete.child (index + 1)) plain.2⟩
   | array residents finite size present ih => exact finite.dataShape
@@ -7957,19 +10095,26 @@ theorem ResultsTyped.dropData {interpretation : Interpretation} {context : Conte
   simpa only [results.referenceValues, resultNodes_data, List.map_nil, List.append_nil] using typed
 
 theorem ResultTyped.newBorrow {interpretation : Interpretation} {context : Context} {environment : Environment}
-    {target : Origin} {referent : Ty} {parent : Option Nat} (finite : FiniteLayout program.target program.data referent) :
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} (finite : FiniteLayout program.target program.data referent) :
     ResultTyped program (interpretation.addNode context.loans.length environment.loans.length)
-      (context.borrow target referent parent) (.shared environment.loans.length) ⟨.shared referent, some context.loans.length⟩ := by
-  refine ⟨.shared _ finite, ?_, _, context.borrow_last target referent parent, rfl⟩
+      (context.borrow target referent parent mode) (.reference environment.loans.length) ⟨.reference referent mode, some context.loans.length⟩ := by
+  refine ⟨.reference _ finite, ?_, _, context.borrow_last target referent parent mode, rfl⟩
   simp [Interpretation.addNode]
 
 theorem Value.ReferenceFree.usable {value : Value} (plain : value.ReferenceFree) (environment : Environment) :
     environment.ResultUsable value := by
   cases value <;> first | exact plain | exact False.elim plain
 
-theorem Environment.ResultUsable.congrLoans {before after : Environment} {value : Value}
-    (usable : after.ResultUsable value) (same : after.loans = before.loans) : before.ResultUsable value := by
-  cases value <;> simpa only [Environment.ResultUsable, Environment.Usable, same] using usable
+theorem Environment.Disposes.restored {before after : Environment} {value : Value} {node : Nat}
+    (disposed : Environment.Disposes program before value after) (ready : before.Restored node) :
+    after.Restored node := by
+  have same := disposed.storage.store
+  cases disposed with
+  | data => exact ready
+  | reference _ ended =>
+    intro loan found own
+    obtain ⟨resident, read⟩ := ready loan (Environment.endOwn_active ended found own).1 own
+    exact ⟨resident, by simpa only [Environment.readAddress, Environment.at, same] using read⟩
 
 theorem Environment.prepare_supply (values : BindingValues) (environment : Environment) :
     environment.nextRoot ≤ (environment.prepare values).nextRoot := by
@@ -7996,8 +10141,8 @@ theorem ResultsTyped.hide {interpretation : Interpretation} {context : Context} 
 result and updated lexical environment. Later expressions consume that actual
 post-state; scopes remove only their own bindings. -/
 private theorem execution_correctness {context afterContext : Context} {heldNodes : List Nat}
-    {expression : Expr} {result : ResultType} {plan : CorePlan}
-    (admitted : HasType program home context heldNodes expression result afterContext plan)
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context heldNodes expression result afterContext plan expected)
     {interpretation : Interpretation} {environment : Environment} {held : List Value}
     (environmentTyped : StateTyped program interpretation context heldNodes environment held) :
     ∃ value after afterMap, Evaluates program environment ⟨expression, plan⟩ value after ∧
@@ -8005,14 +10150,14 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
       StateTyped program afterMap afterContext (heldNodes ++ result.nodes) after (held ++ value.referenceValues) ∧
       StateProgress context afterContext environment after interpretation afterMap := by
   induction admitted using HasType.rec
-    (motive_2 := fun home context heldNodes expressions results afterContext plans _ =>
+    (motive_2 := fun home context heldNodes expressions results afterContext plans expected _ =>
       ∀ (interpretation : Interpretation) (environment : Environment) (held : List Value),
       StateTyped program interpretation context heldNodes environment held →
       ∃ values after afterMap, EvaluatesMany program environment expressions plans values after ∧
         ResultsTyped program afterMap afterContext values results ∧
         StateTyped program afterMap afterContext (heldNodes ++ resultNodes results) after (held ++ referenceValues values) ∧
         StateProgress context afterContext environment after interpretation afterMap)
-    (motive_3 := fun home context heldNodes subject result previous arms afterContext _ =>
+    (motive_3 := fun home context heldNodes subject result previous arms afterContext expected _ =>
       ∀ (interpretation : Interpretation) (environment : Environment) (held : List Value),
       StateTyped program interpretation context heldNodes environment held →
       ∀ value, ValueHasType program value subject → value.ReferenceFree → ∀ bindings body,
@@ -8040,22 +10185,29 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
   | group typed ih =>
     obtain ⟨value, after, afterMap, evaluated, result, typed, progress⟩ := ih environmentTyped
     exact ⟨value, after, afterMap, .group evaluated, result, typed, progress⟩
-  | read selected access initialized path shape copyable =>
+  | implicitMove _ _ ih =>
+    obtain ⟨value, after, afterMap, evaluated, result, typed, progress⟩ := ih environmentTyped
+    exact ⟨value, after, afterMap, .implicitMove evaluated, result, typed, progress⟩
+  | @read home context heldNodes place slot type indices state selected access initialized path shape copyable permitted =>
     obtain ⟨value, resolved, raw, resident⟩ := environmentTyped.toStoreTyped.resolvePlace selected access path
     obtain ⟨resident, live⟩ := resident.complete initialized
     have result {resultContext : Context} := ResultTyped.ofData (interpretation := interpretation) (context := resultContext) resident shape
     exact ⟨value, environment, interpretation,
-      .read resolved (by simp [Environment.readAddress, raw, live]) (.data (resident.referenceFree shape)), result,
+      .read resolved (by simp [Environment.readAddress, raw, live])
+        (environmentTyped.toStoreTyped.permits (origin := ⟨.binder slot.binder, indices⟩) (allowed := permitted)
+          (environmentTyped.source.member_known _ (lookup_member selected)))
+        (.data (resident.referenceFree shape)), result,
       environmentTyped.dataResult result, .refl environmentTyped.source⟩
-  | @copyShared home context heldNodes place slot node loan selected direct handle shape initialized found own =>
+  | @copyShared home context heldNodes place slot node loan selected direct handle shape initialized found own copyable permitted =>
+    have shared := copyable.duplicable_reference_shared
     have handlePath : PathType program home slot.type place.fields [] slot.type := by rw [direct]; exact .nil _
     obtain ⟨carrier, resolved, raw, resident⟩ := environmentTyped.toStoreTyped.resolvePlace selected (.here _) handlePath
     have stored : environment.store (interpretation.binder slot.binder) = some carrier := by
       simpa [Environment.at, Value.readIndices] using raw
-    have same : carrier = .shared (interpretation.node node) := by
+    have same : carrier = .reference (interpretation.node node) := by
       simpa [Slot.Corresponds, handle] using (environmentTyped.slots.lookup selected).2 carrier stored
     subst carrier
-    obtain ⟨value, targetRead, valueTyped⟩ := environmentTyped.targets node loan found own
+    obtain ⟨value, targetRead, valueTyped⟩ := environmentTyped.targets node loan found own shared
     have known := environmentTyped.source.loanKnown found
     obtain ⟨bounded, finite⟩ := environmentTyped.source.targets node loan found
     have ancestor : ∀ parent, some node = some parent → ∃ sourceLoan,
@@ -8064,25 +10216,35 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
       cases Option.some.inj equal
       exact ⟨loan, found, rfl, [], by simp⟩
     exact ⟨_, _, _, .read resolved (by simp [Environment.readAddress, raw, Value.initialized])
-      (.shared (environmentTyped.records node loan found) (environmentTyped.toStoreTyped.usable ⟨loan, found, own⟩)),
-      ResultTyped.newBorrow finite, environmentTyped.borrow known bounded finite ancestor targetRead valueTyped,
+      (environmentTyped.toStoreTyped.permits (origin := ⟨.binder slot.binder, []⟩) (allowed := permitted)
+        (environmentTyped.source.member_known _ (lookup_member selected)))
+      (.reference (environmentTyped.records node loan found) shared (environmentTyped.toStoreTyped.usable ⟨loan, found, own⟩)),
+      ResultTyped.newBorrow finite, environmentTyped.borrow (mode := .shared) known bounded finite ancestor
+        (by intro _ _ _ _ impossible; cases impossible)
+        (by simpa only [Context.SourceTarget, shared] using environmentTyped.sourceTargets node loan found own)
+        ((environmentTyped.sourceTargets node loan found own).2.1 shared) targetRead valueTyped,
       .borrow environmentTyped.source known⟩
   | @move home context heldNodes place slot type indices state slots selected access initialized path shape data free cleared =>
     obtain ⟨value, after, resolved, taken, afterTyped, result, custody⟩ :=
       environmentTyped.toStoreTyped.takeData_custody environmentTyped.custody selected access initialized path data shape cleared free
     have state : StateTyped program interpretation _ _ after held :=
-      { afterTyped with heldShape := environmentTyped.heldShape, heldOwn := environmentTyped.heldOwn, custody := custody }
+      { afterTyped with
+        heldShape := environmentTyped.heldShape
+        heldOwn := environmentTyped.heldOwn
+        heldReady := fun node member => (environmentTyped.heldReady node member).writeSlot
+          environmentTyped.source selected cleared rfl rfl access free
+        custody := custody }
     exact ⟨value, after, interpretation, .move resolved
-      (environmentTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, indices⟩) (.inl ⟨_, lookup_member selected, rfl⟩) free)
+      (environmentTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, indices⟩) (environmentTyped.source.member_known _ (lookup_member selected)) free)
       (result.shape.2.usable _) taken, result, state.dataResult result,
       StateProgress.replaceSlot environmentTyped.source selected cleared rfl
         (congrArg List.length (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2))⟩
-  | @moveShared home context heldNodes place slot node referent slots selected direct handle shape initialized own free cleared =>
+  | @moveReference home context heldNodes place slot node referent mode slots selected direct handle shape initialized own ready free cleared =>
     obtain ⟨after, resolved, taken, afterTyped, result, custody⟩ :=
-      environmentTyped.toStoreTyped.takeShared_custody (home := home) environmentTyped.custody selected direct handle shape initialized cleared free
-    have state : StateTyped program interpretation {context with bindings := slots} (heldNodes ++ [node]) after
-        (held ++ [.shared (interpretation.node node)]) := by
-      refine { afterTyped with heldShape := ?_, heldOwn := ?_, custody := custody }
+      environmentTyped.toStoreTyped.takeReference_custody (home := home) environmentTyped.custody selected direct handle shape initialized cleared free
+    have state : StateTyped program interpretation (context.withSlots slots) (heldNodes ++ [node]) after
+        (held ++ [.reference (interpretation.node node)]) := by
+      refine { afterTyped with heldShape := ?_, heldOwn := ?_, heldReady := ?_, custody := custody }
       · simp only [List.map_append, List.map_cons, List.map_nil, environmentTyped.heldShape]
       · intro other member
         rcases List.mem_append.mp member with old | final
@@ -8090,35 +10252,81 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
         · have equal : other = node := by simpa using final
           subst other
           exact own
+      · intro other member
+        have restored : context.Restored other := by
+          rcases List.mem_append.mp member with old | final
+          · exact environmentTyped.heldReady other old
+          · have same : other = node := by simpa using final
+            exact same ▸ ready
+        exact restored.writeSlot environmentTyped.source selected cleared rfl rfl (.here _) free
     exact ⟨_, after, interpretation, .move resolved
-      (environmentTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, []⟩) (.inl ⟨_, lookup_member selected, rfl⟩) free)
-      (show environment.ResultUsable (.shared (interpretation.node node)) from environmentTyped.toStoreTyped.usable own) taken, result, state,
+      (environmentTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, []⟩) (environmentTyped.source.member_known _ (lookup_member selected)) free)
+      (show environment.ResultUsable (.reference (interpretation.node node)) from
+        ⟨environmentTyped.toStoreTyped.usable own,
+          by obtain ⟨loan, found, _⟩ := own; exact environmentTyped.toStoreTyped.restored found ready⟩) taken, result, state,
       StateProgress.replaceSlot environmentTyped.source selected cleared rfl
         (congrArg List.length (Environment.writeAddress_loans (Environment.takeAddress_eq_some.mp taken).2))⟩
-  | borrow access finite =>
-    obtain ⟨known, bounded, ancestor, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access
-    exact ⟨_, _, _, .borrow resolved allowed selected (resident.referenceFree finite.dataShape),
-      ResultTyped.newBorrow finite, environmentTyped.borrow known bounded finite ancestor selected resident,
+  | borrow access ready permitted finite =>
+    obtain ⟨known, bounded, ancestor, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access ready
+    exact ⟨_, _, _, .borrow resolved allowed (environmentTyped.toStoreTyped.permits known permitted) (environmentTyped.toStoreTyped.accessReady access ready) selected (resident.referenceFree finite.dataShape),
+      ResultTyped.newBorrow finite, environmentTyped.borrow known bounded finite ancestor access.parentMode
+        (access.sourceTarget environmentTyped.toStoreTyped ready) ready.1 selected resident,
       .borrow environmentTyped.source known⟩
-  | dereference access copyable shape =>
-    obtain ⟨_, _, _, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access
+  | reborrow access ready permitted finite =>
+    obtain ⟨known, bounded, ancestor, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access ready
+    exact ⟨_, _, _, .reborrow resolved allowed (environmentTyped.toStoreTyped.permits known permitted) (environmentTyped.toStoreTyped.accessReady access ready) selected (resident.referenceFree finite.dataShape),
+      ResultTyped.newBorrow finite, environmentTyped.borrow known bounded finite ancestor access.parentMode
+        (access.sourceTarget environmentTyped.toStoreTyped ready) ready.1 selected resident,
+      .borrow environmentTyped.source known⟩
+  | expectedData _ _ ih | expectedMove _ ih | expectedBorrow _ ih | expectedCall _ ih => exact ih environmentTyped
+  | dereference access ready permitted copyable shape =>
+    obtain ⟨known, _, _, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access ready
     have result {resultContext : Context} := ResultTyped.ofData (interpretation := interpretation) (context := resultContext) resident shape
-    exact ⟨value, environment, interpretation, .dereference resolved allowed selected (resident.referenceFree shape),
+    exact ⟨value, environment, interpretation, .dereference resolved allowed (environmentTyped.toStoreTyped.permits known permitted) (environmentTyped.toStoreTyped.accessReady access ready) selected (resident.referenceFree shape),
       result, environmentTyped.dataResult result, .refl environmentTyped.source⟩
-  | endOwn selected handle unprotected continued ih =>
+  | moveIndirect access ready permitted shape pending =>
+    obtain ⟨loan, binder, found, own, unique, within, base⟩ := access.uniqueTarget environmentTyped.toStoreTyped
+    obtain ⟨known, _, _, value, resolved, allowed, selected, resident⟩ := environmentTyped.toStoreTyped.resolveAccess access ready
+    obtain ⟨after, written, typed, progress, _⟩ := environmentTyped.writeTarget (access.canonicalTarget environmentTyped.toStoreTyped) base shape
+      .vacant found own unique within permitted (fun node member loan found own => .inr (pending node member loan found own))
+    have result {resultContext : Context} := ResultTyped.ofData (interpretation := interpretation) (context := resultContext) resident shape
+    exact ⟨value, after, interpretation, .moveIndirect resolved allowed
+      (environmentTyped.toStoreTyped.permits known permitted) (environmentTyped.toStoreTyped.accessReady access ready)
+      (resident.referenceFree shape) (Environment.takeAddress_eq_some.mpr ⟨selected, written⟩), result, typed.dataResult result, progress⟩
+  | @assignIndirect expected home context middle afterContext heldNodes reference fields expression rest target type node result valuePlan restPlan slot state resident access permitted shape stored selected discard continued residentIH bodyIH =>
+    obtain ⟨replacement, middleEnv, middleMap, evaluated, residentTyped, pending, firstProgress⟩ := residentIH environmentTyped
+    have middleTyped := pending.dropDataResult residentTyped
+    obtain ⟨loan, binder, found, own, unique, within, base⟩ := access.uniqueTarget middleTyped.toStoreTyped
+    have canonical := access.canonicalTarget middleTyped.toStoreTyped
+    obtain ⟨known, _, _, resolved, allowed, _⟩ := middleTyped.toStoreTyped.resolveAccessMasked access
+    have storedBinder : middle.storage (.binder binder) = some slot := by simpa [base] using stored
+    obtain ⟨rootSlot, rootStored, path, _, _⟩ := (by simpa [Context.Target, base] using canonical)
+    have equal : rootSlot = slot := Option.some.inj (rootStored.symm.trans storedBinder)
+    subst rootSlot
+    obtain ⟨root, rootStored, rootTyped, _⟩ := middleTyped.cells binder slot storedBinder
+    obtain ⟨old, read, oldTyped⟩ := path.resident rootTyped selected
+    have raw : middleEnv.at (middleMap.origin target) = some old := by
+      simp [Environment.at, Interpretation.origin, base, rootStored, read]
+    obtain ⟨updated, written, updatedTyped, writeProgress, evolution⟩ := middleTyped.writeTarget canonical base shape
+      residentTyped.resident found own unique within permitted (fun _ _ _ _ _ => .inl Initialization.Complete.full)
+    obtain ⟨value, after, afterMap, bodyEval, resultTyped, afterTyped, bodyProgress⟩ := bodyIH updatedTyped
+    exact ⟨value, after, afterMap, .assignIndirect evaluated resolved allowed (middleTyped.toStoreTyped.permits known permitted)
+      raw (oldTyped.referenceFree shape) (discard.realized oldTyped).destroys written bodyEval, resultTyped, afterTyped,
+      firstProgress.trans (writeProgress.trans bodyProgress evolution.supply) (evaluated.storage environmentTyped.residents.valid).2.supply⟩
+  | endOwn selected handle unprotected ready continued ih =>
     obtain ⟨loan, found, _⟩ := (environmentTyped.source.slots _ (List.mem_of_getElem? selected)).2 _ handle
     obtain ⟨ended, endedOwn, endedTyped⟩ := environmentTyped.endOwn found unprotected
     obtain ⟨value, after, afterMap, evaluated, result, typed, progress⟩ := ih endedTyped
-    exact ⟨value, after, afterMap, .endOwn ((environmentTyped.toStoreTyped.endSlot selected handle).trans endedOwn) evaluated,
+    exact ⟨value, after, afterMap, .endOwn ((environmentTyped.toStoreTyped.endSlot selected handle ready).trans endedOwn) evaluated,
       result, typed, (StateProgress.endOwn environmentTyped.source endedOwn).trans progress
         (by simp only [Environment.endOwn_state endedOwn, Nat.le_refl])⟩
-  | endAfter evaluated selected handle unprotected ih =>
+  | endAfter evaluated selected handle unprotected ready ih =>
     obtain ⟨value, middle, middleMap, executed, result, typed, progress⟩ := ih environmentTyped
     obtain ⟨loan, found, _⟩ := (typed.source.slots _ (List.mem_of_getElem? selected)).2 _ handle
     obtain ⟨after, ended, afterTyped⟩ := typed.endOwn found unprotected
     have tailProgress := StateProgress.endOwn typed.source ended
     have afterResult := result.transport tailProgress.history tailProgress.interpretation
-    exact ⟨value, after, middleMap, .endAfter executed ((typed.toStoreTyped.endSlot selected handle).trans ended)
+    exact ⟨value, after, middleMap, .endAfter executed ((typed.toStoreTyped.endSlot selected handle ready).trans ended)
       (afterTyped.resultUsable afterResult), afterResult, afterTyped,
       progress.trans tailProgress (executed.storage environmentTyped.residents.valid).2.supply⟩
   | raiseSupply typed larger ih =>
@@ -8126,7 +10334,7 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
     have tailProgress := StateProgress.raiseSupply (interpretation := afterMap) (environment := after) typed.source larger
     exact ⟨value, after, afterMap, evaluated, result.transport tailProgress.history tailProgress.interpretation,
       typed.raiseSupply larger, progress.trans tailProgress (evaluated.storage environmentTyped.residents.valid).2.supply⟩
-  | @sequence home context middleContext afterContext heldNodes first rest discardedType result firstPlan restPlan head drop tail headIH tailIH =>
+  | @sequence expected home context middleContext afterContext heldNodes first rest discardedType result firstPlan restPlan head drop tail headIH tailIH =>
     obtain ⟨discarded, middle, middleMap, headEval, discardedTyped, middleTyped, firstProgress⟩ := headIH environmentTyped
     obtain ⟨disposed, disposal, disposedTyped⟩ := middleTyped.disposeResult discardedTyped drop
     have disposalProgress := StateProgress.dispose (interpretation := middleMap) (reference := discardedType.reference) middleTyped.source disposal
@@ -8134,7 +10342,7 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
     exact ⟨value, after, afterMap, .sequence headEval disposal tailEval, result, typed,
       firstProgress.trans (disposalProgress.trans lastProgress (by simp only [disposal.storage.supply, Nat.le_refl]))
         (headEval.storage environmentTyped.residents.valid).2.supply⟩
-  | @bind home context middle bodyAfter heldNodes mutable name annotation initial body localType result initialPlan bodyPlan initialized annotated continued cleanup initialIH bodyIH =>
+  | @bind expected home context middle bodyAfter heldNodes mutable name annotation initial body localType result initialPlan bodyPlan initialized annotated continued cleanup initialIH bodyIH =>
     obtain ⟨resident, middleEnv, middleMap, initialEval, residentTyped, middleTyped, firstProgress⟩ := initialIH environmentTyped
     have bound := middleTyped.bind residentTyped name mutable
     obtain ⟨value, localAfter, afterMap, bodyEval, resultTyped, localTyped, bodyProgress⟩ := bodyIH bound
@@ -8181,18 +10389,20 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
   | constant declared visible resolved structural shape initialized ih =>
     obtain ⟨value, after, afterMap, evaluated, result, afterTyped, progress⟩ := ih environmentTyped.hide
     exact ⟨value, environment.resume after, afterMap, .constant declared evaluated result.shape.2,
-      result.resume, StateTyped.resume environmentTyped.toStoreTyped afterTyped progress (evaluated.storage environmentTyped.residents.valid.hide).2,
+      result.resume, StateTyped.resume environmentTyped.toStoreTyped afterTyped progress (evaluated.storage environmentTyped.residents.valid.hide).2.supply,
       progress.resume environmentTyped.source⟩
-  | nil =>
+  | nil | expectedNil =>
     rename_i interpretation environment held typed
     exact ⟨[], environment, interpretation, .nil, .nil, by simpa [resultNodes, referenceValues] using typed, .refl typed.source⟩
-  | cons head tail headIH tailIH =>
+  | cons head tail headIH tailIH
+  | expectedCons head tail headIH tailIH =>
     rename_i interpretation environment held typed
     obtain ⟨first, middle, middleMap, headEval, firstTyped, middleTyped, firstProgress⟩ := headIH typed
     obtain ⟨rest, after, afterMap, tailEval, restTyped, afterTyped, tailProgress⟩ := tailIH middleMap middle _ middleTyped
     have firstResult := firstTyped.transport tailProgress.history tailProgress.interpretation
     have usable := firstResult.usable afterTyped.toStoreTyped (fun node member =>
       afterTyped.heldOwn node (List.mem_append_left _ (List.mem_append_right _ member)))
+      (fun node member => afterTyped.heldReady node (List.mem_append_left _ (List.mem_append_right _ member)))
     exact ⟨first :: rest, after, afterMap, .cons headEval tailEval usable, .cons firstResult restTyped,
       by simpa only [resultNodes, List.flatMap_cons, referenceValues, List.append_assoc] using afterTyped,
       firstProgress.trans tailProgress (headEval.storage typed.residents.valid).2.supply⟩
@@ -8218,42 +10428,55 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
     obtain ⟨first, firstNormalized⟩ := headIH
     obtain ⟨rest, restNormalized⟩ := tailIH
     exact ⟨(_, _) :: rest, .armsCons firstNormalized restNormalized⟩
-  | @assign home context middle afterContext heldNodes place expression rest slot target result valuePlan restPlan indices state slots resident selected writable available path shape data discard free written continued residentIH bodyIH =>
+  | @assign expected home context middle afterContext heldNodes place expression rest slot target result valuePlan restPlan indices state slots resident selected writable available path shape data discard free written continued residentIH bodyIH =>
     obtain ⟨replacement, middleEnv, middleMap, evaluated, residentTyped, pending, firstProgress⟩ := residentIH environmentTyped
     have middleTyped := pending.dropDataResult residentTyped
     obtain ⟨old, updated, resolved, raw, disposal, changed, updatedTyped, custody⟩ :=
       middleTyped.toStoreTyped.assignData middleTyped.custody selected available path data shape written residentTyped.resident discard free
     have state : StateTyped program middleMap _ heldNodes updated held :=
-      { updatedTyped with heldShape := middleTyped.heldShape, heldOwn := middleTyped.heldOwn, custody := custody }
+      { updatedTyped with
+        heldShape := middleTyped.heldShape
+        heldOwn := middleTyped.heldOwn
+        heldReady := fun node member => (middleTyped.heldReady node member).writeSlot
+          middleTyped.source selected written rfl rfl available free
+        custody := custody }
     have writeProgress := StateProgress.replaceSlot (interpretation := middleMap) middleTyped.source selected written rfl
       (congrArg List.length (Environment.writeAddress_loans changed))
     obtain ⟨value, after, afterMap, bodyEval, resultTyped, afterTyped, bodyProgress⟩ := bodyIH state
     exact ⟨value, after, afterMap, .assign evaluated resolved
-      (middleTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, indices⟩) (.inl ⟨_, lookup_member selected, rfl⟩) free)
+      (middleTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, indices⟩) (middleTyped.source.member_known _ (lookup_member selected)) free)
       raw disposal (residentTyped.shape.2.usable _) changed bodyEval, resultTyped, afterTyped,
       firstProgress.trans (writeProgress.trans bodyProgress (by simp only [(Environment.writeAddress_update changed).supply, Nat.le_refl]))
         (evaluated.storage environmentTyped.residents.valid).2.supply⟩
-  | @assignShared home context middle afterContext heldNodes place expression rest slot referent node result valuePlan restPlan slots resident selected writable direct shape free unprotected written continued residentIH bodyIH =>
+  | @assignReference expected home context middle afterContext heldNodes place expression rest slot referent mode node result valuePlan restPlan slots resident selected writable direct shape free unprotected ready written continued residentIH bodyIH =>
     obtain ⟨replacement, middleEnv, middleMap, evaluated, residentTyped, middleTyped, firstProgress⟩ := residentIH environmentTyped
     have custody : Custody middleEnv (held ++ [replacement]) := by
       simpa only [residentTyped.shape.1, Value.referenceValues] using middleTyped.custody
     obtain ⟨old, disposed, updated, resolved, raw, disposal, changed, updatedTyped, custody⟩ :=
-      middleTyped.toStoreTyped.assignShared_custody (home := home) custody selected direct shape written residentTyped free
+      middleTyped.toStoreTyped.assignReference_custody (home := home) custody selected direct shape written residentTyped free ready
     have protectedOwn : ∀ other ∈ heldNodes ++ [node], (middle.dispose slot.reference).Own other := by
       intro other member
       exact (middleTyped.heldOwn other member).dispose slot.reference
         (fun ended handle equal => unprotected ended handle (equal ▸ member))
-    have state : StateTyped program middleMap {middle.dispose slot.reference with bindings := slots} heldNodes updated held := by
-      refine { updatedTyped with heldShape := ?_, heldOwn := ?_, custody := custody }
+    have state : StateTyped program middleMap ((middle.dispose slot.reference).withSlots slots) heldNodes updated held := by
+      refine { updatedTyped with heldShape := ?_, heldOwn := ?_, heldReady := ?_, custody := custody }
       · apply List.append_cancel_right
         simpa only [List.map_append, residentTyped.referenceValues] using middleTyped.heldShape
       · intro other member
         exact protectedOwn other (List.mem_append_left _ member)
-    have afterResult : ResultTyped program middleMap {middle.dispose slot.reference with bindings := slots} replacement
-        ⟨.shared referent, some node⟩ := ⟨residentTyped.resident, (residentTyped.dispose slot.reference).shape⟩
-    have allowed := afterResult.usable updatedTyped (fun other member => protectedOwn other (List.mem_append_right _ member))
-    have disposedAllowed : disposed.ResultUsable replacement :=
-      allowed.congrLoans (Environment.writeAddress_loans changed)
+      · intro other member
+        exact ((middleTyped.heldReady other (List.mem_append_left _ member)).dispose slot.reference).writeSlot
+          (nextSlot := { slot with initialization := .full, reference := some node })
+          (slot := slot) (name := place.root) (indices := []) (next := .full)
+          (middleTyped.source.dispose slot.reference)
+          (by cases slot.reference <;> exact selected) (by cases slot.reference <;> exact written)
+          rfl rfl (.here _) (free.dispose slot.reference)
+    have disposedAllowed : disposed.ResultUsable replacement := by
+      have initial := middleTyped.resultUsable residentTyped
+      rw [residentTyped.shape.1] at initial ⊢
+      refine ⟨?_, disposal.restored initial.2⟩
+      have own := updatedTyped.usable (protectedOwn node (by simp))
+      simpa only [Environment.Usable, Environment.writeAddress_loans changed] using own
     have disposalProgress : StateProgress middle (middle.dispose slot.reference) middleEnv disposed middleMap middleMap :=
       .dispose middleTyped.source disposal
     have disposedSource := middleTyped.source.dispose slot.reference
@@ -8264,12 +10487,13 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
       (congrArg List.length (Environment.writeAddress_loans changed))
     obtain ⟨value, after, afterMap, bodyEval, resultTyped, afterTyped, bodyProgress⟩ := bodyIH state
     exact ⟨value, after, afterMap, .assign evaluated resolved
-      (middleTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, []⟩) (.inl ⟨_, lookup_member selected, rfl⟩) free)
+      (middleTyped.toStoreTyped.ownerFree (origin := ⟨.binder slot.binder, []⟩) (middleTyped.source.member_known _ (lookup_member selected)) free)
       raw disposal disposedAllowed changed bodyEval, resultTyped, afterTyped,
       firstProgress.trans (disposalProgress.trans (writeProgress.trans bodyProgress
         (by simp only [(Environment.writeAddress_update changed).supply, Nat.le_refl])) (by simp only [disposal.storage.supply, Nat.le_refl]))
         (evaluated.storage environmentTyped.residents.valid).2.supply⟩
-  | @call home context middle bodyAfter heldNodes identity arguments argumentTypes result argumentPlans bodyPlan declaration declared visible distinct initialized types inputs body resultType origin cleanup inputsIH bodyIH =>
+  | @call home context middle bodyAfter heldNodes identity arguments argumentTypes result argumentPlans bodyPlan declaration declared visible distinct initialized inputs body resultType origin cleanup inputsIH bodyIH =>
+    have types := inputs.expected_types _ rfl
     obtain ⟨values, middleEnv, middleMap, inputsEval, inputsTyped, middleTyped, inputsProgress⟩ := inputsIH interpretation environment held environmentTyped
     have hiddenArguments := inputsTyped.hide
     obtain ⟨boundMap, bound, prepareProgress⟩ := middleTyped.hide.prepare hiddenArguments types.symm
@@ -8286,11 +10510,12 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
     have cleanProgress := StateProgress.cleanup (interpretation := afterMap) localTyped.source cleaned
     have localProgress := prepareProgress.trans (bodyProgress.trans cleanProgress bodySupply)
       (Environment.prepare_supply _ _)
-    have evolved := ((bodyEval.storage bound.residents.valid).2.scope middleTyped.residents.valid.hide _).trans cleanedActual.suffix.evolution
+    have evolved := ((bodyEval.storage bound.residents.valid).2.scope middleTyped.residents.valid.hide _).trans
+      (cleanedActual.suffix_evolution localTyped.residents.valid)
     have afterResult := resultTyped.transport cleanProgress.history cleanProgress.interpretation
     exact ⟨value, middleEnv.resume after, afterMap, .call declared inputsEval bodyEval ⟨trace, cleanedActual⟩
       (afterTyped.resultUsable afterResult), afterResult.resume,
-      StateTyped.resume middleTyped.toStoreTyped afterTyped localProgress evolved,
+      StateTyped.resume middleTyped.toStoreTyped afterTyped localProgress evolved.supply,
       inputsProgress.trans (localProgress.resume middleTyped.source) (inputsEval.storage environmentTyped.residents.valid).2.supply⟩
   | applyPatterns argumentsTyped shape nonempty constants covered bodies argumentsIH constantsIH bodiesIH =>
     obtain ⟨normalized, normalization⟩ := constantsIH
@@ -8304,7 +10529,7 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
     exact ⟨value, after, afterMap, .applyPatterns normalization argumentsEval valuesTyped.data.2 consumed bodyEval cleanup
       (afterTyped.resultUsable result), result, afterTyped,
       argumentsProgress.trans bodyProgress (argumentsEval.storage environmentTyped.residents.valid).2.supply⟩
-  | @clause home context bodyAfter afterContext heldNodes subject result previous pattern bodyExpression rest bindingTypes patternTyped distinct useful bodyTyped cleanup joined tailTyped bodyIH tailIH =>
+  | @clause expected home context bodyAfter afterContext heldNodes subject result previous pattern bodyExpression rest bindingTypes patternTyped distinct useful bodyTyped cleanup joined tailTyped bodyIH tailIH =>
     rename_i interpretation environment held environmentTyped value valueTyped plain bindings body selected
     simp only [selectArm] at selected
     split at selected
@@ -8338,12 +10563,12 @@ private theorem execution_correctness {context afterContext : Context} {heldNode
         tailIH interpretation environment held environmentTyped value valueTyped plain bindings body selected
       exact ⟨resultValue, localAfter, after, afterMap, evaluated, resultTyped, typed, cleanup, .miss found consumed, progress⟩
 
-/-- Connected correctness includes actual root storage and retirement effects,
-not merely agreement of lexical values. Every old root outside the expression's
-lexical owners is framed exactly, and no operation decreases the fresh supply. -/
+/-- Connected correctness includes actual root storage and retirement effects.
+The coarse frame excludes initial owner roots and live unique-target roots;
+it grants no access authority. Source and runtime supplies never decrease. -/
 theorem correctness {context afterContext : Context} {heldNodes : List Nat}
-    {expression : Expr} {result : ResultType} {plan : CorePlan}
-    (admitted : HasType program home context heldNodes expression result afterContext plan)
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context heldNodes expression result afterContext plan expected)
     {interpretation : Interpretation} {environment : Environment} {held : List Value}
     (environmentTyped : StateTyped program interpretation context heldNodes environment held) :
     ∃ value after afterMap, Evaluates program environment ⟨expression, plan⟩ value after ∧
@@ -8361,8 +10586,8 @@ theorem correctness {context afterContext : Context} {heldNodes : List Nat}
 and declarations. Loan-free starting worlds, not a successful final-world premise,
 produce the empty history needed by the conservative agreement specialization. -/
 theorem correctness_referenceFree {context afterContext : Context} {heldNodes : List Nat}
-    {expression : Expr} {result : ResultType} {plan : CorePlan}
-    (admitted : HasType program home context heldNodes expression result afterContext plan)
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context heldNodes expression result afterContext plan expected)
     {interpretation : Interpretation} {environment : Environment} {held : List Value}
     (environmentTyped : StateTyped program interpretation context heldNodes environment held)
     (declarations : program.ReferenceFree) (source : expression.ReferenceFree) (empty : environment.loans = []) :
@@ -8379,19 +10604,38 @@ theorem correctness_referenceFree {context afterContext : Context} {heldNodes : 
   obtain ⟨_, otherAfter, otherEval, afterSame, _⟩ := evaluated.referenceFree_source_agreement declarations source empty otherEmpty same
   exact ⟨otherAfter, otherEval, afterTyped.residents.agrees afterSame, afterSame⟩
 
-/-- No successful transition is assumed: admission constructs the execution and
-its protected-result state before this conclusion inspects every active loan. -/
+/-- Admission constructs execution and restored protected results. Every active
+loan remains addressable; shared loans additionally remain readable. -/
 theorem correctness_noDangling {context afterContext : Context} {heldNodes : List Nat}
-    {expression : Expr} {result : ResultType} {plan : CorePlan}
-    (admitted : HasType program home context heldNodes expression result afterContext plan)
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context heldNodes expression result afterContext plan expected)
     {interpretation : Interpretation} {environment : Environment} {held : List Value}
     (environmentTyped : StateTyped program interpretation context heldNodes environment held) :
     ∃ value after, Evaluates program environment ⟨expression, plan⟩ value after ∧ after.ResultUsable value ∧
       ∀ (node : Nat) (loan : Loan), after.loans[node]? = some loan → loan.own = true →
-        ∃ target type, after.readAddress loan.target = some target ∧ ValueHasType program target type ∧
-          FiniteLayout program.target program.data type := by
+        ∃ target type state, after.at loan.target = some target ∧ ResidentTyped program state target type ∧
+          FiniteLayout program.target program.data type ∧
+          (loan.mode = .shared → after.readAddress loan.target = some target ∧ ValueHasType program target type) := by
   obtain ⟨value, after, _, evaluated, _, afterTyped, _, _, usable, _⟩ := correctness admitted environmentTyped
   exact ⟨value, after, evaluated, usable, fun _ _ found own => afterTyped.toStoreTyped.noDangling found own⟩
+
+/-- Execution preserves canonical root-to-referent typing for every active binder
+loan, without requiring unique referents to be fully initialized. -/
+theorem correctness_canonicalTargets {context afterContext : Context} {heldNodes : List Nat}
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context heldNodes expression result afterContext plan expected)
+    {interpretation : Interpretation} {environment : Environment} {held : List Value}
+    (environmentTyped : StateTyped program interpretation context heldNodes environment held) :
+    ∃ (value : Value) (after : Environment) (afterMap : Interpretation), Evaluates program environment ⟨expression, plan⟩ value after ∧
+      ∀ (node : Nat) (loan : SourceLoan), afterContext.loans[node]? = some loan → loan.own = true →
+        ∀ binder, loan.target.base = .binder binder →
+          ∃ slot state resident, afterContext.storage (.binder binder) = some slot ∧
+            CanonicalPath program slot.type loan.target.fields loan.referent ∧
+            slot.initialization.Access loan.target.fields state ∧
+            after.at (afterMap.origin loan.target) = some resident ∧ ResidentTyped program state resident loan.referent := by
+  obtain ⟨value, after, afterMap, evaluated, _, afterTyped, _⟩ := correctness admitted environmentTyped
+  exact ⟨value, after, afterMap, evaluated, fun _ _ found own _ base => afterTyped.toStoreTyped.canonicalTargets found own base⟩
+
 
 /-- Active shared targets exclude any overlapping owner mutation or disposal.
 Inactive ancestors alone impose no reservation; active descendants keep theirs. -/
@@ -8401,19 +10645,23 @@ theorem Environment.borrowed_owner_exclusion {environment : Environment} {node :
   fun free => overlap (free node loan found own)
 
 theorem HasType.place_initialized {context after : Context} {held : List Nat} {expression : Expr}
-    {result : ResultType} {plan : CorePlan} (typed : HasType program home context held expression result after plan)
+    {result : ResultType} {plan : CorePlan} {expected : Option Ty} (typed : HasType program home context held expression result after plan expected)
     {place : Place} (source : expression = .read place ∨ expression = .move place) :
     ∃ slot indices state, lookup place.root context.bindings = some slot ∧ slot.initialization.Access indices state ∧
       state.Complete ∧ (place.fields = [] → indices = []) := by
   induction typed using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
     (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True)
     generalizing place with
   | read selected access initialized path =>
     rcases source with same | impossible
     · cases same
       exact ⟨_, _, _, selected, access, initialized, by intro fields; rw [fields] at path; cases path; rfl⟩
+    · cases impossible
+  | implicitMove _ _ ih =>
+    rcases source with same | impossible
+    · cases same; exact ih (.inr rfl)
     · cases impossible
   | move selected access initialized path =>
     rcases source with impossible | same
@@ -8424,23 +10672,31 @@ theorem HasType.place_initialized {context after : Context} {held : List Nat} {e
     rcases source with same | impossible
     · cases same; exact ⟨_, [], _, selected, .here _, initialized, fun _ => rfl⟩
     · cases impossible
-  | moveShared selected direct handle shape initialized =>
+  | moveReference selected direct handle shape initialized =>
     rcases source with impossible | same
     · cases impossible
     · cases same; exact ⟨_, [], _, selected, .here _, initialized, fun _ => rfl⟩
-  | endOwn _ _ _ _ ih => exact ih source
-  | endAfter _ _ _ _ ih => exact ih source
+  | endOwn _ _ _ _ _ ih => exact ih source
+  | endAfter _ _ _ _ _ ih => exact ih source
   | raiseSupply _ _ ih => exact ih source
+  | expectedData _ _ ih | expectedMove _ ih => exact ih source
+  | reborrow access =>
+    rcases source with same | impossible
+    · cases same
+      cases access with
+      | dereference selected direct handle shape initialized =>
+        exact ⟨_, [], _, selected, .here _, initialized, fun _ => rfl⟩
+    · cases impossible
   | _ => first | trivial | rcases source with impossible | impossible <;> cases impossible
 
 /-- Neither whole nor nested source use recovers lost initialization certainty,
 including under checked administrative end metadata. -/
 theorem HasType.no_use_maybe {context after : Context} {held : List Nat} {place : Place} {slot : Slot}
-    {result : ResultType} {plan : CorePlan}
+    {result : ResultType} {plan : CorePlan} {expected : Option Ty}
     (found : lookup place.root context.bindings = some slot) (unknown : slot.initialization = .maybe) :
-    (¬ HasType program home context held (.read place) result after plan) ∧
-      (¬ HasType program home context held (.move place) result after plan) := by
-  have exclude {expression : Expr} (admitted : HasType program home context held expression result after plan)
+    (¬ HasType program home context held (.read place) result after plan expected) ∧
+      (¬ HasType program home context held (.move place) result after plan expected) := by
+  have exclude {expression : Expr} (admitted : HasType program home context held expression result after plan expected)
       (source : expression = .read place ∨ expression = .move place) : False := by
     obtain ⟨selectedSlot, indices, state, selected, access, initialized, _⟩ := admitted.place_initialized source
     cases Option.some.inj (selected.symm.trans found)
@@ -8450,8 +10706,8 @@ theorem HasType.no_use_maybe {context after : Context} {held : List Nat} {place 
   exact ⟨fun admitted => exclude admitted (.inl rfl), fun admitted => exclude admitted (.inr rfl)⟩
 
 theorem HasType.read_root_complete {context after : Context} {held : List Nat} {root : String} {slot : Slot}
-    {result : ResultType} {plan : CorePlan}
-    (admitted : HasType program home context held (.read ⟨root, []⟩) result after plan)
+    {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home context held (.read ⟨root, []⟩) result after plan expected)
     (found : lookup root context.bindings = some slot) : slot.initialization.Complete := by
   obtain ⟨selectedSlot, indices, state, selected, access, initialized, rootPath⟩ := admitted.place_initialized (.inl rfl)
   cases Option.some.inj (selected.symm.trans found)
@@ -8461,36 +10717,43 @@ theorem HasType.read_root_complete {context after : Context} {held : List Nat} {
   exact initialized
 
 theorem HasType.no_whole_read_after_clear {context after : Context} {cleared : List (String × Slot)} {held : List Nat} {root : String}
-    {slot : Slot} {indices : List Nat} {selected : Initialization} {result : ResultType} {plan : CorePlan}
+    {slot : Slot} {indices : List Nat} {selected : Initialization} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (valid : context.WellFormed program) (found : lookup root context.bindings = some slot)
     (access : slot.initialization.Access indices selected)
     (changed : replaceBinding root { slot with initialization := slot.initialization.write indices .vacant }
       context.bindings = some cleared) :
-    ¬ HasType program home {context with bindings := cleared} held (.read ⟨root, []⟩) result after plan := by
+    ¬ HasType program home (context.withSlots cleared) held (.read ⟨root, []⟩) result after plan expected := by
   intro admitted
-  exact access.clear_incomplete (admitted.read_root_complete (replaceBinding_lookup changed))
+  have distinct : (cleared.map fun binding => binding.2.binder).Nodup := by
+    rw [replaceBinding_map_same Slot.binder found changed rfl]
+    exact valid.distinct
+  apply access.clear_incomplete
+  apply admitted.read_root_complete (slot := {slot with initialization := slot.initialization.write indices .vacant})
+  rw [context.withSlots_bindings distinct]
+  exact replaceBinding_lookup changed
 
 /-- Closed executions retire every temporary cell. The final source context may
 retain inactive loan history and an advanced binder supply, rather than falsely
 requiring those append-only resources to equal their initial empty state. -/
-theorem closed_correctness {expression : Expr} {result : ResultType} {afterContext : Context} {plan : CorePlan}
-    (admitted : HasType program home .empty [] expression result afterContext plan) :
+theorem closed_correctness {expression : Expr} {result : ResultType} {afterContext : Context} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program home .empty [] expression result afterContext plan expected) :
     ∃ value after afterMap, Evaluates program .empty ⟨expression, plan⟩ value after ∧
       ResultTyped program afterMap afterContext value result ∧ StateTyped program afterMap afterContext result.nodes after value.referenceValues ∧
       after.bindings = [] ∧ (∀ root, after.store root = none) ∧ after.ResultUsable value ∧
       ∀ other otherAfter, Evaluates program .empty ⟨expression, plan⟩ other otherAfter → other = value ∧ otherAfter = after := by
   obtain ⟨value, after, afterMap, evaluated, resultTyped, afterTyped, _, storage, usable, unique⟩ := correctness admitted StateTyped.empty
   exact ⟨value, after, afterMap, evaluated, resultTyped, by simpa using afterTyped, storage.bindings,
-    fun root => storage.frame root (by simp [Environment.roots, Environment.empty]), usable, unique⟩
+    fun root => storage.fresh root (Nat.zero_le _), usable, unique⟩
 
-theorem HasType.literal_valid {context after : Context} {held : List Nat} {expression : Expr} {result : ResultType} {plan : CorePlan}
-    (typed : HasType program home context held expression result after plan) :
+theorem HasType.literal_valid {context after : Context} {held : List Nat} {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected) :
     match expression with
     | .integer type magnitude => type.Contains program.target magnitude
     | .character number => UnicodeScalar number
     | _ => True := by
   induction typed using HasType.rec
-    (motive_2 := fun _ _ _ _ _ _ _ _ => True)
-    (motive_3 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
     (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) <;>
     first | assumption | trivial | (split <;> simp_all)
 
@@ -8526,5 +10789,85 @@ theorem Evaluates.endAfter_transparent {before after : Environment} {expression 
     ∃ middle, Evaluates program before ⟨expression, plan⟩ value middle ∧ middle.SameStorage after ∧ after.ResultUsable value := by
   cases evaluated with
   | endAfter body ended usable => exact ⟨_, body, Environment.endSlot_storage ended, usable⟩
+
+/-- Expected checking cannot silently change either reference mode or referent type.
+Pattern results inherit the expectation through every normalized, nonempty arm;
+constant normalization is obtained from the same producer's correctness proof. -/
+theorem HasType.expected_type {context after : Context} {held : List Nat} {expression : Expr}
+    {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected) :
+    ∀ type, expected = some type → result.type = type := by
+  induction typed using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ result _ arms _ expected _ =>
+      arms ≠ [] → ∀ type, expected = some type → result.type = type)
+    (motive_4 := fun _ source plan _ => ∃ normalized, NormalizesPattern program source plan normalized)
+    (motive_5 := fun _ sources plans _ => ∃ normalized, NormalizesPatterns program sources plans normalized)
+    (motive_6 := fun _ sources plans _ => ∃ normalized, NormalizesArms program sources plans normalized) with
+  | applyPatterns argumentsTyped shape nonempty constants covered bodies argumentsIH constantsIH bodiesIH =>
+    obtain ⟨normalized, normalization⟩ := constantsIH
+    have normalizedNonempty : normalized ≠ [] := by
+      intro empty
+      cases empty
+      cases normalization
+      exact nonempty rfl
+    exact bodiesIH normalized normalization normalizedNonempty
+  | empty =>
+    rename_i nonempty type same
+    exact False.elim (nonempty rfl)
+  | clause patternTyped distinct useful bodyTyped cleanup joined tailTyped bodyIH tailIH =>
+    rename_i nonempty type same
+    exact bodyIH type same
+  | patternWildcard => exact ⟨_, .wildcard⟩
+  | patternBinder name => exact ⟨_, .binder name⟩
+  | patternNode headSource constants ih =>
+    obtain ⟨fields, normalized⟩ := ih
+    exact ⟨_, .node normalized⟩
+  | patternConstant typed ih =>
+    obtain ⟨value, after, afterMap, evaluated, _⟩ := execution_correctness typed StateTyped.empty
+    obtain ⟨declaration, declared, resolved⟩ := typed.constantDeclared rfl
+    exact ⟨_, .constantValue declared resolved evaluated⟩
+  | patternsEmpty => exact ⟨[], .patternsNil⟩
+  | patternsCons head tail headIH tailIH =>
+    obtain ⟨first, firstNormalized⟩ := headIH
+    obtain ⟨rest, restNormalized⟩ := tailIH
+    exact ⟨first :: rest, .patternsCons firstNormalized restNormalized⟩
+  | armsEmpty => exact ⟨[], .armsNil⟩
+  | armsCons head tail headIH tailIH =>
+    obtain ⟨first, firstNormalized⟩ := headIH
+    obtain ⟨rest, restNormalized⟩ := tailIH
+    exact ⟨(_, _) :: rest, .armsCons firstNormalized restNormalized⟩
+  | _ => first | trivial | assumption | (intro type same; cases same <;> rfl)
+
+/-- Shape certificate for a compulsory reborrow, allowing only the existing
+checked administrative endings around its execution plan. -/
+inductive CorePlan.Reborrows (mode : BorrowMode) : CorePlan → Prop where
+  | direct : Reborrows mode (.reborrow mode)
+  | endOwn {plan : CorePlan} (slot : Nat) (body : Reborrows mode plan) :
+      Reborrows mode (.endOwn slot plan)
+  | endAfter {plan : CorePlan} (slot : Nat) (body : Reborrows mode plan) :
+      Reborrows mode (.endAfter slot plan)
+
+/-- Actual plan selection, not merely rejection of one competing leaf: a
+reference-expected bare read always reborrows in the requested mode. -/
+theorem HasType.reference_read_selection {context after : Context} {held : List Nat}
+    {expression : Expr} {result : ResultType} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program home context held expression result after plan expected)
+    {place : Place} {referent : Ty} {mode : BorrowMode} :
+    expression = .read place → expected = some (.reference referent mode) → plan.Reborrows mode := by
+  induction typed using HasType.rec
+    (motive_2 := fun _ _ _ _ _ _ _ _ _ => True)
+    (motive_3 := fun _ _ _ _ _ _ _ _ _ _ => True)
+    (motive_4 := fun _ _ _ _ => True) (motive_5 := fun _ _ _ _ => True) (motive_6 := fun _ _ _ _ => True) with
+  | reborrow => intro _ same; cases same; exact .direct
+  | endOwn _ _ _ _ _ ih => intro source expected; exact .endOwn _ (ih source expected)
+  | endAfter _ _ _ _ _ ih => intro source expected; exact .endAfter _ (ih source expected)
+  | raiseSupply _ _ ih => exact ih
+  | expectedData typed shape ih =>
+    intro _ expected
+    have same := Option.some.inj expected
+    rw [same] at shape
+    exact False.elim shape
+  | _ => first | trivial | (intro source expected; cases source <;> cases expected)
 
 end Grounded

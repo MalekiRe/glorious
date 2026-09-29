@@ -6,6 +6,41 @@ The goal is a smaller, inspectable development built entirely from ground truth,
 with one connected body of definitions and proofs—not a collection of proof
 islands awaiting integration.
 
+## Shared and unique reference boundary
+
+This development extends the same source producer, Core evaluator and
+general correctness theorem; it does not introduce a separate reference model.
+
+- `Context.names` selects stable binder identities in authoritative
+  `Context.storage`. Hidden caller storage survives calls, and resume uses the
+  actual callee post-storage rather than stale caller initialization masks.
+- `AccessType`, mode-indexed loans and ancestry-aware `Permits` distinguish
+  positive authority from conflicting access. Unique referent authority does not
+  require a mutable handle binding. Shared/shared overlap and statically disjoint
+  unique fields remain legal; parent use is suspended only by conflicting children.
+- `moveIndirect` and `assignIndirect` operate on canonical projected targets.
+  Assignment evaluates its RHS first, destroys the exact old resident using its
+  authoritative initialization mask, and reconstructs global storage correspondence.
+  Masked resolution permits restoration without presupposing a restored target.
+- Reads, borrows, reborrows and handle transfers require whole-target readiness.
+  Every ordinary own-ending, sequence disposal, carrier overwrite and scope or
+  parameter cleanup consumes pre-ending restored-target evidence. Pending argument
+  and result readiness lives in `StateTyped.heldReady`; vacant moves require
+  pre-state separation from their targets, while complete writes preserve it.
+- Unique ancestor modes are derived from `Context.Derived.unique`, not an
+  admission assumption. `correctness_canonicalTargets` preserves authoritative
+  paths and masks. `correctness_noDangling` covers addressable typed targets of
+  both modes and additionally proves readable shared targets.
+- `Environment.Evolution` frames outside incoming owner/live-unique roots and
+  proves fresh scoped-root retirement; it does not confer access permission.
+  Reference-free conservation still specializes the sole Core evaluator.
+
+Arbitrary aliasing shared input worlds remain supported. Live external unique
+`.input` origins remain excluded; actual source-derived unique call arguments
+retain canonical binder origins. Inactive unique-input history is inert. This is
+not complete externally supplied unique-input semantics, nor coverage of
+nonlocal transfer, effects, generic parameters or compiler realization.
+
 ## Governing discipline
 
 **Build from established meaning upward. Do not work backward from a desired
@@ -154,7 +189,7 @@ optional type annotations, tuples/projection, fixed-array construction, non-gene
 non-generic finite-inline nominal data with coherent principal restrictions, direct
 nonrecursive first-order calls, immediate structural pattern-callable
 application with conservative affine conditional initialization joins, and the
-first-class shared-reference subset described below.** Records,
+first-class shared/unique-reference subset described below.** Records,
 tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
 is decoded declarations/expressions to logical values and stable-root storage post-states. Normative basis:
@@ -272,13 +307,11 @@ restoration: the replacement and every other child must be complete.
 back to an extracted path recovers whole-root completeness when the root was
 complete before extraction. These laws accompany the existing exact physical
 move/restore round trip.
-Strict Lean checking and the connected correctness, nested take/write, sibling
-framing, restoration and whole-read rejection audits passed; the current axiom
-dependencies are recorded in the verification section below. Custom hooks and
-reference-mediated mutation remain open;
-this is not whole-language soundness.
-Array indexing, enum payload writes and writes through references are not
-silently treated as ordinary field projection.
+Strict Lean checking connects nested take/write, sibling framing, restoration
+and whole-read rejection to general correctness. Custom hooks remain open; this
+is not whole-language soundness. Array indexing and enum payload writes are not
+silently treated as ordinary field projection. Indirect reference writes use
+the canonical access and permission rules described below.
 
 ### Authoritative logical storage identity
 
@@ -302,14 +335,12 @@ producing the reversed newest-first lexical prefix used by cleanup.
 Calls hide caller names, not caller cells. Fresh parameter roots and body
 execution use the same store; return restores caller visibility while retaining
 the actual post-store and advanced supply. `Evaluates.call_frame` proves that
-all old roots remain outside the callee’s lexical bindings at entry and that
-its fully cleaned post-store equals the caller store after argument evaluation.
-`Evaluates.storage` and `correctness` prove `Environment.Evolution`: incoming
-lexical identities remain unchanged, the supply is monotone, and every cell
-outside the incoming lexical roots is exactly framed. This is the owned-write,
-shared-read-only subset’s frame theorem; future indirect reference writes must
-account for their referents, not inherit this lexical-only footprint. Hidden
-cells may be opaque to local typing, but remain globally bounded and framed.
+old roots remain outside callee lexical bindings at entry, and storage outside
+incoming live unique-target roots is unchanged after cleanup. Shared-only calls
+therefore preserve the complete post-argument caller store. `Evaluates.storage`
+and `correctness` prove `Environment.Evolution`: incoming lexical identities and
+monotone supply are preserved, and mutation is confined to incoming owners or
+live unique-target roots. Hidden cells remain globally typed and bounded.
 
 `Cleans.retired` proves that actual cleanup removes every selected root cell;
 `Cleans.frame` and `Environment.retire_retained` preserve all other cells and
@@ -319,7 +350,7 @@ continuation execution cannot make a retired identity resolve again.
 different root names, supplies and hidden cells. `correctness_referenceFree`
 recovers the prior same-data-result agreement from reference-free source and
 declarations and loan-free starting worlds. Its empty-final-history premise is
-derived, not assumed. General shared executions instead carry explicit root/node
+derived, not assumed. General reference executions carry explicit root/node
 interpretations; literal equality of reference identities across renamed worlds
 is not claimed. No duplicate old evaluator or executable projected store remains.
 
@@ -342,72 +373,98 @@ observe vacancies; `readAddress` rejects them and any incomplete selected tree,
 just as the removed owned `readPlace` did. Canonical access never fabricates a
 cell: even an empty-path write fails for a missing or retired root. Direct numeric
 addresses are not a newly admitted source syntax or a borrow permission. Arrays
-and enum payloads remain outside source field resolution; shared dereference
+and enum payloads remain outside source field resolution; reference access
 uses the checked canonical-address extension below.
 
-### First-class shared references
+### First-class shared and unique references
 
-The same `HasType` producer now elaborates decoded source expressions to
-`Core`: the original `Expr` plus a recursively matched `CorePlan`. One
-`Evaluates` relation executes that Core; it is not a detached reference
-interpreter. Shared `&place` and explicit dereference use `AccessType` and
-`Environment.resolveAccess` to extend the existing canonical `Address`.
-Borrowing a projected referent selects its subaddress without copying the
-containing aggregate. Referents have finite, reference-free inline layouts;
-reference handles may be local values and direct arguments/results, but are
-not nested in aggregates in this subset.
+`HasType` elaborates decoded expressions to `Core`: the original `Expr` plus a
+recursively matched `CorePlan`. The sole `Evaluates` relation executes that Core.
+Shared/unique borrowing and dereference use `AccessType` and masked canonical
+address resolution. Projected access does not copy the containing aggregate.
+Referents have finite, reference-free inline layouts; handles can be locals and
+direct arguments/results, but are not nested in aggregates in this subset.
 
-Each usable shared handle has its own loan node. Ordinary shared reads produce
-a fresh child node; explicit moves transfer the same node and clear the source
-carrier. A record retains its target, referent and parent after its own use
-ends. Ending does not clear carrier bits, invalidate child nodes or destroy the
-referent. An ended ancestor remains ancestry evidence, not a usable handle.
-Reads, moves, dereference and returned references require actual own usability.
-Cleanup of a shared carrier ends that handle, not its referenced owner.
+Expected types enter the same `HasType`/`HasTypes` producer at binding annotations,
+direct-call parameters, reference-assignment RHSs and declared function result
+bodies. `ArmsType` carries the expectation into every pattern-result clause;
+groups, sequences, continuations and checked administrative nodes preserve it.
+A reference-expected bare handle read emits `CorePlan.reborrow mode` in the
+requested mode. `HasType.reference_read_selection` proves that the actual plan
+is that reborrow, allowing only checked own-ending metadata around it; neither
+leaf copying nor implicit transfer is an alternative. Explicit `move` remains
+an intentional transfer. `HasTypes.expected_types` derives call argument
+agreement; no independent expected-type elaborator or source walker is used.
 
-`Context` tracks identified slots, exact source loan history, source origins
-and fresh binder supply. `StoreTyped` interprets this information in the actual
-store and runtime loan table, including caller cells hidden during invocation.
-`StateTyped` adds custody and protected, already evaluated values. Its pending
-list is only the reference projection of the actual mixed-value argument/result
-list. Active nodes have exactly one carrier across the whole store and that
-pending list; inert ended bits do not confer custody. Slot residency alone does
-not assert usability. The connected induction derives fresh argument bindings,
-parameter cleanup, caller restoration, protected results and initialized active
-targets from these current-state invariants and source rules.
+Without reference expectation, ordinary owned reads copy `Duplicable` values
+and move values with positive `Nonduplicable` evidence. The same
+`HasType.implicitMove` rule handles unique references and nonduplicable owned
+data by reusing the existing authoritative move derivation; its distinct Core
+plan preserves fixed-Core determinism. Evidence comes from structural resident
+witnesses and nominal restrictions, never failed Copy proof search.
+`Nonduplicable.not_duplicable` excludes copying; `FiniteLayout.owned_choice`
+classifies every finite data layout. Empty arrays remain duplicable even when
+their element type is not; nominal structural evidence covers all variants.
+`Evaluates.implicitMove_invalidates` proves that actual default transfer
+invalidates the selected source resident. General inference remains outside
+this decoded boundary.
 
-`endOwn` and `endAfter` are checked administrative Core metadata, not source
-syntax or a source liveness walker. The former checks the continuation under
-ended own state; the latter checks the actual post-expression slot and excludes
-the protected result. Neither may end a pending node. Runtime metadata looks up
-the actual carrier in that checked lexical slot; it does not reinterpret a static
-node number as a runtime identity. The transparency theorems prove no store,
-binding or root-supply effect. `Core.erase` recovers the exact source expression;
-no arbitrary-plan erasure equivalence or plan-independent handle equality is
-claimed. Determinism is for a fixed admitted Core.
+Each usable handle has its own loan node and immutable mode. Shared copies and
+compatible reborrows allocate fresh child nodes; `Evaluates.reborrow_preserves_storage`
+proves implicit reborrowing preserves the original carrier and all owner storage.
+Explicit moves transfer the same node and clear the source carrier. Ended records
+retain their target and ancestry, but provide no own authority. Ending neither
+clears carrier bits nor destroys referents or surviving children. Unique ancestry
+is derived from the well-formed parent-mode invariant. A unique handle need not
+occupy a mutable binding to authorize mutation of its referent.
 
-Active loans reserve their canonical target against overlapping owner move,
-overwrite and disposal. Ending the last own use permits later owner operations
-only when the same source continuation is admitted. Direct calls accept mixed
-data/shared arguments and may receive multiple shared inputs aliasing the same
-owner. No input non-aliasing premise is added. A shared result currently needs
-exactly one reference input plus the checked `Context.Derived` parent relation;
-callee-local owners cannot escape. Multiple-reference-input reference results
-remain excluded until explicit result-origin contracts are represented.
+`Context.storage` is authoritative for canonical types and initialization masks.
+`StoreTyped.cells` covers all stored binders, including hidden callers. `StateTyped`
+adds custody and protected evaluated reference prefixes/results. Every active
+node has exactly one carrier across the store and pending values; inert ended
+bits do not confer custody. `heldReady` tracks actual target readiness, not a
+duplicate initialization flag in the loan table.
 
-`correctness` constructs execution, result typing, post-state custody,
-protected-result usability, state-interpretation progress, storage evolution and
-fixed-Core uniqueness. `correctness_noDangling` derives an initialized, typed
-resident at every active loan target. Successful transitions, readback, future
-worlds and eventual completion are not admission premises.
+`endOwn` and `endAfter` are checked administrative Core metadata, not a source
+liveness walker. They inspect their actual pre-ending contexts and reject
+protected nodes or unrestored live targets. Runtime `endSlot` checks the actual
+target before clearing own; `endSlot_checked` proves the readiness consumed.
+`Disposes.reference` requires the same readiness, and `Context.Cleanable` checks
+scope and parameter disposal in youngest-first order. Reference-carrier
+overwrite checks the old handle after RHS evaluation; sequence disposal derives
+readiness from its protected result. Metadata has no store/binding/supply effect.
+`Core.erase` retains the source; determinism is for fixed Core, not arbitrary
+alternative elaboration plans.
 
-Unique references, unique-to-shared conversion, borrow-through-unique hole
-obligations, aggregates containing references, borrowed patterns, branch-origin
-unions, captures, effects, custom hooks and physical realization remain open.
-Source parsing/inference and the full expected-type-directed implicit-reborrow
-algorithm are not proved; ordinary decoded shared reads already use the same
-fresh-child operation at binding and call boundaries. Explicit moves remain
-transfers. This is a completed shared-reference subset, not full §5.3 completion.
+`Permits` distinguishes conflict exclusion from positive `Authorizes`. Shared
+loans can overlap; unique operations exempt only their selected self/ancestors,
+not conflicting descendants. Disjoint fields remain independent. Reads, borrows
+and handle transfer require the whole referent restored. Indirect assignment
+uses masked access so a hole can actually be repaired. It evaluates the RHS
+first, derives ordered destruction from the exact canonical mask and actual
+old resident, and writes an initialized replacement. `StateTyped.writeTarget`
+reconstructs cells, target correspondence, custody and held readiness. Vacant
+moves additionally check pre-state separation from pending targets; complete
+writes preserve pending readiness constructively.
+
+`Evaluates.moveIndirect_restore` proves canonical vacancy and exact whole-store
+restoration by replacing the extracted resident, preserving siblings and hidden
+cells. The actual indirect source/evaluation constructors participate in general
+correctness, fixed-Core determinism, storage evolution and reference-free
+conservation; no second evaluator or supplied future-state invariant is used.
+
+Calls accept mixed data/reference arguments and arbitrarily aliasing shared
+inputs without a non-aliasing premise. Reference results currently require one
+reference input and checked `Context.Derived` provenance; local owners cannot
+escape. Multiple-input result-origin unions remain outside this subset.
+`correctness_noDangling` proves addressable typed targets for both modes and
+additionally readable shared targets. `correctness_canonicalTargets` retains
+exact authoritative root-to-referent paths and masks. Protected returned values
+are restored regardless of mode.
+
+Aggregates containing references, borrowed patterns, captures, branch-origin
+unions, effects, custom hooks and physical realization remain open. Parsing,
+general inference and whole-language lifetime elaboration are not proved.
 
 ### Affine conditional initialization joins
 
@@ -605,22 +662,25 @@ Nominal scope excludes generic instances, indirections, hooks and
 non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, custom destruction hooks, unique loans and
-effects remain open. There is no physical-storage, allocation-failure, package-admission
+floating conversion, static strings, custom destruction hooks and effects remain
+open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict checking of `Grounded.lean` with warnings as errors and
-auto-implicit variables disabled passed after the connected shared-reference
-extension. Consumer smoke proofs instantiated the general closed theorem with
-borrow/Copy/move, an ended parent with a surviving projected child, mixed call
-arguments and a returned child after parameter cleanup, and two aliased shared
-inputs. Each derived the real execution and complete local-root retirement;
-these throwaway checks are not permanent example modules.
+auto-implicit variables disabled passed after composing indirect mutation,
+mandatory ordinary endings, all existing reference-expected sites, and
+positive-evidence default owned transfer. General consumer smoke proofs use
+public correctness to derive actual default-transfer execution and source
+invalidation, and compulsory requested-mode reborrow plans with usable results.
+Earlier consumers also exercised fresh reborrow/unchanged storage and indirect
+vacancy/unreadability/exact restoration. These assume arbitrary typed worlds and
+source premises, not successful future states; temporary proof scripts were removed.
 
-The exhaustive Grounded kernel-declaration audit, including private/generated
-constants, found only Lean's standard `propext`, `Classical.choice` and
-`Quot.sound`. Connected correctness and no-dangling use those three;
-fixed-Core determinism and canonical update/readback/frame use only
+The independent exhaustive audit selected declarations by their defining module
+index, not by name: all 3,607 Grounded declarations, including 185 private and all
+generated declarations, depend only on Lean's standard `propext`,
+`Classical.choice` and `Quot.sound`. Connected correctness and no-dangling use
+those three; fixed-Core determinism and canonical update/readback/frame use only
 `propext` and `Quot.sound`. No admitted proof or bypass axiom is present.
 Reproduce the strict check and representative connected audits:
 
@@ -633,6 +693,17 @@ import Grounded
 #print axioms Grounded.closed_correctness
 #print axioms Grounded.correctness_referenceFree
 #print axioms Grounded.correctness_noDangling
+#print axioms Grounded.correctness_canonicalTargets
+#print axioms Grounded.HasType.reference_read_selection
+#print axioms Grounded.HasType.reference_read_not_implicitMove
+#print axioms Grounded.Nonduplicable.not_duplicable
+#print axioms Grounded.FiniteLayout.owned_choice
+#print axioms Grounded.Evaluates.implicitMove_invalidates
+#print axioms Grounded.HasTypes.expected_types
+#print axioms Grounded.Evaluates.reborrow_preserves_storage
+#print axioms Grounded.Evaluates.moveIndirect_restore
+#print axioms Grounded.Environment.endSlot_checked
+#print axioms Grounded.StateTyped.writeTarget
 #print axioms Grounded.Evaluates.deterministic
 #print axioms Grounded.Environment.borrowed_owner_exclusion
 #print axioms Grounded.Evaluates.endOwn_transparent
@@ -674,11 +745,10 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 6. Stable logical roots, authoritative storage, non-reused supply, actual
    retirement, canonical stored-place addresses and exact update framing are
    connected prerequisites, as above.
-   First-class shared borrowing, canonical projected referents, checked own
-   ending, Copy/move distinction and single-input-origin returned references
-   are connected above. Unique references and full expected-type-directed
-   implicit reborrowing (§5.3) remain open; they must use these same storage,
-   ancestry, custody and invocation mechanisms rather than a second model.
+   First-class shared/unique borrowing, canonical projected referents, mutable
+   indirect access, hole restoration, checked own ending, affine handle transfer
+   and single-input-origin returned references use the same storage, ancestry,
+   custody and invocation mechanisms described above.
 7. Callables, captures and invocation quantities.
 8. Recursion and finite/infinite execution guarantees.
 9. Labels, nonlocal transfer and proper tail invocation.
