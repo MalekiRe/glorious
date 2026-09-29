@@ -152,18 +152,20 @@ decoded character literals, grouping, place reads, sequencing, immutable and
 mutable initialized bindings, whole-local and nested tuple/structure moves, restoration and assignment,
 optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data with coherent principal restrictions, direct
-nonrecursive first-order calls, and immediate structural pattern-callable
-application with conservative affine conditional initialization joins.** Records,
+nonrecursive first-order calls, immediate structural pattern-callable
+application with conservative affine conditional initialization joins, and the
+first-class shared-reference subset described below.** Records,
 tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
 is decoded declarations/expressions to logical values and stable-root storage post-states. Normative basis:
-§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7 and 13.1. No
+§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.7, 9.1–9.2 and 13.1. No
 previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
 `Grounded.correctness` proves finite evaluation, result typing, lexical-state
-preservation, stable-root storage evolution and uniqueness of both result and
-final environment. Every constituent consumes its predecessor’s actual post-state.
+preservation, active-loan/custody preservation, protected-result usability,
+stable-root storage evolution and uniqueness for a fixed admitted Core. Every
+constituent consumes its predecessor’s actual post-state.
 Initializers execute before their binding receives a fresh root; their result
 and post-store construct the body environment. Scope exit retires its own root
 prefix and retains changes to surrounding locals. Copying requires duplicability;
@@ -271,8 +273,9 @@ back to an extracted path recovers whole-root completeness when the root was
 complete before extraction. These laws accompany the existing exact physical
 move/restore round trip.
 Strict Lean checking and the connected correctness, nested take/write, sibling
-framing, restoration and whole-read rejection axiom audits passed with only
-`propext` and `Quot.sound`. Custom hooks and reference-mediated mutation remain open;
+framing, restoration and whole-read rejection audits passed; the current axiom
+dependencies are recorded in the verification section below. Custom hooks and
+reference-mediated mutation remain open;
 this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
@@ -303,8 +306,8 @@ all old roots remain outside the callee’s lexical bindings at entry and that
 its fully cleaned post-store equals the caller store after argument evaluation.
 `Evaluates.storage` and `correctness` prove `Environment.Evolution`: incoming
 lexical identities remain unchanged, the supply is monotone, and every cell
-outside the incoming lexical roots is exactly framed. This is the no-reference
-owned-value subset’s frame theorem; future indirect reference writes must
+outside the incoming lexical roots is exactly framed. This is the owned-write,
+shared-read-only subset’s frame theorem; future indirect reference writes must
 account for their referents, not inherit this lexical-only footprint. Hidden
 cells may be opaque to local typing, but remain globally bounded and framed.
 
@@ -313,10 +316,12 @@ cells may be opaque to local typing, but remain globally bounded and framed.
 retained lexical roots exactly. `Cleans.retired_stays_absent` proves that actual
 continuation execution cannot make a retired identity resolve again.
 `Environment.Agrees` compares checked lexical logical-value observations across
-different root names, supplies and hidden cells. `Evaluates.agrees`, consumed by
-`correctness`, transports the same logical result and final observation through
-every current operation. No duplicate old evaluator or executable projected
-store is retained. References, loans and custom hooks are not added by this cutover.
+different root names, supplies and hidden cells. `correctness_referenceFree`
+recovers the prior same-data-result agreement from reference-free source and
+declarations and loan-free starting worlds. Its empty-final-history premise is
+derived, not assumed. General shared executions instead carry explicit root/node
+interpretations; literal equality of reference identities across renamed worlds
+is not claimed. No duplicate old evaluator or executable projected store remains.
 
 `Environment.AddressUpdate` is the derived contract of the actual
 `writeAddress` equation, not an extra execution or admission premise.
@@ -326,7 +331,7 @@ and unchanged raw residents at every disjoint address: different roots or
 siblings and existing holes. Typed write preservation consumes its readback;
 `writeAddress_storage` consumes its bindings, supply and frame to produce the
 storage evolution used at every nested move/assignment in `Evaluates.storage`
-and the unchanged general `correctness` contract. There is no second source
+and the general `correctness` contract. There is no second source
 walker or execution-occurrence table. This is a per-write frame, not a claim
 that later scope retirement preserves the retired cells. Lifecycle framing
 remains the separate, existing `Environment.Evolution`/`Cleans` guarantee.
@@ -336,18 +341,85 @@ from possessing arbitrary numeric coordinates. The internal raw `at` API can
 observe vacancies; `readAddress` rejects them and any incomplete selected tree,
 just as the removed owned `readPlace` did. Canonical access never fabricates a
 cell: even an empty-path write fails for a missing or retired root. Direct numeric
-addresses are not a newly admitted source syntax or a borrow permission. Arrays,
-enum payloads and reference dereferences remain outside source field resolution.
+addresses are not a newly admitted source syntax or a borrow permission. Arrays
+and enum payloads remain outside source field resolution; shared dereference
+uses the checked canonical-address extension below.
+
+### First-class shared references
+
+The same `HasType` producer now elaborates decoded source expressions to
+`Core`: the original `Expr` plus a recursively matched `CorePlan`. One
+`Evaluates` relation executes that Core; it is not a detached reference
+interpreter. Shared `&place` and explicit dereference use `AccessType` and
+`Environment.resolveAccess` to extend the existing canonical `Address`.
+Borrowing a projected referent selects its subaddress without copying the
+containing aggregate. Referents have finite, reference-free inline layouts;
+reference handles may be local values and direct arguments/results, but are
+not nested in aggregates in this subset.
+
+Each usable shared handle has its own loan node. Ordinary shared reads produce
+a fresh child node; explicit moves transfer the same node and clear the source
+carrier. A record retains its target, referent and parent after its own use
+ends. Ending does not clear carrier bits, invalidate child nodes or destroy the
+referent. An ended ancestor remains ancestry evidence, not a usable handle.
+Reads, moves, dereference and returned references require actual own usability.
+Cleanup of a shared carrier ends that handle, not its referenced owner.
+
+`Context` tracks identified slots, exact source loan history, source origins
+and fresh binder supply. `StoreTyped` interprets this information in the actual
+store and runtime loan table, including caller cells hidden during invocation.
+`StateTyped` adds custody and protected, already evaluated values. Its pending
+list is only the reference projection of the actual mixed-value argument/result
+list. Active nodes have exactly one carrier across the whole store and that
+pending list; inert ended bits do not confer custody. Slot residency alone does
+not assert usability. The connected induction derives fresh argument bindings,
+parameter cleanup, caller restoration, protected results and initialized active
+targets from these current-state invariants and source rules.
+
+`endOwn` and `endAfter` are checked administrative Core metadata, not source
+syntax or a source liveness walker. The former checks the continuation under
+ended own state; the latter checks the actual post-expression slot and excludes
+the protected result. Neither may end a pending node. Runtime metadata looks up
+the actual carrier in that checked lexical slot; it does not reinterpret a static
+node number as a runtime identity. The transparency theorems prove no store,
+binding or root-supply effect. `Core.erase` recovers the exact source expression;
+no arbitrary-plan erasure equivalence or plan-independent handle equality is
+claimed. Determinism is for a fixed admitted Core.
+
+Active loans reserve their canonical target against overlapping owner move,
+overwrite and disposal. Ending the last own use permits later owner operations
+only when the same source continuation is admitted. Direct calls accept mixed
+data/shared arguments and may receive multiple shared inputs aliasing the same
+owner. No input non-aliasing premise is added. A shared result currently needs
+exactly one reference input plus the checked `Context.Derived` parent relation;
+callee-local owners cannot escape. Multiple-reference-input reference results
+remain excluded until explicit result-origin contracts are represented.
+
+`correctness` constructs execution, result typing, post-state custody,
+protected-result usability, state-interpretation progress, storage evolution and
+fixed-Core uniqueness. `correctness_noDangling` derives an initialized, typed
+resident at every active loan target. Successful transitions, readback, future
+worlds and eventual completion are not admission premises.
+
+Unique references, unique-to-shared conversion, borrow-through-unique hole
+obligations, aggregates containing references, borrowed patterns, branch-origin
+unions, captures, effects, custom hooks and physical realization remain open.
+Source parsing/inference and the full expected-type-directed implicit-reborrow
+algorithm are not proved; ordinary decoded shared reads already use the same
+fresh-child operation at binding and call boundaries. Explicit moves remain
+transfers. This is a completed shared-reference subset, not full §5.3 completion.
 
 ### Affine conditional initialization joins
 
 Immediate pattern applications retain each arm's own post-context before joining
 it to the common continuation context. `ArmsType.clause` consumes
-`ContextJoins`; `correctness` applies `EnvironmentTyped.join` only after the
+`Context.Joins`; `correctness` applies `StateTyped.join` only after the
 actual selected body and clause-local cleanup. The join retypes that exact
 environment without changing, dropping or inventing any branch resident.
 Pattern selection and failed alternatives retain their existing non-consuming
-meaning. No second initialization analysis or runtime ownership table is added.
+meaning. Loan histories, origins, reference node identities and slot binder
+identities must agree exactly across the join; initialization-only merging
+cannot erase a branch's borrow restrictions.
 
 `Initialization.Joins` preserves an identical mask, or widens an affine
 binding to `Initialization.maybe` using its existing `MayDiscard` permission.
@@ -376,9 +448,9 @@ whether a particular partial residual could be discarded.
 remain identical; two arms can therefore share a plain post-context only when
 their exact-owner masks agree, including identical partial masks. Conditional
 exact-linear control islands and exported correlations remain unsupported.
-Strict Lean checks and the connected join, path, source-use rejection,
-disposition and correctness axiom audits use only `propext` and `Quot.sound`.
-The decoded no-loans/no-hooks subset remains the semantic boundary.
+The source-use rejection and old data cases remain connected under the extended
+producer. Borrowing does not license widening or forgetting loan origins; the
+current strict-check and axiom audit is recorded below.
 
 ### Ownership permissions and zero-use boundaries
 
@@ -445,14 +517,13 @@ execution together; the old binding-only theorem is removed.
 field/postorder trace; `exactly_once` and `skips_vacant_field` prove
 uniqueness and vacancy exclusion. The connected `correctness` theorem retains
 its result, post-context and determinism contract while constructing these
-stronger executions, including after affine joins. Strict checking and the
-connected cleanup, join and correctness axiom audits passed with only
-`propext` and `Quot.sound`.
+stronger executions, including after affine joins and shared-handle transfer.
+The current connected axiom audit is recorded below.
 
-This is finite logical destruction of the no-hooks owned-value subset. Finish
-events are not physical releases or addresses. Custom hooks and their possible
-divergence, reference-mediated cleanup, nonlocal exits, cancellation, physical
-release and exact-linear control islands remain open.
+This is finite logical destruction without hooks. Finish events are not physical
+releases or addresses. Shared-carrier cleanup changes own usability separately
+from target destruction. Custom hooks and their possible divergence, nonlocal
+exits, cancellation, physical release and exact-linear control islands remain open.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -534,52 +605,55 @@ Nominal scope excludes generic instances, indirections, hooks and
 non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, custom destruction hooks, loans and
+floating conversion, static strings, custom destruction hooks, unique loans and
 effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict checking of `Grounded.lean` with warnings as errors and
-auto-implicit variables disabled passed after the canonical-address cutover. An
-exhaustive audit of all 2,196 Grounded kernel declarations, including private and
-generated constants, found only Lean’s standard `propext` and `Quot.sound`.
-The connected correctness, resolution fidelity, canonical update/readback/frame,
-move invalidation/restoration, retirement persistence, caller framing and
-root-renaming agreement audits passed. No bypass axioms, admitted proofs
-or `Classical.choice` dependency. Reproduce:
+auto-implicit variables disabled passed after the connected shared-reference
+extension. Consumer smoke proofs instantiated the general closed theorem with
+borrow/Copy/move, an ended parent with a surviving projected child, mixed call
+arguments and a returned child after parameter cleanup, and two aliased shared
+inputs. Each derived the real execution and complete local-root retirement;
+these throwaway checks are not permanent example modules.
+
+The exhaustive Grounded kernel-declaration audit, including private/generated
+constants, found only Lean's standard `propext`, `Classical.choice` and
+`Quot.sound`. Connected correctness and no-dangling use those three;
+fixed-Core determinism and canonical update/readback/frame use only
+`propext` and `Quot.sound`. No admitted proof or bypass axiom is present.
+Reproduce the strict check and representative connected audits:
 
 ```sh
+lake env lean -DwarningAsError=true -DautoImplicit=false Grounded.lean
 lake build
 lake env lean -DwarningAsError=true -DautoImplicit=false --stdin <<'LEAN'
 import Grounded
 #print axioms Grounded.correctness
 #print axioms Grounded.closed_correctness
-#print axioms Grounded.integer_admission
-#print axioms Grounded.character_admission
-#print axioms Grounded.unit_agreement
-#print axioms Grounded.ValuesHaveTypes.select
-#print axioms Grounded.Covers.selectArm
-#print axioms Grounded.PatternType.consume
-#print axioms Grounded.Value.Destroys.result_order
-#print axioms Grounded.Cleans.exactly_once
-#print axioms Grounded.Evaluates.field_protects_result
-#print axioms Grounded.PathType.write
-#print axioms Grounded.EnvironmentTyped.resolvePlace
-#print axioms Grounded.EnvironmentTyped.resolution_fidelity
-#print axioms Grounded.EnvironmentTyped.writeAddress
+#print axioms Grounded.correctness_referenceFree
+#print axioms Grounded.correctness_noDangling
+#print axioms Grounded.Evaluates.deterministic
+#print axioms Grounded.Environment.borrowed_owner_exclusion
+#print axioms Grounded.Evaluates.endOwn_transparent
+#print axioms Grounded.Evaluates.endAfter_transparent
+#print axioms Grounded.StoreTyped.resolveAccess
+#print axioms Grounded.StateTyped.prepare
+#print axioms Grounded.StateTyped.resume
 #print axioms Grounded.Environment.writeAddress_update
 #print axioms Grounded.Environment.writeAddress_storage
-#print axioms Grounded.Environment.resolvePlace_write
 #print axioms Grounded.Value.writeIndices_frame
 #print axioms Grounded.Evaluates.move_invalidates
 #print axioms Grounded.Evaluates.move_restore
-#print axioms Grounded.Environment.Valid.fresh
-#print axioms Grounded.Environment.retire_retained
 #print axioms Grounded.Evaluates.storage
 #print axioms Grounded.Evaluates.call_frame
-#print axioms Grounded.Cleans.retired
-#print axioms Grounded.Cleans.frame
 #print axioms Grounded.Cleans.retired_stays_absent
-#print axioms Grounded.Evaluates.agrees
+#print axioms Grounded.Evaluates.referenceFree_source_agreement
+#print axioms Grounded.Covers.selectArm
+#print axioms Grounded.PatternType.consume
+#print axioms Grounded.integer_admission
+#print axioms Grounded.character_admission
+#print axioms Grounded.unit_agreement
 LEAN
 ```
 
@@ -600,14 +674,11 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 6. Stable logical roots, authoritative storage, non-reused supply, actual
    retirement, canonical stored-place addresses and exact update framing are
    connected prerequisites, as above.
-   Borrowing, provenance, lifetimes and returned references remain next, including required
-   Rust-style implicit reborrowing of existing references (§5.3). Expected
-   reference types select unique/shared derived loans, not ownership transfer;
-   unconstrained generic owned inputs do not automatically reborrow. Preserve
-   storage identity, parent permissions, initialization restrictions and actual
-   child-loan lifetimes, including loans retained by returned references.
-   Explicit moves remain transfers. Source elaboration must select these same
-   loan operations, not introduce a separate implicit-borrow permission model.
+   First-class shared borrowing, canonical projected referents, checked own
+   ending, Copy/move distinction and single-input-origin returned references
+   are connected above. Unique references and full expected-type-directed
+   implicit reborrowing (§5.3) remain open; they must use these same storage,
+   ancestry, custody and invocation mechanisms rather than a second model.
 7. Callables, captures and invocation quantities.
 8. Recursion and finite/infinite execution guarantees.
 9. Labels, nonlocal transfer and proper tail invocation.
@@ -630,11 +701,7 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. The local proof simplification reduced
-the module from 1,846 to 1,829 Lean lines, including comments and blanks, without
-changing existing theorem statements or semantic definitions. It removes a
-redundant path split, combines impossible constructor cases, shares move
-decomposition, and reuses the generic binding lookup result. Strict proof
-checking and the connected correctness/invalidation/restoration axiom audits
-passed unchanged. The development remains one Lean module; no standalone
-admission checker or speculative proof module is added.
+constants reuse ordinary evaluation. Shared storage and custody preservation
+are consumed by the same expression, constituent, call and pattern induction.
+The module remains one connected development; no standalone admission checker,
+reference evaluator or speculative proof module is added.
