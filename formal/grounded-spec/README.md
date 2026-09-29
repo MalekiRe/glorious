@@ -367,6 +367,11 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. Current size: 1,846 Lean lines including
-comments and blanks. The development remains one Lean module; no standalone
+constants reuse ordinary evaluation. The local proof simplification reduced
+the module from 1,846 to 1,829 Lean lines, including comments and blanks, without
+changing existing theorem statements or semantic definitions. It removes a
+redundant path split, combines impossible constructor cases, shares move
+decomposition, and reuses the generic binding lookup result. Strict proof
+checking and the connected correctness/invalidation/restoration axiom audits
+passed unchanged. The development remains one Lean module; no standalone
 admission checker or speculative proof module is added.

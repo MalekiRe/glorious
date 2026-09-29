@@ -824,11 +824,7 @@ theorem Value.replaceChild_readback {value replacement updated : Value} {index :
     (∀ key, updated.fieldIndex program key = value.fieldIndex program key) ∧
       updated.children[index]? = some replacement := by
   cases value with
-  | vacant => simp [Value.replaceChild] at written
-  | unit => simp [Value.replaceChild] at written
-  | integer => simp [Value.replaceChild] at written
-  | character => simp [Value.replaceChild] at written
-  | array => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero =>
@@ -853,8 +849,7 @@ theorem Value.writePath_readback {value replacement updated : Value} {keys : Lis
     cases Option.some.inj written
     rfl
   | cons key keys ih =>
-    change ((value.fieldIndex program key).bind (fun index => (value.children[index]?).bind (fun child => (child.writePath program keys replacement).bind (fun next => value.replaceChild index next)))) = some updated at written
-    simp only [Option.bind_eq_some_iff] at written
+    simp only [Value.writePath, bind, Option.bind_eq_some_iff] at written
     obtain ⟨index, indexed, child, found, next, changed, replaced⟩ := written
     obtain ⟨indexSame, readback⟩ := Value.replaceChild_readback (program := program) replaced
     simp [Value.readPath, Value.readField, indexSame, indexed, readback, ih changed]
@@ -878,18 +873,19 @@ theorem replaceBinding_lookup {α : Type} {name : String} {value : α} {before a
 theorem writePlace_readback {place : Place} {replacement : Value} {before after : Environment}
     (written : writePlace program place replacement before = some after) :
     ∃ parent, lookup place.root after = some parent ∧ parent.readPath program place.fields = some replacement := by
-  change ((lookup place.root before).bind (fun stored => (stored.writePath program place.fields replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
-  simp only [Option.bind_eq_some_iff] at written
+  simp only [writePlace, bind, Option.bind_eq_some_iff] at written
   obtain ⟨stored, found, updated, changed, replaced⟩ := written
   exact ⟨updated, replaceBinding_lookup replaced, Value.writePath_readback changed⟩
+
+theorem takePlace_eq_some {place : Place} {before after : Environment} {value : Value} :
+    takePlace program place before = some (value, after) ↔
+      readPlace program place before = some value ∧ writePlace program place .vacant before = some after := by
+  simp [takePlace, bind, Option.bind_eq_some_iff]
 
 theorem takePlace_invalidates {place : Place} {before after : Environment} {value : Value}
     (taken : takePlace program place before = some (value, after)) :
     readPlace program place after = none := by
-  change ((readPlace program place before).bind (fun resident => (writePlace program place .vacant before).bind (fun updated => some (resident, updated)))) = some (value, after) at taken
-  simp only [Option.bind_eq_some_iff, Option.some.injEq, Prod.mk.injEq] at taken
-  obtain ⟨resident, read, updated, written, sameValue, sameAfter⟩ := taken
-  cases sameAfter
+  obtain ⟨_, written⟩ := takePlace_eq_some.mp taken
   obtain ⟨parent, found, readback⟩ := writePlace_readback written
   simp [readPlace, found, readback, Value.initialized]
 
@@ -906,11 +902,7 @@ theorem Value.replaceChild_inverse {value resident replacement updated : Value} 
     (written : value.replaceChild index replacement = some updated) :
     updated.replaceChild index resident = some value := by
   cases value with
-  | vacant => simp [Value.replaceChild] at written
-  | unit => simp [Value.replaceChild] at written
-  | integer => simp [Value.replaceChild] at written
-  | character => simp [Value.replaceChild] at written
-  | array => simp [Value.replaceChild] at written
+  | vacant | unit | integer | character | array => simp [Value.replaceChild] at written
   | tuple head tail =>
     cases index with
     | zero =>
@@ -945,8 +937,7 @@ theorem Value.writePath_inverse {value resident replacement updated : Value} {ke
     cases Option.some.inj written
     rfl
   | cons key keys ih =>
-    change ((value.fieldIndex program key).bind (fun index => (value.children[index]?).bind (fun child => (child.writePath program keys replacement).bind (fun next => value.replaceChild index next)))) = some updated at written
-    simp only [Option.bind_eq_some_iff] at written
+    simp only [Value.writePath, bind, Option.bind_eq_some_iff] at written
     obtain ⟨index, indexed, child, found, next, changed, replaced⟩ := written
     have childRead : child.readPath program keys = some resident := by
       simpa [Value.readPath, Value.readField, indexed, found] using read
@@ -981,8 +972,7 @@ theorem writePlace_inverse {place : Place} {resident replacement : Value} {befor
     (read : readPlace program place before = some resident)
     (written : writePlace program place replacement before = some after) :
     writePlace program place resident after = some before := by
-  change ((lookup place.root before).bind (fun stored => (stored.writePath program place.fields replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
-  simp only [Option.bind_eq_some_iff] at written
+  simp only [writePlace, bind, Option.bind_eq_some_iff] at written
   obtain ⟨stored, found, updated, changed, replaced⟩ := written
   have rawRead : stored.readPath program place.fields = some resident := by
     cases selected : stored.readPath program place.fields with
@@ -1003,11 +993,7 @@ theorem Evaluates.move_restore {place : Place} {before after : Environment} {val
     writePlace program place value after = some before := by
   cases evaluated with
   | move taken =>
-    change ((readPlace program place before).bind (fun resident => (writePlace program place .vacant before).bind (fun updated => some (resident, updated)))) = some (value, after) at taken
-    simp only [Option.bind_eq_some_iff, Option.some.injEq, Prod.mk.injEq] at taken
-    obtain ⟨resident, read, updated, written, sameValue, sameAfter⟩ := taken
-    cases sameValue
-    cases sameAfter
+    obtain ⟨read, written⟩ := takePlace_eq_some.mp taken
     exact writePlace_inverse read written
 
 theorem ValueHasType.initialized {value : Value} {type : Ty}
@@ -1142,6 +1128,9 @@ theorem EnvironmentTyped.replace {environment : Environment} {context afterConte
     (resident : SlotTyped program replacement slot) :
     ∃ after, replaceBinding name replacement environment = some after ∧ EnvironmentTyped program after afterContext ∧
       lookup name after = some replacement := by
+  suffices built : ∃ after, replaceBinding name replacement environment = some after ∧ EnvironmentTyped program after afterContext by
+    obtain ⟨after, replaced, afterTyped⟩ := built
+    exact ⟨after, replaced, afterTyped, replaceBinding_lookup replaced⟩
   induction typed generalizing afterContext with
   | nil => simp [replaceBinding] at changed
   | @cons key old type environment context oldTyped rest ih =>
@@ -1149,16 +1138,12 @@ theorem EnvironmentTyped.replace {environment : Environment} {context afterConte
     split at changed
     next same =>
       cases changed
-      exact ⟨_, by simp [replaceBinding, same], .cons resident rest, by simp [lookup, same]⟩
+      exact ⟨_, by simp [replaceBinding, same], .cons resident rest⟩
     next different =>
-      cases tailChanged : replaceBinding name slot context with
-      | none => simp [tailChanged] at changed
-      | some next =>
-        simp [tailChanged] at changed
-        subst afterContext
-        obtain ⟨after, replaced, afterTyped, found⟩ := ih tailChanged
-        exact ⟨_, by simp [replaceBinding, different, replaced], .cons oldTyped afterTyped,
-          by simp [lookup, Ne.symm different, found]⟩
+      obtain ⟨next, tailChanged, same⟩ := Option.map_eq_some_iff.mp changed
+      cases same
+      obtain ⟨after, replaced, afterTyped⟩ := ih tailChanged
+      exact ⟨_, by simp [replaceBinding, different, replaced], .cons oldTyped afterTyped⟩
 
 theorem EnvironmentTyped.lookup {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {name : String} {type : BindingType}
@@ -1211,9 +1196,7 @@ theorem EnvironmentTyped.writePlace {environment : Environment} {context afterCo
     obtain ⟨updated, written, updatedTyped, readback⟩ := path.write parentTyped resident
     obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := updated) (.inl ⟨rfl, updatedTyped⟩)
     refine ⟨after, ?_, afterTyped, by simp [Grounded.readPlace, lookupAfter, readback, resident.initialized]⟩
-    cases fields : place.fields with
-    | nil => exact False.elim (whole fields)
-    | cons key rest => simpa [Grounded.writePlace, found, fields, replaced] using congrArg (fun result => result.bind (fun updated => replaceBinding place.root updated environment)) written
+    simp [Grounded.writePlace, found, written, replaced]
 
 theorem EnvironmentTyped.takePlace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType}
