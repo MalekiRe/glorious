@@ -1437,7 +1437,8 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       HasType program home context (.construct identity tag fields) (.nominal identity) after
   | field {home : Module} {context after : List (String × BindingType)} {body : Expr} {key : FieldKey}
       {parentType type : Ty} {index : Nat} (source : HasType program home context body parentType after)
-      (discard : MayDiscard program.data parentType) (selected : ProjectionType program home parentType key index type) :
+      (discard : StorageDisposition program (Initialization.full.setChild index .vacant) parentType)
+      (selected : ProjectionType program home parentType key index type) :
       HasType program home context (.field body key) type after
   | call {home : Module} {context after bodyAfter : List (String × BindingType)} {identity : Nat}
       {arguments : List Expr} {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
@@ -2505,7 +2506,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     obtain ⟨residual, cleared, residualTyped⟩ := replace .vacant .vacant .vacant
     have extracted : parent.writePath program [key] .vacant = some residual := by
       simp [Value.writePath, indexed, found, cleared]
-    refine ⟨value, after, .field evaluated selectedValue extracted ⟨_, (residualTyped.disposable discard).destroys⟩, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .field evaluated selectedValue extracted ⟨_, (StorageDisposition.realized discard residualTyped).destroys⟩, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
     | field otherSource otherSelected otherExtracted otherDispose =>

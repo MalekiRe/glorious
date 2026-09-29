@@ -339,11 +339,13 @@ left to right. `Cleans.suffix` preserves the exact outer environment,
 and `Cleans.exactly_once` proves that cleanup never revisits a resident
 occurrence. Field paths distinguish equal-valued residents.
 
-Owned-expression projection extracts the selected child and clears its slot
-before destroying the residual parent. `Evaluates.field_protects_result`
-proves that no cleanup event targets that slot or any descendant; no extra Copy
-requirement is introduced. Selected patterns use `Pattern.Consumes` and
-`ConsumesArm`: binders transfer their complete payload without destruction,
+Owned-expression projection checks `StorageDisposition` for the statically
+computed residual mask, not whole-parent discardability. This admits extracting
+from an exact temporary when all surviving fields have a legal disposition.
+Evaluation extracts the selected child and clears its slot before destroying
+the residual parent. `Evaluates.field_protects_result` proves that no cleanup
+event targets that slot or any descendant; no extra Copy requirement is
+introduced. Selected patterns use `Pattern.Consumes` and
 wildcard/literal leaves execute destruction, and deconstruction processes field
 discards in reverse order. Failed candidate patterns remain non-consuming.
 `PatternType.consume` produces typed bindings and the actual selected-pattern
