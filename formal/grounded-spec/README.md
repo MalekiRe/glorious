@@ -180,8 +180,13 @@ projections cannot be admitted. Physical evaluation traces remain outside this
 logical big-step boundary.
 
 `Place` selects the nearest lexical root and a field path. `ProjectionType`
-supplies tuple bounds and nominal-field visibility to both reads and writes;
-the old separate tuple-expression projection rule is removed. Assignment
+supplies tuple bounds, nominal-field visibility, and the source-resolved child
+index to both reads and writes. `PathType` composes those indices along the
+field path. `ProjectionType.access` proves that runtime selection uses that
+exact index; it no longer merely produces some runtime index after the fact.
+Expression projection, place reads, assignment, and their connected proofs
+consume this strengthened contract. No second resolution pass or index table
+is introduced. The old separate tuple-expression projection rule is removed. Assignment
 evaluates the RHS first, then updates the selected place in that actual
 post-state. It requires a mutable root. A live destination requires a legally
 discardable old resident (currently duplicable, without hooks); restoring a

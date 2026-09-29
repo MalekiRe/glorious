@@ -338,22 +338,22 @@ structure Program where
 variable {program : Program}
 variable {home : Module}
 /-- One field contract supplies tuple bounds and nominal visibility to reads and writes. -/
-inductive ProjectionType (program : Program) (home : Module) : Ty → FieldKey → Ty → Prop where
+inductive ProjectionType (program : Program) (home : Module) : Ty → FieldKey → Nat → Ty → Prop where
   | tuple {first type : Ty} {rest : List Ty} {index : Nat}
       (selected : (first :: rest)[index]? = some type) :
-      ProjectionType program home (.tuple first rest) (.positional index) type
+      ProjectionType program home (.tuple first rest) (.positional index) index type
   | nominal {identity index : Nat} {key : FieldKey} {declaration : DataDecl} {schema : Fields} {field : Field}
       (declared : program.data identity = some declaration)
       (structureOnly : declaration.shape = .structure schema)
       (indexed : schema.index key = some index) (selected : schema.residents[index]? = some field)
       (visible : field.visibility.Allows declaration.home home) :
-      ProjectionType program home (.nominal identity) key field.type
+      ProjectionType program home (.nominal identity) key index field.type
 
-inductive PathType (program : Program) (home : Module) : Ty → List FieldKey → Ty → Prop where
-  | nil (type : Ty) : PathType program home type [] type
-  | cons {source middle target : Ty} {key : FieldKey} {keys : List FieldKey}
-      (head : ProjectionType program home source key middle) (tail : PathType program home middle keys target) :
-      PathType program home source (key :: keys) target
+inductive PathType (program : Program) (home : Module) : Ty → List FieldKey → List Nat → Ty → Prop where
+  | nil (type : Ty) : PathType program home type [] [] type
+  | cons {source middle target : Ty} {key : FieldKey} {keys : List FieldKey} {index : Nat} {indices : List Nat}
+      (head : ProjectionType program home source key index middle) (tail : PathType program home middle keys indices target) :
+      PathType program home source (key :: keys) (index :: indices) target
 
 /-- §7.2: scalar owned use may copy; scalar values may also be discarded.
 Keep this explicit at consumers rather than making all future types copyable. -/
@@ -706,9 +706,9 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       HasType program home context (.character number) .character context
   | group {home : Module} {context after : List (String × BindingType)} {body : Expr} {type : Ty}
       (typed : HasType program home context body type after) : HasType program home context (.group body) type after
-  | read {home : Module} {context : List (String × BindingType)} {place : Place} {slot : BindingType} {type : Ty}
+  | read {home : Module} {context : List (String × BindingType)} {place : Place} {slot : BindingType} {type : Ty} {indices : List Nat}
       (selected : lookup place.root context = some slot) (initialized : slot.initialized = true)
-      (path : PathType program home slot.type place.fields type) (copyable : Duplicable program.data type) :
+      (path : PathType program home slot.type place.fields indices type) (copyable : Duplicable program.data type) :
       HasType program home context (.read place) type context
   | move {home : Module} {context after : List (String × BindingType)} {place : Place} {slot : BindingType}
       (selected : lookup place.root context = some slot) (initialized : slot.initialized = true)
@@ -748,8 +748,8 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (residents : HasTypes program home context fields (schema.residents.map Field.type) after) :
       HasType program home context (.construct identity tag fields) (.nominal identity) after
   | field {home : Module} {context after : List (String × BindingType)} {body : Expr} {key : FieldKey}
-      {parentType type : Ty} (source : HasType program home context body parentType after)
-      (discard : Duplicable program.data parentType) (selected : ProjectionType program home parentType key type) :
+      {parentType type : Ty} {index : Nat} (source : HasType program home context body parentType after)
+      (discard : Duplicable program.data parentType) (selected : ProjectionType program home parentType key index type) :
       HasType program home context (.field body key) type after
   | call {home : Module} {context after bodyAfter : List (String × BindingType)} {identity : Nat}
       {arguments : List Expr} {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
@@ -760,10 +760,10 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result bodyAfter) :
       HasType program home context (.call identity arguments) declaration.result after
   | assign {home : Module} {context middle updated after : List (String × BindingType)} {place : Place}
-      {value rest : Expr} {slot : BindingType} {target result : Ty}
+      {value rest : Expr} {slot : BindingType} {target result : Ty} {indices : List Nat}
       (resident : HasType program home context value target middle)
       (selected : lookup place.root middle = some slot) (writable : slot.mutable = true)
-      (available : place.fields = [] ∨ slot.initialized = true) (path : PathType program home slot.type place.fields target)
+      (available : place.fields = [] ∨ slot.initialized = true) (path : PathType program home slot.type place.fields indices target)
       (discard : slot.initialized = true → Duplicable program.data target)
       (written : replaceBinding place.root { slot with initialized := true } middle = some updated)
       (continued : HasType program home updated rest result after) :
@@ -1036,10 +1036,10 @@ theorem ValuesHaveTypes.set {types : List Ty} {values : List Value}
       | succ index => exact .cons head (ih tail index selected)
 
 /-- The selected resident and lawful replacement are derived from the same field contract. -/
-theorem ProjectionType.access {source target : Ty} {key : FieldKey}
-    (projection : ProjectionType program home source key target) {value : Value}
+theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat}
+    (projection : ProjectionType program home source key index target) {value : Value}
     (typed : ValueHasType program value source) :
-    ∃ index resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
+    ∃ resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
       ValueHasType program resident target ∧
       ∀ replacement, ValueHasType program replacement target →
         ∃ updated, value.replaceChild index replacement = some updated ∧ ValueHasType program updated source := by
@@ -1048,7 +1048,7 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey}
     cases typed with
     | @tuple head tail _ _ headTyped tailTyped =>
       obtain ⟨resident, found, residentTyped⟩ := ValuesHaveTypes.select (.cons headTyped tailTyped) index target selected
-      refine ⟨index, resident, rfl, found, residentTyped, ?_⟩
+      refine ⟨resident, rfl, found, residentTyped, ?_⟩
       intro replacement replacementTyped
       cases index with
       | zero =>
@@ -1070,30 +1070,30 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey}
         subst otherSchema
         have selectedType : (schema.residents.map Field.type)[index]? = some field.type := by simp [List.getElem?_map, selected]
         obtain ⟨resident, found, residentTyped⟩ := residents.select index field.type selectedType
-        refine ⟨index, resident, ?_, found, residentTyped, ?_⟩
+        refine ⟨resident, ?_, found, residentTyped, ?_⟩
         · simp [Value.fieldIndex, declared, structureOnly, indexed]
         · intro replacement replacementTyped
           exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite (residents.set index selectedType replacementTyped)⟩
 
-theorem PathType.read {source target : Ty} {keys : List FieldKey}
-    (path : PathType program home source keys target) {value : Value} (typed : ValueHasType program value source) :
+theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : List Nat}
+    (path : PathType program home source keys indices target) {value : Value} (typed : ValueHasType program value source) :
     ∃ resident, value.readPath program keys = some resident ∧ ValueHasType program resident target := by
   induction path generalizing value with
   | nil => exact ⟨value, rfl, typed⟩
   | cons head tail ih =>
-    obtain ⟨index, child, indexed, found, childTyped, _⟩ := head.access typed
+    obtain ⟨child, indexed, found, childTyped, _⟩ := head.access typed
     obtain ⟨resident, selected, residentTyped⟩ := ih childTyped
     exact ⟨resident, by simp [Value.readPath, Value.readField, indexed, found, selected], residentTyped⟩
 
-theorem PathType.write {source target : Ty} {keys : List FieldKey}
-    (path : PathType program home source keys target) {value replacement : Value}
+theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat}
+    (path : PathType program home source keys indices target) {value replacement : Value}
     (typed : ValueHasType program value source) (resident : ValueHasType program replacement target) :
     ∃ updated, value.writePath program keys replacement = some updated ∧ ValueHasType program updated source ∧
       updated.readPath program keys = some replacement := by
   induction path generalizing value with
   | nil => exact ⟨replacement, rfl, resident, rfl⟩
-  | @cons source middle target key keys head tail ih =>
-    obtain ⟨index, child, indexed, found, childTyped, replace⟩ := head.access typed
+  | @cons source middle target key keys index indices head tail ih =>
+    obtain ⟨child, indexed, found, childTyped, replace⟩ := head.access typed
     obtain ⟨updatedChild, childWritten, updatedTyped, _⟩ := ih childTyped resident
     obtain ⟨updated, written, resultTyped⟩ := replace updatedChild updatedTyped
     have pathWritten : value.writePath program (key :: keys) replacement = some updated := by
@@ -1169,18 +1169,18 @@ theorem EnvironmentTyped.lookupLive {environment : Environment} {context : List 
   · simp [initialized] at vacant
 
 theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty}
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat}
     (selected : Grounded.lookup place.root context = some slot) (initialized : slot.initialized = true)
-    (path : PathType program home slot.type place.fields target) :
+    (path : PathType program home slot.type place.fields indices target) :
     ∃ value, Grounded.readPlace program place environment = some value ∧ ValueHasType program value target := by
   obtain ⟨parent, found, parentTyped⟩ := typed.lookupLive selected initialized
   obtain ⟨resident, read, residentTyped⟩ := path.read parentTyped
   exact ⟨resident, by simp [Grounded.readPlace, found, read, residentTyped.initialized], residentTyped⟩
 
 theorem EnvironmentTyped.writePlace {environment : Environment} {context afterContext : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty}
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat}
     (selected : Grounded.lookup place.root context = some slot)
-    (available : place.fields = [] ∨ slot.initialized = true) (path : PathType program home slot.type place.fields target)
+    (available : place.fields = [] ∨ slot.initialized = true) (path : PathType program home slot.type place.fields indices target)
     (changed : replaceBinding place.root { slot with initialized := true } context = some afterContext)
     {replacement : Value} (resident : ValueHasType program replacement target) :
     ∃ after, writePlace program place replacement environment = some after ∧ EnvironmentTyped program after afterContext ∧
@@ -1630,9 +1630,9 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     | construct otherFields =>
       obtain ⟨rfl, rfl⟩ := unique _ _ otherFields
       exact ⟨rfl, rfl⟩
-  | @field home context afterContext body key parentType type source discard selected ih =>
+  | @field home context afterContext body key parentType type index source discard selected ih =>
     obtain ⟨parent, after, evaluated, parentTyped, afterTyped, unique⟩ := ih environmentTyped
-    obtain ⟨index, value, indexed, found, valueTyped, _⟩ := selected.access parentTyped
+    obtain ⟨value, indexed, found, valueTyped, _⟩ := selected.access parentTyped
     have selectedValue : parent.readField program key = some value := by simp [Value.readField, indexed, found]
     refine ⟨value, after, .field evaluated selectedValue, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
