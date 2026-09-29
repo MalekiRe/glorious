@@ -149,7 +149,7 @@ explicit semantic-fidelity and proof-assumption audit.
 
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, place reads, sequencing, immutable and
-mutable initialized bindings, whole-local and nested tuple/structure assignment,
+mutable initialized bindings, whole-local moves and restoration, nested tuple/structure assignment,
 optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data over duplicable fields, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
@@ -183,11 +183,24 @@ logical big-step boundary.
 supplies tuple bounds and nominal-field visibility to both reads and writes;
 the old separate tuple-expression projection rule is removed. Assignment
 evaluates the RHS first, then updates the selected place in that actual
-post-state. It requires a mutable root and a legally discardable old resident
-(currently duplicable, without hooks). Nested writes preserve aggregate typing.
-`PathType.write` and `EnvironmentTyped.writePlace` also prove that an actual
-read of the updated path returns the replacement, not merely some well-typed
-value. These are the same operations consumed by expression correctness.
+post-state. It requires a mutable root. A live destination requires a legally
+discardable old resident (currently duplicable, without hooks); restoring a
+vacant whole root does not discard an old value. Nested writes preserve
+aggregate typing and require an initialized root. `PathType.write` and
+`EnvironmentTyped.writePlace` prove that reading the updated path returns the
+replacement. These are the operations consumed by expression correctness.
+
+Typing now produces the final initialization context, rather than requiring
+every expression to preserve its input context. Runtime slots contain either
+a resident or a vacancy; a vacant nearest binding still shadows outer bindings.
+Whole-root `move` extracts the actual resident and clears that slot, even for
+a duplicable value. `EnvironmentTyped.takePlace` constructs the transition
+and proves the selected slot is vacant afterward. Reads require initialization;
+later arguments and bodies consume the preceding initialization context.
+Assignment restores a vacant mutable root after evaluating its RHS. Function
+parameters and pattern binders start initialized; scope exit removes only its
+own prefix and preserves changes to outer slots. Partial moves and partial
+aggregate initialization remain open at the ownership boundary.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
 
@@ -269,7 +282,7 @@ Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, uninitialized places, moves, loans and
+floating conversion, static strings, partially initialized aggregates, loans and
 effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
@@ -301,9 +314,9 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
 3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
-4. Mutable places, initialization, assignment and explicit moves: initialized
-   mutable locals and nested tuple/structure assignment are connected;
-   uninitialized storage and move transitions remain open.
+4. Mutable places, initialization, assignment and explicit moves: whole-root
+   moves, vacancy-aware reads and restoration, and nested initialized
+   tuple/structure assignment are connected. Partial aggregate moves remain open.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
@@ -335,6 +348,6 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. Current size: 1,565 Lean lines including
+constants reuse ordinary evaluation. Current size: 1,646 Lean lines including
 comments and blanks. The development remains one Lean module; no standalone
 admission checker or speculative proof module is added.
