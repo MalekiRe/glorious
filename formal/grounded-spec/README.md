@@ -54,11 +54,22 @@ selection and replacement are projections of this product, not independent
 reference scans.
 
 `Slot.payload` and `ResultType.payload` replace direct-only reference metadata.
-`Context.names` selects stable binder identities in authoritative
-`Context.storage`. Stored cells pair canonical initialization masks with the
-current payload. Immutable declaration metadata excludes mutable payloads.
-Hidden caller payloads may change through authorized indirect mutation; calls
-reconstruct from actual callee post-storage rather than restoring old metadata.
+`Context.storage` is authoritative for every canonical backing root, including
+external storage. `Context.names` selects only lexical owners; hidden backing
+roots need not be named and are not retired by lexical cleanup. Each cell has a
+declared root type, current initialization mask and current payload. Immutable
+declaration metadata excludes mutable payloads. Hidden caller payloads may change
+through authorized indirect mutation; calls reconstruct from actual callee
+post-storage rather than restoring old metadata.
+
+Arguments are handles, not root identities. Shared aliases, disjoint unique
+fields and parent/child targets can select the same canonical root with their
+respective paths. Interpretation is injective only on distinct canonical roots,
+never on argument references. Unique access derives its referent authority from
+the loan, not mutability of the local handle binding. Reads, moves and writes
+query the same root mask/payload; a move can create a hole and assignment restores
+the selected subtree without stale per-input state. Source identities do not
+allocate runtime owners.
 
 `StateTyped` relates a list of pending source payloads to the **actual pending
 values**. `Carries` records a stored root or pending-value index together with
@@ -81,10 +92,21 @@ knowledge remains distinct from arbitrary hypothetical schemas. Canonical
 current-state import derives knowledge from authoritative cells and their typed
 residents, and supplies
 `SourceImport.pointOfStore`; `imported_correctness` consumes that entry. Imported
-opaque schema identities distinguish canonical binder/input roots and constructor/field
+opaque schema identities distinguish canonical roots and constructor/field
 paths, with fresh schema supply reserved above those identities. Ending one
 source-known plain subtree cannot accidentally end another through a reused ghost
 identity. No source cell is fabricated from a nominal type.
+
+`SourceImport.CanonicalEntry` exposes the initial backing-root contract: declared
+root types/masks and payloads agree with actual store residents, together with
+current loan history, permission, custody and exact pending-value evidence. It
+derives visible resident typing and slot correspondence through
+`Context.reconstruct`, constructs `StateTyped`, then supplies the canonical
+imported producer point. It assumes neither successful normalization nor future
+evaluation. This strengthens the former open-world value-shape premise to
+genuine canonical root typing: a current subvalue alone cannot establish the
+type of a vacant unique target or the backing layout. This is missing modeling
+evidence made explicit, not a new source-language restriction.
 
 `PatternProduces` consumes the same chosen payload. Its executable projection
 uses the existing `PatternType` and `Pattern.matchValue`, transferring bindings
@@ -162,13 +184,27 @@ represented by this `Ty` model. `correctness_return_cleanup` connects general
 body execution, actual cleanup, returned usability and runtime ancestry at every
 nested returned occurrence; cleanup does not auto-end the returned handles.
 
-First-use referent views are checking metadata, not owner allocations. Known
-parent/descendant targets use their canonical owner root and current mask.
-Canonical source import preserves known active-variant facts. Only an absent
-external, source-proved reference-free **shared** target may use the opaque
-existing-node referent view; this fallback cannot acquire unique write authority.
-Derived copies retain the canonical view. Ended views need no stale mutable mask
-cache, and shared input aliases are not assumed injective or disjoint.
+Executable referent views are immutable lenses, not owner allocations or mask
+caches. `ContextMeaning.noOpaqueCells` forbids opaque referent cells in every
+executable producer point; root coverage includes hidden storage, and represented
+root identity prevents two checked cells from denoting one actual canonical root.
+This does not require distinct reference targets or paths. `ViewStep.canonical`
+queries an already-known symbolic target, its existing root and full path, and
+the current mask without changing any target, cell, name, loan history or supply.
+`ViewStep.executable_lens` proves this for every executable view.
+
+`SourceImport.Cells.canonicalView` derives that lens from the actual selected
+stored handle and its field path; `CanonicalEntry.view` constructs the producer
+branch with exact erasure. Parent/child aliases and vacant unique targets retain
+their current canonical masks. The old separately typed input subvalues and
+opaque shared-only fallback are removed. Derived copies retain canonical
+provenance, and ended views retain no stale mutable mask.
+
+Hypothetical opaque views remain available for dormant checking. They cannot
+inhabit executable points. Erasure preserves the selected canonical or
+hypothetical branch exactly; this does not claim that every hypothetical
+checking derivation has an executable realization. `checked_correctness`
+continues to require the exact realization of the chosen checking product.
 
 ## General theorem and public consumers
 
@@ -182,6 +218,9 @@ pending-value state/custody, interpretation and source-history progress, storage
 evolution, returned usability and uniqueness for the admitted Core. Public
 consumers include:
 
+- `canonical_entry_correctness`: constructs the initial state from canonical
+  root and current resource evidence, then consumes the imported producer and
+  the same general correctness theorem.
 - `imported_correctness` and `closed_correctness`: canonical imported or empty
   entry; closed evaluation retires cells without resetting supplies/history.
 - `correctness_referenceFree`: conservation and agreement for the same evaluator
@@ -189,8 +228,8 @@ consumers include:
 - `correctness_noDangling`: addressable typed active targets with actual masks;
   universal readability is asserted for shared targets, not arbitrary unique
   targets with temporary holes.
-- `correctness_canonicalTargets`: canonical binder-target paths, masks and
-  actual resident typing; no fabricated external target cells.
+- `correctness_canonicalTargets`: exact root-to-target paths, masks and actual
+  resident typing for all active targets, including hidden external roots.
 - `correctness_targetClosure`: every nested leaf of an active target retains
   Own and support; every actual pending leaf additionally retains restoration.
 - `checked_correctness`: an executable source-rule realization must erase to the
@@ -212,11 +251,13 @@ readiness. Even zero-length arrays check element layout and target size bounds.
 This distinction does not establish generic layouts, physical sizes/alignment,
 allocation success, or a complete recursive-type semantics.
 
-Live external unique `.input` origins remain excluded. Actual source-derived
-unique call arguments retain canonical binder origins; arbitrary shared aliases
-remain allowed. The return boundary is the bounded singleton-origin rule above.
-The reference-free agreement theorem is not observational equivalence of all
-loan-bearing worlds, nor a proof that every surface program elaborates.
+External unique references use the same canonical mutation/restoration rules as
+source-derived callers, including initially masked targets. Entry requires
+genuine canonical backing-root evidence; arbitrary value-shape-only external
+worlds are not claimed to supply it. The return boundary remains the bounded
+singleton-origin rule above. Reference-free agreement is not observational
+equivalence of all loan-bearing worlds or proof that every surface program
+elaborates.
 
 Other open language boundaries include recursive/diverging calls, general
 callables/captures, nonlocal transfer and proper tail invocation, effects and
@@ -229,12 +270,13 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **6,655
-declarations, including 252 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **6,682
+declarations, including 245 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
-No routine examples or tests were used. Reproduce the strict module check and
-exhaustive defining-module audit from this directory:
+Verification rests on general theorems and exhaustive axiom auditing; no
+permanent example/test suite is introduced. Reproduce the strict module check
+and exhaustive defining-module audit from this directory:
 
 ```sh
 mkdir -p .lake/build/lib/lean
@@ -270,6 +312,7 @@ run_cmd do
 #print axioms Grounded.Elaboration.correctness_targetClosure
 #print axioms Grounded.Elaboration.correctness_return_cleanup
 #print axioms Grounded.Elaboration.imported_correctness
+#print axioms Grounded.Elaboration.canonical_entry_correctness
 #print axioms Grounded.Elaboration.HasType.reference_read_selection
 LEAN
 ```

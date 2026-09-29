@@ -555,10 +555,10 @@ structure Place where
   root : String
   fields : List FieldKey := []
 
-/-- Source identities name binders, never allocated runtime roots. -/
+/-- Canonical storage identities include hidden external backing roots.
+Argument handles may share an identity and path; identities never allocate owners. -/
 inductive OriginBase where
   | binder (identity : Nat)
-  | input (identity : Nat)
   deriving DecidableEq
 
 structure Origin where
@@ -622,7 +622,6 @@ structure Context where
   storage : OriginBase → Option Slot
   loans : List SourceLoan
   nextBinder : Nat
-  inputCount : Nat
 
 /-- Lexical lookup is a view of authoritative source storage. Hiding names does
 not hide, duplicate, or roll back the initialization of the named storage. -/
@@ -2469,13 +2468,11 @@ theorem Cleans.frame {count : Nat} {before after : Environment} {trace : List (R
   exact fun _ outside => before.retire_frame count outside
 
 
-/-- A source-origin disjointness proof is reflected, not assumed, at runtime.
-Different formal inputs may alias; equal input bases retain field separation. -/
+/-- Disjointness concerns canonical backing roots and field coordinates,
+not argument identities. Aliased handles share the same root identity. -/
 def Origin.Apart (left right : Origin) : Prop :=
   match left.base, right.base with
   | .binder first, .binder second => first ≠ second ∨ CoordinatesApart left.fields right.fields
-  | .binder _, .input _ | .input _, .binder _ => True
-  | .input first, .input second => first = second ∧ CoordinatesApart left.fields right.fields
 
 def Origin.Within (child parent : Origin) : Prop :=
   child.base = parent.base ∧ parent.fields.IsPrefix child.fields
@@ -2486,7 +2483,6 @@ def Origin.extend (origin : Origin) (indices : List Nat) : Origin :=
 def Origin.Bounded (origin : Origin) (context : Context) : Prop :=
   match origin.base with
   | .binder identity => identity < context.nextBinder
-  | .input identity => identity < context.inputCount
 
 mutual
 /-- Loan types are checked at their producer-recorded field, including the active
@@ -2626,7 +2622,7 @@ inductive SourcePayload.Write (program : Program) : Ty → List Nat → SourcePa
 
 namespace Context
 
-def empty : Context := ⟨[], fun _ => none, [], 0, 0⟩
+def empty : Context := ⟨[], fun _ => none, [], 0⟩
 def erase (context : Context) : List (String × BindingType) :=
   context.bindings.map fun binding => (binding.1, binding.2.toBindingType)
 
@@ -2655,7 +2651,7 @@ def withSlots (context : Context) (slots : List (String × Slot)) : Context :=
           match slots.find? (fun binding => binding.2.binder == binder) with
           | some binding => some binding.2
           | none => context.storage origin
-      | .input _ => context.storage origin }
+      }
 
 /-- Finite semantic support of the proof interpretation. Gaps below nextBinder
 need no runtime root, so source supply joins never fabricate allocations. -/
@@ -2675,27 +2671,23 @@ def Permits (context : Context) (mode : BorrowMode) (parent : Option Nat) (origi
   ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
     (mode = .shared ∧ loan.mode = .shared) ∨
     (∃ selected, parent = some selected ∧ context.Derived selected node) ∨ origin.Apart loan.target
-/-- A canonical binder target is typed from authoritative root storage. The selected
-mask is obtained by Access, never retained in a loan record. Inputs remain external. -/
+/-- Every target, including an external argument referent, is typed from its
+canonical backing root. The selected mask is queried, never retained in a loan. -/
 def Target (program : Program) (context : Context) (origin : Origin) (referent : Ty) : Prop :=
   match origin.base with
   | .binder binder => ∃ slot, context.storage (.binder binder) = some slot ∧
       CanonicalPath program slot.type origin.fields referent ∧
       ∃ state, slot.initialization.Access origin.fields state
-  | .input _ => True
 
-/-- Readiness is a query of root storage, not a per-reference initialization mask.
-External inputs are accounted for separately by runtime input correspondence. -/
+/-- Readiness queries authoritative root storage, including external backing cells. -/
 def Ready (context : Context) (origin : Origin) : Prop :=
   match origin.base with
   | .binder binder => ∃ slot state, context.storage (.binder binder) = some slot ∧
       slot.initialization.Access origin.fields state ∧ state.Complete
-  | .input _ => True
 
 def SourceTarget (program : Program) (context : Context) (loan : SourceLoan) : Prop :=
   context.Target program loan.target loan.referent ∧
-  (loan.mode = .shared → context.Ready loan.target) ∧
-  (∀ input, loan.target.base = .input input → loan.mode = .shared)
+  (loan.mode = .shared → context.Ready loan.target)
 
 /-- Reads and borrows require the entire parent target, not merely a complete child.
 Restoration uses masked access without this operation-specific prerequisite. -/
@@ -2719,18 +2711,13 @@ def Own (context : Context) (node : Nat) : Prop :=
 def Restored (context : Context) (node : Nat) : Prop :=
   ∀ loan, context.loans[node]? = some loan → loan.own = true → context.Ready loan.target
 
-/-- Target provenance is selected from the authoritative cell. An absent external
-cell is admitted only with positive reference-free referent-layout evidence. -/
+/-- Every target payload is selected from authoritative root storage. -/
 inductive TargetPayload (program : Program) (context : Context) : Origin → Ty → SourcePayload → Prop where
   | cell {origin : Origin} {slot : Slot} {referent : Ty} {payload : SourcePayload}
       (stored : context.storage origin.base = some slot)
       (path : CanonicalPath program slot.type origin.fields referent)
       (selected : slot.payload.select origin.fields = some payload) :
       TargetPayload program context origin referent payload
-  | externalPlain {input : Nat} {fields : List Nat} {referent : Ty}
-      (bounded : input < context.inputCount)
-      (free : ReferenceFreeLayout program.target program.data referent) :
-      TargetPayload program context ⟨.input input, fields⟩ referent .plain
 
 def PayloadAvailable (context : Context) (payload : SourcePayload) : Prop :=
   ∀ node ∈ payload.nodes, context.Own node ∧ context.Restored node
@@ -2792,9 +2779,6 @@ theorem dispose_induction {P : Context → Prop} {context : Context} (initial : 
     (context.dispose payload).nextBinder = context.nextBinder :=
   dispose_induction (P := fun current => current.nextBinder = context.nextBinder) rfl (fun _ _ same => same) payload
 
-@[simp] theorem dispose_inputs (context : Context) (payload : SourcePayload) :
-    (context.dispose payload).inputCount = context.inputCount :=
-  dispose_induction (P := fun current => current.inputCount = context.inputCount) rfl (fun _ _ same => same) payload
 
 def borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) : Context :=
   { context with loans := context.loans ++ [⟨target, referent, parent, true, mode⟩] }
@@ -2837,7 +2821,7 @@ def retire (context : Context) (count : Nat) : Context :=
     names := context.names.drop count
     storage := fun origin => match origin with
       | .binder binder => if binder ∈ (context.names.take count).map Prod.snd then none else context.storage origin
-      | .input _ => context.storage origin }
+      }
 
 /-- Node history and binder supplies are never rewound at scope exit. -/
 def disposeSlots (context : Context) (slots : List (String × Slot)) : Context :=
@@ -2864,9 +2848,6 @@ structure WellFormed (program : Program) (context : Context) : Prop where
   parentModes : ∀ (node : Nat) (loan : SourceLoan) (parent : Nat) (ancestor : SourceLoan),
     context.loans[node]? = some loan → loan.parent = some parent → context.loans[parent]? = some ancestor →
     loan.mode = .unique → ancestor.mode = .unique
-  inputSlots : ∀ (input : Nat) (slot : Slot), context.storage (.input input) = some slot →
-    input < context.inputCount ∧ StorageType program.target program.data slot.type ∧
-    SourcePayload.Typed program context.loans slot.payload slot.type
 
 theorem WellFormed.member_stored {context : Context} (valid : context.WellFormed program)
     (binding : String × Slot) (member : binding ∈ context.bindings) :
@@ -2882,7 +2863,7 @@ theorem WellFormed.member_known {context : Context} (valid : context.WellFormed 
     context.MentionsBinder binding.2.binder :=
   .inl ⟨binding.2, valid.member_stored binding member⟩
 
-private theorem filterMap_congr_mem {α β : Type} (entries : List α) (left right : α → Option β)
+theorem filterMap_congr_mem {α β : Type} (entries : List α) (left right : α → Option β)
     (same : ∀ entry ∈ entries, left entry = right entry) :
     entries.filterMap left = entries.filterMap right := by
   induction entries with
@@ -2931,16 +2912,14 @@ end Context
 def Origin.Known (origin : Origin) (context : Context) : Prop :=
   match origin.base with
   | .binder identity => context.MentionsBinder identity
-  | .input identity => identity < context.inputCount
 
-theorem Context.WellFormed.loanKnown {context : Context} (valid : context.WellFormed program)
+theorem Context.WellFormed.loanKnown {context : Context} (_valid : context.WellFormed program)
     {node : Nat} {loan : SourceLoan} (found : context.loans[node]? = some loan) : loan.target.Known context := by
   cases base : loan.target.base with
   | binder identity =>
-    change (match loan.target.base with | .binder identity => context.MentionsBinder identity | .input identity => identity < context.inputCount)
+    change (match loan.target.base with | .binder identity => context.MentionsBinder identity)
     rw [base]
     exact .inr ⟨node, loan, found, base⟩
-  | input identity => simpa [Origin.Known, Origin.Bounded, base] using (valid.targets _ _ found).1
 
 namespace Context
 
@@ -2974,7 +2953,7 @@ theorem endOwn_mentions (context : Context) (ended binder : Nat) :
 
 theorem WellFormed.endOwn {context : Context} (valid : context.WellFormed program) (ended : Nat) :
     (context.endOwn ended).WellFormed program := by
-  refine { valid with slots := ?_, targets := ?_, parents := ?_, allocated := ?_, parentModes := ?_, inputSlots := ?_ }
+  refine { valid with slots := ?_, targets := ?_, parents := ?_, allocated := ?_, parentModes := ?_ }
   · intro binding member
     obtain ⟨bound, reference⟩ := valid.slots binding member
     refine ⟨bound, ?_⟩
@@ -2994,9 +2973,6 @@ theorem WellFormed.endOwn {context : Context} (valid : context.WellFormed progra
     obtain ⟨old, oldFound, rfl⟩ := endOwn_original found
     obtain ⟨oldParent, oldParentFound, rfl⟩ := endOwn_original parentFound
     exact valid.parentModes node old parent oldParent oldFound derived oldParentFound unique
-  · intro input slot stored
-    obtain ⟨bound, supported, reference⟩ := valid.inputSlots input slot stored
-    exact ⟨bound, supported, reference.transport (fun _ _ found => ⟨_, context.endOwn_found ended found, rfl, rfl⟩)⟩
 
 end Context
 
@@ -3111,7 +3087,7 @@ theorem WellFormed.borrow {context : Context} (valid : context.WellFormed progra
     (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
     (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique) :
     (context.borrow target referent parent mode).WellFormed program := by
-  refine ⟨valid.distinct, valid.supported, ?_, ?_, ?_, valid.named, ?_, ?_, ?_⟩
+  refine ⟨valid.distinct, valid.supported, ?_, ?_, ?_, valid.named, ?_, ?_⟩
   · intro binding member
     obtain ⟨bound, reference⟩ := valid.slots binding member
     refine ⟨bound, ?_⟩
@@ -3140,9 +3116,6 @@ theorem WellFormed.borrow {context : Context} (valid : context.WellFormed progra
       have same := Option.some.inj ((borrow_found originalFound).symm.trans parentFound)
       subst parentLoan
       exact parentMode parentNode original derived originalFound unique
-  · intro input slot stored
-    obtain ⟨bound, supported, reference⟩ := valid.inputSlots input slot stored
-    exact ⟨bound, supported, reference.transport (fun _ loan found => ⟨loan, borrow_found found, rfl, rfl⟩)⟩
 
 end Context
 
@@ -3151,15 +3124,11 @@ end Context
 no source-identity map is installed in the executable environment. -/
 structure Interpretation where
   binder : Nat → Root
-  input : Nat → Address
   node : Nat → Nat
 
 def Interpretation.origin (interpretation : Interpretation) (origin : Origin) : Address :=
   match origin.base with
   | .binder identity => ⟨interpretation.binder identity, origin.fields⟩
-  | .input identity =>
-      let base := interpretation.input identity
-      ⟨base.root, base.fields ++ origin.fields⟩
 
 mutual
 /-- This realizes the producer payload against actual resident values; it does
@@ -3867,7 +3836,6 @@ inductive Reference where
 
 inductive Base where
   | binder (identity : Nat)
-  | input (identity : Nat)
   | referent (reference : Reference)
   deriving DecidableEq
 
@@ -4492,15 +4460,9 @@ structure StoreTyped (program : Program) (interpretation : Interpretation) (cont
   cells : ∀ binder slot, context.storage (.binder binder) = some slot →
     ∃ value, environment.store (interpretation.binder binder) = some value ∧
       SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value
-  inputCells : ∀ input slot, context.storage (.input input) = some slot →
-    ∃ value, environment.at (interpretation.input input) = some value ∧
-      SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value
   binderBound : ∀ binder, context.MentionsBinder binder → interpretation.binder binder < environment.nextRoot
   binderDistinct : ∀ first second, context.MentionsBinder first → context.MentionsBinder second →
     interpretation.binder first = interpretation.binder second → first = second
-  inputBound : ∀ input, input < context.inputCount → (interpretation.input input).root < environment.nextRoot
-  inputApart : ∀ binder input, context.MentionsBinder binder → input < context.inputCount →
-    interpretation.binder binder ≠ (interpretation.input input).root
   nodeOrder : ∀ first second, first < second → second < context.loans.length →
     interpretation.node first < interpretation.node second
   records : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan →
@@ -4510,12 +4472,6 @@ structure StoreTyped (program : Program) (interpretation : Interpretation) (cont
     ∃ sourceNode sourceLoan, context.loans[sourceNode]? = some sourceLoan ∧ interpretation.node sourceNode = node
   sourceTargets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
     context.SourceTarget program loan
-  inputTargets : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → loan.own = true →
-    ∀ input, loan.target.base = .input input →
-    ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧
-      ValueHasType program value loan.referent ∧
-      ∃ payload, context.TargetPayload program loan.target loan.referent payload ∧
-        payload.Corresponds interpretation.node value
   storeShape : ∀ root value, environment.store root = some value →
     ∀ path node, value.readIndices path = some (.reference node) → node < environment.loans.length
 
@@ -4552,15 +4508,12 @@ theorem StoreTyped.targetsReady {interpretation : Interpretation} {context : Con
     ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧ ValueHasType program value loan.referent := by
   cases base : loan.target.base with
   | binder binder => exact typed.targetReady (typed.sourceTargets node loan found own).1 ready base
-  | input input =>
-    obtain ⟨value, read, valueTyped, _⟩ := typed.inputTargets node loan found own input base
-    exact ⟨value, read, valueTyped⟩
 
 theorem StoreTyped.targets {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) (node : Nat) (loan : SourceLoan)
     (found : context.loans[node]? = some loan) (own : loan.own = true) (shared : loan.mode = .shared) :
     ∃ value, environment.readAddress (interpretation.origin loan.target) = some value ∧ ValueHasType program value loan.referent :=
-  typed.targetsReady node loan found own ((typed.sourceTargets node loan found own).2.1 shared)
+  typed.targetsReady node loan found own ((typed.sourceTargets node loan found own).2 shared)
 
 theorem StoreTyped.restored {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) {node : Nat} {loan : SourceLoan}
@@ -4590,11 +4543,6 @@ theorem StoreTyped.canonicalTargets {interpretation : Interpretation} {context :
 
 
 
-private theorem CoordinatesApart.prepend (stem : List Nat) {left right : List Nat}
-    (apart : CoordinatesApart left right) : CoordinatesApart (stem ++ left) (stem ++ right) := by
-  induction stem with
-  | nil => exact apart
-  | cons head tail ih => exact .descend ih
 
 
 theorem Interpretation.within (interpretation : Interpretation) {child parent : Origin}
@@ -4607,17 +4555,13 @@ theorem Interpretation.within (interpretation : Interpretation) {child parent : 
   cases same
   cases childBase with
   | binder identity => exact ⟨rfl, initial⟩
-  | input identity =>
-    refine ⟨rfl, ?_⟩
-    obtain ⟨suffix, equal⟩ := initial
-    exact ⟨suffix, by simpa only [Interpretation.origin, List.append_assoc] using (congrArg ((interpretation.input identity).fields ++ ·) equal)⟩
 
 namespace StoreTyped
 
 variable {interpretation : Interpretation} {context : Context} {environment : Environment}
 
-/-- Static disjointness reflects through injective owned roots, possibly aliased
-formal subaddresses, and the existing canonical field-disjointness relation. -/
+/-- Static disjointness reflects through injective canonical roots and the
+existing canonical field-disjointness relation. -/
 theorem apart (typed : StoreTyped program interpretation context environment)
     {left right : Origin} (leftBound : left.Known context) (rightBound : right.Known context)
     (apart : left.Apart right) : (interpretation.origin left).Apart (interpretation.origin right) := by
@@ -4632,14 +4576,6 @@ theorem apart (typed : StoreTyped program interpretation context environment)
           rcases apart with different | fields
           · exact .inl (fun same => different (typed.binderDistinct _ _ leftBound rightBound same))
           · exact .inr fields
-        | input second => exact .inl (typed.inputApart first second leftBound rightBound)
-      | input first =>
-        cases rightBase with
-        | binder second => exact .inl (Ne.symm (typed.inputApart second first rightBound leftBound))
-        | input second =>
-          rcases apart with ⟨equal, fields⟩
-          cases equal
-          exact .inr (fields.prepend (interpretation.input first).fields)
 
 /-- Ancestry permission is derived from source parent records and componentwise
 interpretation. No ancestor own bit or ancestor target initialization is used. -/
@@ -4725,7 +4661,6 @@ theorem noDangling (typed : StoreTyped program interpretation context environmen
     | binder binder =>
       obtain ⟨state, value, raw, resident⟩ := typed.targetResident (typed.sourceTargets _ _ sourceFound own).1 base
       exact ⟨value, sourceLoan.referent, state, raw, resident, (typed.source.targets _ _ sourceFound).2, fun same => False.elim (shared same)⟩
-    | input input => exact False.elim (shared ((typed.sourceTargets _ _ sourceFound own).2.2 input base))
 end StoreTyped
 
 theorem SlotsCorrespond.bindings {interpretation : Interpretation} {store : Store}
@@ -5776,13 +5711,12 @@ theorem CellJoin.payloadJoins {before after : Option Slot} (joined : CellJoin pr
   | absent => cases first
   | resident _ payloadJoins => cases first; cases last; exact payloadJoins
 
-/-- Branch joins preserve exact loan history, origins, ordered handle identities
-and input interpretation; initialization, empty payload shells and fresh-ID supply may weaken. -/
+/-- Branch joins preserve exact loan history, origins and ordered handle identities;
+initialization, empty payload shells and fresh-ID supply may weaken. -/
 structure Context.Joins (program : Program) (before after : Context) : Prop where
   names : after.names = before.names
   storage : ∀ origin, CellJoin program (before.storage origin) (after.storage origin)
   loans : after.loans = before.loans
-  inputs : after.inputCount = before.inputCount
   supply : before.nextBinder ≤ after.nextBinder
   targetMasks : ∀ (node : Nat) (loan : SourceLoan), before.loans[node]? = some loan → loan.own = true →
     ∀ (binder : Nat) (old current : Slot) (state : Initialization), loan.target.base = .binder binder →
@@ -5817,7 +5751,7 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     (supported : StorageType program.target program.data result.type)
     (reference : SourcePayload.Typed program context.loans result.payload result.type) :
     (context.bind name mutable result).WellFormed program := by
-  refine ⟨?_, ?_, ?_, ?_, valid.parents, ?_, ?_, valid.parentModes, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, valid.parents, ?_, ?_, valid.parentModes⟩
   · rw [valid.bindings_bind name mutable result, List.map_cons, List.nodup_cons]
     refine ⟨?_, valid.distinct⟩
     intro member
@@ -5856,14 +5790,12 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
       exact ⟨identity.symm, identity ▸ Nat.lt_succ_self _, supported, reference⟩
     · obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder slot stored
       exact ⟨identity, Nat.lt_succ_of_lt bound, supported, reference⟩
-  · intro input slot stored
-    exact valid.inputSlots input slot (by simpa only [Context.bind, reduceCtorEq, if_false] using stored)
 
 theorem WellFormed.hide {context : Context} (valid : context.WellFormed program) :
     context.hide.WellFormed program := by
   exact ⟨by simp [Context.hide, Context.bindings], by simp [Context.hide, Context.bindings],
     by simp [Context.hide, Context.bindings], valid.targets, valid.parents,
-    by simp [Context.hide], valid.allocated, valid.parentModes, valid.inputSlots⟩
+    by simp [Context.hide], valid.allocated, valid.parentModes⟩
 
 theorem WellFormed.retire_retained {context : Context} (valid : context.WellFormed program)
     (count : Nat) {binder : Nat} (member : binder ∈ (context.names.drop count).map Prod.snd) :
@@ -5907,7 +5839,7 @@ theorem WellFormed.bindings_retire {context : Context} (valid : context.WellForm
 
 theorem WellFormed.retire {context : Context} (valid : context.WellFormed program) (count : Nat) :
     (context.retire count).WellFormed program := by
-  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes, valid.inputSlots⟩
+  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes⟩
   · rw [valid.bindings_retire count, List.map_drop]
     exact valid.distinct.drop
   · intro binding member
@@ -5957,14 +5889,6 @@ theorem WellFormed.cleanup {context : Context} (valid : context.WellFormed progr
     rw [ih]
     simp
 
-@[simp] theorem disposeSlots_inputs (context : Context) (slots : List (String × Slot)) :
-    (context.disposeSlots slots).inputCount = context.inputCount := by
-  induction slots generalizing context with
-  | nil => rfl
-  | cons slot slots ih =>
-    change ((context.dispose slot.2.payload).disposeSlots slots).inputCount = _
-    rw [ih]
-    simp
 
 theorem WellFormed.prepare {context : Context} (valid : context.WellFormed program)
     (parameters : List (String × BindingType)) (arguments : List ResultType)
@@ -5991,7 +5915,6 @@ structure Context.History (before after : Context) : Prop where
     after.loans[node]? = some retained ∧ retained.target = loan.target ∧
     retained.referent = loan.referent ∧ retained.parent = loan.parent ∧ retained.mode = loan.mode ∧
     (retained.own = true → loan.own = true)
-  inputs : after.inputCount = before.inputCount
   supply : before.nextBinder ≤ after.nextBinder
   visible : ∀ binder ∈ after.names.map Prod.snd, binder < before.nextBinder →
     binder ∈ before.names.map Prod.snd
@@ -6003,12 +5926,12 @@ namespace Context
 namespace History
 
 theorem refl (context : Context) : History context context :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, Nat.le_refl _,
     fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
 theorem trans {before middle after : Context} (first : History before middle)
     (second : History middle after) : History before after := by
-  refine ⟨?_, second.inputs.trans first.inputs, Nat.le_trans first.supply second.supply, ?_, ?_⟩
+  refine ⟨?_, Nat.le_trans first.supply second.supply, ?_, ?_⟩
   · intro node loan found
     obtain ⟨middleLoan, middleFound, target, referent, parent, mode, own⟩ := first.records node loan found
     obtain ⟨lastLoan, lastFound, lastTarget, lastReferent, lastParent, lastMode, lastOwn⟩ := second.records node middleLoan middleFound
@@ -6024,7 +5947,7 @@ theorem trans {before middle after : Context} (first : History before middle)
     exact ⟨afterSlot, afterStored, afterMetadata.trans middleMetadata⟩
 
 theorem endOwn (context : Context) (node : Nat) : History context (context.endOwn node) := by
-  refine ⟨?_, rfl, Nat.le_refl _, fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
+  refine ⟨?_, Nat.le_refl _, fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
   intro old loan found
   refine ⟨_, context.endOwn_found node found, rfl, rfl, rfl, rfl, ?_⟩
   split <;> simp_all
@@ -6040,7 +5963,7 @@ theorem disposeSlots (context : Context) (slots : List (String × Slot)) :
 
 theorem bind (context : Context) (name : String) (mutable : Bool) (result : ResultType) :
     History context (context.bind name mutable result) := by
-  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_succ _, ?_, ?_⟩
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, Nat.le_succ _, ?_, ?_⟩
   · intro binder member old
     rcases List.mem_cons.mp member with same | member
     · exact False.elim (Nat.ne_of_lt old same)
@@ -6049,11 +5972,11 @@ theorem bind (context : Context) (name : String) (mutable : Bool) (result : Resu
     exact ⟨slot, by simpa [Context.bind, Nat.ne_of_lt old] using stored, rfl⟩
 
 theorem hide (context : Context) : History context context.hide :=
-  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+  ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, Nat.le_refl _,
     by simp [Context.hide], fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
 theorem retire (context : Context) (count : Nat) : History context (context.retire count) := by
-  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _, ?_, ?_⟩
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, Nat.le_refl _, ?_, ?_⟩
   · intro binder member _
     exact List.mem_of_mem_drop (by simpa [Context.retire, List.map_drop] using member)
   · intro binder slot _ stored hidden
@@ -6067,7 +5990,7 @@ theorem cleanup (context : Context) (count : Nat) : History context (context.cle
 
 theorem borrow (context : Context) (target : Origin) (referent : Ty) (parent : Option Nat) (mode : BorrowMode) :
     History context (context.borrow target referent parent mode) :=
-  ⟨fun _ loan found => ⟨loan, borrow_found found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+  ⟨fun _ loan found => ⟨loan, borrow_found found, rfl, rfl, rfl, rfl, id⟩, Nat.le_refl _,
     fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩
 
 theorem prepare (context : Context) (parameters : List (String × BindingType)) (arguments : List ResultType) :
@@ -6156,7 +6079,7 @@ namespace Context
 
 theorem Joins.wellFormed {before after : Context} (joined : Joins program before after)
     (valid : before.WellFormed program) : after.WellFormed program := by
-  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
+  refine ⟨?_, ?_, ?_, ?_, ?_, ?_, ?_, ?_⟩
   · rw [joined.slots.binders]
     exact valid.distinct
   · intro binding member
@@ -6177,7 +6100,6 @@ theorem Joins.wellFormed {before after : Context} (joined : Joins program before
     | binder identity =>
       simp only [Origin.Bounded, base] at bounded ⊢
       exact Nat.lt_of_lt_of_le bounded joined.supply
-    | input identity => simpa only [Origin.Bounded, base, joined.inputs] using bounded
   · intro node loan parent found derived
     obtain ⟨older, ancestor, ancestorFound, within⟩ := valid.parents node loan parent (joined.loans ▸ found) derived
     exact ⟨older, ancestor, joined.loans.symm ▸ ancestorFound, within⟩
@@ -6196,13 +6118,6 @@ theorem Joins.wellFormed {before after : Context} (joined : Joins program before
     simpa only [joined.loans, type] using payloadJoins.typed reference
   · intro node loan parent ancestor found derived parentFound unique
     exact valid.parentModes node loan parent ancestor (joined.loans ▸ found) derived (joined.loans ▸ parentFound) unique
-  · intro input slot stored
-    obtain ⟨original, found, metadata, _⟩ := (joined.storage (.input input)).backward stored
-    obtain ⟨bound, supported, reference⟩ := valid.inputSlots input original found
-    have payloadJoins := (joined.storage (.input input)).payloadJoins found stored
-    have type : slot.type = original.type := congrArg Prod.fst metadata
-    refine ⟨joined.inputs.symm ▸ bound, type.symm ▸ supported, ?_⟩
-    simpa only [joined.loans, type] using payloadJoins.typed reference
 
 theorem Joins.mentions {before after : Context} (joined : Joins program before after) (binder : Nat) :
     after.MentionsBinder binder ↔ before.MentionsBinder binder := by
@@ -6218,7 +6133,7 @@ theorem Joins.mentions {before after : Context} (joined : Joins program before a
 
 theorem Joins.history {before after : Context} (joined : Joins program before after) : History before after := by
   refine ⟨fun _ loan found => ⟨loan, joined.loans.symm ▸ found, rfl, rfl, rfl, rfl, id⟩,
-    joined.inputs, joined.supply, fun _ member _ => joined.names ▸ member, ?_⟩
+    joined.supply, fun _ member _ => joined.names ▸ member, ?_⟩
   intro binder slot _ stored _
   obtain ⟨current, found, metadata, _⟩ := (joined.storage (.binder binder)).forward stored
   exact ⟨current, found, metadata⟩
@@ -6277,7 +6192,7 @@ namespace Context
 
 theorem History.resume {caller after : Context} (evolved : History caller.hide after) :
     History caller (caller.resume after) :=
-  ⟨evolved.records, evolved.inputs, evolved.supply, fun _ member _ => member,
+  ⟨evolved.records, evolved.supply, fun _ member _ => member,
     fun binder slot old stored _ => evolved.retained binder slot old stored (by simp [Context.hide])⟩
 
 theorem WellFormed.resume {caller after : Context} (callerValid : caller.WellFormed program)
@@ -6296,7 +6211,7 @@ theorem WellFormed.resume {caller after : Context} (callerValid : caller.WellFor
     intro entry member
     obtain ⟨slot, found⟩ := named entry member
     simp [Context.resume, found, (afterValid.allocated entry.2 slot found).1]
-  refine ⟨?_, ?_, ?_, afterValid.targets, afterValid.parents, named, afterValid.allocated, afterValid.parentModes, afterValid.inputSlots⟩
+  refine ⟨?_, ?_, ?_, afterValid.targets, afterValid.parents, named, afterValid.allocated, afterValid.parentModes⟩
   · rw [binders, ← callerValid.bindings_binders]
     exact callerValid.distinct
   · intro binding member
@@ -6478,7 +6393,7 @@ theorem Context.WellFormed.replaceSlot {program : Program} {context : Context}
     · exact ⟨type.symm ▸ valid.supported (name, slot) member,
         binder.symm ▸ (valid.slots (name, slot) member).1, reference⟩
     · exact ⟨valid.supported binding retained, valid.slots binding retained⟩
-  refine ⟨by simpa only [view] using distinct, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes, valid.inputSlots⟩
+  refine ⟨by simpa only [view] using distinct, ?_, ?_, valid.targets, valid.parents, ?_, ?_, valid.parentModes⟩
   · intro binding memberNew
     exact (properties binding (view ▸ memberNew)).1
   · intro binding memberNew
@@ -6566,7 +6481,7 @@ theorem Context.WellFormed.writeTarget {context : Context} (valid : context.Well
     cases equal
     rw [(allocated entry.2 slot stored).1]
     exact stored
-  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, named, allocated, valid.parentModes, ?_⟩
+  refine ⟨?_, ?_, ?_, valid.targets, valid.parents, named, allocated, valid.parentModes⟩
   · have binders : (context.writeTarget origin next payload).bindings.map (fun binding => binding.2.binder) =
         context.names.map Prod.snd := by
       unfold Context.bindings
@@ -6582,18 +6497,10 @@ theorem Context.WellFormed.writeTarget {context : Context} (valid : context.Well
   · intro binding member
     have facts := allocated _ _ (bindingStored binding member)
     exact ⟨facts.2.1, facts.2.2.2⟩
-  · intro input slot stored
-    by_cases same : OriginBase.input input = origin.base
-    · simp only [Context.writeTarget, if_pos same] at stored
-      obtain ⟨original, found, equal⟩ := Option.map_eq_some_iff.mp stored
-      cases equal
-      obtain ⟨bound, supported, _⟩ := valid.inputSlots input original found
-      exact ⟨bound, supported, typed original (by simpa only [← same] using found)⟩
-    · exact valid.inputSlots input slot (by simpa only [Context.writeTarget, if_neg same] using stored)
 
 theorem Context.History.writeTarget (context : Context) (origin : Origin) (next : Initialization) (payload : SourcePayload) :
     Context.History context (context.writeTarget origin next payload) := by
-  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, Nat.le_refl _,
+  refine ⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, Nat.le_refl _,
     fun _ member _ => member, ?_⟩
   intro binder slot _ stored _
   exact context.writeTarget_stored origin next payload stored
@@ -6649,7 +6556,6 @@ theorem Context.Ready.writeTarget_apart {context : Context} {origin observed : O
     (ready : context.Ready observed) (apart : origin.Apart observed) (next : Initialization) (payload : SourcePayload) :
     (context.writeTarget origin next payload).Ready observed := by
   cases observedBase : observed.base with
-  | input input => simp [Context.Ready, observedBase]
   | binder other =>
     simp only [Context.Ready, observedBase] at ready ⊢
     obtain ⟨slot, retained, stored, kept, complete⟩ := ready
@@ -6671,10 +6577,9 @@ theorem Context.SourceTarget.writeTarget {context : Context} {origin : Origin} {
     {loan : SourceLoan} (source : context.SourceTarget program loan)
     (separated : (origin.Within loan.target ∧ loan.mode = .unique) ∨ origin.Apart loan.target)
     (next : Initialization) (payload : SourcePayload) : (context.writeTarget origin next payload).SourceTarget program loan := by
-  obtain ⟨oldTarget, oldReady, inputShared⟩ := source
-  refine ⟨?_, ?_, inputShared⟩
+  obtain ⟨oldTarget, oldReady⟩ := source
+  refine ⟨?_, ?_⟩
   · cases observedBase : loan.target.base with
-    | input input => simp [Context.Target, observedBase]
     | binder other =>
       simp only [Context.Target, observedBase] at oldTarget ⊢
       obtain ⟨slot, stored, path, retained, kept⟩ := oldTarget
@@ -6729,7 +6634,6 @@ theorem Context.Ready.writeTarget_initialized {context : Context} {origin observ
     (ready : context.Ready observed) {next : Initialization} (complete : next.Complete) (payload : SourcePayload) :
     (context.writeTarget origin next payload).Ready observed := by
   cases observedBase : observed.base with
-  | input input => simp [Context.Ready, observedBase]
   | binder other =>
     simp only [Context.Ready, observedBase] at ready ⊢
     obtain ⟨slot, retained, stored, kept, initialized⟩ := ready
@@ -6768,7 +6672,6 @@ IDs. Bounds remain restricted to semantic support, never invented allocations. -
 structure Interpretation.Extends (before after : Interpretation) (context : Context) : Prop where
   binders : ∀ binder, binder < context.nextBinder → after.binder binder = before.binder binder
   nodes : ∀ node, node < context.loans.length → after.node node = before.node node
-  inputs : after.input = before.input
 
 structure StateProgress (beforeContext afterContext : Context) (before after : Environment)
     (first last : Interpretation) : Prop where
@@ -6831,12 +6734,12 @@ theorem Context.History.loanLength {before after : Context} (history : before.Hi
   simp at kept
 
 theorem Interpretation.Extends.refl (interpretation : Interpretation) (context : Context) :
-    interpretation.Extends interpretation context := ⟨fun _ _ => rfl, fun _ _ => rfl, rfl⟩
+    interpretation.Extends interpretation context := ⟨fun _ _ => rfl, fun _ _ => rfl⟩
 
 theorem Interpretation.Extends.trans {first middle last : Interpretation} {before after : Context}
     (front : first.Extends middle before) (back : middle.Extends last after) (history : before.History after) :
     first.Extends last before := by
-  refine ⟨?_, ?_, back.inputs.trans front.inputs⟩
+  refine ⟨?_, ?_⟩
   · intro binder bound
     exact (back.binders binder (Nat.lt_of_lt_of_le bound history.supply)).trans (front.binders binder bound)
   · intro node bound
@@ -6902,7 +6805,7 @@ theorem StateProgress.bind {interpretation : Interpretation} {context : Context}
     StateProgress context (context.bind name mutable result) environment (environment.bind name value)
       interpretation (interpretation.addBinder context.nextBinder environment.nextRoot) := by
   refine ⟨.bind _ _ _ _, .bind _ _ _ _, ?_, ?_, rfl⟩
-  · refine ⟨?_, fun _ _ => rfl, rfl⟩
+  · refine ⟨?_, fun _ _ => rfl⟩
     intro binder bound
     simp [Interpretation.addBinder, Nat.ne_of_lt bound]
   · intro binder large known
@@ -6917,7 +6820,7 @@ theorem StateProgress.borrow {interpretation : Interpretation} {context : Contex
       (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
       interpretation (interpretation.addNode context.loans.length environment.loans.length) := by
   refine ⟨.borrow _ _ _ _ _, .borrow known, ?_, ?_, ?_⟩
-  · refine ⟨fun _ _ => rfl, ?_, rfl⟩
+  · refine ⟨fun _ _ => rfl, ?_⟩
     intro node bound
     simp [Interpretation.addNode, Nat.ne_of_lt bound]
   · intro binder large mentioned
@@ -6936,7 +6839,7 @@ theorem StateProgress.join {interpretation : Interpretation} {context afterConte
 theorem StateProgress.raiseSupply {interpretation : Interpretation} {context : Context} {environment : Environment}
     (valid : context.WellFormed program) {supply : Nat} (larger : context.nextBinder ≤ supply) :
     StateProgress context {context with nextBinder := supply} environment environment interpretation interpretation := by
-  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, rfl, larger,
+  refine ⟨⟨fun _ loan found => ⟨loan, found, rfl, rfl, rfl, rfl, id⟩, larger,
       fun _ member _ => member, fun _ slot _ found _ => ⟨slot, found, rfl⟩⟩,
     fun _ mentioned _ => mentioned, .refl _ _, ?_, rfl⟩
   intro binder large known
@@ -7038,11 +6941,9 @@ variable {program : Program}
 
 theorem Context.TargetPayload.storage_congr {before after : Context} {origin : Origin}
     {type : Ty} {payload : SourcePayload} (target : before.TargetPayload program origin type payload)
-    (storage : after.storage origin.base = before.storage origin.base)
-    (inputs : before.inputCount ≤ after.inputCount) : after.TargetPayload program origin type payload := by
+    (storage : after.storage origin.base = before.storage origin.base) : after.TargetPayload program origin type payload := by
   cases target with
   | cell stored path selected => exact .cell (storage.trans stored) path selected
-  | externalPlain bounded free => exact .externalPlain (Nat.lt_of_lt_of_le bounded inputs) free
 
 theorem StoreTyped.nodeBound {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) {node : Nat}
@@ -7147,33 +7048,17 @@ theorem StoreTyped.writeTarget_preserves {interpretation : Interpretation} {cont
   obtain ⟨residents, slots⟩ := Context.reconstruct source runtimeValid names cells
   refine ⟨_, written, ?_⟩
   refine { source := source, residents := residents, slots := slots, cells := cells
-           inputCells := ?_, binderBound := ?_, binderDistinct := ?_, inputBound := typed.inputBound
-           inputApart := ?_, nodeOrder := typed.nodeOrder, records := typed.records, activeCoverage := typed.activeCoverage
-           sourceTargets := ?_, inputTargets := ?_, storeShape := ?_ }
-  · intro input current selected
-    have oldStored : context.storage (.input input) = some current := by
-      simpa [Context.writeTarget, base] using selected
-    obtain ⟨value, found, resident, related⟩ := typed.inputCells input current oldStored
-    have different := typed.inputApart binder input (.inl ⟨slot, stored⟩) (typed.source.inputSlots input current oldStored).1
-    exact ⟨value, by simpa [Environment.at, Environment.put, Ne.symm different] using found, resident, related⟩
+           binderBound := ?_, binderDistinct := ?_
+           nodeOrder := typed.nodeOrder, records := typed.records, activeCoverage := typed.activeCoverage
+           sourceTargets := ?_, storeShape := ?_ }
   · intro other mentioned
     exact typed.binderBound other ((context.writeTarget_mentions origin next updatedPayload other).mp mentioned)
   · intro first second firstKnown secondKnown same
     exact typed.binderDistinct first second
       ((context.writeTarget_mentions origin next updatedPayload first).mp firstKnown)
       ((context.writeTarget_mentions origin next updatedPayload second).mp secondKnown) same
-  · intro other input known bound
-    exact typed.inputApart other input ((context.writeTarget_mentions origin next updatedPayload other).mp known) bound
   · intro node loan found own
     exact (typed.sourceTargets node loan found own).writeTarget target base (separated node loan found own) next updatedPayload
-  · intro node loan found own input inputBase
-    obtain ⟨value, read, resident, oldPayload, provenance, related⟩ := typed.inputTargets node loan found own input inputBase
-    have bounded : input < context.inputCount := by
-      simpa only [Origin.Bounded, inputBase] using (typed.source.targets node loan found).1
-    have different := typed.inputApart binder input (.inl ⟨slot, stored⟩) bounded
-    refine ⟨value, ?_, resident, oldPayload, ?_, related⟩
-    · simpa [Environment.readAddress, Environment.at, Environment.put, Interpretation.origin, inputBase, Ne.symm different] using read
-    · exact provenance.storage_congr (by simp [Context.writeTarget, base, inputBase]) (Nat.le_refl _)
   · intro root value found indices node read
     by_cases same : root = interpretation.binder binder
     · subst root
@@ -7193,13 +7078,11 @@ theorem Context.TargetPayload.typed {context : Context} {origin : Origin} {refer
     (target : context.TargetPayload program origin referent payload) (valid : context.WellFormed program) :
     payload.Typed program context.loans referent := by
   cases target with
-  | @cell origin slot referent payload stored path selected =>
+  | @cell slot referent payload stored path selected =>
     have root : slot.payload.Typed program context.loans slot.type := by
       cases base : origin.base with
       | binder binder => exact (valid.allocated binder slot (base ▸ stored)).2.2.2
-      | input input => exact (valid.inputSlots input slot (base ▸ stored)).2.2
     exact root.select path selected
-  | externalPlain bounded free => exact .plain _
 
 namespace StoreTyped
 variable {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -7227,11 +7110,8 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
              typed.residents.residents⟩
            slots := typed.slots
            cells := typed.cells
-           inputCells := typed.inputCells
            binderBound := ?_
            binderDistinct := ?_
-           inputBound := typed.inputBound
-           inputApart := ?_
            nodeOrder := ?_
            records := ?_
            activeCoverage := ?_
@@ -7241,15 +7121,12 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
              have different : ended ≠ node := by intro same; simp [same] at available
              have own : original.own = true := by simpa [different] using available
              exact typed.sourceTargets node original old own
-           inputTargets := ?_
            storeShape := ?_ }
   · intro binder included
     exact typed.binderBound binder ((context.endOwn_mentions ended binder).mp included)
   · intro first second firstKnown secondKnown same
     exact typed.binderDistinct first second ((context.endOwn_mentions ended first).mp firstKnown)
       ((context.endOwn_mentions ended second).mp secondKnown) same
-  · intro binder input included bound
-    exact typed.inputApart binder input ((context.endOwn_mentions ended binder).mp included) bound
   · intro first second older bound
     exact typed.nodeOrder first second older (by simpa [Context.endOwn] using bound)
   · intro node loan selected
@@ -7270,27 +7147,16 @@ theorem endOwn (typed : StoreTyped program interpretation context environment)
     have own : original.own = true := by simpa [different] using available
     obtain ⟨sourceNode, sourceLoan, sourceFound, equal⟩ := typed.activeCoverage node original old own
     exact ⟨sourceNode, _, context.endOwn_found ended sourceFound, equal⟩
-  · intro node loan selected available
-    obtain ⟨original, old, rfl⟩ := Context.endOwn_original selected
-    have different : ended ≠ node := by intro same; simp [same] at available
-    have own : original.own = true := by simpa [different] using available
-    intro input base
-    obtain ⟨value, read, resident, payload, provenance, related⟩ := typed.inputTargets node original old own input base
-    exact ⟨value, read, resident, payload, provenance.storage_congr rfl (Nat.le_refl _), related⟩
   · intro root value stored path node read
     simpa [after] using typed.storeShape root value stored path node read
 
 theorem borrow (typed : StoreTyped program interpretation context environment)
-    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} {value : Value}
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
     (known : target.Known context) (bounded : target.Bounded context)
     (finite : FiniteLayout program.target program.data referent)
     (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
     (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique)
-    (sourceTarget : context.SourceTarget program ⟨target, referent, parent, true, mode⟩)
-    (selected : environment.readAddress (interpretation.origin target) = some value)
-    (valueTyped : ValueHasType program value referent)
-    {payload : SourcePayload} (provenance : context.TargetPayload program target referent payload)
-    (related : payload.Corresponds interpretation.node value) :
+    (sourceTarget : context.SourceTarget program ⟨target, referent, parent, true, mode⟩) :
     StoreTyped program (interpretation.addNode context.loans.length environment.loans.length)
       (context.borrow target referent parent mode)
       (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode) := by
@@ -7318,15 +7184,8 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
              obtain ⟨resident, found, residentTyped, corresponds⟩ := typed.cells binder slot stored
              refine ⟨resident, found, residentTyped, ?_⟩
              exact corresponds.congr (fun node member => (oldNode node ((typed.source.allocated binder slot stored).2.2.2.node_bound member)).symm)
-           inputCells := by
-             intro input slot stored
-             obtain ⟨resident, found, residentTyped, corresponds⟩ := typed.inputCells input slot stored
-             exact ⟨resident, found, residentTyped, corresponds.congr (fun node member =>
-               (oldNode node ((typed.source.inputSlots input slot stored).2.2.node_bound member)).symm)⟩
            binderBound := ?_
            binderDistinct := ?_
-           inputBound := typed.inputBound
-           inputApart := ?_
            nodeOrder := ?_
            records := ?_
            activeCoverage := ?_
@@ -7335,7 +7194,6 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
              rcases Context.borrow_cases found with old | ⟨_, rfl⟩
              · exact typed.sourceTargets node loan old own
              · exact sourceTarget
-           inputTargets := ?_
            storeShape := ?_ }
   · intro binding member node included
     exact oldNode node ((typed.source.slots binding member).2.node_bound included)
@@ -7344,8 +7202,6 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
   · intro first second firstKnown secondKnown same
     exact typed.binderDistinct first second ((Context.borrow_mentions known first).mp firstKnown)
       ((Context.borrow_mentions known second).mp secondKnown) same
-  · intro binder input included inputKnown
-    exact typed.inputApart binder input ((Context.borrow_mentions known binder).mp included) inputKnown
   · intro first second less bound
     have secondLe : second ≤ context.loans.length := Nat.lt_succ_iff.mp (by simpa [Context.borrow] using bound)
     change next.node first < next.node second
@@ -7386,13 +7242,6 @@ theorem borrow (typed : StoreTyped program interpretation context environment)
         exact ⟨context.loans.length, ⟨target, referent, parent, true, mode⟩,
           Context.borrow_last context target referent parent mode, by simp [Interpretation.addNode, same]⟩
       | succ rest => simp [difference] at found
-  · intro node loan found own input base
-    rcases Context.borrow_cases found with old | ⟨_, rfl⟩
-    · obtain ⟨resident, read, residentTyped, payload, provenance, related⟩ := typed.inputTargets node loan old own input base
-      exact ⟨resident, read, residentTyped, payload, provenance.storage_congr rfl (Nat.le_refl _),
-        related.congr (fun node member => (oldNode node ((provenance.typed typed.source).node_bound member)).symm)⟩
-    · exact ⟨value, selected, valueTyped, payload, provenance.storage_congr rfl (Nat.le_refl _),
-        related.congr (fun node member => (oldNode node ((provenance.typed typed.source).node_bound member)).symm)⟩
   · intro root resident stored path node read
     exact Nat.lt_trans (typed.storeShape root resident stored path node read)
       (by simp [Environment.addLoan])
@@ -7420,9 +7269,6 @@ theorem StoreTyped.targetPayload {interpretation : Interpretation} {context : Co
       ValueHasType program value loan.referent ∧ context.TargetPayload program loan.target loan.referent payload ∧
       payload.Corresponds interpretation.node value := by
   cases base : loan.target.base with
-  | input input =>
-    obtain ⟨value, selected, resident, payload, provenance, related⟩ := typed.inputTargets node loan found own input base
-    exact ⟨value, payload, selected, resident, provenance, related⟩
   | binder binder =>
     have target := (typed.sourceTargets node loan found own).1
     obtain ⟨slot, stored, path, _, _⟩ := (by simpa only [Context.Target, base] using target)
@@ -7503,15 +7349,6 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
     intro node loan found
     cases base : loan.target.base with
     | binder binder => simp [Interpretation.origin, base, oldBinder binder (.inr ⟨node, loan, found, base⟩)]
-    | input input => simp [Interpretation.origin, base, next, Interpretation.addBinder]
-  have rootOld : ∀ (node : Nat) (loan : SourceLoan), context.loans[node]? = some loan → (interpretation.origin loan.target).root < environment.nextRoot := by
-    intro node loan found
-    cases base : loan.target.base with
-    | binder binder => simpa [Interpretation.origin, base] using typed.binderBound binder (.inr ⟨node, loan, found, base⟩)
-    | input input =>
-      simp only [Interpretation.origin, base]
-      apply typed.inputBound input
-      simpa [Origin.Bounded, base] using (typed.source.targets node loan found).1
   have supported : StorageType program.target program.data result.type := .finite valueTyped.resident.finite
   have source := typed.source.bind name mutable result supported valueTyped.payload
   have cells : ∀ binder slot, (context.bind name mutable result).storage (.binder binder) = some slot →
@@ -7539,15 +7376,9 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
     simp only [Function.comp_def, oldBinder binding.2.binder (typed.source.member_known binding member)]
   obtain ⟨residents, slots⟩ := Context.reconstruct source (typed.residents.valid.bind name value) names cells
   refine { source := source, residents := residents, slots := slots, cells := cells
-           inputCells := ?_, binderBound := ?_, binderDistinct := ?_, inputBound := ?_, inputApart := ?_
+           binderBound := ?_, binderDistinct := ?_
            nodeOrder := typed.nodeOrder, records := ?_, activeCoverage := typed.activeCoverage
-           sourceTargets := ?_, inputTargets := ?_, storeShape := ?_ }
-  · intro input slot stored
-    have oldStored : context.storage (.input input) = some slot := by simpa [Context.bind] using stored
-    obtain ⟨resident, found, residentTyped, related⟩ := typed.inputCells input slot oldStored
-    have bound := typed.inputBound input (typed.source.inputSlots input slot oldStored).1
-    exact ⟨resident, by simpa [Environment.at, Environment.bind, next, Interpretation.addBinder, Nat.ne_of_lt bound] using found,
-      residentTyped, related⟩
+           sourceTargets := ?_, storeShape := ?_ }
   · intro binder mentioned
     rcases (Context.bind_mentions _ _ _ _ _).mp mentioned with rfl | old
     · simp [Interpretation.addBinder, Environment.bind]
@@ -7569,16 +7400,6 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
     · apply typed.binderDistinct first second firstOld secondOld
       change next.binder first = next.binder second at equal
       simpa [oldBinder first firstOld, oldBinder second secondOld] using equal
-  · intro input bound
-    exact Nat.lt_succ_of_lt (typed.inputBound input bound)
-  · intro binder input mentioned bound
-    rcases (Context.bind_mentions _ _ _ _ _).mp mentioned with rfl | old
-    · change next.binder context.nextBinder ≠ (interpretation.input input).root
-      rw [freshBinder]
-      exact Nat.ne_of_gt (typed.inputBound input bound)
-    · change next.binder binder ≠ (interpretation.input input).root
-      rw [oldBinder binder old]
-      exact typed.inputApart binder input old bound
   · intro node loan found
     change environment.loans[interpretation.node node]? = some ⟨next.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩
     rw [oldOrigin node loan found]
@@ -7586,17 +7407,10 @@ theorem StoreTyped.bind {interpretation : Interpretation} {context : Context} {e
   · intro node loan found own
     apply (typed.sourceTargets node loan found own).storage_congr
     cases base : loan.target.base with
-    | input input => simp [Context.bind]
     | binder binder =>
       have bound : binder < context.nextBinder := by
         simpa [Origin.Bounded, base] using (typed.source.targets node loan found).1
       simp [Context.bind, Nat.ne_of_lt bound]
-  · intro node loan found own input base
-    obtain ⟨resident, read, residentTyped, payload, provenance, related⟩ := typed.inputTargets node loan found own input base
-    refine ⟨resident, ?_, residentTyped, payload, provenance.storage_congr (by simp [Context.bind, base]) (Nat.le_refl _), related⟩
-    change (environment.bind name value).readAddress (next.origin loan.target) = some resident
-    rw [oldOrigin node loan found]
-    simpa [Environment.readAddress, Environment.at, Environment.bind, Nat.ne_of_lt (rootOld node loan found)] using read
   · intro root resident stored path node read
     by_cases equal : root = environment.nextRoot
     · subst root
@@ -7717,7 +7531,7 @@ theorem Unobserved.endOwn {context : Context} {node ended : Nat}
   have different : ended ≠ outer := by intro same; simp [same] at own
   have active : original.own = true := by simpa [different] using own
   exact unobserved outer original previous active distinct payload
-    (target.storage_congr rfl (Nat.le_refl _))
+    (target.storage_congr rfl)
 
 theorem ObservedOwn.endOwn {context : Context} {ended : Nat}
     (observed : context.ObservedOwn program) (unobserved : context.Unobserved program ended) :
@@ -7727,7 +7541,7 @@ theorem ObservedOwn.endOwn {context : Context} {ended : Nat}
   have different : ended ≠ outer := by intro same; simp [same] at own
   have active : original.own = true := by simpa [different] using own
   have targetBefore : context.TargetPayload program original.target original.referent payload :=
-    target.storage_congr rfl (Nat.le_refl _)
+    target.storage_congr rfl
   apply (observed outer original previous active payload targetBefore inner member).endOwn_other
   intro equal
   subst inner
@@ -7740,7 +7554,7 @@ theorem ObservedOwn.borrow {context : Context} {target : Origin} {referent : Ty}
     (context.borrow target referent parent mode).ObservedOwn program := by
   intro outer loan found own payload provenance inner member
   have previous : context.TargetPayload program loan.target loan.referent payload :=
-    provenance.storage_congr rfl (Nat.le_refl _)
+    provenance.storage_congr rfl
   have innerOwn : context.Own inner := by
     rcases borrow_cases found with old | ⟨_, rfl⟩
     · exact observed outer loan old own payload previous inner member
@@ -7751,12 +7565,12 @@ theorem ObservedOwn.borrow {context : Context} {target : Origin} {referent : Ty}
 theorem ObservedOwn.hide {context : Context} (observed : context.ObservedOwn program) :
     context.hide.ObservedOwn program := by
   intro outer loan found own payload target inner member
-  exact observed outer loan found own payload (target.storage_congr rfl (Nat.le_refl _)) inner member
+  exact observed outer loan found own payload (target.storage_congr rfl) inner member
 
 theorem ObservedOwn.resume {caller after : Context} (observed : after.ObservedOwn program) :
     (caller.resume after).ObservedOwn program := by
   intro outer loan found own payload target inner member
-  exact observed outer loan found own payload (target.storage_congr rfl (Nat.le_refl _)) inner member
+  exact observed outer loan found own payload (target.storage_congr rfl) inner member
 
 theorem ObservedOwn.bind {context : Context} (observed : context.ObservedOwn program)
     (valid : context.WellFormed program) (name : String) (mutable : Bool) (result : ResultType) :
@@ -7765,27 +7579,24 @@ theorem ObservedOwn.bind {context : Context} (observed : context.ObservedOwn pro
   have bounded := (valid.targets outer loan found).1
   have storage : context.storage loan.target.base = (context.bind name mutable result).storage loan.target.base := by
     cases base : loan.target.base with
-    | input input => simp [Context.bind]
     | binder binder =>
       have older : binder < context.nextBinder := by simpa [Origin.Bounded, base] using bounded
       simp [Context.bind, Nat.ne_of_lt older]
-  exact observed outer loan found own payload (target.storage_congr storage (Nat.le_refl _)) inner member
+  exact observed outer loan found own payload (target.storage_congr storage) inner member
 
 theorem TargetPayload.retire_original {context : Context} {origin : Origin} {type : Ty} {payload : SourcePayload}
     {count : Nat} (target : (context.retire count).TargetPayload program origin type payload) :
     context.TargetPayload program origin type payload := by
   cases target with
-  | @cell origin slot referent payload stored path selected =>
+  | @cell slot referent payload stored path selected =>
     have previous : context.storage origin.base = some slot := by
       cases base : origin.base with
-      | input input => simpa [Context.retire, base] using stored
       | binder binder =>
         simp only [Context.retire, base] at stored
         split at stored
         · cases stored
         · exact stored
     exact .cell previous path selected
-  | externalPlain bounded free => exact .externalPlain bounded free
 
 theorem ObservedOwn.retire {context : Context} (observed : context.ObservedOwn program) (count : Nat) :
     (context.retire count).ObservedOwn program := by
@@ -8019,7 +7830,7 @@ namespace Context
 
 theorem TargetPayload.nodes_eq {context : Context} {origin : Origin} {type : Ty} {first second : SourcePayload}
     (left : context.TargetPayload program origin type first) (right : context.TargetPayload program origin type second)
-    (valid : context.WellFormed program) : first.nodes = second.nodes := by
+    : first.nodes = second.nodes := by
   cases left with
   | cell stored path selected =>
     cases right with
@@ -8027,32 +7838,27 @@ theorem TargetPayload.nodes_eq {context : Context} {origin : Origin} {type : Ty}
       cases Option.some.inj (stored.symm.trans otherStored)
       cases Option.some.inj (selected.symm.trans otherSelected)
       rfl
-    | externalPlain bounded free =>
-      exact (TargetPayload.cell stored path selected).typed valid |>.referenceFreeNodes free
-  | externalPlain bounded free =>
-    exact ((right.typed valid).referenceFreeNodes free).symm
 
 theorem ObservedOwn.borrowAvailable {context : Context} {target : Origin} {referent : Ty}
     {parent : Option Nat} {mode : BorrowMode} {payload : SourcePayload}
-    (observed : context.ObservedOwn program) (valid : context.WellFormed program)
+    (observed : context.ObservedOwn program)
     (provenance : context.TargetPayload program target referent payload) (available : context.PayloadAvailable payload) :
     (context.borrow target referent parent mode).ObservedOwn program := by
   apply observed.borrow
   intro other target node member
-  exact (available node ((provenance.nodes_eq target valid).symm ▸ member)).1
+  exact (available node ((provenance.nodes_eq target).symm ▸ member)).1
 
 theorem TargetPayload.join_nodes_back {before after : Context} (joined : Joins program before after)
     {origin : Origin} {type : Ty} {payload : SourcePayload}
     (target : after.TargetPayload program origin type payload) {node : Nat} (member : node ∈ payload.nodes) :
     ∃ previous, before.TargetPayload program origin type previous ∧ node ∈ previous.nodes := by
   cases target with
-  | @cell origin slot type payload stored path selected =>
+  | @cell slot type payload stored path selected =>
     obtain ⟨original, found, metadata, _⟩ := (joined.storage origin.base).backward stored
     have typeEq : slot.type = original.type := congrArg Prod.fst metadata
     have payloadJoin := (joined.storage origin.base).payloadJoins found stored
     obtain ⟨previous, oldSelected, oldMember⟩ := payloadJoin.select_nodes_back selected member
     exact ⟨previous, .cell found (typeEq ▸ path) oldSelected, oldMember⟩
-  | externalPlain => simp [SourcePayload.nodes] at member
 
 theorem TargetPayload.writeTarget_nodes_back {context : Context} {changed origin : Origin}
     {slot : Slot} {next : Initialization} {replacement updated payload : SourcePayload} {type : Ty}
@@ -8062,7 +7868,7 @@ theorem TargetPayload.writeTarget_nodes_back {context : Context} {changed origin
     {node : Nat} (member : node ∈ payload.nodes) :
     (∃ previous, context.TargetPayload program origin type previous ∧ node ∈ previous.nodes) ∨ node ∈ replacement.nodes := by
   cases target with
-  | @cell origin current type payload currentStored path selected =>
+  | @cell current type payload currentStored path selected =>
     by_cases same : origin.base = changed.base
     · have equal : { slot with initialization := slot.initialization.write changed.fields next, payload := updated } = current := by
         simpa [Context.writeTarget, same, stored] using currentStored
@@ -8073,7 +7879,6 @@ theorem TargetPayload.writeTarget_nodes_back {context : Context} {changed origin
     · have previous : context.storage origin.base = some current := by
         simpa [Context.writeTarget, same] using currentStored
       exact .inl ⟨payload, .cell previous path selected, member⟩
-  | externalPlain => simp [SourcePayload.nodes] at member
 
 theorem TargetPayload.writeTarget_cut {context : Context} {changed origin : Origin}
     {slot : Slot} {next : Initialization} {replacement updated payload : SourcePayload} {type : Ty} {node : Nat}
@@ -8084,7 +7889,7 @@ theorem TargetPayload.writeTarget_cut {context : Context} {changed origin : Orig
     (target : (context.writeTarget changed next updated).TargetPayload program origin type payload)
     (member : node ∈ payload.nodes) : node ∈ replacement.nodes := by
   cases target with
-  | @cell origin current type payload currentStored path selected =>
+  | @cell current type payload currentStored path selected =>
     obtain ⟨suffix, occurrence⟩ := SourcePayload.mem_nodes_iff.mp member
     have rootOccurrence := SourcePayload.select_occurs selected occurrence
     by_cases same : origin.base = changed.base
@@ -8097,7 +7902,6 @@ theorem TargetPayload.writeTarget_cut {context : Context} {changed origin : Orig
     · have previous : context.storage origin.base = some current := by
         simpa [Context.writeTarget, same] using currentStored
       exact False.elim (same (cut origin.base current _ previous rootOccurrence).1)
-  | externalPlain => simp [SourcePayload.nodes] at member
 
 theorem ObservedOwn.assignTarget {context : Context} {origin : Origin} {slot : Slot}
     {next : Initialization} {old replacement updated : SourcePayload}
@@ -8111,7 +7915,7 @@ theorem ObservedOwn.assignTarget {context : Context} {origin : Origin} {slot : S
   intro outer loan found own payload target inner member
   have priorLoan : context.loans[outer]? = some loan := dispose_active_record found own
   have beforeDisposal : (context.writeTarget origin next updated).TargetPayload program loan.target loan.referent payload :=
-    target.storage_congr (by simp [Context.writeTarget]) (by simp [Context.writeTarget])
+    target.storage_congr (by simp [Context.writeTarget])
   rcases beforeDisposal.writeTarget_nodes_back stored written member with ⟨previous, selected, oldMember⟩ | fresh
   · have owned := observed outer loan priorLoan own previous selected inner oldMember
     by_cases ended : inner ∈ old.nodes
@@ -8151,24 +7955,20 @@ variable {interpretation : Interpretation} {context : Context} {heldPayloads : L
 variable {environment : Environment} {held : List Value}
 
 theorem borrow (typed : StateTyped program interpretation context heldPayloads environment held)
-    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} {value : Value}
+    {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
     (known : target.Known context) (bounded : target.Bounded context)
     (finite : FiniteLayout program.target program.data referent)
     (ancestor : ∀ node, parent = some node → ∃ loan, context.loans[node]? = some loan ∧ target.Within loan.target)
     (parentMode : ∀ node loan, parent = some node → context.loans[node]? = some loan → mode = .unique → loan.mode = .unique)
     (sourceTarget : context.SourceTarget program ⟨target, referent, parent, true, mode⟩)
     (ready : context.Ready target)
-    (selected : environment.readAddress (interpretation.origin target) = some value)
-    (valueTyped : ValueHasType program value referent)
-    {payload : SourcePayload} (provenance : context.TargetPayload program target referent payload)
-    (related : payload.Corresponds interpretation.node value)
     (targetOwn : ∀ payload, context.TargetPayload program target referent payload → ∀ node ∈ payload.nodes, context.Own node) :
     StateTyped program (interpretation.addNode context.loans.length environment.loans.length)
       (context.borrow target referent parent mode) (heldPayloads ++ [.reference context.loans.length])
       (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
       (held ++ [.reference environment.loans.length]) := by
   refine {
-    toStoreTyped := typed.toStoreTyped.borrow known bounded finite ancestor parentMode sourceTarget selected valueTyped provenance related
+    toStoreTyped := typed.toStoreTyped.borrow known bounded finite ancestor parentMode sourceTarget
     heldShape := ?_
     heldOwn := ?_
     heldReady := ?_
@@ -8249,7 +8049,6 @@ theorem bind {value : Value} {result : ResultType}
   have ready := typed.heldReady node (by simp [payloadNodes_append, member]) loan found own
   have bounded := (typed.source.targets node loan found).1
   cases base : loan.target.base with
-  | input input => simp only [Context.Ready, base]
   | binder binder =>
     have older : binder < context.nextBinder := by simpa [Origin.Bounded, base] using bounded
     simpa only [Context.Ready, Context.bind, base, OriginBase.binder.injEq, if_neg (Nat.ne_of_lt older)] using ready
@@ -8303,27 +8102,15 @@ theorem StoreTyped.retire {interpretation : Interpretation} {context : Context} 
   obtain ⟨residents, slots⟩ := Context.reconstruct source (typed.residents.valid.retire count) names cells
   refine { typed with
     source := source, residents := residents, slots := slots, cells := cells
-    inputCells := ?_, binderBound := ?_, binderDistinct := ?_, inputApart := ?_
-    sourceTargets := ?_, inputTargets := ?_, storeShape := ?_ }
-  · intro input slot stored
-    obtain ⟨value, found, resident, related⟩ := typed.inputCells input slot stored
-    have outside : (interpretation.input input).root ∉ (environment.bindings.take count).map Prod.snd := by
-      intro member
-      rw [List.map_take, typed.slots.roots, ← List.map_take] at member
-      obtain ⟨binding, included, equal⟩ := List.mem_map.mp member
-      exact typed.inputApart binding.2.binder input (typed.source.member_known binding (List.mem_of_mem_take included))
-        (typed.source.inputSlots input slot stored).1 equal
-    exact ⟨value, by simpa only [Environment.at, Environment.retire, if_neg outside] using found, resident, related⟩
+    binderBound := ?_, binderDistinct := ?_
+    sourceTargets := ?_, storeShape := ?_ }
   · intro binder known
     exact typed.binderBound binder (Context.retire_mentions known)
   · intro first second firstKnown secondKnown same
     exact typed.binderDistinct first second (Context.retire_mentions firstKnown) (Context.retire_mentions secondKnown) same
-  · intro binder input known bound
-    exact typed.inputApart binder input (Context.retire_mentions known) bound
   · intro node loan found own
     apply (typed.sourceTargets node loan found own).storage_congr
     cases base : loan.target.base with
-    | input input => rfl
     | binder binder =>
       have outside : binder ∉ (context.names.take count).map Prod.snd := by
         intro removed
@@ -8338,16 +8125,6 @@ theorem StoreTyped.retire {interpretation : Interpretation} {context : Context} 
         · exact different rfl
         · cases fields
       simp only [Context.retire, if_neg outside]
-  · intro node loan found own input base
-    obtain ⟨value, read, valueTyped, payload, provenance, related⟩ := typed.inputTargets node loan found own input base
-    have outside : (interpretation.origin loan.target).root ∉ (environment.bindings.take count).map Prod.snd := by
-      intro removed
-      have apart := free _ removed (interpretation.node node) _ (typed.records node loan found) own
-      rcases apart with different | fields
-      · exact different rfl
-      · cases fields
-    refine ⟨value, ?_, valueTyped, payload, provenance.storage_congr (by simp [Context.retire, base]) (Nat.le_refl _), related⟩
-    simpa only [Environment.readAddress, Environment.at, Environment.retire, if_neg outside] using read
   · intro root value stored
     simp only [Environment.retire] at stored
     split at stored
@@ -8420,11 +8197,7 @@ theorem StoreTyped.hide {interpretation : Interpretation} {context : Context} {e
   refine { typed with
     source := typed.source.hide
     residents := ⟨typed.residents.valid.hide, [], .nil, .nil⟩
-    slots := .nil
-    inputTargets := ?_ }
-  intro node loan found own input base
-  obtain ⟨value, read, resident, payload, provenance, related⟩ := typed.inputTargets node loan found own input base
-  exact ⟨value, read, resident, payload, provenance.storage_congr rfl (Nat.le_refl _), related⟩
+    slots := .nil }
 
 theorem StoreTyped.resume {first last : Interpretation} {callerContext afterContext : Context} {caller after : Environment}
     (callerTyped : StoreTyped program first callerContext caller)
@@ -8445,10 +8218,7 @@ theorem StoreTyped.resume {first last : Interpretation} {callerContext afterCont
     simp only [Function.comp_def, same]
   obtain ⟨residents, slots⟩ := Context.reconstruct source
     (callerTyped.residents.valid.resume afterTyped.residents.valid supply) names afterTyped.cells
-  refine { afterTyped with source := source, residents := residents, slots := slots, inputTargets := ?_ }
-  intro node loan found own input base
-  obtain ⟨value, read, resident, payload, provenance, related⟩ := afterTyped.inputTargets node loan found own input base
-  exact ⟨value, read, resident, payload, provenance.storage_congr rfl (Nat.le_refl _), related⟩
+  exact { afterTyped with source := source, residents := residents, slots := slots }
 
 end Grounded
 
@@ -8769,7 +8539,6 @@ theorem Context.Ready.retire {context : Context} {origin : Origin} {referent : T
     (ready : context.Ready origin) (target : (context.retire count).Target program origin referent) :
     (context.retire count).Ready origin := by
   cases base : origin.base with
-  | input input => simp only [Context.Ready, base]
   | binder binder =>
     simp only [Context.Target, base] at target
     obtain ⟨slot, stored, _⟩ := target
@@ -8892,7 +8661,7 @@ theorem Interpretation.origin_extend (interpretation : Interpretation) (origin :
     interpretation.origin (origin.extend indices) =
       ⟨(interpretation.origin origin).root, (interpretation.origin origin).fields ++ indices⟩ := by
   cases origin with
-  | mk base fields => cases base <;> simp [Interpretation.origin, Origin.extend, List.append_assoc]
+  | mk base fields => cases base <;> simp [Interpretation.origin, Origin.extend]
 
 /-- Canonical target typing is independent of operation readiness. -/
 theorem AccessType.canonicalTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -8930,9 +8699,6 @@ theorem AccessType.uniqueTarget {interpretation : Interpretation} {context : Con
   · cases Option.some.inj same
     cases base : target.base with
     | binder binder => exact ⟨loan, binder, found, own, unique, within, rfl⟩
-    | input input =>
-      have shared := (typed.sourceTargets node loan found own).2.2 input (within.1.symm.trans base)
-      cases unique.symm.trans shared
 
 theorem AccessType.parentMode {context : Context} {place : AccessPlace} {target : Origin}
     {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
@@ -8952,15 +8718,7 @@ theorem AccessType.sourceTarget {interpretation : Interpretation} {context : Con
     (access : AccessType program home context mode place target referent parent)
     (ready : context.AccessReady target parent) :
     context.SourceTarget program ⟨target, referent, parent, true, mode⟩ := by
-  refine ⟨access.canonicalTarget typed, fun _ => ready.1, ?_⟩
-  cases access with
-  | owner => intro input impossible; cases impossible
-  | dereference _ _ _ _ _ _ found own _ _ authority =>
-    intro input base
-    have shared := (typed.sourceTargets _ _ found own).2.2 input base
-    cases mode with
-    | shared => rfl
-    | unique => cases shared.symm.trans (authority rfl)
+  exact ⟨access.canonicalTarget typed, fun _ => ready.1⟩
 
 /-- Readiness-free positive capability: conflict exclusion is a separate check. -/
 theorem StoreTyped.accessAuthority {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -9014,12 +8772,6 @@ private theorem StoreTyped.projectAccess {interpretation : Interpretation} {cont
     · rw [Interpretation.origin_extend]
       exact Environment.at_subaddress raw selected
     · exact Context.ready_complete (by simpa [Origin.extend] using base) stored access
-  | input input =>
-    obtain ⟨resident, read, residentTyped, _⟩ := typed.inputTargets node loan found own input base
-    obtain ⟨resolved, value, selected, valueTyped⟩ := path.resident residentTyped (.full indices)
-    refine ⟨.full, resident, value, Environment.readAddress_at read, resolved, ?_, valueTyped, fun _ => .full⟩
-    rw [Interpretation.origin_extend]
-    exact Environment.at_subaddress (Environment.readAddress_at read) selected
 
 
 theorem StoreTyped.resolveAccessMasked {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -9119,23 +8871,15 @@ theorem StoreTyped.accessResolved {interpretation : Interpretation} {context : C
 theorem StoreTyped.targetPayloadCorresponds {interpretation : Interpretation} {context : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) {origin : Origin} {referent : Ty}
     {payload : SourcePayload} (provenance : context.TargetPayload program origin referent payload)
-    {value : Value} {state : Initialization} (resident : ResidentTyped program state value referent)
+    {value : Value}
     (read : environment.at (interpretation.origin origin) = some value) :
     payload.Corresponds interpretation.node value := by
   cases provenance with
-  | @cell origin slot referent payload stored path selected =>
+  | @cell slot referent payload stored path selected =>
     cases base : origin.base with
     | binder binder =>
       obtain ⟨root, found, _, related⟩ := typed.cells binder slot (by simpa [base] using stored)
       exact related.select selected (by simpa [Environment.at, Interpretation.origin, base, found] using read)
-    | input input =>
-      obtain ⟨root, found, _, related⟩ := typed.inputCells input slot (by simpa [base] using stored)
-      have splitAt : environment.at (interpretation.origin origin) =
-          (environment.at (interpretation.input input)).bind (fun root => root.readIndices origin.fields) := by
-        simp [Environment.at, Interpretation.origin, base, Value.readIndices_append, Option.bind_assoc]
-      rw [splitAt, found] at read
-      exact related.select selected read
-  | externalPlain _ free => exact .plain (resident.referenceFree free)
 
 end Grounded
 
@@ -9173,7 +8917,6 @@ theorem Context.TargetPayload.joins {before after : Context} {origin : Origin} {
     have typeEqual := congrArg (fun metadata => metadata.1) metadata
     change slot.type = _ at typeEqual
     exact ⟨current, .cell found (typeEqual ▸ path) selectedAfter, payloadJoins⟩
-  | externalPlain bounded free => exact ⟨.plain, .externalPlain (by simpa [joined.inputs] using bounded) free, .same _⟩
 
 theorem StoreTyped.join {interpretation : Interpretation} {context afterContext : Context} {environment : Environment}
     (typed : StoreTyped program interpretation context environment) (joined : context.Joins program afterContext) :
@@ -9196,27 +8939,17 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
   obtain ⟨residents, slots⟩ := Context.reconstruct source typed.residents.valid names cells
   refine { typed with
     source := source, residents := residents, slots := slots, cells := cells
-    inputCells := by
-      intro input slot stored
-      obtain ⟨original, sourceStored, metadata, state⟩ := (joined.storage (.input input)).backward stored
-      obtain ⟨value, found, resident, corresponds⟩ := typed.inputCells input original sourceStored
-      have sameType : slot.type = original.type := congrArg (fun metadata => metadata.1) metadata
-      refine ⟨value, found, ?_, (joined.storage (.input input)).payloadJoins sourceStored stored |>.corresponds corresponds⟩
-      simpa only [SlotTyped, sameType] using resident.join state
     binderBound := ?_
     binderDistinct := ?_
-    inputBound := ?_
-    inputApart := ?_
     nodeOrder := ?_
     records := ?_
     activeCoverage := ?_
     sourceTargets := by
       intro node loan found own
       have oldFound : context.loans[node]? = some loan := joined.loans ▸ found
-      obtain ⟨target, ready, inputShared⟩ := typed.sourceTargets node loan oldFound own
-      refine ⟨?_, ?_, inputShared⟩
+      obtain ⟨target, ready⟩ := typed.sourceTargets node loan oldFound own
+      refine ⟨?_, ?_⟩
       · cases base : loan.target.base with
-        | input input => simp [Context.Target, base]
         | binder binder =>
           obtain ⟨slot, stored, path, state, access⟩ := (by simpa [Context.Target, base] using target)
           obtain ⟨current, currentStored, metadata, _⟩ := (joined.storage (.binder binder)).forward stored
@@ -9227,29 +8960,20 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
       · intro shared
         have oldReady := ready shared
         cases base : loan.target.base with
-        | input input => simp [Context.Ready, base]
         | binder binder =>
           simp only [Context.Ready, base] at oldReady ⊢
           obtain ⟨slot, state, stored, access, complete⟩ := oldReady
           obtain ⟨current, currentStored, _, _⟩ := (joined.storage (.binder binder)).forward stored
           obtain ⟨next, nextAccess, nextComplete⟩ := joined.targetMasks node loan oldFound own binder slot current state base stored currentStored access
           exact ⟨current, next, currentStored, nextAccess, nextComplete complete⟩
-    inputTargets := ?_ }
+    }
   · intro binder known
     exact typed.binderBound binder ((joined.mentions binder).mp known)
   · intro first second firstKnown secondKnown same
     exact typed.binderDistinct first second ((joined.mentions first).mp firstKnown) ((joined.mentions second).mp secondKnown) same
-  · intro input bound
-    exact typed.inputBound input (by simpa only [joined.inputs] using bound)
-  · intro binder input known bound
-    exact typed.inputApart binder input ((joined.mentions binder).mp known) (by simpa only [joined.inputs] using bound)
   · simpa only [joined.loans] using typed.nodeOrder
   · simpa only [joined.loans] using typed.records
   · simpa only [joined.loans] using typed.activeCoverage
-  · intro node loan found own input base
-    obtain ⟨value, read, resident, payload, provenance, related⟩ := typed.inputTargets node loan (joined.loans ▸ found) own input base
-    obtain ⟨current, currentProvenance, payloadJoins⟩ := provenance.joins joined
-    exact ⟨value, read, resident, current, currentProvenance, payloadJoins.corresponds related⟩
 end Grounded
 
 /- Section: StateScopes -/
@@ -9269,7 +8993,6 @@ theorem StateTyped.join {interpretation : Interpretation} {context afterContext 
       have oldFound : context.loans[node]? = some loan := joined.loans ▸ found
       have ready := typed.heldReady node member loan oldFound own
       cases base : loan.target.base with
-      | input input => simp [Context.Ready, base]
       | binder binder =>
         simp only [Context.Ready, base] at ready ⊢
         obtain ⟨slot, state, stored, access, complete⟩ := ready
@@ -9285,7 +9008,7 @@ theorem StateTyped.raiseSupply {interpretation : Interpretation} {context : Cont
     (larger : context.nextBinder ≤ supply) :
     StateTyped program interpretation { context with nextBinder := supply } heldPayloads environment held := by
   apply typed.join
-  refine ⟨rfl, ?_, rfl, rfl, larger, ?_⟩
+  refine ⟨rfl, ?_, rfl, larger, ?_⟩
   · intro base
     cases context.storage base with
     | none => exact .absent
@@ -9744,22 +9467,21 @@ structure PatternContextEffects (before after : Context) : Prop where
   supply : after.nextBinder = before.nextBinder
   names : after.names = before.names
   storage : after.storage = before.storage
-  inputs : after.inputCount = before.inputCount
 
 theorem PatternContextEffects.refl (context : Context) : PatternContextEffects context context :=
-  ⟨.refl _, .refl _, rfl, rfl, rfl, rfl, rfl⟩
+  ⟨.refl _, .refl _, rfl, rfl, rfl, rfl⟩
 
 theorem PatternContextEffects.dispose (context : Context) (payload : SourcePayload) :
     PatternContextEffects context (context.dispose payload) :=
   ⟨.dispose _ _, .dispose _ _, Context.dispose_loans_length _ _, Context.dispose_supply _ _,
-    Context.dispose_names _ _, Context.dispose_storage _ _, Context.dispose_inputs _ _⟩
+    Context.dispose_names _ _, Context.dispose_storage _ _⟩
 
 theorem PatternContextEffects.trans {before middle after : Context}
     (first : PatternContextEffects before middle) (second : PatternContextEffects middle after) :
     PatternContextEffects before after :=
   ⟨first.history.trans second.history, first.support.trans second.support first.history.supply,
     second.loans.trans first.loans, second.supply.trans first.supply, second.names.trans first.names,
-    second.storage.trans first.storage, second.inputs.trans first.inputs⟩
+    second.storage.trans first.storage⟩
 
 def PatternOutcome.SourceEffects (before : Context) : PatternOutcome → Prop
   | .impossible => True
@@ -10033,7 +9755,6 @@ theorem StateTyped.copyPayload {before after : Context} {source copied : SourceP
       have ownEqual : ownLoan = loan := Option.some.inj (ownFound.symm.trans found)
       subst ownLoan
       have targetReady := ready loan found ownBit
-      obtain ⟨targetValue, targetPayload, read, resident, provenance, corresponds⟩ := typed.toStoreTyped.targetPayload found ownBit targetReady
       have known := typed.source.loanKnown found
       have finite := (typed.source.targets node loan found).2
       have ancestor : ∀ parent, some node = some parent → ∃ sourceLoan, before.loans[parent]? = some sourceLoan ∧ loan.target.Within sourceLoan.target := by
@@ -10043,7 +9764,7 @@ theorem StateTyped.copyPayload {before after : Context} {source copied : SourceP
       have state := typed.borrow (parent := some node) (mode := .shared) known (typed.source.targets node loan found).1 finite ancestor
         (fun _ _ _ _ impossible => by cases impossible)
         (by simpa only [Context.SourceTarget, shared] using typed.sourceTargets node loan found ownBit)
-        targetReady read resident provenance corresponds
+        targetReady
         (fun payload target inner member => typed.observedOwn node loan found ownBit payload target inner member)
       refine ⟨_, _, _, Environment.Copies.reference (typed.records node loan found) shared (typed.toStoreTyped.usable ⟨loan, found, ownBit⟩), state, ?_, ?_, .borrow typed.source known⟩
       · simpa only [shared] using (SourcePayload.Typed.reference (program := program)
@@ -12356,7 +12077,6 @@ def Required (phase : Phase) (condition : phase = .executable → Prop) : Prop :
 structure Symbols where
   reference : Checked.Reference → Nat
   binder : Nat → Nat
-  input : Nat → Nat
 
 mutual
 /-- A masked interpretation relates the chosen symbolic payload product to the
@@ -12406,7 +12126,6 @@ end
 /-- Opaque referent views are not additional authoritative owner cells. -/
 def Symbols.base (symbols : Symbols) : Checked.Base → Option OriginBase
   | .binder identity => some (.binder (symbols.binder identity))
-  | .input identity => some (.input (symbols.input identity))
   | .referent _ => none
 
 /-- An opaque referent may itself begin at a subaddress. Its prefix is retained. -/
@@ -12414,9 +12133,14 @@ def Symbols.address (symbols : Symbols) (context : Grounded.Context)
     (address : Checked.Address) : Option Origin :=
   match address.base with
   | .binder identity => some ⟨.binder (symbols.binder identity), address.fields⟩
-  | .input identity => some ⟨.input (symbols.input identity), address.fields⟩
   | .referent reference =>
       (context.loans[symbols.reference reference]?).map (fun loan => loan.target.extend address.fields)
+
+/-- A root identity remains represented while its cell or a retained loan target
+mentions it. Reference aliases do not introduce a second identity. -/
+def _root_.Grounded.Checked.Context.RootRepresented (checked : Checked.Context) (identity : Nat) : Prop :=
+  (∃ slot, checked.storage (.binder identity) = some slot) ∨
+    ∃ loan ∈ checked.loans, loan.target.base = .binder identity
 
 structure ContextMeaning (program : Program) (symbols : Symbols)
     (checked : Checked.Context) (concrete : Grounded.Context) : Prop where
@@ -12428,18 +12152,15 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
       actual.mutable = slot.mutable ∧ actual.binder = symbols.binder slot.binder ∧
       actual.initialization = slot.initialization ∧
       PayloadMeaning program symbols slot.initialization slot.payload slot.type actual.payload
-  views : ∀ reference slot, checked.ViewNeeded (program := program) reference →
-    checked.storage (.referent reference) = some slot →
-    ∃ target payload, symbols.address concrete ⟨.referent reference, []⟩ = some target ∧
-      concrete.Target program target slot.type ∧
-      concrete.TargetPayload program target slot.type payload ∧
-      PayloadMeaning program symbols slot.initialization slot.payload slot.type payload
-  viewMasks : ∀ reference slot target root,
-    checked.ViewNeeded (program := program) reference →
-    checked.storage (.referent reference) = some slot →
-    symbols.address concrete ⟨.referent reference, []⟩ = some target →
-    concrete.storage target.base = some root →
-    root.initialization.Access target.fields slot.initialization
+  /-- Executable references are lenses into binder cells, never mask caches. -/
+  noOpaqueCells : ∀ reference, checked.storage (.referent reference) = none
+  /-- Every existing source root is represented, including hidden roots. -/
+  rootCoverage : ∀ binder slot, concrete.storage (.binder binder) = some slot →
+    ∃ identity cell, checked.storage (.binder identity) = some cell ∧ symbols.binder identity = binder
+  /-- Injectivity concerns represented roots, including historical loan targets,
+  not references or their potentially aliased target paths. -/
+  rootIdentity : ∀ first second, checked.RootRepresented first → checked.RootRepresented second →
+    symbols.binder first = symbols.binder second → first = second
   loans : ∀ loan ∈ checked.loans, ∃ actual,
     concrete.loans[symbols.reference loan.reference]? = some actual ∧
       symbols.address concrete loan.target = some actual.target ∧
@@ -12957,28 +12678,25 @@ theorem ReferenceEstablished.mono {before after : Nat} (growth : before ≤ afte
   | parameter | borrowed => exact Nat.lt_of_lt_of_le established growth
   | copied identity parent ih => exact ⟨Nat.lt_of_lt_of_le established.1 growth, ih established.2⟩
 
-/-- Point-to-point identity preservation; no injectivity of input addresses or
-of address interpretation is imposed. Only new local stamps may be remapped. -/
+/-- Point-to-point identity preservation. Aliased references retain their existing
+canonical targets; only new local stamps may be remapped. -/
 structure Symbols.Stable (checked : Checked.Context) (before after : Symbols) : Prop where
   reference : ∀ reference, ReferenceEstablished checked.nextSymbol reference →
     after.reference reference = before.reference reference
   binder : ∀ identity, identity < checked.nextBinder → after.binder identity = before.binder identity
-  input : ∀ identity, after.input identity = before.input identity
 
 theorem Symbols.Stable.refl (checked : Checked.Context) (symbols : Symbols) :
-    Symbols.Stable checked symbols symbols := ⟨fun _ _ => rfl, fun _ _ => rfl, fun _ => rfl⟩
+    Symbols.Stable checked symbols symbols := ⟨fun _ _ => rfl, fun _ _ => rfl⟩
 
 theorem Symbols.Stable.trans {before middle : Checked.Context} {first second third : Symbols}
     (left : Symbols.Stable before first second) (right : Symbols.Stable middle second third)
     (symbols : before.nextSymbol ≤ middle.nextSymbol) (binders : before.nextBinder ≤ middle.nextBinder) :
     Symbols.Stable before first third := by
-  refine ⟨?_, ?_, ?_⟩
+  refine ⟨?_, ?_⟩
   · intro reference established
     exact (right.reference reference (established.mono symbols)).trans (left.reference reference established)
   · intro identity established
     exact (right.binder identity (Nat.lt_of_lt_of_le established binders)).trans (left.binder identity established)
-  · intro identity
-    exact (right.input identity).trans (left.input identity)
 
 def PointsStable {phase : Phase} (before after : Point program phase) : Prop :=
   Required phase fun executable => Symbols.Stable before.checked
@@ -13325,7 +13043,7 @@ theorem StateTyped.borrowAccess {interpretation : Interpretation} {context : Con
         (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
         interpretation (interpretation.addNode context.loans.length environment.loans.length) := by
   obtain ⟨known, bounded, ancestor, resident, resolved, authority, selected, residentTyped⟩ := typed.toStoreTyped.resolveAccess access ready
-  have related := typed.toStoreTyped.targetPayloadCorresponds provenance residentTyped (Environment.readAddress_at selected)
+  have related := typed.toStoreTyped.targetPayloadCorresponds provenance (Environment.readAddress_at selected)
   have usable : environment.ResultUsable resident := by
     apply related.usable
     intro node member
@@ -13335,8 +13053,8 @@ theorem StateTyped.borrowAccess {interpretation : Interpretation} {context : Con
   refine ⟨resident, resolved, authority, typed.toStoreTyped.carrierPermits access,
     typed.toStoreTyped.permits known permitted, selected, usable, ?_, .newBorrow finite, .borrow typed.source known⟩
   exact typed.borrow known bounded finite ancestor access.parentMode (access.sourceTarget typed.toStoreTyped ready)
-    ready.1 selected residentTyped provenance related (fun other target node member =>
-      (available node ((provenance.nodes_eq target typed.source).symm ▸ member)).1)
+    ready.1 (fun other target node member =>
+      (available node ((provenance.nodes_eq target).symm ▸ member)).1)
 
 end Grounded
 
@@ -13486,7 +13204,7 @@ theorem StateTyped.executesRead
   obtain ⟨valueTyped, live⟩ := residentTyped.complete initialized
   have source : context.TargetPayload program ⟨.binder slot.binder, indices⟩ type payload :=
     .cell (typed.source.member_stored _ (lookup_member selected)) path.canonical provenance
-  have related := typed.toStoreTyped.targetPayloadCorresponds source residentTyped raw
+  have related := typed.toStoreTyped.targetPayloadCorresponds source raw
   obtain ⟨after, last, value, copiedValue, stateTyped, resultTyped, progress⟩ :=
     typed.copyResult copy ⟨valueTyped, source.typed typed.source, related⟩
   exact ⟨value, after, last, .read resolved (by simp [Environment.readAddress, raw, live])
@@ -13547,7 +13265,7 @@ theorem StateTyped.executesDereference
       StateProgress context afterCtx environment after interpretation last := by
   obtain ⟨known, _, _, resident, resolved, authority, selected, residentTyped⟩ :=
     typed.toStoreTyped.resolveAccess access ready
-  have related := typed.toStoreTyped.targetPayloadCorresponds provenance residentTyped
+  have related := typed.toStoreTyped.targetPayloadCorresponds provenance
     (Environment.readAddress_at selected)
   obtain ⟨after, last, value, copiedValue, stateTyped, resultTyped, progress⟩ :=
     typed.copyResult copy ⟨residentTyped, provenance.typed typed.source, related⟩
@@ -14411,7 +14129,7 @@ theorem StateProgress.resume {first last : Interpretation} {callerContext afterC
  (progress : StateProgress callerContext.hide afterContext caller.hide after first last) :
  StateProgress callerContext (callerContext.resume afterContext) caller (caller.resume after) first last := by
  refine ⟨progress.history.resume, progress.support.resume,
-   ⟨progress.interpretation.binders, progress.interpretation.nodes, progress.interpretation.inputs⟩,
+   ⟨progress.interpretation.binders, progress.interpretation.nodes⟩,
    ?_, progress.loanCount⟩
  intro binder fresh mentioned
  rcases Context.resume_mentions mentioned with old | new
@@ -14738,8 +14456,8 @@ end Grounded.Elaboration
 namespace Grounded.Checked
 set_option autoImplicit false
 
-/-- A view is opaque checking metadata, never a second owner cell. The unused
-binder field does not reserve a binder identity or install an authoritative root. -/
+/-- Hypothetical checking metadata only. Executable ContextMeaning forbids
+referent cells; actual views query existing canonical binder storage instead. -/
 def Context.installView (context : Context) (original : Reference) (referent : Ty)
     (mutable : Bool) (payload : Payload) : Context :=
   { context with
@@ -14763,10 +14481,9 @@ namespace Grounded.Elaboration
 set_option autoImplicit false
 variable {program : Program} {home : Module} {phase : Phase}
 
-/-- First-use metadata is authorized by an existing selected handle. The exact
-current source mask is an input obligation, not a consequence of outer Own.
-The resulting Point already carries the complete ContextMeaning invariant. -/
-structure ViewStep (program : Program) (home : Module) {phase : Phase}
+/-- Dormant checking can retain an abstract referent schema. Such a cell cannot
+inhabit an executable Point: that Point's meaning forbids opaque mask caches. -/
+structure OpaqueViewStep (program : Program) (home : Module) {phase : Phase}
     (before after : Point program phase) (referencePlace : Place) where
   symbol : Checked.Reference
   original : Checked.Reference
@@ -14781,24 +14498,43 @@ structure ViewStep (program : Program) (home : Module) {phase : Phase}
     (before.checked.installView original referent (mode == .unique)
       (Checked.Payload.input before.checked.nextSymbol [] referent [] .unknown)).advanceSymbol
   stable : PointsStable before after
-  actual : Required phase fun executable =>
-    after.source executable = before.source executable ∧
-    ∃ target payload,
-      (before.symbols executable).address (before.source executable) ⟨.referent original, []⟩ = some target ∧
-      (after.symbols executable).address (before.source executable) ⟨.referent original, []⟩ = some target ∧
-      (before.source executable).Target program target referent ∧
-      (before.source executable).TargetPayload program target referent payload ∧
-      PayloadMeaning program (after.symbols executable) .full
-        (Checked.Payload.input before.checked.nextSymbol [] referent [] .unknown) referent payload ∧
-      ∀ root, (before.source executable).storage target.base = some root →
-        root.initialization.Access target.fields .full
 
-namespace ViewStep
+/-- A canonical view is a lens into the already declared target of a selected
+handle. Its whole root, prefix, and current mask are read, never chosen afresh or
+reset. In particular, a unique target may be masked and aliases share one cell. -/
+structure CanonicalView (program : Program) (home : Module) {phase : Phase}
+    (point : Point program phase) (referencePlace : Place) where
+  symbol : Checked.Reference
+  referent : Ty
+  mode : BorrowMode
+  selection : Checked.PlaceSelection program home point.checked referencePlace
+    ⟨.reference referent mode, .reference symbol referent mode⟩
+  available : point.checked.NotEnded (program := program) symbol
+  binder : Nat
+  fields : List Nat
+  root : Checked.Slot
+  state : Initialization
+  target : point.checked.referenceTarget symbol = ⟨.binder binder, fields⟩
+  stored : point.checked.storage (.binder binder) = some root
+  path : CanonicalPath program root.type fields referent
+  mask : root.initialization.Access fields state
+
+/-- Both branches are preserved by erasure. Only the canonical lens can occur
+on an executable path; it changes no cell, target, name, history, or supply. -/
+inductive ViewStep (program : Program) (home : Module) {phase : Phase} :
+    Point program phase → Point program phase → Place → Type where
+  | hypothetical {before after : Point program phase} {referencePlace : Place}
+      (step : OpaqueViewStep program home before after referencePlace) :
+      ViewStep program home before after referencePlace
+  | canonical {point : Point program phase} {referencePlace : Place}
+      (view : CanonicalView program home point referencePlace) :
+      ViewStep program home point point referencePlace
+
+namespace OpaqueViewStep
 variable {before after : Point program phase} {referencePlace : Place}
 
-/-- Erasure retains every common authority, canonicality, and first-use check. -/
-def erase (step : ViewStep program home before after referencePlace) :
-    ViewStep program home before.erase after.erase referencePlace where
+def erase (step : OpaqueViewStep program home before after referencePlace) :
+    OpaqueViewStep program home before.erase after.erase referencePlace where
   symbol := step.symbol
   original := step.original
   referent := step.referent
@@ -14809,88 +14545,145 @@ def erase (step : ViewStep program home before after referencePlace) :
   absent := step.absent
   checked := step.checked
   stable := PointsStable.erase
-  actual := by intro executable; cases executable
 
-theorem source_eq (step : ViewStep program home before after referencePlace)
-    (executable : phase = .executable) : after.source executable = before.source executable :=
-  (step.actual executable).1
-
-/-- Source consumers see no operation at this checking-only metadata boundary. -/
-theorem source_transport (step : ViewStep program home before after referencePlace)
-    (executable : phase = .executable) {motive : Grounded.Context → Prop}
-    (consumer : motive (after.source executable)) : motive (before.source executable) := by
-  simpa only [step.source_eq executable] using consumer
-
-theorem installed (step : ViewStep program home before after referencePlace) :
+theorem installed (step : OpaqueViewStep program home before after referencePlace) :
     after.checked.storage (.referent step.original) =
       some ⟨⟨step.referent, step.mode == .unique, .full⟩, 0,
         Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown⟩ := by
   rw [step.checked]
   simp [Checked.Context.advanceSymbol]
 
-theorem storage_other (step : ViewStep program home before after referencePlace)
+theorem not_executable (step : OpaqueViewStep program home before after referencePlace)
+    (executable : phase = .executable) : False := by
+  cases executable
+  have absent := after.meaning.related.noOpaqueCells step.original
+  rw [step.installed] at absent
+  cases absent
+
+theorem storage_other (step : OpaqueViewStep program home before after referencePlace)
     (base : Checked.Base) (different : base ≠ .referent step.original) :
     after.checked.storage base = before.checked.storage base := by
   rw [step.checked]
   simp [Checked.Context.advanceSymbol, different]
 
-/-- There is no ownership grant, loan row, owner allocation, or name change. -/
-theorem metadata_only (step : ViewStep program home before after referencePlace) :
+theorem metadata_only (step : OpaqueViewStep program home before after referencePlace) :
     after.checked.names = before.checked.names ∧
     after.checked.loans = before.checked.loans ∧
     after.checked.ended = before.checked.ended ∧
     after.checked.nextBinder = before.checked.nextBinder ∧
     after.checked.nextSymbol = before.checked.nextSymbol + 1 ∧
-    (∀ identity, after.checked.storage (.binder identity) = before.checked.storage (.binder identity)) ∧
-    (∀ identity, after.checked.storage (.input identity) = before.checked.storage (.input identity)) := by
+    (∀ identity, after.checked.storage (.binder identity) = before.checked.storage (.binder identity)) := by
   rw [step.checked]
   simp [Checked.Context.advanceSymbol, Checked.Context.installView]
 
-theorem notEnded_iff (step : ViewStep program home before after referencePlace)
+theorem notEnded_iff (step : OpaqueViewStep program home before after referencePlace)
     (reference : Checked.Reference) :
     after.checked.NotEnded (program := program) reference ↔
       before.checked.NotEnded (program := program) reference := by
   rw [step.checked]
   rfl
 
-/-- Once a canonical view exists, a subsequent step cannot reset its mask. -/
-theorem no_reinstall (step : ViewStep program home before after referencePlace)
+theorem no_reinstall (step : OpaqueViewStep program home before after referencePlace)
     {next : Point program phase} {otherPlace : Place}
-    (nextStep : ViewStep program home after next otherPlace) :
+    (nextStep : OpaqueViewStep program home after next otherPlace) :
     nextStep.original ≠ step.original := by
   intro equal
   have absent := nextStep.absent
   rw [equal, step.installed] at absent
   cases absent
 
-/-- The fixed empty canonical path prevents duplicate views of known subfields. -/
-theorem no_subfield (step : ViewStep program home before after referencePlace)
+theorem no_subfield (step : OpaqueViewStep program home before after referencePlace)
     {original : Checked.Reference} {fields : List Nat}
     (target : before.checked.referenceTarget step.symbol = ⟨.referent original, fields⟩) :
     original = step.original ∧ fields = [] := by
   have equal := target.symm.trans step.canonical
   cases equal
   exact ⟨rfl, rfl⟩
+end OpaqueViewStep
 
-/-- Exact current-source evidence, including the initial full-mask obligation,
-survives installation without mutating the authoritative source context. -/
-theorem exact_view (step : ViewStep program home before after referencePlace)
+namespace CanonicalView
+variable {point : Point program phase} {referencePlace : Place}
+
+def erase (view : CanonicalView program home point referencePlace) :
+    CanonicalView program home point.erase referencePlace where
+  symbol := view.symbol
+  referent := view.referent
+  mode := view.mode
+  selection := view.selection
+  available := view.available
+  binder := view.binder
+  fields := view.fields
+  root := view.root
+  state := view.state
+  target := view.target
+  stored := view.stored
+  path := view.path
+  mask := view.mask
+
+/-- The lens reports the current authoritative whole-root mask, not a cached
+per-reference mask. No restoration or complete-mask premise is required. -/
+theorem exact_view (view : CanonicalView program home point referencePlace)
     (executable : phase = .executable) :
-    ∃ target payload,
-      (after.symbols executable).address (after.source executable) ⟨.referent step.original, []⟩ = some target ∧
-      (after.source executable).Target program target step.referent ∧
-      (after.source executable).TargetPayload program target step.referent payload ∧
-      PayloadMeaning program (after.symbols executable) .full
-        (Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown) step.referent payload ∧
-      ∀ root, (after.source executable).storage target.base = some root →
-        root.initialization.Access target.fields .full := by
-  obtain ⟨target, payload, _, address, typed, provenance, meaning, mask⟩ := (step.actual executable).2
-  rw [step.source_eq executable]
-  exact ⟨target, payload, address, typed, provenance, meaning, mask⟩
+    ∃ actual, (point.source executable).storage (.binder ((point.symbols executable).binder view.binder)) = some actual ∧
+      actual.type = view.root.type ∧ actual.initialization = view.root.initialization ∧
+      actual.initialization.Access view.fields view.state := by
+  cases executable
+  obtain ⟨actual, stored, type, _, _, mask, _⟩ :=
+    point.meaning.related.cells (.binder view.binder) view.root
+      (.binder (point.meaning.symbols.binder view.binder)) view.stored rfl
+  exact ⟨actual, stored, type, mask, mask ▸ view.mask⟩
 
+/-- Two canonical lens roots denoting the same source root are the very same
+checked cell. References and field paths need not be equal. -/
+theorem aliased_root {otherPlace : Place}
+    (left : CanonicalView program home point referencePlace)
+    (right : CanonicalView program home point otherPlace)
+    (executable : phase = .executable)
+    (same : (point.symbols executable).binder left.binder = (point.symbols executable).binder right.binder) :
+    left.binder = right.binder := by
+  cases executable
+  exact point.meaning.related.rootIdentity _ _ (.inl ⟨_, left.stored⟩) (.inl ⟨_, right.stored⟩) same
+end CanonicalView
+
+namespace ViewStep
+variable {before after : Point program phase} {referencePlace : Place}
+
+def erase (step : ViewStep program home before after referencePlace) :
+    ViewStep program home before.erase after.erase referencePlace := by
+  cases step with
+  | hypothetical step => exact .hypothetical step.erase
+  | canonical view => exact .canonical view.erase
+
+theorem selection_found (step : ViewStep program home before after referencePlace) :
+    ∃ slot, lookup referencePlace.root before.checked.bindings = some slot := by
+  cases step with
+  | hypothetical step => exact ⟨_, step.selection.found⟩
+  | canonical view => exact ⟨_, view.selection.found⟩
+
+/-- Every executable view is a lens-only query of an existing canonical cell. -/
+theorem executable_lens (step : ViewStep program home before after referencePlace)
+    (executable : phase = .executable) :
+    after = before ∧ Nonempty (CanonicalView program home before referencePlace) := by
+  cases step with
+  | hypothetical step => exact False.elim (step.not_executable executable)
+  | canonical view => exact ⟨rfl, ⟨view⟩⟩
+
+theorem source_eq (step : ViewStep program home before after referencePlace)
+    (executable : phase = .executable) : after.source executable = before.source executable := by
+  rw [(step.executable_lens executable).1]
+
+theorem source_transport (step : ViewStep program home before after referencePlace)
+    (executable : phase = .executable) {motive : Grounded.Context → Prop}
+    (consumer : motive (after.source executable)) : motive (before.source executable) := by
+  simpa only [step.source_eq executable] using consumer
+
+/-- Unlike a hypothetical opaque schema installation, an executable view leaves
+all checking storage, targets, endings, and both identity supplies unchanged. -/
+theorem metadata_only (step : ViewStep program home before after referencePlace)
+    (executable : phase = .executable) : after.checked = before.checked := by
+  rw [(step.executable_lens executable).1]
 end ViewStep
 end Grounded.Elaboration
-
 /- Section: ElaborationDormant -/
 namespace Grounded.Elaboration
 set_option autoImplicit false
@@ -15947,7 +15740,7 @@ theorem HasType.structural_evaluates {program : Program} {phase : Phase} {home :
       exact ⟨last, _, .construct evaluated (.of_plain plain), nominalResident shape finite residents, plain⟩
   | .view view body =>
     intro structural empty
-    have found := view.selection.found
+    obtain ⟨_, found⟩ := view.selection_found
     simp [empty.bindings, lookup] at found
   | .constant declared visible resolved structural hidden body resume referenceFree interpreted actual =>
     intro _ empty
@@ -16119,15 +15912,6 @@ theorem StateTyped.selectedCut {interpretation : Interpretation} {context : Cont
     have components := Carrier.stored.inj equality
     have same := typed.binderDistinct second binder (.inl ⟨resident, otherStored⟩) (.inl ⟨slot, stored⟩) components.1
     exact ⟨by simp only [base, same], ⟨suffix, components.2.symm⟩⟩
-  | input input =>
-    obtain ⟨otherValue, otherRuntimeStored, _, otherRelated⟩ := typed.inputCells input resident otherStored
-    have nested := Environment.at_subaddress otherRuntimeStored (otherRelated.occurs_readIndices occurrence)
-    have otherCarried : Carries environment held (interpretation.node node)
-        (.stored (interpretation.input input).root ((interpretation.input input).fields ++ fields)) := nested
-    have equality := (unique _ otherCarried).trans (unique _ carried).symm
-    have roots := (Carrier.stored.inj equality).1
-    exact False.elim ((typed.inputApart binder input (.inl ⟨slot, stored⟩)
-      (typed.source.inputSlots input resident otherStored).1) roots.symm)
 
 theorem StateTyped.assignTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value} {replacement : ResultType} {value : Value}
@@ -17510,23 +17294,14 @@ def symbols : Symbols where
     | .existing node => node
     | _ => 0
   binder := id
-  input := id
 
 def base : OriginBase → Checked.Base
   | .binder identity => .binder identity
-  | .input identity => .input identity
 
 def address (origin : Origin) : Checked.Address := ⟨base origin.base, origin.fields⟩
 
-def target (source : Grounded.Context) (entry : SourceLoan × Nat) : Checked.Address :=
-  match entry.1.target.base with
-  | .binder _ => address entry.1.target
-  | .input identity => match source.storage (.input identity) with
-    | some _ => address entry.1.target
-    | none => ⟨.referent (.existing entry.2), []⟩
-
-def loan (source : Grounded.Context) (entry : SourceLoan × Nat) : Checked.Loan :=
-  ⟨.existing entry.2, target source entry, entry.1.referent, entry.1.mode,
+def loan (entry : SourceLoan × Nat) : Checked.Loan :=
+  ⟨.existing entry.2, address entry.1.target, entry.1.referent, entry.1.mode,
     entry.1.parent.map Checked.Reference.existing⟩
 
 
@@ -17534,13 +17309,12 @@ def ended (entry : SourceLoan × Nat) : Checked.Payload :=
   if entry.1.own then .plain
   else .reference (.existing entry.2) entry.1.referent entry.1.mode
 
-/-- Root identity is structural: binder and input namespaces are disjoint. -/
+/-- Schema owners use canonical root identities, never argument identities. -/
 def owner : OriginBase → Nat
-  | .binder identity => 2 * identity
-  | .input identity => 2 * identity + 1
+  | .binder identity => identity
 
 def symbolSupply (source : Grounded.Context) : Nat :=
-  2 * (source.nextBinder + source.inputCount) + 1
+  source.nextBinder
 
 
 mutual
@@ -17606,9 +17380,8 @@ def Cells.context {program : Program} {source : Grounded.Context}
   names := source.names
   storage := fun checked => match checked with
     | .binder identity => (source.storage (.binder identity)).map (cells.slot (.binder identity))
-    | .input identity => (source.storage (.input identity)).map (cells.slot (.input identity))
     | .referent _ => none
-  loans := source.loans.zipIdx.map (loan source)
+  loans := source.loans.zipIdx.map loan
   ended := source.loans.zipIdx.map ended
   nextBinder := source.nextBinder
   nextSymbol := symbolSupply source
@@ -17653,16 +17426,6 @@ theorem Cells.notEnded {program : Program} {source : Grounded.Context} (cells : 
     symbols.address source (address origin) = some origin := by
   cases origin with | mk origin fields => cases origin <;> rfl
 
-theorem target_meaning {source : Grounded.Context} {entry : SourceLoan × Nat}
-    (found : source.loans[entry.2]? = some entry.1) :
-    symbols.address source (target source entry) = some entry.1.target := by
-  unfold target
-  cases targetBase : entry.1.target.base with
-  | binder identity => exact address_meaning source entry.1.target
-  | input identity =>
-    cases stored : source.storage (.input identity) with
-    | some slot => simpa only [stored] using address_meaning source entry.1.target
-    | none => simp [stored, Symbols.address, symbols, found, Origin.extend]
 
 
 theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : Cells program source) :
@@ -17678,20 +17441,20 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
       cases equal
       cases mapped
       exact ⟨actual, found, rfl, rfl, rfl, rfl, (cells.produced _ _ found).meaning⟩
-    | input identity =>
-      obtain ⟨actual, found, equal⟩ := Option.map_eq_some_iff.mp stored
-      cases equal
-      cases mapped
-      exact ⟨actual, found, rfl, rfl, rfl, rfl, (cells.produced _ _ found).meaning⟩
-  views := by intro reference slot needed stored; cases stored
-  viewMasks := by intro reference slot target root needed stored; cases stored
+  noOpaqueCells := fun _ => rfl
+  rootCoverage := by
+    intro binder slot stored
+    refine ⟨binder, cells.slot (.binder binder) slot, ?_, rfl⟩
+    change (source.storage (.binder binder)).map (cells.slot (.binder binder)) = _
+    simp only [stored, Option.map_some]
+  rootIdentity := by intro first second _ _ same; exact same
   loans := by
     intro imported member
-    change imported ∈ source.loans.zipIdx.map (loan source) at member
-    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan source)).mp member
+    change imported ∈ source.loans.zipIdx.map loan at member
+    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan)).mp member
     subst imported
     have found := List.mem_zipIdx_iff_getElem?.mp indexed
-    refine ⟨entry.1, found, target_meaning found, rfl, rfl, ?_, ?_⟩
+    refine ⟨entry.1, found, address_meaning source entry.1.target, rfl, rfl, ?_, ?_⟩
     · simp [loan, symbols, Option.map_map, Function.comp_def]
     · exact (cells.notEnded found).symm
 
@@ -17705,8 +17468,8 @@ def Cells.point {program : Program} {source : Grounded.Context} (cells : Cells p
 
 theorem Cells.loan_found {program : Program} {source : Grounded.Context} (cells : Cells program source)
     {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual) :
-    cells.context.loan (.existing node) = some (loan source (actual, node)) := by
-  have member : loan source (actual, node) ∈ cells.context.loans :=
+    cells.context.loan (.existing node) = some (loan (actual, node)) := by
+  have member : loan (actual, node) ∈ cells.context.loans :=
     List.mem_map.mpr ⟨_, List.mem_zipIdx_iff_getElem?.mpr found, rfl⟩
   cases selected : cells.context.loan (.existing node) with
   | none =>
@@ -17715,8 +17478,8 @@ theorem Cells.loan_found {program : Program} {source : Grounded.Context} (cells 
   | some imported =>
     have same := List.find?_some selected
     have included := List.mem_of_find?_eq_some selected
-    change imported ∈ source.loans.zipIdx.map (loan source) at included
-    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan source)).mp included
+    change imported ∈ source.loans.zipIdx.map loan at included
+    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan)).mp included
     subst imported
     have identity : entry.2 = node := by simpa [loan] using same
     have actualFound := List.mem_zipIdx_iff_getElem?.mp indexed
@@ -17731,19 +17494,16 @@ theorem Cells.loan_found {program : Program} {source : Grounded.Context} (cells 
 
 theorem Cells.referenceTarget {program : Program} {source : Grounded.Context} (cells : Cells program source)
     {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual) :
-    cells.context.referenceTarget (.existing node) = target source (actual, node) := by
+    cells.context.referenceTarget (.existing node) = address actual.target := by
   simp only [Checked.Context.referenceTarget, cells.loan_found found]
   rfl
 
 theorem Cells.no_opaque_target {program : Program} {source : Grounded.Context} (cells : Cells program source)
     {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual)
-    {slot : Grounded.Slot} (stored : source.storage actual.target.base = some slot)
     (reference : Checked.Reference) (fields : List Nat) :
     cells.context.referenceTarget (.existing node) ≠ ⟨.referent reference, fields⟩ := by
   rw [cells.referenceTarget found]
-  cases targetBase : actual.target.base <;> simp [target, address, base, targetBase] at stored ⊢
-  rw [stored]
-  simp
+  cases targetBase : actual.target.base <;> simp [address, base, targetBase]
 
 
 mutual
@@ -17871,9 +17631,6 @@ theorem cellPayload_exists {program : Program} {interpretation : Interpretation}
   | binder identity =>
     obtain ⟨value, _, resident, related⟩ := store.cells identity slot found
     exact payloadProduced_of_resident resident (store.source.allocated identity slot found).2.2.2 related
-  | input identity =>
-    obtain ⟨value, _, resident, related⟩ := store.inputCells identity slot found
-    exact payloadProduced_of_resident resident (store.source.inputSlots identity slot found).2.2 related
 
 /-- Only the current resident store is consumed. No evaluator, later execution,
 future callback, or hypothetical source world is used to import its products. -/
@@ -17899,6 +17656,81 @@ noncomputable def pointOfStore {program : Program} {interpretation : Interpretat
     {source : Grounded.Context} {environment : Environment}
     (store : StoreTyped program interpretation source environment) :
     (pointOfStore store).source rfl = source := rfl
+/-- External entry checks the declared canonical root type and mask against the
+actual resident. Value shape alone does not establish this typing evidence.
+Names may omit hidden roots; loans may alias any canonical root/path. All
+resource obligations concern the current state, including the actual pending
+values and ended loan history, not a future evaluation. -/
+structure CanonicalEntry (program : Program) (interpretation : Interpretation)
+    (source : Grounded.Context) (pendingPayloads : List SourcePayload)
+    (environment : Environment) (pending : List Value) : Prop where
+  sourceValid : source.WellFormed program
+  runtimeValid : environment.Valid
+  names : environment.bindings = source.names.map (fun entry => (entry.1, interpretation.binder entry.2))
+  roots : ∀ binder slot, source.storage (.binder binder) = some slot →
+    ∃ value, environment.store (interpretation.binder binder) = some value ∧
+      SlotTyped program value slot.toBindingType ∧ slot.Corresponds interpretation value
+  binderBound : ∀ binder, source.MentionsBinder binder → interpretation.binder binder < environment.nextRoot
+  binderDistinct : ∀ first second, source.MentionsBinder first → source.MentionsBinder second →
+    interpretation.binder first = interpretation.binder second → first = second
+  nodeOrder : ∀ first second, first < second → second < source.loans.length →
+    interpretation.node first < interpretation.node second
+  records : ∀ (node : Nat) (loan : SourceLoan), source.loans[node]? = some loan →
+    environment.loans[interpretation.node node]? =
+      some ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩
+  activeCoverage : ∀ (node : Nat) (loan : Loan), environment.loans[node]? = some loan → loan.own = true →
+    ∃ sourceNode sourceLoan, source.loans[sourceNode]? = some sourceLoan ∧ interpretation.node sourceNode = node
+  targets : ∀ (node : Nat) (loan : SourceLoan), source.loans[node]? = some loan → loan.own = true →
+    source.Target program loan.target loan.referent ∧ (loan.mode = .shared → source.Ready loan.target)
+  storedHandles : ∀ root value, environment.store root = some value →
+    ∀ path node, value.readIndices path = some (.reference node) → node < environment.loans.length
+  pendingShape : PayloadsCorrespond interpretation.node pendingPayloads pending
+  pendingOwn : ∀ node ∈ payloadNodes pendingPayloads, source.Own node
+  pendingReady : ∀ node ∈ payloadNodes pendingPayloads, source.Restored node
+  observedOwn : source.ObservedOwn program
+  custody : Custody environment pending
+
+/-- Visible resident typing and correspondence are reconstructed from canonical
+root evidence; neither a pre-established StateTyped nor execution is assumed. -/
+theorem CanonicalEntry.stateTyped {program : Program} {interpretation : Interpretation}
+    {source : Grounded.Context} {pendingPayloads : List SourcePayload}
+    {environment : Environment} {pending : List Value}
+    (entry : CanonicalEntry program interpretation source pendingPayloads environment pending) :
+    StateTyped program interpretation source pendingPayloads environment pending := by
+  obtain ⟨residents, slots⟩ := Grounded.Context.reconstruct entry.sourceValid entry.runtimeValid entry.names entry.roots
+  exact {
+    source := entry.sourceValid
+    residents := residents
+    slots := slots
+    cells := entry.roots
+    binderBound := entry.binderBound
+    binderDistinct := entry.binderDistinct
+    nodeOrder := entry.nodeOrder
+    records := entry.records
+    activeCoverage := entry.activeCoverage
+    sourceTargets := entry.targets
+    storeShape := entry.storedHandles
+    heldShape := entry.pendingShape
+    heldOwn := entry.pendingOwn
+    heldReady := entry.pendingReady
+    observedOwn := entry.observedOwn
+    custody := entry.custody }
+
+/-- The executable producer imports the canonical cells justified by entry
+root typing. This is metadata only: it allocates no runtime root or loan. -/
+noncomputable def CanonicalEntry.point {program : Program} {interpretation : Interpretation}
+    {source : Grounded.Context} {pendingPayloads : List SourcePayload}
+    {environment : Environment} {pending : List Value}
+    (entry : CanonicalEntry program interpretation source pendingPayloads environment pending) :
+    Point program .executable := pointOfStore entry.stateTyped.toStoreTyped
+
+@[simp] theorem CanonicalEntry.point_source {program : Program} {interpretation : Interpretation}
+    {source : Grounded.Context} {pendingPayloads : List SourcePayload}
+    {environment : Environment} {pending : List Value}
+    (entry : CanonicalEntry program interpretation source pendingPayloads environment pending) :
+    entry.point.source rfl = source := rfl
+
+
 
 theorem PayloadProduced.plain_knowledge {program : Program} {state : Initialization}
     {ownerId : Nat} {path : List Checked.Component}
@@ -17939,6 +17771,167 @@ theorem Cells.storage {program : Program} {source : Grounded.Context} (cells : C
       (source.storage origin).map (cells.slot origin) := by
   cases origin <;> rfl
 
+theorem PayloadsProduced.getElem {program : Program} {ownerId : Nat}
+    {paths : Nat → List Checked.Component} {states : Nat → Initialization}
+    {sources : List SourcePayload} {types : List Ty} {checks : List Checked.Payload}
+    (produced : PayloadsProduced program ownerId paths states sources types checks)
+    {index : Nat} {source : SourcePayload} (found : sources[index]? = some source) :
+    ∃ type checked, types[index]? = some type ∧ checks[index]? = some checked ∧
+      PayloadProduced program ownerId (paths index) (states index) source type checked := by
+  induction index generalizing paths states sources types checks with
+  | zero =>
+    cases produced with
+    | nil => simp at found
+    | cons first rest =>
+      cases Option.some.inj found
+      exact ⟨_, _, rfl, rfl, first⟩
+  | succ index ih =>
+    cases produced with
+    | nil => simp at found
+    | cons first rest => exact ih rest found
+
+/-- Import preserves the exact selected handle through arbitrary nested source
+products. It does not replace the source target with a guessed symbolic owner. -/
+theorem PayloadProduced.selectReference {program : Program} {home : Module}
+    {type referent : Ty} {mode : BorrowMode} {keys : List FieldKey} {indices : List Nat}
+    (path : PathType program home type keys indices (.reference referent mode))
+    {ownerId : Nat} {stem : List Checked.Component} {state : Initialization}
+    {source : SourcePayload} {checked : Checked.Payload}
+    (produced : PayloadProduced program ownerId stem state source type checked)
+    {node : Nat} (selected : source.select indices = some (.reference node)) :
+    Nonempty (Checked.Payload.Select program home checked type keys indices
+      (.reference (.existing node) referent mode) (.reference referent mode)) := by
+  induction keys generalizing type indices ownerId stem state source checked with
+  | nil =>
+    cases path
+    cases produced with
+    | plain => simp [SourcePayload.select] at selected
+    | reference =>
+      simp only [SourcePayload.select, Option.some.injEq, SourcePayload.reference.injEq] at selected
+      subst node
+      exact ⟨.here _ _⟩
+    | aggregate => simp [SourcePayload.select] at selected
+  | cons key keys ih =>
+    cases path with
+    | cons projection rest =>
+      cases produced with
+      | plain => simp [SourcePayload.select] at selected
+      | reference => simp [SourcePayload.select] at selected
+      | aggregate source shape fields =>
+        simp only [SourcePayload.select] at selected
+        obtain ⟨child, found, selected⟩ := Option.bind_eq_some_iff.mp selected
+        obtain ⟨type, checked, typeFound, checkedFound, produced⟩ := fields.getElem found
+        have same := Option.some.inj (typeFound.symm.trans (projection.headType shape).2)
+        subst type
+        obtain ⟨selection⟩ := ih rest produced selected
+        exact ⟨.aggregate projection checkedFound selection⟩
+
+theorem Cells.bindings {program : Program} {source : Grounded.Context}
+    (cells : Cells program source) (valid : source.WellFormed program) :
+    cells.context.bindings = source.bindings.map
+      (fun entry => (entry.1, cells.slot (.binder entry.2.binder) entry.2)) := by
+  unfold Checked.Context.bindings Grounded.Context.bindings
+  simp only [Cells.context]
+  rw [List.map_filterMap]
+  apply Grounded.Context.filterMap_congr_mem
+  intro entry _
+  cases stored : source.storage (.binder entry.2) with
+  | none => simp
+  | some slot => simp [(valid.allocated entry.2 slot stored).1]
+
+theorem Cells.lookup_imported {program : Program} {source : Grounded.Context}
+    (cells : Cells program source) (valid : source.WellFormed program)
+    {name : String} {slot : Grounded.Slot} (found : lookup name source.bindings = some slot) :
+    lookup name cells.context.bindings = some (cells.slot (.binder slot.binder) slot) := by
+  rw [cells.bindings valid]
+  have mapped : ∀ bindings : List (String × Grounded.Slot), lookup name bindings = some slot →
+      lookup name (bindings.map (fun entry => (entry.1, cells.slot (.binder entry.2.binder) entry.2))) =
+        some (cells.slot (.binder slot.binder) slot) := by
+    intro bindings
+    induction bindings with
+    | nil => intro found; simp [lookup] at found
+    | cons entry rest ih =>
+      intro found
+      simp only [lookup, List.map_cons] at found ⊢
+      split at found
+      · rename_i same
+        cases Option.some.inj found
+        simp [same]
+      · rename_i different
+        simpa [different] using ih found
+  exact mapped _ found
+
+/-- An actual selected imported handle constructs its canonical lens. The target
+and current referent mask are derived from its existing loan and declared root,
+not accepted as a new canonical-target premise. Nested carriers and masked
+unique referents are admitted; no target-alias injectivity is needed. -/
+theorem Cells.canonicalView {program : Program} {home : Module} {source : Grounded.Context}
+    (cells : Cells program source) {interpretation : Interpretation} {environment : Environment}
+    (store : StoreTyped program interpretation source environment)
+    {place : Place} {slot : Grounded.Slot} {indices : List Nat} {state : Initialization}
+    {node : Nat} {actual : SourceLoan}
+    (found : lookup place.root source.bindings = some slot)
+    (access : slot.initialization.Access indices state) (complete : state.Complete)
+    (path : PathType program home slot.type place.fields indices (.reference actual.referent actual.mode))
+    (selected : slot.payload.select indices = some (.reference node))
+    (loanFound : source.loans[node]? = some actual) (own : actual.own = true) :
+    Nonempty (CanonicalView program home cells.point place) := by
+  have slotStored := store.source.member_stored _ (lookup_member found)
+  obtain ⟨selection⟩ := (cells.produced _ _ slotStored).selectReference path selected
+  have target := (store.sourceTargets node actual loanFound own).1
+  cases base : actual.target.base with
+  | binder binder =>
+    obtain ⟨root, stored, canonical, mask, masked⟩ := target
+    refine ⟨{
+      symbol := .existing node
+      referent := actual.referent
+      mode := actual.mode
+      selection := {
+        slot := cells.slot (.binder slot.binder) slot
+        indices := indices
+        state := state
+        found := cells.lookup_imported store.source found
+        access := access
+        complete := complete
+        selected := selection
+        typed := .reference .. }
+      available := (cells.notEnded loanFound).mpr own
+      binder := binder
+      fields := actual.target.fields
+      root := cells.slot (.binder binder) root
+      state := mask
+      target := ?_
+      stored := ?_
+      path := canonical
+      mask := masked }⟩
+    · change cells.context.referenceTarget (.existing node) = _
+      rw [cells.referenceTarget loanFound]
+      simp [address, base, SourceImport.base]
+    · change (source.storage (.binder binder)).map (cells.slot (.binder binder)) = _
+      simp only [← base, stored, Option.map_some]
+
+
+/-- The canonical external entry supplies an executable view directly from the
+actual selected carrier. The constructed view neither allocates nor redirects
+any checking or runtime identity; its erasure retains the canonical branch. -/
+theorem CanonicalEntry.view {program : Program} {home : Module} {interpretation : Interpretation}
+    {source : Grounded.Context} {pendingPayloads : List SourcePayload}
+    {environment : Environment} {pending : List Value}
+    (entry : CanonicalEntry program interpretation source pendingPayloads environment pending)
+    {place : Place} {slot : Grounded.Slot} {indices : List Nat} {state : Initialization}
+    {node : Nat} {actual : SourceLoan}
+    (found : lookup place.root source.bindings = some slot)
+    (access : slot.initialization.Access indices state) (complete : state.Complete)
+    (path : PathType program home slot.type place.fields indices (.reference actual.referent actual.mode))
+    (selected : slot.payload.select indices = some (.reference node))
+    (loanFound : source.loans[node]? = some actual) (own : actual.own = true) :
+    ∃ view : CanonicalView program home entry.point place,
+      (ViewStep.canonical view).erase = ViewStep.canonical view.erase := by
+  obtain ⟨view⟩ := (Cells.ofStoreTyped entry.stateTyped.toStoreTyped).canonicalView
+    entry.stateTyped.toStoreTyped found access complete path selected loanFound own
+  exact ⟨view, rfl⟩
+
+
 theorem Cells.resident_plain {program : Program} {source : Grounded.Context} (cells : Cells program source)
     {origin : OriginBase} {slot : Grounded.Slot} (found : source.storage origin = some slot)
     (plain : slot.payload = .plain) :
@@ -17956,68 +17949,21 @@ theorem Cells.erased_plain {program : Program} {source : Grounded.Context} (cell
 
 theorem mixed_plain_target_cell {program : Program} {source : Grounded.Context}
     {target : Origin} {type : Ty} (payload : source.TargetPayload program target type .plain)
-    (mixed : ¬ ReferenceFreeLayout program.target program.data type) :
+    (_mixed : ¬ ReferenceFreeLayout program.target program.data type) :
     ∃ slot, source.storage target.base = some slot ∧ CanonicalPath program slot.type target.fields type ∧
       slot.payload.select target.fields = some .plain := by
   cases payload with
   | cell stored path selected => exact ⟨_, stored, path, selected⟩
-  | externalPlain _ free => exact False.elim (mixed free)
 
 
-theorem target_stored {source : Grounded.Context} {entry : SourceLoan × Nat} {slot : Grounded.Slot}
-    (stored : source.storage entry.1.target.base = some slot) :
-    target source entry = address entry.1.target := by
-  cases targetBase : entry.1.target.base with
-  | binder identity => simp [target, targetBase]
-  | input identity =>
-    simp only [targetBase] at stored
-    simp [target, targetBase, stored]
-
-theorem Cells.referenceTarget_stored {program : Program} {source : Grounded.Context}
-    (cells : Cells program source) {node : Nat} {actual : SourceLoan}
-    (found : source.loans[node]? = some actual) {slot : Grounded.Slot}
-    (stored : source.storage actual.target.base = some slot) :
-    cells.context.referenceTarget (.existing node) = address actual.target :=
-  (cells.referenceTarget found).trans (target_stored stored)
 
 theorem Cells.referenceTarget_source {program : Program} {source : Grounded.Context}
     (cells : Cells program source) {node : Nat} {actual : SourceLoan}
     (found : source.loans[node]? = some actual) :
     symbols.address source (cells.context.referenceTarget (.existing node)) = some actual.target := by
   rw [cells.referenceTarget found]
-  exact target_meaning found
+  exact address_meaning source actual.target
 
-theorem target_opaque_inv {source : Grounded.Context} {entry : SourceLoan × Nat}
-    {reference : Checked.Reference} {fields : List Nat}
-    (viewed : target source entry = ⟨.referent reference, fields⟩) :
-    ∃ input, entry.1.target.base = .input input ∧ source.storage (.input input) = none ∧
-      reference = .existing entry.2 ∧ fields = [] := by
-  cases targetBase : entry.1.target.base with
-  | binder identity => simp [target, address, base, targetBase] at viewed
-  | input identity =>
-    cases stored : source.storage (.input identity) with
-    | some slot => simp [target, address, base, targetBase, stored] at viewed
-    | none =>
-      have equal : .existing entry.2 = reference ∧ ([] : List Nat) = fields := by
-        simpa [target, targetBase, stored] using viewed
-      exact ⟨identity, rfl, stored, equal.1.symm, equal.2.symm⟩
-
-/-- Missing external inputs retain opaque checking-only views. Their live
-source authority is shared; concrete target cells never take this fallback.
-Different original external rows are not claimed to have globally unified views. -/
-theorem pointOfStore_opaque_shared {program : Program} {interpretation : Interpretation}
-    {source : Grounded.Context} {environment : Environment}
-    (store : StoreTyped program interpretation source environment)
-    {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual)
-    (own : actual.own = true) {reference : Checked.Reference} {fields : List Nat}
-    (viewed : (pointOfStore store).checked.referenceTarget (.existing node) = ⟨.referent reference, fields⟩) :
-    actual.mode = .shared ∧ ∃ input, actual.target.base = .input input ∧
-      source.storage (.input input) = none ∧ reference = .existing node ∧ fields = [] := by
-  change (Cells.ofStoreTyped store).context.referenceTarget (.existing node) = _ at viewed
-  rw [(Cells.ofStoreTyped store).referenceTarget found] at viewed
-  obtain ⟨input, targetBase, absent, original, empty⟩ := target_opaque_inv viewed
-  exact ⟨(store.sourceTargets node actual found own).2.2 input targetBase,
-    input, targetBase, absent, original, empty⟩
 
 theorem pointOfStore_target {program : Program} {interpretation : Interpretation}
     {source : Grounded.Context} {environment : Environment}
@@ -18028,18 +17974,12 @@ theorem pointOfStore_target {program : Program} {interpretation : Interpretation
     source.Target program actual.target actual.referent :=
   ⟨(Cells.ofStoreTyped store).referenceTarget_source found, (store.sourceTargets node actual found own).1⟩
 
-theorem Cells.referenceTarget_external {program : Program} {source : Grounded.Context}
-    (cells : Cells program source) {node : Nat} {actual : SourceLoan}
-    (found : source.loans[node]? = some actual) {input : Nat}
-    (external : actual.target.base = .input input) (absent : source.storage (.input input) = none) :
-    cells.context.referenceTarget (.existing node) = ⟨.referent (.existing node), []⟩ := by
-  rw [cells.referenceTarget found]
-  simp [target, external, absent]
 
 
 theorem owner_injective {first second : OriginBase} (same : owner first = owner second) : first = second := by
-  cases first <;> cases second <;> simp only [owner] at same
-  all_goals first | congr 1; omega | omega
+  cases first
+  cases second
+  exact congrArg OriginBase.binder same
 
 theorem owner_lt_supply {program : Program} {source : Grounded.Context}
     (valid : source.WellFormed program) {origin : OriginBase} {slot : Grounded.Slot}
@@ -18047,10 +17987,6 @@ theorem owner_lt_supply {program : Program} {source : Grounded.Context}
   cases origin with
   | binder identity =>
     have bound := (valid.allocated identity slot found).2.1
-    simp only [owner, symbolSupply]
-    omega
-  | input identity =>
-    have bound := (valid.inputSlots identity slot found).1
     simp only [owner, symbolSupply]
     omega
 
@@ -18323,7 +18259,7 @@ namespace Grounded
 set_option autoImplicit false
 variable {program : Program}
 
-def Interpretation.empty : Interpretation := ⟨id, fun root => ⟨root, []⟩, id⟩
+def Interpretation.empty : Interpretation := ⟨id, id⟩
 
 theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
  refine {
@@ -18331,16 +18267,12 @@ theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
    residents := ⟨.empty, [], .nil, .nil⟩
    slots := .nil
    cells := by intro binder slot stored; cases stored
-   inputCells := by intro input slot stored; cases stored
    binderBound := ?_
    binderDistinct := ?_
-   inputBound := ?_
-   inputApart := ?_
    nodeOrder := ?_
    records := ?_
    activeCoverage := ?_
    sourceTargets := by intro node loan found; simp [Context.empty] at found
-   inputTargets := by intro node loan found; simp [Context.empty] at found
    storeShape := by intro root value found; cases found
    heldShape := .nil
    heldOwn := by intro node member; cases member
@@ -18353,8 +18285,6 @@ theorem StateTyped.empty : StateTyped program .empty .empty [] .empty [] := by
    · cases stored
    · simp [Context.empty] at found
  · intro first second _ _ same; exact same
- · intro input bound; exact False.elim (Nat.not_lt_zero _ bound)
- · intro binder input _ bound; exact False.elim (Nat.not_lt_zero _ bound)
  · intro first second _ bound; exact False.elim (Nat.not_lt_zero _ bound)
  · intro node loan found; simp [Context.empty] at found
  · intro node loan found; simp [Environment.empty] at found
@@ -18385,6 +18315,27 @@ theorem imported_correctness {home : Module} {source : Grounded.Context}
       ∀ other otherFinal, Evaluates program environment ⟨expression, plan⟩ other otherFinal →
         other = value ∧ otherFinal = final :=
   correctness admitted state
+
+/-- General canonical external entry derives the initial state from declared
+root typing and current loan/custody evidence, then runs the same admitted Core
+with exact pending residents. No normalization or evaluation premise is used. -/
+theorem canonical_entry_correctness {home : Module} {source : Grounded.Context}
+    {interpretation : Interpretation} {environment : Environment}
+    {held : List (Payload .executable)} {values : List Value}
+    (entry : SourceImport.CanonicalEntry program interpretation source (sourcePayloads held rfl) environment values)
+    {after : Point program .executable} {expression : Expr} {result : Result .executable}
+    {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program .executable home entry.point held expression result after plan expected) :
+    ∃ value final last, Evaluates program environment ⟨expression, plan⟩ value final ∧
+      ResultTyped program last (after.source rfl) (result.source rfl) value ∧
+      StateTyped program last (after.source rfl) (sourcePayloads held rfl ++ [result.payload.source rfl])
+        final (values ++ [value]) ∧
+      StateProgress source (after.source rfl) environment final interpretation last ∧
+      environment.Evolution final ∧ final.ResultUsable value ∧
+      ∀ other otherFinal, Evaluates program environment ⟨expression, plan⟩ other otherFinal →
+        other = value ∧ otherFinal = final :=
+  imported_correctness entry.stateTyped admitted
+
 
 /-- Reference-free syntax and declarations preserve empty loan history. Agreement
 transports the exact same Core and result through the sole evaluator; it does not
@@ -18437,8 +18388,8 @@ theorem correctness_noDangling {home : Module} {before after : Point program .ex
   exact ⟨value, final, last, evaluated, resident, finalTyped, usable,
     fun _ _ found own => finalTyped.toStoreTyped.noDangling found own⟩
 
-/-- Canonical root-to-referent paths cover active binder targets, including
-masked unique targets. External opaque shared targets are not fabricated cells. -/
+/-- Canonical root-to-referent paths cover every active target, including hidden
+external roots and masked unique targets. -/
 theorem correctness_canonicalTargets {home : Module} {before after : Point program .executable}
     {held : List (Payload .executable)} {expression : Expr} {result : Result .executable}
     {plan : CorePlan} {expected : Option Ty}
@@ -18500,16 +18451,6 @@ theorem state_targetClosure {interpretation : Interpretation} {context : Grounde
         simpa [Environment.at, Interpretation.origin, base, rootStored] using raw
       obtain ⟨payload, selectedPayload, relatedPayload⟩ := related.readIndices selected
       exact ⟨payload, .cell (by simpa [base] using stored) canonical selectedPayload, relatedPayload⟩
-    | input input =>
-      obtain ⟨value, read, _, payload, provenance, related⟩ :=
-        state.inputTargets sourceNode sourceLoan sourceFound own input base
-      have same : resident = value := by
-        simp only [Environment.readAddress, raw, Bind.bind, Option.bind_some] at read
-        split at read
-        · exact Option.some.inj read
-        · cases read
-      subst value
-      exact ⟨payload, provenance, related⟩
   obtain ⟨payload, provenance, related⟩ := payload
   obtain ⟨identity, occurrence, same⟩ := related.readIndices_reference_iff.mp leaf
   rw [same]
