@@ -210,6 +210,12 @@ read of that exact path fail, including nested paths in already partial trees.
 Its proof needs neither source admission nor an assumed post-state invariant.
 The shared operational readback theorem also supplies typed write preservation;
 the superseded typed-only child-readback proof is removed.
+`Evaluates.move_restore` proves the exact operational round trip: immediately
+writing the extracted resident back to its path recovers the entire original
+environment, including siblings, pre-existing holes and shadowed bindings.
+This is not merely equality of the selected field or preservation of its type.
+It does not grant source-level write permission to an immutable place.
+Whole-root and nested writes now share one path-update implementation.
 Source admission and preservation of partially initialized aggregates remain
 open: the static initialization context still distinguishes only whole-live
 and whole-vacant roots. The operational path generalization alone does not
@@ -361,6 +367,6 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. Current size: 1,747 Lean lines including
+constants reuse ordinary evaluation. Current size: 1,846 Lean lines including
 comments and blanks. The development remains one Lean module; no standalone
 admission checker or speculative proof module is added.

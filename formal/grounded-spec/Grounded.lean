@@ -593,9 +593,7 @@ def readPlace (program : Program) (place : Place) (environment : Environment) : 
 
 def writePlace (program : Program) (place : Place) (replacement : Value) (environment : Environment) : Option Environment := do
   let stored ← lookup place.root environment
-  let updated ← match place.fields with
-    | [] => some replacement
-    | _ :: _ => stored.writePath program place.fields replacement
+  let updated ← stored.writePath program place.fields replacement
   replaceBinding place.root updated environment
 
 def takePlace (program : Program) (place : Place) (environment : Environment) : Option (Value × Environment) := do
@@ -880,18 +878,10 @@ theorem replaceBinding_lookup {α : Type} {name : String} {value : α} {before a
 theorem writePlace_readback {place : Place} {replacement : Value} {before after : Environment}
     (written : writePlace program place replacement before = some after) :
     ∃ parent, lookup place.root after = some parent ∧ parent.readPath program place.fields = some replacement := by
-  cases fields : place.fields with
-  | nil =>
-    simp only [writePlace, fields] at written
-    change ((lookup place.root before).bind (fun _ => replaceBinding place.root replacement before)) = some after at written
-    obtain ⟨stored, found, replaced⟩ := Option.bind_eq_some_iff.mp written
-    exact ⟨replacement, replaceBinding_lookup replaced, rfl⟩
-  | cons key rest =>
-    simp only [writePlace, fields] at written
-    change ((lookup place.root before).bind (fun stored => (stored.writePath program (key :: rest) replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
-    simp only [Option.bind_eq_some_iff] at written
-    obtain ⟨stored, found, updated, changed, replaced⟩ := written
-    exact ⟨updated, replaceBinding_lookup replaced, by simpa only [fields] using Value.writePath_readback changed⟩
+  change ((lookup place.root before).bind (fun stored => (stored.writePath program place.fields replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
+  simp only [Option.bind_eq_some_iff] at written
+  obtain ⟨stored, found, updated, changed, replaced⟩ := written
+  exact ⟨updated, replaceBinding_lookup replaced, Value.writePath_readback changed⟩
 
 theorem takePlace_invalidates {place : Place} {before after : Environment} {value : Value}
     (taken : takePlace program place before = some (value, after)) :
@@ -910,6 +900,115 @@ theorem Evaluates.move_invalidates {place : Place} {before after : Environment} 
     readPlace program place after = none := by
   cases evaluated with
   | move taken => exact takePlace_invalidates taken
+
+theorem Value.replaceChild_inverse {value resident replacement updated : Value} {index : Nat}
+    (found : value.children[index]? = some resident)
+    (written : value.replaceChild index replacement = some updated) :
+    updated.replaceChild index resident = some value := by
+  cases value with
+  | vacant => simp [Value.replaceChild] at written
+  | unit => simp [Value.replaceChild] at written
+  | integer => simp [Value.replaceChild] at written
+  | character => simp [Value.replaceChild] at written
+  | array => simp [Value.replaceChild] at written
+  | tuple head tail =>
+    cases index with
+    | zero =>
+      simp only [Value.children, List.getElem?_cons_zero, Option.some.injEq] at found
+      cases found
+      cases Option.some.inj written
+      rfl
+    | succ index =>
+      change tail[index]? = some resident at found
+      have same : .tuple head (tail.set index replacement) = updated := by
+        simpa [Value.replaceChild, found] using written
+      cases same
+      obtain ⟨bound, selected⟩ := List.getElem?_eq_some_iff.mp found
+      rw [← selected]
+      simp [Value.replaceChild, bound, List.set_set, List.set_getElem_self]
+  | nominal identity tag fields =>
+    change fields[index]? = some resident at found
+    have same : .nominal identity tag (fields.set index replacement) = updated := by
+      simpa [Value.replaceChild, found] using written
+    cases same
+    obtain ⟨bound, selected⟩ := List.getElem?_eq_some_iff.mp found
+    rw [← selected]
+    simp [Value.replaceChild, bound, List.set_set, List.set_getElem_self]
+
+theorem Value.writePath_inverse {value resident replacement updated : Value} {keys : List FieldKey}
+    (read : value.readPath program keys = some resident)
+    (written : value.writePath program keys replacement = some updated) :
+    updated.writePath program keys resident = some value := by
+  induction keys generalizing value updated with
+  | nil =>
+    cases Option.some.inj read
+    cases Option.some.inj written
+    rfl
+  | cons key keys ih =>
+    change ((value.fieldIndex program key).bind (fun index => (value.children[index]?).bind (fun child => (child.writePath program keys replacement).bind (fun next => value.replaceChild index next)))) = some updated at written
+    simp only [Option.bind_eq_some_iff] at written
+    obtain ⟨index, indexed, child, found, next, changed, replaced⟩ := written
+    have childRead : child.readPath program keys = some resident := by
+      simpa [Value.readPath, Value.readField, indexed, found] using read
+    obtain ⟨indexSame, childAfter⟩ := Value.replaceChild_readback (program := program) replaced
+    have parentRestored := Value.replaceChild_inverse found replaced
+    simp [Value.writePath, indexSame, indexed, childAfter, ih childRead changed, parentRestored]
+
+theorem replaceBinding_inverse {α : Type} {name : String} {resident replacement : α}
+    {before after : List (String × α)} (found : lookup name before = some resident)
+    (written : replaceBinding name replacement before = some after) :
+    replaceBinding name resident after = some before := by
+  induction before generalizing after with
+  | nil => simp [lookup] at found
+  | cons entry rest ih =>
+    obtain ⟨key, old⟩ := entry
+    simp only [replaceBinding] at written
+    split at written
+    next same =>
+      subst key
+      simp [lookup] at found
+      cases found
+      cases Option.some.inj written
+      simp [replaceBinding]
+    next different =>
+      have foundRest : lookup name rest = some resident := by
+        simpa [lookup, Ne.symm different] using found
+      obtain ⟨next, changed, same⟩ := Option.map_eq_some_iff.mp written
+      cases same
+      simp [replaceBinding, different, ih foundRest changed]
+
+theorem writePlace_inverse {place : Place} {resident replacement : Value} {before after : Environment}
+    (read : readPlace program place before = some resident)
+    (written : writePlace program place replacement before = some after) :
+    writePlace program place resident after = some before := by
+  change ((lookup place.root before).bind (fun stored => (stored.writePath program place.fields replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
+  simp only [Option.bind_eq_some_iff] at written
+  obtain ⟨stored, found, updated, changed, replaced⟩ := written
+  have rawRead : stored.readPath program place.fields = some resident := by
+    cases selected : stored.readPath program place.fields with
+    | none => simp [readPlace, found, selected] at read
+    | some value =>
+      cases live : value.initialized <;> simp [readPlace, found, selected, live] at read
+      cases read
+      rfl
+  have restored := Value.writePath_inverse rawRead changed
+  have foundAfter := replaceBinding_lookup replaced
+  have bindingRestored := replaceBinding_inverse found replaced
+  simp [writePlace, foundAfter, restored, bindingRestored]
+
+/-- Restoring the extracted value recovers the entire prior environment,
+including siblings, existing holes, and shadowed bindings. -/
+theorem Evaluates.move_restore {place : Place} {before after : Environment} {value : Value}
+    (evaluated : Evaluates program before (.move place) value after) :
+    writePlace program place value after = some before := by
+  cases evaluated with
+  | move taken =>
+    change ((readPlace program place before).bind (fun resident => (writePlace program place .vacant before).bind (fun updated => some (resident, updated)))) = some (value, after) at taken
+    simp only [Option.bind_eq_some_iff, Option.some.injEq, Prod.mk.injEq] at taken
+    obtain ⟨resident, read, updated, written, sameValue, sameAfter⟩ := taken
+    cases sameValue
+    cases sameAfter
+    exact writePlace_inverse read written
 
 theorem ValueHasType.initialized {value : Value} {type : Ty}
     (typed : ValueHasType program value type) : value.initialized = true := by
@@ -1106,7 +1205,7 @@ theorem EnvironmentTyped.writePlace {environment : Environment} {context afterCo
     cases path
     obtain ⟨old, found, _⟩ := typed.lookup selected
     obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := replacement) (.inl ⟨rfl, resident⟩)
-    exact ⟨after, by simp [Grounded.writePlace, found, whole, replaced], afterTyped,
+    exact ⟨after, by simp [Grounded.writePlace, found, whole, Value.writePath, replaced], afterTyped,
       by simp [Grounded.readPlace, lookupAfter, whole, Value.readPath, resident.initialized]⟩
   · obtain ⟨parent, found, parentTyped⟩ := typed.lookupLive selected (available.resolve_left whole)
     obtain ⟨updated, written, updatedTyped, readback⟩ := path.write parentTyped resident
@@ -1125,7 +1224,7 @@ theorem EnvironmentTyped.takePlace {environment : Environment} {context afterCon
       EnvironmentTyped program after afterContext ∧ Grounded.lookup place.root after = some .vacant := by
   obtain ⟨value, found, valueTyped⟩ := typed.lookupLive selected initialized
   obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := .vacant) (.inr ⟨rfl, rfl⟩)
-  exact ⟨value, after, by simp [Grounded.takePlace, Grounded.readPlace, Grounded.writePlace, whole, found, Value.readPath, valueTyped.initialized, replaced], valueTyped, afterTyped, lookupAfter⟩
+  exact ⟨value, after, by simp [Grounded.takePlace, Grounded.readPlace, Grounded.writePlace, whole, found, Value.readPath, Value.writePath, valueTyped.initialized, replaced], valueTyped, afterTyped, lookupAfter⟩
 
 /-- Runtime typing produces the constructor signature consumed by both pattern
 binding and exhaustive dispatch; neither consumer guesses resident types. -/
