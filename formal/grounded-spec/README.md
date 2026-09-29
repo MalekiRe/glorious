@@ -151,8 +151,9 @@ explicit semantic-fidelity and proof-assumption audit.
 decoded character literals, grouping, lexical reads, sequencing, immutable
 bindings with optional type annotations, tuples/projection, fixed-array
 construction, non-generic transparent aliases, structural constants, and
-non-generic finite-inline nominal data over duplicable fields.** Records, tuple
-structs and enum variants retain declaration identity; struct projections check
+non-generic finite-inline nominal data over duplicable fields, and direct
+nonrecursive first-order function calls.** Records, tuple structs and enum
+variants retain declaration identity; struct projections check
 field visibility. The boundary is decoded declarations/expressions to logical
 values. Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
 and 13.1. No previous proof modules are imported. The objective is the full
@@ -205,11 +206,22 @@ field and rejects direct recursive layouts and duplicate record field names.
 Empty arrays remain resident-free but must have valid element types. This also
 repairs the previously unchecked malformed element type of an empty array.
 
+Direct calls select a resolved function identity, check visibility, exact
+argument arity/types and distinct parameter names, and admit the actual body
+in its declaring module. Arguments evaluate in order. Their proved value
+typing constructs the isolated parameter environment; caller locals cannot
+leak into the body. Body admission is a recursive static derivation, not a
+promise of execution: correctness carries both argument and body induction
+hypotheses through actual invocation. Recursive call cycles have no finite
+admission derivation in this subset. Structural constants still exclude calls.
+Computed callees, first-class function values, captures, effects, recursion and
+named-label exits are not included in this direct-call boundary.
+
 Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, calls, mutation, moves, loans and effects
+floating conversion, static strings, mutation, moves, loans and effects
 remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
@@ -235,7 +247,7 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 
 1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
-3. Nonrecursive first-order calls, then structural patterns and branching.
+3. Direct nonrecursive first-order calls: connected; structural patterns and branching next.
 4. Mutable places, initialization, assignment and explicit moves.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references.
@@ -256,8 +268,8 @@ booleans: truth and branching use ordinary library declarations.
 
 At verified checkpoints, review size, duplicated reasoning and unused concepts.
 Simplify where meaning and guarantees are preserved; do not introduce a generic
-framework merely to shorten local proof plumbing. Nominal integration keeps one
-module and groups shared declaration inputs in `Program`, replacing repeated
+framework merely to shorten local proof plumbing. The current 688-line Lean
+module groups shared declaration inputs in `Program`, replacing repeated
 parameters. Tuple and nominal projection now consume one positional typing
 lemma; it was extracted only when the second actual consumer needed it. Arrays
 and constructors reuse constituent evaluation; constants reuse ordinary

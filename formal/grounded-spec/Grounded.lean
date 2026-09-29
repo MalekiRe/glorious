@@ -186,6 +186,7 @@ inductive Expr where
   | constant (name : String)
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
   | field (body : Expr) (key : FieldKey)
+  | call (identity : Nat) (arguments : List Expr)
 /-- This restricts constant syntax, not a second evaluator. Constant dependencies
 are checked by the same typing derivation and use the same evaluation relation. -/
 inductive Structural : Expr → Prop where
@@ -211,6 +212,14 @@ structure ConstantDecl where
 
 abbrev Constants := String → Option ConstantDecl
 
+/-- Direct, noncapturing, effect-free functions; omitted results denote unit. -/
+structure FunctionDecl where
+  home : Module
+  visibility : Visibility := .private
+  parameters : List (String × Ty)
+  result : Ty := .unit
+  body : Expr
+
 /-- One immutable decoded program supplies the facts shared by static and
 dynamic semantics. It carries source declarations, never execution guarantees. -/
 structure Program where
@@ -218,6 +227,7 @@ structure Program where
   aliases : Aliases
   constants : Constants
   data : DataDeclarations
+  functions : Nat → Option FunctionDecl
 variable {program : Program}
 variable {home : Module}
 /-- §7.2: scalar owned use may copy; scalar values may also be discarded.
@@ -308,6 +318,15 @@ inductive HasType (program : Program) : Module → List (String × Ty) → Expr 
       (indexed : schema.index key = some index) (selected : schema.residents[index]? = some field)
       (visible : field.visibility.Allows declaration.home home) :
       HasType program home context (.field body key) field.type
+  | call {home : Module} {context : List (String × Ty)} {identity : Nat}
+      {arguments : List Expr} {declaration : FunctionDecl}
+      (declared : program.functions identity = some declaration)
+      (visible : declaration.visibility.Allows declaration.home home)
+      (distinct : (declaration.parameters.map Prod.fst).Nodup)
+      (discard : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2)
+      (inputs : HasTypes program home context arguments (declaration.parameters.map Prod.snd))
+      (body : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
+      HasType program home context (.call identity arguments) declaration.result
 
 inductive HasTypes (program : Program) : Module → List (String × Ty) → List Expr → List Ty → Prop where
   | nil {home : Module} {context : List (String × Ty)} : HasTypes program home context [] []
@@ -402,6 +421,12 @@ inductive Evaluates (program : Program) : List (String × Value) → Expr → Va
       (structureOnly : declaration.shape = .structure schema)
       (indexed : schema.index key = some index) (selected : values[index]? = some value) :
       Evaluates program environment (.field body key) value
+  | call {environment : List (String × Value)} {identity : Nat} {arguments : List Expr}
+      {declaration : FunctionDecl} {values : List Value} {value : Value}
+      (declared : program.functions identity = some declaration)
+      (inputs : EvaluatesMany program environment arguments values)
+      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value) :
+      Evaluates program environment (.call identity arguments) value
 
 inductive EvaluatesMany (program : Program) : List (String × Value) → List Expr → List Value → Prop where
   | nil {environment : List (String × Value)} : EvaluatesMany program environment [] []
@@ -466,6 +491,32 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       have same := Option.some.inj (otherDeclared.symm.trans declared)
       cases same
       exact unique other otherEval
+  | @call home context identity arguments declaration declared visible distinct discard inputs body inputsIH bodyIH =>
+    obtain ⟨values, inputsEval, inputsTyped, inputsUnique⟩ := inputsIH environment environmentTyped
+    have bindParameters : ∀ (parameters : List (String × Ty)) (values : List Value),
+        ValuesHaveTypes program values (parameters.map Prod.snd) →
+        EnvironmentTyped program (List.zip (parameters.map Prod.fst) values) parameters := by
+      intro parameters
+      induction parameters with
+      | nil =>
+        intro values typed
+        cases typed
+        exact .nil
+      | cons parameter parameters ih =>
+        intro values typed
+        cases typed with
+        | cons headTyped tailTyped => exact .cons headTyped (ih _ tailTyped)
+    obtain ⟨value, bodyEval, valueTyped, bodyUnique⟩ :=
+      bodyIH (bindParameters declaration.parameters values inputsTyped)
+    refine ⟨value, .call declared inputsEval bodyEval, valueTyped, ?_⟩
+    intro other evaluation
+    cases evaluation with
+    | call otherDeclared otherInputs otherBody =>
+      have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
+      cases sameDeclaration
+      have sameInputs := inputsUnique _ otherInputs
+      subst sameInputs
+      exact bodyUnique other otherBody
   | group typed ih =>
     obtain ⟨value, evaluated, valueTyped, unique⟩ := ih environmentTyped
     refine ⟨value, .group evaluated, valueTyped, ?_⟩
