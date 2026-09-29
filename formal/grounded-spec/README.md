@@ -147,38 +147,43 @@ explicit semantic-fidelity and proof-assumption audit.
 
 ## Current boundary
 
-**Completed subset: the closed unit expression, from source AST to logical
-value.** `Grounded.lean` defines just expression/type/value syntax, admission,
-value typing, and big-step evaluation. Its normative basis is language
-specification §§3.4 and 4.1. No previous proof modules are imported.
+**Completed subset: closed unit, explicitly typed fixed-width nonnegative integer
+literals, and decoded character literals, from source AST to logical value.**
+`Grounded.lean` defines their syntax, normative ranges, admission, value typing,
+and big-step evaluation. Normative basis: §§3.2–3.4, 4.1 and 7.2. No previous
+proof modules are imported. The objective is the full specification, not a
+percentage of features; this subset is an intermediate completed boundary.
 
-`Grounded.correctness` proves, for every supported expression, admission and,
-for every admitted typing, existence of a finite evaluation to the unit value,
-result typing, and uniqueness of the evaluation result. Admission is produced
-by the theorem, not assumed inhabited; its rule contains no execution premise.
-There are no intermediate machine states in this big-step model. This result
-establishes total logical evaluation, not small-step machine preservation.
+`Grounded.correctness` proves finite evaluation, result typing and uniqueness
+for every admitted expression. `integer_admission` and `character_admission`
+characterize admission exactly: all valid magnitudes/scalars are admitted and
+all invalid ones are rejected. Admission has no execution premise.
+`unit_agreement` consumes the extended correctness theorem and preserves the
+original unit admission and evaluation meaning.
 
-The only supported AST form is `()`. Grouping, other literals, sequencing,
-bindings, calls, resources, effects and all other constructs are outside this
-subset. Parsing/source authentication, package admission, physical storage,
-allocation failure and compiler realization are not proved. No claim about
-physical allocation follows from this logical unit-value rule.
+Integer types include signed and unsigned 8/16/32/64/128-bit families. Range
+checking uses mathematical integers with no wrapping. Characters exclude
+surrogates and values above U+10FFFF. Parsing, type inference, prefix negation,
+target-size integers, floating conversion, static strings, grouping, sequencing,
+bindings and all other constructs remain outside this subset. There is no
+physical storage, allocation-failure, package-admission or compiler-realization
+claim. Big-step total evaluation is not a small-step machine theorem.
 
-Verification: `lake build` with warnings as errors and implicit variables
-disabled passed. `#print axioms Grounded.correctness` reports no axioms.
-Reproduce from this directory with:
+Verification: strict `lake build` passed; all four exported theorems report no
+axiom dependencies. Reproduce from this directory:
 
 ```sh
 lake build
 lake env lean -DwarningAsError=true -DautoImplicit=false --stdin <<'LEAN'
 import Grounded
 #print axioms Grounded.correctness
+#print axioms Grounded.integer_admission
+#print axioms Grounded.character_admission
+#print axioms Grounded.unit_agreement
 LEAN
 ```
 
-Next: extend this same chain with a simple normative scalar literal family,
-including its validity bounds. Do not introduce primitive booleans: §4.1
-explicitly excludes them; truth and branching use ordinary library declarations.
-Then grow composition through sequencing and immutable bindings, closing each
-extension before advancing. No standalone prerequisite programme is authorized.
+Next: extend the same chain through sequencing and immutable bindings of these
+duplicable values. No primitive booleans: §4.1 explicitly excludes them. Truth
+and branching must use ordinary library declarations when those are supported.
+No standalone prerequisite programme is authorized.
