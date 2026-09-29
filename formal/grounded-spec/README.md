@@ -147,13 +147,13 @@ explicit semantic-fidelity and proof-assumption audit.
 
 ## Current boundary
 
-**Completed subset: unit, explicitly typed fixed-width nonnegative integer and
+**Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, lexical reads, sequencing, immutable
-bindings, arbitrary-arity tuples, and numeric tuple projection over duplicable
-values.** The boundary is decoded expression AST to logical value; names use
-nearest-binder lookup. Normative basis: §§2.3, 3.2–3.4, 4.1–4.2, 5.1, 5.3 and
-7.2–7.3. No previous proof modules are imported. The objective is the full
-specification, not a percentage of features.
+bindings, arbitrary-arity tuples, numeric tuple projection, and fixed-array
+construction over duplicable values.** The boundary is decoded expression AST
+to logical value. Normative basis: §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3, 7.2–7.3
+and 13.1. No previous proof modules are imported. The objective is the full
+specification, not a feature percentage.
 
 `Grounded.correctness` proves finite evaluation, result typing and uniqueness
 for every admitted expression in a typed environment. Initializers execute in
@@ -172,17 +172,20 @@ an in-range runtime selection is not separately assumed. Out-of-range tuple
 projections cannot be admitted. Physical evaluation traces remain outside this
 pure big-step boundary.
 
-Integer types include signed and unsigned 8/16/32/64/128-bit families. Range
-checking uses mathematical integers with no wrapping. Characters exclude
-surrogates and values above U+10FFFF. Parsing, type inference, prefix negation,
-target-size integers, floating conversion, static strings, nominal aggregates,
-arrays, calls, mutation, moves, loans, effects and remaining constructs are open.
+The explicit target supplies its positive pointer width. Signed and unsigned
+fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
+admission, execution and result typing. Integer checking never wraps. Characters
+exclude surrogates and values above U+10FFFF. Array construction reuses the
+existing constituent relations; admission enforces homogeneous residents,
+exact arity and target-representable length. Known-empty arrays are resident-free.
+
+Parsing, inference, prefix negation, floating conversion, static strings, nominal
+data, calls, mutation, moves, loans, effects and remaining constructs are open.
 There is no physical-storage, allocation-failure, package-admission or compiler-
 realization claim. Big-step total evaluation is not a small-step machine theorem.
 
-Verification: strict `lake build` passed. The connected correctness and unit
-agreement proofs use only Lean's `propext`; scalar admission proofs use no axioms.
-Reproduce from this directory:
+Verification: strict `lake build` passed. All exported proofs report only Lean
+standard `propext`. No bypass axioms or admitted proofs. Reproduce here:
 
 ```sh
 lake build
@@ -196,7 +199,33 @@ import Grounded
 LEAN
 ```
 
-Next: connect source admission constructively to the existing execution theorem,
-then grow callable and nominal-value semantics without primitive booleans:
-§4.1 excludes them; truth and branching use ordinary library declarations.
-No standalone prerequisite programme is authorized.
+## Construction order and size reviews
+
+Proceed serially, closing each extension through the same end-to-end theorem:
+
+1. Structural constants and transparent aliases (remaining ordinary values).
+2. Nominal data, constructors, visibility and projection.
+3. Nonrecursive first-order calls, then structural patterns and branching.
+4. Mutable places, initialization, assignment and explicit moves.
+5. Affine/exact-linear ownership, destruction and scope cleanup.
+6. Borrowing, provenance, lifetimes and returned references.
+7. Callables, captures and invocation quantities.
+8. Recursion and finite/infinite execution guarantees.
+9. Labels, nonlocal transfer and proper tail invocation.
+10. Effects, handlers, replay, cancellation and cleanup.
+11. Generics, traits, constraints, inference and static evidence.
+12. Physical representation, allocation/exhaustion and unsafe operations.
+13. Floating-point contracts and authenticated static literal storage.
+14. Source authentication, packages, resolution and elaboration.
+15. Foreign/runtime/ABI and compiler-correctness composition; full normative audit.
+
+This is dependency order, not disconnected workstreams. Move a requirement
+earlier when its current consumer needs it. Do not add a standalone admission
+checker without a present semantic obligation requiring one. No primitive
+booleans: truth and branching use ordinary library declarations.
+
+At verified checkpoints, review size, duplicated reasoning and unused concepts.
+Simplify where meaning and guarantees are preserved; do not introduce a generic
+framework merely to shorten local proof plumbing. Latest review: target widths
+and arrays reuse the existing relations and proof, growing Lean from 350 to 386
+lines including comments/blanks. No extra analysis or proof module was needed.

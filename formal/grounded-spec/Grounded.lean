@@ -2,7 +2,7 @@
 # Target-indexed scalar expressions, immutable composition, tuples and arrays
 
 Normative basis: language specification §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3,
-7.2–7.3 and 13.2 (target-representable array lengths). Integer literals have
+7.2–7.3 and 13.1 (target-representable array lengths). Integer literals have
 a selected type and a decoded nonnegative magnitude; characters a decoded
 scalar number. Local names are decoded identifiers; lookup selects the nearest
 binder. Token decoding, inference, prefix negation, floating conversion, static
