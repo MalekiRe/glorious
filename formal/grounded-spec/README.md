@@ -78,9 +78,27 @@ Allocation must not be assumed successful. Exhaustion must concern the actual
 admitted request and preserve any already executed preparation prefix. Logical
 type conversion must not be silently treated as physical tag identity.
 
-Do not narrow the intended language to make a theorem easy. A connected fragment
-may be an intermediate stage, but state its exact boundary and unsupported
-cases. Never present fragment soundness as whole-language soundness.
+### Simpler semantics first: complete subsets end to end
+
+Start with the simplest faithful subset and complete its semantic proof end to
+end before extending it. This supersedes the older hardest-first construction
+order for this directory. The full language remains the goal.
+
+State the supported syntax, admission rules, execution relation, and both ends
+of the correctness theorem precisely. Exclude unsupported constructs explicitly;
+never give them placeholder behavior. Prove admission is nonvacuous and prove
+all applicable typing, progress, result, resource and lifetime guarantees for
+every admitted program. Progress alone does not imply termination.
+
+Grow the same definitions and general result. Each extension must preserve the
+meaning and guarantees of previously supported programs, with agreement proved
+when representations change. Do not build disposable toy languages or parallel
+fragments for later unification. Completed subset soundness is a legitimate
+milestone, not whole-language completion or compiler correctness.
+
+An AST-to-value theorem does not prove parsing, physical allocation behavior,
+or implementation correctness. Those boundaries must later be established,
+not silently inferred from a logical evaluation theorem.
 
 ## Reusing existing work
 
@@ -129,8 +147,38 @@ explicit semantic-fidelity and proof-assumption audit.
 
 ## Current boundary
 
-Only this governing discipline has been established. No Lean code has been
-copied or introduced here, and no semantic theorem or soundness result is yet
-claimed. The first semantic extension must justify its foundational definitions
-against the normative specification and establish their first connected result;
-there is no pre-approved list of standalone prerequisite lemmas.
+**Completed subset: the closed unit expression, from source AST to logical
+value.** `Grounded.lean` defines just expression/type/value syntax, admission,
+value typing, and big-step evaluation. Its normative basis is language
+specification §§3.4 and 4.1. No previous proof modules are imported.
+
+`Grounded.correctness` proves, for every supported expression, admission and,
+for every admitted typing, existence of a finite evaluation to the unit value,
+result typing, and uniqueness of the evaluation result. Admission is produced
+by the theorem, not assumed inhabited; its rule contains no execution premise.
+There are no intermediate machine states in this big-step model. This result
+establishes total logical evaluation, not small-step machine preservation.
+
+The only supported AST form is `()`. Grouping, other literals, sequencing,
+bindings, calls, resources, effects and all other constructs are outside this
+subset. Parsing/source authentication, package admission, physical storage,
+allocation failure and compiler realization are not proved. No claim about
+physical allocation follows from this logical unit-value rule.
+
+Verification: `lake build` with warnings as errors and implicit variables
+disabled passed. `#print axioms Grounded.correctness` reports no axioms.
+Reproduce from this directory with:
+
+```sh
+lake build
+lake env lean -DwarningAsError=true -DautoImplicit=false --stdin <<'LEAN'
+import Grounded
+#print axioms Grounded.correctness
+LEAN
+```
+
+Next: extend this same chain with a simple normative scalar literal family,
+including its validity bounds. Do not introduce primitive booleans: §4.1
+explicitly excludes them; truth and branching use ordinary library declarations.
+Then grow composition through sequencing and immutable bindings, closing each
+extension before advancing. No standalone prerequisite programme is authorized.
