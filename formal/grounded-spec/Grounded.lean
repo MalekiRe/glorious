@@ -196,6 +196,431 @@ def DataDecl.constructor (declaration : DataDecl) (tag : Option Nat) : Option Fi
 
 abbrev DataDeclarations := Nat → Option DataDecl
 
+end Grounded
+
+namespace Grounded
+set_option autoImplicit false
+
+/-- Coordinates belong to the static, generative producer tree. They are not
+addresses, runtime loan numbers, or lexical lifetime spellings. -/
+inductive ScopeEdge where
+  | invocation (occurrence : Nat)
+  | binding (occurrence : Nat)
+  | clause (occurrence : Nat)
+  deriving DecidableEq
+
+abbrev ScopePath := List ScopeEdge
+
+inductive UseBoundary where
+  | entry | operation | result | cleanup
+  deriving DecidableEq
+
+structure UsePoint where
+  scope : ScopePath
+  occurrence : List Nat
+  boundary : UseBoundary
+  deriving DecidableEq
+
+/-- Lifetime spelling is eliminated by the declaration/type resolver. In
+particular two omitted input occurrences do not denote the same variable. -/
+inductive LifetimeSyntax where
+  | omitted
+  | named (name : String)
+  | «static»
+  deriving DecidableEq
+
+/-- Resolved regions describe static use boundaries, not runtime nodes.
+Finite inferred regions may be empty when a reference is never used. Actual
+uses must separately supply membership at their authoritative producer point. -/
+inductive Region where
+  | «static»
+  | lexical (scope : ScopePath)
+  | uses (points : List UsePoint)
+  | intersection (left right : Region)
+  | union (left right : Region)
+  deriving DecidableEq
+
+def Region.Contains : Region → UsePoint → Prop
+  | .static, _ => True
+  | .lexical scope, point => scope.IsPrefix point.scope
+  | .uses points, point => point ∈ points
+  | .intersection left right, point => left.Contains point ∧ right.Contains point
+  | .union left right, point => left.Contains point ∨ right.Contains point
+
+/-- `'a : 'b`: every use represented by the shorter region is in the longer. -/
+def Region.Outlives (long short : Region) : Prop :=
+  ∀ point, short.Contains point → long.Contains point
+
+theorem Region.Outlives.refl (region : Region) : region.Outlives region := fun _ used => used
+
+theorem Region.Outlives.trans {first second third : Region}
+    (front : first.Outlives second) (back : second.Outlives third) : first.Outlives third :=
+  fun point used => front point (back point used)
+
+theorem Region.static_outlives (region : Region) : Region.static.Outlives region :=
+  fun _ _ => True.intro
+
+theorem Region.lexical_outlives {outer inner : ScopePath} (nested : outer.IsPrefix inner) :
+    (Region.lexical outer).Outlives (.lexical inner) := by
+  intro point used
+  exact nested.trans used
+
+theorem Region.intersection_outlives {first second shorter : Region}
+    (left : first.Outlives shorter) (right : second.Outlives shorter) :
+    (Region.intersection first second).Outlives shorter :=
+  fun point used => ⟨left point used, right point used⟩
+
+theorem Region.outlives_union {long first second : Region}
+    (left : long.Outlives first) (right : long.Outlives second) :
+    long.Outlives (.union first second) := by
+  intro point used
+  exact used.elim (left point) (right point)
+
+/-- Instantiation separates a bound lifetime variable from a callee-local scope.
+Only local coordinates are rebased into the fresh invocation; caller regions
+substituted for bound variables remain exactly the caller's regions. -/
+inductive RegionTerm where
+  | parameter (index : Nat)
+  | «static»
+  | local (scope : ScopePath)
+  | intersection (left right : RegionTerm)
+  | union (left right : RegionTerm)
+  deriving DecidableEq
+
+def RegionTerm.instantiate (parameters : Nat → Region) (invocation : ScopePath) : RegionTerm → Region
+  | .parameter index => parameters index
+  | .static => .static
+  | .local scope => .lexical (invocation ++ scope)
+  | .intersection first second =>
+      .intersection (first.instantiate parameters invocation) (second.instantiate parameters invocation)
+  | .union first second =>
+      .union (first.instantiate parameters invocation) (second.instantiate parameters invocation)
+
+/-- A declaration's result cannot mention callee-local lexical scopes. This
+condition alone grants no provenance or runtime support. -/
+def RegionTerm.Exportable : RegionTerm → Prop
+  | .parameter _ | .static => True
+  | .local _ => False
+  | .intersection first second | .union first second => first.Exportable ∧ second.Exportable
+
+theorem RegionTerm.exportable_instantiation_independent {term : RegionTerm}
+    (exportable : term.Exportable) (parameters : Nat → Region) (first second : ScopePath) :
+    term.instantiate parameters first = term.instantiate parameters second := by
+  induction term with
+  | parameter | «static» => rfl
+  | «local» => exact False.elim exportable
+  | intersection left right ihLeft ihRight =>
+      simp only [RegionTerm.instantiate, ihLeft exportable.1, ihRight exportable.2]
+  | union left right ihLeft ihRight =>
+      simp only [RegionTerm.instantiate, ihLeft exportable.1, ihRight exportable.2]
+
+/-- The fresh child is determined by a producer-owned supply, never by a
+chosen root or by a lifetime spelling. -/
+structure ScopeSupply where
+  current : ScopePath
+  next : Nat
+
+def ScopeSupply.enterCall (supply : ScopeSupply) : ScopePath :=
+  supply.current ++ [.invocation supply.next]
+
+def ScopeSupply.advance (supply : ScopeSupply) : ScopeSupply :=
+  { supply with next := supply.next + 1 }
+
+theorem ScopeSupply.call_fresh (supply : ScopeSupply) :
+    supply.enterCall ≠ supply.advance.enterCall := by
+  intro equal
+  have tail := List.append_cancel_left equal
+  have indices := ScopeEdge.invocation.inj (List.cons.inj tail).1
+  simp only [ScopeSupply.advance] at indices
+  omega
+
+end Grounded
+
+
+namespace Grounded
+set_option autoImplicit false
+
+mutual
+/-- The index is the erased canonical storage shape. Region arguments are part
+of the source type, including nominal instances and invariant unique referents. -/
+inductive QualifiedTy (Region : Type) : Ty → Type where
+  | unit : QualifiedTy Region .unit
+  | integer (type : IntegerType) : QualifiedTy Region (.integer type)
+  | character : QualifiedTy Region .character
+  | tuple {head : Ty} {tail : List Ty}
+      (first : QualifiedTy Region head) (rest : QualifiedTys Region tail) :
+      QualifiedTy Region (.tuple head tail)
+  | array {element : Ty} (item : QualifiedTy Region element) (length : Nat) :
+      QualifiedTy Region (.array element length)
+  | nominal (identity : Nat) (arguments : List Region) : QualifiedTy Region (.nominal identity)
+  | reference {referent : Ty} (region : Region) (item : QualifiedTy Region referent)
+      (mode : BorrowMode := .shared) : QualifiedTy Region (.reference referent mode)
+inductive QualifiedTys (Region : Type) : List Ty → Type where
+  | nil : QualifiedTys Region []
+  | cons {head : Ty} {tail : List Ty}
+      (first : QualifiedTy Region head) (rest : QualifiedTys Region tail) :
+      QualifiedTys Region (head :: tail)
+end
+
+namespace QualifiedTy
+
+def erase {Region : Type} {type : Ty} (_ : QualifiedTy Region type) : Ty := type
+
+mutual
+def map {R S : Type} (f : R → S) {type : Ty} : QualifiedTy R type → QualifiedTy S type
+  | .unit => .unit
+  | .integer type => .integer type
+  | .character => .character
+  | .tuple first rest => .tuple (map f first) (mapList f rest)
+  | .array item length => .array (map f item) length
+  | .nominal identity arguments => .nominal identity (arguments.map f)
+  | .reference region item mode => .reference (f region) (map f item) mode
+def mapList {R S : Type} (f : R → S) {types : List Ty} :
+    QualifiedTys R types → QualifiedTys S types
+  | .nil => .nil
+  | .cons first rest => .cons (map f first) (mapList f rest)
+end
+
+@[simp] theorem erase_map {R S : Type} (f : R → S) {type : Ty}
+    (q : QualifiedTy R type) : (map f q).erase = q.erase := rfl
+
+mutual
+theorem map_id {R : Type} {type : Ty} (q : QualifiedTy R type) : map id q = q := by
+  cases q with
+  | unit | integer | character => rfl
+  | nominal => simp [map]
+  | tuple first rest => simp only [map, map_id first, mapList_id rest]
+  | array item length => simp only [map, map_id item]
+  | reference region item mode => simp only [map, id_eq, map_id item]
+theorem mapList_id {R : Type} {types : List Ty} (qs : QualifiedTys R types) :
+    mapList id qs = qs := by
+  cases qs with
+  | nil => rfl
+  | cons first rest => simp only [mapList, map_id first, mapList_id rest]
+end
+
+mutual
+theorem map_comp {R S U : Type} (f : R → S) (g : S → U) {type : Ty}
+    (q : QualifiedTy R type) : map g (map f q) = map (g ∘ f) q := by
+  cases q with
+  | unit | integer | character => rfl
+  | nominal => simp [map, List.map_map]
+  | tuple first rest => simp only [map, map_comp f g first, mapList_comp f g rest]
+  | array item length => simp only [map, map_comp f g item]
+  | reference region item mode => simp only [map, map_comp f g item, Function.comp_apply]
+theorem mapList_comp {R S U : Type} (f : R → S) (g : S → U) {types : List Ty}
+    (qs : QualifiedTys R types) : mapList g (mapList f qs) = mapList (g ∘ f) qs := by
+  cases qs with
+  | nil => rfl
+  | cons first rest => simp only [mapList, map_comp f g first, mapList_comp f g rest]
+end
+
+/-- Locally bound names and free names have disjoint constructors. -/
+def liftRegionMap {Bound R S : Type} (f : R → S) : Sum Bound R → Sum Bound S
+  | .inl bound => .inl bound
+  | .inr free => .inr (f free)
+
+def mapUnder {Bound R S : Type} (f : R → S) {type : Ty}
+    (q : QualifiedTy (Sum Bound R) type) : QualifiedTy (Sum Bound S) type :=
+  map (liftRegionMap f) q
+
+def instantiate {Bound R : Type} (arguments : Bound → R) {type : Ty}
+    (q : QualifiedTy (Sum Bound R) type) : QualifiedTy R type :=
+  map (Sum.elim arguments id) q
+
+@[simp] theorem lift_bound {Bound R S : Type} (f : R → S) (bound : Bound) :
+    liftRegionMap f (.inl bound) = .inl bound := rfl
+
+@[simp] theorem erase_instantiate {Bound R : Type} (arguments : Bound → R) {type : Ty}
+    (q : QualifiedTy (Sum Bound R) type) : (instantiate arguments q).erase = q.erase := rfl
+
+theorem instantiate_natural {Bound R S : Type} (f : R → S) (arguments : Bound → R)
+    {type : Ty} (q : QualifiedTy (Sum Bound R) type) :
+    map f (instantiate arguments q) = instantiate (f ∘ arguments) (mapUnder f q) := by
+  simp only [instantiate, mapUnder, map_comp]
+  congr 1
+  funext region
+  cases region <;> rfl
+
+abbrev NominalRelation (R : Type) := Nat → List R → List R → Prop
+
+mutual
+/-- Structural view conversion is separate from canonical storage equality.
+The nominal relation is discharged from declarations below, not freely chosen
+by the source producer. Unique referents compare entire qualified trees. -/
+def View {R : Type} (nominal : NominalRelation R) (outlives : R → R → Prop) {type : Ty} :
+    QualifiedTy R type → QualifiedTy R type → Prop
+  | .unit, .unit => True
+  | .integer _, .integer _ => True
+  | .character, .character => True
+  | .tuple first rest, .tuple first' rest' =>
+      View nominal outlives first first' ∧ Views nominal outlives rest rest'
+  | .array item _, .array item' _ => View nominal outlives item item'
+  | .nominal identity arguments, .nominal _ arguments' => nominal identity arguments arguments'
+  | .reference region item .shared, .reference region' item' .shared =>
+      outlives region region' ∧ View nominal outlives item item'
+  | .reference region item .unique, .reference region' item' .unique =>
+      outlives region region' ∧ item = item'
+def Views {R : Type} (nominal : NominalRelation R) (outlives : R → R → Prop) {types : List Ty} :
+    QualifiedTys R types → QualifiedTys R types → Prop
+  | .nil, .nil => True
+  | .cons first rest, .cons first' rest' =>
+      View nominal outlives first first' ∧ Views nominal outlives rest rest'
+end
+
+mutual
+theorem view_mono {R : Type} {first second : NominalRelation R} {outlives : R → R → Prop}
+    (lift : ∀ identity left right, first identity left right → second identity left right)
+    {type : Ty} (a b : QualifiedTy R type) : View first outlives a b → View second outlives a b := by
+  cases a <;> cases b
+  case unit.unit | integer.integer | character.character => exact id
+  case nominal.nominal => exact lift _ _ _
+  case tuple.tuple a as b bs =>
+    exact fun related => ⟨view_mono lift a b related.1, views_mono lift as bs related.2⟩
+  case array.array a length b => exact view_mono lift a b
+  case reference.reference ar a mode br b =>
+    cases mode with
+    | shared => exact fun related => ⟨related.1, view_mono lift a b related.2⟩
+    | unique => exact id
+theorem views_mono {R : Type} {first second : NominalRelation R} {outlives : R → R → Prop}
+    (lift : ∀ identity left right, first identity left right → second identity left right)
+    {types : List Ty} (a b : QualifiedTys R types) : Views first outlives a b → Views second outlives a b := by
+  cases a <;> cases b
+  case nil.nil => exact id
+  case cons.cons a as b bs =>
+    exact fun related => ⟨view_mono lift a b related.1, views_mono lift as bs related.2⟩
+end
+
+mutual
+theorem view_compose {R : Type} {first second third : NominalRelation R} {outlives : R → R → Prop}
+    (nominal : ∀ identity a b c, first identity a b → second identity b c → third identity a c)
+    (trans : ∀ {a b c}, outlives a b → outlives b c → outlives a c)
+    {type : Ty} (a b c : QualifiedTy R type) :
+    View first outlives a b → View second outlives b c → View third outlives a c := by
+  cases a <;> cases b <;> cases c
+  case unit.unit.unit | integer.integer.integer | character.character.character => exact fun _ _ => True.intro
+  case nominal.nominal.nominal => exact nominal _ _ _ _
+  case tuple.tuple.tuple a as b bs c cs =>
+    exact fun ab bc => ⟨view_compose (outlives := outlives) nominal trans a b c ab.1 bc.1,
+      views_compose (outlives := outlives) nominal trans as bs cs ab.2 bc.2⟩
+  case array.array.array a length b c => exact view_compose (outlives := outlives) nominal trans a b c
+  case reference.reference.reference ar a mode br b cr c =>
+    cases mode with
+    | shared => exact fun ab bc => ⟨trans ab.1 bc.1, view_compose (outlives := outlives) nominal trans a b c ab.2 bc.2⟩
+    | unique => exact fun ab bc => ⟨trans ab.1 bc.1, ab.2.trans bc.2⟩
+theorem views_compose {R : Type} {first second third : NominalRelation R} {outlives : R → R → Prop}
+    (nominal : ∀ identity a b c, first identity a b → second identity b c → third identity a c)
+    (trans : ∀ {a b c}, outlives a b → outlives b c → outlives a c)
+    {types : List Ty} (a b c : QualifiedTys R types) :
+    Views first outlives a b → Views second outlives b c → Views third outlives a c := by
+  cases a <;> cases b <;> cases c
+  case nil.nil.nil => exact fun _ _ => True.intro
+  case cons.cons.cons a as b bs c cs =>
+    exact fun ab bc => ⟨view_compose (outlives := outlives) nominal trans a b c ab.1 bc.1,
+      views_compose (outlives := outlives) nominal trans as bs cs ab.2 bc.2⟩
+end
+
+end QualifiedTy
+
+structure QualifiedField (R : Type) where
+  shape : Ty
+  type : QualifiedTy R shape
+  visibility : Visibility := .private
+
+def QualifiedField.erase {R : Type} (field : QualifiedField R) : Field :=
+  ⟨field.shape, field.visibility⟩
+
+inductive QualifiedFields (R : Type) where
+  | tuple (fields : List (QualifiedField R))
+  | record (fields : List (String × QualifiedField R))
+
+def QualifiedFields.residents {R : Type} : QualifiedFields R → List (QualifiedField R)
+  | .tuple fields => fields
+  | .record fields => fields.map Prod.snd
+
+def QualifiedFields.erase {R : Type} : QualifiedFields R → Fields
+  | .tuple fields => .tuple (fields.map QualifiedField.erase)
+  | .record fields => .record (fields.map fun field => (field.1, field.2.erase))
+
+inductive QualifiedDataShape (R : Type) where
+  | «structure» (fields : QualifiedFields R)
+  | enumeration (variants : List (QualifiedFields R))
+
+def QualifiedDataShape.erase {R : Type} : QualifiedDataShape R → DataShape
+  | .structure fields => .structure fields.erase
+  | .enumeration variants => .enumeration (variants.map QualifiedFields.erase)
+
+/-- `none` denotes static; `some i` names the i-th declaration lifetime binder.
+No unchecked index or fallback lifetime can enter a declared field. -/
+structure QualifiedDataDecl where
+  home : Module
+  visibility : Visibility := .private
+  regions : Nat
+  shape : QualifiedDataShape (Option (Fin regions))
+  restriction : Option Principal := none
+
+def QualifiedDataDecl.erase (declaration : QualifiedDataDecl) : DataDecl :=
+  ⟨declaration.home, declaration.visibility, declaration.shape.erase, declaration.restriction⟩
+
+def QualifiedDataDecl.fields (declaration : QualifiedDataDecl) :
+    List (QualifiedField (Option (Fin declaration.regions))) :=
+  match declaration.shape with
+  | .structure fields => fields.residents
+  | .enumeration variants => variants.flatMap QualifiedFields.residents
+
+def QualifiedDataDecl.substitution {R : Type} (declaration : QualifiedDataDecl)
+    (static : R) (arguments : List R) (arity : arguments.length = declaration.regions) :
+    Option (Fin declaration.regions) → R
+  | none => static
+  | some index => arguments[index.val]'(by rw [arity]; exact index.isLt)
+
+abbrev QualifiedDeclarations := Nat → Option QualifiedDataDecl
+
+def QualifiedDeclarations.erase (declarations : QualifiedDeclarations) : DataDeclarations :=
+  fun identity => (declarations identity).map QualifiedDataDecl.erase
+
+/-- One unfolding checks all declared fields, not just the active constructor.
+A recursive nominal occurrence is the only use of the recursive relation. -/
+def NominalViewStep {R : Type} (declarations : QualifiedDeclarations) (static : R)
+    (outlives : R → R → Prop) (relation : QualifiedTy.NominalRelation R) : Prop :=
+  ∀ identity left right, relation identity left right →
+    ∃ declaration, declarations identity = some declaration ∧
+      ∃ leftArity : left.length = declaration.regions,
+      ∃ rightArity : right.length = declaration.regions,
+        ∀ field ∈ declaration.fields,
+          QualifiedTy.View relation outlives
+            (field.type.map (declaration.substitution static left leftArity))
+            (field.type.map (declaration.substitution static right rightArity))
+
+/-- Greatest representation-closed relation. The certificate must justify every
+related instance by its actual declaration. Recursive layouts need no arbitrary
+invariance fallback, and absent declarations cannot authorize conversion. -/
+def NominalView {R : Type} (declarations : QualifiedDeclarations) (static : R)
+    (outlives : R → R → Prop) (identity : Nat) (left right : List R) : Prop :=
+  ∃ relation : QualifiedTy.NominalRelation R,
+    relation identity left right ∧ NominalViewStep declarations static outlives relation
+
+theorem NominalView.unfold {R : Type} {declarations : QualifiedDeclarations} {static : R}
+    {outlives : R → R → Prop} {identity : Nat} {left right : List R}
+    (view : NominalView declarations static outlives identity left right) :
+    ∃ declaration, declarations identity = some declaration ∧
+      ∃ leftArity : left.length = declaration.regions,
+      ∃ rightArity : right.length = declaration.regions,
+        ∀ field ∈ declaration.fields,
+          QualifiedTy.View (NominalView declarations static outlives) outlives
+            (field.type.map (declaration.substitution static left leftArity))
+            (field.type.map (declaration.substitution static right rightArity)) := by
+  obtain ⟨relation, selected, closed⟩ := view
+  obtain ⟨declaration, found, leftArity, rightArity, fields⟩ := closed identity left right selected
+  refine ⟨declaration, found, leftArity, rightArity, ?_⟩
+  intro field member
+  exact QualifiedTy.view_mono (fun _ _ _ related => ⟨relation, related, closed⟩) _ _ (fields field member)
+
+end Grounded
+
+namespace Grounded
+
+
 /-- Inline expansion checks every variant; a reference is a finite handle and
 never expands its referent. Zero-length arrays still check their element layout. -/
 inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop where
@@ -712,13 +1137,508 @@ structure ConstantDecl where
 
 abbrev Constants := String → Option ConstantDecl
 
+
+/-- Only declaration-bound names enter signature resolution. Inferred input
+variables start beyond this range and cannot capture a declared name. -/
+structure LifetimeEnvironment where
+  bindings : List String
+  distinct : bindings.Nodup
+
+def LifetimeEnvironment.count (environment : LifetimeEnvironment) : Nat := environment.bindings.length
+
+private def lifetimeIndex : (names : List String) → String → Option (Fin names.length)
+  | [], _ => none
+  | first :: rest, name =>
+      if first = name then some ⟨0, Nat.succ_pos _⟩
+      else (lifetimeIndex rest name).map Fin.succ
+
+def LifetimeEnvironment.names (environment : LifetimeEnvironment) (name : String) :
+    Option (Fin environment.count) := lifetimeIndex environment.bindings name
+
+inductive ResolvesInputLifetime (environment : LifetimeEnvironment) :
+    Nat → LifetimeSyntax → RegionTerm → Nat → Prop where
+  | omitted (next : Nat) :
+      ResolvesInputLifetime environment next .omitted (.parameter next) (next + 1)
+  | named {next : Nat} {name : String} {index : Fin environment.count}
+      (found : environment.names name = some index) :
+      ResolvesInputLifetime environment next (.named name) (.parameter index.val) next
+  | «static» (next : Nat) : ResolvesInputLifetime environment next .static .static next
+
+inductive ResolvesInputLifetimes (environment : LifetimeEnvironment) :
+    Nat → List LifetimeSyntax → List RegionTerm → Nat → Prop where
+  | nil (next : Nat) : ResolvesInputLifetimes environment next [] [] next
+  | cons {before middle after : Nat} {source : LifetimeSyntax} {sources : List LifetimeSyntax}
+      {region : RegionTerm} {regions : List RegionTerm}
+      (first : ResolvesInputLifetime environment before source region middle)
+      (rest : ResolvesInputLifetimes environment middle sources regions after) :
+      ResolvesInputLifetimes environment before (source :: sources) (region :: regions) after
+
+mutual
+/-- Input elision traverses source type syntax, not runtime payloads. An array
+has one element-type lifetime occurrence regardless of its length. Nominal
+arguments instantiate the declaration's binders without inventing field-local
+lifetimes for each runtime element or active constructor. -/
+inductive ResolvesInputType (environment : LifetimeEnvironment) :
+    Nat → {shape : Ty} → QualifiedTy LifetimeSyntax shape → QualifiedTy RegionTerm shape → Nat → Prop where
+  | unit (next : Nat) : ResolvesInputType environment next .unit .unit next
+  | integer (next : Nat) (type : IntegerType) :
+      ResolvesInputType environment next (.integer type) (.integer type) next
+  | character (next : Nat) : ResolvesInputType environment next .character .character next
+  | tuple {before middle after : Nat} {head : Ty} {tail : List Ty}
+      {first : QualifiedTy LifetimeSyntax head} {rest : QualifiedTys LifetimeSyntax tail}
+      {firstType : QualifiedTy RegionTerm head} {restTypes : QualifiedTys RegionTerm tail}
+      (headResolved : ResolvesInputType environment before first firstType middle)
+      (tailResolved : ResolvesInputTypes environment middle rest restTypes after) :
+      ResolvesInputType environment before (.tuple first rest) (.tuple firstType restTypes) after
+  | array {before after : Nat} {element : Ty} {source : QualifiedTy LifetimeSyntax element}
+      {result : QualifiedTy RegionTerm element} (length : Nat)
+      (elementResolved : ResolvesInputType environment before source result after) :
+      ResolvesInputType environment before (.array source length) (.array result length) after
+  | nominal {before after : Nat} (identity : Nat) {sources : List LifetimeSyntax} {regions : List RegionTerm}
+      (arguments : ResolvesInputLifetimes environment before sources regions after) :
+      ResolvesInputType environment before (.nominal identity sources) (.nominal identity regions) after
+  | reference {before middle after : Nat} {shape : Ty} {lifetime : LifetimeSyntax}
+      {source : QualifiedTy LifetimeSyntax shape} {region : RegionTerm} {result : QualifiedTy RegionTerm shape}
+      (mode : BorrowMode)
+      (outer : ResolvesInputLifetime environment before lifetime region middle)
+      (inner : ResolvesInputType environment middle source result after) :
+      ResolvesInputType environment before (.reference lifetime source mode) (.reference region result mode) after
+inductive ResolvesInputTypes (environment : LifetimeEnvironment) :
+    Nat → {shapes : List Ty} → QualifiedTys LifetimeSyntax shapes → QualifiedTys RegionTerm shapes → Nat → Prop where
+  | nil (next : Nat) : ResolvesInputTypes environment next .nil .nil next
+  | cons {before middle after : Nat} {head : Ty} {tail : List Ty}
+      {first : QualifiedTy LifetimeSyntax head} {rest : QualifiedTys LifetimeSyntax tail}
+      {firstType : QualifiedTy RegionTerm head} {restTypes : QualifiedTys RegionTerm tail}
+      (headResolved : ResolvesInputType environment before first firstType middle)
+      (tailResolved : ResolvesInputTypes environment middle rest restTypes after) :
+      ResolvesInputTypes environment before (.cons first rest) (.cons firstType restTypes) after
+end
+
+theorem ResolvesInputLifetime.monotone {environment : LifetimeEnvironment} {before after : Nat}
+    {source : LifetimeSyntax} {region : RegionTerm}
+    (resolved : ResolvesInputLifetime environment before source region after) : before ≤ after := by
+  cases resolved <;> omega
+
+theorem ResolvesInputLifetimes.monotone {environment : LifetimeEnvironment} {before after : Nat}
+    {source : List LifetimeSyntax} {regions : List RegionTerm}
+    (resolved : ResolvesInputLifetimes environment before source regions after) : before ≤ after := by
+  induction resolved with
+  | nil => exact Nat.le_refl _
+  | cons first _ ih => exact Nat.le_trans first.monotone ih
+
+mutual
+theorem ResolvesInputType.monotone {environment : LifetimeEnvironment} {before after : Nat}
+    {shape : Ty} {source : QualifiedTy LifetimeSyntax shape} {result : QualifiedTy RegionTerm shape}
+    (resolved : ResolvesInputType environment before source result after) : before ≤ after := by
+  cases resolved with
+  | unit | integer | character => exact Nat.le_refl _
+  | tuple first rest => exact Nat.le_trans first.monotone rest.monotone
+  | array _ element => exact element.monotone
+  | nominal _ arguments => exact arguments.monotone
+  | reference _ outer inner => exact Nat.le_trans outer.monotone inner.monotone
+theorem ResolvesInputTypes.monotone {environment : LifetimeEnvironment} {before after : Nat}
+    {shapes : List Ty} {source : QualifiedTys LifetimeSyntax shapes} {result : QualifiedTys RegionTerm shapes}
+    (resolved : ResolvesInputTypes environment before source result after) : before ≤ after := by
+  cases resolved with
+  | nil => exact Nat.le_refl _
+  | cons first rest => exact Nat.le_trans first.monotone rest.monotone
+end
+
+theorem ResolvesInputLifetime.deterministic {environment : LifetimeEnvironment} {before firstAfter secondAfter : Nat}
+    {source : LifetimeSyntax} {first second : RegionTerm}
+    (left : ResolvesInputLifetime environment before source first firstAfter)
+    (right : ResolvesInputLifetime environment before source second secondAfter) :
+    first = second ∧ firstAfter = secondAfter := by
+  cases left with
+  | omitted | «static» => cases right; exact ⟨rfl, rfl⟩
+  | named found =>
+    cases right with
+    | named other => cases Option.some.inj (found.symm.trans other); exact ⟨rfl, rfl⟩
+
+theorem ResolvesInputLifetimes.deterministic {environment : LifetimeEnvironment} {before firstAfter secondAfter : Nat}
+    {source : List LifetimeSyntax} {first second : List RegionTerm}
+    (left : ResolvesInputLifetimes environment before source first firstAfter)
+    (right : ResolvesInputLifetimes environment before source second secondAfter) :
+    first = second ∧ firstAfter = secondAfter := by
+  induction left generalizing second secondAfter with
+  | nil => cases right; exact ⟨rfl, rfl⟩
+  | cons head tail ih =>
+    cases right with
+    | cons otherHead otherTail =>
+      obtain ⟨rfl, rfl⟩ := head.deterministic otherHead
+      obtain ⟨rfl, rfl⟩ := ih otherTail
+      exact ⟨rfl, rfl⟩
+
+mutual
+def QualifiedTy.regions {R : Type} {shape : Ty} : QualifiedTy R shape → List R
+  | .unit | .integer _ | .character => []
+  | .tuple first rest => first.regions ++ rest.regions
+  | .array element _ => element.regions
+  | .nominal _ arguments => arguments
+  | .reference region referent _ => region :: referent.regions
+def QualifiedTys.regions {R : Type} {shapes : List Ty} : QualifiedTys R shapes → List R
+  | .nil => []
+  | .cons first rest => first.regions ++ rest.regions
+end
+
+/-- Repeated occurrences of the same named lifetime are unambiguous. Distinct
+omitted variables never become one candidate through constructor exclusivity. -/
+def UniqueInputLifetime (inputs : List RegionTerm) (region : RegionTerm) : Prop :=
+  region ∈ inputs ∧ ∀ other ∈ inputs, other = region
+
+theorem UniqueInputLifetime.unique {inputs : List RegionTerm} {first second : RegionTerm}
+    (left : UniqueInputLifetime inputs first) (right : UniqueInputLifetime inputs second) : first = second :=
+  right.2 first left.1
+
+inductive ResolvesOutputLifetime (environment : LifetimeEnvironment) (inputs : List RegionTerm) :
+    LifetimeSyntax → RegionTerm → Prop where
+  | omitted {region : RegionTerm} (unambiguous : UniqueInputLifetime inputs region) :
+      ResolvesOutputLifetime environment inputs .omitted region
+  | named {name : String} {index : Fin environment.count} (found : environment.names name = some index) :
+      ResolvesOutputLifetime environment inputs (.named name) (.parameter index.val)
+  | «static» : ResolvesOutputLifetime environment inputs .static .static
+
+theorem ResolvesOutputLifetime.deterministic {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {source : LifetimeSyntax} {first second : RegionTerm}
+    (left : ResolvesOutputLifetime environment inputs source first)
+    (right : ResolvesOutputLifetime environment inputs source second) : first = second := by
+  cases left with
+  | omitted unambiguous => cases right with | omitted other => exact unambiguous.unique other
+  | named found => cases right with | named other => cases Option.some.inj (found.symm.trans other); rfl
+  | «static» => cases right; rfl
+
+
+mutual
+theorem ResolvesInputType.deterministic {environment : LifetimeEnvironment}
+    {before firstAfter secondAfter : Nat} {shape : Ty} {source : QualifiedTy LifetimeSyntax shape}
+    {first second : QualifiedTy RegionTerm shape}
+    (left : ResolvesInputType environment before source first firstAfter)
+    (right : ResolvesInputType environment before source second secondAfter) :
+    first = second ∧ firstAfter = secondAfter := by
+  cases left with
+  | unit | integer | character => cases right; exact ⟨rfl, rfl⟩
+  | tuple head tail =>
+    cases right with
+    | tuple otherHead otherTail =>
+      obtain ⟨rfl, rfl⟩ := head.deterministic otherHead
+      obtain ⟨rfl, rfl⟩ := tail.deterministic otherTail
+      exact ⟨rfl, rfl⟩
+  | array length element =>
+    cases right with
+    | array _ other =>
+      obtain ⟨rfl, rfl⟩ := element.deterministic other
+      exact ⟨rfl, rfl⟩
+  | nominal identity arguments =>
+    cases right with
+    | nominal _ other =>
+      obtain ⟨rfl, rfl⟩ := arguments.deterministic other
+      exact ⟨rfl, rfl⟩
+  | reference mode outer inner =>
+    cases right with
+    | reference _ otherOuter otherInner =>
+      obtain ⟨rfl, rfl⟩ := outer.deterministic otherOuter
+      obtain ⟨rfl, rfl⟩ := inner.deterministic otherInner
+      exact ⟨rfl, rfl⟩
+theorem ResolvesInputTypes.deterministic {environment : LifetimeEnvironment}
+    {before firstAfter secondAfter : Nat} {shapes : List Ty} {source : QualifiedTys LifetimeSyntax shapes}
+    {first second : QualifiedTys RegionTerm shapes}
+    (left : ResolvesInputTypes environment before source first firstAfter)
+    (right : ResolvesInputTypes environment before source second secondAfter) :
+    first = second ∧ firstAfter = secondAfter := by
+  cases left with
+  | nil => cases right; exact ⟨rfl, rfl⟩
+  | cons head tail =>
+    cases right with
+    | cons otherHead otherTail =>
+      obtain ⟨rfl, rfl⟩ := head.deterministic otherHead
+      obtain ⟨rfl, rfl⟩ := tail.deterministic otherTail
+      exact ⟨rfl, rfl⟩
+end
+
+inductive ResolvesOutputLifetimes (environment : LifetimeEnvironment) (inputs : List RegionTerm) :
+    List LifetimeSyntax → List RegionTerm → Prop where
+  | nil : ResolvesOutputLifetimes environment inputs [] []
+  | cons {source : LifetimeSyntax} {sources : List LifetimeSyntax} {region : RegionTerm} {regions : List RegionTerm}
+      (head : ResolvesOutputLifetime environment inputs source region)
+      (tail : ResolvesOutputLifetimes environment inputs sources regions) :
+      ResolvesOutputLifetimes environment inputs (source :: sources) (region :: regions)
+
+mutual
+inductive ResolvesOutputType (environment : LifetimeEnvironment) (inputs : List RegionTerm) :
+    {shape : Ty} → QualifiedTy LifetimeSyntax shape → QualifiedTy RegionTerm shape → Prop where
+  | unit : ResolvesOutputType environment inputs .unit .unit
+  | integer (type : IntegerType) : ResolvesOutputType environment inputs (.integer type) (.integer type)
+  | character : ResolvesOutputType environment inputs .character .character
+  | tuple {head : Ty} {tail : List Ty} {first : QualifiedTy LifetimeSyntax head}
+      {rest : QualifiedTys LifetimeSyntax tail} {firstType : QualifiedTy RegionTerm head}
+      {restTypes : QualifiedTys RegionTerm tail}
+      (headResolved : ResolvesOutputType environment inputs first firstType)
+      (tailResolved : ResolvesOutputTypes environment inputs rest restTypes) :
+      ResolvesOutputType environment inputs (.tuple first rest) (.tuple firstType restTypes)
+  | array {element : Ty} {source : QualifiedTy LifetimeSyntax element} {result : QualifiedTy RegionTerm element}
+      (length : Nat) (elementResolved : ResolvesOutputType environment inputs source result) :
+      ResolvesOutputType environment inputs (.array source length) (.array result length)
+  | nominal (identity : Nat) {sources : List LifetimeSyntax} {regions : List RegionTerm}
+      (arguments : ResolvesOutputLifetimes environment inputs sources regions) :
+      ResolvesOutputType environment inputs (.nominal identity sources) (.nominal identity regions)
+  | reference {shape : Ty} {lifetime : LifetimeSyntax} {source : QualifiedTy LifetimeSyntax shape}
+      {region : RegionTerm} {result : QualifiedTy RegionTerm shape} (mode : BorrowMode)
+      (outer : ResolvesOutputLifetime environment inputs lifetime region)
+      (inner : ResolvesOutputType environment inputs source result) :
+      ResolvesOutputType environment inputs (.reference lifetime source mode) (.reference region result mode)
+inductive ResolvesOutputTypes (environment : LifetimeEnvironment) (inputs : List RegionTerm) :
+    {shapes : List Ty} → QualifiedTys LifetimeSyntax shapes → QualifiedTys RegionTerm shapes → Prop where
+  | nil : ResolvesOutputTypes environment inputs .nil .nil
+  | cons {head : Ty} {tail : List Ty} {first : QualifiedTy LifetimeSyntax head}
+      {rest : QualifiedTys LifetimeSyntax tail} {firstType : QualifiedTy RegionTerm head}
+      {restTypes : QualifiedTys RegionTerm tail}
+      (headResolved : ResolvesOutputType environment inputs first firstType)
+      (tailResolved : ResolvesOutputTypes environment inputs rest restTypes) :
+      ResolvesOutputTypes environment inputs (.cons first rest) (.cons firstType restTypes)
+end
+
+theorem ResolvesOutputLifetimes.deterministic {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {source : List LifetimeSyntax} {first second : List RegionTerm}
+    (left : ResolvesOutputLifetimes environment inputs source first)
+    (right : ResolvesOutputLifetimes environment inputs source second) : first = second := by
+  induction left generalizing second with
+  | nil => cases right; rfl
+  | cons head tail ih =>
+    cases right with
+    | cons otherHead otherTail =>
+      cases head.deterministic otherHead
+      cases ih otherTail
+      rfl
+
+mutual
+theorem ResolvesOutputType.deterministic {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {shape : Ty} {source : QualifiedTy LifetimeSyntax shape} {first second : QualifiedTy RegionTerm shape}
+    (left : ResolvesOutputType environment inputs source first)
+    (right : ResolvesOutputType environment inputs source second) : first = second := by
+  cases left with
+  | unit | integer | character => cases right; rfl
+  | tuple head tail =>
+    cases right with
+    | tuple otherHead otherTail =>
+      cases head.deterministic otherHead
+      cases tail.deterministic otherTail
+      rfl
+  | array length element =>
+    cases right with
+    | array _ other => cases element.deterministic other; rfl
+  | nominal identity arguments =>
+    cases right with
+    | nominal _ other => cases arguments.deterministic other; rfl
+  | reference mode outer inner =>
+    cases right with
+    | reference _ otherOuter otherInner =>
+      cases outer.deterministic otherOuter
+      cases inner.deterministic otherInner
+      rfl
+theorem ResolvesOutputTypes.deterministic {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {shapes : List Ty} {source : QualifiedTys LifetimeSyntax shapes} {first second : QualifiedTys RegionTerm shapes}
+    (left : ResolvesOutputTypes environment inputs source first)
+    (right : ResolvesOutputTypes environment inputs source second) : first = second := by
+  cases left with
+  | nil => cases right; rfl
+  | cons head tail =>
+    cases right with
+    | cons otherHead otherTail =>
+      cases head.deterministic otherHead
+      cases tail.deterministic otherTail
+      rfl
+end
+
+structure QualifiedBindingType (R : Type) where
+  shape : Ty
+  type : QualifiedTy R shape
+  mutable : Bool := false
+  initialization : Initialization := .full
+
+def QualifiedBindingType.erase {R : Type} (binding : QualifiedBindingType R) : BindingType :=
+  ⟨binding.shape, binding.mutable, binding.initialization⟩
+
+structure FunctionSignature where
+  lifetimes : LifetimeEnvironment
+  parameters : List (String × QualifiedBindingType LifetimeSyntax)
+  result : (shape : Ty) × QualifiedTy LifetimeSyntax shape := ⟨.unit, .unit⟩
+
+def qualifiedParameterTypes : (parameters : List (String × QualifiedBindingType LifetimeSyntax)) →
+    QualifiedTys LifetimeSyntax (parameters.map fun parameter => parameter.2.shape)
+  | [] => .nil
+  | parameter :: rest => .cons parameter.2.type (qualifiedParameterTypes rest)
+
+/-- Source signature resolution precedes invocation. The supply starts beyond
+all named binders; result elision uses resolved source lifetimes, never an active
+constructor or the number of runtime loan nodes. -/
+structure ResolvedSignature (signature : FunctionSignature) where
+  inputs : QualifiedTys RegionTerm (signature.parameters.map fun parameter => parameter.2.shape)
+  result : QualifiedTy RegionTerm signature.result.1
+  supply : Nat
+  inputResolution : ResolvesInputTypes signature.lifetimes signature.lifetimes.count
+    (qualifiedParameterTypes signature.parameters) inputs supply
+  resultResolution : ResolvesOutputType signature.lifetimes inputs.regions signature.result.2 result
+
+theorem ResolvedSignature.unique {signature : FunctionSignature} (first second : ResolvedSignature signature) :
+    first = second := by
+  cases first with
+  | mk firstInputs firstResult firstSupply firstResolution firstOutput =>
+    cases second with
+    | mk secondInputs secondResult secondSupply secondResolution secondOutput =>
+      obtain ⟨rfl, rfl⟩ := firstResolution.deterministic secondResolution
+      cases firstOutput.deterministic secondOutput
+      rfl
+
+
+
+/-- Resolved declaration syntax contains only static or in-range formal regions.
+Local scopes and compound semantic regions are introduced by invocation, not by
+an unconstrained signature variable or a missing substitution entry. -/
+def RegionTerm.SignatureBound (count : Nat) : RegionTerm → Prop
+  | .parameter index => index < count
+  | .static => True
+  | .local _ | .intersection _ _ | .union _ _ => False
+
+theorem RegionTerm.SignatureBound.mono {before after : Nat} {region : RegionTerm}
+    (bound : region.SignatureBound before) (larger : before ≤ after) : region.SignatureBound after := by
+  cases region <;> simp_all [SignatureBound] <;> omega
+
+theorem ResolvesInputLifetime.closed {environment : LifetimeEnvironment} {before after : Nat}
+    {source : LifetimeSyntax} {region : RegionTerm}
+    (resolved : ResolvesInputLifetime environment before source region after)
+    (namedBound : environment.count ≤ before) : region.SignatureBound after := by
+  cases resolved with
+  | omitted => exact Nat.lt_succ_self _
+  | @named _ index _ => exact Nat.lt_of_lt_of_le index.isLt namedBound
+  | «static» => trivial
+
+theorem ResolvesInputLifetimes.closed {environment : LifetimeEnvironment} {before after : Nat}
+    {source : List LifetimeSyntax} {regions : List RegionTerm}
+    (resolved : ResolvesInputLifetimes environment before source regions after)
+    (namedBound : environment.count ≤ before) : ∀ region ∈ regions, region.SignatureBound after := by
+  induction resolved with
+  | nil => simp
+  | cons head tail ih =>
+    intro region member
+    rcases List.mem_cons.mp member with equal | member
+    · subst region
+      exact (head.closed namedBound).mono tail.monotone
+    · exact ih (Nat.le_trans namedBound head.monotone) region member
+
+mutual
+theorem ResolvesInputType.closed {environment : LifetimeEnvironment} {before after : Nat}
+    {shape : Ty} {source : QualifiedTy LifetimeSyntax shape} {result : QualifiedTy RegionTerm shape}
+    (resolved : ResolvesInputType environment before source result after)
+    (namedBound : environment.count ≤ before) : ∀ region ∈ result.regions, region.SignatureBound after := by
+  cases resolved with
+  | unit | integer | character => simp [QualifiedTy.regions]
+  | tuple head tail =>
+    intro region member
+    rcases List.mem_append.mp member with member | member
+    · exact (head.closed namedBound region member).mono tail.monotone
+    · exact tail.closed (Nat.le_trans namedBound head.monotone) region member
+  | array length element => exact element.closed namedBound
+  | nominal identity arguments => exact arguments.closed namedBound
+  | reference mode outer inner =>
+    intro region member
+    rcases List.mem_cons.mp member with equal | member
+    · subst region
+      exact (outer.closed namedBound).mono inner.monotone
+    · exact inner.closed (Nat.le_trans namedBound outer.monotone) region member
+theorem ResolvesInputTypes.closed {environment : LifetimeEnvironment} {before after : Nat}
+    {shapes : List Ty} {source : QualifiedTys LifetimeSyntax shapes} {result : QualifiedTys RegionTerm shapes}
+    (resolved : ResolvesInputTypes environment before source result after)
+    (namedBound : environment.count ≤ before) : ∀ region ∈ result.regions, region.SignatureBound after := by
+  cases resolved with
+  | nil => simp [QualifiedTys.regions]
+  | cons head tail =>
+    intro region member
+    rcases List.mem_append.mp member with member | member
+    · exact (head.closed namedBound region member).mono tail.monotone
+    · exact tail.closed (Nat.le_trans namedBound head.monotone) region member
+end
+
+theorem ResolvesOutputLifetime.closed {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {source : LifetimeSyntax} {region : RegionTerm} {count : Nat}
+    (resolved : ResolvesOutputLifetime environment inputs source region)
+    (namedBound : environment.count ≤ count)
+    (inputBound : ∀ input ∈ inputs, input.SignatureBound count) : region.SignatureBound count := by
+  cases resolved with
+  | omitted unambiguous => exact inputBound _ unambiguous.1
+  | @named _ index _ => exact Nat.lt_of_lt_of_le index.isLt namedBound
+  | «static» => trivial
+
+theorem ResolvesOutputLifetimes.closed {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {source : List LifetimeSyntax} {regions : List RegionTerm} {count : Nat}
+    (resolved : ResolvesOutputLifetimes environment inputs source regions)
+    (namedBound : environment.count ≤ count)
+    (inputBound : ∀ input ∈ inputs, input.SignatureBound count) :
+    ∀ region ∈ regions, region.SignatureBound count := by
+  induction resolved with
+  | nil => simp
+  | cons head tail ih =>
+    intro region member
+    rcases List.mem_cons.mp member with equal | member
+    · subst region
+      exact head.closed namedBound inputBound
+    · exact ih region member
+
+mutual
+theorem ResolvesOutputType.closed {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {shape : Ty} {source : QualifiedTy LifetimeSyntax shape} {result : QualifiedTy RegionTerm shape} {count : Nat}
+    (resolved : ResolvesOutputType environment inputs source result)
+    (namedBound : environment.count ≤ count)
+    (inputBound : ∀ input ∈ inputs, input.SignatureBound count) :
+    ∀ region ∈ result.regions, region.SignatureBound count := by
+  cases resolved with
+  | unit | integer | character => simp [QualifiedTy.regions]
+  | tuple head tail =>
+    intro region member
+    rcases List.mem_append.mp member with member | member
+    · exact head.closed namedBound inputBound region member
+    · exact tail.closed namedBound inputBound region member
+  | array length element => exact element.closed namedBound inputBound
+  | nominal identity arguments => exact arguments.closed namedBound inputBound
+  | reference mode outer inner =>
+    intro region member
+    rcases List.mem_cons.mp member with equal | member
+    · subst region
+      exact outer.closed namedBound inputBound
+    · exact inner.closed namedBound inputBound region member
+theorem ResolvesOutputTypes.closed {environment : LifetimeEnvironment} {inputs : List RegionTerm}
+    {shapes : List Ty} {source : QualifiedTys LifetimeSyntax shapes} {result : QualifiedTys RegionTerm shapes} {count : Nat}
+    (resolved : ResolvesOutputTypes environment inputs source result)
+    (namedBound : environment.count ≤ count)
+    (inputBound : ∀ input ∈ inputs, input.SignatureBound count) :
+    ∀ region ∈ result.regions, region.SignatureBound count := by
+  cases resolved with
+  | nil => simp [QualifiedTys.regions]
+  | cons head tail =>
+    intro region member
+    rcases List.mem_append.mp member with member | member
+    · exact head.closed namedBound inputBound region member
+    · exact tail.closed namedBound inputBound region member
+end
+
+theorem ResolvedSignature.closed {source : FunctionSignature} (signature : ResolvedSignature source) :
+    (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
+    (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
+  have inputs := signature.inputResolution.closed (Nat.le_refl _)
+  exact ⟨inputs, signature.resultResolution.closed signature.inputResolution.monotone inputs⟩
+
+
 /-- Direct, noncapturing, effect-free functions; omitted results denote unit. -/
 structure FunctionDecl where
   home : Module
   visibility : Visibility := .private
-  parameters : List (String × BindingType)
-  result : Ty := .unit
+  signature : FunctionSignature
   body : Expr
+
+def FunctionDecl.parameters (declaration : FunctionDecl) : List (String × BindingType) :=
+  declaration.signature.parameters.map fun parameter => (parameter.1, parameter.2.erase)
+
+def FunctionDecl.result (declaration : FunctionDecl) : Ty := declaration.signature.result.1
+
 
 /-- One immutable decoded program supplies the facts shared by static and
 dynamic semantics. It carries source declarations, never execution guarantees. -/
@@ -726,8 +1646,12 @@ structure Program where
   target : Target
   aliases : Aliases
   constants : Constants
-  data : DataDeclarations
+  declarations : QualifiedDeclarations
   functions : Nat → Option FunctionDecl
+
+/-- Canonical layouts are derived from the sole qualified declaration product. -/
+def Program.data (program : Program) : DataDeclarations := program.declarations.erase
+
 variable {program : Program}
 variable {home : Module}
 /-- One field contract supplies tuple bounds and nominal visibility to reads and writes. -/
@@ -770,6 +1694,280 @@ theorem CanonicalPath.append {source middle target : Ty} {first second : List Na
   induction front with
   | nil => exact back
   | cons head _ ih => exact .cons head (ih back)
+
+end Grounded
+
+
+namespace Grounded
+set_option autoImplicit false
+
+theorem NominalView.trans {R : Type} {declarations : QualifiedDeclarations} {static : R}
+    {outlives : R → R → Prop}
+    (transitive : ∀ {a b c}, outlives a b → outlives b c → outlives a c)
+    {identity : Nat} {left middle right : List R}
+    (front : NominalView declarations static outlives identity left middle)
+    (back : NominalView declarations static outlives identity middle right) :
+    NominalView declarations static outlives identity left right := by
+  obtain ⟨first, front, firstClosed⟩ := front
+  obtain ⟨second, back, secondClosed⟩ := back
+  let composed : QualifiedTy.NominalRelation R :=
+    fun identity left right => ∃ middle, first identity left middle ∧ second identity middle right
+  refine ⟨composed, ⟨middle, front, back⟩, ?_⟩
+  intro identity left right related
+  obtain ⟨middle, front, back⟩ := related
+  obtain ⟨declaration, found, leftArity, middleArity, firstFields⟩ := firstClosed identity left middle front
+  obtain ⟨other, otherFound, otherMiddleArity, rightArity, secondFields⟩ := secondClosed identity middle right back
+  cases Option.some.inj (found.symm.trans otherFound)
+  refine ⟨declaration, found, leftArity, rightArity, ?_⟩
+  intro field member
+  exact QualifiedTy.view_compose (outlives := outlives)
+    (fun _ _ middle _ first second => ⟨middle, first, second⟩) transitive _ _ _
+    (firstFields field member) (secondFields field member)
+
+
+@[simp] theorem QualifiedFields.erase_residents {R : Type} (fields : QualifiedFields R) :
+    fields.erase.residents = fields.residents.map QualifiedField.erase := by
+  cases fields <;> simp [erase, residents, Fields.residents, List.map_map, Function.comp_def]
+
+inductive QualifiedTys.At {R : Type} : {types : List Ty} → QualifiedTys R types → Nat →
+    {type : Ty} → QualifiedTy R type → Prop where
+  | here {type : Ty} {types : List Ty} (first : QualifiedTy R type) (rest : QualifiedTys R types) :
+      At (.cons first rest) 0 first
+  | there {head type : Ty} {types : List Ty} {index : Nat}
+      {first : QualifiedTy R head} {rest : QualifiedTys R types} {selected : QualifiedTy R type}
+      (tail : At rest index selected) : At (.cons first rest) (index + 1) selected
+
+theorem QualifiedTys.At.erase {R : Type} {types : List Ty} {fields : QualifiedTys R types}
+    {index : Nat} {type : Ty} {field : QualifiedTy R type} (selected : fields.At index field) :
+    types[index]? = some type := by
+  induction selected with
+  | here => rfl
+  | there _ ih => exact ih
+
+theorem QualifiedTys.At.view {R : Type} {nominal : QualifiedTy.NominalRelation R}
+    {outlives : R → R → Prop} {types : List Ty} {first second : QualifiedTys R types}
+    (related : QualifiedTy.Views nominal outlives first second) {index : Nat}
+    {type : Ty} {field : QualifiedTy R type} (selected : second.At index field) :
+    ∃ original, first.At index original ∧ QualifiedTy.View nominal outlives original field := by
+  induction selected with
+  | here field rest =>
+    cases first with
+    | cons original others => exact ⟨original, .here _ _, related.1⟩
+  | there tail ih =>
+    cases first with
+    | cons original others =>
+      obtain ⟨value, selected, view⟩ := ih related.2
+      exact ⟨value, .there selected, view⟩
+
+/-- Qualified projection selects the visible declaration instance. Erasure is
+derived afterward; canonical storage cannot supply a longer visible lifetime. -/
+inductive QualifiedProjection {R : Type} (declarations : QualifiedDeclarations)
+    (static : R) (home : Module) : {source : Ty} → QualifiedTy R source → FieldKey → Nat →
+    {target : Ty} → QualifiedTy R target → Prop where
+  | tuple {head type : Ty} {tail : List Ty} {index : Nat}
+      {first : QualifiedTy R head} {rest : QualifiedTys R tail} {field : QualifiedTy R type}
+      (selected : (QualifiedTys.cons first rest).At index field) :
+      QualifiedProjection declarations static home (.tuple first rest) (.positional index) index field
+  | nominal {identity index : Nat} {key : FieldKey} {declaration : QualifiedDataDecl}
+      {arguments : List R} {schema : QualifiedFields (Option (Fin declaration.regions))}
+      {field : QualifiedField (Option (Fin declaration.regions))}
+      (declared : declarations identity = some declaration)
+      (arity : arguments.length = declaration.regions)
+      (structureOnly : declaration.shape = .structure schema)
+      (indexed : schema.erase.index key = some index)
+      (selected : schema.residents[index]? = some field)
+      (visible : field.visibility.Allows declaration.home home) :
+      QualifiedProjection declarations static home (.nominal identity arguments) key index
+        (field.type.map (declaration.substitution static arguments arity))
+
+theorem QualifiedProjection.erase {R : Type} {program : Program}
+    {static : R} {home : Module} {source target : Ty} {parent : QualifiedTy R source}
+    {field : QualifiedTy R target} {key : FieldKey} {index : Nat}
+    (selected : QualifiedProjection program.declarations static home parent key index field) :
+    ProjectionType program home source key index target := by
+  cases selected with
+  | tuple selected => exact .tuple selected.erase
+  | @nominal identity index key declaration arguments schema field declared arity shape indexed selected visible =>
+    refine .nominal (declaration := declaration.erase) (schema := schema.erase)
+      (field := field.erase) ?_ ?_ indexed ?_ visible
+    · simp [Program.data, QualifiedDeclarations.erase, declared]
+    · simp [QualifiedDataDecl.erase, QualifiedDataShape.erase, shape]
+    · rw [QualifiedFields.erase_residents, List.getElem?_map, selected]; rfl
+
+theorem QualifiedProjection.view {R : Type} {declarations : QualifiedDeclarations}
+    {static : R} {outlives : R → R → Prop} {home : Module} {source target : Ty}
+    {first second : QualifiedTy R source} {field : QualifiedTy R target} {key : FieldKey} {index : Nat}
+    (related : QualifiedTy.View (NominalView declarations static outlives) outlives first second)
+    (selected : QualifiedProjection declarations static home second key index field) :
+    ∃ original, QualifiedProjection declarations static home first key index original ∧
+      QualifiedTy.View (NominalView declarations static outlives) outlives original field := by
+  cases selected with
+  | @tuple head target tail index headView tailView field selected =>
+    cases first with
+    | tuple first rest =>
+      obtain ⟨original, atField, view⟩ := selected.view
+        (first := .cons first rest) (second := .cons headView tailView) related
+      exact ⟨original, .tuple atField, view⟩
+  | @nominal identity index key declaration arguments schema field declared arity shape indexed selected visible =>
+    cases first with
+    | nominal _ initial =>
+      obtain ⟨actual, found, initialArity, _, fields⟩ := NominalView.unfold related
+      cases Option.some.inj (declared.symm.trans found)
+      refine ⟨field.type.map (declaration.substitution static initial initialArity),
+        .nominal declared initialArity shape indexed selected visible, ?_⟩
+      exact fields field (by simpa [QualifiedDataDecl.fields, shape] using List.mem_of_getElem? selected)
+
+end Grounded
+
+
+namespace Grounded
+set_option autoImplicit false
+
+mutual
+def QualifiedTy.WellFormed {R : Type} (declarations : QualifiedDeclarations) {shape : Ty} :
+    QualifiedTy R shape → Prop
+  | .unit | .integer _ | .character => True
+  | .tuple first rest => first.WellFormed declarations ∧ rest.WellFormed declarations
+  | .array element _ => element.WellFormed declarations
+  | .nominal identity arguments =>
+      ∃ declaration, declarations identity = some declaration ∧ arguments.length = declaration.regions
+  | .reference _ referent _ => referent.WellFormed declarations
+def QualifiedTys.WellFormed {R : Type} (declarations : QualifiedDeclarations) {shapes : List Ty} :
+    QualifiedTys R shapes → Prop
+  | .nil => True
+  | .cons first rest => first.WellFormed declarations ∧ rest.WellFormed declarations
+end
+
+mutual
+theorem QualifiedTy.WellFormed.map {R S : Type} {declarations : QualifiedDeclarations}
+    {shape : Ty} {type : QualifiedTy R shape} (valid : type.WellFormed declarations) (f : R → S) :
+    (type.map f).WellFormed declarations := by
+  cases type with
+  | unit | integer | character => trivial
+  | tuple first rest => exact ⟨valid.1.map (type := first) f, valid.2.map (types := rest) f⟩
+  | array element _ => exact valid.map (type := element) f
+  | nominal identity arguments => simpa [QualifiedTy.map, QualifiedTy.WellFormed] using valid
+  | reference _ referent _ => exact valid.map (type := referent) f
+theorem QualifiedTys.WellFormed.map {R S : Type} {declarations : QualifiedDeclarations}
+    {shapes : List Ty} {types : QualifiedTys R shapes} (valid : types.WellFormed declarations) (f : R → S) :
+    (QualifiedTy.mapList f types).WellFormed declarations := by
+  cases types with
+  | nil => trivial
+  | cons first rest => exact ⟨valid.1.map (type := first) f, valid.2.map (types := rest) f⟩
+end
+
+mutual
+theorem QualifiedTy.view_refl {R : Type} {declarations : QualifiedDeclarations}
+    {nominal : QualifiedTy.NominalRelation R} {outlives : R → R → Prop}
+    (nominalRefl : ∀ identity arguments, (QualifiedTy.nominal identity arguments).WellFormed declarations →
+      nominal identity arguments arguments)
+    (regionRefl : ∀ region, outlives region region) {shape : Ty} (type : QualifiedTy R shape)
+    (valid : type.WellFormed declarations) : QualifiedTy.View nominal outlives type type := by
+  cases type with
+  | unit | integer | character => trivial
+  | tuple first rest => exact ⟨first.view_refl nominalRefl regionRefl valid.1,
+      rest.view_refl nominalRefl regionRefl valid.2⟩
+  | array element _ => exact element.view_refl nominalRefl regionRefl valid
+  | nominal identity arguments => exact nominalRefl identity arguments valid
+  | reference region referent mode =>
+    cases mode with
+    | shared => exact ⟨regionRefl region, referent.view_refl nominalRefl regionRefl valid⟩
+    | unique => exact ⟨regionRefl region, rfl⟩
+theorem QualifiedTys.view_refl {R : Type} {declarations : QualifiedDeclarations}
+    {nominal : QualifiedTy.NominalRelation R} {outlives : R → R → Prop}
+    (nominalRefl : ∀ identity arguments, (QualifiedTy.nominal identity arguments).WellFormed declarations →
+      nominal identity arguments arguments)
+    (regionRefl : ∀ region, outlives region region) {shapes : List Ty} (types : QualifiedTys R shapes)
+    (valid : types.WellFormed declarations) : QualifiedTy.Views nominal outlives types types := by
+  cases types with
+  | nil => trivial
+  | cons first rest => exact ⟨first.view_refl nominalRefl regionRefl valid.1,
+      rest.view_refl nominalRefl regionRefl valid.2⟩
+end
+
+/-- Declaration closure inspects the authoritative qualified fields. Recursive
+names are checked for existence and arity, not infinitely unfolded. -/
+def QualifiedDeclarations.WellFormed (declarations : QualifiedDeclarations) : Prop :=
+  ∀ identity declaration, declarations identity = some declaration →
+    ∀ field ∈ declaration.fields, field.type.WellFormed declarations
+
+theorem NominalView.refl {R : Type} {declarations : QualifiedDeclarations} {static : R}
+    {outlives : R → R → Prop} (regionRefl : ∀ region, outlives region region)
+    (closed : declarations.WellFormed) {identity : Nat} {arguments : List R}
+    (valid : (QualifiedTy.nominal identity arguments).WellFormed declarations) :
+    NominalView declarations static outlives identity arguments arguments := by
+  let same : QualifiedTy.NominalRelation R := fun identity left right =>
+    left = right ∧ (QualifiedTy.nominal identity left).WellFormed declarations
+  refine ⟨same, ⟨rfl, valid⟩, ?_⟩
+  intro identity left right related
+  obtain ⟨rfl, declaration, found, arity⟩ := related
+  refine ⟨declaration, found, arity, arity, ?_⟩
+  intro field member
+  exact (field.type.map (declaration.substitution static left arity)).view_refl
+    (fun _ _ known => ⟨rfl, known⟩) regionRefl
+    ((closed identity declaration found field member).map _)
+
+theorem QualifiedTys.At.wellFormed {R : Type} {declarations : QualifiedDeclarations}
+    {shapes : List Ty} {fields : QualifiedTys R shapes} {index : Nat} {shape : Ty}
+    {field : QualifiedTy R shape} (selected : fields.At index field)
+    (valid : fields.WellFormed declarations) : field.WellFormed declarations := by
+  induction selected with
+  | here => exact valid.1
+  | there _ ih => exact ih valid.2
+
+theorem QualifiedProjection.wellFormed {R : Type} {declarations : QualifiedDeclarations}
+    {static : R} {home : Module} {source target : Ty} {parent : QualifiedTy R source}
+    {field : QualifiedTy R target} {key : FieldKey} {index : Nat}
+    (selected : QualifiedProjection declarations static home parent key index field)
+    (closed : declarations.WellFormed) (valid : parent.WellFormed declarations) :
+    field.WellFormed declarations := by
+  cases selected with
+  | tuple selected => exact selected.wellFormed valid
+  | @nominal identity index key declaration arguments schema field declared arity shape indexed selected visible =>
+    exact (closed identity declaration declared field
+      (by simpa [QualifiedDataDecl.fields, shape] using List.mem_of_getElem? selected)).map _
+
+inductive QualifiedPath {R : Type} (declarations : QualifiedDeclarations) (static : R) (home : Module) :
+    {source : Ty} → QualifiedTy R source → List FieldKey → List Nat →
+    {target : Ty} → QualifiedTy R target → Prop where
+  | nil {shape : Ty} (type : QualifiedTy R shape) : QualifiedPath declarations static home type [] [] type
+  | cons {source middle target : Ty} {first : QualifiedTy R source} {second : QualifiedTy R middle}
+      {third : QualifiedTy R target} {key : FieldKey} {keys : List FieldKey} {index : Nat} {indices : List Nat}
+      (head : QualifiedProjection declarations static home first key index second)
+      (tail : QualifiedPath declarations static home second keys indices third) :
+      QualifiedPath declarations static home first (key :: keys) (index :: indices) third
+
+theorem QualifiedPath.erase {R : Type} {program : Program} {static : R} {home : Module}
+    {source target : Ty} {parent : QualifiedTy R source} {field : QualifiedTy R target}
+    {keys : List FieldKey} {indices : List Nat}
+    (path : QualifiedPath program.declarations static home parent keys indices field) :
+    PathType program home source keys indices target := by
+  induction path with
+  | nil => exact .nil _
+  | cons head _ ih => exact .cons head.erase ih
+
+theorem QualifiedPath.view {R : Type} {declarations : QualifiedDeclarations} {static : R}
+    {outlives : R → R → Prop} {home : Module} {source target : Ty} {first second : QualifiedTy R source}
+    {field : QualifiedTy R target} {keys : List FieldKey} {indices : List Nat}
+    (related : QualifiedTy.View (NominalView declarations static outlives) outlives first second)
+    (path : QualifiedPath declarations static home second keys indices field) :
+    ∃ original, QualifiedPath declarations static home first keys indices original ∧
+      QualifiedTy.View (NominalView declarations static outlives) outlives original field := by
+  induction path with
+  | nil => exact ⟨first, .nil _, related⟩
+  | cons head tail ih =>
+    obtain ⟨middle, firstProjection, middleView⟩ := head.view related
+    obtain ⟨last, rest, resultView⟩ := ih middleView
+    exact ⟨last, .cons firstProjection rest, resultView⟩
+
+end Grounded
+
+
+
+namespace Grounded
+variable {program : Program}
+variable {home : Module}
+
 
 
 
@@ -15491,6 +16689,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (visible : declaration.visibility.Allows declaration.home home)
       (distinct : (declaration.parameters.map Prod.fst).Nodup)
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
+      (signature : ResolvedSignature declaration.signature)
       (inputs : HasTypes program phase home before held arguments argumentTypes middle argumentPlans
         (some (declaration.parameters.map fun parameter => parameter.2.type)))
       (hide : HideStep program middle hidden)
@@ -17215,8 +18414,8 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .constant declared visible resolved structural hidden body resume referenceFree interpreted empty =>
     exact .constant declared visible resolved structural hidden.erase body.erase resume.erase referenceFree checkingRequired checkingRequired
   | .field body projection evidence => exact .field body.erase projection.erase evidence.erase
-  | .call declared visible distinct initialized inputs hide prepare body resultType origin cleanup resume stable =>
-    exact .call declared visible distinct initialized inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
+  | .call declared visible distinct initialized signature inputs hide prepare body resultType origin cleanup resume stable =>
+    exact .call declared visible distinct initialized signature inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
   | .assign resident write continued => exact .assign resident.erase write.erase continued.erase
   | .assignIndirect resident write continued => exact .assignIndirect resident.erase write.erase continued.erase
   | .endOwn ending body => exact .endOwn ending.erase body.erase
@@ -18140,7 +19339,7 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .constant declared _ _ _ hidden initialized resume _ _ empty =>
     exact Executes.constant declared hidden initialized.execution_correctness resume empty
   | .field body projection _ => exact Executes.field body.execution_correctness projection
-  | .call declared _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
+  | .call declared _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
     exact Executes.call declared inputs.execution_correctness (inputs.expected_types _ rfl) hide prepare
       body.execution_correctness cleanup resume
   | .assign resident write continued => exact Executes.assign resident.execution_correctness write continued.execution_correctness
@@ -18878,3 +20077,39 @@ theorem checked_correctness {program : Program} {home : Module}
   exact correctness admitted state
 
 end Grounded.Elaboration
+
+/- Section: SignatureAdmission -/
+
+namespace Grounded.Elaboration
+set_option autoImplicit false
+
+/-- Every admitted named call, including through administrative and expected-type
+rules, has one source-resolved signature with no out-of-range lifetime variables.
+This does not assert that body views already enforce those lifetime bounds. -/
+theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
+    {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
+    {result : Result phase} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program phase home before held expression result after plan expected) :
+    ∀ identity arguments, expression = .call identity arguments →
+      ∃ declaration, program.functions identity = some declaration ∧
+        ∃ signature : ResolvedSignature declaration.signature,
+          (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
+          (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
+  match typed with
+  | .call declared _ _ _ signature _ _ _ _ _ _ _ _ _ =>
+    intro identity arguments same
+    cases same
+    exact ⟨_, declared, signature, signature.closed⟩
+  | .view _ body | .endOwn _ body | .endAfter body _ | .raiseSupply body _ _ _ _ |
+      .expectedData body _ _ | .expectedCall body => exact body.call_signature
+  | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |
+      .borrow .. | .reborrow .. | .dereference .. | .moveIndirect .. | .tuple .. | .array .. |
+      .construct .. | .sequence .. | .bind .. | .constant .. | .field .. | .assign .. |
+      .assignIndirect .. | .applyPatterns .. | .expectedField .. | .expectedDereference .. |
+      .expectedMoveIndirect .. | .expectedMove .. | .expectedBorrow .. =>
+    intro identity arguments same
+    cases same
+termination_by structural typed
+
+end Grounded.Elaboration
+

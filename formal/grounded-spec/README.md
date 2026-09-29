@@ -44,6 +44,36 @@ stable logical roots and canonical field coordinates. Literal bounds, nominal
 identity, field visibility, principal restrictions, arity and evaluation order
 remain checked. Unit, grouping and singleton tuples are distinct.
 
+### Qualified declarations and signature resolution
+
+`Program.declarations` owns qualified nominal fields; `Program.data` derives
+canonical layouts by erasure, rather than accepting an independently supplied
+declaration table. `QualifiedTy` retains nested lifetime arguments while its
+index fixes the canonical storage shape. Qualified projection and path proofs
+preserve declared view bounds and derive canonical projection from this same
+program product. Nominal view conversion unfolds the qualified declared fields;
+unique referents remain invariant, including their nested qualifiers.
+
+`FunctionDecl.signature` owns qualified input and result syntax and distinct
+named lifetime binders. `ResolvedSignature` resolves inputs left-to-right from
+a supply beyond the named binders. Every omitted input occurrence gets a fresh
+parameter; repeated named occurrences share their declared parameter. Omitted
+output lifetimes require one unique resolved input lifetime, not one active
+runtime node or mutually exclusive constructor. Unknown names and ambiguous
+output elision have no resolution derivation. Omitted function results are unit.
+
+The actual `HasType.call` constructor carries this resolved product in both
+phases; erasure preserves it. `ResolvedSignature.unique` proves determinism,
+and `ResolvedSignature.closed` bounds every input and result region by the
+produced supply. `HasType.call_signature` derives this closure for every admitted
+named call, including administrative and expected-type wrappers. The existing
+general execution-correctness theorem consumes the migrated producer.
+
+This closes signature resolution, not lifetime-qualified body or return checking.
+Binding views, invocation substitutions and source return provenance still need
+to consume the resolved qualifiers. The bounded return rule below remains; no
+multi-input lifetime safety or complete declared-lifetime conformance is claimed.
+
 ### A single produced payload and authoritative storage
 
 `SourcePayload` is `.plain`, a reference node, or a constructor head plus child
@@ -179,8 +209,8 @@ positively handle-free result needs no reference input. Otherwise the current
 bounded rule permits at most one simultaneous input reference occurrence, and
 every result node must derive from it. Mutually exclusive variants do not count
 as simultaneous runtime occurrences. This is **not** full declared-lifetime
-elision: distinct lifetime parameters, variance and outlives constraints are not
-represented by this `Ty` model. `correctness_return_cleanup` connects general
+return checking: signatures now resolve lifetime parameters, but body bindings
+and `ReturnStep` still use canonical `Ty`. `correctness_return_cleanup` connects general
 body execution, actual cleanup, returned usability and runtime ancestry at every
 nested returned occurrence; cleanup does not auto-end the returned handles.
 Every active target after cleanup is backed by storage already present before
@@ -276,8 +306,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **6,684
-declarations, including 245 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,627
+declarations, including 277 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no
@@ -321,5 +351,8 @@ run_cmd do
 #print axioms Grounded.Elaboration.imported_correctness
 #print axioms Grounded.Elaboration.canonical_entry_correctness
 #print axioms Grounded.Elaboration.HasType.reference_read_selection
+#print axioms Grounded.ResolvedSignature.unique
+#print axioms Grounded.ResolvedSignature.closed
+#print axioms Grounded.Elaboration.HasType.call_signature
 LEAN
 ```
