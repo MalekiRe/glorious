@@ -165,8 +165,8 @@ for every admitted expression in a typed environment. Initializers execute in
 the old environment; their proved result typing constructs the extended body
 environment. Sequencing and binding scope do not leak local names. Copy/discard
 sites require explicit duplicability evidence. `closed_correctness` constructs
-the empty environment rather than assuming it. Admission has no execution
-premise. Exact scalar admission theorems and `unit_agreement` remain connected
+the empty environment rather than assuming it. Admission supplies no successful
+execution or normalization witness. Exact scalar admission theorems and `unit_agreement` remain connected
 to this general result. No intermediate machine-state theorem is claimed.
 
 Tuple arity is preserved: unit is the empty tuple; grouping and a singleton
@@ -218,8 +218,8 @@ admission derivation in this subset. Structural constants still exclude calls.
 Computed callees, first-class function values, captures, effects, recursion and
 named-label exits are not included in this direct-call boundary.
 
-Immediate pattern-callable application supports binders, wildcards and nested
-scalar/tuple/array/nominal constructor patterns. It retains the callable’s
+Immediate pattern-callable application supports binders, wildcards, nested
+scalar/tuple/array/nominal constructor patterns and named structural constants. It retains the callable’s
 argument list: one tuple argument is not two arguments. Source-ordered selection
 executes just the first matching body; bindings remain clause-local. Each body
 uses the same incoming lexical environment and declared result type.
@@ -232,10 +232,21 @@ previous clauses, excluding unreachable clauses without assuming a result
 for the subject expression. There is no primitive Boolean or library-name
 dispatch rule.
 
+Named constants are retained in `PatternSource`. Their initializers are checked
+by ordinary source typing; `correctness` constructs unique normalization using
+the same `Evaluates` relation, not a second evaluator or a supplied value table.
+Coverage and body typing are checked over those constant normal forms; their
+existence is proved before either check is consumed, so missing normalization
+cannot make admission vacuous. A normalized literal retains its declared type,
+including the element type of an empty array. Structural equality is total and
+proved lawful; it calls no user `Eq` and does not ownership-deconstruct a
+constant’s private representation. Comparison-only nodes created during
+coverage specialization cannot be admitted as typed source patterns.
+
 This pattern boundary is decoded immediate application, not stored callables
-or a proof of library `match`. Named constant-pattern normalization, source
-record/remainder expansion, borrowed patterns, first-class callable identity
-and captured-storage semantics remain open.
+or a proof of library `match`. Source record/remainder expansion, borrowed
+patterns, first-class callable identity and captured-storage semantics remain
+open at their respective source/borrowing/callable boundaries.
 
 Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are

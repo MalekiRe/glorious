@@ -8,7 +8,9 @@ Direct named calls and immediate pattern-callable application share correctness.
 Only duplicable nominal owners without hooks or indirections are admitted.
 Physical representation, exhaustion and nonduplicable ownership remain outside
 this logical AST-to-value boundary.
-Admission has no execution premise. No prior specification modules are imported.
+Admission supplies no successful execution or normalization witness.
+Constant-normal-form checks are consumed only after normalization is derived.
+No prior specification modules are imported.
 -/
 
 namespace Grounded
@@ -184,11 +186,69 @@ inductive Head where
   | nominal (identity : Nat) (tag : Option Nat)
   deriving DecidableEq
 
+inductive Value where
+  | unit
+  | integer (type : IntegerType) (number : Int)
+  | character (number : Nat)
+  | tuple (head : Value) (tail : List Value)
+  | array (elements : List Value)
+  | nominal (identity : Nat) (tag : Option Nat) (fields : List Value)
+
+mutual
+/-- Total structural equality for constant patterns, without user-defined Eq. -/
+def Value.equal (left right : Value) : Bool :=
+  match left, right with
+  | .unit, .unit => true
+  | .integer type number, .integer otherType otherNumber => decide (type = otherType) && decide (number = otherNumber)
+  | .character number, .character other => decide (number = other)
+  | .tuple head tail, .tuple otherHead otherTail => head.equal otherHead && valuesEqual tail otherTail
+  | .array values, .array others => valuesEqual values others
+  | .nominal identity tag values, .nominal otherIdentity otherTag others =>
+      decide (identity = otherIdentity) && decide (tag = otherTag) && valuesEqual values others
+  | _, _ => false
+termination_by sizeOf left
+
+def valuesEqual (left right : List Value) : Bool :=
+  match left, right with
+  | [], [] => true
+  | head :: tail, otherHead :: otherTail => head.equal otherHead && valuesEqual tail otherTail
+  | _, _ => false
+termination_by sizeOf left
+end
+
+instance : BEq Value := ⟨Value.equal⟩
+
+instance : LawfulBEq Value := by
+  have equal_iff : ∀ (left right : Value), left.equal right = true ↔ left = right := by
+    intro left
+    induction left using Value.rec
+      (motive_2 := fun values => ∀ others, valuesEqual values others = true ↔ values = others) with
+    | unit => intro right; cases right <;> simp [Value.equal]
+    | integer type number => intro right; cases right <;> simp [Value.equal]
+    | character number => intro right; cases right <;> simp [Value.equal]
+    | tuple head tail headIH tailIH => intro right; cases right <;> simp [Value.equal, headIH, tailIH]
+    | array values ih => intro right; cases right <;> simp [Value.equal, ih]
+    | nominal identity tag values ih => intro right; cases right <;> simp [Value.equal, ih, and_assoc]
+    | nil => rename_i others; cases others <;> simp [valuesEqual]
+    | cons head tail headIH tailIH => rename_i others; cases others <;> simp [valuesEqual, headIH, tailIH]
+  exact { rfl := (equal_iff _ _).mpr rfl, eq_of_beq := fun matched => (equal_iff _ _).mp matched }
+
+instance : DecidableEq Value := instDecidableEqOfLawfulBEq
+
+
 inductive Pattern where
   | wildcard
   | binder (name : String)
   | node (head : Head) (fields : List Pattern)
+  /-- Some retains the declared type; None occurs only in coverage specialization. -/
+  | literal (type : Option Ty) (value : Value)
 
+
+inductive PatternSource where
+  | wildcard
+  | binder (name : String)
+  | node (head : Head) (fields : List PatternSource)
+  | constant (name : String)
 
 inductive Expr where
   | unit
@@ -205,7 +265,7 @@ inductive Expr where
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
   | field (body : Expr) (key : FieldKey)
   | call (identity : Nat) (arguments : List Expr)
-  | applyPatterns (inputs : List Ty) (arguments : List Expr) (arms : List (Pattern × Expr))
+  | applyPatterns (inputs : List Ty) (arguments : List Expr) (arms : List (PatternSource × Expr))
 /-- This restricts constant syntax, not a second evaluator. Constant dependencies
 are checked by the same typing derivation and use the same evaluation relation. -/
 inductive Structural : Expr → Prop where
@@ -265,13 +325,7 @@ inductive Duplicable (data : DataDeclarations) : Ty → Prop where
       (restriction : declaration.restriction = none ∨ declaration.restriction = some .duplicable)
       (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents, Duplicable data field.type) :
       Duplicable data (.nominal identity)
-inductive Value where
-  | unit
-  | integer (type : IntegerType) (number : Int)
-  | character (number : Nat)
-  | tuple (head : Value) (tail : List Value)
-  | array (elements : List Value)
-  | nominal (identity : Nat) (tag : Option Nat) (fields : List Value)
+
 /-- Nearest lexical binding wins, including in shadowing initializers. -/
 def lookup {α : Type} (name : String) : List (String × α) → Option α
   | [] => none
@@ -332,6 +386,7 @@ def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (Strin
   match pattern with
   | .wildcard => some []
   | .binder name => some [(name, value)]
+  | .literal _ expected => if value = expected then some [] else none
   | .node head fields =>
       if head = value.head then matchPatterns fields value.children else none
 termination_by sizeOf pattern
@@ -373,6 +428,8 @@ inductive PatternType (program : Program) (home : Module) : Pattern → Ty → L
   | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
   | binder (name : String) {type : Ty} (discard : Duplicable program.data type) :
       PatternType program home (.binder name) type [(name, type)]
+  | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
+      (discard : Duplicable program.data type) : PatternType program home (.literal (some type) value) type []
   | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (String × Ty)}
       (shape : HeadType program head type fields) (access : head.Accessible program home)
       (fieldsTyped : PatternsType program home patterns fields bindings) :
@@ -389,6 +446,8 @@ end
 def Pattern.specialize (head : Head) (arity : Nat) : Pattern → Option (List Pattern)
   | .wildcard | .binder _ => some (List.replicate arity .wildcard)
   | .node selected fields => if selected = head ∧ fields.length = arity then some fields else none
+  | .literal _ value => if value.head = head ∧ value.children.length = arity
+      then some (value.children.map (Pattern.literal none)) else none
 
 def specializeRow (head : Head) (arity : Nat) : List Pattern → Option (List Pattern)
   | [] => none
@@ -426,6 +485,99 @@ def Useful (program : Program) (type : Ty) (previous : List Pattern) (pattern : 
   ∃ value, ValueHasType program value type ∧ pattern.matchValue value ≠ none ∧
     ∀ earlier ∈ previous, earlier.matchValue value = none
 
+
+mutual
+inductive Evaluates (program : Program) : List (String × Value) → Expr → Value → Prop where
+  | unit {environment : List (String × Value)} : Evaluates program environment .unit .unit
+  | integer {environment : List (String × Value)} {type : IntegerType} {magnitude : Nat}
+      (fits : type.Contains program.target magnitude) :
+      Evaluates program environment (.integer type magnitude) (.integer type magnitude)
+  | character {environment : List (String × Value)} {number : Nat}
+      (valid : UnicodeScalar number) :
+      Evaluates program environment (.character number) (.character number)
+  | group {environment : List (String × Value)} {body : Expr} {value : Value}
+      (evaluated : Evaluates program environment body value) :
+      Evaluates program environment (.group body) value
+  | local {environment : List (String × Value)} {name : String} {value : Value}
+      (selected : lookup name environment = some value) :
+      Evaluates program environment (.local name) value
+  | sequence {environment : List (String × Value)} {first rest : Expr}
+      {discarded value : Value} (head : Evaluates program environment first discarded)
+      (tail : Evaluates program environment rest value) :
+      Evaluates program environment (.sequence first rest) value
+  | bind {environment : List (String × Value)} {name : String} {annotation : Option TypeExpr} {initial body : Expr}
+      {resident value : Value} (initialized : Evaluates program environment initial resident)
+      (continued : Evaluates program ((name, resident) :: environment) body value) :
+      Evaluates program environment (.bind name annotation initial body) value
+  | tuple {environment : List (String × Value)} {head : Expr} {tail : List Expr}
+      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first)
+      (tailEval : EvaluatesMany program environment tail rest) :
+      Evaluates program environment (.tuple head tail) (.tuple first rest)
+  | project {environment : List (String × Value)} {body : Expr} {index : Nat}
+      {first value : Value} {rest : List Value}
+      (source : Evaluates program environment body (.tuple first rest))
+      (selected : (first :: rest)[index]? = some value) :
+      Evaluates program environment (.project body index) value
+  | array {environment : List (String × Value)} {elements : List Expr} {values : List Value}
+      (residents : EvaluatesMany program environment elements values) :
+      Evaluates program environment (.array elements) (.array values)
+  | constant {environment : List (String × Value)} {name : String} {declaration : ConstantDecl}
+      {value : Value} (declared : program.constants name = some declaration)
+      (initialized : Evaluates program [] declaration.body value) :
+      Evaluates program environment (.constant name) value
+  | construct {environment : List (String × Value)} {identity : Nat} {tag : Option Nat}
+      {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values) :
+      Evaluates program environment (.construct identity tag fields) (.nominal identity tag values)
+  | field {environment : List (String × Value)} {body : Expr} {key : FieldKey} {identity index : Nat}
+      {declaration : DataDecl} {schema : Fields} {values : List Value} {value : Value}
+      (source : Evaluates program environment body (.nominal identity none values))
+      (declared : program.data identity = some declaration)
+      (structureOnly : declaration.shape = .structure schema)
+      (indexed : schema.index key = some index) (selected : values[index]? = some value) :
+      Evaluates program environment (.field body key) value
+  | call {environment : List (String × Value)} {identity : Nat} {arguments : List Expr}
+      {declaration : FunctionDecl} {values : List Value} {value : Value}
+      (declared : program.functions identity = some declaration)
+      (inputs : EvaluatesMany program environment arguments values)
+      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value) :
+      Evaluates program environment (.call identity arguments) value
+  | applyPatterns {environment : List (String × Value)} {inputs : List Ty} {arguments : List Expr}
+      {arms : List (PatternSource × Expr)} {normalized : List (Pattern × Expr)} {values : List Value} {bindings : List (String × Value)} {body : Expr} {value : Value}
+      (normalization : NormalizesArms program arms normalized)
+      (argumentsEval : EvaluatesMany program environment arguments values)
+      (selected : selectArm (argumentValue values) normalized = some (bindings, body))
+      (bodyEval : Evaluates program (bindings ++ environment) body value) :
+      Evaluates program environment (.applyPatterns inputs arguments arms) value
+
+inductive EvaluatesMany (program : Program) : List (String × Value) → List Expr → List Value → Prop where
+  | nil {environment : List (String × Value)} : EvaluatesMany program environment [] []
+  | cons {environment : List (String × Value)} {head : Expr} {tail : List Expr}
+      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first)
+      (tailEval : EvaluatesMany program environment tail rest) :
+      EvaluatesMany program environment (head :: tail) (first :: rest)
+inductive NormalizesPattern (program : Program) : PatternSource → Pattern → Prop where
+  | wildcard : NormalizesPattern program .wildcard .wildcard
+  | binder (name : String) : NormalizesPattern program (.binder name) (.binder name)
+  | node {head : Head} {source : List PatternSource} {result : List Pattern}
+      (fields : NormalizesPatterns program source result) :
+      NormalizesPattern program (.node head source) (.node head result)
+  | constant {name : String} {declaration : ConstantDecl} {type : Ty} {value : Value}
+      (declared : program.constants name = some declaration)
+      (resolved : ResolvesType program.aliases declaration.type type)
+      (evaluated : Evaluates program [] (.constant name) value) :
+      NormalizesPattern program (.constant name) (.literal (some type) value)
+inductive NormalizesPatterns (program : Program) : List PatternSource → List Pattern → Prop where
+  | nil : NormalizesPatterns program [] []
+  | cons {source : PatternSource} {sources : List PatternSource} {result : Pattern} {results : List Pattern}
+      (head : NormalizesPattern program source result) (tail : NormalizesPatterns program sources results) :
+      NormalizesPatterns program (source :: sources) (result :: results)
+inductive NormalizesArms (program : Program) : List (PatternSource × Expr) → List (Pattern × Expr) → Prop where
+  | nil : NormalizesArms program [] []
+  | cons {source : PatternSource} {pattern : Pattern} {body : Expr}
+      {sources : List (PatternSource × Expr)} {results : List (Pattern × Expr)}
+      (head : NormalizesPattern program source pattern) (tail : NormalizesArms program sources results) :
+      NormalizesArms program ((source, body) :: sources) ((pattern, body) :: results)
+end
 
 mutual
 inductive HasType (program : Program) : Module → List (String × Ty) → Expr → Ty → Prop where
@@ -497,11 +649,14 @@ inductive HasType (program : Program) : Module → List (String × Ty) → Expr 
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
       HasType program home context (.call identity arguments) declaration.result
   | applyPatterns {home : Module} {context : List (String × Ty)} {inputs : List Ty}
-      {arguments : List Expr} {arms : List (Pattern × Expr)} {result : Ty}
+      {arguments : List Expr} {arms : List (PatternSource × Expr)} {result : Ty}
       (argumentsTyped : HasTypes program home context arguments inputs)
       (nonempty : arms ≠ [])
-      (covered : Covers program [argumentType inputs] (arms.map (fun arm => [arm.1])))
-      (bodies : ArmsType program home context (argumentType inputs) result [] arms) :
+      (constants : ArmConstantsTyped program home arms)
+      (covered : ∀ normalized, NormalizesArms program arms normalized →
+        Covers program [argumentType inputs] (normalized.map (fun arm => [arm.1])))
+      (bodies : ∀ normalized, NormalizesArms program arms normalized →
+        ArmsType program home context (argumentType inputs) result [] normalized) :
       HasType program home context (.applyPatterns inputs arguments arms) result
 
 inductive HasTypes (program : Program) : Module → List (String × Ty) → List Expr → List Ty → Prop where
@@ -521,77 +676,28 @@ inductive ArmsType (program : Program) :
       (bodyTyped : HasType program home (bindings ++ context) body result)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest) :
       ArmsType program home context subject result previous ((pattern, body) :: rest)
+/-- These source rules check constant initializers before pattern normalization.
+No evaluated value or successful-normalization witness is supplied. -/
+inductive PatternConstantsTyped (program : Program) : Module → PatternSource → Prop where
+  | patternWildcard {home : Module} : PatternConstantsTyped program home .wildcard
+  | patternBinder {home : Module} (name : String) : PatternConstantsTyped program home (.binder name)
+  | patternNode {home : Module} {head : Head} {fields : List PatternSource}
+      (constants : PatternsConstantsTyped program home fields) : PatternConstantsTyped program home (.node head fields)
+  | patternConstant {home : Module} {name : String} {type : Ty}
+      (typed : HasType program home [] (.constant name) type) : PatternConstantsTyped program home (.constant name)
+inductive PatternsConstantsTyped (program : Program) : Module → List PatternSource → Prop where
+  | patternsEmpty {home : Module} : PatternsConstantsTyped program home []
+  | patternsCons {home : Module} {first : PatternSource} {rest : List PatternSource}
+      (head : PatternConstantsTyped program home first) (tail : PatternsConstantsTyped program home rest) :
+      PatternsConstantsTyped program home (first :: rest)
+inductive ArmConstantsTyped (program : Program) : Module → List (PatternSource × Expr) → Prop where
+  | armsEmpty {home : Module} : ArmConstantsTyped program home []
+  | armsCons {home : Module} {pattern : PatternSource} {body : Expr} {rest : List (PatternSource × Expr)}
+      (head : PatternConstantsTyped program home pattern) (tail : ArmConstantsTyped program home rest) :
+      ArmConstantsTyped program home ((pattern, body) :: rest)
 end
 
-mutual
-inductive Evaluates (program : Program) : List (String × Value) → Expr → Value → Prop where
-  | unit {environment : List (String × Value)} : Evaluates program environment .unit .unit
-  | integer {environment : List (String × Value)} {type : IntegerType} {magnitude : Nat}
-      (fits : type.Contains program.target magnitude) :
-      Evaluates program environment (.integer type magnitude) (.integer type magnitude)
-  | character {environment : List (String × Value)} {number : Nat}
-      (valid : UnicodeScalar number) :
-      Evaluates program environment (.character number) (.character number)
-  | group {environment : List (String × Value)} {body : Expr} {value : Value}
-      (evaluated : Evaluates program environment body value) :
-      Evaluates program environment (.group body) value
-  | local {environment : List (String × Value)} {name : String} {value : Value}
-      (selected : lookup name environment = some value) :
-      Evaluates program environment (.local name) value
-  | sequence {environment : List (String × Value)} {first rest : Expr}
-      {discarded value : Value} (head : Evaluates program environment first discarded)
-      (tail : Evaluates program environment rest value) :
-      Evaluates program environment (.sequence first rest) value
-  | bind {environment : List (String × Value)} {name : String} {annotation : Option TypeExpr} {initial body : Expr}
-      {resident value : Value} (initialized : Evaluates program environment initial resident)
-      (continued : Evaluates program ((name, resident) :: environment) body value) :
-      Evaluates program environment (.bind name annotation initial body) value
-  | tuple {environment : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first)
-      (tailEval : EvaluatesMany program environment tail rest) :
-      Evaluates program environment (.tuple head tail) (.tuple first rest)
-  | project {environment : List (String × Value)} {body : Expr} {index : Nat}
-      {first value : Value} {rest : List Value}
-      (source : Evaluates program environment body (.tuple first rest))
-      (selected : (first :: rest)[index]? = some value) :
-      Evaluates program environment (.project body index) value
-  | array {environment : List (String × Value)} {elements : List Expr} {values : List Value}
-      (residents : EvaluatesMany program environment elements values) :
-      Evaluates program environment (.array elements) (.array values)
-  | constant {environment : List (String × Value)} {name : String} {declaration : ConstantDecl}
-      {value : Value} (declared : program.constants name = some declaration)
-      (initialized : Evaluates program [] declaration.body value) :
-      Evaluates program environment (.constant name) value
-  | construct {environment : List (String × Value)} {identity : Nat} {tag : Option Nat}
-      {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values) :
-      Evaluates program environment (.construct identity tag fields) (.nominal identity tag values)
-  | field {environment : List (String × Value)} {body : Expr} {key : FieldKey} {identity index : Nat}
-      {declaration : DataDecl} {schema : Fields} {values : List Value} {value : Value}
-      (source : Evaluates program environment body (.nominal identity none values))
-      (declared : program.data identity = some declaration)
-      (structureOnly : declaration.shape = .structure schema)
-      (indexed : schema.index key = some index) (selected : values[index]? = some value) :
-      Evaluates program environment (.field body key) value
-  | call {environment : List (String × Value)} {identity : Nat} {arguments : List Expr}
-      {declaration : FunctionDecl} {values : List Value} {value : Value}
-      (declared : program.functions identity = some declaration)
-      (inputs : EvaluatesMany program environment arguments values)
-      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value) :
-      Evaluates program environment (.call identity arguments) value
-  | applyPatterns {environment : List (String × Value)} {inputs : List Ty} {arguments : List Expr}
-      {arms : List (Pattern × Expr)} {values : List Value} {bindings : List (String × Value)} {body : Expr} {value : Value}
-      (argumentsEval : EvaluatesMany program environment arguments values)
-      (selected : selectArm (argumentValue values) arms = some (bindings, body))
-      (bodyEval : Evaluates program (bindings ++ environment) body value) :
-      Evaluates program environment (.applyPatterns inputs arguments arms) value
 
-inductive EvaluatesMany (program : Program) : List (String × Value) → List Expr → List Value → Prop where
-  | nil {environment : List (String × Value)} : EvaluatesMany program environment [] []
-  | cons {environment : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first)
-      (tailEval : EvaluatesMany program environment tail rest) :
-      EvaluatesMany program environment (head :: tail) (first :: rest)
-end
 
 /-- Both structural and nominal projections consume the same positional typing fact. -/
 theorem ValuesHaveTypes.select {types : List Ty} {values : List Value}
@@ -655,6 +761,14 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
     exact .cons valueTyped .nil
+  | literal typed discard =>
+    simp only [Pattern.matchValue] at matched
+    split at matched
+    next equal =>
+      have empty := Option.some.inj matched
+      subst bindings
+      exact .nil
+    next different => contradiction
   | @node head patterns type fields context shape access fieldsTyped fieldsIH =>
     simp only [Pattern.matchValue] at matched
     split at matched
@@ -736,6 +850,33 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
           cases front : matchPatterns patterns values <;>
           cases back : matchPatterns tail rest <;>
           simp [List.append_assoc]
+  have literalFields : ∀ (expected actual : List Value) (bindings : List (String × Value)),
+      matchPatterns (expected.map (Pattern.literal none)) actual = some bindings → expected = actual := by
+    intro expected
+    induction expected with
+    | nil =>
+      intro actual bindings matched
+      cases actual with
+      | nil => rfl
+      | cons head tail => simp [matchPatterns] at matched
+    | cons expected rest ih =>
+      intro actual bindings matched
+      cases actual with
+      | nil => simp [matchPatterns] at matched
+      | cons value values =>
+        simp only [List.map_cons, matchPatterns, Pattern.matchValue] at matched
+        split at matched
+        next same =>
+          subst value
+          have tailMatch : matchPatterns (rest.map (Pattern.literal none)) values = some bindings := by
+            simpa using matched
+          have sameTail := ih values bindings tailMatch
+          subst values
+          rfl
+        next different => simp at matched
+  have valueExt : ∀ (left right : Value), left.head = right.head → left.children = right.children → left = right := by
+    intro left right heads children
+    cases left <;> cases right <;> simp_all [Value.head, Value.children]
   have matrixSound : ∀ {types : List Ty} {rows : List (List Pattern)}, Covers program types rows →
       ∀ values, ValuesHaveTypes program values types →
       ∃ row ∈ rows, ∃ bindings, matchPatterns row values = some bindings := by
@@ -767,6 +908,14 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
               | node head children =>
                 simp only [Pattern.specialize] at frontSelected
                 split at frontSelected <;> simp_all
+              | literal type expected =>
+                simp only [Pattern.specialize] at frontSelected
+                split at frontSelected
+                next selected =>
+                  have same := Option.some.inj frontSelected
+                  subst front
+                  simpa using selected.2
+                next impossible => contradiction
             exact normalized.trans (lengths childrenTyped).symm
           rw [appendMatching front value.children frontLength] at matched
           simp only [Option.bind_eq_some_iff] at matched
@@ -782,6 +931,16 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
                 have sameChildren := Option.some.inj frontSelected
                 subst front
                 exact ⟨firstBindings, by simpa [Pattern.matchValue, selected.1] using firstMatched⟩
+              next impossible => contradiction
+            | literal type expected =>
+              simp only [Pattern.specialize] at frontSelected
+              split at frontSelected
+              next selected =>
+                have sameFront := Option.some.inj frontSelected
+                subst front
+                have childrenEqual := literalFields expected.children value.children firstBindings firstMatched
+                have equal := valueExt expected value selected.1 childrenEqual
+                exact ⟨[], by simp [Pattern.matchValue, equal]⟩
               next impossible => contradiction
           obtain ⟨headBindings, headMatched⟩ := originalMatches
           exact ⟨pattern :: patterns, originalIncluded, headBindings ++ restBindings,
@@ -832,6 +991,12 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
         ∃ resultValue, Evaluates program (bindings ++ environment) body resultValue ∧
           ValueHasType program resultValue result ∧
           ∀ other, Evaluates program (bindings ++ environment) body other → other = resultValue)
+    (motive_4 := fun home source _ => ∃ normalized, NormalizesPattern program source normalized ∧
+      ∀ other, NormalizesPattern program source other → other = normalized)
+    (motive_5 := fun home sources _ => ∃ normalized, NormalizesPatterns program sources normalized ∧
+      ∀ other, NormalizesPatterns program sources other → other = normalized)
+    (motive_6 := fun home sources _ => ∃ normalized, NormalizesArms program sources normalized ∧
+      ∀ other, NormalizesArms program sources other → other = normalized)
     generalizing environment with
   | unit =>
     refine ⟨.unit, .unit, .unit, ?_⟩
@@ -883,15 +1048,19 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       have sameInputs := inputsUnique _ otherInputs
       subst sameInputs
       exact bodyUnique other otherBody
-  | applyPatterns argumentsTyped nonempty covered bodies argumentsIH bodiesIH =>
+  | applyPatterns argumentsTyped nonempty constants covered bodies argumentsIH constantsIH bodiesIH =>
+    obtain ⟨normalized, normalization, normalizationUnique⟩ := constantsIH
+    have coverage := covered normalized normalization
     obtain ⟨values, argumentsEval, valuesTyped, argumentsUnique⟩ := argumentsIH environment environmentTyped
     have subjectTyped := valuesTyped.argument
-    obtain ⟨bindings, body, selected⟩ := covered.selectArm subjectTyped
-    obtain ⟨value, bodyEval, valueTyped, unique⟩ := bodiesIH environment environmentTyped _ subjectTyped bindings body selected
-    refine ⟨value, .applyPatterns argumentsEval selected bodyEval, valueTyped, ?_⟩
+    obtain ⟨bindings, body, selected⟩ := coverage.selectArm subjectTyped
+    obtain ⟨value, bodyEval, valueTyped, unique⟩ := bodiesIH normalized normalization environment environmentTyped _ subjectTyped bindings body selected
+    refine ⟨value, .applyPatterns normalization argumentsEval selected bodyEval, valueTyped, ?_⟩
     intro other evaluation
     cases evaluation with
-    | applyPatterns otherArguments otherSelected otherBody =>
+    | applyPatterns otherNormalization otherArguments otherSelected otherBody =>
+      have sameNormalization := normalizationUnique _ otherNormalization
+      subst sameNormalization
       have sameArguments := argumentsUnique _ otherArguments
       subst sameArguments
       have sameSelection := Option.some.inj (otherSelected.symm.trans selected)
@@ -1041,6 +1210,116 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
     next missed => exact tailIH environment environmentTyped value valueTyped bindings body selected
 
 
+  | patternWildcard =>
+    refine ⟨.wildcard, .wildcard, ?_⟩
+    intro other normalized
+    cases normalized
+    rfl
+  | patternBinder name =>
+    refine ⟨.binder name, .binder name, ?_⟩
+    intro other normalized
+    cases normalized
+    rfl
+  | patternNode constants ih =>
+    obtain ⟨fields, normalized, unique⟩ := ih
+    refine ⟨.node _ fields, .node normalized, ?_⟩
+    intro other alternative
+    cases alternative with
+    | node otherFields =>
+      have same := unique _ otherFields
+      subst same
+      rfl
+  | @patternConstant home name type typed ih =>
+    have resolvesUnique : ∀ {source : TypeExpr} {first : Ty}, ResolvesType program.aliases source first →
+        ∀ {second : Ty}, ResolvesType program.aliases source second → second = first := by
+      intro source first resolved second alternative
+      induction resolved using ResolvesType.rec
+        (motive_2 := fun sources types _ => ∀ others, ResolvesTypes program.aliases sources others → others = types)
+        generalizing second with
+      | concrete type => cases alternative; rfl
+      | alias declared expanded ih =>
+        cases alternative with
+        | alias otherDeclared otherExpanded =>
+          have same := Option.some.inj (otherDeclared.symm.trans declared)
+          cases same
+          exact ih otherExpanded
+      | tuple first rest firstIH restIH =>
+        cases alternative with
+        | tuple otherFirst otherRest =>
+          have sameFirst := firstIH otherFirst
+          have sameRest := restIH _ otherRest
+          subst sameFirst
+          subst sameRest
+          rfl
+      | array length resolved ih =>
+        cases alternative with
+        | array otherLength otherResolved =>
+          have same := ih otherResolved
+          subst same
+          rfl
+      | nil =>
+        rename_i others alternative
+        cases alternative
+        rfl
+      | cons first rest firstIH restIH =>
+        rename_i others alternative
+        cases alternative with
+        | cons otherFirst otherRest =>
+          have sameFirst := firstIH otherFirst
+          have sameRest := restIH _ otherRest
+          subst sameFirst
+          subst sameRest
+          rfl
+    obtain ⟨value, evaluated, valueTyped, unique⟩ := ih EnvironmentTyped.nil
+    cases typed with
+    | constant declared visible resolved structural initialized =>
+      refine ⟨.literal (some type) value, .constant declared resolved evaluated, ?_⟩
+      intro other normalized
+      cases normalized with
+      | constant otherDeclared otherResolved otherEvaluated =>
+        have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
+        cases sameDeclaration
+        have sameType := resolvesUnique resolved otherResolved
+        have sameValue := unique _ otherEvaluated
+        subst sameType
+        subst sameValue
+        rfl
+  | patternsEmpty =>
+    refine ⟨[], .nil, ?_⟩
+    intro other normalized
+    cases normalized
+    rfl
+  | patternsCons head tail headIH tailIH =>
+    obtain ⟨first, firstNormalized, firstUnique⟩ := headIH
+    obtain ⟨rest, restNormalized, restUnique⟩ := tailIH
+    refine ⟨first :: rest, .cons firstNormalized restNormalized, ?_⟩
+    intro other normalized
+    cases normalized with
+    | cons otherHead otherTail =>
+      have sameHead := firstUnique _ otherHead
+      have sameTail := restUnique _ otherTail
+      subst sameHead
+      subst sameTail
+      rfl
+  | armsEmpty =>
+    refine ⟨[], .nil, ?_⟩
+    intro other normalized
+    cases normalized
+    rfl
+  | armsCons head tail headIH tailIH =>
+    obtain ⟨first, firstNormalized, firstUnique⟩ := headIH
+    obtain ⟨rest, restNormalized, restUnique⟩ := tailIH
+    refine ⟨(_, _) :: rest, .cons firstNormalized restNormalized, ?_⟩
+    intro other normalized
+    cases normalized with
+    | cons otherHead otherTail =>
+      have sameHead := firstUnique _ otherHead
+      have sameTail := restUnique _ otherTail
+      subst sameHead
+      subst sameTail
+      rfl
+
+/-- Empty source environments are realized, not assumed. -/
 theorem closed_correctness {expression : Expr} {type : Ty}
     (admitted : HasType program home [] expression type) :
     ∃ value, Evaluates program [] expression value ∧ ValueHasType program value type ∧
