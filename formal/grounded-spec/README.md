@@ -149,7 +149,7 @@ explicit semantic-fidelity and proof-assumption audit.
 
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
 decoded character literals, grouping, place reads, sequencing, immutable and
-mutable initialized bindings, whole-local moves and restoration, nested tuple/structure assignment,
+mutable initialized bindings, whole-local and nested tuple/structure moves, restoration and assignment,
 optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data over duplicable fields, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
@@ -190,19 +190,21 @@ is introduced. The old separate tuple-expression projection rule is removed. Ass
 evaluates the RHS first, then updates the selected place in that actual
 post-state. It requires a mutable root. A live destination requires a legally
 discardable old resident (currently duplicable, without hooks); restoring a
-vacant whole root does not discard an old value. Nested writes preserve
-aggregate typing and require an initialized root. `PathType.write` and
-`EnvironmentTyped.writePlace` prove that reading the updated path returns the
-replacement. These are the operations consumed by expression correctness.
+vacant selected subtree does not discard an old value. Nested writes require
+present ancestors, not complete siblings or an initialized destination.
+`PathType.write` and `EnvironmentTyped.writePlace` preserve the computed partial
+state and prove readback of an initialized replacement; clearing makes the
+selected path unreadable. Expression correctness consumes these operations.
 
 Typing now produces the final initialization context, rather than requiring
 every expression to preserve its input context. Runtime slots contain either
 a resident or a vacancy; a vacant nearest binding still shadows outer bindings.
-Whole-root `move` extracts the actual resident and clears that slot, even for
-a duplicable value. `EnvironmentTyped.takePlace` constructs the transition
-and proves the selected slot is vacant afterward. Reads require initialization;
-later arguments and bodies consume the preceding initialization context.
-Assignment restores a vacant mutable root after evaluating its RHS. Function
+Whole-root and nested `move` extract the actual selected resident and clear
+that path, even for a duplicable value. `EnvironmentTyped.takePlace` constructs
+the transition and proves the selected path unreadable afterward. Reads and
+moves require the selected subtree to be complete; later arguments and bodies
+consume the preceding initialization context. Assignment restores a vacant
+subtree of a mutable root after evaluating its RHS. Function
 parameters and pattern binders start initialized; scope exit removes only its
 own prefix and preserves changes to outer slots. Vacancies now reside directly
 in the resident tree; the separate optional-root wrapper and pattern-binding
@@ -226,17 +228,28 @@ a whole-root Boolean. `ResidentTyped` is the authoritative storage typing
 relation; owned-value typing is its fully initialized specialization, not a
 second value-typing relation. `ResidentTyped.complete` recovers owned typing
 and proves physical absence of vacancies from complete initialization evidence.
-Source reads use `Initialization.Ready` along the exact coordinates produced by
-`PathType`: only ancestors must be present and the selected subtree complete.
-`PathType.read`, `EnvironmentTyped.readPlace`, and `correctness` therefore cover
-reads of complete subtrees inside partially initialized typed storage, without
-requiring unrelated siblings to be complete. Strict proof checking and the
-connected correctness, completeness, path-read, and restoration axiom audits
-passed with only `propext` and `Quot.sound`.
-Nested source moves and partial restoration remain open: their admission and
-preservation must construct the changed field states through actual writes.
-Whole-root moves and restoration remain connected; the representation and read
-proof migration do not by themselves establish typed partial-move support.
+Reads, moves and writes share `Initialization.Access` along the exact coordinates
+produced by `PathType`. The former read-only `Initialization.Ready` relation is
+removed. Source moves and assignments compute the next mask with the same
+`Initialization.write`; `ProjectionType.access` and `PathType.write` prove that
+the actual resident replacement has that state. `correctness` consumes those
+proofs and preserves partial initialization through arguments, bodies and scope
+exit, without assuming any runtime post-state.
+`Initialization.Access.write_frame` preserves the selected state at every
+disjoint coordinate path, including siblings below a shared prefix. Complete
+retained subtrees therefore remain readable.
+`HasType.no_whole_read_after_clear` rejects a whole-root source read after any
+accessible nested clear. `Initialization.setChild_complete_iff` characterizes
+restoration: the replacement and every other child must be complete.
+`Initialization.Access.restore_complete` proves that writing a complete value
+back to an extracted path recovers whole-root completeness when the root was
+complete before extraction. These laws accompany the existing exact physical
+move/restore round trip.
+Strict Lean checking and the connected correctness, nested take/write, sibling
+framing, restoration and whole-read rejection axiom audits passed with only
+`propext` and `Quot.sound`. Conditional ownership joins, destruction of surviving
+fields, exact-linear disposition, and reference-mediated mutation remain at
+their ownership and borrowing boundaries; this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
 
@@ -350,9 +363,9 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
 3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
-4. Mutable places, initialization, assignment and explicit moves: whole-root
-   moves, vacancy-aware reads and restoration, and nested initialized
-   tuple/structure assignment are connected. Partial aggregate moves remain open.
+4. Mutable places, initialization, assignment and explicit moves: whole-root and
+   nested tuple/structure moves, partial restoration, sibling access and
+   incomplete-aggregate rejection are connected through the general theorem.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected

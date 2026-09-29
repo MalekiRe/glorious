@@ -285,22 +285,122 @@ def Initialization.child (state : Initialization) (index : Nat) : Initialization
 inductive Initialization.Complete : Initialization → Prop where
   | full : Complete .full
   | fields {entries : List (Nat × Initialization)}
-      (complete : ∀ entry ∈ entries, Complete entry.2) : Complete (.fields entries)
+      (complete : ∀ index, ((Initialization.fields entries).child index).Complete) : Complete (.fields entries)
 
 theorem Initialization.Complete.child {state : Initialization} (complete : state.Complete) (index : Nat) :
     (state.child index).Complete := by
   cases complete with
   | full => exact .full
-  | fields complete =>
-    simp only [Initialization.child]
-    split
-    next found => exact complete _ (List.mem_of_find?_eq_some found)
-    next => exact .full
+  | fields complete => exact complete index
 
-inductive Initialization.Ready : Initialization → List Nat → Prop where
-  | here {state : Initialization} (complete : state.Complete) : Ready state []
-  | child {state : Initialization} {index : Nat} {indices : List Nat}
-      (present : state ≠ .vacant) (ready : Ready (state.child index) indices) : Ready state (index :: indices)
+def Initialization.setChild (state : Initialization) (index : Nat) (replacement : Initialization) : Initialization :=
+  let entries := match state with | .fields entries => entries | _ => []
+  .fields ((index, replacement) :: entries.filter (fun entry => entry.1 != index))
+
+theorem Initialization.child_setChild {state : Initialization} (present : state ≠ .vacant)
+    (index : Nat) (replacement : Initialization) (other : Nat) :
+    (state.setChild index replacement).child other = if other = index then replacement else state.child other := by
+  cases state with
+  | vacant => exact False.elim (present rfl)
+  | full =>
+    by_cases same : other = index
+    · subst other; simp only [setChild, child, List.find?_cons, show (index == index) = true from decide_eq_true rfl, ↓reduceIte]
+    · simp only [setChild, child, List.filter_nil, List.find?_cons, show (index == other) = false from beq_eq_false_iff_ne.mpr (Ne.symm same), List.find?_nil, if_neg same]
+  | fields entries =>
+    by_cases same : other = index
+    · subst other; simp only [setChild, child, List.find?_cons, show (index == index) = true from decide_eq_true rfl, ↓reduceIte]
+    · simp only [setChild, child, List.find?_cons]
+      simp only [show (index == other) = false from beq_eq_false_iff_ne.mpr (Ne.symm same)]
+      rw [List.find?_filter]
+      have predicates : (fun entry : Nat × Initialization => decide ((entry.1 != index) = true ∧ (entry.1 == other) = true)) = (fun entry => entry.1 == other) := by
+        funext entry
+        apply Bool.eq_iff_iff.mpr
+        simp only [decide_eq_true_eq, bne_iff_ne, beq_iff_eq]
+        exact ⟨And.right, fun equal => ⟨fun h => same (equal.symm.trans h), equal⟩⟩
+      rw [predicates]
+      simp only [if_neg same]
+
+inductive Initialization.Access : Initialization → List Nat → Initialization → Prop where
+  | here (state : Initialization) : Access state [] state
+  | child {state selected : Initialization} {index : Nat} {indices : List Nat}
+      (present : state ≠ .vacant) (access : Access (state.child index) indices selected) : Access state (index :: indices) selected
+
+def Initialization.write (state : Initialization) (indices : List Nat) (replacement : Initialization) : Initialization :=
+  match indices with
+  | [] => replacement
+  | index :: rest => state.setChild index ((state.child index).write rest replacement)
+
+theorem Initialization.setChild_complete_iff {state next : Initialization} (present : state ≠ .vacant) (index : Nat) :
+    (state.setChild index next).Complete ↔ next.Complete ∧ ∀ other, other ≠ index → (state.child other).Complete := by
+  constructor
+  · intro complete
+    exact ⟨by simpa only [child_setChild present, ↓reduceIte] using complete.child index,
+      fun other different => by simpa only [child_setChild present, if_neg different] using complete.child other⟩
+  · rintro ⟨nextComplete, remaining⟩
+    apply Complete.fields
+    intro other
+    change ((state.setChild index next).child other).Complete
+    rw [child_setChild present]
+    split
+    next => exact nextComplete
+    next different => exact remaining other different
+
+theorem Initialization.Complete.access {state selected : Initialization} {indices : List Nat}
+    (complete : state.Complete) (access : state.Access indices selected) : selected.Complete := by
+  induction access with
+  | here => exact complete
+  | child present access ih => exact ih (complete.child _)
+
+theorem Initialization.Access.write {state selected : Initialization} {indices : List Nat}
+    (access : state.Access indices selected) (next : Initialization) : (state.write indices next).Access indices next := by
+  induction access with
+  | here => exact .here next
+  | child present access ih =>
+    apply Access.child (by simp [Initialization.write, setChild])
+    simpa only [Initialization.write, child_setChild present, ↓reduceIte] using ih
+
+theorem Initialization.Access.clear_incomplete {state selected : Initialization} {indices : List Nat}
+    (access : state.Access indices selected) : ¬ (state.write indices .vacant).Complete := by
+  intro complete
+  have impossible := complete.access (access.write .vacant)
+  cases impossible
+
+inductive CoordinatesApart : List Nat → List Nat → Prop where
+  | siblings {left right : Nat} {xs ys : List Nat} (different : left ≠ right) : CoordinatesApart (left :: xs) (right :: ys)
+  | descend {index : Nat} {xs ys : List Nat} (apart : CoordinatesApart xs ys) : CoordinatesApart (index :: xs) (index :: ys)
+
+theorem Initialization.Access.write_frame {state selected retained : Initialization} {indices observed : List Nat}
+    (access : state.Access indices selected) (kept : state.Access observed retained) (apart : CoordinatesApart indices observed)
+    (next : Initialization) : (state.write indices next).Access observed retained := by
+  induction apart generalizing state selected retained with
+  | siblings different =>
+    cases access with
+    | child present access =>
+      cases kept with
+      | child keptPresent kept =>
+        apply Access.child (by simp [Initialization.write, setChild])
+        simpa only [Initialization.write, child_setChild present, if_neg (Ne.symm different)] using kept
+  | descend apart ih =>
+    cases access with
+    | child present access =>
+      cases kept with
+      | child keptPresent kept =>
+        apply Access.child (by simp [Initialization.write, setChild])
+        simpa only [Initialization.write, child_setChild present, ↓reduceIte] using ih access kept
+
+theorem Initialization.Access.restore_complete {state selected next : Initialization} {indices : List Nat}
+    (access : state.Access indices selected) (first : Initialization) (restored : next.Complete) :
+    state.Complete → ((state.write indices first).write indices next).Complete := by
+  induction access with
+  | here => intro _; exact restored
+  | @child state selected index indices present access ih =>
+    intro complete
+    have outerPresent : state.write (index :: indices) first ≠ .vacant := by simp [Initialization.write, setChild]
+    apply (setChild_complete_iff outerPresent index).mpr
+    constructor
+    · simpa only [Initialization.write, child_setChild present, ↓reduceIte] using ih (complete.child index)
+    · intro other different
+      simpa only [Initialization.write, child_setChild present, if_neg different] using complete.child other
 
 structure BindingType where
   type : Ty
@@ -773,15 +873,16 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       HasType program home context (.character number) .character context
   | group {home : Module} {context after : List (String × BindingType)} {body : Expr} {type : Ty}
       (typed : HasType program home context body type after) : HasType program home context (.group body) type after
-  | read {home : Module} {context : List (String × BindingType)} {place : Place} {slot : BindingType} {type : Ty} {indices : List Nat}
-      (selected : lookup place.root context = some slot) (initialized : slot.initialization.Ready indices)
+  | read {home : Module} {context : List (String × BindingType)} {place : Place} {slot : BindingType} {type : Ty} {indices : List Nat} {state : Initialization}
+      (selected : lookup place.root context = some slot) (access : slot.initialization.Access indices state) (initialized : state.Complete)
       (path : PathType program home slot.type place.fields indices type) (copyable : Duplicable program.data type) :
       HasType program home context (.read place) type context
   | move {home : Module} {context after : List (String × BindingType)} {place : Place} {slot : BindingType}
-      (selected : lookup place.root context = some slot) (initialized : slot.initialization.Complete)
-      (whole : place.fields = [])
-      (cleared : replaceBinding place.root { slot with initialization := .vacant } context = some after) :
-      HasType program home context (.move place) slot.type after
+      {type : Ty} {indices : List Nat} {state : Initialization}
+      (selected : lookup place.root context = some slot) (access : slot.initialization.Access indices state) (initialized : state.Complete)
+      (path : PathType program home slot.type place.fields indices type)
+      (cleared : replaceBinding place.root { slot with initialization := slot.initialization.write indices .vacant } context = some after) :
+      HasType program home context (.move place) type after
   | sequence {home : Module} {context middle after : List (String × BindingType)} {first rest : Expr} {discarded type : Ty}
       (head : HasType program home context first discarded middle) (drop : Duplicable program.data discarded)
       (tail : HasType program home middle rest type after) : HasType program home context (.sequence first rest) type after
@@ -827,12 +928,12 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result bodyAfter) :
       HasType program home context (.call identity arguments) declaration.result after
   | assign {home : Module} {context middle updated after : List (String × BindingType)} {place : Place}
-      {value rest : Expr} {slot : BindingType} {target result : Ty} {indices : List Nat}
+      {value rest : Expr} {slot : BindingType} {target result : Ty} {indices : List Nat} {state : Initialization}
       (resident : HasType program home context value target middle)
       (selected : lookup place.root middle = some slot) (writable : slot.mutable = true)
-      (available : place.fields = [] ∨ slot.initialization.Complete) (path : PathType program home slot.type place.fields indices target)
-      (discard : slot.initialization ≠ .vacant → Duplicable program.data target)
-      (written : replaceBinding place.root { slot with initialization := .full } middle = some updated)
+      (available : slot.initialization.Access indices state) (path : PathType program home slot.type place.fields indices target)
+      (discard : state ≠ .vacant → Duplicable program.data target)
+      (written : replaceBinding place.root { slot with initialization := slot.initialization.write indices .full } middle = some updated)
       (continued : HasType program home updated rest result after) :
       HasType program home context (.assign place value rest) result after
   | applyPatterns {home : Module} {context middle after : List (String × BindingType)} {inputs : List Ty}
@@ -1084,10 +1185,11 @@ theorem ResidentsTyped.select {types : List Ty} {values : List Value} {states : 
         exact ⟨_, rfl, headTyped⟩
       | succ index => exact ih tailTyped index selection
 
-theorem ResidentsTyped.set {types : List Ty} {values : List Value} {states : Nat → Initialization}
+theorem ResidentsTyped.set {program : Program} {types : List Ty} {values : List Value} {states : Nat → Initialization}
     (typed : ResidentsTyped program states values types) (index : Nat) {type : Ty}
-    (selected : types[index]? = some type) {replacement : Value} (resident : ResidentTyped program (states index) replacement type) :
-    ResidentsTyped program states (values.set index replacement) types := by
+    (selected : types[index]? = some type) {replacement : Value} {next : Initialization}
+    (resident : ResidentTyped program next replacement type) :
+    ResidentsTyped program (fun other => if other = index then next else states other) (values.set index replacement) types := by
   induction types generalizing values index states with
   | nil => cases typed; simp at selected
   | cons first rest ih =>
@@ -1097,8 +1199,9 @@ theorem ResidentsTyped.set {types : List Ty} {values : List Value} {states : Nat
       | zero =>
         simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
         cases selected
-        exact .cons resident tail
-      | succ index => exact .cons head (ih tail index selected resident)
+        exact .cons (by simpa only [↓reduceIte] using resident) (by simpa only [Nat.add_one_ne_zero, ↓reduceIte] using tail)
+      | succ index =>
+        exact .cons (by simpa only [Nat.zero_ne_add_one, ↓reduceIte] using head) (by simpa only [Nat.add_right_cancel_iff] using ih tail index selected)
 
 /-- The selected resident and lawful replacement are derived from the same field contract. -/
 theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat} {state : Initialization}
@@ -1106,8 +1209,9 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
     (typed : ResidentTyped program state value source) (present : state ≠ .vacant := by intro h; cases h) :
     ∃ resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
       ResidentTyped program (state.child index) resident target ∧
-      ∀ replacement, ResidentTyped program (state.child index) replacement target →
-        ∃ updated, value.replaceChild index replacement = some updated ∧ ResidentTyped program state updated source := by
+      ∀ replacement next, ResidentTyped program next replacement target →
+        ∃ updated, value.replaceChild index replacement = some updated ∧
+          ResidentTyped program (state.setChild index next) updated source := by
   cases projection with
   | @tuple first type rest index selected =>
     cases typed with
@@ -1115,19 +1219,23 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
     | @tuple state head tail _ _ headTyped tailTyped _ =>
       obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select (states := state.child) (.cons headTyped tailTyped) index target selected
       refine ⟨resident, rfl, found, residentTyped, ?_⟩
-      intro replacement replacementTyped
+      intro replacement next replacementTyped
+      have changed : ResidentsTyped program (state.setChild index next).child ((head :: tail).set index replacement) (first :: rest) := by
+        rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
+        exact ResidentsTyped.set (.cons headTyped tailTyped) index selected replacementTyped
       cases index with
       | zero =>
-        simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
-        cases selected
-        exact ⟨_, rfl, .tuple replacementTyped tailTyped present⟩
+        cases changed with
+        | cons firstChanged restChanged => exact ⟨_, rfl, .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
       | succ index =>
         change tail[index]? = some resident at found
-        exact ⟨_, by simp [Value.replaceChild, found], .tuple headTyped (ResidentsTyped.set tailTyped index selected replacementTyped) present⟩
+        cases changed with
+        | cons firstChanged restChanged =>
+          exact ⟨_, by simp [Value.replaceChild, found], .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
   | @nominal identity index key declaration schema field declared structureOnly indexed selected visible =>
     cases typed with
     | vacant => exact False.elim (present rfl)
-    | @nominal _ _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents _ =>
+    | @nominal state _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents _ =>
       have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
       subst otherDeclaration
       cases tag with
@@ -1139,38 +1247,42 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
         obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select residents index field.type selectedType
         refine ⟨resident, ?_, found, residentTyped, ?_⟩
         · simp [Value.fieldIndex, declared, structureOnly, indexed]
-        · intro replacement replacementTyped
-          exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite (ResidentsTyped.set residents index selectedType replacementTyped) present⟩
+        · intro replacement next replacementTyped
+          have changed : ResidentsTyped program (state.setChild index next).child (values.set index replacement) (schema.residents.map Field.type) := by
+            rw [show (state.setChild index next).child = (fun other => if other = index then next else state.child other) from funext (state.child_setChild present index next)]
+            exact residents.set index selectedType replacementTyped
+          exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite changed (by simp [Initialization.setChild])⟩
 
-theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state : Initialization}
+theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
     (path : PathType program home source keys indices target) {value : Value}
-    (typed : ResidentTyped program state value source) (ready : state.Ready indices) :
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected) (initialized : selected.Complete) :
     ∃ resident, value.readPath program keys = some resident ∧ ValueHasType program resident target := by
-  induction path generalizing value state with
-  | nil =>
-    cases ready with
-    | here complete => exact ⟨value, rfl, (typed.complete complete).1⟩
-  | cons head tail ih =>
-    cases ready with
-    | child present childReady =>
+  induction path generalizing value state selected with
+  | nil => cases access; exact ⟨value, rfl, (typed.complete initialized).1⟩
+  | @cons source middle target key keys index indices head tail ih =>
+    cases access with
+    | child present childAccess =>
       obtain ⟨child, indexed, found, childTyped, _⟩ := head.access typed present
-      obtain ⟨resident, selected, residentTyped⟩ := ih childTyped childReady
+      obtain ⟨resident, selected, residentTyped⟩ := ih childTyped childAccess initialized
       exact ⟨resident, by simp [Value.readPath, Value.readField, indexed, found, selected], residentTyped⟩
 
-theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat}
+theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected next : Initialization}
     (path : PathType program home source keys indices target) {value replacement : Value}
-    (typed : ValueHasType program value source) (resident : ValueHasType program replacement target) :
-    ∃ updated, value.writePath program keys replacement = some updated ∧ ValueHasType program updated source ∧
-      updated.readPath program keys = some replacement := by
-  induction path generalizing value with
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected)
+    (resident : ResidentTyped program next replacement target) :
+    ∃ updated, value.writePath program keys replacement = some updated ∧
+      ResidentTyped program (state.write indices next) updated source ∧ updated.readPath program keys = some replacement := by
+  induction path generalizing value state selected with
   | nil => exact ⟨replacement, rfl, resident, rfl⟩
   | @cons source middle target key keys index indices head tail ih =>
-    obtain ⟨child, indexed, found, childTyped, replace⟩ := head.access typed
-    obtain ⟨updatedChild, childWritten, updatedTyped, _⟩ := ih childTyped resident
-    obtain ⟨updated, written, resultTyped⟩ := replace updatedChild updatedTyped
-    have pathWritten : value.writePath program (key :: keys) replacement = some updated := by
-      simp [Value.writePath, indexed, found, childWritten, written]
-    exact ⟨updated, pathWritten, resultTyped, Value.writePath_readback pathWritten⟩
+    cases access with
+    | child present childAccess =>
+      obtain ⟨child, index, found, childTyped, replace⟩ := head.access typed present
+      obtain ⟨updatedChild, written, updatedChildTyped, _⟩ := ih childTyped childAccess resident
+      obtain ⟨updated, replaced, updatedTyped⟩ := replace updatedChild _ updatedChildTyped
+      have pathWritten : value.writePath program (key :: keys) replacement = some updated := by
+        simp [Value.writePath, index, found, written, replaced]
+      exact ⟨updated, pathWritten, updatedTyped, Value.writePath_readback pathWritten⟩
 
 theorem EnvironmentTyped.append {left right : Environment} {first rest : List (String × BindingType)}
     (front : EnvironmentTyped program left first) (back : EnvironmentTyped program right rest) :
@@ -1231,53 +1343,39 @@ theorem EnvironmentTyped.lookup {environment : Environment} {context : List (Str
     · obtain ⟨found, selection, typed⟩ := ih selected
       exact ⟨found, by simp_all, typed⟩
 
-theorem EnvironmentTyped.lookupLive {environment : Environment} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {name : String} {type : BindingType}
-    (selected : Grounded.lookup name context = some type) (initialized : type.initialization.Complete) :
-    ∃ value, Grounded.lookup name environment = some value ∧ ValueHasType program value type.type := by
-  obtain ⟨resident, found, residentTyped⟩ := typed.lookup selected
-  exact ⟨resident, found, (residentTyped.complete initialized).1⟩
-
 theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat}
-    (selected : Grounded.lookup place.root context = some slot) (initialized : slot.initialization.Ready indices)
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state : Initialization}
+    (selected : Grounded.lookup place.root context = some slot) (access : slot.initialization.Access indices state) (initialized : state.Complete)
     (path : PathType program home slot.type place.fields indices target) :
     ∃ value, Grounded.readPlace program place environment = some value ∧ ValueHasType program value target := by
   obtain ⟨parent, found, parentTyped⟩ := typed.lookup selected
-  obtain ⟨resident, read, residentTyped⟩ := path.read parentTyped initialized
+  obtain ⟨resident, read, residentTyped⟩ := path.read parentTyped access initialized
   exact ⟨resident, by simp [Grounded.readPlace, found, read, residentTyped.initialized], residentTyped⟩
 
 theorem EnvironmentTyped.writePlace {environment : Environment} {context afterContext : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat}
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state next : Initialization}
     (selected : Grounded.lookup place.root context = some slot)
-    (available : place.fields = [] ∨ slot.initialization.Complete) (path : PathType program home slot.type place.fields indices target)
-    (changed : replaceBinding place.root { slot with initialization := .full } context = some afterContext)
-    {replacement : Value} (resident : ValueHasType program replacement target) :
+    (access : slot.initialization.Access indices state) (path : PathType program home slot.type place.fields indices target)
+    (changed : replaceBinding place.root { slot with initialization := slot.initialization.write indices next } context = some afterContext)
+    {replacement : Value} (resident : ResidentTyped program next replacement target) :
     ∃ after, writePlace program place replacement environment = some after ∧ EnvironmentTyped program after afterContext ∧
-      Grounded.readPlace program place after = some replacement := by
-  by_cases whole : place.fields = []
-  · rw [whole] at path
-    cases path
-    obtain ⟨old, found, _⟩ := typed.lookup selected
-    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := replacement) resident
-    exact ⟨after, by simp [Grounded.writePlace, found, whole, Value.writePath, replaced], afterTyped,
-      by simp [Grounded.readPlace, lookupAfter, whole, Value.readPath, resident.initialized]⟩
-  · obtain ⟨parent, found, parentTyped⟩ := typed.lookupLive selected (available.resolve_left whole)
-    obtain ⟨updated, written, updatedTyped, readback⟩ := path.write parentTyped resident
-    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := updated) updatedTyped
-    refine ⟨after, ?_, afterTyped, by simp [Grounded.readPlace, lookupAfter, readback, resident.initialized]⟩
-    simp [Grounded.writePlace, found, written, replaced]
+      Grounded.readPlace program place after = (if replacement.initialized then some replacement else none) := by
+  obtain ⟨parent, found, parentTyped⟩ := typed.lookup selected
+  obtain ⟨updated, written, updatedTyped, readback⟩ := path.write parentTyped access resident
+  obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := updated) updatedTyped
+  refine ⟨after, ?_, afterTyped, by simp [Grounded.readPlace, lookupAfter, readback]⟩
+  simp [Grounded.writePlace, found, written, replaced]
 
 theorem EnvironmentTyped.takePlace {environment : Environment} {context afterContext : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType}
-    (selected : Grounded.lookup place.root context = some slot) (initialized : slot.initialization.Complete)
-    (whole : place.fields = [])
-    (changed : replaceBinding place.root { slot with initialization := .vacant } context = some afterContext) :
-    ∃ value after, Grounded.takePlace program place environment = some (value, after) ∧ ValueHasType program value slot.type ∧
-      EnvironmentTyped program after afterContext ∧ Grounded.lookup place.root after = some .vacant := by
-  obtain ⟨value, found, valueTyped⟩ := typed.lookupLive selected initialized
-  obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := .vacant) .vacant
-  exact ⟨value, after, by simp [Grounded.takePlace, Grounded.readPlace, Grounded.writePlace, whole, found, Value.readPath, Value.writePath, valueTyped.initialized, replaced], valueTyped, afterTyped, lookupAfter⟩
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state : Initialization}
+    (selected : Grounded.lookup place.root context = some slot) (access : slot.initialization.Access indices state) (initialized : state.Complete)
+    (path : PathType program home slot.type place.fields indices target)
+    (changed : replaceBinding place.root { slot with initialization := slot.initialization.write indices .vacant } context = some afterContext) :
+    ∃ value after, Grounded.takePlace program place environment = some (value, after) ∧ ValueHasType program value target ∧
+      EnvironmentTyped program after afterContext ∧ Grounded.readPlace program place after = none := by
+  obtain ⟨value, read, valueTyped⟩ := typed.readPlace selected access initialized path
+  obtain ⟨after, written, afterTyped, readback⟩ := typed.writePlace selected access path changed (replacement := .vacant) .vacant
+  exact ⟨value, after, takePlace_eq_some.mpr ⟨read, written⟩, valueTyped, afterTyped, by simpa [Value.initialized] using readback⟩
 
 /-- Runtime typing produces the constructor signature consumed by both pattern
 binding and exhaustive dispatch; neither consumer guesses resident types. -/
@@ -1631,14 +1729,14 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     intro other otherAfter evaluation
     cases evaluation with
     | group inner => exact unique _ _ inner
-  | read selected initialized path copyable =>
-    obtain ⟨value, selectedValue, valueTyped⟩ := environmentTyped.readPlace selected initialized path
+  | read selected access initialized path copyable =>
+    obtain ⟨value, selectedValue, valueTyped⟩ := environmentTyped.readPlace selected access initialized path
     refine ⟨value, environment, .read selectedValue, valueTyped, environmentTyped, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
     | read found => exact ⟨Option.some.inj (found.symm.trans selectedValue), rfl⟩
-  | move selected initialized whole cleared =>
-    obtain ⟨value, after, taken, valueTyped, afterTyped, _⟩ := environmentTyped.takePlace selected initialized whole cleared
+  | move selected access initialized path cleared =>
+    obtain ⟨value, after, taken, valueTyped, afterTyped, _⟩ := environmentTyped.takePlace selected access initialized path cleared
     refine ⟨value, after, .move taken, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
@@ -1855,6 +1953,25 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       subst sameHead
       subst sameTail
       rfl
+
+theorem HasType.read_root_complete {context after : List (String × BindingType)} {root : String} {slot : BindingType} {type : Ty}
+    (admitted : HasType program home context (.read ⟨root, []⟩) type after)
+    (found : lookup root context = some slot) : slot.initialization.Complete := by
+  cases admitted with
+  | read selected access initialized path copyable =>
+    have same := Option.some.inj (selected.symm.trans found)
+    cases same
+    cases path
+    cases access
+    exact initialized
+
+theorem HasType.no_whole_read_after_clear {context cleared after : List (String × BindingType)} {root : String}
+    {slot : BindingType} {indices : List Nat} {selected : Initialization} {type : Ty}
+    (access : slot.initialization.Access indices selected)
+    (changed : replaceBinding root { slot with initialization := slot.initialization.write indices .vacant } context = some cleared) :
+    ¬ HasType program home cleared (.read ⟨root, []⟩) type after := by
+  intro admitted
+  exact access.clear_incomplete (admitted.read_root_complete (replaceBinding_lookup changed))
 
 /-- Empty source environments are realized, not assumed. -/
 theorem closed_correctness {expression : Expr} {type : Ty}
