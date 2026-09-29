@@ -151,7 +151,7 @@ explicit semantic-fidelity and proof-assumption audit.
 decoded character literals, grouping, place reads, sequencing, immutable and
 mutable initialized bindings, whole-local and nested tuple/structure moves, restoration and assignment,
 optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
-non-generic finite-inline nominal data over duplicable fields, direct
+non-generic finite-inline nominal data with coherent principal restrictions, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
 application.** Records, tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
@@ -165,8 +165,8 @@ preservation and uniqueness of both result and final environment. Every
 constituent consumes its predecessor’s actual post-state. Initializers execute
 before their binding is introduced; their result and post-state construct the
 body environment. Scope exit removes its own binding prefix and retains
-changes to surrounding locals. Copy/discard
-sites require explicit duplicability evidence. `closed_correctness` constructs
+changes to surrounding locals. Copying requires duplicability; zero-use sites
+require the distinct affine-bound permission `MayDiscard`. `closed_correctness` constructs
 the empty environment rather than assuming it. Admission supplies no successful
 execution or normalization witness. Exact scalar admission theorems and `unit_agreement` remain connected
 to this general result. This is lexical-state preservation, not physical-machine preservation.
@@ -189,7 +189,7 @@ consume this strengthened contract. No second resolution pass or index table
 is introduced. The old separate tuple-expression projection rule is removed. Assignment
 evaluates the RHS first, then updates the selected place in that actual
 post-state. It requires a mutable root. A live destination requires a legally
-discardable old resident (currently duplicable, without hooks); restoring a
+discardable old resident (duplicable or affine, without hooks); restoring a
 vacant selected subtree does not discard an old value. Nested writes require
 present ancestors, not complete siblings or an initialized destination.
 `PathType.write` and `EnvironmentTyped.writePlace` preserve the computed partial
@@ -247,11 +247,47 @@ complete before extraction. These laws accompany the existing exact physical
 move/restore round trip.
 Strict Lean checking and the connected correctness, nested take/write, sibling
 framing, restoration and whole-read rejection axiom audits passed with only
-`propext` and `Quot.sound`. Conditional ownership joins, destruction of surviving
-fields, exact-linear disposition, and reference-mediated mutation remain at
-their ownership and borrowing boundaries; this is not whole-language soundness.
+`propext` and `Quot.sound`. Conditional ownership joins, ordered destruction of
+surviving fields, custom hooks, and reference-mediated mutation remain open;
+this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
+
+### Ownership permissions and zero-use boundaries
+
+`UsePermission` replaces the copy-only structural relation. Its index is a
+requested interval, not a claim that the principal class equals that interval:
+an exact-once request is supported by all three ordinary principal classes.
+`Duplicable` and `MayDiscard` are specializations of this same producer.
+Manual restrictions are checked against every field of every variant; they
+cannot widen structural capability. Empty arrays remain resident-free.
+`UsePermission.weaken` proves interval-request weakening, and
+`UsePermission.nominal_restriction` proves fidelity to the selected declaration.
+
+Local bindings, function parameters and pattern binders are checked at their
+final initialization state. A transferred owner leaves a vacant slot; a live
+slot requires `MayDiscard`. Pattern binding itself no longer requires copying
+or discardability. Coherent nonduplicable nominal construction and whole-owner
+transfer are admitted through the same general correctness theorem.
+
+`Value.Disposable` states zero-use eligibility for an actual resident. Evaluation
+consumes this evidence when discarding a sequencing result, removing lexical or
+parameter bindings, projecting an owned expression, or overwriting storage.
+`EnvironmentTyped.disposable` derives scope evidence from the actual final
+typed environment. `EnvironmentTyped.place_disposable` derives overwrite
+evidence for the actual selected resident after RHS evaluation, including
+vacancy restoration. `correctness` constructs these permissions; source
+admission does not assume successful runtime cleanup.
+`Value.Disposable.not_exact_nominal` excludes live manually exact-linear owners
+even when fieldless. `SlotTyped.must_transfer` proves that a slot eligible for
+removal must actually be vacant when its type forbids zero use.
+
+This is logical zero-use eligibility, not a proof of ordered destructor
+execution. Partial exact-linear residual-shell cleanup, conditional joins,
+custom hooks and their possible divergence, and physical storage release remain
+open. Those require their actual cleanup transitions, not more eligibility
+assumptions. Strict checking and the connected correctness and disposition
+axiom audits passed with only `propext` and `Quot.sound`.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -277,8 +313,9 @@ One declaration supplies constructor schemas, projection indices and field
 types. Private access includes descendants; package/parent/public visibility
 is explicit. Aliases cannot change a nominal field’s access rule. Numeric
 tuple-struct access and named record access remain distinct; enum payloads
-cannot be projected without matching. Copyability checks every variant and
-respects manual principal restrictions. Inline type expansion checks every
+cannot be projected without matching. `UsePermission` checks every variant and
+validates a manual principal restriction against structural availability before
+allowing any requested bound. Inline type expansion checks every
 field and rejects direct recursive layouts and duplicate record field names.
 Empty arrays remain resident-free but must have valid element types. This also
 repairs the previously unchecked malformed element type of an empty array.
@@ -327,11 +364,11 @@ open at their respective source/borrowing/callable boundaries. In particular,
 this does not prove source capture formation or compatibility between a
 materialized callee’s captured loans and argument evaluation.
 
-Nominal scope excludes generic instances, indirections, hooks, nonduplicable
-owners and non-exhaustive-enum deconstruction. Constructor arguments are
+Nominal scope excludes generic instances, indirections, hooks and
+non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, partially initialized aggregates, loans and
+floating conversion, static strings, residual-shell destruction, loans and
 effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
@@ -366,7 +403,9 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 4. Mutable places, initialization, assignment and explicit moves: whole-root and
    nested tuple/structure moves, partial restoration, sibling access and
    incomplete-aggregate rejection are connected through the general theorem.
-5. Affine/exact-linear ownership, destruction and scope cleanup.
+5. Affine/exact-linear ownership, destruction and scope cleanup: shared use
+   permissions and final-state zero-use eligibility are connected above; ordered
+   destruction, residual exact-linear shells and conditional joins remain open.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;

@@ -5,9 +5,9 @@ Declarations, field types, identities and lexical names are already decoded.
 Constructors consume argument expressions in their recorded order. Literal
 magnitudes and Unicode numbers are decoded; source elaboration is not proved.
 Direct named calls and immediate pattern-callable application share correctness.
-Only duplicable nominal owners without hooks or indirections are admitted.
-Physical representation, exhaustion and nonduplicable ownership remain outside
-this logical AST-to-value boundary.
+Finite-inline nominal owners have checked structural use bounds and manual
+restrictions. Actual zero-use boundaries consume derived disposal permission.
+Hooks, ordered destruction, physical representation and exhaustion remain open.
 Admission supplies no successful execution or normalization witness.
 Constant-normal-form checks are consumed only after normalization is derived.
 No prior specification modules are imported.
@@ -488,22 +488,39 @@ inductive PathType (program : Program) (home : Module) : Ty → List FieldKey �
       (head : ProjectionType program home source key index middle) (tail : PathType program home middle keys indices target) :
       PathType program home source (key :: keys) (index :: indices) target
 
-/-- §7.2: scalar owned use may copy; scalar values may also be discarded.
-Keep this explicit at consumers rather than making all future types copyable. -/
-inductive Duplicable (data : DataDeclarations) : Ty → Prop where
-  | unit : Duplicable data .unit
-  | integer (type : IntegerType) : Duplicable data (.integer type)
-  | character : Duplicable data .character
-  | tuple {head : Ty} {tail : List Ty} (first : Duplicable data head)
-      (rest : ∀ type ∈ tail, Duplicable data type) : Duplicable data (.tuple head tail)
-  | array {element : Ty} (length : Nat) (resident : Duplicable data element) :
-      Duplicable data (.array element length)
-  | emptyArray (element : Ty) : Duplicable data (.array element 0)
-  | nominal {identity : Nat} {declaration : DataDecl}
-      (declared : data identity = some declaration)
-      (restriction : declaration.restriction = none ∨ declaration.restriction = some .duplicable)
-      (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents, Duplicable data field.type) :
-      Duplicable data (.nominal identity)
+/-- A requested interval must be contained in the owner's principal interval. -/
+def Principal.Accepts : Principal → Principal → Prop
+  | .duplicable, _ => True
+  | .affine, .duplicable => False
+  | .affine, _ => True
+  | .exact, .exact => True
+  | .exact, _ => False
+
+/-- One producer checks structural capability and coherent manual restrictions.
+The index is a requested bound, not an assertion of the principal class. -/
+inductive UsePermission (data : DataDeclarations) : Ty → Principal → Prop where
+  | unit {bound : Principal} : UsePermission data .unit bound
+  | integer (type : IntegerType) {bound : Principal} : UsePermission data (.integer type) bound
+  | character {bound : Principal} : UsePermission data .character bound
+  | tuple {head : Ty} {tail : List Ty} {bound : Principal} (first : UsePermission data head bound)
+      (rest : ∀ type ∈ tail, UsePermission data type bound) : UsePermission data (.tuple head tail) bound
+  | array {element : Ty} {bound : Principal} (length : Nat) (resident : UsePermission data element bound) :
+      UsePermission data (.array element length) bound
+  | emptyArray (element : Ty) {bound : Principal} : UsePermission data (.array element 0) bound
+  | inferred {identity : Nat} {declaration : DataDecl} {bound : Principal}
+      (declared : data identity = some declaration) (unrestricted : declaration.restriction = none)
+      (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents, UsePermission data field.type bound) :
+      UsePermission data (.nominal identity) bound
+  | restricted {identity : Nat} {declaration : DataDecl} {principal bound : Principal}
+      (declared : data identity = some declaration) (restriction : declaration.restriction = some principal)
+      (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents, UsePermission data field.type principal)
+      (permitted : principal.Accepts bound) : UsePermission data (.nominal identity) bound
+
+abbrev Duplicable (data : DataDeclarations) (type : Ty) := UsePermission data type .duplicable
+abbrev MayDiscard (data : DataDeclarations) (type : Ty) := UsePermission data type .affine
+
+def BindingType.Disposable (data : DataDeclarations) (slot : BindingType) : Prop :=
+  slot.initialization = .vacant ∨ MayDiscard data slot.type
 
 /-- Nearest lexical binding wins, including in shadowing initializers. -/
 def lookup {α : Type} (name : String) : List (String × α) → Option α
@@ -586,6 +603,96 @@ inductive EnvironmentTyped (program : Program) : Environment → List (String ×
       {environment : Environment} {context : List (String × BindingType)}
       (resident : SlotTyped program value type) (rest : EnvironmentTyped program environment context) :
       EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
+
+theorem Principal.Accepts.trans {first middle last : Principal} (front : first.Accepts middle) (back : middle.Accepts last) : first.Accepts last := by
+  cases first <;> cases middle <;> cases last <;> simp_all [Principal.Accepts]
+
+theorem UsePermission.weaken {data : DataDeclarations} {type : Ty} {bound requested : Principal}
+    (permission : UsePermission data type bound) (accepted : bound.Accepts requested) : UsePermission data type requested := by
+  induction permission with
+  | unit => exact .unit
+  | integer type => exact .integer type
+  | character => exact .character
+  | tuple first rest firstIH restIH => exact .tuple (firstIH accepted) (fun type included => restIH type included accepted)
+  | array length resident ih => exact .array length (ih accepted)
+  | emptyArray element => exact .emptyArray element
+  | inferred declared unrestricted fields ih => exact .inferred declared unrestricted (fun schema included field member => ih schema included field member accepted)
+  | restricted declared restriction fields permitted ih => exact .restricted declared restriction fields (permitted.trans accepted)
+
+theorem UsePermission.nominal_restriction {data : DataDeclarations} {identity : Nat} {declaration : DataDecl} {principal bound : Principal}
+    (permission : UsePermission data (.nominal identity) bound) (declared : data identity = some declaration)
+    (restriction : declaration.restriction = some principal) : principal.Accepts bound := by
+  cases permission with
+  | inferred found unrestricted fields =>
+    have same := Option.some.inj (found.symm.trans declared)
+    cases same
+    simp [restriction] at unrestricted
+  | restricted found chosen fields permitted =>
+    have same := Option.some.inj (found.symm.trans declared)
+    cases same
+    have samePrincipal := Option.some.inj (chosen.symm.trans restriction)
+    cases samePrincipal
+    exact permitted
+
+theorem ResidentTyped.vacant_value {program : Program} {value : Value} {type : Ty}
+    (typed : ResidentTyped program .vacant value type) : value = .vacant := by
+  cases typed <;> simp_all
+
+theorem SlotTyped.disposition {program : Program} {value : Value} {slot : BindingType}
+    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data) :
+    value = .vacant ∨ MayDiscard program.data slot.type := by
+  rcases allowed with vacant | discard
+  · left
+    exact ResidentTyped.vacant_value (by simpa [SlotTyped, vacant] using typed)
+  · exact Or.inr discard
+
+theorem SlotTyped.must_transfer {program : Program} {value : Value} {slot : BindingType}
+    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data)
+    (required : ¬ MayDiscard program.data slot.type) : value = .vacant :=
+  (typed.disposition allowed).resolve_right required
+
+def Value.Disposable (program : Program) (value : Value) : Prop :=
+  value = .vacant ∨ ∃ state type, ResidentTyped program state value type ∧ MayDiscard program.data type
+
+theorem ResidentTyped.disposable {state : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) (allowed : MayDiscard program.data type) : value.Disposable program :=
+  Or.inr ⟨state, type, typed, allowed⟩
+
+theorem SlotTyped.disposable {value : Value} {slot : BindingType}
+    (typed : SlotTyped program value slot) (allowed : slot.Disposable program.data) : value.Disposable program := by
+  rcases typed.disposition allowed with vacant | permitted
+  · exact Or.inl vacant
+  · exact ResidentTyped.disposable typed permitted
+
+theorem EnvironmentTyped.disposable {environment : Environment} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) :
+    (∀ entry ∈ context, entry.2.Disposable program.data) → ∀ entry ∈ environment, entry.2.Disposable program := by
+  induction typed with
+  | nil => intro _ entry included; cases included
+  | cons head tail ih =>
+    intro allowed entry included
+    rcases List.mem_cons.mp included with rfl | member
+    · exact SlotTyped.disposable head (allowed _ (List.mem_cons_self ..))
+    · exact ih (fun binding member => allowed binding (List.mem_cons_of_mem _ member)) entry member
+
+theorem EnvironmentTyped.take {environment : Environment} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) (count : Nat) :
+    EnvironmentTyped program (environment.take count) (context.take count) := by
+  induction count generalizing environment context with
+  | zero => exact .nil
+  | succ count ih =>
+    cases typed with
+    | nil => exact .nil
+    | cons head tail => exact .cons head (ih tail)
+
+theorem Value.Disposable.not_exact_nominal {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl}
+    (declared : program.data identity = some declaration) (restriction : declaration.restriction = some .exact) :
+    ¬ (Value.nominal identity tag fields).Disposable program := by
+  rintro (impossible | ⟨state, type, typed, permitted⟩)
+  · cases impossible
+  · cases typed with
+    | nominal found chosen finite residents present =>
+      exact permitted.nominal_restriction declared restriction
 
 def Value.head : Value → Head
   | .vacant => .vacant
@@ -685,11 +792,11 @@ def Head.Accessible (program : Program) (home : Module) : Head → Prop
 
 mutual
 inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (String × BindingType) → Prop where
-  | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
-  | binder (name : String) {type : Ty} (discard : Duplicable program.data type) :
+  | wildcard {type : Ty} (discard : MayDiscard program.data type) : PatternType program home .wildcard type []
+  | binder (name : String) {type : Ty} :
       PatternType program home (.binder name) type [(name, ⟨type, false, .full⟩)]
   | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
-      (discard : Duplicable program.data type) : PatternType program home (.literal (some type) value) type []
+      (discard : MayDiscard program.data type) : PatternType program home (.literal (some type) value) type []
   | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (String × BindingType)}
       (shape : HeadType program head type fields) (access : head.Accessible program home)
       (fieldsTyped : PatternsType program home patterns fields bindings) :
@@ -787,16 +894,18 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       Evaluates program environment (.move place) value after
   | sequence {environment middle after : Environment} {first rest : Expr}
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
-      (tail : Evaluates program middle rest value after) :
+      (tail : Evaluates program middle rest value after) (dispose : discarded.Disposable program) :
       Evaluates program environment (.sequence first rest) value after
   | bind {environment middle after : Environment} {mutable : Bool} {name : String}
       {annotation : Option TypeExpr} {initial body : Expr} {resident value : Value}
       (initialized : Evaluates program environment initial resident middle)
-      (continued : Evaluates program ((name, resident) :: middle) body value after) :
+      (continued : Evaluates program ((name, resident) :: middle) body value after)
+      (cleanup : ∀ entry ∈ after.take 1, entry.2.Disposable program) :
       Evaluates program environment (.bind mutable name annotation initial body) value (after.drop 1)
   | assign {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value}
       (evaluated : Evaluates program environment expression resident middle)
+      (dispose : ∃ parent old, lookup place.root middle = some parent ∧ parent.readPath program place.fields = some old ∧ old.Disposable program)
       (written : writePlace program place resident middle = some updated)
       (continued : Evaluates program updated rest value after) :
       Evaluates program environment (.assign place expression rest) value after
@@ -816,13 +925,14 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       Evaluates program environment (.construct identity tag fields) (.nominal identity tag values) after
   | field {environment after : Environment} {body : Expr} {key : FieldKey} {parent value : Value}
       (source : Evaluates program environment body parent after)
-      (selected : parent.readField program key = some value) :
+      (selected : parent.readField program key = some value) (dispose : parent.Disposable program) :
       Evaluates program environment (.field body key) value after
   | call {environment middle localAfter : Environment} {identity : Nat} {arguments : List Expr}
       {declaration : FunctionDecl} {values : List Value} {value : Value}
       (declared : program.functions identity = some declaration)
       (inputs : EvaluatesMany program environment arguments values middle)
-      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter) :
+      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter)
+      (cleanup : ∀ entry ∈ localAfter, entry.2.Disposable program) :
       Evaluates program environment (.call identity arguments) value middle
   | applyPatterns {environment middle after : Environment} {inputs : List Ty} {arguments : List Expr}
       {arms : List (PatternSource × Expr)} {normalized : List (Pattern × Expr)} {values : List Value}
@@ -830,7 +940,8 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       (normalization : NormalizesArms program arms normalized)
       (argumentsEval : EvaluatesMany program environment arguments values middle)
       (selected : selectArm (argumentValue values) normalized = some (bindings, body))
-      (bodyEval : Evaluates program (bindings ++ middle) body value after) :
+      (bodyEval : Evaluates program (bindings ++ middle) body value after)
+      (cleanup : ∀ entry ∈ after.take bindings.length, entry.2.Disposable program) :
       Evaluates program environment (.applyPatterns inputs arguments arms) value (after.drop bindings.length)
 
 inductive EvaluatesMany (program : Program) : Environment → List Expr → List Value → Environment → Prop where
@@ -884,12 +995,12 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (cleared : replaceBinding place.root { slot with initialization := slot.initialization.write indices .vacant } context = some after) :
       HasType program home context (.move place) type after
   | sequence {home : Module} {context middle after : List (String × BindingType)} {first rest : Expr} {discarded type : Ty}
-      (head : HasType program home context first discarded middle) (drop : Duplicable program.data discarded)
+      (head : HasType program home context first discarded middle) (drop : MayDiscard program.data discarded)
       (tail : HasType program home middle rest type after) : HasType program home context (.sequence first rest) type after
   | bind {home : Module} {context middle after : List (String × BindingType)} {mutable : Bool} {remaining : Initialization}
       {name : String} {annotation : Option TypeExpr} {initial body : Expr} {localType type : Ty}
       (initialized : HasType program home context initial localType middle)
-      (drop : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
+      (drop : BindingType.Disposable program.data ⟨localType, mutable, remaining⟩) (annotated : Annotation program.aliases annotation localType)
       (continued : HasType program home ((name, ⟨localType, mutable, .full⟩) :: middle) body type
         ((name, ⟨localType, mutable, remaining⟩) :: after)) :
       HasType program home context (.bind mutable name annotation initial body) type after
@@ -911,19 +1022,19 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       {declaration : DataDecl} {schema : Fields} {fields : List Expr}
       (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some schema)
       (finite : FiniteLayout program.target program.data (.nominal identity))
-      (copyable : Duplicable program.data (.nominal identity)) (visible : declaration.visibility.Allows declaration.home home)
+      (capability : UsePermission program.data (.nominal identity) .exact) (visible : declaration.visibility.Allows declaration.home home)
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
       (residents : HasTypes program home context fields (schema.residents.map Field.type) after) :
       HasType program home context (.construct identity tag fields) (.nominal identity) after
   | field {home : Module} {context after : List (String × BindingType)} {body : Expr} {key : FieldKey}
       {parentType type : Ty} {index : Nat} (source : HasType program home context body parentType after)
-      (discard : Duplicable program.data parentType) (selected : ProjectionType program home parentType key index type) :
+      (discard : MayDiscard program.data parentType) (selected : ProjectionType program home parentType key index type) :
       HasType program home context (.field body key) type after
   | call {home : Module} {context after bodyAfter : List (String × BindingType)} {identity : Nat}
       {arguments : List Expr} {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
       (visible : declaration.visibility.Allows declaration.home home) (distinct : (declaration.parameters.map Prod.fst).Nodup)
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
-      (discard : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2.type)
+      (discard : ∀ binding ∈ bodyAfter, binding.2.Disposable program.data)
       (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type)) after)
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result bodyAfter) :
       HasType program home context (.call identity arguments) declaration.result after
@@ -932,7 +1043,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (resident : HasType program home context value target middle)
       (selected : lookup place.root middle = some slot) (writable : slot.mutable = true)
       (available : slot.initialization.Access indices state) (path : PathType program home slot.type place.fields indices target)
-      (discard : state ≠ .vacant → Duplicable program.data target)
+      (discard : state ≠ .vacant → MayDiscard program.data target)
       (written : replaceBinding place.root { slot with initialization := slot.initialization.write indices .full } middle = some updated)
       (continued : HasType program home updated rest result after) :
       HasType program home context (.assign place value rest) result after
@@ -962,6 +1073,7 @@ inductive ArmsType (program : Program) :
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (bindings ++ context) body result (afterBindings ++ after))
       (lengths : afterBindings.length = bindings.length)
+      (discard : ∀ binding ∈ afterBindings, binding.2.Disposable program.data)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest after) :
       ArmsType program home context subject result previous ((pattern, body) :: rest) after
 /-- These source rules check constant initializers before pattern normalization.
@@ -1253,18 +1365,25 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
             exact residents.set index selectedType replacementTyped
           exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite changed (by simp [Initialization.setChild])⟩
 
-theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
+theorem PathType.resident {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
     (path : PathType program home source keys indices target) {value : Value}
-    (typed : ResidentTyped program state value source) (access : state.Access indices selected) (initialized : selected.Complete) :
-    ∃ resident, value.readPath program keys = some resident ∧ ValueHasType program resident target := by
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected) :
+    ∃ resident, value.readPath program keys = some resident ∧ ResidentTyped program selected resident target := by
   induction path generalizing value state selected with
-  | nil => cases access; exact ⟨value, rfl, (typed.complete initialized).1⟩
+  | nil => cases access; exact ⟨value, rfl, typed⟩
   | @cons source middle target key keys index indices head tail ih =>
     cases access with
     | child present childAccess =>
       obtain ⟨child, indexed, found, childTyped, _⟩ := head.access typed present
-      obtain ⟨resident, selected, residentTyped⟩ := ih childTyped childAccess initialized
+      obtain ⟨resident, selected, residentTyped⟩ := ih childTyped childAccess
       exact ⟨resident, by simp [Value.readPath, Value.readField, indexed, found, selected], residentTyped⟩
+
+theorem PathType.read {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected : Initialization}
+    (path : PathType program home source keys indices target) {value : Value}
+    (typed : ResidentTyped program state value source) (access : state.Access indices selected) (initialized : selected.Complete) :
+    ∃ resident, value.readPath program keys = some resident ∧ ValueHasType program resident target := by
+  obtain ⟨resident, found, residentTyped⟩ := path.resident typed access
+  exact ⟨resident, found, (residentTyped.complete initialized).1⟩
 
 theorem PathType.write {source target : Ty} {keys : List FieldKey} {indices : List Nat} {state selected next : Initialization}
     (path : PathType program home source keys indices target) {value replacement : Value}
@@ -1352,6 +1471,18 @@ theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (
   obtain ⟨resident, read, residentTyped⟩ := path.read parentTyped access initialized
   exact ⟨resident, by simp [Grounded.readPlace, found, read, residentTyped.initialized], residentTyped⟩
 
+theorem EnvironmentTyped.place_disposable {environment : Environment} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state : Initialization}
+    (selected : Grounded.lookup place.root context = some slot) (access : slot.initialization.Access indices state)
+    (path : PathType program home slot.type place.fields indices target) (allowed : state ≠ .vacant → MayDiscard program.data target) :
+    ∃ parent resident, Grounded.lookup place.root environment = some parent ∧ parent.readPath program place.fields = some resident ∧ resident.Disposable program := by
+  obtain ⟨parent, found, parentTyped⟩ := typed.lookup selected
+  obtain ⟨resident, read, residentTyped⟩ := path.resident parentTyped access
+  refine ⟨parent, resident, found, read, ?_⟩
+  cases state with
+  | vacant => exact Or.inl (ResidentTyped.vacant_value residentTyped)
+  | full | fields _ => exact residentTyped.disposable (allowed (by intro h; cases h))
+
 theorem EnvironmentTyped.writePlace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty} {indices : List Nat} {state next : Initialization}
     (selected : Grounded.lookup place.root context = some slot)
@@ -1411,7 +1542,7 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
     exact .nil
-  | binder name discard =>
+  | binder name =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
     exact .cons valueTyped .nil
@@ -1646,6 +1777,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
         selectArm value arms = some (bindings, body) →
         ∃ resultValue after, Evaluates program (bindings ++ environment) body resultValue after ∧
           ValueHasType program resultValue result ∧ EnvironmentTyped program (after.drop bindings.length) afterContext ∧
+          (∀ entry ∈ after.take bindings.length, entry.2.Disposable program) ∧
           ∀ other otherAfter, Evaluates program (bindings ++ environment) body other otherAfter → other = resultValue ∧ otherAfter = after)
     (motive_4 := fun home source _ => ∃ normalized, NormalizesPattern program source normalized ∧
       ∀ other, NormalizesPattern program source other → other = normalized)
@@ -1694,12 +1826,12 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
         | cons headTyped tailTyped =>
           exact .cons (by simpa [SlotTyped, initialized parameter (by simp)] using headTyped)
             (ih _ tailTyped (fun p included => initialized p (List.mem_cons_of_mem _ included)))
-    obtain ⟨value, localAfter, bodyEval, valueTyped, _, bodyUnique⟩ :=
+    obtain ⟨value, localAfter, bodyEval, valueTyped, localTyped, bodyUnique⟩ :=
       bodyIH (bindParameters declaration.parameters values inputsTyped initialized)
-    refine ⟨value, middle, .call declared inputsEval bodyEval, valueTyped, middleTyped, ?_⟩
+    refine ⟨value, middle, .call declared inputsEval bodyEval (localTyped.disposable discard), valueTyped, middleTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
-    | call otherDeclared otherInputs otherBody =>
+    | call otherDeclared otherInputs otherBody otherCleanup =>
       have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
       cases sameDeclaration
       obtain ⟨rfl, rfl⟩ := inputsUnique _ _ otherInputs
@@ -1710,12 +1842,12 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     obtain ⟨values, middle, argumentsEval, valuesTyped, middleTyped, argumentsUnique⟩ := argumentsIH environment environmentTyped
     have subjectTyped := valuesTyped.argument
     obtain ⟨bindings, body, selected⟩ := coverage.selectArm subjectTyped
-    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, unique⟩ :=
+    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, cleanup, unique⟩ :=
       bodiesIH normalized normalization middle middleTyped _ subjectTyped bindings body selected
-    refine ⟨value, after.drop bindings.length, .applyPatterns normalization argumentsEval selected bodyEval, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after.drop bindings.length, .applyPatterns normalization argumentsEval selected bodyEval cleanup, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
-    | applyPatterns otherNormalization otherArguments otherSelected otherBody =>
+    | applyPatterns otherNormalization otherArguments otherSelected otherBody otherCleanup =>
       have sameNormalization := normalizationUnique _ otherNormalization
       subst sameNormalization
       obtain ⟨rfl, rfl⟩ := argumentsUnique _ _ otherArguments
@@ -1742,32 +1874,39 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     cases evaluated with
     | move otherTaken => exact Prod.mk.inj (Option.some.inj (otherTaken.symm.trans taken))
   | sequence head drop tail headIH tailIH =>
-    obtain ⟨discarded, middle, headEval, _, middleTyped, headUnique⟩ := headIH environmentTyped
+    obtain ⟨discarded, middle, headEval, discardedTyped, middleTyped, headUnique⟩ := headIH environmentTyped
     obtain ⟨value, after, tailEval, valueTyped, afterTyped, unique⟩ := tailIH middleTyped
-    refine ⟨value, after, .sequence headEval tailEval, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .sequence headEval tailEval (ResidentTyped.disposable discardedTyped drop), valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
-    | sequence otherHead otherTail =>
+    | sequence otherHead otherTail otherDispose =>
       obtain ⟨rfl, rfl⟩ := headUnique _ _ otherHead
       exact unique _ _ otherTail
   | bind initialized drop annotated continued initialIH bodyIH =>
     obtain ⟨resident, middle, initialEval, residentTyped, middleTyped, initialUnique⟩ := initialIH environmentTyped
     obtain ⟨value, after, bodyEval, valueTyped, afterTyped, bodyUnique⟩ := bodyIH (.cons (value := resident) residentTyped middleTyped)
-    refine ⟨value, after.drop 1, .bind initialEval bodyEval, valueTyped, afterTyped.drop 1, ?_⟩
+    have cleanup : ∀ entry ∈ after.take 1, entry.2.Disposable program := by
+      apply (afterTyped.take 1).disposable
+      intro entry included
+      simp at included
+      subst entry
+      exact drop
+    refine ⟨value, after.drop 1, .bind initialEval bodyEval cleanup, valueTyped, afterTyped.drop 1, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
-    | bind otherInitial otherBody =>
+    | bind otherInitial otherBody otherCleanup =>
       obtain ⟨rfl, rfl⟩ := initialUnique _ _ otherInitial
       obtain ⟨rfl, rfl⟩ := bodyUnique _ _ otherBody
       exact ⟨rfl, rfl⟩
   | assign resident selected writable available path discard written continued residentIH bodyIH =>
     obtain ⟨replacement, middle, evaluated, residentTyped, middleTyped, residentUnique⟩ := residentIH environmentTyped
+    have disposal := middleTyped.place_disposable selected available path discard
     obtain ⟨updated, written, updatedTyped, _⟩ := middleTyped.writePlace selected available path written residentTyped
     obtain ⟨value, after, bodyEval, valueTyped, afterTyped, bodyUnique⟩ := bodyIH updatedTyped
-    refine ⟨value, after, .assign evaluated written bodyEval, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .assign evaluated disposal written bodyEval, valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
-    | assign otherEval otherWritten otherBody =>
+    | assign otherEval otherDisposal otherWritten otherBody =>
       obtain ⟨rfl, rfl⟩ := residentUnique _ _ otherEval
       have same := Option.some.inj (otherWritten.symm.trans written)
       cases same
@@ -1802,10 +1941,10 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     obtain ⟨parent, after, evaluated, parentTyped, afterTyped, unique⟩ := ih environmentTyped
     obtain ⟨value, indexed, found, valueTyped, _⟩ := selected.access parentTyped
     have selectedValue : parent.readField program key = some value := by simp [Value.readField, indexed, found]
-    refine ⟨value, after, .field evaluated selectedValue, valueTyped, afterTyped, ?_⟩
+    refine ⟨value, after, .field evaluated selectedValue (ResidentTyped.disposable parentTyped discard), valueTyped, afterTyped, ?_⟩
     intro other otherAfter evaluation
     cases evaluation with
-    | field otherSource otherSelected =>
+    | field otherSource otherSelected otherDispose =>
       obtain ⟨rfl, rfl⟩ := unique _ _ otherSource
       exact ⟨Option.some.inj (otherSelected.symm.trans selectedValue), rfl⟩
   | nil =>
@@ -1828,7 +1967,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
   | empty =>
     rename_i environment environmentTyped value valueTyped bindings body selected
     simp [selectArm] at selected
-  | @clause home context afterContext subject result previous pattern bodyExpression rest bindingTypes afterBindings patternTyped distinct useful bodyTyped lengths tailTyped bodyIH tailIH =>
+  | @clause home context afterContext subject result previous pattern bodyExpression rest bindingTypes afterBindings patternTyped distinct useful bodyTyped lengths discard tailTyped bodyIH tailIH =>
     rename_i environment environmentTyped value valueTyped bindings body selected
     simp only [selectArm] at selected
     split at selected
@@ -1838,10 +1977,12 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       have bindingsTyped := patternTyped.bindings valueTyped found
       obtain ⟨result, after, evaluated, resultTyped, afterTyped, unique⟩ :=
         bodyIH (EnvironmentTyped.append bindingsTyped environmentTyped)
-      refine ⟨result, after, evaluated, resultTyped, ?_, unique⟩
-      have count := bindingsTyped.length
-      rw [count, ← lengths]
-      simpa using afterTyped.drop afterBindings.length
+      refine ⟨result, after, evaluated, resultTyped, ?_, ?_, unique⟩
+      · rw [bindingsTyped.length, ← lengths]
+        simpa using afterTyped.drop afterBindings.length
+      · rw [bindingsTyped.length, ← lengths]
+        apply (afterTyped.take afterBindings.length).disposable
+        simpa using discard
     next missed => exact tailIH environment environmentTyped value valueTyped bindings body selected
 
   | patternWildcard =>
