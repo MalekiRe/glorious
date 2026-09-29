@@ -1,34 +1,44 @@
 /-!
-# Scalar expressions, immutable lexical composition, and tuples
+# Target-indexed scalar expressions, immutable composition, tuples and arrays
 
-Normative basis: language specification §§2.3, 3.2–3.4, 4.1–4.2, 5.1, 5.3, 7.2–7.3.
-Integer literals have an explicitly selected fixed-width type and a decoded
-nonnegative magnitude. Character literals have a decoded scalar number.
-Local names are already decoded identifiers; lookup selects the nearest binder.
-Token decoding, inference, prefix negation, target-size integers, floating
-conversion, static strings, and physical realization remain outside this subset.
+Normative basis: language specification §§2.3, 3.2–3.4, 4.1–4.4, 5.1, 5.3,
+7.2–7.3 and 13.2 (target-representable array lengths). Integer literals have
+a selected type and a decoded nonnegative magnitude; characters a decoded
+scalar number. Local names are decoded identifiers; lookup selects the nearest
+binder. Token decoding, inference, prefix negation, floating conversion, static
+strings and physical realization remain outside this subset.
 Admission has no execution premise. No prior specification modules are imported.
 -/
 
 namespace Grounded
 
+/-- The selected target supplies its positive pointer width (§4.4). Other ABI
+properties enter when their semantic consumers are introduced. -/
+structure Target where
+  pointerBits : Nat
+  positive : 0 < pointerBits
+
+variable {target : Target}
+
 inductive Width where
   | w8 | w16 | w32 | w64 | w128
+  | pointer
 
-def Width.bits : Width → Nat
+def Width.bits (target : Target) : Width → Nat
   | .w8 => 8
   | .w16 => 16
   | .w32 => 32
   | .w64 => 64
   | .w128 => 128
+  | .pointer => target.pointerBits
 
 structure IntegerType where
   signed : Bool
   width : Width
 
 /-- Mathematical scalar range; there is no implicit wrapping of literals. -/
-def IntegerType.Contains (type : IntegerType) (value : Int) : Prop :=
-  let bound : Int := 2 ^ (type.width.bits - if type.signed then 1 else 0)
+def IntegerType.Contains (target : Target) (type : IntegerType) (value : Int) : Prop :=
+  let bound : Int := 2 ^ (type.width.bits target - if type.signed then 1 else 0)
   (if type.signed then -bound else 0) ≤ value ∧ value < bound
 
 def UnicodeScalar (number : Nat) : Prop :=
@@ -44,12 +54,14 @@ inductive Expr where
   | bind (name : String) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
   | project (body : Expr) (index : Nat)
+  | array (elements : List Expr)
 
 inductive Ty where
   | unit
   | integer (type : IntegerType)
   | character
   | tuple (head : Ty) (tail : List Ty)
+  | array (element : Ty) (length : Nat)
 
 /-- §7.2: scalar owned use may copy; scalar values may also be discarded.
 Keep this explicit at consumers rather than making all future types copyable. -/
@@ -59,12 +71,16 @@ inductive Duplicable : Ty → Prop where
   | character : Duplicable .character
   | tuple {head : Ty} {tail : List Ty} (first : Duplicable head)
       (rest : ∀ type ∈ tail, Duplicable type) : Duplicable (.tuple head tail)
+  | array {element : Ty} (length : Nat) (resident : Duplicable element) :
+      Duplicable (.array element length)
+  | emptyArray (element : Ty) : Duplicable (.array element 0)
 
 inductive Value where
   | unit
   | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
   | tuple (head : Value) (tail : List Value)
+  | array (elements : List Value)
 
 /-- Nearest lexical binding wins, including in shadowing initializers. -/
 def lookup {α : Type} (name : String) : List (String × α) → Option α
@@ -72,124 +88,135 @@ def lookup {α : Type} (name : String) : List (String × α) → Option α
   | (key, value) :: rest => if name = key then some value else lookup name rest
 
 mutual
-inductive HasType : List (String × Ty) → Expr → Ty → Prop where
-  | unit {context : List (String × Ty)} : HasType context .unit .unit
+inductive HasType (target : Target) : List (String × Ty) → Expr → Ty → Prop where
+  | unit {context : List (String × Ty)} : HasType target context .unit .unit
   | integer {context : List (String × Ty)} {type : IntegerType} {magnitude : Nat}
-      (fits : type.Contains magnitude) :
-      HasType context (.integer type magnitude) (.integer type)
+      (fits : type.Contains target magnitude) :
+      HasType target context (.integer type magnitude) (.integer type)
   | character {context : List (String × Ty)} {number : Nat}
       (valid : UnicodeScalar number) :
-      HasType context (.character number) .character
+      HasType target context (.character number) .character
   | group {context : List (String × Ty)} {body : Expr} {type : Ty}
-      (typed : HasType context body type) : HasType context (.group body) type
+      (typed : HasType target context body type) : HasType target context (.group body) type
   | local {context : List (String × Ty)} {name : String} {type : Ty}
       (selected : lookup name context = some type) (copyable : Duplicable type) :
-      HasType context (.local name) type
+      HasType target context (.local name) type
   | sequence {context : List (String × Ty)} {first rest : Expr} {discarded type : Ty}
-      (head : HasType context first discarded) (drop : Duplicable discarded)
-      (tail : HasType context rest type) : HasType context (.sequence first rest) type
+      (head : HasType target context first discarded) (drop : Duplicable discarded)
+      (tail : HasType target context rest type) : HasType target context (.sequence first rest) type
   | bind {context : List (String × Ty)} {name : String} {initial body : Expr}
-      {localType type : Ty} (initialized : HasType context initial localType)
+      {localType type : Ty} (initialized : HasType target context initial localType)
       (drop : Duplicable localType)
-      (continued : HasType ((name, localType) :: context) body type) :
-      HasType context (.bind name initial body) type
+      (continued : HasType target ((name, localType) :: context) body type) :
+      HasType target context (.bind name initial body) type
   | tuple {context : List (String × Ty)} {head : Expr} {tail : List Expr}
-      {first : Ty} {rest : List Ty} (headTyped : HasType context head first)
-      (tailTyped : HasTypes context tail rest) :
-      HasType context (.tuple head tail) (.tuple first rest)
+      {first : Ty} {rest : List Ty} (headTyped : HasType target context head first)
+      (tailTyped : HasTypes target context tail rest) :
+      HasType target context (.tuple head tail) (.tuple first rest)
   | project {context : List (String × Ty)} {body : Expr} {index : Nat}
-      {first type : Ty} {rest : List Ty} (source : HasType context body (.tuple first rest))
+      {first type : Ty} {rest : List Ty} (source : HasType target context body (.tuple first rest))
       (discard : Duplicable (.tuple first rest)) (selected : (first :: rest)[index]? = some type) :
-      HasType context (.project body index) type
+      HasType target context (.project body index) type
+  | array {context : List (String × Ty)} {elements : List Expr} {element : Ty} {length : Nat}
+      (residents : HasTypes target context elements (List.replicate length element))
+      (size : length < 2 ^ target.pointerBits) :
+      HasType target context (.array elements) (.array element length)
 
-inductive HasTypes : List (String × Ty) → List Expr → List Ty → Prop where
-  | nil {context : List (String × Ty)} : HasTypes context [] []
+inductive HasTypes (target : Target) : List (String × Ty) → List Expr → List Ty → Prop where
+  | nil {context : List (String × Ty)} : HasTypes target context [] []
   | cons {context : List (String × Ty)} {head : Expr} {tail : List Expr}
-      {first : Ty} {rest : List Ty} (headTyped : HasType context head first)
-      (tailTyped : HasTypes context tail rest) :
-      HasTypes context (head :: tail) (first :: rest)
+      {first : Ty} {rest : List Ty} (headTyped : HasType target context head first)
+      (tailTyped : HasTypes target context tail rest) :
+      HasTypes target context (head :: tail) (first :: rest)
 end
 
 mutual
-inductive ValueHasType : Value → Ty → Prop where
-  | unit : ValueHasType .unit .unit
+inductive ValueHasType (target : Target) : Value → Ty → Prop where
+  | unit : ValueHasType target .unit .unit
   | integer {type : IntegerType} {number : Int}
-      (fits : type.Contains number) :
-      ValueHasType (.integer type number) (.integer type)
+      (fits : type.Contains target number) :
+      ValueHasType target (.integer type number) (.integer type)
   | character {number : Nat} (valid : UnicodeScalar number) :
-      ValueHasType (.character number) .character
+      ValueHasType target (.character number) .character
   | tuple {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
-      (headTyped : ValueHasType head first) (tailTyped : ValuesHaveTypes tail rest) :
-      ValueHasType (.tuple head tail) (.tuple first rest)
+      (headTyped : ValueHasType target head first) (tailTyped : ValuesHaveTypes target tail rest) :
+      ValueHasType target (.tuple head tail) (.tuple first rest)
+  | array {values : List Value} {element : Ty} {length : Nat}
+      (residents : ValuesHaveTypes target values (List.replicate length element))
+      (size : length < 2 ^ target.pointerBits) :
+      ValueHasType target (.array values) (.array element length)
 
-inductive ValuesHaveTypes : List Value → List Ty → Prop where
-  | nil : ValuesHaveTypes [] []
+inductive ValuesHaveTypes (target : Target) : List Value → List Ty → Prop where
+  | nil : ValuesHaveTypes target [] []
   | cons {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
-      (headTyped : ValueHasType head first) (tailTyped : ValuesHaveTypes tail rest) :
-      ValuesHaveTypes (head :: tail) (first :: rest)
+      (headTyped : ValueHasType target head first) (tailTyped : ValuesHaveTypes target tail rest) :
+      ValuesHaveTypes target (head :: tail) (first :: rest)
 end
 
-inductive EnvironmentTyped : List (String × Value) → List (String × Ty) → Prop where
-  | nil : EnvironmentTyped [] []
+inductive EnvironmentTyped (target : Target) : List (String × Value) → List (String × Ty) → Prop where
+  | nil : EnvironmentTyped target [] []
   | cons {name : String} {value : Value} {type : Ty}
       {environment : List (String × Value)} {context : List (String × Ty)}
-      (resident : ValueHasType value type) (rest : EnvironmentTyped environment context) :
-      EnvironmentTyped ((name, value) :: environment) ((name, type) :: context)
+      (resident : ValueHasType target value type) (rest : EnvironmentTyped target environment context) :
+      EnvironmentTyped target ((name, value) :: environment) ((name, type) :: context)
 
 mutual
-inductive Evaluates : List (String × Value) → Expr → Value → Prop where
-  | unit {environment : List (String × Value)} : Evaluates environment .unit .unit
+inductive Evaluates (target : Target) : List (String × Value) → Expr → Value → Prop where
+  | unit {environment : List (String × Value)} : Evaluates target environment .unit .unit
   | integer {environment : List (String × Value)} {type : IntegerType} {magnitude : Nat}
-      (fits : type.Contains magnitude) :
-      Evaluates environment (.integer type magnitude) (.integer type magnitude)
+      (fits : type.Contains target magnitude) :
+      Evaluates target environment (.integer type magnitude) (.integer type magnitude)
   | character {environment : List (String × Value)} {number : Nat}
       (valid : UnicodeScalar number) :
-      Evaluates environment (.character number) (.character number)
+      Evaluates target environment (.character number) (.character number)
   | group {environment : List (String × Value)} {body : Expr} {value : Value}
-      (evaluated : Evaluates environment body value) :
-      Evaluates environment (.group body) value
+      (evaluated : Evaluates target environment body value) :
+      Evaluates target environment (.group body) value
   | local {environment : List (String × Value)} {name : String} {value : Value}
       (selected : lookup name environment = some value) :
-      Evaluates environment (.local name) value
+      Evaluates target environment (.local name) value
   | sequence {environment : List (String × Value)} {first rest : Expr}
-      {discarded value : Value} (head : Evaluates environment first discarded)
-      (tail : Evaluates environment rest value) :
-      Evaluates environment (.sequence first rest) value
+      {discarded value : Value} (head : Evaluates target environment first discarded)
+      (tail : Evaluates target environment rest value) :
+      Evaluates target environment (.sequence first rest) value
   | bind {environment : List (String × Value)} {name : String} {initial body : Expr}
-      {resident value : Value} (initialized : Evaluates environment initial resident)
-      (continued : Evaluates ((name, resident) :: environment) body value) :
-      Evaluates environment (.bind name initial body) value
+      {resident value : Value} (initialized : Evaluates target environment initial resident)
+      (continued : Evaluates target ((name, resident) :: environment) body value) :
+      Evaluates target environment (.bind name initial body) value
   | tuple {environment : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates environment head first)
-      (tailEval : EvaluatesMany environment tail rest) :
-      Evaluates environment (.tuple head tail) (.tuple first rest)
+      {first : Value} {rest : List Value} (headEval : Evaluates target environment head first)
+      (tailEval : EvaluatesMany target environment tail rest) :
+      Evaluates target environment (.tuple head tail) (.tuple first rest)
   | project {environment : List (String × Value)} {body : Expr} {index : Nat}
       {first value : Value} {rest : List Value}
-      (source : Evaluates environment body (.tuple first rest))
+      (source : Evaluates target environment body (.tuple first rest))
       (selected : (first :: rest)[index]? = some value) :
-      Evaluates environment (.project body index) value
+      Evaluates target environment (.project body index) value
+  | array {environment : List (String × Value)} {elements : List Expr} {values : List Value}
+      (residents : EvaluatesMany target environment elements values) :
+      Evaluates target environment (.array elements) (.array values)
 
-inductive EvaluatesMany : List (String × Value) → List Expr → List Value → Prop where
-  | nil {environment : List (String × Value)} : EvaluatesMany environment [] []
+inductive EvaluatesMany (target : Target) : List (String × Value) → List Expr → List Value → Prop where
+  | nil {environment : List (String × Value)} : EvaluatesMany target environment [] []
   | cons {environment : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates environment head first)
-      (tailEval : EvaluatesMany environment tail rest) :
-      EvaluatesMany environment (head :: tail) (first :: rest)
+      {first : Value} {rest : List Value} (headEval : Evaluates target environment head first)
+      (tailEval : EvaluatesMany target environment tail rest) :
+      EvaluatesMany target environment (head :: tail) (first :: rest)
 end
 
 /-- Every admitted expression in a typed lexical environment terminates with a
 correctly typed, unique result. Binding constructs its body's typed environment;
 no continuation-readiness or successful-evaluation premise is assumed. -/
 theorem correctness {context : List (String × Ty)} {expression : Expr} {type : Ty}
-    (admitted : HasType context expression type)
-    {environment : List (String × Value)} (environmentTyped : EnvironmentTyped environment context) :
-    ∃ value, Evaluates environment expression value ∧ ValueHasType value type ∧
-      ∀ other, Evaluates environment expression other → other = value := by
+    (admitted : HasType target context expression type)
+    {environment : List (String × Value)} (environmentTyped : EnvironmentTyped target environment context) :
+    ∃ value, Evaluates target environment expression value ∧ ValueHasType target value type ∧
+      ∀ other, Evaluates target environment expression other → other = value := by
   induction admitted using HasType.rec
     (motive_2 := fun context expressions types _ =>
-      ∀ environment, EnvironmentTyped environment context →
-        ∃ values, EvaluatesMany environment expressions values ∧ ValuesHaveTypes values types ∧
-          ∀ other, EvaluatesMany environment expressions other → other = values)
+      ∀ environment, EnvironmentTyped target environment context →
+        ∃ values, EvaluatesMany target environment expressions values ∧ ValuesHaveTypes target values types ∧
+          ∀ other, EvaluatesMany target environment expressions other → other = values)
     generalizing environment with
   | unit =>
     refine ⟨.unit, .unit, .unit, ?_⟩
@@ -213,7 +240,7 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
     cases evaluation with
     | group inner => exact unique other inner
   | @«local» context name type selected copyable =>
-    have resident : ∃ value, lookup name environment = some value ∧ ValueHasType value type := by
+    have resident : ∃ value, lookup name environment = some value ∧ ValueHasType target value type := by
       induction environmentTyped with
       | nil => simp [lookup] at selected
       | @cons name value type environment context valueTyped rest ih =>
@@ -258,13 +285,22 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
       subst sameHead
       subst sameTail
       rfl
+  | array residents size ih =>
+    obtain ⟨values, evaluated, typed, unique⟩ := ih environment environmentTyped
+    refine ⟨.array values, .array evaluated, .array typed size, ?_⟩
+    intro other evaluation
+    cases evaluation with
+    | array elements =>
+      have same := unique _ elements
+      subst same
+      rfl
   | @project context body index first type rest source discard selected sourceIH =>
     obtain ⟨aggregate, sourceEval, aggregateTyped, sourceUnique⟩ := sourceIH environmentTyped
     cases aggregateTyped with
     | tuple headTyped tailTyped =>
       have selectTyped : ∀ {types : List Ty} {values : List Value},
-          ValuesHaveTypes values types → ∀ (index : Nat) (type : Ty), types[index]? = some type →
-            ∃ value, values[index]? = some value ∧ ValueHasType value type := by
+          ValuesHaveTypes target values types → ∀ (index : Nat) (type : Ty), types[index]? = some type →
+            ∃ value, values[index]? = some value ∧ ValueHasType target value type := by
         intro types
         induction types with
         | nil =>
@@ -311,14 +347,14 @@ theorem correctness {context : List (String × Ty)} {expression : Expr} {type : 
 
 /-- Empty source environments are realized, not assumed. -/
 theorem closed_correctness {expression : Expr} {type : Ty}
-    (admitted : HasType [] expression type) :
-    ∃ value, Evaluates [] expression value ∧ ValueHasType value type ∧
-      ∀ other, Evaluates [] expression other → other = value :=
+    (admitted : HasType target [] expression type) :
+    ∃ value, Evaluates target [] expression value ∧ ValueHasType target value type ∧
+      ∀ other, Evaluates target [] expression other → other = value :=
   correctness admitted .nil
 
 /-- Exact admission boundary, in every lexical context and at every width. -/
 theorem integer_admission (context : List (String × Ty)) (type : IntegerType) (magnitude : Nat) :
-    (∃ result, HasType context (.integer type magnitude) result) ↔ type.Contains magnitude := by
+    (∃ result, HasType target context (.integer type magnitude) result) ↔ type.Contains target magnitude := by
   constructor
   · rintro ⟨_, admitted⟩
     cases admitted with
@@ -327,7 +363,7 @@ theorem integer_admission (context : List (String × Ty)) (type : IntegerType) (
     exact ⟨_, .integer fits⟩
 
 theorem character_admission (context : List (String × Ty)) (number : Nat) :
-    (∃ result, HasType context (.character number) result) ↔ UnicodeScalar number := by
+    (∃ result, HasType target context (.character number) result) ↔ UnicodeScalar number := by
   constructor
   · rintro ⟨_, admitted⟩
     cases admitted with
@@ -336,8 +372,8 @@ theorem character_admission (context : List (String × Ty)) (number : Nat) :
     exact ⟨_, .character valid⟩
 
 /-- The original unit subset retains precisely its admission and evaluation meaning. -/
-theorem unit_agreement : HasType [] .unit .unit ∧
-    ∀ value, Evaluates [] .unit value ↔ value = .unit := by
+theorem unit_agreement : HasType target [] .unit .unit ∧
+    ∀ value, Evaluates target [] .unit value ↔ value = .unit := by
   obtain ⟨value, evaluated, _, unique⟩ := closed_correctness HasType.unit
   have same : value = .unit := by cases evaluated; rfl
   refine ⟨.unit, fun other => ⟨?_, ?_⟩⟩
