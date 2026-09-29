@@ -148,26 +148,28 @@ explicit semantic-fidelity and proof-assumption audit.
 ## Current boundary
 
 **Completed subset: unit, selected fixed/target-width nonnegative integer and
-decoded character literals, grouping, lexical reads, sequencing, immutable
-bindings with optional type annotations, tuples/projection, fixed-array
+decoded character literals, grouping, lexical reads, sequencing, immutable and
+mutable initialized bindings, whole-local assignment, optional type annotations, tuples/projection, fixed-array
 construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data over duplicable fields, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
 application.** Records, tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
-is decoded declarations/expressions to logical values. Normative basis:
+is decoded declarations/expressions to logical values and lexical post-states. Normative basis:
 §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.3 and 13.1. No
 previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
-`Grounded.correctness` proves finite evaluation, result typing and uniqueness
-for every admitted expression in a typed environment. Initializers execute in
-the old environment; their proved result typing constructs the extended body
-environment. Sequencing and binding scope do not leak local names. Copy/discard
+`Grounded.correctness` proves finite evaluation, result typing, lexical-state
+preservation and uniqueness of both result and final environment. Every
+constituent consumes its predecessor’s actual post-state. Initializers execute
+before their binding is introduced; their result and post-state construct the
+body environment. Scope exit removes its own binding prefix and retains
+changes to surrounding locals. Copy/discard
 sites require explicit duplicability evidence. `closed_correctness` constructs
 the empty environment rather than assuming it. Admission supplies no successful
 execution or normalization witness. Exact scalar admission theorems and `unit_agreement` remain connected
-to this general result. No intermediate machine-state theorem is claimed.
+to this general result. This is lexical-state preservation, not physical-machine preservation.
 
 Tuple arity is preserved: unit is the empty tuple; grouping and a singleton
 tuple are distinct. Constituent evaluation and positional value typing are
@@ -175,7 +177,7 @@ proved inside the connected theorem, not left as separate prerequisites.
 Projection derives its actual resident and typing from the evaluated tuple;
 an in-range runtime selection is not separately assumed. Out-of-range tuple
 projections cannot be admitted. Physical evaluation traces remain outside this
-pure big-step boundary.
+logical big-step boundary.
 
 The explicit target supplies its positive pointer width. Signed and unsigned
 fixed widths remain 8/16/32/64/128; `usize/isize` use the target width throughout
@@ -222,7 +224,8 @@ Immediate pattern-callable application supports binders, wildcards, nested
 scalar/tuple/array/nominal constructor patterns and named structural constants. It retains the callable’s
 argument list: one tuple argument is not two arguments. Source-ordered selection
 executes just the first matching body; bindings remain clause-local. Each body
-uses the same incoming lexical environment and declared result type.
+receives the caller environment after argument evaluation and the declared
+result type. The selected body’s outer-local updates survive clause exit.
 `Covers` is an inductive constructor-space specialization, not a future-match
 assumption. Its proof constructs actual successful dispatch for every typed
 subject. Pattern binding preservation then constructs the body’s typed
@@ -246,14 +249,16 @@ coverage specialization cannot be admitted as typed source patterns.
 This pattern boundary is decoded immediate application, not stored callables
 or a proof of library `match`. Source record/remainder expansion, borrowed
 patterns, first-class callable identity and captured-storage semantics remain
-open at their respective source/borrowing/callable boundaries.
+open at their respective source/borrowing/callable boundaries. In particular,
+this does not prove source capture formation or compatibility between a
+materialized callee’s captured loans and argument evaluation.
 
 Nominal scope excludes generic instances, indirections, hooks, nonduplicable
 owners and non-exhaustive-enum deconstruction. Constructor arguments are
 already ordered decoded expressions; source record-initializer elaboration
 and name resolution are not proved. Parsing, inference, prefix negation,
-floating conversion, static strings, mutation, moves, loans and effects
-remain open. There is no physical-storage, allocation-failure, package-admission
+floating conversion, static strings, projected assignment, uninitialized places,
+moves, loans and effects remain open. There is no physical-storage, allocation-failure, package-admission
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict `lake build` passed. The connected theorem reports Lean’s
@@ -282,7 +287,9 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 1. Ordinary values, non-generic constants and aliases: connected as described above.
 2. Nominal data, constructors, visibility and projection: connected for the subset above.
 3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
-4. Mutable places, initialization, assignment and explicit moves.
+4. Mutable places, initialization, assignment and explicit moves: initialized
+   mutable locals and whole-local assignment are connected; projected writes,
+   uninitialized storage and move transitions remain open.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
