@@ -199,8 +199,16 @@ and proves the selected slot is vacant afterward. Reads require initialization;
 later arguments and bodies consume the preceding initialization context.
 Assignment restores a vacant mutable root after evaluating its RHS. Function
 parameters and pattern binders start initialized; scope exit removes only its
-own prefix and preserves changes to outer slots. Partial moves and partial
-aggregate initialization remain open at the ownership boundary.
+own prefix and preserves changes to outer slots. Vacancies now reside directly
+in the resident tree; the separate optional-root wrapper and pattern-binding
+conversion are removed. `ValueHasType.initialized` proves that every typed owned
+result contains no vacancy at any depth. Reads check the selected subtree, and
+extraction uses the same path write as restoration, replacing the selected
+resident with a vacancy rather than retaining its payload elsewhere.
+Source admission and preservation of partially initialized aggregates remain
+open: the static initialization context still distinguishes only whole-live
+and whole-vacant roots. The operational path generalization alone does not
+establish typed partial-move support.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
 
@@ -348,6 +356,6 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. Current size: 1,646 Lean lines including
+constants reuse ordinary evaluation. Current size: 1,662 Lean lines including
 comments and blanks. The development remains one Lean module; no standalone
 admission checker or speculative proof module is added.

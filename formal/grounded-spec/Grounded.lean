@@ -179,6 +179,7 @@ inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop
 
 /-- Constructor identity for structural matching; tuples remain distinct from nominal data. -/
 inductive Head where
+  | vacant
   | unit
   | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
@@ -187,6 +188,7 @@ inductive Head where
   deriving DecidableEq
 
 inductive Value where
+  | vacant
   | unit
   | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
@@ -195,9 +197,25 @@ inductive Value where
   | nominal (identity : Nat) (tag : Option Nat) (fields : List Value)
 
 mutual
+/-- A whole owned result contains no vacancy at any depth. -/
+def Value.initialized : Value → Bool
+  | .vacant => false
+  | .tuple head tail => head.initialized && valuesInitialized tail
+  | .array values | .nominal _ _ values => valuesInitialized values
+  | _ => true
+termination_by value => sizeOf value
+
+def valuesInitialized : List Value → Bool
+  | [] => true
+  | value :: values => value.initialized && valuesInitialized values
+termination_by values => sizeOf values
+end
+
+mutual
 /-- Total structural equality for constant patterns, without user-defined Eq. -/
 def Value.equal (left right : Value) : Bool :=
   match left, right with
+  | .vacant, .vacant => true
   | .unit, .unit => true
   | .integer type number, .integer otherType otherNumber => decide (type = otherType) && decide (number = otherNumber)
   | .character number, .character other => decide (number = other)
@@ -223,6 +241,7 @@ instance : LawfulBEq Value := by
     intro left
     induction left using Value.rec
       (motive_2 := fun values => ∀ others, valuesEqual values others = true ↔ values = others) with
+    | vacant => intro right; cases right <;> simp [Value.equal]
     | unit => intro right; cases right <;> simp [Value.equal]
     | integer type number => intro right; cases right <;> simp [Value.equal]
     | character number => intro right; cases right <;> simp [Value.equal]
@@ -387,24 +406,22 @@ inductive ValuesHaveTypes (program : Program) : List Value → List Ty → Prop 
       ValuesHaveTypes program (head :: tail) (first :: rest)
 end
 
-abbrev Environment := List (String × Option Value)
+abbrev Environment := List (String × Value)
 
-def presentBindings (bindings : List (String × Value)) : Environment :=
-  bindings.map fun binding => (binding.1, some binding.2)
-
-def SlotTyped (program : Program) (resident : Option Value) (slot : BindingType) : Prop :=
-  match resident with
-  | none => slot.initialized = false
-  | some value => slot.initialized = true ∧ ValueHasType program value slot.type
+/-- Vacancies are storage, never well-typed owned results. -/
+def SlotTyped (program : Program) (resident : Value) (slot : BindingType) : Prop :=
+  (slot.initialized = true ∧ ValueHasType program resident slot.type) ∨
+  (slot.initialized = false ∧ resident = .vacant)
 
 inductive EnvironmentTyped (program : Program) : Environment → List (String × BindingType) → Prop where
   | nil : EnvironmentTyped program [] []
-  | cons {name : String} {value : Option Value} {type : BindingType}
+  | cons {name : String} {value : Value} {type : BindingType}
       {environment : Environment} {context : List (String × BindingType)}
       (resident : SlotTyped program value type) (rest : EnvironmentTyped program environment context) :
       EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
 
 def Value.head : Value → Head
+  | .vacant => .vacant
   | .unit => .unit
   | .integer type number => .integer type number
   | .character number => .character number
@@ -571,26 +588,20 @@ def replaceBinding {α : Type} (name : String) (value : α) : List (String × α
 
 def readPlace (program : Program) (place : Place) (environment : Environment) : Option Value := do
   let stored ← lookup place.root environment
-  let parent ← stored
-  parent.readPath program place.fields
+  let value ← stored.readPath program place.fields
+  if value.initialized then some value else none
 
 def writePlace (program : Program) (place : Place) (replacement : Value) (environment : Environment) : Option Environment := do
   let stored ← lookup place.root environment
   let updated ← match place.fields with
     | [] => some replacement
-    | _ :: _ => do
-        let parent ← stored
-        parent.writePath program place.fields replacement
-  replaceBinding place.root (some updated) environment
+    | _ :: _ => stored.writePath program place.fields replacement
+  replaceBinding place.root updated environment
 
-def takePlace (place : Place) (environment : Environment) : Option (Value × Environment) := do
-  match place.fields with
-  | [] =>
-      let stored ← lookup place.root environment
-      let value ← stored
-      let after ← replaceBinding place.root none environment
-      some (value, after)
-  | _ :: _ => none
+def takePlace (program : Program) (place : Place) (environment : Environment) : Option (Value × Environment) := do
+  let value ← readPlace program place environment
+  let after ← writePlace program place .vacant environment
+  some (value, after)
 
 mutual
 inductive Evaluates (program : Program) : Environment → Expr → Value → Environment → Prop where
@@ -607,7 +618,7 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       (selected : readPlace program place environment = some value) :
       Evaluates program environment (.read place) value environment
   | move {environment after : Environment} {place : Place} {value : Value}
-      (taken : takePlace place environment = some (value, after)) :
+      (taken : takePlace program place environment = some (value, after)) :
       Evaluates program environment (.move place) value after
   | sequence {environment middle after : Environment} {first rest : Expr}
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
@@ -616,7 +627,7 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
   | bind {environment middle after : Environment} {mutable : Bool} {name : String}
       {annotation : Option TypeExpr} {initial body : Expr} {resident value : Value}
       (initialized : Evaluates program environment initial resident middle)
-      (continued : Evaluates program ((name, some resident) :: middle) body value after) :
+      (continued : Evaluates program ((name, resident) :: middle) body value after) :
       Evaluates program environment (.bind mutable name annotation initial body) value (after.drop 1)
   | assign {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value}
@@ -646,7 +657,7 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       {declaration : FunctionDecl} {values : List Value} {value : Value}
       (declared : program.functions identity = some declaration)
       (inputs : EvaluatesMany program environment arguments values middle)
-      (body : Evaluates program (presentBindings (List.zip (declaration.parameters.map Prod.fst) values)) declaration.body value localAfter) :
+      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter) :
       Evaluates program environment (.call identity arguments) value middle
   | applyPatterns {environment middle after : Environment} {inputs : List Ty} {arguments : List Expr}
       {arms : List (PatternSource × Expr)} {normalized : List (Pattern × Expr)} {values : List Value}
@@ -654,7 +665,7 @@ inductive Evaluates (program : Program) : Environment → Expr → Value → Env
       (normalization : NormalizesArms program arms normalized)
       (argumentsEval : EvaluatesMany program environment arguments values middle)
       (selected : selectArm (argumentValue values) normalized = some (bindings, body))
-      (bodyEval : Evaluates program (presentBindings bindings ++ middle) body value after) :
+      (bodyEval : Evaluates program (bindings ++ middle) body value after) :
       Evaluates program environment (.applyPatterns inputs arguments arms) value (after.drop bindings.length)
 
 inductive EvaluatesMany (program : Program) : Environment → List Expr → List Value → Environment → Prop where
@@ -810,6 +821,12 @@ end
 
 
 
+theorem ValueHasType.initialized {value : Value} {type : Ty}
+    (typed : ValueHasType program value type) : value.initialized = true := by
+  induction typed using ValueHasType.rec
+    (motive_2 := fun values types _ => valuesInitialized values = true) <;>
+    simp_all [Value.initialized, valuesInitialized]
+
 /-- Both structural and nominal projections consume the same positional typing fact. -/
 theorem ValuesHaveTypes.select {types : List Ty} {values : List Value}
     (typed : ValuesHaveTypes program values types) (index : Nat) (type : Ty)
@@ -937,7 +954,7 @@ theorem EnvironmentTyped.length {environment : Environment} {context : List (Str
 
 theorem EnvironmentTyped.replace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {name : String} {slot : BindingType}
-    (changed : replaceBinding name slot context = some afterContext) {replacement : Option Value}
+    (changed : replaceBinding name slot context = some afterContext) {replacement : Value}
     (resident : SlotTyped program replacement slot) :
     ∃ after, replaceBinding name replacement environment = some after ∧ EnvironmentTyped program after afterContext ∧
       lookup name after = some replacement := by
@@ -976,11 +993,11 @@ theorem EnvironmentTyped.lookup {environment : Environment} {context : List (Str
 theorem EnvironmentTyped.lookupLive {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {name : String} {type : BindingType}
     (selected : Grounded.lookup name context = some type) (initialized : type.initialized = true) :
-    ∃ value, Grounded.lookup name environment = some (some value) ∧ ValueHasType program value type.type := by
+    ∃ value, Grounded.lookup name environment = some value ∧ ValueHasType program value type.type := by
   obtain ⟨resident, found, residentTyped⟩ := typed.lookup selected
-  cases resident with
-  | none => simp [SlotTyped, initialized] at residentTyped
-  | some value => exact ⟨value, found, residentTyped.2⟩
+  rcases residentTyped with ⟨_, residentTyped⟩ | ⟨vacant, _⟩
+  · exact ⟨resident, found, residentTyped⟩
+  · simp [initialized] at vacant
 
 theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty}
@@ -989,7 +1006,7 @@ theorem EnvironmentTyped.readPlace {environment : Environment} {context : List (
     ∃ value, Grounded.readPlace program place environment = some value ∧ ValueHasType program value target := by
   obtain ⟨parent, found, parentTyped⟩ := typed.lookupLive selected initialized
   obtain ⟨resident, read, residentTyped⟩ := path.read parentTyped
-  exact ⟨resident, by simp [Grounded.readPlace, found, read], residentTyped⟩
+  exact ⟨resident, by simp [Grounded.readPlace, found, read, residentTyped.initialized], residentTyped⟩
 
 theorem EnvironmentTyped.writePlace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType} {target : Ty}
@@ -1003,27 +1020,27 @@ theorem EnvironmentTyped.writePlace {environment : Environment} {context afterCo
   · rw [whole] at path
     cases path
     obtain ⟨old, found, _⟩ := typed.lookup selected
-    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := some replacement) ⟨rfl, resident⟩
+    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := replacement) (.inl ⟨rfl, resident⟩)
     exact ⟨after, by simp [Grounded.writePlace, found, whole, replaced], afterTyped,
-      by simp [Grounded.readPlace, lookupAfter, whole, Value.readPath]⟩
+      by simp [Grounded.readPlace, lookupAfter, whole, Value.readPath, resident.initialized]⟩
   · obtain ⟨parent, found, parentTyped⟩ := typed.lookupLive selected (available.resolve_left whole)
     obtain ⟨updated, written, updatedTyped, readback⟩ := path.write parentTyped resident
-    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := some updated) ⟨rfl, updatedTyped⟩
-    refine ⟨after, ?_, afterTyped, by simp [Grounded.readPlace, lookupAfter, readback]⟩
+    obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := updated) (.inl ⟨rfl, updatedTyped⟩)
+    refine ⟨after, ?_, afterTyped, by simp [Grounded.readPlace, lookupAfter, readback, resident.initialized]⟩
     cases fields : place.fields with
     | nil => exact False.elim (whole fields)
-    | cons key rest => simpa [Grounded.writePlace, found, fields, replaced] using congrArg (fun result => result.bind (fun updated => replaceBinding place.root (some updated) environment)) written
+    | cons key rest => simpa [Grounded.writePlace, found, fields, replaced] using congrArg (fun result => result.bind (fun updated => replaceBinding place.root updated environment)) written
 
 theorem EnvironmentTyped.takePlace {environment : Environment} {context afterContext : List (String × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {slot : BindingType}
     (selected : Grounded.lookup place.root context = some slot) (initialized : slot.initialized = true)
     (whole : place.fields = [])
     (changed : replaceBinding place.root { slot with initialized := false } context = some afterContext) :
-    ∃ value after, Grounded.takePlace place environment = some (value, after) ∧ ValueHasType program value slot.type ∧
-      EnvironmentTyped program after afterContext ∧ Grounded.lookup place.root after = some none := by
+    ∃ value after, Grounded.takePlace program place environment = some (value, after) ∧ ValueHasType program value slot.type ∧
+      EnvironmentTyped program after afterContext ∧ Grounded.lookup place.root after = some .vacant := by
   obtain ⟨value, found, valueTyped⟩ := typed.lookupLive selected initialized
-  obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := none) rfl
-  exact ⟨value, after, by simp [Grounded.takePlace, whole, found, replaced], valueTyped, afterTyped, lookupAfter⟩
+  obtain ⟨after, replaced, afterTyped, lookupAfter⟩ := typed.replace changed (replacement := .vacant) (.inr ⟨rfl, rfl⟩)
+  exact ⟨value, after, by simp [Grounded.takePlace, Grounded.readPlace, Grounded.writePlace, whole, found, Value.readPath, valueTyped.initialized, replaced], valueTyped, afterTyped, lookupAfter⟩
 
 /-- Runtime typing produces the constructor signature consumed by both pattern
 binding and exhaustive dispatch; neither consumer guesses resident types. -/
@@ -1050,10 +1067,10 @@ theorem ValuesHaveTypes.argument {values : List Value} {types : List Ty}
 theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (String × BindingType)}
     (typed : PatternType program home pattern type context) {value : Value}
     (valueTyped : ValueHasType program value type) {bindings : List (String × Value)}
-    (matched : pattern.matchValue value = some bindings) : EnvironmentTyped program (presentBindings bindings) context := by
+    (matched : pattern.matchValue value = some bindings) : EnvironmentTyped program bindings context := by
   induction typed using PatternType.rec
     (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
-      ∀ bindings, matchPatterns patterns values = some bindings → EnvironmentTyped program (presentBindings bindings) context)
+      ∀ bindings, matchPatterns patterns values = some bindings → EnvironmentTyped program bindings context)
     generalizing value bindings with
   | wildcard discard =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
@@ -1062,7 +1079,7 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
   | binder name discard =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
-    exact .cons ⟨rfl, valueTyped⟩ .nil
+    exact .cons (.inl ⟨rfl, valueTyped⟩) .nil
   | literal typed discard =>
     simp only [Pattern.matchValue] at matched
     split at matched
@@ -1101,7 +1118,7 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (St
         | some back =>
           simp [headMatch, tailMatch] at matched
           subst bindings
-          simpa [presentBindings] using EnvironmentTyped.append (headIH first headMatch) (tailIH _ rest _ tailMatch)
+          exact EnvironmentTyped.append (headIH first headMatch) (tailIH _ rest _ tailMatch)
 
 /-- Constructor-space coverage constructs an actual first matching clause. No
 post-evaluation match result occurs among the admission premises. -/
@@ -1292,9 +1309,9 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       ∀ environment, EnvironmentTyped program environment context →
       ∀ value, ValueHasType program value subject → ∀ bindings body,
         selectArm value arms = some (bindings, body) →
-        ∃ resultValue after, Evaluates program (presentBindings bindings ++ environment) body resultValue after ∧
+        ∃ resultValue after, Evaluates program (bindings ++ environment) body resultValue after ∧
           ValueHasType program resultValue result ∧ EnvironmentTyped program (after.drop bindings.length) afterContext ∧
-          ∀ other otherAfter, Evaluates program (presentBindings bindings ++ environment) body other otherAfter → other = resultValue ∧ otherAfter = after)
+          ∀ other otherAfter, Evaluates program (bindings ++ environment) body other otherAfter → other = resultValue ∧ otherAfter = after)
     (motive_4 := fun home source _ => ∃ normalized, NormalizesPattern program source normalized ∧
       ∀ other, NormalizesPattern program source other → other = normalized)
     (motive_5 := fun home sources _ => ∃ normalized, NormalizesPatterns program sources normalized ∧
@@ -1332,7 +1349,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
     have bindParameters : ∀ (parameters : List (String × BindingType)) (values : List Value),
         ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type)) →
         (∀ parameter ∈ parameters, parameter.2.initialized = true) →
-        EnvironmentTyped program (presentBindings (List.zip (parameters.map Prod.fst) values)) parameters := by
+        EnvironmentTyped program (List.zip (parameters.map Prod.fst) values) parameters := by
       intro parameters
       induction parameters with
       | nil => intro values typed initialized; cases typed; exact .nil
@@ -1340,7 +1357,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
         intro values typed initialized
         cases typed with
         | cons headTyped tailTyped =>
-          exact .cons ⟨initialized parameter (by simp), headTyped⟩
+          exact .cons (.inl ⟨initialized parameter (by simp), headTyped⟩)
             (ih _ tailTyped (fun p included => initialized p (List.mem_cons_of_mem _ included)))
     obtain ⟨value, localAfter, bodyEval, valueTyped, _, bodyUnique⟩ :=
       bodyIH (bindParameters declaration.parameters values inputsTyped initialized)
@@ -1400,7 +1417,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       exact unique _ _ otherTail
   | bind initialized drop annotated continued initialIH bodyIH =>
     obtain ⟨resident, middle, initialEval, residentTyped, middleTyped, initialUnique⟩ := initialIH environmentTyped
-    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, bodyUnique⟩ := bodyIH (.cons (value := some resident) ⟨rfl, residentTyped⟩ middleTyped)
+    obtain ⟨value, after, bodyEval, valueTyped, afterTyped, bodyUnique⟩ := bodyIH (.cons (value := resident) (.inl ⟨rfl, residentTyped⟩) middleTyped)
     refine ⟨value, after.drop 1, .bind initialEval bodyEval, valueTyped, afterTyped.drop 1, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
@@ -1488,7 +1505,6 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
         bodyIH (EnvironmentTyped.append bindingsTyped environmentTyped)
       refine ⟨result, after, evaluated, resultTyped, ?_, unique⟩
       have count := bindingsTyped.length
-      simp only [presentBindings, List.length_map] at count
       rw [count, ← lengths]
       simpa using afterTyped.drop afterBindings.length
     next missed => exact tailIH environment environmentTyped value valueTyped bindings body selected
