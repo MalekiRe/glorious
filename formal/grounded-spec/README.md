@@ -284,7 +284,14 @@ Proceed serially, closing each extension through the same end-to-end theorem:
 3. Direct calls and immediate structural-pattern application: connected; remaining pattern/callable boundaries above.
 4. Mutable places, initialization, assignment and explicit moves.
 5. Affine/exact-linear ownership, destruction and scope cleanup.
-6. Borrowing, provenance, lifetimes and returned references.
+6. Borrowing, provenance, lifetimes and returned references, including required
+   Rust-style implicit reborrowing of existing references (§5.3). Expected
+   reference types select unique/shared derived loans, not ownership transfer;
+   unconstrained generic owned inputs do not automatically reborrow. Preserve
+   storage identity, parent permissions, initialization restrictions and actual
+   child-loan lifetimes, including loans retained by returned references.
+   Explicit moves remain transfers. Source elaboration must select these same
+   loan operations, not introduce a separate implicit-borrow permission model.
 7. Callables, captures and invocation quantities.
 8. Recursion and finite/infinite execution guarantees.
 9. Labels, nonlocal transfer and proper tail invocation.
