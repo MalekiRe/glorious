@@ -1,12 +1,13 @@
 /-!
 Target-indexed expressions, immutable composition, structural and nominal data.
-Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.3 and 13.1.
+Normative basis: §§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.5, 7.7 and 13.1.
 Declarations, field types, identities and lexical names are already decoded.
 Constructors consume argument expressions in their recorded order. Literal
 magnitudes and Unicode numbers are decoded; source elaboration is not proved.
 Direct named calls and immediate pattern-callable application share correctness.
 Finite-inline nominal owners have checked structural use bounds and manual
 restrictions. Actual zero-use boundaries consume derived disposal permission.
+Affine arm joins retain branch residents under conservative initialization.
 Hooks, ordered destruction, physical representation and exhaustion remain open.
 Admission supplies no successful execution or normalization witness.
 Constant-normal-form checks are consumed only after normalization is derived.
@@ -272,12 +273,20 @@ inductive PatternSource where
 inductive Initialization where
   | full
   | vacant
+  /-- A correlation-losing affine join retains the actual resident or vacancy. -/
+  | maybe
   | fields (entries : List (Nat × Initialization))
+
+/-- Field access requires a definitely present ancestor, not a complete one. -/
+@[simp] def Initialization.Present : Initialization → Prop
+  | .full | .fields _ => True
+  | .vacant | .maybe => False
 
 def Initialization.child (state : Initialization) (index : Nat) : Initialization :=
   match state with
   | .full => .full
   | .vacant => .vacant
+  | .maybe => .maybe
   | .fields entries => match entries.find? (fun entry => entry.1 == index) with
     | some entry => entry.2
     | none => .full
@@ -297,11 +306,11 @@ def Initialization.setChild (state : Initialization) (index : Nat) (replacement 
   let entries := match state with | .fields entries => entries | _ => []
   .fields ((index, replacement) :: entries.filter (fun entry => entry.1 != index))
 
-theorem Initialization.child_setChild {state : Initialization} (present : state ≠ .vacant)
+theorem Initialization.child_setChild {state : Initialization} (present : state.Present)
     (index : Nat) (replacement : Initialization) (other : Nat) :
     (state.setChild index replacement).child other = if other = index then replacement else state.child other := by
   cases state with
-  | vacant => exact False.elim (present rfl)
+  | vacant | maybe => exact False.elim present
   | full =>
     by_cases same : other = index
     · subst other; simp only [setChild, child, List.find?_cons, show (index == index) = true from decide_eq_true rfl, ↓reduceIte]
@@ -323,14 +332,25 @@ theorem Initialization.child_setChild {state : Initialization} (present : state 
 inductive Initialization.Access : Initialization → List Nat → Initialization → Prop where
   | here (state : Initialization) : Access state [] state
   | child {state selected : Initialization} {index : Nat} {indices : List Nat}
-      (present : state ≠ .vacant) (access : Access (state.child index) indices selected) : Access state (index :: indices) selected
+      (present : state.Present) (access : Access (state.child index) indices selected) : Access state (index :: indices) selected
+
+/-- Unknown presence permits replacing the whole root, never descending into it. -/
+theorem Initialization.Access.maybe_iff {indices : List Nat} {selected : Initialization} :
+    Access .maybe indices selected ↔ indices = [] ∧ selected = .maybe := by
+  constructor
+  · intro access
+    cases access with
+    | here => exact ⟨rfl, rfl⟩
+    | child present access => exact False.elim present
+  · rintro ⟨rfl, rfl⟩
+    exact .here .maybe
 
 def Initialization.write (state : Initialization) (indices : List Nat) (replacement : Initialization) : Initialization :=
   match indices with
   | [] => replacement
   | index :: rest => state.setChild index ((state.child index).write rest replacement)
 
-theorem Initialization.setChild_complete_iff {state next : Initialization} (present : state ≠ .vacant) (index : Nat) :
+theorem Initialization.setChild_complete_iff {state next : Initialization} (present : state.Present) (index : Nat) :
     (state.setChild index next).Complete ↔ next.Complete ∧ ∀ other, other ≠ index → (state.child other).Complete := by
   constructor
   · intro complete
@@ -395,7 +415,7 @@ theorem Initialization.Access.restore_complete {state selected next : Initializa
   | here => intro _; exact restored
   | @child state selected index indices present access ih =>
     intro complete
-    have outerPresent : state.write (index :: indices) first ≠ .vacant := by simp [Initialization.write, setChild]
+    have outerPresent : (state.write (index :: indices) first).Present := by simp [Initialization.write, setChild]
     apply (setChild_complete_iff outerPresent index).mpr
     constructor
     · simpa only [Initialization.write, child_setChild present, ↓reduceIte] using ih (complete.child index)
@@ -519,6 +539,27 @@ inductive UsePermission (data : DataDeclarations) : Ty → Principal → Prop wh
 abbrev Duplicable (data : DataDeclarations) (type : Ty) := UsePermission data type .duplicable
 abbrev MayDiscard (data : DataDeclarations) (type : Ty) := UsePermission data type .affine
 
+/-- A branch may preserve its exact mask, or forget an affine slot's state.
+No resident is destroyed and no runtime choice is supplied by this rule. -/
+inductive Initialization.Joins (data : DataDeclarations) (type : Ty) : Initialization → Initialization → Prop where
+  | same (state : Initialization) : Joins data type state state
+  | affine {state : Initialization} (permission : MayDiscard data type) : Joins data type state .maybe
+
+/-- Correlation-losing joins preserve lexical identity, type and mutability.
+Positive-lower slots must retain their entire initialization mask. -/
+inductive ContextJoins (program : Program) : List (String × BindingType) → List (String × BindingType) → Prop where
+  | nil : ContextJoins program [] []
+  | cons {name : String} {type : Ty} {mutable : Bool} {before after : Initialization}
+      {context joined : List (String × BindingType)}
+      (head : Initialization.Joins program.data type before after) (tail : ContextJoins program context joined) :
+      ContextJoins program ((name, ⟨type, mutable, before⟩) :: context) ((name, ⟨type, mutable, after⟩) :: joined)
+
+theorem Initialization.Joins.positive_lower {data : DataDeclarations} {type : Ty} {before after : Initialization}
+    (joined : Joins data type before after) (positive : ¬ MayDiscard data type) : before = after := by
+  cases joined with
+  | same => rfl
+  | affine permission => exact False.elim (positive permission)
+
 def Initialization.Hole (program : Program) (state : Initialization) (type : Ty) : Prop :=
   ∃ home keys indices target, PathType program home type keys indices target ∧ state.Access indices .vacant
 
@@ -552,6 +593,10 @@ def lookup {α : Type} (name : String) : List (String × α) → Option α
 mutual
 inductive ResidentTyped (program : Program) : Initialization → Value → Ty → Prop where
   | vacant {type : Ty} : ResidentTyped program .vacant .vacant type
+  /-- Static uncertainty never replaces, drops or fabricates a branch resident. -/
+  | uncertain {state : Initialization} {value : Value} {type : Ty}
+      (actual : ResidentTyped program state value type) (permission : MayDiscard program.data type) :
+      ResidentTyped program .maybe value type
   | unit : ResidentTyped program .full .unit .unit
   | integer {type : IntegerType} {number : Int} (fits : type.Contains program.target number) :
       ResidentTyped program .full (.integer type number) (.integer type)
@@ -559,20 +604,20 @@ inductive ResidentTyped (program : Program) : Initialization → Value → Ty �
   | tuple {state : Initialization} {head : Value} {tail : List Value} {first : Ty} {rest : List Ty}
       (headTyped : ResidentTyped program (state.child 0) head first)
       (tailTyped : ResidentsTyped program (fun index => state.child (index + 1)) tail rest)
-      (present : state ≠ .vacant := by intro h; cases h) :
+      (present : state.Present := by trivial) :
       ResidentTyped program state (.tuple head tail) (.tuple first rest)
   | array {state : Initialization} {values : List Value} {element : Ty} {length : Nat}
       (residents : ResidentsTyped program state.child values (List.replicate length element))
       (elementValid : FiniteLayout program.target program.data element)
       (size : length < 2 ^ program.target.pointerBits)
-      (present : state ≠ .vacant := by intro h; cases h) :
+      (present : state.Present := by trivial) :
       ResidentTyped program state (.array values) (.array element length)
   | nominal {state : Initialization} {identity : Nat} {tag : Option Nat} {declaration : DataDecl} {schema : Fields}
       {values : List Value} (declared : program.data identity = some declaration)
       (chosen : declaration.constructor tag = some schema)
       (finite : FiniteLayout program.target program.data (.nominal identity))
       (residents : ResidentsTyped program state.child values (schema.residents.map Field.type))
-      (present : state ≠ .vacant := by intro h; cases h) :
+      (present : state.Present := by trivial) :
       ResidentTyped program state (.nominal identity tag values) (.nominal identity)
 inductive ResidentsTyped (program : Program) : (Nat → Initialization) → List Value → List Ty → Prop where
   | nil {states : Nat → Initialization} : ResidentsTyped program states [] []
@@ -593,6 +638,7 @@ theorem ResidentTyped.complete {program : Program} {state : Initialization} {val
     (motive_2 := fun states values types _ => (∀ index, (states index).Complete) →
       ValuesHaveTypes program values types ∧ valuesInitialized values = true) with
   | vacant => cases complete
+  | uncertain actual permission ih => cases complete
   | unit => exact ⟨.unit, by simp [Value.initialized]⟩
   | integer fits => exact ⟨.integer fits, by simp [Value.initialized]⟩
   | character valid => exact ⟨.character valid, by simp [Value.initialized]⟩
@@ -625,6 +671,24 @@ inductive EnvironmentTyped (program : Program) : Environment → List (String ×
       {environment : Environment} {context : List (String × BindingType)}
       (resident : SlotTyped program value type) (rest : EnvironmentTyped program environment context) :
       EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
+
+/-- Join soundness keeps the actual branch resident unchanged. -/
+theorem ResidentTyped.join {state joined : Initialization} {value : Value} {type : Ty}
+    (typed : ResidentTyped program state value type) (join : Initialization.Joins program.data type state joined) :
+    ResidentTyped program joined value type := by
+  cases join with
+  | same => exact typed
+  | affine permission => exact .uncertain typed permission
+
+/-- A common static post-context accepts each actual branch environment verbatim. -/
+theorem EnvironmentTyped.join {environment : Environment} {context joined : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) (join : ContextJoins program context joined) :
+    EnvironmentTyped program environment joined := by
+  induction join generalizing environment with
+  | nil => cases typed; exact .nil
+  | cons head tail ih =>
+    cases typed with
+    | cons resident rest => exact .cons (ResidentTyped.join resident head) (ih rest)
 
 theorem Principal.Accepts.trans {first middle last : Principal} (front : first.Accepts middle) (back : middle.Accepts last) : first.Accepts last := by
   cases first <;> cases middle <;> cases last <;> simp_all [Principal.Accepts]
@@ -686,16 +750,7 @@ theorem EnvironmentTyped.take {environment : Environment} {context : List (Strin
     | nil => exact .nil
     | cons head tail => exact .cons head (ih tail)
 
-theorem Value.Disposable.not_live_exact_nominal {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl}
-    (declared : program.data identity = some declaration) (restriction : declaration.restriction = some .exact)
-    (live : (Value.nominal identity tag fields).initialized = true) :
-    ¬ Value.Disposable program (.nominal identity tag fields) := by
-  intro disposable
-  cases disposable with
-  | owned typed permitted =>
-    cases typed with
-    | nominal found chosen finite residents present => exact permitted.nominal_restriction declared restriction
-  | nominal found structureOnly incomplete fields => simp [live] at incomplete
+
 
 def Value.head : Value → Head
   | .vacant => .vacant
@@ -1070,11 +1125,12 @@ inductive ArmsType (program : Program) :
     Module → List (String × BindingType) → Ty → Ty → List Pattern → List (Pattern × Expr) → List (String × BindingType) → Prop where
   | empty {home : Module} {context after : List (String × BindingType)} {subject result : Ty} {previous : List Pattern} :
       ArmsType program home context subject result previous [] after
-  | clause {home : Module} {context after : List (String × BindingType)} {subject result : Ty}
+  | clause {home : Module} {context branchAfter after : List (String × BindingType)} {subject result : Ty}
       {previous : List Pattern} {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)}
       {bindings afterBindings : List (String × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
-      (bodyTyped : HasType program home (bindings ++ context) body result (afterBindings ++ after))
+      (bodyTyped : HasType program home (bindings ++ context) body result (afterBindings ++ branchAfter))
+      (joined : ContextJoins program branchAfter after)
       (lengths : afterBindings.length = bindings.length)
       (discard : ∀ binding ∈ afterBindings, binding.2.Disposable program)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest after) :
@@ -1321,7 +1377,7 @@ theorem ResidentsTyped.set {program : Program} {types : List Ty} {values : List 
 /-- The selected resident and lawful replacement are derived from the same field contract. -/
 theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat} {state : Initialization}
     (projection : ProjectionType program home source key index target) {value : Value}
-    (typed : ResidentTyped program state value source) (present : state ≠ .vacant := by intro h; cases h) :
+    (typed : ResidentTyped program state value source) (present : state.Present := by trivial) :
     ∃ resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
       ResidentTyped program (state.child index) resident target ∧
       ∀ replacement next, ResidentTyped program next replacement target →
@@ -1330,7 +1386,8 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
   cases projection with
   | @tuple first type rest index selected =>
     cases typed with
-    | vacant => exact False.elim (present rfl)
+    | vacant => exact False.elim present
+    | uncertain typed permission => exact False.elim present
     | @tuple state head tail _ _ headTyped tailTyped _ =>
       obtain ⟨resident, found, residentTyped⟩ := ResidentsTyped.select (states := state.child) (.cons headTyped tailTyped) index target selected
       refine ⟨resident, rfl, found, residentTyped, ?_⟩
@@ -1349,7 +1406,8 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey} {index : Nat
           exact ⟨_, by simp [Value.replaceChild, found], .tuple firstChanged restChanged (by simp [Initialization.setChild])⟩
   | @nominal identity index key declaration schema field declared structureOnly indexed selected visible =>
     cases typed with
-    | vacant => exact False.elim (present rfl)
+    | vacant => exact False.elim present
+    | uncertain typed permission => exact False.elim present
     | @nominal state _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents _ =>
       have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
       subst otherDeclaration
@@ -1393,6 +1451,7 @@ theorem ResidentTyped.fully_initialized {state : Initialization} {value : Value}
   induction typed using ResidentTyped.rec
     (motive_2 := fun states values types _ => valuesInitialized values = true → ValuesHaveTypes program values types) with
   | vacant => simp [Value.initialized] at live
+  | uncertain actual permission ih => exact ih live
   | unit => exact .unit
   | integer fits => exact .integer fits
   | character valid => exact .character valid
@@ -1407,10 +1466,21 @@ theorem ResidentTyped.fully_initialized {state : Initialization} {value : Value}
     simp only [valuesInitialized, Bool.and_eq_true] at live
     exact .cons (headIH live.1) (tailIH live.2)
 
+theorem Value.Disposable.not_live_exact_nominal {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl}
+    (declared : program.data identity = some declaration) (restriction : declaration.restriction = some .exact)
+    (live : (Value.nominal identity tag fields).initialized = true) :
+    ¬ Value.Disposable program (.nominal identity tag fields) := by
+  intro disposable
+  cases disposable with
+  | owned typed permitted =>
+    cases typed.fully_initialized live with
+    | nominal found chosen finite residents present => exact permitted.nominal_restriction declared restriction
+  | nominal found structureOnly incomplete fields => simp [live] at incomplete
+
 theorem Initialization.Access.full (indices : List Nat) : Initialization.Access .full indices .full := by
   induction indices with
   | nil => exact .here .full
-  | cons index indices ih => exact .child (by intro h; cases h) ih
+  | cons index indices ih => exact .child (by trivial) ih
 
 theorem ResidentTyped.hole_uninitialized {state : Initialization} {value : Value} {type : Ty}
     (typed : ResidentTyped program state value type) (hole : state.Hole program type) : value.initialized = false := by
@@ -1437,6 +1507,7 @@ theorem StorageDisposition.realized {state : Initialization} {type : Ty} {value 
     have incomplete := typed.hole_uninitialized hole
     cases typed with
     | vacant => exact .vacant
+    | uncertain actual permission => exact .owned actual permission
     | tuple head tail present =>
       have children := ih _ (.cons head tail)
       exact .tuple incomplete (children _ (List.mem_cons_self ..)) (fun value member => children value (List.mem_cons_of_mem _ member))
@@ -1444,6 +1515,7 @@ theorem StorageDisposition.realized {state : Initialization} {type : Ty} {value 
     have incomplete := typed.hole_uninitialized hole
     cases typed with
     | vacant => exact .vacant
+    | uncertain actual permission => exact .owned actual permission
     | @nominal _ _ tag otherDeclaration otherSchema values found chosen finite residents present =>
       have same := Option.some.inj (found.symm.trans declared)
       subst otherDeclaration
@@ -2067,7 +2139,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
   | empty =>
     rename_i environment environmentTyped value valueTyped bindings body selected
     simp [selectArm] at selected
-  | @clause home context afterContext subject result previous pattern bodyExpression rest bindingTypes afterBindings patternTyped distinct useful bodyTyped lengths discard tailTyped bodyIH tailIH =>
+  | @clause home context branchAfter afterContext subject result previous pattern bodyExpression rest bindingTypes afterBindings patternTyped distinct useful bodyTyped joined lengths discard tailTyped bodyIH tailIH =>
     rename_i environment environmentTyped value valueTyped bindings body selected
     simp only [selectArm] at selected
     split at selected
@@ -2079,7 +2151,7 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
         bodyIH (EnvironmentTyped.append bindingsTyped environmentTyped)
       refine ⟨result, after, evaluated, resultTyped, ?_, ?_, unique⟩
       · rw [bindingsTyped.length, ← lengths]
-        simpa using afterTyped.drop afterBindings.length
+        exact (by simpa using afterTyped.drop afterBindings.length : EnvironmentTyped program (after.drop afterBindings.length) branchAfter).join joined
       · rw [bindingsTyped.length, ← lengths]
         apply (afterTyped.take afterBindings.length).disposable
         simpa using discard
@@ -2194,6 +2266,31 @@ theorem correctness {context afterContext : List (String × BindingType)} {expre
       subst sameHead
       subst sameTail
       rfl
+
+/-- Neither whole nor nested source use can recover lost initialization certainty. -/
+theorem HasType.no_use_maybe {context after : List (String × BindingType)} {place : Place} {slot : BindingType} {type : Ty}
+    (found : lookup place.root context = some slot) (unknown : slot.initialization = .maybe) :
+    (¬ HasType program home context (.read place) type after) ∧
+      (¬ HasType program home context (.move place) type after) := by
+  constructor
+  · intro admitted
+    cases admitted with
+    | read selected access initialized path copyable =>
+      have same := Option.some.inj (selected.symm.trans found)
+      cases same
+      rw [unknown] at access
+      have selectedMaybe := (Initialization.Access.maybe_iff.mp access).2
+      cases selectedMaybe
+      cases initialized
+  · intro admitted
+    cases admitted with
+    | move selected access initialized path cleared =>
+      have same := Option.some.inj (selected.symm.trans found)
+      cases same
+      rw [unknown] at access
+      have selectedMaybe := (Initialization.Access.maybe_iff.mp access).2
+      cases selectedMaybe
+      cases initialized
 
 theorem HasType.read_root_complete {context after : List (String × BindingType)} {root : String} {slot : BindingType} {type : Ty}
     (admitted : HasType program home context (.read ⟨root, []⟩) type after)

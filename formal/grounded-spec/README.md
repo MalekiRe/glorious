@@ -153,10 +153,11 @@ mutable initialized bindings, whole-local and nested tuple/structure moves, rest
 optional type annotations, tuples/projection, fixed-array construction, non-generic transparent aliases, structural constants,
 non-generic finite-inline nominal data with coherent principal restrictions, direct
 nonrecursive first-order calls, and immediate structural pattern-callable
-application.** Records, tuple structs and enum variants retain declaration
+application with conservative affine conditional initialization joins.** Records,
+tuple structs and enum variants retain declaration
 identity; projection and deconstruction check field visibility. The boundary
 is decoded declarations/expressions to logical values and lexical post-states. Normative basis:
-§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.3 and 13.1. No
+§§2.2–2.3, 3.2–3.4, 4.1–4.4, 5.1–5.3, 6.1–6.3, 7.2–7.5, 7.7 and 13.1. No
 previous proof modules are imported. The objective is the full
 specification, not a feature percentage.
 
@@ -247,11 +248,51 @@ complete before extraction. These laws accompany the existing exact physical
 move/restore round trip.
 Strict Lean checking and the connected correctness, nested take/write, sibling
 framing, restoration and whole-read rejection axiom audits passed with only
-`propext` and `Quot.sound`. Conditional ownership joins, ordered destruction of
+`propext` and `Quot.sound`. Ordered destruction of
 surviving fields, custom hooks, and reference-mediated mutation remain open;
 this is not whole-language soundness.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
+
+### Affine conditional initialization joins
+
+Immediate pattern applications retain each arm's own post-context before joining
+it to the common continuation context. `ArmsType.clause` consumes
+`ContextJoins`; `correctness` applies `EnvironmentTyped.join` only after the
+actual selected body and clause-local cleanup. The join retypes that exact
+environment without changing, dropping or inventing any branch resident.
+Pattern selection and failed alternatives retain their existing non-consuming
+meaning. No second initialization analysis or runtime ownership table is added.
+
+`Initialization.Joins` preserves an identical mask, or widens an affine
+binding to `Initialization.maybe` using its existing `MayDiscard` permission.
+`ResidentTyped.uncertain` retains the actual typed resident, including an
+actual vacancy or partial aggregate. Identical partial masks preserve field
+precision. Widening is deliberately whole-binding conservative: differing
+partial masks lose all field precision until the whole mutable root is restored.
+This is not field-sensitive join completeness.
+
+`Initialization.Present` now governs every ancestor access: both vacancy
+and maybe-initialization forbid descent. `Initialization.Access.maybe_iff`
+proves that only the whole root is accessible in a maybe state, and
+`HasType.no_use_maybe` rejects both whole and nested reads and moves. Root
+assignment still evaluates its RHS first, derives disposal of the actual old
+resident through `EnvironmentTyped.place_disposable`, and writes an initialized
+replacement through the same `PathType`/`Initialization.write` contract. Thus
+restoration establishes definite initialization without assuming old vacancy.
+Scope and overwrite eligibility likewise use the actual branch resident; a
+vacancy never becomes a fabricated owner. Ordered execution is a separate
+cleanup boundary, not a premise of join soundness.
+
+Positive-lower owners cannot use the affine widening rule, regardless of
+whether a particular partial residual could be discarded.
+`Initialization.Joins.positive_lower` proves the entire existing mask must
+remain identical; two arms can therefore share a plain post-context only when
+their exact-owner masks agree, including identical partial masks. Conditional
+exact-linear control islands and exported correlations remain unsupported.
+Strict Lean checks and the connected join, path, source-use rejection,
+disposition and correctness axiom audits use only `propext` and `Quot.sound`.
+The decoded no-loans/no-hooks subset remains the semantic boundary.
 
 ### Ownership permissions and zero-use boundaries
 
@@ -289,7 +330,7 @@ exact-linear owners, including fieldless owners.
 
 This is logical zero-use eligibility, not ordered destructor execution.
 Residual exact-linear shells are connected to actual scope removal and
-overwrites; ordered cleanup transitions, conditional joins, custom hooks and
+overwrites; ordered cleanup transitions, custom hooks and
 their possible divergence, and physical storage release remain open. Strict
 checking and the connected correctness and disposition axiom audits passed
 with only `propext` and `Quot.sound`.
@@ -410,7 +451,8 @@ Proceed serially, closing each extension through the same end-to-end theorem:
    incomplete-aggregate rejection are connected through the general theorem.
 5. Affine/exact-linear ownership, destruction and scope cleanup: shared use
    permissions, final-state zero-use eligibility and residual exact-linear
-   shells are connected above; ordered destruction and conditional joins remain open.
+   shells and conservative affine joins are connected above; ordered destruction
+   and correlation-preserving exact-linear control islands remain open.
 6. Borrowing, provenance, lifetimes and returned references, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;
