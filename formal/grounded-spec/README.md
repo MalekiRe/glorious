@@ -221,10 +221,22 @@ environment, including siblings, pre-existing holes and shadowed bindings.
 This is not merely equality of the selected field or preservation of its type.
 It does not grant source-level write permission to an immutable place.
 Whole-root and nested writes now share one path-update implementation.
-Source admission and preservation of partially initialized aggregates remain
-open: the static initialization context still distinguishes only whole-live
-and whole-vacant roots. The operational path generalization alone does not
-establish typed partial-move support.
+The static initialization context now stores finite field overrides rather than
+a whole-root Boolean. `ResidentTyped` is the authoritative storage typing
+relation; owned-value typing is its fully initialized specialization, not a
+second value-typing relation. `ResidentTyped.complete` recovers owned typing
+and proves physical absence of vacancies from complete initialization evidence.
+Source reads use `Initialization.Ready` along the exact coordinates produced by
+`PathType`: only ancestors must be present and the selected subtree complete.
+`PathType.read`, `EnvironmentTyped.readPlace`, and `correctness` therefore cover
+reads of complete subtrees inside partially initialized typed storage, without
+requiring unrelated siblings to be complete. Strict proof checking and the
+connected correctness, completeness, path-read, and restoration axiom audits
+passed with only `propext` and `Quot.sound`.
+Nested source moves and partial restoration remain open: their admission and
+preservation must construct the changed field states through actual writes.
+Whole-root moves and restoration remain connected; the representation and read
+proof migration do not by themselves establish typed partial-move support.
 Array indexing, enum payload writes and writes through references are not
 silently treated as ordinary field projection.
 
