@@ -205,6 +205,11 @@ conversion are removed. `ValueHasType.initialized` proves that every typed owned
 result contains no vacancy at any depth. Reads check the selected subtree, and
 extraction uses the same path write as restoration, replacing the selected
 resident with a vacancy rather than retaining its payload elsewhere.
+`Evaluates.move_invalidates` proves that every actual move makes a subsequent
+read of that exact path fail, including nested paths in already partial trees.
+Its proof needs neither source admission nor an assumed post-state invariant.
+The shared operational readback theorem also supplies typed write preservation;
+the superseded typed-only child-readback proof is removed.
 Source admission and preservation of partially initialized aggregates remain
 open: the static initialization context still distinguishes only whole-live
 and whole-vacant roots. The operational path generalization alone does not
@@ -356,6 +361,6 @@ preservation are connected immediately to the same expression theorem. Runtime
 typing supplies one constructor decomposition to both proofs. Place and
 expression projections share field selection; tuple and nominal updates share
 positional typing. Arrays and constructors share constituent evaluation;
-constants reuse ordinary evaluation. Current size: 1,662 Lean lines including
+constants reuse ordinary evaluation. Current size: 1,747 Lean lines including
 comments and blanks. The development remains one Lean module; no standalone
 admission checker or speculative proof module is added.

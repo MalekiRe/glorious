@@ -821,6 +821,96 @@ end
 
 
 
+theorem Value.replaceChild_readback {value replacement updated : Value} {index : Nat}
+    (written : value.replaceChild index replacement = some updated) :
+    (∀ key, updated.fieldIndex program key = value.fieldIndex program key) ∧
+      updated.children[index]? = some replacement := by
+  cases value with
+  | vacant => simp [Value.replaceChild] at written
+  | unit => simp [Value.replaceChild] at written
+  | integer => simp [Value.replaceChild] at written
+  | character => simp [Value.replaceChild] at written
+  | array => simp [Value.replaceChild] at written
+  | tuple head tail =>
+    cases index with
+    | zero =>
+      cases Option.some.inj written
+      exact ⟨fun key => by cases key <;> rfl, rfl⟩
+    | succ index =>
+      obtain ⟨old, found, same⟩ := Option.map_eq_some_iff.mp written
+      cases same
+      obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp found
+      exact ⟨fun key => by cases key <;> rfl, by simp [Value.children, bound]⟩
+  | nominal identity tag fields =>
+    obtain ⟨old, found, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp found
+    exact ⟨fun key => by cases tag <;> cases key <;> rfl, by simp [Value.children, bound]⟩
+
+theorem Value.writePath_readback {value replacement updated : Value} {keys : List FieldKey}
+    (written : value.writePath program keys replacement = some updated) :
+    updated.readPath program keys = some replacement := by
+  induction keys generalizing value updated with
+  | nil =>
+    cases Option.some.inj written
+    rfl
+  | cons key keys ih =>
+    change ((value.fieldIndex program key).bind (fun index => (value.children[index]?).bind (fun child => (child.writePath program keys replacement).bind (fun next => value.replaceChild index next)))) = some updated at written
+    simp only [Option.bind_eq_some_iff] at written
+    obtain ⟨index, indexed, child, found, next, changed, replaced⟩ := written
+    obtain ⟨indexSame, readback⟩ := Value.replaceChild_readback (program := program) replaced
+    simp [Value.readPath, Value.readField, indexSame, indexed, readback, ih changed]
+
+theorem replaceBinding_lookup {α : Type} {name : String} {value : α} {before after : List (String × α)}
+    (replaced : replaceBinding name value before = some after) : lookup name after = some value := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at replaced
+  | cons entry rest ih =>
+    obtain ⟨key, old⟩ := entry
+    simp only [replaceBinding] at replaced
+    split at replaced
+    next same =>
+      cases Option.some.inj replaced
+      simp [lookup, same]
+    next different =>
+      obtain ⟨next, changed, same⟩ := Option.map_eq_some_iff.mp replaced
+      cases same
+      simp [lookup, Ne.symm different, ih changed]
+
+theorem writePlace_readback {place : Place} {replacement : Value} {before after : Environment}
+    (written : writePlace program place replacement before = some after) :
+    ∃ parent, lookup place.root after = some parent ∧ parent.readPath program place.fields = some replacement := by
+  cases fields : place.fields with
+  | nil =>
+    simp only [writePlace, fields] at written
+    change ((lookup place.root before).bind (fun _ => replaceBinding place.root replacement before)) = some after at written
+    obtain ⟨stored, found, replaced⟩ := Option.bind_eq_some_iff.mp written
+    exact ⟨replacement, replaceBinding_lookup replaced, rfl⟩
+  | cons key rest =>
+    simp only [writePlace, fields] at written
+    change ((lookup place.root before).bind (fun stored => (stored.writePath program (key :: rest) replacement).bind (fun updated => replaceBinding place.root updated before))) = some after at written
+    simp only [Option.bind_eq_some_iff] at written
+    obtain ⟨stored, found, updated, changed, replaced⟩ := written
+    exact ⟨updated, replaceBinding_lookup replaced, by simpa only [fields] using Value.writePath_readback changed⟩
+
+theorem takePlace_invalidates {place : Place} {before after : Environment} {value : Value}
+    (taken : takePlace program place before = some (value, after)) :
+    readPlace program place after = none := by
+  change ((readPlace program place before).bind (fun resident => (writePlace program place .vacant before).bind (fun updated => some (resident, updated)))) = some (value, after) at taken
+  simp only [Option.bind_eq_some_iff, Option.some.injEq, Prod.mk.injEq] at taken
+  obtain ⟨resident, read, updated, written, sameValue, sameAfter⟩ := taken
+  cases sameAfter
+  obtain ⟨parent, found, readback⟩ := writePlace_readback written
+  simp [readPlace, found, readback, Value.initialized]
+
+/-- Invalidation holds for the actual operation, including nested paths and
+already partial surrounding aggregates, without a supplied post-state invariant. -/
+theorem Evaluates.move_invalidates {place : Place} {before after : Environment} {value : Value}
+    (evaluated : Evaluates program before (.move place) value after) :
+    readPlace program place after = none := by
+  cases evaluated with
+  | move taken => exact takePlace_invalidates taken
+
 theorem ValueHasType.initialized {value : Value} {type : Ty}
     (typed : ValueHasType program value type) : value.initialized = true := by
   induction typed using ValueHasType.rec
@@ -867,8 +957,7 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey}
     ∃ index resident, value.fieldIndex program key = some index ∧ value.children[index]? = some resident ∧
       ValueHasType program resident target ∧
       ∀ replacement, ValueHasType program replacement target →
-        ∃ updated, value.replaceChild index replacement = some updated ∧ ValueHasType program updated source ∧
-          updated.fieldIndex program key = some index ∧ updated.children[index]? = some replacement := by
+        ∃ updated, value.replaceChild index replacement = some updated ∧ ValueHasType program updated source := by
   cases projection with
   | @tuple first type rest index selected =>
     cases typed with
@@ -880,12 +969,10 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey}
       | zero =>
         simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
         cases selected
-        exact ⟨_, rfl, .tuple replacementTyped tailTyped, rfl, rfl⟩
+        exact ⟨_, rfl, .tuple replacementTyped tailTyped⟩
       | succ index =>
         change tail[index]? = some resident at found
-        obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp found
-        exact ⟨_, by simp [Value.replaceChild, found], .tuple headTyped (tailTyped.set index selected replacementTyped),
-          rfl, by simp [Value.children, bound]⟩
+        exact ⟨_, by simp [Value.replaceChild, found], .tuple headTyped (tailTyped.set index selected replacementTyped)⟩
   | @nominal identity index key declaration schema field declared structureOnly indexed selected visible =>
     cases typed with
     | @nominal _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents =>
@@ -901,10 +988,7 @@ theorem ProjectionType.access {source target : Ty} {key : FieldKey}
         refine ⟨index, resident, ?_, found, residentTyped, ?_⟩
         · simp [Value.fieldIndex, declared, structureOnly, indexed]
         · intro replacement replacementTyped
-          obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp found
-          refine ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite (residents.set index selectedType replacementTyped), ?_, ?_⟩
-          · simp [Value.fieldIndex, declared, structureOnly, indexed]
-          · simp [Value.children, bound]
+          exact ⟨_, by simp [Value.replaceChild, found], .nominal declared chosen finite (residents.set index selectedType replacementTyped)⟩
 
 theorem PathType.read {source target : Ty} {keys : List FieldKey}
     (path : PathType program home source keys target) {value : Value} (typed : ValueHasType program value source) :
@@ -923,12 +1007,13 @@ theorem PathType.write {source target : Ty} {keys : List FieldKey}
       updated.readPath program keys = some replacement := by
   induction path generalizing value with
   | nil => exact ⟨replacement, rfl, resident, rfl⟩
-  | cons head tail ih =>
+  | @cons source middle target key keys head tail ih =>
     obtain ⟨index, child, indexed, found, childTyped, replace⟩ := head.access typed
-    obtain ⟨updatedChild, childWritten, updatedTyped, childRead⟩ := ih childTyped resident
-    obtain ⟨updated, written, resultTyped, newIndex, newChild⟩ := replace updatedChild updatedTyped
-    exact ⟨updated, by simp [Value.writePath, indexed, found, childWritten, written], resultTyped,
-      by simp [Value.readPath, Value.readField, newIndex, newChild, childRead]⟩
+    obtain ⟨updatedChild, childWritten, updatedTyped, _⟩ := ih childTyped resident
+    obtain ⟨updated, written, resultTyped⟩ := replace updatedChild updatedTyped
+    have pathWritten : value.writePath program (key :: keys) replacement = some updated := by
+      simp [Value.writePath, indexed, found, childWritten, written]
+    exact ⟨updated, pathWritten, resultTyped, Value.writePath_readback pathWritten⟩
 
 theorem EnvironmentTyped.append {left right : Environment} {first rest : List (String × BindingType)}
     (front : EnvironmentTyped program left first) (back : EnvironmentTyped program right rest) :
