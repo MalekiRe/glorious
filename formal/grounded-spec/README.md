@@ -186,29 +186,45 @@ an in-range runtime selection is not separately assumed. Out-of-range tuple
 projections cannot be admitted. Physical evaluation traces remain outside this
 logical big-step boundary.
 
-`Place` selects the nearest lexical root and a field path. `ProjectionType`
-supplies tuple bounds, nominal-field visibility, and the source-resolved child
-index to both reads and writes. `PathType` composes those indices along the
-field path. `ProjectionType.access` proves that runtime selection uses that
-exact index; it no longer merely produces some runtime index after the fact.
-Expression projection, place reads, assignment, and their connected proofs
-consume this strengthened contract. No second resolution pass or index table
-is introduced. The old separate tuple-expression projection rule is removed. Assignment
-evaluates the RHS first, then updates the selected place in that actual
-post-state. It requires a mutable root. A live destination requires a legally
-discardable old resident (duplicable or affine, without hooks); restoring a
-vacant selected subtree does not discard an old value. Nested writes require
+`Place` selects the nearest lexical root and a source field path.
+`Environment.resolvePlace` produces one `Address` consisting of that stable
+`Root` and canonical `List Nat` field indices. The existing
+`Value.fieldIndex` remains the runtime field producer; no second nominal-layout
+lookup algorithm or fact table is introduced. Resolution requires an actual
+allocated root cell and a present child at each step, permits a vacant selected
+slot, and cannot descend through a vacancy. The nearest vacant binding still
+shadows older names. Addresses are logical coordinates, not physical byte addresses.
+
+`ProjectionType` checks tuple bounds and nominal-field visibility; `PathType`
+composes its canonical indices. `EnvironmentTyped.resolvePlace` derives runtime
+resolution and the selected resident from those source facts and current resident
+typing. `resolution_fidelity` proves the runtime indices equal the `PathType`
+indices; that equality is consumed by typed writing, never supplied as a premise.
+
+Actual stored reads, moves and assignments carry the resolved address explicitly.
+`Environment.at` returns raw selected storage, including vacancy, for assignment
+disposal; `readAddress` additionally requires the entire selected subtree to be
+initialized for owned access. `writeAddress` and `takeAddress` operate only on
+canonical indices. No lexical name or `FieldKey` is re-resolved during access.
+Assignment evaluates the RHS first, resolves in that actual post-state once,
+and shares the address between old-resident disposal and replacement. Source
+admission still requires a mutable root and legal old-resident disposal; a vacant
+selected subtree is restored without destroying an old value. Nested writes need
 present ancestors, not complete siblings or an initialized destination.
-`PathType.write` and `EnvironmentTyped.writePlace` preserve the computed partial
-state and prove readback of an initialized replacement; clearing makes the
-selected path unreadable. Expression correctness consumes these operations.
+`PathType.write` and `EnvironmentTyped.writeAddress` preserve the computed partial
+state and derive readback from the actual canonical update. The old stored-place
+`readPlace/writePlace/takePlace` operations, lexical `Environment.replace`,
+and source-key `Value.readPath/writePath` walkers are removed. Owned temporary
+projection retains only its necessary single-field `readField/takeField`
+operations and the existing residual `StorageDisposition`/result-protection contract.
 
 Typing now produces the final initialization context, rather than requiring
 every expression to preserve its input context. Runtime slots contain either
 a resident or a vacancy; a vacant nearest binding still shadows outer bindings.
 Whole-root and nested `move` extract the actual selected resident and clear
-that path, even for a duplicable value. `EnvironmentTyped.takePlace` constructs
-the transition and proves the selected path unreadable afterward. Reads and
+that path, even for a duplicable value. The correctness induction constructs
+`takeAddress` from canonical resolution, the initialized resident and typed
+canonical clearing. `takeAddress_invalidates` proves that address unreadable afterward. Reads and
 moves require the selected subtree to be complete; later arguments and bodies
 consume the preceding initialization context. Assignment restores a vacant
 subtree of a mutable root after evaluating its RHS. Function
@@ -218,15 +234,16 @@ in the resident tree. The authoritative store distinguishes a still-live moved-o
 cell (`some .vacant`) from a retired or nonexistent cell (`none`); absence never
 projects to a fabricated vacancy. `ValueHasType.initialized` proves that every typed owned
 result contains no vacancy at any depth. Reads check the selected subtree, and
-extraction uses the same path write as restoration, replacing the selected
+extraction uses the same canonical write as restoration, replacing the selected
 resident with a vacancy rather than retaining its payload elsewhere.
 `Evaluates.move_invalidates` proves that every actual move makes a subsequent
-read of that exact path fail, including nested paths in already partial trees.
+read of that exact address fail, including nested paths in already partial trees,
+and proves that the source spelling still resolves to the same address.
 Its proof needs neither source admission nor an assumed post-state invariant.
 The shared operational readback theorem also supplies typed write preservation;
 the superseded typed-only child-readback proof is removed.
 `Evaluates.move_restore` proves the exact operational round trip: immediately
-writing the extracted resident back to its path recovers the entire original
+writing the extracted resident back to the same canonical address recovers the entire original
 environment, including siblings, pre-existing holes and shadowed bindings.
 This is not merely equality of the selected field or preservation of its type.
 It does not grant source-level write permission to an immutable place.
@@ -271,7 +288,7 @@ logical identities, not physical addresses, allocation requests or a model of
 allocation exhaustion. Shadowing creates a fresh root rather than changing the
 identity of the older binding. Retirement never rewinds the supply.
 
-`get`, `replace`, place reads/moves/writes, binding creation and source-order
+Canonical address resolution/access, binding creation and source-order
 parameter/pattern preparation all consume this store. `StoredBindings` is a
 read-only relational projection requiring an actual `some resident` for every
 binding; typing consumes it, and no missing cell receives a default value.
@@ -301,6 +318,27 @@ different root names, supplies and hidden cells. `Evaluates.agrees`, consumed by
 every current operation. No duplicate old evaluator or executable projected
 store is retained. References, loans and custom hooks are not added by this cutover.
 
+`Environment.AddressUpdate` is the derived contract of the actual
+`writeAddress` equation, not an extra execution or admission premise.
+`writeAddress_update` proves exact raw readback, unchanged bindings/supply,
+and unchanged raw residents at every disjoint address: different roots or
+`CoordinatesApart` field paths below a common root. This includes initialized
+siblings and existing holes. Typed write preservation consumes its readback;
+`writeAddress_storage` consumes its bindings, supply and frame to produce the
+storage evolution used at every nested move/assignment in `Evaluates.storage`
+and the unchanged general `correctness` contract. There is no second source
+walker or execution-occurrence table. This is a per-write frame, not a claim
+that later scope retirement preserves the retired cells. Lifecycle framing
+remains the separate, existing `Environment.Evolution`/`Cleans` guarantee.
+
+Public source authorization still comes from `ProjectionType/PathType`, not
+from possessing arbitrary numeric coordinates. The internal raw `at` API can
+observe vacancies; `readAddress` rejects them and any incomplete selected tree,
+just as the removed owned `readPlace` did. Canonical access never fabricates a
+cell: even an empty-path write fails for a missing or retired root. Direct numeric
+addresses are not a newly admitted source syntax or a borrow permission. Arrays,
+enum payloads and reference dereferences remain outside source field resolution.
+
 ### Affine conditional initialization joins
 
 Immediate pattern applications retain each arm's own post-context before joining
@@ -324,8 +362,9 @@ and maybe-initialization forbid descent. `Initialization.Access.maybe_iff`
 proves that only the whole root is accessible in a maybe state, and
 `HasType.no_use_maybe` rejects both whole and nested reads and moves. Root
 assignment still evaluates its RHS first, derives disposal of the actual old
-resident through `EnvironmentTyped.place_disposable`, and writes an initialized
-replacement through the same `PathType`/`Initialization.write` contract. Thus
+resident through `EnvironmentTyped.resolvePlace` and `StorageDisposition.realized`,
+and writes an initialized replacement through `EnvironmentTyped.writeAddress`
+and the same `PathType`/`Initialization.write` contract. Thus
 restoration establishes definite initialization without assuming old vacancy.
 Scope and overwrite eligibility likewise use the actual branch resident; a
 vacancy never becomes a fabricated owner. The ordered cleanup relation below
@@ -500,11 +539,12 @@ effects remain open. There is no physical-storage, allocation-failure, package-a
 or compiler-realization claim. Big-step evaluation is not a small-step theorem.
 
 Verification: strict checking of `Grounded.lean` with warnings as errors and
-auto-implicit variables disabled passed after the storage cutover. An exhaustive
-audit of all 2,145 Grounded kernel declarations, including private and generated
-constants, found only Lean’s standard `propext` and `Quot.sound`,
-including connected correctness, storage evolution, retirement persistence,
-caller framing and logical-value agreement. No bypass axioms, admitted proofs
+auto-implicit variables disabled passed after the canonical-address cutover. An
+exhaustive audit of all 2,196 Grounded kernel declarations, including private and
+generated constants, found only Lean’s standard `propext` and `Quot.sound`.
+The connected correctness, resolution fidelity, canonical update/readback/frame,
+move invalidation/restoration, retirement persistence, caller framing and
+root-renaming agreement audits passed. No bypass axioms, admitted proofs
 or `Classical.choice` dependency. Reproduce:
 
 ```sh
@@ -523,7 +563,15 @@ import Grounded
 #print axioms Grounded.Cleans.exactly_once
 #print axioms Grounded.Evaluates.field_protects_result
 #print axioms Grounded.PathType.write
-#print axioms Grounded.EnvironmentTyped.writePlace
+#print axioms Grounded.EnvironmentTyped.resolvePlace
+#print axioms Grounded.EnvironmentTyped.resolution_fidelity
+#print axioms Grounded.EnvironmentTyped.writeAddress
+#print axioms Grounded.Environment.writeAddress_update
+#print axioms Grounded.Environment.writeAddress_storage
+#print axioms Grounded.Environment.resolvePlace_write
+#print axioms Grounded.Value.writeIndices_frame
+#print axioms Grounded.Evaluates.move_invalidates
+#print axioms Grounded.Evaluates.move_restore
 #print axioms Grounded.Environment.Valid.fresh
 #print axioms Grounded.Environment.retire_retained
 #print axioms Grounded.Evaluates.storage
@@ -550,7 +598,8 @@ Proceed serially, closing each extension through the same end-to-end theorem:
    shells, conservative affine joins and ordered logical destruction are connected
    above; hooks and correlation-preserving exact-linear control islands remain open.
 6. Stable logical roots, authoritative storage, non-reused supply, actual
-   retirement and retained-root framing are connected prerequisites, as above.
+   retirement, canonical stored-place addresses and exact update framing are
+   connected prerequisites, as above.
    Borrowing, provenance, lifetimes and returned references remain next, including required
    Rust-style implicit reborrowing of existing references (§5.3). Expected
    reference types select unique/shared derived loans, not ownership transfer;
