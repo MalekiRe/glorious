@@ -16690,6 +16690,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (distinct : (declaration.parameters.map Prod.fst).Nodup)
       (initialized : ∀ parameter ∈ declaration.parameters, parameter.2.initialization = .full)
       (signature : ResolvedSignature declaration.signature)
+      (signatureTypes : signature.inputs.WellFormed program.declarations ∧
+        signature.result.WellFormed program.declarations)
       (inputs : HasTypes program phase home before held arguments argumentTypes middle argumentPlans
         (some (declaration.parameters.map fun parameter => parameter.2.type)))
       (hide : HideStep program middle hidden)
@@ -18414,8 +18416,8 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .constant declared visible resolved structural hidden body resume referenceFree interpreted empty =>
     exact .constant declared visible resolved structural hidden.erase body.erase resume.erase referenceFree checkingRequired checkingRequired
   | .field body projection evidence => exact .field body.erase projection.erase evidence.erase
-  | .call declared visible distinct initialized signature inputs hide prepare body resultType origin cleanup resume stable =>
-    exact .call declared visible distinct initialized signature inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
+  | .call declared visible distinct initialized signature signatureTypes inputs hide prepare body resultType origin cleanup resume stable =>
+    exact .call declared visible distinct initialized signature signatureTypes inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
   | .assign resident write continued => exact .assign resident.erase write.erase continued.erase
   | .assignIndirect resident write continued => exact .assignIndirect resident.erase write.erase continued.erase
   | .endOwn ending body => exact .endOwn ending.erase body.erase
@@ -19339,7 +19341,7 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .constant declared _ _ _ hidden initialized resume _ _ empty =>
     exact Executes.constant declared hidden initialized.execution_correctness resume empty
   | .field body projection _ => exact Executes.field body.execution_correctness projection
-  | .call declared _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
+  | .call declared _ _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
     exact Executes.call declared inputs.execution_correctness (inputs.expected_types _ rfl) hide prepare
       body.execution_correctness cleanup resume
   | .assign resident write continued => exact Executes.assign resident.execution_correctness write continued.execution_correctness
@@ -20084,7 +20086,7 @@ namespace Grounded.Elaboration
 set_option autoImplicit false
 
 /-- Every admitted named call, including through administrative and expected-type
-rules, has one source-resolved signature with no out-of-range lifetime variables.
+rules, has a well-formed source-resolved signature with no out-of-range lifetime variables.
 This does not assert that body views already enforce those lifetime bounds. -/
 theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
@@ -20093,13 +20095,15 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
     ∀ identity arguments, expression = .call identity arguments →
       ∃ declaration, program.functions identity = some declaration ∧
         ∃ signature : ResolvedSignature declaration.signature,
+          (signature.inputs.WellFormed program.declarations ∧
+            signature.result.WellFormed program.declarations) ∧
           (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
           (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
   match typed with
-  | .call declared _ _ _ signature _ _ _ _ _ _ _ _ _ =>
+  | .call declared _ _ _ signature signatureTypes _ _ _ _ _ _ _ _ _ =>
     intro identity arguments same
     cases same
-    exact ⟨_, declared, signature, signature.closed⟩
+    exact ⟨_, declared, signature, signatureTypes, signature.closed⟩
   | .view _ body | .endOwn _ body | .endAfter body _ | .raiseSupply body _ _ _ _ |
       .expectedData body _ _ | .expectedCall body => exact body.call_signature
   | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |

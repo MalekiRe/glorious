@@ -63,11 +63,14 @@ runtime node or mutually exclusive constructor. Unknown names and ambiguous
 output elision have no resolution derivation. Omitted function results are unit.
 
 The actual `HasType.call` constructor carries this resolved product in both
-phases; erasure preserves it. `ResolvedSignature.unique` proves determinism,
-and `ResolvedSignature.closed` bounds every input and result region by the
-produced supply. `HasType.call_signature` derives this closure for every admitted
-named call, including administrative and expected-type wrappers. The existing
-general execution-correctness theorem consumes the migrated producer.
+phases and checks qualified input/result well-formedness against the same
+`Program.declarations`, including nominal existence and lifetime-argument arity.
+Erasure preserves both resolution and well-formedness evidence.
+`ResolvedSignature.unique` proves determinism; `ResolvedSignature.closed` bounds
+every input and result region by the produced supply. `HasType.call_signature`
+derives well-formedness and closure for every admitted named call, including
+administrative and expected-type wrappers. The existing general execution-
+correctness theorem consumes the migrated producer.
 
 This closes signature resolution, not lifetime-qualified body or return checking.
 Binding views, invocation substitutions and source return provenance still need
