@@ -257,6 +257,25 @@ and mutation preserve that closure. Parent and descendant permissions remain
 distinct, including suspended unique parents, shared aliases and disjoint unique
 fields.
 
+`ContextMeaning` covers every active source loan with a checked row, and canonical
+import constructs that coverage from the actual loan table. Root-identity
+correspondence includes identities used by selected binding slots as well as
+canonical cells and retained loan targets. `ContextMeaning.permits` and `free`
+derive source conflict permissions from the checked judgment, recorded ancestry,
+and positive separation. Shared/shared overlap remains legal. Different fields
+of one opaque referent retain their common canonical prefix; different opaque
+reference names alone do not establish separation. `KnownOverlap` is removed.
+
+Ordinary reads, moves, borrows/reborrows, indirect reads/moves, and direct/indirect
+assignments consume this bridge through the general execution theorem. Their
+source-operation records no longer assume the outer access permission or owner
+freedom. They retain address/parent correspondence and other source witnesses:
+access selection (including carrier permissions), readiness, nested-resource
+availability, Copy, and post-context construction are not yet derived solely
+from checking. Separation needing an unresolved external alias contract is not
+established by the current positive local judgment. This cutover closes the
+outer permission transport boundary, not general executable realization.
+
 Reborrow admission now bounds the result region by the actual selected carrier
 region. `HasType.borrow` consumes `Access.ParentOutlives`; both explicit borrowed
 subaddresses and expected-reference reborrows use this producer. Its carrier
@@ -406,8 +425,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,942
-declarations, including 318 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,959
+declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no

@@ -5679,10 +5679,13 @@ def Context.empty : Context := ⟨[], fun _ => none, [], [], 0, 0, Invocation.ro
 def Address.extend (address : Address) (fields : List Nat) : Address :=
   { address with fields := address.fields ++ fields }
 
-/-- Different opaque referents are not assumed disjoint. This predicate detects
-only a definite local overlap; external separation remains a realization duty. -/
-def Address.KnownOverlap (left right : Address) : Prop :=
-  left.base = right.base ∧ ¬ CoordinatesApart left.fields right.fields
+/-- Separation is positive evidence. Distinct opaque handles may alias; distinct
+canonical roots or different fields of one base establish local separation. -/
+inductive Address.Apart : Address → Address → Prop where
+  | roots {first second : Nat} {left right : List Nat} (different : first ≠ second) :
+      Apart ⟨.binder first, left⟩ ⟨.binder second, right⟩
+  | fields {base : Base} {left right : List Nat} (apart : CoordinatesApart left right) :
+      Apart ⟨base, left⟩ ⟨base, right⟩
 
 def Context.loan (context : Context) (reference : Reference) : Option Loan :=
   context.directLoans.find? (fun loan => loan.reference == reference)
@@ -5722,7 +5725,7 @@ def Context.LocalPermits (context : Context) (mode : BorrowMode)
     (parent : Option Reference) (target : Address) : Prop :=
   ∀ loan, context.HasLoan program loan → context.NotEnded (program := program) loan.reference →
     (∃ reference, parent = some reference ∧ context.Derived (program := program) reference loan.reference) ∨
-      (mode = .shared ∧ loan.mode = .shared) ∨ ¬ target.KnownOverlap loan.target
+      (mode = .shared ∧ loan.mode = .shared) ∨ target.Apart loan.target
 
 def Context.hide (context : Context) : Context := { context with names := [], invocation := Invocation.root }
 
@@ -13994,11 +13997,12 @@ def Symbols.address (symbols : Symbols) (context : Grounded.Context)
       (symbols.reference reference).bind fun node =>
         (context.loans[node]?).map (fun loan => loan.target.extend address.fields)
 
-/-- A root identity remains represented while its cell or a retained loan target
-mentions it. Reference aliases do not introduce a second identity. -/
+/-- Root identities mentioned by canonical cells, retained loan targets, or
+selected binding slots must remain distinct. Reference aliases need not be. -/
 def _root_.Grounded.Checked.Context.RootRepresented (checked : Checked.Context) (identity : Nat) : Prop :=
   (∃ slot, checked.storage (.binder identity) = some slot) ∨
-    ∃ loan ∈ checked.directLoans, loan.target.base = .binder identity
+    (∃ loan ∈ checked.directLoans, loan.target.base = .binder identity) ∨
+    ∃ name slot, lookup name checked.bindings = some slot ∧ slot.binder = identity
 
 def LoanRowMeaning (program : Program) (symbols : Symbols) (checked : Checked.Context)
     (source : Grounded.Context) (loan : Checked.Loan) (node : Nat) : Prop :=
@@ -14039,6 +14043,10 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
   rootIdentity : ∀ first second, checked.RootRepresented first → checked.RootRepresented second →
     symbols.binder first = symbols.binder second → first = second
   loans : ∀ entry ∈ checked.loans, LoanEntryMeaning program symbols checked concrete entry
+  /-- Every active source loan has a checked representative. Forward row
+  correspondence alone cannot exclude hidden permission conflicts. -/
+  activeCoverage : ∀ node actual, concrete.loans[node]? = some actual → actual.own = true →
+    ∃ loan, checked.HasLoan program loan ∧ symbols.reference loan.reference = some node
 
 structure Meaning (program : Program) (checked : Checked.Context) where
   context : Grounded.Context
@@ -14067,6 +14075,11 @@ def Point.symbols {program : Program} {phase : Phase} (point : Point program pha
     (executable : phase = .executable) : Symbols := by
   cases executable
   exact point.meaning.symbols
+theorem Point.related {program : Program} {phase : Phase} (point : Point program phase)
+    (executable : phase = .executable) :
+    ContextMeaning program (point.symbols executable) point.checked (point.source executable) := by
+  cases executable
+  exact point.meaning.related
 
 def Payload.source {phase : Phase} (payload : Payload phase)
     (executable : phase = .executable) : SourcePayload :=
@@ -15401,6 +15414,7 @@ set_option autoImplicit false
 /-- These are concrete source premises, not assumptions about evaluation,
 future storage or readiness of an execution. The evaluator bridges consume them. -/
 structure SourceRead (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address)
     (place : Place) (result : ResultType) (after : Grounded.Context) where
   slot : Grounded.Slot
   indices : List Nat
@@ -15413,10 +15427,11 @@ structure SourceRead (program : Program) (home : Module) (before : Grounded.Cont
   provenance : slot.payload.select indices = some payload
   available : before.PayloadAvailable payload
   permission : Duplicable program.data result.type
-  permitted : before.Permits .shared none ⟨.binder slot.binder, indices⟩
+  targetImage : symbols.address before checkedTarget = some ⟨.binder slot.binder, indices⟩
   copied : Grounded.Context.CopyPayload before payload result.payload after
 
 structure SourceMove (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address)
     (place : Place) (result : ResultType) (after : Grounded.Context) where
   slot : Grounded.Slot
   indices : List Nat
@@ -15428,11 +15443,12 @@ structure SourceMove (program : Program) (home : Module) (before : Grounded.Cont
   path : PathType program home slot.type place.fields indices result.type
   provenance : slot.payload.select indices = some result.payload
   available : before.PayloadAvailable result.payload
-  free : before.Free ⟨.binder slot.binder, indices⟩
+  targetImage : symbols.address before checkedTarget = some ⟨.binder slot.binder, indices⟩
   cleared : SourcePayload.Write program slot.type indices slot.payload .plain remainder
   updated : after = before.writeTarget ⟨.binder slot.binder, indices⟩ .vacant remainder
 
 structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
     (mode : BorrowMode) (place : AccessPlace) (referent : Ty)
     (result : ResultType) (after : Grounded.Context) where
   target : Origin
@@ -15440,7 +15456,8 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   payload : SourcePayload
   access : AccessType program home before mode place target referent parent
   ready : before.AccessReady target parent
-  permitted : before.Permits mode parent target
+  targetImage : symbols.address before checkedTarget = some target
+  parentImage : checkedParent.map symbols.reference = parent.map some
   finite : FiniteLayout program.target program.data referent
   provenance : before.TargetPayload program target referent payload
   available : before.PayloadAvailable payload
@@ -15449,19 +15466,22 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   updated : after = before.borrow target referent parent mode
 
 structure SourceDereference (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
     (reference : Place) (fields : List FieldKey) (result : ResultType) (after : Grounded.Context) where
   target : Origin
   parent : Option Nat
   payload : SourcePayload
   access : AccessType program home before .shared (.dereference reference fields) target result.type parent
   ready : before.AccessReady target parent
-  permitted : before.Permits .shared parent target
+  targetImage : symbols.address before checkedTarget = some target
+  parentImage : checkedParent.map symbols.reference = parent.map some
   provenance : before.TargetPayload program target result.type payload
   available : before.PayloadAvailable payload
   permission : Duplicable program.data result.type
   copied : Grounded.Context.CopyPayload before payload result.payload after
 
 structure SourceMoveIndirect (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Checked.Reference)
     (held : List SourcePayload) (reference : Place) (fields : List FieldKey)
     (result : ResultType) (after : Grounded.Context) where
   target : Origin
@@ -15470,7 +15490,8 @@ structure SourceMoveIndirect (program : Program) (home : Module) (before : Groun
   remainder : SourcePayload
   access : AccessType program home before .unique (.dereference reference fields) target result.type (some node)
   ready : before.AccessReady target (some node)
-  permitted : before.Permits .unique (some node) target
+  targetImage : symbols.address before checkedTarget = some target
+  parentImage : symbols.reference checkedParent = some node
   stored : before.storage target.base = some slot
   path : CanonicalPath program slot.type target.fields result.type
   provenance : slot.payload.select target.fields = some result.payload
@@ -16973,6 +16994,96 @@ theorem ContextMeaning.derived {checked : Checked.Context} {source : Grounded.Co
           obtain ⟨origin, originImage, ancestry⟩ := ih parentImage
           exact ⟨origin, originImage, .child stored actualParent ancestry⟩
 
+private theorem loan_root_represented {checked : Checked.Context} {loan : Checked.Loan}
+    (member : checked.HasLoan program loan) {binder : Nat} (base : loan.target.base = .binder binder) :
+    checked.RootRepresented binder := by
+  obtain ⟨entry, included, row⟩ := member
+  cases row with
+  | direct loan => exact .inr (.inl ⟨loan, List.mem_filterMap.mpr ⟨_, included, rfl⟩, base⟩)
+  | schemaCopy declared => cases base
+
+private theorem apart_prefix {left right : List Nat} (apart : CoordinatesApart left right)
+    (stem : List Nat) : CoordinatesApart (stem ++ left) (stem ++ right) := by
+  induction stem with
+  | nil => exact apart
+  | cons _ _ ih => exact .descend ih
+
+/-- Symbolic separation transports only through represented root identities or
+through a common referent prefix. No injectivity of reference aliases is used. -/
+theorem ContextMeaning.apart {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {left right : Checked.Address}
+    (leftKnown : ∀ binder, left.base = .binder binder → checked.RootRepresented binder)
+    (rightKnown : ∀ binder, right.base = .binder binder → checked.RootRepresented binder)
+    {first second : Origin} (leftImage : symbols.address source left = some first)
+    (rightImage : symbols.address source right = some second) (apart : left.Apart right) :
+    first.Apart second := by
+  cases apart with
+  | roots different =>
+      simp only [Symbols.address] at leftImage rightImage
+      cases leftImage
+      cases rightImage
+      exact .inl (fun same => different (meaning.rootIdentity _ _ (leftKnown _ rfl) (rightKnown _ rfl) same))
+  | @fields base left right apart =>
+      cases base with
+      | binder identity =>
+          simp only [Symbols.address] at leftImage rightImage
+          cases leftImage
+          cases rightImage
+          exact .inr apart
+      | referent reference =>
+          unfold Symbols.address at leftImage rightImage
+          cases image : symbols.reference reference with
+          | none => simp [image] at leftImage
+          | some node =>
+              cases found : source.loans[node]? with
+              | none => simp [image, found] at leftImage
+              | some loan =>
+                  simp only [image, found, Option.bind_some, Option.map_some] at leftImage rightImage
+                  cases leftImage
+                  cases rightImage
+                  cases loan.target.base
+                  exact .inr (apart_prefix apart loan.target.fields)
+
+/-- Complete row correspondence turns the checked conflict judgment into source
+permission. Active coverage supplies every possible interfering loan. -/
+theorem ContextMeaning.permits {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {mode : BorrowMode}
+    {parent : Option Checked.Reference} {target : Checked.Address}
+    (known : ∀ binder, target.base = .binder binder → checked.RootRepresented binder)
+    {actualTarget : Origin} {actualParent : Option Nat}
+    (targetImage : symbols.address source target = some actualTarget)
+    (parentImage : parent.map symbols.reference = actualParent.map some)
+    (permission : checked.LocalPermits (program := program) mode parent target) :
+    source.Permits mode actualParent actualTarget := by
+  intro node actual found own
+  obtain ⟨loan, member, mapped⟩ := meaning.activeCoverage node actual found own
+  obtain ⟨represented, stored, address, _, modeEq, _, coupled⟩ := meaning.row member mapped
+  cases Option.some.inj (stored.symm.trans found)
+  rcases permission loan member (coupled.mp own) with ⟨reference, selected, derived⟩ | shared | apart
+  · cases actualSelected : actualParent with
+    | none => simp [selected, actualSelected] at parentImage
+    | some ancestor =>
+        have image : symbols.reference reference = some ancestor := by
+          simpa [selected, actualSelected] using parentImage
+        obtain ⟨original, originalImage, ancestry⟩ := meaning.derived derived image
+        cases Option.some.inj (originalImage.symm.trans mapped)
+        exact .inr (.inl ⟨ancestor, rfl, ancestry⟩)
+  · exact .inl ⟨shared.1, modeEq.trans shared.2⟩
+  · exact .inr (.inr (meaning.apart known (fun _ base => loan_root_represented member base)
+      targetImage address apart))
+
+theorem ContextMeaning.free {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    (known : ∀ binder, target.base = .binder binder → checked.RootRepresented binder)
+    {actualTarget : Origin} (targetImage : symbols.address source target = some actualTarget)
+    (free : checked.LocalFree (program := program) target) : source.Free actualTarget := by
+  have permission := meaning.permits (parent := none) (actualParent := none) known targetImage rfl free
+  intro node loan found own
+  rcases permission node loan found own with shared | ⟨_, impossible, _⟩ | apart
+  · cases shared.1
+  · cases impossible
+  · exact apart
+
 mutual
 theorem Payload.NoHandles.nodes_eq_nil {payload : Checked.Payload} {state : Initialization}
     {type : Ty} {concrete : SourcePayload} (free : Payload.NoHandles payload)
@@ -17149,6 +17260,7 @@ structure EndingStep (program : Program) {phase : Phase} (before after : Point p
     (before.source executable) (sourcePayloads held executable) slotIndex fields (after.source executable))
 
 structure SourceWrite (program : Program) (home : Module) (before : Grounded.Context)
+    (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
     (held : List SourcePayload) (place : AccessPlace) (replacement : ResultType) (after : Grounded.Context) where
   target : Origin
   parent : Option Nat
@@ -17157,7 +17269,8 @@ structure SourceWrite (program : Program) (home : Module) (before : Grounded.Con
   old : SourcePayload
   updatedPayload : SourcePayload
   access : AccessType program home before .unique place target replacement.type parent
-  permitted : before.Permits .unique parent target
+  targetImage : symbols.address before checkedTarget = some target
+  parentImage : checkedParent.map symbols.reference = parent.map some
   stored : before.storage target.base = some slot
   mask : slot.initialization.Access target.fields state
   path : CanonicalPath program slot.type target.fields replacement.type
@@ -17190,7 +17303,7 @@ structure WriteStep (program : Program) (home : Module) {phase : Phase}
   updated : after.checked = (before.checked.endPayload old).writeTarget target .full updatedPayload
   stable : PointsStable before after
   actual : Required phase fun executable => Nonempty (SourceWrite program home
-    (before.source executable) (sourcePayloads held executable) place
+    (before.source executable) (before.symbols executable) target parent (sourcePayloads held executable) place
     (replacement.source executable) (after.source executable))
 
 structure ProjectionStep (program : Program) (home : Module) {phase : Phase}
@@ -17272,7 +17385,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (copy : Checked.CopyPayload before.checked selected.payload.checked result.payload.checked after.checked)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceRead program home
-        (before.source executable) place (result.source executable) (after.source executable))) :
+        (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
+        place (result.source executable) (after.source executable))) :
       HasType program phase home before held (.read place) result after .leaf none
   | move {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {place : Place} {result : Result phase} {remainder : Checked.Payload}
@@ -17283,7 +17397,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (updated : after.checked = before.checked.writeTarget ⟨.binder selection.slot.binder, selection.indices⟩ .vacant remainder)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceMove program home
-        (before.source executable) place (result.source executable) (after.source executable))) :
+        (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
+        place (result.source executable) (after.source executable))) :
       HasType program phase home before held (.move place) result after .leaf none
   | implicitMove {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {place : Place} {result : Result phase}
@@ -17307,7 +17422,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (updated : after.checked = before.checked.borrow target referent mode parent)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceBorrow program home
-        (before.source executable) mode place referent (result.source executable) (after.source executable))) :
+        (before.source executable) (before.symbols executable) target parent
+        mode place referent (result.source executable) (after.source executable))) :
       HasType program phase home before held (.borrow mode place) result after .leaf none
   | reborrow {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {mode : BorrowMode} {place : Place} {referent : Ty} {result : Result phase}
@@ -17329,7 +17445,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (copy : Checked.CopyPayload before.checked selected.payload.checked result.payload.checked after.checked)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceDereference program home
-        (before.source executable) reference fields (result.source executable) (after.source executable))) :
+        (before.source executable) (before.symbols executable) target parent
+        reference fields (result.source executable) (after.source executable))) :
       HasType program phase home before held (.dereference reference fields) result after .leaf none
   | moveIndirect {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {reference : Place} {fields : List FieldKey} {target : Checked.Address} {parent : Checked.Reference}
@@ -17344,7 +17461,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (updated : after.checked = before.checked.writeTarget target .vacant remainder)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceMoveIndirect program home
-        (before.source executable) (sourcePayloads held executable) reference fields
+        (before.source executable) (before.symbols executable) target parent
+        (sourcePayloads held executable) reference fields
         (result.source executable) (after.source executable))) :
       HasType program phase home before held (.moveIndirect reference fields) result after .leaf none
   | tuple {phase : Phase} {home : Module} {before middle after : Point program phase} {held : List (Payload phase)}
@@ -17980,7 +18098,9 @@ continuation or an assumed post-state. Disposal preserves the pending replacemen
 theorem SourceWrite.execute {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {place : AccessPlace} {replacement : ResultType}
-    (write : SourceWrite program home before heldPayloads place replacement after)
+    {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
+    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads place replacement after)
+    (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18016,7 +18136,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
   have separated : ∀ (node : Nat) (loan : SourceLoan), before.loans[node]? = some loan → loan.own = true →
       (write.target.Within loan.target ∧ loan.mode = .unique) ∨ write.target.Apart loan.target := by
     intro node loan found own
-    rcases write.permitted node loan found own with shared | ancestral | apart
+    rcases permission node loan found own with shared | ancestral | apart
     · cases shared.1
     · obtain ⟨parent, same, derived⟩ := ancestral
       obtain ⟨parentLoan, parentFound, within⟩ := ancestor parent same
@@ -18045,14 +18165,16 @@ theorem SourceWrite.execute {program : Program} {home : Module}
       (fun old => write.unprotected node old (by simp [payloadNodes_append, payloadNodes, member])))
     (fun node member => (typed.heldReady node (by simp [payloadNodes_append, payloadNodes, member])).dispose write.old)
   exact ⟨resident, disposed, updated, resolved, typed.toStoreTyped.carrierPermits write.access,
-    authority, typed.toStoreTyped.permits known write.permitted, read, disposal, usable, written,
+    authority, typed.toStoreTyped.permits known permission, read, disposal, usable, written,
     write.updated.symm ▸ state, write.updated.symm ▸ progress⟩
 
 /-- Direct assignment fragments, including owner conflict exclusion. -/
 theorem SourceWrite.executeOwner {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {place : Place} {replacement : ResultType}
-    (write : SourceWrite program home before heldPayloads (.owner place) replacement after)
+    {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
+    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.owner place) replacement after)
+    (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18066,7 +18188,7 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
   obtain ⟨resident, disposed, updated, resolved, _, _, permitted, read, disposal, usable, written, state, progress⟩ :=
-    write.execute typed valueTyped
+    write.execute permission typed valueTyped
   have parentNone : ∀ {target type parent}, AccessType program home before .unique (.owner place) target type parent → parent = none := by
     intro target type parent access
     cases access
@@ -18088,7 +18210,9 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
 theorem SourceWrite.executeIndirect {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {reference : Place} {fields : List FieldKey} {replacement : ResultType}
-    (write : SourceWrite program home before heldPayloads (.dereference reference fields) replacement after)
+    {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
+    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.dereference reference fields) replacement after)
+    (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18103,7 +18227,7 @@ theorem SourceWrite.executeIndirect {program : Program} {home : Module}
       disposed.writeAddress access.address value = some updated ∧
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
-  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute typed valueTyped
+  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute permission typed valueTyped
   exact ⟨_, resident, disposed, updated, fragments⟩
 
 end Grounded.Elaboration
@@ -18278,24 +18402,39 @@ theorem Executes.group {body : Expr} {plan : CorePlan} (bodyExec : Executes befo
   obtain ⟨value, final, last, evaluated, resident, finalTyped, progress⟩ := bodyExec executable state
   exact ⟨value, final, last, .group evaluated, resident, finalTyped, progress⟩
 
-theorem Executes.read {place : Place}
+theorem Executes.read {place : Place} {selected : Checked.Result}
+    (selection : Checked.CopySelection program home before.checked place selected)
     (actual : Required phase fun executable => Nonempty (SourceRead program home
-      (before.source executable) place (result.source executable) (after.source executable))) :
+      (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
+      place (result.source executable) (after.source executable))) :
     Executes before held (.read place) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
+  have known : before.checked.RootRepresented selection.slot.binder :=
+    .inr (.inr ⟨place.root, selection.slot, selection.found, rfl⟩)
+  have permission := (before.related executable).permits (parent := none) (actualParent := none)
+    (target := ⟨.binder selection.slot.binder, selection.indices⟩)
+    (fun binder base => Checked.Base.binder.inj base ▸ known) step.targetImage rfl selection.carrier
   exact state.executesRead step.selected step.access step.initialized step.path step.provenance
-    step.available step.permission step.permitted step.copied
+    step.available step.permission permission step.copied
 
 theorem Executes.move {place : Place}
+    (selection : Checked.PlaceSelection program home before.checked place result.checked)
+    (free : before.checked.LocalFree (program := program) ⟨.binder selection.slot.binder, selection.indices⟩)
     (actual : Required phase fun executable => Nonempty (SourceMove program home
-      (before.source executable) place (result.source executable) (after.source executable))) :
+      (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
+      place (result.source executable) (after.source executable))) :
     Executes before held (.move place) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
+  have known : before.checked.RootRepresented selection.slot.binder :=
+    .inr (.inr ⟨place.root, selection.slot, selection.found, rfl⟩)
+  have unobserved := (before.related executable).free
+    (target := ⟨.binder selection.slot.binder, selection.indices⟩)
+    (fun binder base => Checked.Base.binder.inj base ▸ known) step.targetImage free
   rw [step.updated]
   exact state.executesMove step.selected step.access step.initialized step.path step.provenance
-    step.available step.free step.cleared
+    step.available unobserved step.cleared
 
 theorem Executes.implicitMove {place : Place} (body : Executes before held (.move place) result after .leaf) :
     Executes before held (.read place) result after .implicitMove := by
@@ -18304,15 +18443,23 @@ theorem Executes.implicitMove {place : Place} (body : Executes before held (.mov
   exact ⟨value, final, last, .implicitMove evaluated, resident, finalTyped, progress⟩
 
 theorem Executes.borrow {mode : BorrowMode} {place : AccessPlace} {referent : Ty}
+    {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
+    (stored : before.checked.storage target.base = some slot)
+    (permitted : before.checked.LocalPermits (program := program) mode parent target)
     (actual : Required phase fun executable => Nonempty (SourceBorrow program home
-      (before.source executable) mode place referent (result.source executable) (after.source executable))) :
+      (before.source executable) (before.symbols executable) target parent
+      mode place referent (result.source executable) (after.source executable))) :
     Executes before held (.borrow mode place) result after .leaf := by
-  intro executable interpretation environment values state
-  obtain ⟨step⟩ := actual executable
-  have payload : result.payload.source executable = .reference (before.source executable).loans.length :=
+  intro executable
+  cases executable
+  intro interpretation environment values state
+  obtain ⟨step⟩ := actual rfl
+  have permission := before.meaning.related.permits
+    (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage step.parentImage permitted
+  have payload : result.payload.source rfl = .reference (before.source rfl).loans.length :=
     congrArg ResultType.payload step.produced
   simpa only [step.updated, step.produced, payload] using
-    state.executesBorrow step.access step.ready step.permitted step.finite step.provenance step.available
+    state.executesBorrow step.access step.ready permission step.finite step.provenance step.available
 
 theorem Executes.reborrow {mode : BorrowMode} {place : Place}
     (body : Executes before held (.borrow mode (.dereference place [])) result after .leaf) :
@@ -18326,22 +18473,35 @@ theorem Executes.reborrow {mode : BorrowMode} {place : Place}
   exact ⟨value, final, last, reborrow, resident, finalTyped, progress⟩
 
 theorem Executes.dereference {reference : Place} {fields : List FieldKey}
+    {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
+    (stored : before.checked.storage target.base = some slot)
+    (permitted : before.checked.LocalPermits (program := program) .shared parent target)
     (actual : Required phase fun executable => Nonempty (SourceDereference program home
-      (before.source executable) reference fields (result.source executable) (after.source executable))) :
+      (before.source executable) (before.symbols executable) target parent
+      reference fields (result.source executable) (after.source executable))) :
     Executes before held (.dereference reference fields) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
-  exact state.executesDereference step.access step.ready step.permitted step.provenance step.available step.permission step.copied
+  have permission := (before.related executable).permits
+    (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage step.parentImage permitted
+  exact state.executesDereference step.access step.ready permission step.provenance step.available step.permission step.copied
 
 theorem Executes.moveIndirect {reference : Place} {fields : List FieldKey}
+    {target : Checked.Address} {parent : Checked.Reference} {slot : Checked.Slot}
+    (stored : before.checked.storage target.base = some slot)
+    (permitted : before.checked.LocalPermits (program := program) .unique (some parent) target)
     (actual : Required phase fun executable => Nonempty (SourceMoveIndirect program home
-      (before.source executable) (sourcePayloads held executable) reference fields
+      (before.source executable) (before.symbols executable) target parent
+      (sourcePayloads held executable) reference fields
       (result.source executable) (after.source executable))) :
     Executes before held (.moveIndirect reference fields) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
+  have permission := (before.related executable).permits (parent := some parent) (actualParent := some step.node)
+    (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage
+    (congrArg some step.parentImage) permitted
   rw [step.updated]
-  exact state.executesMoveIndirect step.access step.ready step.permitted step.stored step.path
+  exact state.executesMoveIndirect step.access step.ready permission step.stored step.path
     step.provenance step.available step.pending step.cleared
 
 end Grounded.Elaboration
@@ -18517,8 +18677,10 @@ theorem Executes.assign {before middle written after : Point program phase} {hel
   intro executable interpretation environment values state
   obtain ⟨replacementValue, initial, firstMap, evaluated, replacementTyped, initialState, firstProgress⟩ := resident executable state
   obtain ⟨step⟩ := write.actual executable
+  have permission := (middle.related executable).permits
+    (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
   obtain ⟨old, disposed, updated, resolved, free, read, disposal, usable, changed, updatedState, writeProgress⟩ :=
-    step.executeOwner initialState replacementTyped
+    step.executeOwner permission initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -18536,8 +18698,10 @@ theorem Executes.assignIndirect {before middle written after : Point program pha
   intro executable interpretation environment values state
   obtain ⟨replacementValue, initial, firstMap, evaluated, replacementTyped, initialState, firstProgress⟩ := resident executable state
   obtain ⟨step⟩ := write.actual executable
+  have permission := (middle.related executable).permits
+    (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
   obtain ⟨access, old, disposed, updated, resolved, carrier, authority, permitted, read, disposal, usable, changed,
-    updatedState, writeProgress⟩ := step.executeIndirect initialState replacementTyped
+    updatedState, writeProgress⟩ := step.executeIndirect permission initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -19515,7 +19679,12 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
     refine ⟨entry.2, rfl, entry.1, found, address_meaning source entry.1.target, rfl, rfl, ?_, ?_⟩
     · simp [loan, symbols, Symbols.reference, schemaCoordinates, Option.map_map, Function.comp_def]
     · exact (cells.notEnded found).symm
-
+  activeCoverage := by
+    intro node actual found _
+    refine ⟨loan (actual, node), ?_, rfl⟩
+    refine ⟨.direct (loan (actual, node)), ?_, .direct _⟩
+    exact List.mem_map.mpr ⟨_, List.mem_map.mpr
+      ⟨_, List.mem_zipIdx_iff_getElem?.mpr found, rfl⟩, rfl⟩
 /-- Import uses each existing source root and loan identity exactly once. No
 referent mirror, ownership grant, alias injectivity, or runtime premise is added. -/
 def Cells.point {program : Program} {source : Grounded.Context} (cells : Cells program source) :
@@ -20180,13 +20349,13 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .integer fits => exact Executes.integer fits
   | .character valid => exact Executes.character valid
   | .group body => exact Executes.group body.execution_correctness
-  | .read _ _ _ _ actual => exact Executes.read actual
-  | .move _ _ _ _ _ _ actual => exact Executes.move actual
+  | .read selection _ _ _ actual => exact Executes.read selection actual
+  | .move selection _ free _ _ _ actual => exact Executes.move selection free actual
   | .implicitMove body _ => exact Executes.implicitMove body.execution_correctness
-  | .borrow _ _ _ _ _ _ _ _ _ _ _ actual => exact Executes.borrow actual
+  | .borrow _ _ _ stored _ _ _ permitted _ _ _ actual => exact Executes.borrow stored permitted actual
   | .reborrow body _ => exact Executes.reborrow body.execution_correctness
-  | .dereference _ _ _ _ _ _ _ _ _ _ actual => exact Executes.dereference actual
-  | .moveIndirect _ _ _ _ _ _ _ _ _ actual => exact Executes.moveIndirect actual
+  | .dereference _ _ stored _ _ _ permitted _ _ _ actual => exact Executes.dereference stored permitted actual
+  | .moveIndirect _ _ permitted stored _ _ _ _ _ actual => exact Executes.moveIndirect stored permitted actual
   | .tuple _ first rest _ => exact Executes.tuple first.execution_correctness rest.execution_correctness
   | .array _ body types finite size => exact Executes.array body.execution_correctness (congrArg Sigma.fst types) finite size
   | .construct shape _ body finite _ => exact Executes.construct shape.erase body.execution_correctness finite
