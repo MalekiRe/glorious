@@ -72,10 +72,11 @@ argument qualifiers. Phase erasure preserves the same substitution and complete
 qualified-type equalities. `ResolvedSignature.unique` proves resolution
 determinism; `ResolvedSignature.closed` bounds all formal regions.
 `ResolvedSignature.instantiate_wellFormed` preserves declared nominal validity.
-`HasType.call_signature` derives closure, an instantiated qualified result and
-its well-formedness for every admitted named call, including administrative and
-expected-type wrappers. The general execution-correctness theorem consumes
-the migrated producer.
+`HasType.call_signature` derives closure and relates the actual result to its
+instantiated signature: either the qualifier is unchanged or an outer lifetime
+coercion derives a valid qualified view. Both preserve nominal well-formedness,
+including under administrative and expected-type wrappers. The general
+execution-correctness theorem consumes the migrated producer.
 
 Source and checked slots, expression results, pattern fields and aggregate
 results now carry intrinsic qualified types. Binding and preparation retain
@@ -91,7 +92,16 @@ Dormant pattern alternatives must agree with the common result on the complete
 qualified type, not just its erased shape. Their checking-only derivations and
 the general arm execution/expected-type proofs retain this requirement.
 
-Qualified annotations/coercions, region-validity interpretation and source
+`HasType.shorten` admits lifetime coercion through the declaration-derived
+`QualifiedTy.View` relation and semantic `Region.Outlives` inclusion. It changes
+only the visible result qualifier: payload, storage, reference mode, Core plan
+and execution remain unchanged. Shared referents are covariant; unique referents
+retain their complete qualified type. Nominal views inspect all declared fields.
+The general execution, phase-erasure, reference-read selection and call-signature
+proofs consume this constructor. Successive coercions compose rather than
+recovering a longer lifetime from canonical storage.
+
+Qualified annotation resolution, region-validity interpretation and source
 return provenance remain open. A carried qualifier is
 not yet a proof of its lifetime bound. The bounded return rule below remains;
 no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
@@ -329,7 +339,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,764
+warnings as errors. The exhaustive defining-module audit covered **7,774
 declarations, including 299 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.

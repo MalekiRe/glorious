@@ -1945,6 +1945,34 @@ theorem QualifiedTys.WellFormed.map {R S : Type} {declarations : QualifiedDeclar
   | nil => trivial
   | cons first rest => exact ⟨valid.1.map (type := first) f, valid.2.map (types := rest) f⟩
 end
+mutual
+theorem QualifiedTy.view_wellFormed {R : Type} {declarations : QualifiedDeclarations}
+    {static : R} {outlives : R → R → Prop} {shape : Ty} {first second : QualifiedTy R shape}
+    (view : QualifiedTy.View (NominalView declarations static outlives) outlives first second)
+    (valid : first.WellFormed declarations) : second.WellFormed declarations := by
+  cases first <;> cases second
+  case unit.unit | integer.integer | character.character => trivial
+  case tuple.tuple first rest second tail =>
+    exact ⟨QualifiedTy.view_wellFormed (first := first) (second := second) view.1 valid.1,
+      QualifiedTys.view_wellFormed (first := rest) (second := tail) view.2 valid.2⟩
+  case array.array first length second => exact QualifiedTy.view_wellFormed (first := first) (second := second) view valid
+  case nominal.nominal identity arguments other =>
+    obtain ⟨declaration, found, _, arity, _⟩ := NominalView.unfold view
+    exact ⟨declaration, found, arity⟩
+  case reference.reference region first mode other second =>
+    cases mode with
+    | shared => exact QualifiedTy.view_wellFormed (first := first) (second := second) view.2 valid
+    | unique => exact view.2 ▸ valid
+theorem QualifiedTys.view_wellFormed {R : Type} {declarations : QualifiedDeclarations}
+    {static : R} {outlives : R → R → Prop} {shapes : List Ty} {first second : QualifiedTys R shapes}
+    (view : QualifiedTy.Views (NominalView declarations static outlives) outlives first second)
+    (valid : first.WellFormed declarations) : second.WellFormed declarations := by
+  cases first <;> cases second
+  case nil.nil => trivial
+  case cons.cons first rest second tail =>
+    exact ⟨QualifiedTy.view_wellFormed (first := first) (second := second) view.1 valid.1,
+      QualifiedTys.view_wellFormed (first := rest) (second := tail) view.2 valid.2⟩
+end
 
 mutual
 theorem QualifiedTy.view_refl {R : Type} {declarations : QualifiedDeclarations}
@@ -17121,6 +17149,14 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (typed : HasType program phase home before held expression result after plan none)
       (atomic : ExpectedAtom expression) (notReference : NotReference result.type) :
       HasType program phase home before held expression result after plan (some result.type)
+  | shorten {phase : Phase} {home : Module} {before after : Point program phase}
+      {held : List (Payload phase)} {expression : Expr} {result : Result phase}
+      {plan : CorePlan} {expected : Option Ty} {qualification : QualifiedTy Region result.type}
+      (body : HasType program phase home before held expression result after plan expected)
+      (view : QualifiedTy.View (NominalView program.declarations Region.static Region.Outlives)
+        Region.Outlives result.qualification qualification) :
+      HasType program phase home before held expression
+        ⟨result.type, result.payload, qualification⟩ after plan expected
 inductive HasTypes (program : Program) : (phase : Phase) → Module → Point program phase →
     List (Payload phase) → List Expr → List (Result phase) → Point program phase → List CorePlan → Option (List Ty) → Type where
   | nil {phase : Phase} {home : Module} {before : Point program phase} {held : List (Payload phase)} :
@@ -17272,6 +17308,7 @@ theorem HasType.structural_evaluates {program : Program} {phase : Phase} {home :
         Evaluates program .empty ⟨expression, plan⟩ value .empty ∧
         ValueHasType program value result.type ∧ value.ReferenceFree := by
   match typed with
+  | .shorten body _ => exact body.structural_evaluates
   | .unit => intro _ empty; exact ⟨empty, .unit, .unit, .unit, trivial⟩
   | .integer fits => intro _ empty; exact ⟨empty, _, .integer fits, .integer fits, trivial⟩
   | .character valid => intro _ empty; exact ⟨empty, _, .character valid, .character valid, trivial⟩
@@ -17383,6 +17420,7 @@ theorem HasType.constantDeclaration {program : Program} {phase : Phase} {home : 
     ∀ name, expression = .constant name → ∃ declaration,
       program.constants name = some declaration ∧ ResolvesType program.aliases declaration.type result.type := by
   match typed with
+  | .shorten body _ => exact body.constantDeclaration
   | .constant declared _ resolved _ _ _ _ _ _ _ =>
     intro name same; cases same; exact ⟨_, declared, resolved⟩
   | .view _ body => exact body.constantDeclaration
@@ -18825,6 +18863,7 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .expectedBorrow body => exact .expectedBorrow body.erase
   | .expectedCall body => exact .expectedCall body.erase
   | .expectedData body atomic notReference => exact .expectedData body.erase atomic notReference
+  | .shorten body view => exact .shorten body.erase view
 termination_by structural product
 
 def HasTypes.erase {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
@@ -19719,6 +19758,11 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
     (typed : HasType program phase home before held expression result after plan expected) :
     Executes before held expression result after plan := by
   match typed with
+  | .shorten body _ =>
+    intro executable interpretation environment values state
+    obtain ⟨value, final, last, evaluated, resident, afterTyped, progress⟩ :=
+      body.execution_correctness executable state
+    exact ⟨value, final, last, evaluated, ⟨resident.resident, resident.payload, resident.corresponds⟩, afterTyped, progress⟩
   | .unit => exact Executes.unit
   | .integer fits => exact Executes.integer fits
   | .character valid => exact Executes.character valid
@@ -20155,6 +20199,7 @@ theorem HasType.reference_read_selection {before after : Point program phase}
     {place : Place} {referent : Ty} {mode : BorrowMode} :
     expression = .read place → expected = some (.reference referent mode) → plan.Reborrows mode := by
   match typed with
+  | .shorten body _ => exact body.reference_read_selection
   | .reborrow _ _ => intro _ same; cases same; exact .direct
   | .view _ body => exact body.reference_read_selection
   | .endOwn _ body =>
@@ -20206,6 +20251,7 @@ theorem HasType.read_leaf_duplicable {before after : Point program phase}
     {place : Place} :
     expression = .read place → plan = .leaf → Duplicable program.data result.type := by
   match typed with
+  | .shorten body _ => exact body.read_leaf_duplicable
   | .read selection sameType _ _ _ =>
     intro _ _
     have typeEqual := congrArg Sigma.fst sameType
@@ -20244,6 +20290,7 @@ theorem HasType.implicitMove_nonduplicable {before after : Point program phase}
     (typed : HasType program phase home before held expression result after plan expected) :
     plan = .implicitMove → Nonduplicable program.data result.type := by
   match typed with
+  | .shorten body _ => exact body.implicitMove_nonduplicable
   | .implicitMove _ noncopy => intro _; exact noncopy
   | .view _ body | .raiseSupply body _ _ _ _ | .expectedData body _ _ |
       .expectedField body | .expectedDereference body | .expectedMoveIndirect body |
@@ -20270,6 +20317,7 @@ theorem HasType.expected_type {phase : Phase} {home : Module}
     (typed : HasType program phase home before held expression result after plan expected) :
     ∀ type, expected = some type → result.type = type := by
   match typed with
+  | .shorten body _ => exact body.expected_type
   | .unit | .integer .. | .character .. | .read .. | .move .. | .implicitMove .. |
       .borrow .. | .dereference .. | .moveIndirect .. | .construct .. | .constant .. |
       .field .. | .call .. => intro _ impossible; cases impossible
@@ -20323,6 +20371,7 @@ theorem HasType.literal_valid {before after : Point program phase}
       | .character number => UnicodeScalar number
       | _ => True) expression := by
   match typed with
+  | .shorten body _ => exact body.literal_valid
   | .integer fits => exact fits
   | .character valid => exact valid
   | .view _ body | .endOwn _ body | .endAfter body _ | .raiseSupply body _ _ _ _ |
@@ -20490,8 +20539,8 @@ namespace Grounded.Elaboration
 set_option autoImplicit false
 
 /-- Every admitted named call uses a finite instance of its source-resolved
-signature, including under administrative and expected-type wrappers. The
-actual result has that qualified type and preserves nominal well-formedness.
+signature. Outer coercions may shorten that instance through the declaration-
+derived qualified view relation; they preserve nominal well-formedness.
 Runtime interpretation of the declared region bounds is a separate obligation. -/
 theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
@@ -20505,19 +20554,39 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
           (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
           (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) ∧
           ∃ lifetimes : Fin signature.supply → Region,
-            (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
-              ⟨_, signature.instantiateResult lifetimes⟩ ∧
-            (signature.instantiateInputs lifetimes).WellFormed program.declarations ∧
-            result.qualification.WellFormed program.declarations := by
+            ∃ original : QualifiedTy Region result.type,
+              (⟨result.type, original⟩ : (type : Ty) × QualifiedTy Region type) =
+                ⟨_, signature.instantiateResult lifetimes⟩ ∧
+              (original = result.qualification ∨
+                QualifiedTy.View (NominalView program.declarations Region.static Region.Outlives)
+                  Region.Outlives original result.qualification) ∧
+              (signature.instantiateInputs lifetimes).WellFormed program.declarations ∧
+              result.qualification.WellFormed program.declarations := by
   match typed with
   | .call declared _ _ _ signature signatureTypes lifetimes _ _ _ _ _ resultType _ _ _ _ =>
     intro identity arguments same
     cases same
     have instantiated := signature.instantiate_wellFormed signatureTypes lifetimes
     refine ⟨_, declared, signature, signatureTypes, signature.closed.1, signature.closed.2,
-      lifetimes, resultType, instantiated.1, ?_⟩
+      lifetimes, _, resultType, Or.inl rfl, instantiated.1, ?_⟩
     exact (congrArg (fun entry : (type : Ty) × QualifiedTy Region type =>
       entry.2.WellFormed program.declarations) resultType).mpr instantiated.2
+  | .shorten body conversion =>
+    intro identity arguments same
+    obtain ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound,
+      lifetimes, original, instantiated, converted, inputsValid, resultValid⟩ := body.call_signature identity arguments same
+    refine ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound,
+      lifetimes, original, instantiated, Or.inr ?_, inputsValid, QualifiedTy.view_wellFormed conversion resultValid⟩
+    rcases converted with equal | converted
+    · exact equal ▸ conversion
+    · exact QualifiedTy.view_compose
+        (first := NominalView program.declarations Region.static Region.Outlives)
+        (second := NominalView program.declarations Region.static Region.Outlives)
+        (third := NominalView program.declarations Region.static Region.Outlives)
+        (outlives := Region.Outlives)
+        (fun _ _ _ _ front back => NominalView.trans (outlives := Region.Outlives)
+          (fun {a b c} first second => @Region.Outlives.trans a b c first second) front back)
+        (fun {a b c} front back => @Region.Outlives.trans a b c front back) _ _ _ converted conversion
   | .view _ body | .endOwn _ body | .endAfter body _ | .raiseSupply body _ _ _ _ |
       .expectedData body _ _ | .expectedCall body => exact body.call_signature
   | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |
