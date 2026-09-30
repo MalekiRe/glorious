@@ -5489,15 +5489,15 @@ structure Address where
   fields : List Nat := []
   deriving DecidableEq
 
-/-- Shape knowledge is produced from source facts; it never deletes declared
-reference occurrences from ordinary checking. -/
+/-- Shape knowledge is produced from source facts. Positive reference-free
+knowledge removes resource occurrences, not declared type alternatives. -/
 inductive SchemaKnowledge where
   | unknown
   | referenceFree
   deriving DecidableEq
 
-/-- Schemas retain declared hypothetical references even when the current
-source subtree is known reference-free. Fresh declaration inputs are unknown. -/
+/-- Schemas retain their declared type; only unknown products carry hypothetical
+resource occurrences. Fresh declaration inputs are unknown. -/
 inductive Payload where
   | plain
   | reference (symbol : Reference) (referent : Ty) (mode : BorrowMode)
@@ -14045,6 +14045,9 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
       PayloadMeaning program symbols slot.initialization slot.payload slot.type actual.payload
   /-- Executable references are lenses into binder cells, never mask caches. -/
   noOpaqueCells : ∀ reference, checked.storage (.referent reference) = none
+  /-- A missing checked owner cannot appear under its interpreted name. -/
+  absent : ∀ binder, checked.storage (.binder binder) = none →
+    concrete.storage (.binder (symbols.binder binder)) = none
   /-- Every existing source root is represented, including hidden roots. -/
   rootCoverage : ∀ binder slot, concrete.storage (.binder binder) = some slot →
     ∃ identity cell, checked.storage (.binder identity) = some cell ∧ symbols.binder identity = binder
@@ -14053,6 +14056,11 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
   rootIdentity : ∀ first second, checked.RootRepresented first → checked.RootRepresented second →
     symbols.binder first = symbols.binder second → first = second
   loans : ∀ entry ∈ checked.loans, LoanEntryMeaning program symbols checked concrete entry
+  /-- Distinct recorded handles have distinct own permissions. This does not
+  constrain aliases of their referent addresses or unrecorded schema names. -/
+  loanIdentity : ∀ first second node, checked.HasLoan program first → checked.HasLoan program second →
+    symbols.reference first.reference = some node → symbols.reference second.reference = some node →
+    first.reference = second.reference
   /-- Every active source loan has a checked representative. Forward row
   correspondence alone cannot exclude hidden permission conflicts. -/
   activeCoverage : ∀ node actual, concrete.loans[node]? = some actual → actual.own = true →
@@ -14604,6 +14612,79 @@ theorem ContextMeaning.loan_own {checked : Checked.Context} {source : Grounded.C
     exact coupled.mp own
   · intro available
     exact ⟨actual, found, coupled.mpr available⟩
+
+theorem Symbols.address_endOwn (symbols : Symbols) (source : Grounded.Context) (node : Nat)
+    (address : Checked.Address) : symbols.address (source.endOwn node) address = symbols.address source address := by
+  cases address with
+  | mk base fields =>
+    cases base with
+    | binder => rfl
+    | referent reference =>
+      simp only [Symbols.address]
+      cases image : symbols.reference reference with
+      | none => rfl
+      | some other =>
+        cases found : source.loans[other]? with
+        | none => simp [Grounded.Context.endOwn, List.getElem?_modify, found]
+        | some loan =>
+          by_cases same : node = other <;> simp [Grounded.Context.endOwn, List.getElem?_modify, found, same]
+
+/-- Ending constructs the successor meaning. Only recorded handle identities
+are compared; equal referent addresses remain unrestricted. -/
+theorem ContextMeaning.endOwn {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {loan : Checked.Loan} {node : Nat}
+    (recorded : checked.HasLoan program loan) (mapped : symbols.reference loan.reference = some node) :
+    ContextMeaning program symbols (checked.endPayload (.reference loan.reference loan.referent loan.mode))
+      (source.endOwn node) := by
+  have occurrence : ∀ reference, Checked.Payload.Occurs program
+      (.reference loan.reference loan.referent loan.mode) reference ↔ reference = loan.reference := by
+    intro reference
+    constructor
+    · intro occurs; cases occurs; rfl
+    · intro equal; subst reference; exact .reference ..
+  have ended : ∀ reference, (checked.endPayload (.reference loan.reference loan.referent loan.mode)).NotEnded
+      (program := program) reference ↔ checked.NotEnded (program := program) reference ∧ reference ≠ loan.reference := by
+    intro reference
+    simp only [Checked.Context.NotEnded, Checked.Context.endPayload, List.mem_cons, forall_eq_or_imp, occurrence]
+    exact and_comm
+  have rows : ∀ other, checked.HasLoan program other → ∀ actualNode, symbols.reference other.reference = some actualNode →
+      LoanRowMeaning program symbols (checked.endPayload (.reference loan.reference loan.referent loan.mode))
+        (source.endOwn node) other actualNode := by
+    intro other member actualNode image
+    obtain ⟨actual, found, target, referent, mode, parent, own⟩ := meaning.row member image
+    refine ⟨_, source.endOwn_found node found, ?_, referent, mode, parent, ?_⟩
+    · simpa only [Symbols.address_endOwn] using target
+    · rw [ended]
+      by_cases same : node = actualNode
+      · have identity := meaning.loanIdentity other loan node member recorded (same ▸ image) mapped
+        simp [same, identity]
+      · have different : other.reference ≠ loan.reference := by
+          intro equal
+          exact same (Option.some.inj (mapped.symm.trans (equal ▸ image)))
+        constructor
+        · intro live; exact ⟨own.mp (by simpa [same] using live), different⟩
+        · intro live; simpa [same] using own.mpr live.1
+  refine {
+    names := meaning.names
+    binders := meaning.binders
+    cells := meaning.cells
+    noOpaqueCells := meaning.noOpaqueCells
+    absent := meaning.absent
+    rootCoverage := meaning.rootCoverage
+    rootIdentity := meaning.rootIdentity
+    loans := ?_
+    loanIdentity := meaning.loanIdentity
+    activeCoverage := ?_ }
+  · intro entry member
+    cases entry with
+    | direct other =>
+      obtain ⟨actualNode, image, _⟩ := meaning.loans _ member
+      exact ⟨actualNode, image, rows other ⟨_, member, .direct _⟩ actualNode image⟩
+    | schemaCopy stamp owner path type copies =>
+      intro other row actualNode image
+      exact rows other ⟨_, member, row⟩ actualNode image
+  · intro actualNode actual found own
+    exact meaning.activeCoverage actualNode actual (Grounded.Context.endOwn_active_record found own).1 own
 
 /-- Source parameter schemas and locally created identities share the checking
 stamp supply. Fresh schema meanings can be assigned at their introducing step. -/
@@ -15369,15 +15450,18 @@ inductive Access (program : Program) (home : Module) (context : Context) :
   | dereference {mode ownerMode : BorrowMode} {reference : Place} {fields : List FieldKey}
       {symbol : Reference} {referent type : Ty} {indices : List Nat} {region : Region}
       {referentQualification : QualifiedTy Region referent} {qualification : QualifiedTy Region type}
+      {canonical : Address}
       (carrier : PlaceSelection program home context reference
         ⟨.reference referent ownerMode, .reference symbol referent ownerMode, .reference region referentQualification ownerMode⟩)
       (live : context.NotEnded (program := program) symbol)
+      (recorded : ∃ loan, context.HasLoan program loan ∧ loan.reference = symbol ∧
+        loan.referent = referent ∧ loan.mode = ownerMode ∧ context.Resolves program loan.target canonical)
       (authority : mode = .unique → ownerMode = .unique)
       (carrierPermits : context.LocalPermits (program := program) mode none
         ⟨.binder carrier.slot.binder, carrier.indices⟩)
       (path : QualifiedPath program.declarations Region.static home referentQualification fields indices qualification) :
       Access program home context mode (.dereference reference fields)
-        ((context.referenceTarget symbol).extend indices) qualification (some symbol)
+        (canonical.extend indices) qualification (some symbol)
 
 /-- Reborrowing inherits the lifetime of the selected carrier. Owned access has
 no parent carrier; its root-scope obligation is separate and is not established
@@ -15430,36 +15514,26 @@ future storage or readiness of an execution. The evaluator bridges consume them.
 structure SourceRead (program : Program) (home : Module) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address)
     (place : Place) (result : ResultType) (after : Grounded.Context) where
+  target : Origin
   slot : Grounded.Slot
-  indices : List Nat
-  state : Initialization
   payload : SourcePayload
-  selected : lookup place.root before.bindings = some slot
-  access : slot.initialization.Access indices state
-  initialized : state.Complete
-  path : PathType program home slot.type place.fields indices result.type
-  provenance : slot.payload.select indices = some payload
-  available : before.PayloadAvailable payload
+  stored : before.storage target.base = some slot
+  provenance : slot.payload.select target.fields = some payload
   permission : Duplicable program.data result.type
-  targetImage : symbols.address before checkedTarget = some ⟨.binder slot.binder, indices⟩
+  targetImage : symbols.address before checkedTarget = some target
   copied : Grounded.Context.CopyPayload before payload result.payload after
 
 structure SourceMove (program : Program) (home : Module) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address)
     (place : Place) (result : ResultType) (after : Grounded.Context) where
+  target : Origin
   slot : Grounded.Slot
-  indices : List Nat
-  state : Initialization
   remainder : SourcePayload
-  selected : lookup place.root before.bindings = some slot
-  access : slot.initialization.Access indices state
-  initialized : state.Complete
-  path : PathType program home slot.type place.fields indices result.type
-  provenance : slot.payload.select indices = some result.payload
-  available : before.PayloadAvailable result.payload
-  targetImage : symbols.address before checkedTarget = some ⟨.binder slot.binder, indices⟩
-  cleared : SourcePayload.Write program slot.type indices slot.payload .plain remainder
-  updated : after = before.writeTarget ⟨.binder slot.binder, indices⟩ .vacant remainder
+  stored : before.storage target.base = some slot
+  provenance : slot.payload.select target.fields = some result.payload
+  targetImage : symbols.address before checkedTarget = some target
+  cleared : SourcePayload.Write program slot.type target.fields slot.payload .plain remainder
+  updated : after = before.writeTarget target .vacant remainder
 
 structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
@@ -15468,12 +15542,10 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   target : Origin
   parent : Option Nat
   payload : SourcePayload
-  access : AccessType program home before mode place target referent parent
   targetImage : symbols.address before checkedTarget = some target
   parentImage : checkedParent.map symbols.reference = parent.map some
   finite : FiniteLayout program.target program.data referent
   provenance : before.TargetPayload program target referent payload
-  available : before.PayloadAvailable payload
   qualification : QualifiedTy Region (.reference referent mode)
   produced : result = ⟨.reference referent mode, .reference before.loans.length, qualification⟩
   updated : after = before.borrow target referent parent mode
@@ -15484,11 +15556,9 @@ structure SourceDereference (program : Program) (home : Module) (before : Ground
   target : Origin
   parent : Option Nat
   payload : SourcePayload
-  access : AccessType program home before .shared (.dereference reference fields) target result.type parent
   targetImage : symbols.address before checkedTarget = some target
   parentImage : checkedParent.map symbols.reference = parent.map some
   provenance : before.TargetPayload program target result.type payload
-  available : before.PayloadAvailable payload
   permission : Duplicable program.data result.type
   copied : Grounded.Context.CopyPayload before payload result.payload after
 
@@ -15500,13 +15570,11 @@ structure SourceMoveIndirect (program : Program) (home : Module) (before : Groun
   node : Nat
   slot : Grounded.Slot
   remainder : SourcePayload
-  access : AccessType program home before .unique (.dereference reference fields) target result.type (some node)
   targetImage : symbols.address before checkedTarget = some target
   parentImage : symbols.reference checkedParent = some node
   stored : before.storage target.base = some slot
   path : CanonicalPath program slot.type target.fields result.type
   provenance : slot.payload.select target.fields = some result.payload
-  available : before.PayloadAvailable result.payload
   pending : ∀ heldNode ∈ payloadNodes (held ++ [result.payload]), ∀ loan,
     before.loans[heldNode]? = some loan → loan.own = true → target.Apart loan.target
   cleared : SourcePayload.Write program slot.type target.fields slot.payload .plain remainder
@@ -17213,6 +17281,327 @@ theorem ContextMeaning.resourcesAvailable {checked : Checked.Context} {source : 
     source.PayloadAvailable concrete :=
   meaning.resourcesAvailableNodes (fun _ member => product.node_mapped member) available
 
+theorem ContextMeaning.lookup {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {name : String} {slot : Checked.Slot}
+    (found : lookup name checked.bindings = some slot) :
+    ∃ actual, lookup name source.bindings = some actual ∧
+      (⟨actual.type, actual.qualification⟩ : (type : Ty) × QualifiedTy Region type) = ⟨slot.type, slot.qualification⟩ ∧
+      actual.mutable = slot.mutable ∧ actual.binder = symbols.binder slot.binder ∧
+      actual.initialization = slot.initialization ∧
+      PayloadMeaning program symbols slot.initialization slot.payload slot.type actual.payload := by
+  unfold Checked.Context.bindings at found
+  unfold Grounded.Context.bindings
+  rw [meaning.names, List.filterMap_map]
+  generalize checked.names = names at found ⊢
+  induction names with
+  | nil => simp [Grounded.lookup] at found
+  | cons entry names ih =>
+      cases stored : checked.storage (.binder entry.2) with
+      | none =>
+          have absent := meaning.absent entry.2 stored
+          simp only [List.filterMap_cons, stored, Option.map_none] at found
+          simpa only [List.filterMap_cons, Function.comp_apply, absent, Option.map_none] using ih found
+      | some cell =>
+          obtain ⟨actual, actualStored, shape, mutable, binder, mask, payload⟩ := meaning.cells _ _ _ stored rfl
+          simp only [List.filterMap_cons, stored, Option.map_some, Grounded.lookup] at found
+          simp only [List.filterMap_cons, Function.comp_apply, actualStored, Option.map_some, Grounded.lookup]
+          split at found
+          · rename_i equal
+            cases Option.some.inj found
+            exact ⟨actual, by simp [equal], shape, mutable, binder, mask, payload⟩
+          · rename_i different
+            simpa only [different, ↓reduceIte] using ih found
+
+
+theorem _root_.Grounded.ProjectionType.head_eq {program : Program} {home : Module} {type child : Ty}
+    {key : FieldKey} {index : Nat} {first second : Head} {left right : List Ty}
+    (projection : ProjectionType program home type key index child)
+    (a : HeadType program first type left) (b : HeadType program second type right) : first = second := by
+  cases projection with
+  | tuple => cases a; cases b; rfl
+  | nominal declared structureOnly indexed selected visible =>
+      cases a with
+      | @nominal _ firstTag aDeclaration aSchema aDeclared aChosen =>
+          cases b with
+          | @nominal _ secondTag bDeclaration bSchema bDeclared bChosen =>
+              cases Option.some.inj (aDeclared.symm.trans declared)
+              cases Option.some.inj (bDeclared.symm.trans declared)
+              cases firstTag <;> cases secondTag <;> simp_all [DataDecl.constructor]
+
+theorem PayloadMeanings.get {states : Nat → Initialization} {payloads : List Checked.Payload}
+    {types : List Ty} {concretes : List SourcePayload}
+    (meaning : PayloadMeanings program symbols states payloads types concretes)
+    {index : Nat} {payload : Checked.Payload} {type : Ty}
+    (selected : payloads[index]? = some payload) (typed : types[index]? = some type) :
+    ∃ concrete, concretes[index]? = some concrete ∧
+      PayloadMeaning program symbols (states index) payload type concrete := by
+  induction index generalizing states payloads types concretes with
+  | zero =>
+      cases meaning with
+      | nil => cases selected
+      | cons first rest =>
+          cases Option.some.inj selected
+          cases Option.some.inj typed
+          exact ⟨_, rfl, first⟩
+  | succ index ih =>
+      cases meaning with
+      | nil => cases selected
+      | cons first rest => exact ih rest selected typed
+
+theorem PayloadMeaning.at_node {state : Initialization} {payload selected : Checked.Payload}
+    {type target : Ty} {concrete resident : SourcePayload} {indices : List Nat}
+    (meaning : PayloadMeaning program symbols state payload type concrete)
+    (selection : Checked.Payload.At program payload type indices selected target)
+    (canonical : CanonicalPath program type indices target)
+    (read : concrete.select indices = some resident) {node : Nat} (member : node ∈ resident.nodes) :
+    ∃ reference, selected.Occurs program reference ∧ symbols.reference reference = some node := by
+  induction selection generalizing state concrete with
+  | here =>
+      have same : concrete = resident := by simpa [SourcePayload.select] using read
+      subst resident
+      exact meaning.node_mapped member
+  | @aggregate head fields type child target types index indices field selected source shape fieldType found rest ih =>
+      cases canonical with
+      | cons projection tail =>
+          have same := Option.some.inj (fieldType.symm.trans (projection.headType shape).2)
+          cases same
+          cases meaning with
+          | vacant => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+          | aggregate _ actualShape meanings =>
+              cases shape.fields_unique actualShape
+              obtain ⟨actual, actualFound, interpreted⟩ := meanings.get found fieldType
+              simp only [SourcePayload.select, actualFound, Option.bind_some] at read
+              exact ih interpreted tail read
+  | @schema owner path type child target copies knowledge head types index indices selected source shape fieldType rest ih =>
+      cases canonical with
+      | cons projection tail =>
+          have same := Option.some.inj (fieldType.symm.trans (projection.headType shape).2)
+          cases same
+          cases meaning with
+          | vacant => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+          | schemaPlain => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+          | schemaReference => cases projection
+          | @schemaAggregate _ _ _ _ _ actualHead actualTypes actuals actualSource actualShape image meanings =>
+              cases projection.head_eq shape actualShape
+              cases shape.fields_unique actualShape
+              have selectedInput : (types.zipIdx.map fun entry => Checked.Payload.input owner
+                  (path ++ [.constructor head, .field entry.2]) entry.1 copies)[index]? =
+                  some (Checked.Payload.input owner (path ++ [.constructor head, .field index]) child copies) := by
+                simp [List.getElem?_map, List.getElem?_zipIdx, fieldType]
+              obtain ⟨actual, actualFound, interpreted⟩ := meanings.get selectedInput fieldType
+              simp only [SourcePayload.select, actualFound, Option.bind_some] at read
+              exact ih interpreted tail read
+  | @plain type child target head types index indices selected free source shape fieldType rest ih =>
+      cases meaning <;> simp [SourcePayload.select] at read <;> subst resident <;> simp [SourcePayload.nodes] at member
+
+
+theorem PayloadMeaning.select_node {home : Module} {state : Initialization} {payload selected : Checked.Payload}
+    {type target : Ty} {concrete resident : SourcePayload} {keys : List FieldKey} {indices : List Nat}
+    (meaning : PayloadMeaning program symbols state payload type concrete)
+    (selection : Checked.Payload.Select program home payload type keys indices selected target)
+    (read : concrete.select indices = some resident) {node : Nat} (member : node ∈ resident.nodes) :
+    ∃ reference, selected.Occurs program reference ∧ symbols.reference reference = some node := by
+  induction selection generalizing state concrete with
+  | here =>
+      have same : concrete = resident := by simpa [SourcePayload.select] using read
+      subst resident
+      exact meaning.node_mapped member
+  | aggregate projection found rest ih =>
+      cases meaning with
+      | vacant => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+      | aggregate _ shape meanings =>
+          obtain ⟨actual, actualFound, interpreted⟩ := meanings.get found (projection.headType shape).2
+          simp only [SourcePayload.select, actualFound, Option.bind_some] at read
+          exact ih interpreted read
+  | @schema owner path type child target copies head types knowledge key keys index indices selected projection shape found rest ih =>
+      cases meaning with
+      | vacant => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+      | schemaPlain => simp [SourcePayload.select] at read; subst resident; simp [SourcePayload.nodes] at member
+      | schemaReference => cases projection
+      | @schemaAggregate _ _ _ _ _ actualHead actualTypes actuals actualSource actualShape image meanings =>
+          cases projection.head_eq shape actualShape
+          cases shape.fields_unique actualShape
+          have selectedInput : (types.zipIdx.map fun entry => Checked.Payload.input owner
+              (path ++ [.constructor head, .field entry.2]) entry.1 copies)[index]? =
+              some (Checked.Payload.input owner (path ++ [.constructor head, .field index]) child copies) := by
+            simp [List.getElem?_map, List.getElem?_zipIdx, found]
+          obtain ⟨actual, actualFound, interpreted⟩ := meanings.get selectedInput found
+          simp only [SourcePayload.select, actualFound, Option.bind_some] at read
+          exact ih interpreted read
+  | plain =>
+      cases meaning <;> simp [SourcePayload.select] at read <;> subst resident <;> simp [SourcePayload.nodes] at member
+
+
+/-- The checked path selects an actual current source resident; no selection or
+initialization premise is imported from an executable operation record. -/
+theorem ContextMeaning.placeSelection {home : Module} {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {interpretation : Interpretation} {environment : Environment}
+    (typed : StoreTyped program interpretation source environment)
+    {place : Place} {result : Checked.Result}
+    (selection : Checked.PlaceSelection program home checked place result) :
+    ∃ actual payload, Grounded.lookup place.root source.bindings = some actual ∧
+      actual.binder = symbols.binder selection.slot.binder ∧
+      actual.initialization.Access selection.indices selection.state ∧
+      PathType program home actual.type place.fields selection.indices result.type ∧
+      actual.payload.select selection.indices = some payload ∧
+      (∃ value, ValueHasType program value result.type ∧ payload.Corresponds interpretation.node value) ∧
+      (∀ node ∈ payload.nodes, ∃ reference, result.payload.Occurs program reference ∧
+        symbols.reference reference = some node) := by
+  obtain ⟨actual, found, shape, _, binder, mask, payload⟩ := meaning.lookup selection.found
+  have typeEq : actual.type = selection.slot.type := congrArg (fun (entry : (type : Ty) × QualifiedTy Region type) => entry.1) shape
+  have path : PathType program home actual.type place.fields selection.indices result.type :=
+    by rw [typeEq]; exact selection.qualified.erase
+  have access : actual.initialization.Access selection.indices selection.state := mask ▸ selection.access
+  obtain ⟨root, _, rootTyped, related⟩ := typed.cells actual.binder actual
+    (typed.source.member_stored _ (lookup_member found))
+  obtain ⟨_, resident, read, residentTyped⟩ := path.resident rootTyped access
+  obtain ⟨selected, provenance, corresponds⟩ := related.readIndices read
+  refine ⟨actual, selected, found, binder, access, path, provenance,
+    ⟨resident, (residentTyped.complete selection.complete).1, corresponds⟩, ?_⟩
+  intro node member
+  exact payload.select_node selection.selected provenance member
+theorem ContextMeaning.mask {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} {state : Initialization} (stored : checked.storage target.base = some slot)
+    (mask : slot.initialization.Access target.fields state) {actual : Origin}
+    (image : symbols.address source target = some actual) :
+    ∃ slot, source.storage actual.base = some slot ∧ slot.initialization.Access actual.fields state := by
+  cases target with
+  | mk base fields =>
+      cases base with
+      | referent reference => rw [meaning.noOpaqueCells reference] at stored; cases stored
+      | binder binder =>
+          obtain ⟨slot, found, _, _, _, same, _⟩ := meaning.cells _ _ _ stored rfl
+          cases image
+          exact ⟨slot, found, same ▸ mask⟩
+
+theorem ContextMeaning.access {home : Module} {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {interpretation : Interpretation} {environment : Environment}
+    (typed : StoreTyped program interpretation source environment)
+    {mode : BorrowMode} {place : AccessPlace} {target : Checked.Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Checked.Reference}
+    (access : Checked.Access program home checked mode place target qualification parent)
+    {slot : Checked.Slot} {state : Initialization} (stored : checked.storage target.base = some slot)
+    (mask : slot.initialization.Access target.fields state) :
+    ∃ actual actualParent, AccessType program home source mode place actual type actualParent ∧
+      symbols.address source target = some actual ∧ parent.map symbols.reference = actualParent.map some := by
+  cases access with
+  | @owned place selectedSlot indices type qualification found path writable =>
+      obtain ⟨actual, selected, shape, mutable, binder, _, _⟩ := meaning.lookup found
+      have typeEq : actual.type = selectedSlot.type := congrArg (fun (entry : (type : Ty) × QualifiedTy Region type) => entry.1) shape
+      have image : symbols.address source ⟨.binder selectedSlot.binder, indices⟩ =
+          some ⟨.binder actual.binder, indices⟩ := by simp [Symbols.address, binder]
+      obtain ⟨masked, actualStored, actualMask⟩ := meaning.mask stored mask image
+      have actualSelected := typed.source.member_stored _ (lookup_member selected)
+      cases Option.some.inj (actualStored.symm.trans actualSelected)
+      refine ⟨_, none, .owner selected actualMask ?_ (fun unique => mutable.trans (writable unique)), image, rfl⟩
+      rw [typeEq]
+      exact path.erase
+  | @dereference ownerMode reference fields symbol referent type indices region referentQualification qualification canonical
+      carrier live recorded authority carrierPermits path =>
+      obtain ⟨actual, payload, selected, binder, initialized, carrierPath, handle, resident, mappedNodes⟩ :=
+        meaning.placeSelection typed carrier
+      obtain ⟨value, valueTyped, corresponds⟩ := resident
+      cases valueTyped with
+      | reference actualNode finite =>
+          obtain ⟨node, payloadEq, _⟩ := corresponds.reference_inv
+          subst payload
+          obtain ⟨mappedReference, occurrence, mapped⟩ := mappedNodes node (List.mem_singleton_self _)
+          cases occurrence
+          obtain ⟨loan, member, identity, referentEq, modeEq, resolved⟩ := recorded
+          obtain ⟨actualLoan, found, loanImage, actualReferent, actualMode, _, own⟩ :=
+            meaning.row member (identity ▸ mapped)
+          have own : actualLoan.own = true := own.mpr (identity ▸ live)
+          have canonicalImage := meaning.resolve_address resolved loanImage
+          have image := Symbols.address_extend canonicalImage indices
+          obtain ⟨masked, actualStored, actualMask⟩ := meaning.mask stored mask image
+          have parentTarget := (typed.sourceTargets node actualLoan found own).1
+          cases baseEq : actualLoan.target.base with
+          | binder root =>
+              simp only [Context.Target, baseEq] at parentTarget
+              change source.storage actualLoan.target.base = some masked at actualStored
+              rw [baseEq] at actualStored
+              obtain ⟨parentSlot, parentStored, parentPath, _⟩ := parentTarget
+              cases Option.some.inj (parentStored.symm.trans actualStored)
+              have actualReferent : actualLoan.referent = referent := actualReferent.trans referentEq
+              have actualMode : actualLoan.mode = ownerMode := actualMode.trans modeEq
+              have carrierImage : symbols.address source ⟨.binder carrier.slot.binder, carrier.indices⟩ =
+                  some ⟨.binder actual.binder, carrier.indices⟩ := by simp [Symbols.address, binder]
+              have known : checked.RootRepresented carrier.slot.binder :=
+                .inr (.inr ⟨reference.root, carrier.slot, carrier.found, rfl⟩)
+              have permits := meaning.permits (parent := none) (actualParent := none)
+                (target := ⟨.binder carrier.slot.binder, carrier.indices⟩)
+                (fun root equal => Checked.Base.binder.inj equal ▸ known) carrierImage rfl carrierPermits
+              refine ⟨_, some node, .dereference selected ?_ handle initialized carrier.complete permits found own ?_ ?_ ?_,
+                image, congrArg some mapped⟩
+              · simpa only [actualReferent, actualMode] using carrierPath
+              · simpa only [actualReferent] using path.erase
+              · simp only [Context.Target, Origin.extend, baseEq]
+                exact ⟨masked, actualStored, parentPath.append (by simpa only [actualReferent] using path.erase.canonical),
+                  state, actualMask⟩
+              · intro unique
+                exact actualMode.trans (authority unique)
+
+
+theorem ContextMeaning.access_at {home : Module} {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {interpretation : Interpretation} {environment : Environment}
+    (typed : StoreTyped program interpretation source environment)
+    {mode : BorrowMode} {place : AccessPlace} {target : Checked.Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Checked.Reference}
+    (access : Checked.Access program home checked mode place target qualification parent)
+    {slot : Checked.Slot} {state : Initialization} (stored : checked.storage target.base = some slot)
+    (mask : slot.initialization.Access target.fields state) {actual : Origin} {actualParent : Option Nat}
+    (image : symbols.address source target = some actual)
+    (parents : parent.map symbols.reference = actualParent.map some) :
+    AccessType program home source mode place actual type actualParent := by
+  obtain ⟨target, selectedParent, constructed, targetImage, parentImage⟩ := meaning.access typed access stored mask
+  cases Option.some.inj (targetImage.symm.trans image)
+  have same : selectedParent = actualParent := by
+    have equal := parentImage.symm.trans parents
+    cases selectedParent <;> cases actualParent <;> simp_all
+  cases same
+  exact constructed
+
+/-- Selected resources follow the same canonical cell and payload projection as access. -/
+theorem ContextMeaning.selectedResources {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} {payload : Checked.Payload} {type : Ty}
+    (stored : checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload type)
+    (available : checked.ResourcesAvailable (program := program) payload)
+    {actual : Origin} (image : symbols.address source target = some actual)
+    {resident : Grounded.Slot} (actualStored : source.storage actual.base = some resident)
+    (path : CanonicalPath program resident.type actual.fields type)
+    {concrete : SourcePayload} (read : resident.payload.select actual.fields = some concrete) :
+    source.PayloadAvailable concrete := by
+  cases target with
+  | mk base fields =>
+      cases base with
+      | referent reference => rw [meaning.noOpaqueCells reference] at stored; cases stored
+      | binder binder =>
+          obtain ⟨actualSlot, found, shape, _, _, _, product⟩ := meaning.cells _ _ _ stored rfl
+          cases image
+          cases Option.some.inj (found.symm.trans actualStored)
+          have typeEq : resident.type = slot.type := congrArg (fun entry => entry.1) shape
+          exact meaning.resourcesAvailableNodes
+            (fun _ member => product.at_node selected (typeEq ▸ path) read member) available
+
+theorem ContextMeaning.targetResources {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} {payload : Checked.Payload} {type : Ty}
+    (stored : checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload type)
+    (available : checked.ResourcesAvailable (program := program) payload)
+    {actual : Origin} (image : symbols.address source target = some actual)
+    {concrete : SourcePayload} (produced : source.TargetPayload program actual type concrete) :
+    source.PayloadAvailable concrete := by
+  cases produced with
+  | cell actualStored path read =>
+      exact meaning.selectedResources stored selected available image actualStored path read
+
 mutual
 theorem Payload.NoHandles.nodes_eq_nil {payload : Checked.Payload} {state : Initialization}
     {type : Ty} {concrete : SourcePayload} (free : Payload.NoHandles payload)
@@ -17397,7 +17786,6 @@ structure SourceWrite (program : Program) (home : Module) (before : Grounded.Con
   state : Initialization
   old : SourcePayload
   updatedPayload : SourcePayload
-  access : AccessType program home before .unique place target replacement.type parent
   targetImage : symbols.address before checkedTarget = some target
   parentImage : checkedParent.map symbols.reference = parent.map some
   stored : before.storage target.base = some slot
@@ -18232,6 +18620,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
     {place : AccessPlace} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
     (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads place replacement after)
+    (access : AccessType program home before .unique place write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
@@ -18247,9 +18636,9 @@ theorem SourceWrite.execute {program : Program} {home : Module}
       disposed.writeAddress (interpretation.origin write.target) value = some updated ∧
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
-  obtain ⟨known, _, ancestor, resolved, authority, _⟩ := typed.toStoreTyped.resolveAccessMasked write.access
+  obtain ⟨known, _, ancestor, resolved, authority, _⟩ := typed.toStoreTyped.resolveAccessMasked access
   have baseExists : ∃ binder, write.target.base = .binder binder := by
-    have access := write.access
+    have access := access
     cases parent : write.parent with
     | none =>
       rw [parent] at access
@@ -18274,7 +18663,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
       obtain ⟨parentLoan, parentFound, within⟩ := ancestor parent same
       have outer := derived.targetWithin typed.source parentFound found
       exact .inl ⟨⟨within.1.trans outer.1, outer.2.trans within.2⟩,
-        derived.unique typed.source parentFound found (write.access.parentMode parent parentLoan same parentFound rfl)⟩
+        derived.unique typed.source parentFound found (access.parentMode parent parentLoan same parentFound rfl)⟩
     · exact .inr apart
   obtain ⟨resident, disposed, updated, read, disposal, written, state, progress⟩ :=
     typed.assignTarget valueTyped base stored write.path write.mask write.selected write.discard
@@ -18296,7 +18685,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
     (fun node member => (typed.heldOwn node (by simp [payloadNodes_append, payloadNodes, member])).dispose_of_not_mem
       (fun old => write.unprotected node old (by simp [payloadNodes_append, payloadNodes, member])))
     (fun node member => (typed.heldReady node (by simp [payloadNodes_append, payloadNodes, member])).dispose write.old)
-  exact ⟨resident, disposed, updated, resolved, typed.toStoreTyped.carrierPermits write.access,
+  exact ⟨resident, disposed, updated, resolved, typed.toStoreTyped.carrierPermits access,
     authority, typed.toStoreTyped.permits known permission, read, disposal, usable, written,
     write.updated.symm ▸ state, write.updated.symm ▸ progress⟩
 
@@ -18306,6 +18695,7 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
     {place : Place} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
     (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.owner place) replacement after)
+    (access : AccessType program home before .unique (.owner place) write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
@@ -18320,12 +18710,12 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
   obtain ⟨resident, disposed, updated, resolved, _, _, permitted, read, disposal, usable, written, state, progress⟩ :=
-    write.execute permission typed valueTyped
+    write.execute access permission typed valueTyped
   have parentNone : ∀ {target type parent}, AccessType program home before .unique (.owner place) target type parent → parent = none := by
     intro target type parent access
     cases access
     rfl
-  have parent := parentNone write.access
+  have parent := parentNone access
   have ownerResolved : environment.resolvePlace program place = some (interpretation.origin write.target) := by
     cases found : environment.resolvePlace program place <;> simp [Environment.resolveAccess, found] at resolved
     exact congrArg some resolved.1
@@ -18344,6 +18734,7 @@ theorem SourceWrite.executeIndirect {program : Program} {home : Module}
     {reference : Place} {fields : List FieldKey} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
     (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.dereference reference fields) replacement after)
+    (access : AccessType program home before .unique (.dereference reference fields) write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
@@ -18359,8 +18750,9 @@ theorem SourceWrite.executeIndirect {program : Program} {home : Module}
       disposed.writeAddress access.address value = some updated ∧
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
-  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute permission typed valueTyped
+  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute access permission typed valueTyped
   exact ⟨_, resident, disposed, updated, fragments⟩
+
 
 end Grounded.Elaboration
 
@@ -18536,22 +18928,44 @@ theorem Executes.group {body : Expr} {plan : CorePlan} (bodyExec : Executes befo
 
 theorem Executes.read {place : Place} {selected : Checked.Result}
     (selection : Checked.CopySelection program home before.checked place selected)
+    (sameType : result.type = selected.type)
     (actual : Required phase fun executable => Nonempty (SourceRead program home
       (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
       place (result.source executable) (after.source executable))) :
     Executes before held (.read place) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
+  obtain ⟨slot, payload, selectedAt, binder, mask, path, readback, _, nodes⟩ :=
+    (before.related executable).placeSelection state.toStoreTyped selection.toPlaceSelection
+  have image : (before.symbols executable).address (before.source executable)
+      ⟨.binder selection.slot.binder, selection.indices⟩ = some ⟨.binder slot.binder, selection.indices⟩ := by
+    simp [Symbols.address, binder]
+  have same := Option.some.inj (step.targetImage.symm.trans image)
   have known : before.checked.RootRepresented selection.slot.binder :=
     .inr (.inr ⟨place.root, selection.slot, selection.found, rfl⟩)
   have permission := (before.related executable).permits (parent := none) (actualParent := none)
     (target := ⟨.binder selection.slot.binder, selection.indices⟩)
-    (fun binder base => Checked.Base.binder.inj base ▸ known) step.targetImage rfl selection.carrier
-  exact state.executesRead step.selected step.access step.initialized step.path step.provenance
-    step.available step.permission permission step.copied
+    (fun binder base => Checked.Base.binder.inj base ▸ known) image rfl selection.carrier
+  have sourceStored := step.stored
+  rw [same] at sourceStored
+  have actualStored := state.source.member_stored _ (lookup_member selectedAt)
+  have slotEq : slot = step.slot := Option.some.inj (actualStored.symm.trans sourceStored)
+  subst slot
+  have selectedPayload := step.provenance
+  rw [same] at selectedPayload
+  have path : PathType program home step.slot.type place.fields selection.indices (result.source executable).type := by
+    change PathType program home step.slot.type place.fields selection.indices result.type
+    rw [sameType]
+    exact path
+  have usable := (before.related executable).resourcesAvailableNodes nodes selection.available
+  have payloadEq := Option.some.inj (readback.symm.trans selectedPayload)
+  rw [payloadEq] at usable
+  exact state.executesRead selectedAt mask selection.complete path selectedPayload
+    usable step.permission permission step.copied
 
 theorem Executes.move {place : Place}
     (selection : Checked.PlaceSelection program home before.checked place result.checked)
+    (available : before.checked.ResourcesAvailable (program := program) result.payload.checked)
     (free : before.checked.LocalFree (program := program) ⟨.binder selection.slot.binder, selection.indices⟩)
     (actual : Required phase fun executable => Nonempty (SourceMove program home
       (before.source executable) (before.symbols executable) ⟨.binder selection.slot.binder, selection.indices⟩
@@ -18559,14 +18973,31 @@ theorem Executes.move {place : Place}
     Executes before held (.move place) result after .leaf := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := actual executable
+  obtain ⟨slot, payload, selectedAt, binder, mask, path, readback, _, nodes⟩ :=
+    (before.related executable).placeSelection state.toStoreTyped selection
+  have image : (before.symbols executable).address (before.source executable)
+      ⟨.binder selection.slot.binder, selection.indices⟩ = some ⟨.binder slot.binder, selection.indices⟩ := by
+    simp [Symbols.address, binder]
+  have same := Option.some.inj (step.targetImage.symm.trans image)
   have known : before.checked.RootRepresented selection.slot.binder :=
     .inr (.inr ⟨place.root, selection.slot, selection.found, rfl⟩)
   have unobserved := (before.related executable).free
     (target := ⟨.binder selection.slot.binder, selection.indices⟩)
-    (fun binder base => Checked.Base.binder.inj base ▸ known) step.targetImage free
-  rw [step.updated]
-  exact state.executesMove step.selected step.access step.initialized step.path step.provenance
-    step.available unobserved step.cleared
+    (fun binder base => Checked.Base.binder.inj base ▸ known) image free
+  have sourceStored := step.stored
+  rw [same] at sourceStored
+  have actualStored := state.source.member_stored _ (lookup_member selectedAt)
+  have slotEq : slot = step.slot := Option.some.inj (actualStored.symm.trans sourceStored)
+  subst slot
+  have provenance := step.provenance
+  have cleared := step.cleared
+  rw [same] at provenance cleared
+  have usable := (before.related executable).resourcesAvailableNodes nodes available
+  have payloadEq := Option.some.inj (readback.symm.trans provenance)
+  rw [payloadEq] at usable
+  rw [step.updated, same]
+  exact state.executesMove selectedAt mask selection.complete path provenance
+    usable unobserved cleared
 
 theorem Executes.implicitMove {place : Place} (body : Executes before held (.move place) result after .leaf) :
     Executes before held (.read place) result after .implicitMove := by
@@ -18576,7 +19007,11 @@ theorem Executes.implicitMove {place : Place} (body : Executes before held (.mov
 
 theorem Executes.borrow {mode : BorrowMode} {place : AccessPlace} {referent : Ty}
     {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
+    {qualification : QualifiedTy Region referent} {payload : Checked.Payload}
+    (access : Checked.Access program home before.checked mode place target qualification parent)
     (stored : before.checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload referent)
+    (available : before.checked.ResourcesAvailable (program := program) payload)
     (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) mode parent target)
     (parentReady : before.checked.ParentReady program parent)
@@ -18592,10 +19027,13 @@ theorem Executes.borrow {mode : BorrowMode} {place : AccessPlace} {referent : Ty
     (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage step.parentImage permitted
   have payload : result.payload.source rfl = .reference (before.source rfl).loans.length :=
     congrArg ResultType.payload step.produced
+  obtain ⟨maskState, mask, _⟩ := ready slot stored
+  have sourceAccess := before.meaning.related.access_at state.toStoreTyped access stored mask step.targetImage step.parentImage
+  have usable := before.meaning.related.targetResources stored selected available step.targetImage step.provenance
   simpa only [step.updated, step.produced, payload] using
-    state.executesBorrow step.access
+    state.executesBorrow sourceAccess
       (before.meaning.related.accessReady stored ready parentReady step.targetImage step.parentImage)
-      permission step.finite step.provenance step.available
+      permission step.finite step.provenance usable
 
 theorem Executes.reborrow {mode : BorrowMode} {place : Place}
     (body : Executes before held (.borrow mode (.dereference place [])) result after .leaf) :
@@ -18610,7 +19048,12 @@ theorem Executes.reborrow {mode : BorrowMode} {place : Place}
 
 theorem Executes.dereference {reference : Place} {fields : List FieldKey}
     {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
+    {selectedType : Ty} {qualification : QualifiedTy Region selectedType} {payload : Checked.Payload}
+    (access : Checked.Access program home before.checked .shared (.dereference reference fields) target qualification parent)
+    (sameType : result.type = selectedType)
     (stored : before.checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload selectedType)
+    (available : before.checked.ResourcesAvailable (program := program) payload)
     (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) .shared parent target)
     (parentReady : before.checked.ParentReady program parent)
@@ -18622,13 +19065,26 @@ theorem Executes.dereference {reference : Place} {fields : List FieldKey}
   obtain ⟨step⟩ := actual executable
   have permission := (before.related executable).permits
     (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage step.parentImage permitted
-  exact state.executesDereference step.access
+  obtain ⟨maskState, mask, _⟩ := ready slot stored
+  have sourceAccess := (before.related executable).access_at state.toStoreTyped access stored mask step.targetImage step.parentImage
+  have sourceAccess : AccessType program home (before.source executable) .shared (.dereference reference fields) step.target (result.source executable).type step.parent := by
+    change AccessType program home (before.source executable) .shared (.dereference reference fields) step.target result.type step.parent
+    rw [sameType]
+    exact sourceAccess
+  have selectedResult : Checked.Payload.At program slot.payload slot.type target.fields payload result.type := by
+    rw [sameType]
+    exact selected
+  have usable := (before.related executable).targetResources stored selectedResult available step.targetImage step.provenance
+  exact state.executesDereference sourceAccess
     ((before.related executable).accessReady stored ready parentReady step.targetImage step.parentImage)
-    permission step.provenance step.available step.permission step.copied
+    permission step.provenance usable step.permission step.copied
 
 theorem Executes.moveIndirect {reference : Place} {fields : List FieldKey}
     {target : Checked.Address} {parent : Checked.Reference} {slot : Checked.Slot}
+    (access : Checked.Access program home before.checked .unique (.dereference reference fields) target result.qualification (some parent))
     (stored : before.checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields result.payload.checked result.type)
+    (available : before.checked.ResourcesAvailable (program := program) result.payload.checked)
     (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) .unique (some parent) target)
     (parentReady : before.checked.ParentReady program (some parent))
@@ -18642,11 +19098,15 @@ theorem Executes.moveIndirect {reference : Place} {fields : List FieldKey}
   have permission := (before.related executable).permits (parent := some parent) (actualParent := some step.node)
     (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage
     (congrArg some step.parentImage) permitted
+  obtain ⟨maskState, mask, _⟩ := ready slot stored
+  have sourceAccess := (before.related executable).access_at (actualParent := some step.node) state.toStoreTyped access stored mask step.targetImage (congrArg some step.parentImage)
+  have usable := (before.related executable).selectedResources stored selected available
+    step.targetImage step.stored step.path step.provenance
   rw [step.updated]
-  exact state.executesMoveIndirect step.access
+  exact state.executesMoveIndirect sourceAccess
     ((before.related executable).accessReady (actualParent := some step.node) stored ready parentReady
       step.targetImage (congrArg some step.parentImage)) permission step.stored step.path
-    step.provenance step.available step.pending step.cleared
+    step.provenance usable step.pending step.cleared
 
 end Grounded.Elaboration
 
@@ -18823,8 +19283,9 @@ theorem Executes.assign {before middle written after : Point program phase} {hel
   obtain ⟨step⟩ := write.actual executable
   have permission := (middle.related executable).permits
     (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
+  have sourceAccess := (middle.related executable).access_at initialState.toStoreTyped write.access write.stored write.mask step.targetImage step.parentImage
   obtain ⟨old, disposed, updated, resolved, free, read, disposal, usable, changed, updatedState, writeProgress⟩ :=
-    step.executeOwner permission initialState replacementTyped
+    step.executeOwner sourceAccess permission initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -18844,8 +19305,9 @@ theorem Executes.assignIndirect {before middle written after : Point program pha
   obtain ⟨step⟩ := write.actual executable
   have permission := (middle.related executable).permits
     (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
+  have sourceAccess := (middle.related executable).access_at initialState.toStoreTyped write.access write.stored write.mask step.targetImage step.parentImage
   obtain ⟨access, old, disposed, updated, resolved, carrier, authority, permitted, read, disposal, usable, changed,
-    updatedState, writeProgress⟩ := step.executeIndirect permission initialState replacementTyped
+    updatedState, writeProgress⟩ := step.executeIndirect sourceAccess permission initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -19867,6 +20329,9 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
       refine ⟨actual, found, rfl, rfl, rfl, rfl, (cells.produced _ _ found).meaning ?_⟩
       simp [Symbols.schema, symbols, owner, found, SourcePayload.projectComponents]
   noOpaqueCells := fun _ => rfl
+  absent := by
+    intro binder missing
+    exact Option.map_eq_none_iff.mp missing
   rootCoverage := by
     intro binder slot stored
     refine ⟨binder, cells.slot (.binder binder) slot, ?_, rfl⟩
@@ -19884,6 +20349,24 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
     refine ⟨entry.2, rfl, entry.1, found, address_meaning source entry.1.target, rfl, rfl, ?_, ?_⟩
     · simp [loan, symbols, Symbols.reference, schemaCoordinates, Option.map_map, Function.comp_def]
     · exact (cells.notEnded found).symm
+  loanIdentity := by
+    have recorded : ∀ row, cells.context.HasLoan program row → ∃ node, row.reference = .existing node := by
+      intro row ⟨entry, member, rowProof⟩
+      change entry ∈ (source.loans.zipIdx.map loan).map Checked.LoanEntry.direct at member
+      obtain ⟨direct, directMember, equal⟩ := List.mem_map.mp member
+      subst entry
+      cases rowProof
+      obtain ⟨original, _, equal⟩ := (List.mem_map (f := loan)).mp directMember
+      cases equal
+      exact ⟨original.2, rfl⟩
+    intro first second node firstRow secondRow firstImage secondImage
+    obtain ⟨firstNode, firstIdentity⟩ := recorded first firstRow
+    obtain ⟨secondNode, secondIdentity⟩ := recorded second secondRow
+    rw [firstIdentity] at firstImage
+    rw [secondIdentity] at secondImage
+    have firstEq : firstNode = node := Option.some.inj firstImage
+    have secondEq : secondNode = node := Option.some.inj secondImage
+    exact firstIdentity.trans ((congrArg Checked.Reference.existing (firstEq.trans secondEq.symm)).trans secondIdentity.symm)
   activeCoverage := by
     intro node actual found _
     refine ⟨loan (actual, node), ?_, rfl⟩
@@ -20554,13 +21037,13 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .integer fits => exact Executes.integer fits
   | .character valid => exact Executes.character valid
   | .group body => exact Executes.group body.execution_correctness
-  | .read selection _ _ _ actual => exact Executes.read selection actual
-  | .move selection _ free _ _ _ actual => exact Executes.move selection free actual
+  | .read selection sameType _ _ actual => exact Executes.read selection (congrArg Sigma.fst sameType) actual
+  | .move selection available free _ _ _ actual => exact Executes.move selection available free actual
   | .implicitMove body _ => exact Executes.implicitMove body.execution_correctness
-  | .borrow _ _ ready stored _ _ _ permitted _ _ _ parentReady actual => exact Executes.borrow stored ready permitted parentReady actual
+  | .borrow access _ ready stored selected available _ permitted _ _ _ parentReady actual => exact Executes.borrow access stored selected available ready permitted parentReady actual
   | .reborrow body _ => exact Executes.reborrow body.execution_correctness
-  | .dereference _ ready stored _ _ _ permitted _ _ _ parentReady actual => exact Executes.dereference stored ready permitted parentReady actual
-  | .moveIndirect _ ready permitted stored _ _ _ _ _ parentReady actual => exact Executes.moveIndirect stored ready permitted parentReady actual
+  | .dereference access ready stored selected _ available permitted sameType _ _ parentReady actual => exact Executes.dereference access (congrArg Sigma.fst sameType) stored selected available ready permitted parentReady actual
+  | .moveIndirect access ready permitted stored selected available _ _ _ parentReady actual => exact Executes.moveIndirect access stored selected available ready permitted parentReady actual
   | .tuple _ first rest _ => exact Executes.tuple first.execution_correctness rest.execution_correctness
   | .array _ body types finite size => exact Executes.array body.execution_correctness (congrArg Sigma.fst types) finite size
   | .construct shape _ body finite _ => exact Executes.construct shape.erase body.execution_correctness finite

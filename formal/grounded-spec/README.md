@@ -268,10 +268,12 @@ reference names alone do not establish separation. `KnownOverlap` is removed.
 
 Ordinary reads, moves, borrows/reborrows, indirect reads/moves, and direct/indirect
 assignments consume this bridge through the general execution theorem. Their
-source-operation records no longer assume the outer access permission or owner
-freedom. They retain address/parent correspondence and other source witnesses:
-access selection (including carrier permissions), nested-resource availability,
-Copy, and post-context construction are not yet derived solely from checking.
+source-operation records no longer assume outer permission, owner freedom,
+reference-carrier access, named selection, mask access, or path typing.
+`ContextMeaning.placeSelection` and `access` construct those facts from checked
+selection, recorded loan resolution, and the current typed state. Address/parent
+correspondence, payload mutations, Copy, and general successor construction
+remain explicit obligations.
 `ContextMeaning.ready` derives target readiness from the checked mask and an
 existing canonical cell. The checked `ParentReady` obligation additionally
 selects the parent from the authoritative loan table and checks the mask of its
@@ -290,12 +292,18 @@ transports this resolution without introducing opaque duplicate cells.
 from checked occurrences and their interpretation. Known-reference-free schemas
 have no resource occurrences; canonical import proves both occurrence
 faithfulness and `Cells.resourcesAvailable`, including inactive enum alternatives.
-The remaining source-operation availability premises still need migration
-through the selected-payload interpretation proof.
+`PayloadMeaning.at_node` and `select_node` connect selected source residents to
+checked occurrences. `selectedResources` and `targetResources` feed the ordinary
+read/move/borrow and indirect read/move execution consumers; their source records
+no longer contain independent availability premises. The general execution
+theorem passes the original checked resource obligations into these proofs.
+`ContextMeaning.endOwn` constructs correspondence after ending a recorded handle;
+its identity invariant distinguishes handles without forbidding aliased targets.
+The remaining ending and ordered-cleanup admission cutover is not yet complete.
 
 Separation or restoration needing unresolved external alias/storage contracts
 is not established by these positive local judgments. These cutovers close
-outer permission and access-readiness transport, not general executable realization.
+permission, access selection and resource transport, not general executable realization.
 
 Reborrow admission now bounds the result region by the actual selected carrier
 region. `HasType.borrow` consumes `Access.ParentOutlives`; both explicit borrowed
@@ -446,7 +454,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,987
+warnings as errors. The exhaustive defining-module audit covered **7,990
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
