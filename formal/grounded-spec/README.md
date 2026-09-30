@@ -270,11 +270,15 @@ Ordinary reads, moves, borrows/reborrows, indirect reads/moves, and direct/indir
 assignments consume this bridge through the general execution theorem. Their
 source-operation records no longer assume the outer access permission or owner
 freedom. They retain address/parent correspondence and other source witnesses:
-access selection (including carrier permissions), readiness, nested-resource
-availability, Copy, and post-context construction are not yet derived solely
-from checking. Separation needing an unresolved external alias contract is not
-established by the current positive local judgment. This cutover closes the
-outer permission transport boundary, not general executable realization.
+access selection (including carrier permissions), parent-loan restoration,
+nested-resource availability, Copy, and post-context construction are not yet
+derived solely from checking. `ContextMeaning.ready` does derive target
+readiness from the checked mask and an existing canonical cell, and the general
+borrow/reborrow and indirect read/move consumers use it instead of a source
+target-readiness assumption. A ready subfield does not establish restoration of
+the whole parent loan. Separation needing an unresolved external alias contract
+is not established by the current positive local judgment. These cutovers close
+outer permission and target-readiness transport, not general executable realization.
 
 Reborrow admission now bounds the result region by the actual selected carrier
 region. `HasType.borrow` consumes `Access.ParentOutlives`; both explicit borrowed
@@ -425,7 +429,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,959
+warnings as errors. The exhaustive defining-module audit covered **7,960
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
