@@ -15285,6 +15285,48 @@ inductive Access (program : Program) (home : Module) (context : Context) :
       Access program home context mode (.dereference reference fields)
         ((context.referenceTarget symbol).extend indices) qualification (some symbol)
 
+/-- Reborrowing inherits the lifetime of the selected carrier. Owned access has
+no parent carrier; its root-scope obligation is separate and is not established
+by this predicate. This projects the existing access derivation, not a new walk. -/
+def Access.ParentOutlives {program : Program} {home : Module} {context : Context}
+    {mode : BorrowMode} {place : AccessPlace} {target : Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Reference}
+    (access : Access program home context mode place target qualification parent)
+    (result : Region) : Prop := by
+  cases access with
+  | owned => exact True
+  | @dereference ownerMode reference fields symbol referent type indices region =>
+      exact region.Outlives result
+
+theorem Access.ParentOutlives.shorten {program : Program} {home : Module} {context : Context}
+    {mode : BorrowMode} {place : AccessPlace} {target : Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Reference}
+    {access : Access program home context mode place target qualification parent}
+    {first second : Region} (bounded : access.ParentOutlives first)
+    (shorter : first.Outlives second) : access.ParentOutlives second := by
+  cases access with
+  | owned => exact True.intro
+  | dereference => exact Region.Outlives.trans bounded shorter
+
+
+/-- Every use allowed by a borrowed subaddress's result region is also in the
+selected carrier's region. The witness is the actual access selection, so equal
+referent types or another alias cannot substitute a different lifetime. -/
+theorem Access.ParentOutlives.carrier {program : Program} {home : Module} {context : Context}
+    {mode : BorrowMode} {reference : Place} {fields : List FieldKey} {target : Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Reference}
+    {access : Access program home context mode (.dereference reference fields) target qualification parent}
+    {result : Region} (bounded : access.ParentOutlives result) :
+    ∃ (symbol : Reference) (referent : Ty) (ownerMode : BorrowMode) (region : Region)
+      (referentQualification : QualifiedTy Region referent),
+      Nonempty (PlaceSelection program home context reference
+        ⟨.reference referent ownerMode, .reference symbol referent ownerMode,
+          .reference region referentQualification ownerMode⟩) ∧
+      (∀ point, result.Contains point → region.Contains point) := by
+  cases access with
+  | dereference carrier => exact ⟨_, _, _, _, _, ⟨carrier⟩, bounded⟩
+
+
 end Grounded.Checked
 namespace Grounded.Elaboration
 set_option autoImplicit false
@@ -17157,6 +17199,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       {referent : Ty} {result : Result phase} {slot : Checked.Slot} {payload : Checked.Payload}
       {region : Region} {qualification : QualifiedTy Region referent}
       (access : Checked.Access program home before.checked mode place target qualification parent)
+      (lifetime : access.ParentOutlives region)
       (ready : before.checked.TargetReady target)
       (stored : before.checked.storage target.base = some slot)
       (selected : Checked.Payload.At program slot.payload slot.type target.fields payload referent)
@@ -19064,8 +19107,8 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .move selection available free cleared updated evidence actual =>
     exact .move selection available free cleared updated evidence.erase checkingRequired
   | .implicitMove body noncopy => exact .implicitMove body.erase noncopy
-  | .borrow access ready stored selected available finite permitted produced updated evidence actual =>
-    exact .borrow access ready stored selected available finite permitted produced updated evidence.erase checkingRequired
+  | .borrow access lifetime ready stored selected available finite permitted produced updated evidence actual =>
+    exact .borrow access lifetime ready stored selected available finite permitted produced updated evidence.erase checkingRequired
   | .reborrow body type => exact .reborrow body.erase type
   | @HasType.dereference _ phase home before after held reference fields target parent selected result slot access ready stored provenance permission available permitted sameType copy evidence actual =>
     exact .dereference (selected := selected.erase) access ready stored provenance permission available permitted sameType copy evidence.erase checkingRequired
@@ -20041,7 +20084,7 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .read _ _ _ _ actual => exact Executes.read actual
   | .move _ _ _ _ _ _ actual => exact Executes.move actual
   | .implicitMove body _ => exact Executes.implicitMove body.execution_correctness
-  | .borrow _ _ _ _ _ _ _ _ _ _ actual => exact Executes.borrow actual
+  | .borrow _ _ _ _ _ _ _ _ _ _ _ actual => exact Executes.borrow actual
   | .reborrow body _ => exact Executes.reborrow body.execution_correctness
   | .dereference _ _ _ _ _ _ _ _ _ _ actual => exact Executes.dereference actual
   | .moveIndirect _ _ _ _ _ _ _ _ _ actual => exact Executes.moveIndirect actual

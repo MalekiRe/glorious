@@ -248,6 +248,15 @@ and mutation preserve that closure. Parent and descendant permissions remain
 distinct, including suspended unique parents, shared aliases and disjoint unique
 fields.
 
+Reborrow admission now bounds the result region by the actual selected carrier
+region. `HasType.borrow` consumes `Access.ParentOutlives`; both explicit borrowed
+subaddresses and expected-reference reborrows use this producer. Its carrier
+theorem proves inclusion of every permitted result use in that carrier region,
+and lifetime shortening preserves the bound. Erasure retains the obligation;
+the general execution and cleanup proofs consume the strengthened admission.
+Owned-root scope bounds and runtime interpretation of these regions remain open;
+this parent-lifetime check does not establish either of them.
+
 Pending arguments and returned nested references retain Own and restored-target
 obligations. Ordinary ending resolves the **current** carrier field, including
 post-body selection. Sequence disposal, overwrites and cleanup cannot end a
@@ -388,7 +397,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,886
+warnings as errors. The exhaustive defining-module audit covered **7,899
 declarations, including 312 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
