@@ -87,6 +87,9 @@ constructor fields rather than inventing erased field types. Checked-to-source
 cell correspondence requires equality of the complete qualified type; canonical
 entry import and phase erasure preserve that correspondence. The general
 execution and cleanup correctness proofs consume these migrated producers.
+Dormant pattern alternatives must agree with the common result on the complete
+qualified type, not just its erased shape. Their checking-only derivations and
+the general arm execution/expected-type proofs retain this requirement.
 
 Qualified annotations/coercions, region-validity interpretation and source
 return provenance remain open. A carried qualifier is

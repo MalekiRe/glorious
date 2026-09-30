@@ -17156,7 +17156,8 @@ inductive ArmsType (program : Program) : (phase : Phase) → Module → Point pr
       (useful : Useful program subject.type previous pattern)
       (bodyTyped : HasType program .checking home (patternBodyPoint patternAfter bindings)
         (held.map Payload.erase) body.source hypotheticalResult bodyAfter body.plan expected)
-      (resultType : hypotheticalResult.type = result.type)
+      (resultType : (⟨hypotheticalResult.type, hypotheticalResult.qualification⟩ :
+        (type : Ty) × QualifiedTy Region type) = ⟨result.type, result.qualification⟩)
       (cleanup : CleanupStep program bodyAfter cleaned (held.map Payload.erase ++ [hypotheticalResult.payload]) bindings.length)
       (tailTyped : ArmsType program phase home before held subject result (previous ++ [pattern]) rest after expected) :
       ArmsType program phase home before held subject result previous ((pattern, body) :: rest) after expected
@@ -18527,7 +18528,8 @@ theorem ExecutesArms.dormant
     (_useful : Useful program subject.type previous pattern)
     (_bodyTyped : HasType program .checking home (patternBodyPoint patternAfter bindings)
       (held.map Payload.erase) body.source hypotheticalResult bodyAfter body.plan expected)
-    (_resultType : hypotheticalResult.type = result.type)
+    (_resultType : (⟨hypotheticalResult.type, hypotheticalResult.qualification⟩ :
+      (type : Ty) × QualifiedTy Region type) = ⟨result.type, result.qualification⟩)
     (_cleanup : CleanupStep program bodyAfter cleaned (held.map Payload.erase ++ [hypotheticalResult.payload]) bindings.length)
     (_tailTyped : ArmsType program phase home before held subject result (previous ++ [pattern]) rest after expected)
     (_bodyExecutes : Executes (patternBodyPoint patternAfter bindings) (held.map Payload.erase)
@@ -20304,7 +20306,8 @@ theorem ArmsType.expected_type {phase : Phase} {home : Module}
   match typed with
   | .empty => intro nonempty; exact False.elim (nonempty rfl)
   | .dormant _ _ _ _ body resultType _ _ =>
-    intro _ type expected; exact resultType.symm.trans (body.expected_type type expected)
+    intro _ type expected
+    exact (congrArg Sigma.fst resultType).symm.trans (body.expected_type type expected)
   | .clause _ _ _ _ body _ _ _ _ => intro _; exact body.expected_type
 termination_by structural typed
 end
