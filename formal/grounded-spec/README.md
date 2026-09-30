@@ -123,19 +123,28 @@ The general execution, phase-erasure, reference-read selection and call-signatur
 proofs consume this constructor. Successive coercions compose rather than
 recovering a longer lifetime from canonical storage.
 
-Decoded `TypeExpr` annotations and aliases now retain qualified semantic regions.
-`ResolvesType` produces the full qualified type in one traversal; its canonical
-shape is the result index, not a second resolution. Its determinism theorem
-proves equality of the complete qualified product. Explicit local bindings and
-constants consume this result without discarding qualifiers. Constant inversion
-tracks any outer shortening, and pattern-constant normalization derives its
-canonical literal type from that same qualified resolution. These changes are
-consumed by the general normalization, erasure and execution proofs.
+Decoded `TypeExpr` annotations and aliases retain lifetime syntax, not preselected
+semantic regions. `ResolvesType` uses the existing finite input-lifetime resolver
+under the declaration-owned `Invocation`. Named occurrences use that activation's
+exact substitution; omitted occurrences extend it with fresh inference variables
+constrained by the qualified initializer. No annotation-derived variable is
+misrepresented as a lexical binding scope. The canonical type remains the result
+index, and `type_unique` proves its uniqueness. Complete qualified results need
+not be unique before omitted lifetimes have been inferred.
 
-Body-annotation lifetime-name resolution into semantic regions and region-validity
-interpretation remain open. Declared lifetime constraints 'a:'b now resolve into
-the signature product and are discharged exactly at each call, but the decoded
-bound syntax is not yet populated from source. Return provenance is now derived
+Actual named calls install `Invocation.call signature lifetimes` during parameter
+preparation. Local binding and pattern preparation retain this scope; hiding
+resets it for declaration evaluation, return restores the caller's scope, and
+joins preserve it. `PrepareStep.named_annotation` proves that a named reference
+annotation in the prepared body uses exactly the caller-selected lifetime,
+even with nested omitted lifetimes. Constants resolve under the empty root
+scope. General normalization, phase erasure and execution proofs consume the
+migrated annotation and preparation judgments.
+
+Runtime region-validity interpretation and owner-root lexical scope integration
+remain open. Declared lifetime constraints 'a:'b resolve into the signature
+product and are discharged exactly at each call, but decoded lifetime and bound
+syntax is not yet populated by a source parser. Return provenance is derived
 from checked loan parents and interpreted source products without a singleton
 input restriction. Neither that ancestry nor a discharged outlives bound proves
 runtime validity for the declared region; full declared-lifetime conformance
@@ -397,8 +406,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,899
-declarations, including 312 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,942
+declarations, including 318 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no

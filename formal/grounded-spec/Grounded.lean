@@ -583,42 +583,16 @@ theorem NominalView.unfold {R : Type} {declarations : QualifiedDeclarations} {st
 end Grounded
 
 namespace Grounded
-/-- Decoded type expressions retain qualified semantic regions and alias references.
-Lifetime-name resolution into these regions is an earlier source obligation. -/
+/-- Decoded annotation syntax retains lifetime names and aliases. The actual
+invocation resolves names; omitted occurrences are constrained by the initializer. -/
 inductive TypeExpr where
-  | concrete {shape : Ty} (type : QualifiedTy Region shape)
+  | concrete {shape : Ty} (type : QualifiedTy LifetimeSyntax shape)
   | alias (name : String)
   | tuple (head : TypeExpr) (tail : List TypeExpr)
   | array (element : TypeExpr) (length : Nat)
 
 abbrev Aliases := String → Option TypeExpr
 
-mutual
-/-- One alias expansion produces the full qualified type, including its canonical index. -/
-inductive ResolvesType (aliases : Aliases) : TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
-  | concrete {shape : Ty} (type : QualifiedTy Region shape) : ResolvesType aliases (.concrete type) type
-  | alias {name : String} {body : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
-      (declared : aliases name = some body) (expanded : ResolvesType aliases body type) :
-      ResolvesType aliases (.alias name) type
-  | tuple {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
-      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
-      (headResolved : ResolvesType aliases head firstType) (tailResolved : ResolvesTypes aliases tail restTypes) :
-      ResolvesType aliases (.tuple head tail) (.tuple firstType restTypes)
-  | array {element : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape} (length : Nat)
-      (resolved : ResolvesType aliases element type) :
-      ResolvesType aliases (.array element length) (.array type length)
-inductive ResolvesTypes (aliases : Aliases) : List TypeExpr → {shapes : List Ty} → QualifiedTys Region shapes → Prop where
-  | nil : ResolvesTypes aliases [] .nil
-  | cons {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
-      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
-      (headResolved : ResolvesType aliases head firstType) (tailResolved : ResolvesTypes aliases tail restTypes) :
-      ResolvesTypes aliases (head :: tail) (.cons firstType restTypes)
-end
-
-inductive Annotation (aliases : Aliases) : Option TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
-  | inferred {shape : Ty} (type : QualifiedTy Region shape) : Annotation aliases none type
-  | explicit {source : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
-      (resolved : ResolvesType aliases source type) : Annotation aliases (some source) type
 
 
 
@@ -1771,6 +1745,87 @@ def ResolvedSignature.Satisfies {source : FunctionSignature} (signature : Resolv
       (long.instantiateBound signature.supply parameters (signature.bounds_closed long short member).1)
       (short.instantiateBound signature.supply parameters (signature.bounds_closed long short member).2)
 
+
+
+/-- Declaration-owned lifetime names and the exact finite substitution for one
+activation. This is static annotation scope, not runtime storage lifetime. -/
+structure Invocation where
+  environment : LifetimeEnvironment
+  supply : Nat
+  parameters : Fin supply → Region
+  bound : environment.count ≤ supply
+
+def Invocation.root : Invocation := ⟨⟨[], List.nodup_nil⟩, 0, Fin.elim0, Nat.le_refl 0⟩
+
+def Invocation.call {declaration : FunctionSignature} (signature : ResolvedSignature declaration)
+    (parameters : Fin signature.supply → Region) : Invocation :=
+  ⟨declaration.lifetimes, signature.supply, parameters, signature.inputResolution.monotone⟩
+
+/-- Annotation-local inference extends, but never replaces, the activation's
+finite substitution. Fresh omitted occurrences are existential inference variables;
+they are not fabricated lexical binding scopes. -/
+def Invocation.Extends (scope : Invocation) {count : Nat} (larger : scope.supply ≤ count)
+    (parameters : Fin count → Region) : Prop :=
+  ∀ index : Fin scope.supply, parameters ⟨index.val, Nat.lt_of_lt_of_le index.isLt larger⟩ = scope.parameters index
+
+mutual
+inductive ResolvesType (aliases : Aliases) (scope : Invocation) :
+    TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
+  | concrete {shape : Ty} {source : QualifiedTy LifetimeSyntax shape}
+      {formal : QualifiedTy RegionTerm shape} {count : Nat}
+      (resolved : ResolvesInputType scope.environment scope.supply source formal count)
+      (parameters : Fin count → Region) (extension : scope.Extends resolved.monotone parameters) :
+      ResolvesType aliases scope (.concrete source)
+        (formal.mapBounded (RegionTerm.SignatureBound count)
+          (RegionTerm.instantiateBound count parameters) (resolved.closed scope.bound))
+  | alias {name : String} {body : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
+      (declared : aliases name = some body) (expanded : ResolvesType aliases scope body type) :
+      ResolvesType aliases scope (.alias name) type
+  | tuple {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
+      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
+      (headResolved : ResolvesType aliases scope head firstType)
+      (tailResolved : ResolvesTypes aliases scope tail restTypes) :
+      ResolvesType aliases scope (.tuple head tail) (.tuple firstType restTypes)
+  | array {element : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape} (length : Nat)
+      (resolved : ResolvesType aliases scope element type) :
+      ResolvesType aliases scope (.array element length) (.array type length)
+inductive ResolvesTypes (aliases : Aliases) (scope : Invocation) :
+    List TypeExpr → {shapes : List Ty} → QualifiedTys Region shapes → Prop where
+  | nil : ResolvesTypes aliases scope [] .nil
+  | cons {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
+      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
+      (headResolved : ResolvesType aliases scope head firstType)
+      (tailResolved : ResolvesTypes aliases scope tail restTypes) :
+      ResolvesTypes aliases scope (head :: tail) (.cons firstType restTypes)
+end
+
+inductive Annotation (aliases : Aliases) (scope : Invocation) :
+    Option TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
+  | inferred {shape : Ty} (type : QualifiedTy Region shape) : Annotation aliases scope none type
+  | explicit {source : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
+      (resolved : ResolvesType aliases scope source type) : Annotation aliases scope (some source) type
+
+
+/-- A named outer annotation cannot select a different region from the activation,
+even when nested omitted lifetimes allocate additional inference variables. -/
+theorem ResolvesType.named_reference {aliases : Aliases} {scope : Invocation}
+    {name : String} {index : Fin scope.environment.count} {shape : Ty}
+    {source : QualifiedTy LifetimeSyntax shape} {mode : BorrowMode}
+    {result : QualifiedTy Region (.reference shape mode)}
+    (resolved : ResolvesType aliases scope (.concrete (.reference (.named name) source mode)) result)
+    (found : scope.environment.names name = some index) :
+    ∃ referent, result = .reference
+      (scope.parameters ⟨index.val, Nat.lt_of_lt_of_le index.isLt scope.bound⟩) referent mode := by
+  cases resolved with
+  | concrete resolved parameters extension =>
+    cases resolved with
+    | reference _ outer inner =>
+      cases outer with
+      | named selected =>
+        cases Option.some.inj (found.symm.trans selected)
+        simp only [QualifiedTy.mapBounded, RegionTerm.instantiateBound]
+        exact ⟨_, congrArg (fun region => QualifiedTy.reference region _ mode)
+          (extension ⟨index.val, Nat.lt_of_lt_of_le index.isLt scope.bound⟩)⟩
 
 
 /-- Direct, noncapturing, effect-free functions; omitted results denote unit. -/
@@ -5549,6 +5604,7 @@ structure Context where
   ended : List Payload
   nextBinder : Nat
   nextSymbol : Nat
+  invocation : Invocation := Invocation.root
 
 def Context.directLoans (context : Context) : List Loan :=
   context.loans.filterMap fun entry => match entry with
@@ -5618,7 +5674,7 @@ namespace Grounded.Checked
 set_option autoImplicit false
 variable {program : Program}
 
-def Context.empty : Context := ⟨[], fun _ => none, [], [], 0, 0⟩
+def Context.empty : Context := ⟨[], fun _ => none, [], [], 0, 0, Invocation.root⟩
 
 def Address.extend (address : Address) (fields : List Nat) : Address :=
   { address with fields := address.fields ++ fields }
@@ -5668,10 +5724,10 @@ def Context.LocalPermits (context : Context) (mode : BorrowMode)
     (∃ reference, parent = some reference ∧ context.Derived (program := program) reference loan.reference) ∨
       (mode = .shared ∧ loan.mode = .shared) ∨ ¬ target.KnownOverlap loan.target
 
-def Context.hide (context : Context) : Context := { context with names := [] }
+def Context.hide (context : Context) : Context := { context with names := [], invocation := Invocation.root }
 
 def Context.resume (caller callee : Context) : Context :=
-  { callee with names := caller.names }
+  { callee with names := caller.names, invocation := caller.invocation }
 
 def Context.bind (context : Context) (name : String) (mutable : Bool) (result : Result) : Context :=
   { context with
@@ -11676,7 +11732,7 @@ inductive NormalizesPattern (program : Program) : PatternSource → PatternPlan 
       NormalizesPattern program (.node head source) (.node plans) (.node head result)
   | constantValue {name : String} {declaration : ConstantDecl} {type : Ty} {value : Value} {plan : CorePlan}
       {qualification : QualifiedTy Region type}
-      (declared : program.constants name = some declaration) (resolved : ResolvesType program.aliases declaration.type qualification)
+      (declared : program.constants name = some declaration) (resolved : ResolvesType program.aliases Invocation.root declaration.type qualification)
       {constantAfter : Environment} (evaluated : Evaluates program .empty ⟨.constant name, plan⟩ value constantAfter) :
       NormalizesPattern program (.constant name) (.constant plan) (.literal (some type) value)
 inductive NormalizesPatterns (program : Program) : List PatternSource → List PatternPlan → List Pattern → Prop where
@@ -12783,14 +12839,13 @@ theorem Cleans.deterministic {before firstAfter secondAfter : Environment} {coun
   | retire first => cases right with
     | retire second => obtain ⟨rfl, rfl⟩ := first.deterministic second; exact ⟨rfl, rfl⟩
 
-theorem ResolvesType.deterministic {aliases : Aliases} {source : TypeExpr} {firstShape secondShape : Ty}
-    {first : QualifiedTy Region firstShape} {second : QualifiedTy Region secondShape}
-    (left : ResolvesType aliases source first) (right : ResolvesType aliases source second) :
-    (⟨_, first⟩ : (shape : Ty) × QualifiedTy Region shape) = ⟨_, second⟩ := by
+theorem ResolvesType.type_unique {aliases : Aliases} {scope : Invocation} {source : TypeExpr}
+    {firstShape secondShape : Ty} {first : QualifiedTy Region firstShape} {second : QualifiedTy Region secondShape}
+    (left : ResolvesType aliases scope source first) (right : ResolvesType aliases scope source second) :
+    firstShape = secondShape := by
   induction left using ResolvesType.rec
     (motive_2 := fun sources shapes types _ => ∀ {otherShapes} (others : QualifiedTys Region otherShapes),
-      ResolvesTypes aliases sources others →
-        (⟨shapes, types⟩ : (shapes : List Ty) × QualifiedTys Region shapes) = ⟨_, others⟩)
+      ResolvesTypes aliases scope sources others → shapes = otherShapes)
     generalizing secondShape with
   | concrete => cases right; rfl
   | alias declared expanded ih =>
@@ -12808,6 +12863,7 @@ theorem ResolvesType.deterministic {aliases : Aliases} {source : TypeExpr} {firs
     rename_i others other
     cases other with
     | cons otherHead otherTail => cases headIH otherHead; cases tailIH _ otherTail; rfl
+
 
 theorem Pattern.Consumes.deterministic {before firstAfter secondAfter : Environment} {pattern : Pattern} {value : Value}
     {firstBindings secondBindings : BindingValues} {firstTrace secondTrace : List (List Nat)}
@@ -13003,7 +13059,7 @@ theorem Evaluates.deterministic {before firstAfter secondAfter : Environment} {c
       cases otherEval with
       | constantValue otherDeclared otherResolved otherEvaluated =>
         cases Option.some.inj (declared.symm.trans otherDeclared)
-        cases resolved.deterministic otherResolved
+        cases resolved.type_unique otherResolved
         obtain ⟨rfl, rfl⟩ := ih otherEvaluated
         rfl
   | patternsNil | armsNil => rename_i other otherEval; cases otherEval; rfl
@@ -13047,7 +13103,7 @@ theorem NormalizesPattern.deterministic {source : PatternSource} {plan : Pattern
   | constantValue declared resolved evaluated ih => cases right with
     | constantValue otherDeclared otherResolved otherEvaluated =>
       cases Option.some.inj (declared.symm.trans otherDeclared)
-      cases resolved.deterministic otherResolved
+      cases resolved.type_unique otherResolved
       obtain ⟨rfl, rfl⟩ := evaluated.deterministic otherEvaluated
       rfl
   | patternsNil => rename_i other otherEval; cases otherEval; rfl
@@ -14151,6 +14207,17 @@ def Context.prepare : List (String × BindingType) → List Result → Context �
   | (name, parameter) :: parameters, result :: results, context =>
       Context.prepare parameters results (context.bind name parameter.mutable result)
   | _, _, context => context
+
+theorem Context.prepare_invocation (parameters : List (String × BindingType))
+    (arguments : List Result) (context : Context) :
+    (context.prepare parameters arguments).invocation = context.invocation := by
+  induction parameters generalizing arguments context with
+  | nil => rfl
+  | cons parameter rest ih =>
+    cases arguments with
+    | nil => rfl
+    | cons argument arguments => exact ih arguments (context.bind parameter.1 parameter.2.mutable argument)
+
 
 end Grounded.Checked
 
@@ -16975,11 +17042,39 @@ structure BindStep (program : Program) {phase : Phase} (before after : Point pro
     (before.source executable).bind name mutable (result.source executable)
 
 structure PrepareStep (program : Program) {phase : Phase} (before after : Point program phase)
-    (parameters : List (String × BindingType)) (arguments : List (Result phase)) : Prop where
-  checked : after.checked = before.checked.prepare parameters (checkedResults arguments)
+    (parameters : List (String × BindingType)) (arguments : List (Result phase))
+    (invocation : Invocation := before.checked.invocation) : Prop where
+  checked : after.checked = ({ before.checked with invocation := invocation }).prepare parameters (checkedResults arguments)
   actual : Required phase fun executable => after.source executable =
     (before.source executable).prepare parameters (sourceResults arguments executable)
 
+
+
+/-- The actual call preparation installs the same finite substitution used by its
+signature. Every admitted named body annotation is tied to that substitution,
+including annotations with fresh nested inferred lifetimes. -/
+theorem PrepareStep.named_annotation {program : Program} {phase : Phase}
+    {before after : Point program phase}
+    {parameters : List (String × BindingType)} {arguments : List (Result phase)}
+    {declaration : FunctionSignature} {signature : ResolvedSignature declaration}
+    {lifetimes : Fin signature.supply → Region} {name : String}
+    {index : Fin declaration.lifetimes.count} {shape : Ty}
+    {source : QualifiedTy LifetimeSyntax shape} {mode : BorrowMode}
+    {result : QualifiedTy Region (.reference shape mode)}
+    (step : PrepareStep program before after parameters arguments (.call signature lifetimes))
+    (annotated : Annotation program.aliases after.checked.invocation
+      (some (.concrete (.reference (.named name) source mode))) result)
+    (found : declaration.lifetimes.names name = some index) :
+    ∃ referent, result = .reference
+      (lifetimes ⟨index.val, Nat.lt_of_lt_of_le index.isLt signature.inputResolution.monotone⟩)
+      referent mode := by
+  have scope : after.checked.invocation = .call signature lifetimes := by
+    rw [step.checked]
+    exact Checked.Context.prepare_invocation _ _ _
+  cases annotated with
+  | explicit resolved =>
+    rw [scope] at resolved
+    exact resolved.named_reference found
 
 
 structure ResultEvidence (program : Program) {phase : Phase}
@@ -17023,6 +17118,7 @@ structure JoinStep (program : Program) {phase : Phase} (before after : Point pro
   ended : before.checked.ended = after.checked.ended
   binders : before.checked.nextBinder ≤ after.checked.nextBinder
   symbols : before.checked.nextSymbol ≤ after.checked.nextSymbol
+  invocation : before.checked.invocation = after.checked.invocation
   stable : PointsStable before after
   actual : Required phase fun executable => (before.source executable).Joins program (after.source executable)
 
@@ -17301,7 +17397,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       {mutable : Bool} {name : String} {annotation : Option TypeExpr} {initial body : Expr}
       {localType result : Result phase} {initialPlan bodyPlan : CorePlan} {expected : Option Ty}
       (initialized : HasType program phase home before held initial localType middle initialPlan (annotation.map fun _ => localType.type))
-      (annotated : Annotation program.aliases annotation localType.qualification)
+      (annotated : Annotation program.aliases before.checked.invocation annotation localType.qualification)
       (binding : BindStep program middle bound name mutable localType)
       (continued : HasType program phase home bound held body result bodyAfter bodyPlan expected)
       (cleanup : CleanupStep program bodyAfter after (held ++ [result.payload]) 1)
@@ -17311,7 +17407,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       {name : String} {declaration : ConstantDecl} {result : Result phase} {plan : CorePlan}
       (declared : program.constants name = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
-      (resolved : ResolvesType program.aliases declaration.type result.qualification)
+      (resolved : ResolvesType program.aliases Invocation.root declaration.type result.qualification)
       (structural : Structural declaration.body)
       (hiddenStep : HideStep program before hidden)
       (initialized : HasType program phase declaration.home hidden held declaration.body result constantAfter plan none)
@@ -17343,7 +17439,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (inputs : HasTypes program phase home before held arguments argumentTypes middle argumentPlans
         (some (declaration.parameters.map fun parameter => parameter.2.type)))
       (hide : HideStep program middle hidden)
-      (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes)
+      (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes
+        (.call signature lifetimes))
       (body : HasType program phase declaration.home prepared held declaration.body result bodyAfter bodyPlan (some declaration.result))
       (resultType : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
         ⟨_, signature.instantiateResult lifetimes⟩)
@@ -17697,7 +17794,7 @@ theorem HasType.constantDeclaration {program : Program} {phase : Phase} {home : 
     ∀ name, expression = .constant name → ∃ declaration,
       program.constants name = some declaration ∧
         ∃ qualification : QualifiedTy Region result.type,
-          ResolvesType program.aliases declaration.type qualification ∧
+          ResolvesType program.aliases Invocation.root declaration.type qualification ∧
           (qualification = result.qualification ∨
             QualifiedTy.View (NominalView program.declarations Region.static Region.Outlives)
               Region.Outlives qualification result.qualification) := by
@@ -18571,11 +18668,12 @@ theorem Executes.call {before middle hidden prepared bodyAfter cleaned after : P
     {held : List (Payload phase)} {identity : Nat} {arguments : List Expr}
     {argumentTypes : List (Result phase)} {result : Result phase}
     {argumentPlans : List CorePlan} {bodyPlan : CorePlan} {declaration : FunctionDecl}
+    {invocation : Invocation}
     (declared : program.functions identity = some declaration)
     (inputs : ExecutesList before held arguments argumentTypes middle argumentPlans)
     (types : argumentTypes.map Result.type = declaration.parameters.map fun parameter => parameter.2.type)
     (hide : HideStep program middle hidden)
-    (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes)
+    (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes invocation)
     (body : Executes prepared held declaration.body result bodyAfter bodyPlan)
     (cleanup : CleanupStep program bodyAfter cleaned (held ++ [result.payload]) declaration.parameters.length)
     (resume : ResumeStep program middle cleaned after) :
@@ -19045,8 +19143,9 @@ theorem BindStep.erase {before after : Point program phase} {name : String} {mut
     (step : BindStep program before after name mutable result) :
     BindStep program before.erase after.erase name mutable result.erase := ⟨step.checked, checkingRequired⟩
 theorem PrepareStep.erase {before after : Point program phase} {parameters : List (String × BindingType)} {arguments : List (Result phase)}
-    (step : PrepareStep program before after parameters arguments) :
-    PrepareStep program before.erase after.erase parameters (arguments.map Result.erase) :=
+    {invocation : Invocation}
+    (step : PrepareStep program before after parameters arguments invocation) :
+    PrepareStep program before.erase after.erase parameters (arguments.map Result.erase) invocation :=
   ⟨by simpa using step.checked, checkingRequired⟩
 theorem ResultEvidence.erase {before after : Point program phase} {result : Result phase}
     (e : ResultEvidence program before after result) : ResultEvidence program before.erase after.erase result.erase :=
@@ -19057,7 +19156,7 @@ theorem ResumeStep.erase {caller callee after : Point program phase} (step : Res
     ResumeStep program caller.erase callee.erase after.erase := ⟨step.checked, checkingStable, checkingRequired⟩
 theorem JoinStep.erase {before after : Point program phase} (step : JoinStep program before after) :
     JoinStep program before.erase after.erase :=
-  ⟨step.names, step.storage, step.loans, step.ended, step.binders, step.symbols, checkingStable, checkingRequired⟩
+  ⟨step.names, step.storage, step.loans, step.ended, step.binders, step.symbols, step.invocation, checkingStable, checkingRequired⟩
 def EndingStep.erase {before after : Point program phase} {held : List (Payload phase)} {slot : Nat} {fields : List Nat}
     (step : EndingStep program before after held slot fields) :
     EndingStep program before.erase after.erase (held.map Payload.erase) slot fields :=
