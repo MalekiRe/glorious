@@ -18,12 +18,12 @@ project is introduced by this reset. Subagent use remains paused.
 
 ## Recovered, verified baseline
 
-At the user's request, `Grounded.lean` is restored byte-for-byte from commit
+At commit `2958fffc`, `Grounded.lean` was restored byte-for-byte from commit
 `d182ea2a` ("Derive ordered pattern dispatch from structural coverage"), the
-1,081-line early second-revision milestone. Its small Lean project is independent
-of the reference trees, uses Lean 4.33.1, and imports no prior specification
-modules. The package is named `languageSemantics`; the original `Grounded`
-module/namespace is retained to avoid an unrelated source rewrite.
+1,081-line early second-revision milestone. This historical baseline established
+the independent Lean 4.33.1 project described below. Subsequent changes are
+recorded separately; the active files are no longer a byte-identical restoration.
+The package remains `languageSemantics`, with module/namespace `Grounded`.
 
 Covered: target-bounded integer and Unicode scalar literals; immutable lexical
 binding and sequencing; tuples, fixed arrays and projections; decoded aliases
@@ -80,6 +80,57 @@ Verification performed in `formal/semantics`:
 The recovered proof is the first semantic checkpoint here. It supplies a
 connected base to extend, not permission to replay the later development's
 assumed bridges or to treat its finite terminating subset as the full language.
+
+## Structural constant-pattern boundary
+
+The authoritative entry remains `Grounded.lean`. It now imports two modules:
+`Grounded/Core.lean` owns decoded typing, coverage, evaluation and general
+correctness; `Grounded/SourcePatterns.lean` owns source-pattern normalization
+and its application consumer. There is no second evaluator or copied admission
+framework. The public `Grounded.correctness` signature is unchanged.
+
+Normative scope: §4.3 structural constant patterns, composed with §6.3 ordered
+pattern application. Normalized constants retain their resolved declared type
+and compare complete structural values without invoking user-defined Eq.
+Nominal identity, constructor tags, scalar kinds and aggregate shape participate
+in equality. The existing coverage-selection and binding theorems now handle
+literal patterns, and the general correctness induction consumes them.
+
+The new public theorem is `SourceArmsChecked.correctness`:
+
+- Inputs: source patterns with ordinary closed constant typing; typed arguments;
+  a nonempty source arm list; ordinary coverage, usefulness, pattern and body
+  checking of the **computed normalized list**; a typed current environment.
+- Conclusions: normalization of that source list; uniqueness of the entire
+  normalized list, including declared type tags; actual evaluation of its
+  application; result typing; uniqueness of the evaluation result.
+- No successful evaluation or normalization is supplied. Static checking of the
+  normalized patterns remains explicit: normalization alone does not establish
+  exhaustiveness, usefulness, visibility, or body typing.
+
+| Fact | Producer | Consumer |
+| --- | --- | --- |
+| Constant value | Existing `closed_correctness`, from ordinary constant typing | `SourcePattern.Checked.normalize` and `normalizes` |
+| Unique constant type and value | `ResolvesType.unique` and existing evaluation uniqueness | `NormalizesPattern.unique`, then `NormalizesArms.unique` |
+| Ordered normalized patterns and unchanged bodies | `SourceArmsChecked.normalize` and `normalizes` | Ordinary `Covers` / `ArmsType`, then `SourceArmsChecked.correctness` |
+| Actual selected-body execution | `Covers.selectArm`, `PatternType.bindings`, general correctness | The source application theorem |
+
+Normalization uses standard `Classical.choice` to extract a value whose
+existence is already proved; its uniqueness is proved independently of choice.
+This is a semantic definition, not an implemented normalization algorithm.
+Source patterns are elaborated for an application whose arguments and bodies
+remain decoded core. No parser or complete recursive source elaborator is
+claimed. Stateful and whole-language obligations remain open.
+
+Verification: `lake build` passed with strict configured options. A strict
+Lean audit inspected every declaration defined by both modules, including
+private/generated declarations (1,428 total, 64 private). Only `propext`,
+`Quot.sound` and standard `Classical.choice` occur transitively. Core
+correctness, coverage selection, pattern binding and normalization uniqueness
+still require only `propext` and `Quot.sound`; the chosen normalization
+product and its public consumer additionally use `Classical.choice`.
+No `sorry`, custom axiom, unit test or concrete-example evidence was introduced.
+
 
 ## Destination contract
 
@@ -181,11 +232,12 @@ At each meaningful checkpoint update this document with:
   theorems distinguished from discharged guarantees, and unsupported features.
 - The exact next obligation on the same dependency chain.
 
-Current next obligation: use the recovered general theorem as the starting
-point, specifying the next coherent extension and its premise-producer map.
-Before a stateful extension, settle the four contract questions above against
-the normative language. Preserve the proved immutable fragment through actual
-consumers; do not accumulate detached helper proofs or assume realization.
+Current next obligation: specify mutable lexical storage and assignment
+(§5.2) as an extension of the existing checking-to-evaluation theorem. Settle
+the current-state, successor-state and framing contracts before adding rules;
+derive actual successor storage from checking, not a supplied realization.
+Keep the four stateful contract questions above explicit, and preserve the
+proved immutable and constant-pattern consumers.
 
 Whole-language completion additionally requires an explicit normative coverage
 and consumer audit. Features absent from this new folder remain unproved,
