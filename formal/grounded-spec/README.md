@@ -282,6 +282,17 @@ the parent obligation. Assignment does not acquire this prerequisite, so writing
 through a unique loan can still restore a hole. A ready subfield alone never
 establishes that its whole parent is restored.
 
+`ResourceReady` requires a recorded loan and a complete canonical mask, not a
+vacuous query over missing storage. `Context.Resolves` follows recorded loan
+targets through copied-reference parents; `ContextMeaning.resolve_address`
+transports this resolution without introducing opaque duplicate cells.
+`ContextMeaning.resourcesAvailable` derives source ownership and restoration
+from checked occurrences and their interpretation. Known-reference-free schemas
+have no resource occurrences; canonical import proves both occurrence
+faithfulness and `Cells.resourcesAvailable`, including inactive enum alternatives.
+The remaining source-operation availability premises still need migration
+through the selected-payload interpretation proof.
+
 Separation or restoration needing unresolved external alias/storage contracts
 is not established by these positive local judgments. These cutovers close
 outer permission and access-readiness transport, not general executable realization.
@@ -435,7 +446,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,959
+warnings as errors. The exhaustive defining-module audit covered **7,987
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.

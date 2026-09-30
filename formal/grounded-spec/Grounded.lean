@@ -5527,8 +5527,8 @@ inductive ReferencePath (program : Program) : Ty → List Component → Ty → B
       (nested : ReferencePath program child path referent mode) :
       ReferencePath program type (.constructor head :: .field index :: path) referent mode
 
-/-- The same payload product supplies local resource occurrences. Schema
-occurrences range over declared alternatives; they are not live-node claims. -/
+/-- Resource occurrences retain unknown constructor alternatives, but positive
+reference-free knowledge carries no handle obligations. -/
 inductive Payload.Occurs (program : Program) : Payload → Reference → Prop where
   | reference (symbol : Reference) (referent : Ty) (mode : BorrowMode) :
       Occurs program (.reference symbol referent mode) symbol
@@ -5536,9 +5536,9 @@ inductive Payload.Occurs (program : Program) : Payload → Reference → Prop wh
       (selected : field ∈ fields) (nested : Occurs program field symbol) :
       Occurs program (.aggregate head fields) symbol
   | schema {owner : Nat} {path suffix : List Component} {type referent : Ty}
-      {mode : BorrowMode} {copies : List Nat} {knowledge : SchemaKnowledge}
+      {mode : BorrowMode} {copies : List Nat}
       (selected : ReferencePath program type suffix referent mode) :
-      Occurs program (.schema owner path type copies knowledge)
+      Occurs program (.schema owner path type copies .unknown)
         ((Reference.parameter owner (path ++ suffix)).rename copies)
 
 mutual
@@ -5655,17 +5655,6 @@ theorem CopyAllowed.not_nonduplicable {context : Context} {result : Result}
     (noncopy : Nonduplicable program.data result.type) : False :=
   noncopy.not_duplicable allowed.permission
 
-/-- Every reference-typed checked product accounts for a reference occurrence;
-neither abstract schemas nor aggregate heads can erase the obligation. -/
-theorem Payload.Typed.reference_occurs {payload : Payload} {referent : Ty} {mode : BorrowMode}
-    (typed : Payload.Typed program payload (.reference referent mode)) :
-    ∃ reference, payload.Occurs program reference := by
-  cases typed with
-  | plain free => cases free
-  | reference reference referent mode => exact ⟨reference, .reference reference referent mode⟩
-  | aggregate source shape children => cases shape; contradiction
-  | schema owner path type copies knowledge =>
-      exact ⟨_, .schema (.here referent mode)⟩
 
 end Grounded.Checked
 
@@ -5717,9 +5706,30 @@ def Context.NotKnownUnrestored (context : Context) (reference : Reference) : Pro
   ∀ slot, context.storage address.base = some slot →
     ∃ state, slot.initialization.Access address.fields state ∧ state.Complete
 
+/-- Canonical storage follows authoritative rows, including opaque Copy parents. -/
+inductive Context.Resolves (context : Context) (program : Program) : Address → Address → Prop where
+  | binder (binder : Nat) (fields : List Nat) : Resolves context program ⟨.binder binder, fields⟩ ⟨.binder binder, fields⟩
+  | reference {reference : Reference} {fields : List Nat} {loan : Loan} {target : Address}
+      (member : context.HasLoan program loan) (identity : loan.reference = reference)
+      (parent : Resolves context program loan.target target) :
+      Resolves context program ⟨.referent reference, fields⟩ (target.extend fields)
+
+theorem Context.Resolves.binder_target {context : Context} {address target : Address}
+    (resolved : context.Resolves program address target) : ∃ binder, target.base = .binder binder := by
+  induction resolved with
+  | binder binder => exact ⟨binder, rfl⟩
+  | reference _ _ _ ih => exact ih
+
+/-- Usability requires the recorded loan and its entire canonical target mask.
+Missing storage is unknown, never evidence that an inner handle is restored. -/
+def Context.ResourceReady (context : Context) (program : Program) (reference : Reference) : Prop :=
+  ∃ loan target slot state, context.HasLoan program loan ∧ loan.reference = reference ∧
+    context.Resolves program loan.target target ∧ context.storage target.base = some slot ∧
+    slot.initialization.Access target.fields state ∧ state.Complete
+
 def Context.ResourcesAvailable (context : Context) (payload : Payload) : Prop :=
   ∀ reference, payload.Occurs program reference →
-    context.NotEnded (program := program) reference ∧ context.NotKnownUnrestored reference
+    context.NotEnded (program := program) reference ∧ context.ResourceReady program reference
 
 def Context.LocalPermits (context : Context) (mode : BorrowMode)
     (parent : Option Reference) (target : Address) : Prop :=
@@ -14469,12 +14479,12 @@ theorem input_occurs_path {owner : Nat} {path : List Checked.Component} {type : 
     | exact ⟨_, _, _, by assumption, rfl⟩
 
 theorem schema_child_occurs {owner : Nat} {path : List Checked.Component} {type : Ty}
-    {copies : List Nat} {knowledge : Checked.SchemaKnowledge}
+    {copies : List Nat}
     {head : Head} {types : List Ty} {reference : Checked.Reference}
     (source : head.Source) (shape : HeadType program head type types)
     (selected : ∃ payload ∈ (types.zipIdx.map fun entry => Checked.Payload.input owner
-      (path ++ [.constructor head, .field entry.2]) entry.1 copies knowledge), payload.Occurs program reference) :
-    (Checked.Payload.schema owner path type copies knowledge).Occurs program reference := by
+      (path ++ [.constructor head, .field entry.2]) entry.1 copies), payload.Occurs program reference) :
+    (Checked.Payload.schema owner path type copies).Occurs program reference := by
   obtain ⟨payload, member, occurs⟩ := selected
   obtain ⟨⟨child, index⟩, entryMember, equal⟩ := List.mem_map.mp member
   subst payload
@@ -14918,9 +14928,8 @@ inductive Payload.EndsBefore (program : Program) : Payload → Reference → Ref
       (member : field ∈ fields) (inside : EndsBefore program field first second) :
       EndsBefore program (.aggregate head fields) first second
   | schema {owner : Nat} {path firstPath secondPath : List Component} {type : Ty} {copies : List Nat}
-      {knowledge : SchemaKnowledge}
       (ordered : ReferenceOrder program type firstPath secondPath) :
-      EndsBefore program (.schema owner path type copies knowledge)
+      EndsBefore program (.schema owner path type copies .unknown)
         ((Reference.parameter owner (path ++ firstPath)).rename copies)
         ((Reference.parameter owner (path ++ secondPath)).rename copies)
 
@@ -15347,9 +15356,7 @@ def Context.TargetReady (context : Context) (target : Address) : Prop :=
 restored, not just the selected subfield. Assignment deliberately does not use
 this condition, because writing is how a unique loan's hole is restored. -/
 def Context.ParentReady (context : Context) (program : Program) (parent : Option Reference) : Prop :=
-  ∀ reference, parent = some reference → ∃ loan slot,
-    context.HasLoan program loan ∧ loan.reference = reference ∧
-    context.storage loan.target.base = some slot ∧ context.TargetReady loan.target
+  ∀ reference, parent = some reference → context.ResourceReady program reference
 
 inductive Access (program : Program) (home : Module) (context : Context) :
     BorrowMode → AccessPlace → Address → {type : Ty} → QualifiedTy Region type → Option Reference → Type where
@@ -17087,6 +17094,36 @@ theorem ContextMeaning.free {checked : Checked.Context} {source : Grounded.Conte
   · cases shared.1
   · cases impossible
   · exact apart
+theorem Symbols.address_extend {source : Grounded.Context} {address : Checked.Address}
+    {actual : Origin} (image : symbols.address source address = some actual) (fields : List Nat) :
+    symbols.address source (address.extend fields) = some (actual.extend fields) := by
+  cases address with
+  | mk base indices =>
+      cases base with
+      | binder binder =>
+          cases image
+          rfl
+      | referent reference =>
+          simp only [Symbols.address, Option.bind_eq_some_iff, Option.map_eq_some_iff] at image
+          obtain ⟨node, mapped, loan, found, equal⟩ := image
+          cases equal
+          simp [Symbols.address, Checked.Address.extend, mapped, found, Origin.extend, List.append_assoc]
+
+theorem ContextMeaning.resolve_address {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {address target : Checked.Address}
+    (resolved : checked.Resolves program address target) {actual : Origin}
+    (image : symbols.address source address = some actual) :
+    symbols.address source target = some actual := by
+  induction resolved generalizing actual with
+  | binder => exact image
+  | @reference reference fields loan target member identity parent ih =>
+      simp only [Symbols.address, Option.bind_eq_some_iff, Option.map_eq_some_iff] at image
+      obtain ⟨node, mapped, actualLoan, found, equal⟩ := image
+      obtain ⟨represented, stored, rowImage, _, _, _, _⟩ := meaning.row member (identity ▸ mapped)
+      cases Option.some.inj (stored.symm.trans found)
+      cases equal
+      exact Symbols.address_extend (ih rowImage) fields
+
 /-- A checked readiness query becomes actual readiness only when its canonical
 cell exists. An absent opaque cell never makes this implication vacuous. -/
 theorem ContextMeaning.ready {checked : Checked.Context} {source : Grounded.Context}
@@ -17126,11 +17163,55 @@ theorem ContextMeaning.accessReady {checked : Checked.Context} {source : Grounde
   | some reference =>
       have mapped : symbols.reference reference = some node := by
         simpa [parentSelected, selected] using parentImage
-      obtain ⟨loan, parentSlot, member, referenceEq, parentStored, restored⟩ := parentReady reference parentSelected
+      obtain ⟨loan, target, parentSlot, mask, member, referenceEq, resolved, parentStored, access, complete⟩ :=
+        parentReady reference parentSelected
       have loanImage : symbols.reference loan.reference = some node := referenceEq ▸ mapped
       obtain ⟨represented, actualFound, address, _⟩ := meaning.row member loanImage
       cases Option.some.inj (actualFound.symm.trans found)
-      exact meaning.ready parentStored restored address
+      exact meaning.ready parentStored (fun other same => by
+        cases Option.some.inj (parentStored.symm.trans same)
+        exact ⟨mask, access, complete⟩) (meaning.resolve_address resolved address)
+
+/-- The same canonical loan-mask evidence serves observation and own-ending. -/
+theorem ContextMeaning.resourceRestored {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {reference : Checked.Reference}
+    (ready : checked.ResourceReady program reference) {node : Nat}
+    (mapped : symbols.reference reference = some node) : source.Restored node := by
+  obtain ⟨loan, target, slot, mask, recorded, selected, resolved, stored, access, complete⟩ := ready
+  have loanImage : symbols.reference loan.reference = some node := selected ▸ mapped
+  intro actual found _
+  obtain ⟨represented, actualFound, address, _⟩ := meaning.row recorded loanImage
+  cases Option.some.inj (actualFound.symm.trans found)
+  exact meaning.ready stored (fun other same => by
+    cases Option.some.inj (stored.symm.trans same)
+    exact ⟨mask, access, complete⟩) (meaning.resolve_address resolved address)
+
+/-- Resource transport needs only the realized occurrence projection. This is
+also usable for selected subtrees whose absent reference-free leaves carry no
+source handles. The projection is derived from the existing payload meaning. -/
+theorem ContextMeaning.resourcesAvailableNodes {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {payload : Checked.Payload} {concrete : SourcePayload}
+    (nodes : ∀ node ∈ concrete.nodes, ∃ reference,
+      payload.Occurs program reference ∧ symbols.reference reference = some node)
+    (available : checked.ResourcesAvailable (program := program) payload) :
+    source.PayloadAvailable concrete := by
+  intro node member
+  obtain ⟨reference, occurs, mapped⟩ := nodes node member
+  obtain ⟨notEnded, ready⟩ := available reference occurs
+  have restored := meaning.resourceRestored ready mapped
+  obtain ⟨loan, _, _, _, recorded, selected, _⟩ := ready
+  have loanImage : symbols.reference loan.reference = some node := selected ▸ mapped
+  exact ⟨(meaning.loan_own recorded loanImage).mpr (selected ▸ notEnded), restored⟩
+
+/-- Shared referents need not be disjoint for resource availability. -/
+theorem ContextMeaning.resourcesAvailable {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {state : Initialization} {payload : Checked.Payload} {type : Ty} {concrete : SourcePayload}
+    (product : PayloadMeaning program symbols state payload type concrete)
+    (available : checked.ResourcesAvailable (program := program) payload) :
+    source.PayloadAvailable concrete :=
+  meaning.resourcesAvailableNodes (fun _ member => product.node_mapped member) available
 
 mutual
 theorem Payload.NoHandles.nodes_eq_nil {payload : Checked.Payload} {state : Initialization}
@@ -19646,6 +19727,38 @@ theorem PayloadsProduced.meaning {program : Program} {context : Grounded.Context
         (rest.meaning fun index payload found => selected (index + 1) payload found)
 end
 
+mutual
+/-- Canonical import introduces resource occurrences only for actual handles,
+not for inactive alternatives hidden beneath known-reference-free products. -/
+theorem PayloadProduced.occurs_source {program : Program} {ownerId : Nat} {path : List Checked.Component}
+    {state : Initialization} {concrete : SourcePayload} {type : Ty} {checked : Checked.Payload}
+    (produced : PayloadProduced program ownerId path state concrete type checked)
+    {reference : Checked.Reference} (occurs : checked.Occurs program reference) :
+    ∃ node, reference = .existing node ∧ node ∈ concrete.nodes := by
+  cases produced with
+  | plain => cases occurs
+  | reference => cases occurs; exact ⟨_, rfl, List.mem_singleton_self _⟩
+  | aggregate source shape fields =>
+    cases occurs with
+    | child member nested => exact fields.occurs_source member nested
+
+theorem PayloadsProduced.occurs_source {program : Program} {ownerId : Nat}
+    {paths : Nat → List Checked.Component} {states : Nat → Initialization}
+    {concrete : List SourcePayload} {types : List Ty} {checked : List Checked.Payload}
+    (produced : PayloadsProduced program ownerId paths states concrete types checked)
+    {field : Checked.Payload} (member : field ∈ checked)
+    {reference : Checked.Reference} (occurs : field.Occurs program reference) :
+    ∃ node, reference = .existing node ∧ node ∈ payloadNodes concrete := by
+  cases produced with
+  | nil => cases member
+  | cons first rest =>
+    rcases List.mem_cons.mp member with rfl | member
+    · obtain ⟨node, same, present⟩ := first.occurs_source occurs
+      exact ⟨node, same, List.mem_append_left _ present⟩
+    · obtain ⟨node, same, present⟩ := rest.occurs_source member occurs
+      exact ⟨node, same, List.mem_append_right _ present⟩
+end
+
 /-- The source cell is the producer input in both phases, not an executable-only
 permission to choose a knowledge bit. Its current mask is preserved verbatim. -/
 structure Cells (program : Program) (source : Grounded.Context) where
@@ -19703,6 +19816,35 @@ theorem Cells.notEnded {program : Program} {source : Grounded.Context} (cells : 
     rw [← identity, found] at selected
     have equal := Option.some.inj selected
     exact Bool.noConfusion (own.symm.trans (equal ▸ dead))
+
+/-- Canonical import preserves positive resource admission from the actual
+pre-state, including aggregates with inactive reference-bearing alternatives. -/
+theorem Cells.resourcesAvailable {program : Program} {source : Grounded.Context}
+    (cells : Cells program source) {ownerId : Nat} {path : List Checked.Component}
+    {state : Initialization} {concrete : SourcePayload} {type : Ty} {checked : Checked.Payload}
+    (produced : PayloadProduced program ownerId path state concrete type checked)
+    (available : source.PayloadAvailable concrete) :
+    cells.context.ResourcesAvailable (program := program) checked := by
+  intro reference occurs
+  obtain ⟨node, rfl, present⟩ := produced.occurs_source occurs
+  obtain ⟨⟨actual, found, own⟩, restored⟩ := available node present
+  obtain ⟨slot, mask, stored, access, complete⟩ := restored actual found own
+  refine ⟨(cells.notEnded found).mpr own, loan (actual, node), address actual.target,
+    cells.slot actual.target.base slot, mask, ?_, rfl, ?_, ?_, access, complete⟩
+  · refine ⟨.direct (loan (actual, node)), ?_, .direct _⟩
+    exact List.mem_map.mpr ⟨_, List.mem_map.mpr
+      ⟨_, List.mem_zipIdx_iff_getElem?.mpr found, rfl⟩, rfl⟩
+  · cases targetBase : actual.target.base with
+    | binder identity =>
+      simpa only [loan, address, targetBase, base] using
+        (Checked.Context.Resolves.binder (context := cells.context) (program := program) identity actual.target.fields)
+  · cases baseEq : actual.target.base with
+    | binder identity =>
+      have canonicalStored : source.storage (.binder identity) = some slot := by
+        rw [← baseEq]
+        exact stored
+      simpa only [loan, address, baseEq, base, Cells.context, Option.map_some] using
+        congrArg (fun entry => entry.map (cells.slot (.binder identity))) canonicalStored
 
 @[simp] theorem address_meaning (source : Grounded.Context) (origin : Origin) :
     (symbols source).address source (address origin) = some origin := by
@@ -20295,8 +20437,8 @@ theorem owner_lt_supply {program : Program} {source : Grounded.Context}
     omega
 
 theorem schema_occurs_identity {program : Program} {ownerId : Nat} {path : List Checked.Component}
-    {type : Ty} {reference : Checked.Reference}
-    (occurs : Checked.Payload.Occurs program (.schema ownerId path type [] .referenceFree) reference) :
+    {type : Ty} {reference : Checked.Reference} {knowledge : Checked.SchemaKnowledge}
+    (occurs : Checked.Payload.Occurs program (.schema ownerId path type [] knowledge) reference) :
     ∃ suffix, reference = .parameter ownerId (path ++ suffix) := by
   cases occurs
   exact ⟨_, rfl⟩
@@ -21150,7 +21292,7 @@ theorem CopyPayload.origins {before after : Context} {payload copied : Payload}
     cases typed
     intro reference occurs
     cases occurs with
-    | @schema _ _ suffix _ referent mode _ _ declared =>
+    | @schema _ _ suffix _ referent mode _ declared =>
       have shared : mode = .shared := by
         cases mode with
         | shared => rfl
