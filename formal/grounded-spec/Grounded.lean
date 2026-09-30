@@ -289,7 +289,20 @@ def ScopeSupply.enterCall (supply : ScopeSupply) : ScopePath :=
 
 def ScopeSupply.advance (supply : ScopeSupply) : ScopeSupply :=
   { supply with next := supply.next + 1 }
+def ScopeSupply.enterBinding (supply : ScopeSupply) : ScopePath :=
+  supply.current ++ [.binding supply.next]
 
+def ScopeSupply.bind (supply : ScopeSupply) : ScopeSupply :=
+  ⟨supply.enterBinding, supply.next + 1⟩
+
+def ScopeSupply.call (supply : ScopeSupply) : ScopeSupply :=
+  ⟨supply.enterCall, supply.next + 1⟩
+
+def ScopeSupply.retire (supply : ScopeSupply) (count : Nat) : ScopeSupply :=
+  { supply with current := supply.current.take (supply.current.length - count) }
+
+def ScopeSupply.resume (caller callee : ScopeSupply) : ScopeSupply :=
+  { callee with current := caller.current }
 theorem ScopeSupply.call_fresh (supply : ScopeSupply) :
     supply.enterCall ≠ supply.advance.enterCall := by
   intro equal
@@ -1013,6 +1026,7 @@ structure Slot extends BindingType where
   binder : Nat
   payload : SourcePayload
   qualification : QualifiedTy Region type
+  storageScope : ScopePath := []
 
 /-- Declaration identity excludes mutable resident provenance. -/
 def Slot.metadata (slot : Slot) : ((shape : Ty) × QualifiedTy Region shape) × Bool × Nat :=
@@ -1023,6 +1037,7 @@ structure Context where
   storage : OriginBase → Option Slot
   loans : List SourceLoan
   nextBinder : Nat
+  scopes : ScopeSupply := ⟨[], 0⟩
 
 /-- Lexical lookup is a view of authoritative source storage. Hiding names does
 not hide, duplicate, or roll back the initialization of the named storage. -/
@@ -4104,10 +4119,34 @@ inductive SourcePayload.Write (program : Program) : Ty → List Nat → SourcePa
 
 namespace Context
 
-def empty : Context := ⟨[], fun _ => none, [], 0⟩
+def empty : Context := ⟨[], fun _ => none, [], 0, ⟨[], 0⟩⟩
 def erase (context : Context) : List (String × BindingType) :=
   context.bindings.map fun binding => (binding.1, binding.2.toBindingType)
 
+/-- Source storage retains its producer scope, so importing or aliasing a root
+cannot relabel a local owner as ambient storage. -/
+def TargetOutlives (context : Context) (target : Origin) (region : Region) : Prop :=
+  ∃ slot, context.storage target.base = some slot ∧
+    (Region.lexical slot.storageScope).Outlives region
+
+def _root_.Grounded.ResultType.BorrowRegion (result : ResultType) (context : Context) : Prop :=
+  ∃ (referent : Ty) (mode : BorrowMode) (region : Region)
+    (qualification : QualifiedTy Region referent) (node : Nat) (loan : SourceLoan),
+    result = ⟨.reference referent mode, .reference node, .reference region qualification mode⟩ ∧
+    context.loans[node]? = some loan ∧ context.TargetOutlives loan.target region
+
+theorem _root_.Grounded.ResultType.BorrowRegion.shorten {context : Context} {type : Ty}
+    {payload : SourcePayload} {first second : QualifiedTy Region type}
+    {nominal : QualifiedTy.NominalRelation Region}
+    (safe : (⟨type, payload, first⟩ : ResultType).BorrowRegion context)
+    (view : QualifiedTy.View nominal Region.Outlives first second) :
+    (⟨type, payload, second⟩ : ResultType).BorrowRegion context := by
+  obtain ⟨referent, mode, region, qualification, node, loan, equal, found, slot, stored, bound⟩ := safe
+  cases equal
+  cases second with
+  | reference shorter referentQualification =>
+    refine ⟨_, _, shorter, referentQualification, node, loan, rfl, found, slot, stored, ?_⟩
+    cases mode <;> exact bound.trans view.1
 
 /-- Update the canonical mask and the producer-computed whole-root payload.
 Type, mutability and binder identity remain declaration metadata. -/
@@ -4292,15 +4331,19 @@ def bind (context : Context) (name : String) (mutable : Bool) (result : ResultTy
   { context with
     names := (name, context.nextBinder) :: context.names
     storage := fun origin => if origin = .binder context.nextBinder then
-      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩
+      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification,
+        context.scopes.enterBinding⟩
       else context.storage origin
-    nextBinder := context.nextBinder + 1 }
+    nextBinder := context.nextBinder + 1
+    scopes := context.scopes.bind }
 
-def hide (context : Context) : Context := { context with names := [] }
+def hide (context : Context) (enterScope : Bool := false) : Context :=
+  { context with names := [], scopes := if enterScope then context.scopes.call else context.scopes }
 
 def retire (context : Context) (count : Nat) : Context :=
   { context with
     names := context.names.drop count
+    scopes := context.scopes.retire count
     storage := fun origin => match origin with
       | .binder binder => if binder ∈ (context.names.take count).map Prod.snd then none else context.storage origin
       }
@@ -4366,7 +4409,8 @@ theorem WellFormed.bindings_binders {context : Context} (valid : context.WellFor
 theorem WellFormed.bindings_bind {context : Context} (valid : context.WellFormed program)
     (name : String) (mutable : Bool) (result : ResultType) :
     (context.bind name mutable result).bindings =
-      (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩) :: context.bindings := by
+      (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification,
+        context.scopes.enterBinding⟩) :: context.bindings := by
   simp only [Context.bindings, Context.bind, List.filterMap_cons, ↓reduceIte, Option.map_some]
   congr 1
   apply filterMap_congr_mem
@@ -5570,6 +5614,7 @@ structure Slot extends BindingType where
   binder : Nat
   payload : Payload
   qualification : QualifiedTy Region type
+  storageScope : ScopePath := []
 
 structure Loan where
   reference : Reference
@@ -5605,6 +5650,7 @@ structure Context where
   nextBinder : Nat
   nextSymbol : Nat
   invocation : Invocation := Invocation.root
+  scopes : ScopeSupply := ⟨[], 0⟩
 
 def Context.directLoans (context : Context) : List Loan :=
   context.loans.filterMap fun entry => match entry with
@@ -5663,7 +5709,7 @@ namespace Grounded.Checked
 set_option autoImplicit false
 variable {program : Program}
 
-def Context.empty : Context := ⟨[], fun _ => none, [], [], 0, 0, Invocation.root⟩
+def Context.empty : Context := ⟨[], fun _ => none, [], [], 0, 0, Invocation.root, ⟨[], 0⟩⟩
 
 def Address.extend (address : Address) (fields : List Nat) : Address :=
   { address with fields := address.fields ++ fields }
@@ -5737,17 +5783,26 @@ def Context.LocalPermits (context : Context) (mode : BorrowMode)
     (∃ reference, parent = some reference ∧ context.Derived (program := program) reference loan.reference) ∨
       (mode = .shared ∧ loan.mode = .shared) ∨ target.Apart loan.target
 
-def Context.hide (context : Context) : Context := { context with names := [], invocation := Invocation.root }
+def Context.hide (context : Context) (enterScope : Bool := false) : Context :=
+  { context with
+    names := []
+    invocation := Invocation.root
+    scopes := if enterScope then context.scopes.call else context.scopes }
 
 def Context.resume (caller callee : Context) : Context :=
-  { callee with names := caller.names, invocation := caller.invocation }
+  { callee with
+    names := caller.names
+    invocation := caller.invocation
+    scopes := caller.scopes.resume callee.scopes }
 
 def Context.bind (context : Context) (name : String) (mutable : Bool) (result : Result) : Context :=
   { context with
     names := (name, context.nextBinder) :: context.names
     storage := fun base => if base = .binder context.nextBinder then
-      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩ else context.storage base
-    nextBinder := context.nextBinder + 1 }
+      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification,
+        context.scopes.enterBinding⟩ else context.storage base
+    nextBinder := context.nextBinder + 1
+    scopes := context.scopes.bind }
 
 def Context.writeTarget (context : Context) (target : Address)
     (next : Initialization) (payload : Payload) : Context :=
@@ -7351,7 +7406,8 @@ end Context
 def Context.prepare (parameters : List (String × BindingType)) (arguments : List ResultType) (context : Context) : Context :=
   (parameters.zip arguments).foldl (fun current entry => current.bind entry.1.1 entry.1.2.mutable entry.2) context
 
-def Context.resume (caller after : Context) : Context := { after with names := caller.names }
+def Context.resume (caller after : Context) : Context :=
+  { after with names := caller.names, scopes := caller.scopes.resume after.scopes }
 
 inductive SourcePayload.Joins : SourcePayload → SourcePayload → Prop where
   | same (payload : SourcePayload) : Joins payload payload
@@ -7375,11 +7431,11 @@ inductive SlotsJoin (program : Program) : List (String × Slot) → List (String
   | nil : SlotsJoin program [] []
   | cons {name : String} {type : Ty} {mutable : Bool} {before after : Initialization}
       {binder : Nat} {beforePayload afterPayload : SourcePayload} {slots joined : List (String × Slot)}
-      {qualification : QualifiedTy Region type}
+      {qualification : QualifiedTy Region type} {storageScope : ScopePath}
       (head : Initialization.Joins program.data type before after)
       (payloadJoins : beforePayload.Joins afterPayload) (tail : SlotsJoin program slots joined) :
-      SlotsJoin program ((name, ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification⟩) :: slots)
-        ((name, ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification⟩) :: joined)
+      SlotsJoin program ((name, ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification, storageScope⟩) :: slots)
+        ((name, ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification, storageScope⟩) :: joined)
 
 /-- Initialization may weaken, but payload abstraction may erase only empty
 reference-free constructor shells, preserving the complete ordered node list. -/
@@ -7387,11 +7443,11 @@ inductive CellJoin (program : Program) : Option Slot → Option Slot → Prop wh
   | absent : CellJoin program none none
   | resident {type : Ty} {mutable : Bool} {before after : Initialization}
       {binder : Nat} {beforePayload afterPayload : SourcePayload}
-      {qualification : QualifiedTy Region type}
+      {qualification : QualifiedTy Region type} {storageScope : ScopePath}
       (state : Initialization.Joins program.data type before after)
       (payloadJoins : beforePayload.Joins afterPayload) :
-      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification⟩)
-        (some ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification⟩)
+      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification, storageScope⟩)
+        (some ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification, storageScope⟩)
 
 theorem CellJoin.forward {before after : Option Slot} (joined : CellJoin program before after)
     {slot : Slot} (found : before = some slot) :
@@ -7482,7 +7538,8 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     omega
   · intro entry member
     rcases List.mem_cons.mp member with rfl | member
-    · exact ⟨⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩, by simp [Context.bind]⟩
+    · exact ⟨⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification,
+        context.scopes.enterBinding⟩, by simp [Context.bind]⟩
     · obtain ⟨slot, found⟩ := valid.named entry member
       have different := Nat.ne_of_lt (valid.allocated entry.2 slot found).2.1
       exact ⟨slot, by simpa [Context.bind, different] using found⟩
@@ -7496,8 +7553,8 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     · obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder slot stored
       exact ⟨identity, Nat.lt_succ_of_lt bound, supported, reference⟩
 
-theorem WellFormed.hide {context : Context} (valid : context.WellFormed program) :
-    context.hide.WellFormed program := by
+theorem WellFormed.hide {context : Context} (valid : context.WellFormed program) (enterScope : Bool := false) :
+    (context.hide enterScope).WellFormed program := by
   exact ⟨by simp [Context.hide, Context.bindings], by simp [Context.hide, Context.bindings],
     by simp [Context.hide, Context.bindings], valid.targets, valid.parents,
     by simp [Context.hide], valid.allocated, valid.parentModes⟩
@@ -8386,6 +8443,17 @@ structure StateProgress (beforeContext afterContext : Context) (before after : E
     before.nextRoot ≤ last.binder binder
   loanCount : after.loans.length + beforeContext.loans.length = before.loans.length + afterContext.loans.length
 
+/-- Scope coordinates are static metadata; the runtime frame relation keeps the
+same roots and loan history when the invocation entry marker is erased. -/
+theorem StateProgress.hideScope {context afterContext : Context} {enterScope : Bool}
+    {before after : Environment} {first last : Interpretation}
+    (progress : StateProgress (context.hide enterScope) afterContext before after first last) :
+    StateProgress context.hide afterContext before after first last :=
+  ⟨⟨progress.history.records, progress.history.supply, progress.history.visible,
+      progress.history.retained⟩, progress.support,
+    ⟨progress.interpretation.binders, progress.interpretation.nodes⟩,
+    progress.fresh, progress.loanCount⟩
+
 def Interpretation.addBinder (interpretation : Interpretation) (source runtime : Nat) : Interpretation :=
   { interpretation with binder := fun binder => if binder = source then runtime else interpretation.binder binder }
 
@@ -9267,8 +9335,8 @@ theorem ObservedOwn.borrow {context : Context} {target : Origin} {referent : Ty}
   obtain ⟨innerLoan, selected, active⟩ := innerOwn
   exact ⟨innerLoan, borrow_found selected, active⟩
 
-theorem ObservedOwn.hide {context : Context} (observed : context.ObservedOwn program) :
-    context.hide.ObservedOwn program := by
+theorem ObservedOwn.hide {context : Context} (observed : context.ObservedOwn program) (enterScope : Bool := false) :
+    (context.hide enterScope).ObservedOwn program := by
   intro outer loan found own payload target inner member
   exact observed outer loan found own payload (target.storage_congr rfl) inner member
 
@@ -9897,10 +9965,10 @@ theorem StoreTyped.writeOwner {interpretation : Interpretation} {context : Conte
   exact ⟨after, written, afterTyped, (Environment.writeAddress_evolution authority written typed.residents.valid).2⟩
 
 theorem StoreTyped.hide {interpretation : Interpretation} {context : Context} {environment : Environment}
-    (typed : StoreTyped program interpretation context environment) :
-    StoreTyped program interpretation context.hide environment.hide := by
+    (typed : StoreTyped program interpretation context environment) (enterScope : Bool := false) :
+    StoreTyped program interpretation (context.hide enterScope) environment.hide := by
   refine { typed with
-    source := typed.source.hide
+    source := typed.source.hide enterScope
     residents := ⟨typed.residents.valid.hide, [], .nil, .nil⟩
     slots := .nil }
 
@@ -10209,13 +10277,13 @@ theorem StateTyped.disposeResident {interpretation : Interpretation} {context : 
 
 theorem StateTyped.hide {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value}
-    (typed : StateTyped program interpretation context heldPayloads environment held) :
-    StateTyped program interpretation context.hide heldPayloads environment.hide held :=
-  { typed.toStoreTyped.hide with
+    (typed : StateTyped program interpretation context heldPayloads environment held) (enterScope : Bool := false) :
+    StateTyped program interpretation (context.hide enterScope) heldPayloads environment.hide held :=
+  { typed.toStoreTyped.hide enterScope with
     heldShape := typed.heldShape
     heldOwn := typed.heldOwn
     heldReady := typed.heldReady
-    observedOwn := typed.observedOwn.hide
+    observedOwn := typed.observedOwn.hide enterScope
     custody := typed.custody }
 
 theorem StateTyped.resume {first last : Interpretation} {callerContext afterContext : Context} {caller after : Environment}
@@ -14278,6 +14346,10 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
   correspondence alone cannot exclude hidden permission conflicts. -/
   activeCoverage : ∀ node actual, concrete.loans[node]? = some actual → actual.own = true →
     ∃ loan, checked.HasLoan program loan ∧ symbols.reference loan.reference = some node
+  scopes : concrete.scopes = checked.scopes
+  storageScopes : ∀ base slot actualBase actual,
+    checked.storage base = some slot → symbols.base base = some actualBase →
+    concrete.storage actualBase = some actual → actual.storageScope = slot.storageScope
 
 structure Meaning (program : Program) (checked : Checked.Context) where
   context : Grounded.Context
@@ -14446,6 +14518,7 @@ def Context.CanEnd (context : Context) (held : List Payload) (reference : Refere
 def Context.retire (context : Context) (count : Nat) : Context :=
   { context with
     names := context.names.drop count
+    scopes := context.scopes.retire count
     storage := fun base =>
       if base ∈ (context.names.take count).map (fun entry => Base.binder entry.2)
       then none else context.storage base }
@@ -14873,6 +14946,8 @@ theorem ContextMeaning.endOwn {checked : Checked.Context} {source : Grounded.Con
   refine {
     names := meaning.names
     binders := meaning.binders
+    scopes := meaning.scopes
+    storageScopes := meaning.storageScopes
     cells := meaning.cells
     noOpaqueCells := meaning.noOpaqueCells
     absent := meaning.absent
@@ -15645,6 +15720,9 @@ this condition, because writing is how a unique loan's hole is restored. -/
 def Context.ParentReady (context : Context) (program : Program) (parent : Option Reference) : Prop :=
   ∀ reference, parent = some reference → context.ResourceReady program reference
 
+def Context.usePoint (context : Context) : UsePoint :=
+  ⟨context.scopes.current, [context.scopes.next], .operation⟩
+
 inductive Access (program : Program) (home : Module) (context : Context) :
     BorrowMode → AccessPlace → Address → {type : Ty} → QualifiedTy Region type → Option Reference → Type where
   | owned {mode : BorrowMode} {place : Place} {slot : Slot} {indices : List Nat} {type : Ty}
@@ -15660,6 +15738,7 @@ inductive Access (program : Program) (home : Module) (context : Context) :
       (carrier : PlaceSelection program home context reference
         ⟨.reference referent ownerMode, .reference symbol referent ownerMode, .reference region referentQualification ownerMode⟩)
       (live : context.NotEnded (program := program) symbol)
+      (within : region.Contains context.usePoint)
       (recorded : ∃ loan, context.HasLoan program loan ∧ loan.reference = symbol ∧
         loan.referent = referent ∧ loan.mode = ownerMode ∧ context.Resolves program loan.target canonical)
       (authority : mode = .unique → ownerMode = .unique)
@@ -15669,18 +15748,40 @@ inductive Access (program : Program) (home : Module) (context : Context) :
       Access program home context mode (.dereference reference fields)
         (canonical.extend indices) qualification (some symbol)
 
-/-- Reborrowing inherits the lifetime of the selected carrier. Owned access has
-no parent carrier; its root-scope obligation is separate and is not established
-by this predicate. This projects the existing access derivation, not a new walk. -/
+/-- The bound names the authoritative target cell, not the carrier's storage.
+Reborrowing retains this bound even when several symbols share one owner. -/
+def Context.TargetOutlives (context : Context) (target : Address) (region : Region) : Prop :=
+  ∃ slot, context.storage target.base = some slot ∧
+    (Region.lexical slot.storageScope).Outlives region
+
+theorem Context.TargetOutlives.shorten {context : Context} {target : Address}
+    {first second : Region} (bounded : context.TargetOutlives target first)
+    (shorter : first.Outlives second) : context.TargetOutlives target second := by
+  obtain ⟨slot, stored, bounded⟩ := bounded
+  exact ⟨slot, stored, bounded.trans shorter⟩
+
+/-- Borrowing is bounded by the actual owner-root storage scope; a reborrow is
+additionally bounded by the selected carrier's declared region. -/
 def Access.ParentOutlives {program : Program} {home : Module} {context : Context}
     {mode : BorrowMode} {place : AccessPlace} {target : Address} {type : Ty}
     {qualification : QualifiedTy Region type} {parent : Option Reference}
     (access : Access program home context mode place target qualification parent)
     (result : Region) : Prop := by
   cases access with
-  | owned => exact True
-  | @dereference ownerMode reference fields symbol referent type indices region =>
-      exact region.Outlives result
+  | @owned place slot indices =>
+      exact context.TargetOutlives ⟨.binder slot.binder, indices⟩ result
+  | @dereference ownerMode reference fields symbol referent type indices region _ _ canonical =>
+      exact context.TargetOutlives (canonical.extend indices) result ∧ region.Outlives result
+
+theorem Access.ParentOutlives.storage {program : Program} {home : Module} {context : Context}
+    {mode : BorrowMode} {place : AccessPlace} {target : Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Reference}
+    {access : Access program home context mode place target qualification parent}
+    {region : Region} (bounded : access.ParentOutlives region) :
+    context.TargetOutlives target region := by
+  cases access with
+  | owned => exact bounded
+  | dereference => exact bounded.1
 
 theorem Access.ParentOutlives.shorten {program : Program} {home : Module} {context : Context}
     {mode : BorrowMode} {place : AccessPlace} {target : Address} {type : Ty}
@@ -15689,8 +15790,8 @@ theorem Access.ParentOutlives.shorten {program : Program} {home : Module} {conte
     {first second : Region} (bounded : access.ParentOutlives first)
     (shorter : first.Outlives second) : access.ParentOutlives second := by
   cases access with
-  | owned => exact True.intro
-  | dereference => exact Region.Outlives.trans bounded shorter
+  | owned => exact Context.TargetOutlives.shorten bounded shorter
+  | dereference => exact ⟨Context.TargetOutlives.shorten bounded.1 shorter, bounded.2.trans shorter⟩
 
 
 /-- Every use allowed by a borrowed subaddress's result region is also in the
@@ -15708,12 +15809,37 @@ theorem Access.ParentOutlives.carrier {program : Program} {home : Module} {conte
           .reference region referentQualification ownerMode⟩) ∧
       (∀ point, result.Contains point → region.Contains point) := by
   cases access with
-  | dereference carrier => exact ⟨_, _, _, _, _, ⟨carrier⟩, bounded⟩
+  | dereference carrier => exact ⟨_, _, _, _, _, ⟨carrier⟩, bounded.2⟩
 
 
 end Grounded.Checked
 namespace Grounded.Elaboration
 set_option autoImplicit false
+
+/-- The static region bound names the very source owner selected by the checked
+address interpretation. It is not a premise about a future runtime state. -/
+theorem ContextMeaning.targetOutlives {program : Program} {symbols : Symbols}
+    {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {target : Checked.Address} {region : Region}
+    (bounded : checked.TargetOutlives target region) {actualTarget : Origin}
+    (image : symbols.address source target = some actualTarget) :
+    source.TargetOutlives actualTarget region := by
+  obtain ⟨slot, stored, bounded⟩ := bounded
+  cases target with
+  | mk base fields =>
+    cases base with
+    | referent reference =>
+      rw [meaning.noOpaqueCells reference] at stored
+      cases stored
+    | binder identity =>
+      obtain ⟨actual, found, _⟩ := meaning.cells _ _ _ stored rfl
+      have equal : (⟨.binder (symbols.binder identity), fields⟩ : Origin) = actualTarget :=
+        Option.some.inj image
+      cases equal
+      refine ⟨actual, found, ?_⟩
+      rw [meaning.storageScopes _ _ _ _ stored rfl found]
+      exact bounded
 
 /-- These are concrete source premises, not assumptions about evaluation,
 future storage or readiness of an execution. The evaluator bridges consume them. -/
@@ -15755,6 +15881,27 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   qualification : QualifiedTy Region (.reference referent mode)
   produced : result = ⟨.reference referent mode, .reference before.loans.length, qualification⟩
   updated : after = before.borrow target referent parent mode
+
+theorem SourceBorrow.borrowRegion {program : Program} {home : Module}
+    {before after : Grounded.Context} {symbols : Symbols} {checked : Checked.Context}
+    {target : Checked.Address} {parent : Option Checked.Reference} {mode : BorrowMode}
+    {place : AccessPlace} {referent : Ty} {result : ResultType}
+    {region : Region} {qualification : QualifiedTy Region referent}
+    (step : SourceBorrow program home before symbols target parent mode place referent result after)
+    (meaning : ContextMeaning program symbols checked before)
+    (bounded : checked.TargetOutlives target region)
+    (qualified : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+      ⟨.reference referent mode, .reference region qualification mode⟩) :
+    result.BorrowRegion after := by
+  have same := (congrArg (fun result : ResultType =>
+    (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type)) step.produced).symm.trans qualified
+  have equal : step.qualification = .reference region qualification mode :=
+    eq_of_heq (Sigma.mk.inj same).2
+  simp only [step.produced, step.updated, equal]
+  refine ⟨referent, mode, region, qualification, before.loans.length,
+    ⟨step.target, referent, step.parent, true, mode⟩, rfl, ?_, ?_⟩
+  · simp [Grounded.Context.borrow]
+  · exact meaning.targetOutlives bounded step.targetImage
 
 structure SourceDereference (program : Program) (home : Module) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
@@ -16418,17 +16565,17 @@ theorem ResultTyped.resume {interpretation : Interpretation} {caller after : Con
 
 theorem ResultTyped.hide {interpretation : Interpretation} {context : Context}
  {value : Value} {result : ResultType}
- (typed : ResultTyped program interpretation context result value) :
- ResultTyped program interpretation context.hide result value :=
+ (typed : ResultTyped program interpretation context result value) (enterScope : Bool := false) :
+ ResultTyped program interpretation (context.hide enterScope) result value :=
  ⟨typed.resident, typed.payload, typed.corresponds⟩
 
 theorem ResultsTyped.hide {interpretation : Interpretation} {context : Context}
  {values : List Value} {results : List ResultType}
- (typed : ResultsTyped program interpretation context results values) :
- ResultsTyped program interpretation context.hide results values := by
+ (typed : ResultsTyped program interpretation context results values) (enterScope : Bool := false) :
+ ResultsTyped program interpretation (context.hide enterScope) results values := by
  induction typed with
  | nil => exact .nil
- | cons head tail ih => exact .cons head.hide ih
+ | cons head tail ih => exact .cons (head.hide enterScope) ih
 
 theorem StateProgress.resume {first last : Interpretation} {callerContext afterContext : Context}
  {caller after : Environment} (valid : callerContext.WellFormed program)
@@ -16790,12 +16937,12 @@ def Context.installView (context : Context) (original : Reference) (referent : T
     (qualification : QualifiedTy Region referent) (mutable : Bool) (payload : Payload) : Context :=
   { context with
     storage := fun base => if base = .referent original then
-      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification⟩ else context.storage base }
+      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification, context.scopes.current⟩ else context.storage base }
 
 @[simp] theorem Context.installView_storage_self (context : Context) (original : Reference)
     (referent : Ty) (qualification : QualifiedTy Region referent) (mutable : Bool) (payload : Payload) :
     (context.installView original referent qualification mutable payload).storage (.referent original) =
-      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification⟩ := by
+      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification, context.scopes.current⟩ := by
   simp [Context.installView]
 
 @[simp] theorem Context.installView_storage_other (context : Context) (original : Reference)
@@ -16883,7 +17030,8 @@ def erase (step : OpaqueViewStep program home before after referencePlace) :
 theorem installed (step : OpaqueViewStep program home before after referencePlace) :
     after.checked.storage (.referent step.original) =
       some ⟨⟨step.referent, step.mode == .unique, .full⟩, 0,
-        Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown, step.qualification⟩ := by
+        Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown, step.qualification,
+        before.checked.scopes.current⟩ := by
   rw [step.checked]
   simp [Checked.Context.advanceSymbol]
 
@@ -17776,7 +17924,7 @@ theorem ContextMeaning.access {home : Module} {checked : Checked.Context} {sourc
       rw [typeEq]
       exact path.erase
   | @dereference ownerMode reference fields symbol referent type indices region referentQualification qualification canonical
-      carrier live recorded authority carrierPermits path =>
+      carrier live _within recorded authority carrierPermits path =>
       obtain ⟨actual, payload, selected, binder, initialized, carrierPath, handle, resident, mappedNodes⟩ :=
         meaning.placeSelection typed carrier
       obtain ⟨value, valueTyped, corresponds⟩ := resident
@@ -18038,10 +18186,10 @@ inductive CellJoin (program : Program) : Option Checked.Slot → Option Checked.
   | absent : CellJoin program none none
   | resident {type : Ty} {mutable : Bool} {before after : Initialization} {binder : Nat}
       {first last : Checked.Payload}
-      {qualification : QualifiedTy Region type}
+      {qualification : QualifiedTy Region type} {storageScope : ScopePath}
       (masks : Initialization.Joins program.data type before after) (payloads : PayloadJoin first last) :
-      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, first, qualification⟩)
-        (some ⟨⟨type, mutable, after⟩, binder, last, qualification⟩)
+      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, first, qualification, storageScope⟩)
+        (some ⟨⟨type, mutable, after⟩, binder, last, qualification, storageScope⟩)
 
 structure JoinStep (program : Program) {phase : Phase} (before after : Point program phase) : Prop where
   names : before.checked.names = after.checked.names
@@ -18051,13 +18199,16 @@ structure JoinStep (program : Program) {phase : Phase} (before after : Point pro
   binders : before.checked.nextBinder ≤ after.checked.nextBinder
   symbols : before.checked.nextSymbol ≤ after.checked.nextSymbol
   invocation : before.checked.invocation = after.checked.invocation
+  scope : before.checked.scopes.current = after.checked.scopes.current
+  scopes : before.checked.scopes.next ≤ after.checked.scopes.next
   stable : PointsStable before after
   actual : Required phase fun executable => (before.source executable).Joins program (after.source executable)
 
-structure HideStep (program : Program) {phase : Phase} (before after : Point program phase) : Prop where
-  checked : after.checked = before.checked.hide
+structure HideStep (program : Program) {phase : Phase} (before after : Point program phase)
+    (enterScope : Bool := false) : Prop where
+  checked : after.checked = before.checked.hide enterScope
   stable : PointsStable before after
-  actual : Required phase fun executable => after.source executable = (before.source executable).hide
+  actual : Required phase fun executable => after.source executable = (before.source executable).hide enterScope
 
 structure ResumeStep (program : Program) {phase : Phase} (caller callee after : Point program phase) : Prop where
   checked : after.checked = caller.checked.resume callee.checked
@@ -18377,7 +18528,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
           ⟨_, signature.instantiateInputs lifetimes⟩)
       (inputs : HasTypes program phase home before held arguments argumentTypes middle argumentPlans
         (some (declaration.parameters.map fun parameter => parameter.2.type)))
-      (hide : HideStep program middle hidden)
+      (hide : HideStep program middle hidden true)
       (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes
         (.call signature lifetimes))
       (body : HasType program phase declaration.home prepared held declaration.body result bodyAfter bodyPlan (some declaration.result))
@@ -19741,7 +19892,7 @@ theorem Executes.call {before middle hidden prepared bodyAfter cleaned after : P
     (declared : program.functions identity = some declaration)
     (inputs : ExecutesList before held arguments argumentTypes middle argumentPlans)
     (types : argumentTypes.map Result.type = declaration.parameters.map fun parameter => parameter.2.type)
-    (hide : HideStep program middle hidden)
+    (hide : HideStep program middle hidden true)
     (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes invocation)
     (body : Executes prepared held declaration.body result bodyAfter bodyPlan)
     (cleanup : CleanupStep program bodyAfter cleaned (held ++ [result.payload]) declaration.parameters.length)
@@ -19749,8 +19900,8 @@ theorem Executes.call {before middle hidden prepared bodyAfter cleaned after : P
     Executes before held (.call identity arguments) result after (.call argumentPlans bodyPlan) := by
   intro executable interpretation environment values typed
   obtain ⟨residents, middleEnv, middleMap, inputsEval, inputsResult, inputsState, inputsProgress⟩ := inputs executable typed
-  have hiddenState := inputsState.hide
-  have hiddenResults := inputsResult.hide
+  have hiddenState := inputsState.hide true
+  have hiddenResults := inputsResult.hide true
   rw [← hide.actual executable] at hiddenState hiddenResults
   have aligned : declaration.parameters.map (fun parameter => parameter.2.type) =
       (sourceResults argumentTypes executable).map ResultType.type := by
@@ -19770,6 +19921,7 @@ theorem Executes.call {before middle hidden prepared bodyAfter cleaned after : P
   have innerProgress := preparedProgress.trans bodyProgress preparedSupply
   have localProgress := innerProgress.trans cleanupProgress (Nat.le_trans preparedSupply bodySupply)
   rw [hide.actual executable] at localProgress
+  have localProgress := localProgress.hideScope
   have cleanedResult := bodyResult.transport cleanupProgress.history cleanupProgress.interpretation
   have resultResumed := cleanedResult.resume (caller := middle.source executable)
   have length : ((declaration.parameters.map Prod.fst).zip residents).length = declaration.parameters.length := by
@@ -20219,13 +20371,15 @@ theorem PrepareStep.erase {before after : Point program phase} {parameters : Lis
 theorem ResultEvidence.erase {before after : Point program phase} {result : Result phase}
     (e : ResultEvidence program before after result) : ResultEvidence program before.erase after.erase result.erase :=
   ⟨e.typed, checkingRequired, checkingStable⟩
-theorem HideStep.erase {before after : Point program phase} (step : HideStep program before after) :
-    HideStep program before.erase after.erase := ⟨step.checked, checkingStable, checkingRequired⟩
+theorem HideStep.erase {before after : Point program phase} {enterScope : Bool}
+    (step : HideStep program before after enterScope) :
+    HideStep program before.erase after.erase enterScope := ⟨step.checked, checkingStable, checkingRequired⟩
 theorem ResumeStep.erase {caller callee after : Point program phase} (step : ResumeStep program caller callee after) :
     ResumeStep program caller.erase callee.erase after.erase := ⟨step.checked, checkingStable, checkingRequired⟩
 theorem JoinStep.erase {before after : Point program phase} (step : JoinStep program before after) :
     JoinStep program before.erase after.erase :=
-  ⟨step.names, step.storage, step.loans, step.ended, step.binders, step.symbols, step.invocation, checkingStable, checkingRequired⟩
+  ⟨step.names, step.storage, step.loans, step.ended, step.binders, step.symbols, step.invocation,
+    step.scope, step.scopes, checkingStable, checkingRequired⟩
 def EndingStep.erase {before after : Point program phase} {held : List (Payload phase)} {slot : Nat} {fields : List Nat}
     (step : EndingStep program before after held slot fields) :
     EndingStep program before.erase after.erase (held.map Payload.erase) slot fields :=
@@ -20528,7 +20682,7 @@ structure Cells (program : Program) (source : Grounded.Context) where
 
 def Cells.slot {program : Program} {source : Grounded.Context}
     (cells : Cells program source) (origin : OriginBase) (slot : Grounded.Slot) : Checked.Slot :=
-  ⟨slot.toBindingType, slot.binder, cells.payload origin slot, slot.qualification⟩
+  ⟨slot.toBindingType, slot.binder, cells.payload origin slot, slot.qualification, slot.storageScope⟩
 
 def Cells.context {program : Program} {source : Grounded.Context}
     (cells : Cells program source) : Checked.Context where
@@ -20540,6 +20694,7 @@ def Cells.context {program : Program} {source : Grounded.Context}
   ended := source.loans.zipIdx.map ended
   nextBinder := source.nextBinder
   nextSymbol := symbolSupply source
+  scopes := source.scopes
 
 theorem ended_occurs {program : Program} {entry : SourceLoan × Nat} {reference : Checked.Reference} :
     (ended entry).Occurs program reference ↔
@@ -20616,6 +20771,18 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
     ContextMeaning program (symbols source) cells.context source where
   names := by simp [Cells.context, symbols]
   binders := rfl
+  scopes := rfl
+  storageScopes := by
+    intro base slot actualBase actual stored mapped found
+    cases base with
+    | referent reference => cases mapped
+    | binder identity =>
+      obtain ⟨original, previous, equal⟩ := Option.map_eq_some_iff.mp stored
+      cases equal
+      cases mapped
+      have same := Option.some.inj (previous.symm.trans found)
+      cases same
+      rfl
   cells := by
     intro checked slot actualBase stored mapped
     cases checked with
@@ -21163,7 +21330,8 @@ theorem Cells.resident_plain {program : Program} {source : Grounded.Context} (ce
     {origin : OriginBase} {slot : Grounded.Slot} (found : source.storage origin = some slot)
     (plain : slot.payload = .plain) :
     cells.context.storage (base origin) = some
-      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree, slot.qualification⟩ := by
+      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree,
+        slot.qualification, slot.storageScope⟩ := by
   rw [cells.storage, found]
   simp only [Option.map_some, Cells.slot, cells.plain_knowledge found plain]
 
@@ -21171,7 +21339,8 @@ theorem Cells.erased_plain {program : Program} {source : Grounded.Context} (cell
     {origin : OriginBase} {slot : Grounded.Slot} (found : source.storage origin = some slot)
     (plain : slot.payload = .plain) :
     cells.point.erase.checked.storage (base origin) = some
-      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree, slot.qualification⟩ :=
+      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree,
+        slot.qualification, slot.storageScope⟩ :=
   cells.resident_plain found plain
 
 theorem mixed_plain_target_cell {program : Program} {source : Grounded.Context}
@@ -22286,4 +22455,291 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
 termination_by structural typed
 
 end Grounded.Elaboration
+/- Section: DeclaredStorageRegions -/
+namespace Grounded
+set_option autoImplicit false
 
+theorem ScopeSupply.binding_excludes_parent (supply : ScopeSupply) (point : UsePoint)
+    (parent : point.scope = supply.current) :
+    ¬ (Region.lexical supply.enterBinding).Contains point := by
+  intro contained
+  have length := List.IsPrefix.length_le contained
+  simp only [ScopeSupply.enterBinding, List.length_append, List.length_singleton, parent] at length
+  omega
+
+theorem ScopeSupply.invocation_excludes_parent (supply : ScopeSupply) (point : UsePoint)
+    (parent : point.scope = supply.current) :
+    ¬ (Region.lexical supply.enterCall).Contains point := by
+  intro contained
+  have length := List.IsPrefix.length_le contained
+  simp only [ScopeSupply.enterCall, List.length_append, List.length_singleton, parent] at length
+  omega
+
+theorem ScopeSupply.retire_binding (supply : ScopeSupply) :
+    (supply.bind.retire 1).current = supply.current := by
+  simp [ScopeSupply.retire, ScopeSupply.bind, ScopeSupply.enterBinding]
+
+theorem ResultType.BorrowRegion.endOwn {context : Context} {result : ResultType}
+    (safe : result.BorrowRegion context) (ended : Nat) :
+    result.BorrowRegion (context.endOwn ended) := by
+  obtain ⟨referent, mode, region, qualification, node, loan, result, found, bound⟩ := safe
+  exact ⟨referent, mode, region, qualification, node, _, result,
+    context.endOwn_found ended found, bound⟩
+
+namespace Checked
+
+theorem Context.bind_region_excludes_parent {context : Context} {name : String} {mutable : Bool}
+    {result : Result} {fields : List Nat} {region : Region}
+    (bounded : (context.bind name mutable result).TargetOutlives ⟨.binder context.nextBinder, fields⟩ region)
+    {point : UsePoint} (parent : point.scope = context.scopes.current) : ¬ region.Contains point := by
+  obtain ⟨slot, stored, bound⟩ := bounded
+  simp only [Context.bind, ↓reduceIte, Option.some.injEq] at stored
+  subst slot
+  exact fun used => context.scopes.binding_excludes_parent point parent (bound point used)
+
+theorem Context.prepare_storage_origin (parameters : List (String × BindingType))
+    (arguments : List Result) (context : Context) {base : Base} {slot : Slot}
+    (stored : (context.prepare parameters arguments).storage base = some slot) :
+    context.storage base = some slot ∨ context.scopes.current.IsPrefix slot.storageScope := by
+  induction parameters generalizing arguments context with
+  | nil => exact Or.inl stored
+  | cons parameter rest ih =>
+    cases arguments with
+    | nil => exact Or.inl stored
+    | cons argument arguments =>
+      obtain previous | nested := ih arguments (context.bind parameter.1 parameter.2.mutable argument) stored
+      · simp only [Context.bind] at previous
+        split at previous
+        · cases previous
+          exact Or.inr ⟨_, rfl⟩
+        · exact Or.inl previous
+      · exact Or.inr ((show context.scopes.current.IsPrefix
+          (context.bind parameter.1 parameter.2.mutable argument).scopes.current from ⟨_, rfl⟩).trans nested)
+
+theorem Context.prepare_local_region {parameters : List (String × BindingType)}
+    {arguments : List Result} {context : Context} {target : Address} {region : Region}
+    (fresh : context.storage target.base = none)
+    (bounded : (context.prepare parameters arguments).TargetOutlives target region) :
+    (Region.lexical context.scopes.current).Outlives region := by
+  obtain ⟨slot, stored, bound⟩ := bounded
+  obtain previous | nested := context.prepare_storage_origin parameters arguments stored
+  · rw [fresh] at previous
+    cases previous
+  · exact (Region.lexical_outlives nested).trans bound
+
+theorem Context.TargetOutlives.not_retired {context : Context} {count : Nat}
+    {target : Address} {region : Region}
+    (retired : target.base ∈ (context.names.take count).map (fun entry => Base.binder entry.2)) :
+    ¬ (context.retire count).TargetOutlives target region := by
+  rintro ⟨slot, stored, _⟩
+  simp only [Context.retire, if_pos retired] at stored
+  cases stored
+
+theorem Context.disposeBindings_frame (context : Context) (bindings : List (String × Slot)) :
+    (context.disposeBindings bindings).names = context.names ∧
+    (context.disposeBindings bindings).storage = context.storage ∧
+    (context.disposeBindings bindings).scopes = context.scopes := by
+  induction bindings generalizing context with
+  | nil => exact ⟨rfl, rfl, rfl⟩
+  | cons binding rest ih => exact ih (context.endPayload binding.2.payload)
+
+end Checked
+
+namespace Elaboration
+
+theorem CleanupStep.retired_region {program : Program} {phase : Phase}
+    {before after : Point program phase} {held : List (Payload phase)} {count : Nat}
+    (step : CleanupStep program before after held count) {target : Checked.Address} {region : Region}
+    (retired : target.base ∈ (before.checked.names.take count).map (fun entry => Checked.Base.binder entry.2)) :
+    ¬ after.checked.TargetOutlives target region := by
+  rw [step.checked_eq]
+  apply Checked.Context.TargetOutlives.not_retired
+  rw [(before.checked.disposeBindings_frame (before.checked.bindings.take count)).1]
+  exact retired
+
+theorem CleanupStep.no_retired_borrow {program : Program} {phase : Phase} {home : Module}
+    {before after : Point program phase} {held : List (Payload phase)} {count : Nat}
+    (step : CleanupStep program before after held count)
+    {mode : BorrowMode} {place : AccessPlace} {target : Checked.Address} {type : Ty}
+    {qualification : QualifiedTy Region type} {parent : Option Checked.Reference} {region : Region}
+    (access : Checked.Access program home after.checked mode place target qualification parent)
+    (lifetime : access.ParentOutlives region)
+    (retired : target.base ∈ (before.checked.names.take count).map (fun entry => Checked.Base.binder entry.2)) : False :=
+  step.retired_region retired lifetime.storage
+
+theorem CleanupStep.scope {program : Program} {phase : Phase}
+    {before after : Point program phase} {held : List (Payload phase)} {count : Nat}
+    (step : CleanupStep program before after held count) :
+    after.checked.scopes = before.checked.scopes.retire count := by
+  rw [step.checked_eq]
+  change (before.checked.disposeBindings (before.checked.bindings.take count)).scopes.retire count = _
+  rw [(before.checked.disposeBindings_frame (before.checked.bindings.take count)).2.2]
+
+theorem BindStep.region_excludes_parent {program : Program} {phase : Phase}
+    {before after : Point program phase} {name : String} {mutable : Bool} {result : Result phase}
+    (step : BindStep program before after name mutable result) {fields : List Nat} {region : Region}
+    (bounded : after.checked.TargetOutlives ⟨.binder before.checked.nextBinder, fields⟩ region)
+    {point : UsePoint} (parent : point.scope = before.checked.scopes.current) : ¬ region.Contains point := by
+  rw [step.checked] at bounded
+  exact Checked.Context.bind_region_excludes_parent bounded parent
+
+
+theorem BindStep.close_scope {program : Program} {phase : Phase}
+    {before after : Point program phase} {name : String} {mutable : Bool} {result : Result phase}
+    (step : BindStep program before after name mutable result) :
+    (after.checked.scopes.retire 1).current = before.checked.scopes.current := by
+  rw [step.checked]
+  exact before.checked.scopes.retire_binding
+
+theorem PrepareStep.local_region {program : Program} {phase : Phase}
+    {before after : Point program phase} {parameters : List (String × BindingType)}
+    {arguments : List (Result phase)} {invocation : Invocation}
+    (step : PrepareStep program before after parameters arguments invocation)
+    {target : Checked.Address} {region : Region}
+    (fresh : before.checked.storage target.base = none)
+    (bounded : after.checked.TargetOutlives target region) :
+    (Region.lexical before.checked.scopes.current).Outlives region := by
+  rw [step.checked] at bounded
+  exact Checked.Context.prepare_local_region
+    (context := { before.checked with invocation := invocation }) fresh bounded
+
+theorem PrepareStep.call_local_excludes_caller {program : Program} {phase : Phase}
+    {caller hidden prepared : Point program phase} {parameters : List (String × BindingType)}
+    {arguments : List (Result phase)} {invocation : Invocation}
+    (hide : HideStep program caller hidden true)
+    (prepare : PrepareStep program hidden prepared parameters arguments invocation)
+    {target : Checked.Address} {region : Region}
+    (fresh : caller.checked.storage target.base = none)
+    (bounded : prepared.checked.TargetOutlives target region)
+    {point : UsePoint} (atCaller : point.scope = caller.checked.scopes.current) :
+    ¬ region.Contains point := by
+  have bound := prepare.local_region (by simpa only [hide.checked, Checked.Context.hide] using fresh) bounded
+  rw [hide.checked] at bound
+  exact fun used => caller.checked.scopes.invocation_excludes_parent point atCaller (bound point used)
+
+theorem HasType.borrow_region {program : Program} {phase : Phase} {home : Module}
+    {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
+    {result : Result phase} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program phase home before held expression result after plan expected) :
+    ∀ mode place, expression = .borrow mode place → ∀ executable : phase = .executable,
+      (result.source executable).BorrowRegion (after.source executable) := by
+  match typed with
+  | .borrow access lifetime _ _ _ _ _ _ produced _ _ _ actual =>
+    intro mode place same executable
+    cases same
+    obtain ⟨step⟩ := actual executable
+    exact step.borrowRegion (before.related executable) lifetime.storage
+      (congrArg (fun result : Checked.Result =>
+        (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type)) produced)
+  | .shorten body conversion =>
+    intro mode place same executable
+    exact (body.borrow_region mode place same executable).shorten conversion
+  | .view _ body | .endOwn _ body | .expectedBorrow body | .expectedData body _ _ =>
+    exact body.borrow_region
+  | .endAfter body ending =>
+    intro mode place same executable
+    obtain ⟨step⟩ := ending.actual executable
+    rw [step.updated]
+    exact (body.borrow_region mode place same executable).endOwn step.node
+  | .raiseSupply body _ _ _ actual =>
+    intro mode place same executable
+    obtain ⟨supply, _, updated⟩ := actual executable
+    rw [updated]
+    exact body.borrow_region mode place same executable
+  | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |
+      .reborrow .. | .dereference .. | .moveIndirect .. | .tuple .. | .array .. |
+      .construct .. | .sequence .. | .bind .. | .constant .. | .field .. | .call .. | .assign .. |
+      .assignIndirect .. | .applyPatterns .. | .expectedField .. | .expectedDereference .. |
+      .expectedMoveIndirect .. | .expectedMove .. | .expectedCall .. =>
+    intro mode place same
+    cases same
+termination_by structural typed
+
+
+theorem HasType.reborrow_region {program : Program} {phase : Phase} {home : Module}
+    {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
+    {result : Result phase} {plan : CorePlan} {expected : Option Ty}
+    (typed : HasType program phase home before held expression result after plan expected) :
+    ∀ mode, plan = .reborrow mode → ∀ executable : phase = .executable,
+      (result.source executable).BorrowRegion (after.source executable) := by
+  match typed with
+  | .reborrow body _ =>
+    intro mode same executable
+    exact body.borrow_region _ _ rfl executable
+  | .shorten body conversion =>
+    intro mode same executable
+    exact (body.reborrow_region mode same executable).shorten conversion
+  | .view _ body | .expectedBorrow body | .expectedData body _ _ | .expectedField body |
+      .expectedDereference body | .expectedMoveIndirect body | .expectedMove body | .expectedCall body =>
+    exact body.reborrow_region
+  | .raiseSupply body _ _ _ actual =>
+    intro mode same executable
+    obtain ⟨supply, _, updated⟩ := actual executable
+    rw [updated]
+    exact body.reborrow_region mode same executable
+  | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |
+      .borrow .. | .dereference .. | .moveIndirect .. | .tuple .. | .array .. |
+      .construct .. | .sequence .. | .bind .. | .constant .. | .field .. | .call .. | .assign .. |
+      .assignIndirect .. | .applyPatterns .. | .endOwn .. | .endAfter .. =>
+    intro mode same
+    cases same
+termination_by structural typed
+
+end Elaboration
+
+theorem StoreTyped.borrow_region_owner {program : Program} {interpretation : Interpretation}
+    {context : Context} {environment : Environment} (typed : StoreTyped program interpretation context environment)
+    {result : ResultType} (safe : result.BorrowRegion context) :
+    ∃ (referent : Ty) (mode : BorrowMode) (region : Region) (qualification : QualifiedTy Region referent)
+      (node : Nat) (loan : SourceLoan) (slot : Slot) (resident : Value),
+      result = ⟨.reference referent mode, .reference node, .reference region qualification mode⟩ ∧
+      context.loans[node]? = some loan ∧
+      environment.loans[interpretation.node node]? =
+        some ⟨interpretation.origin loan.target, loan.parent.map interpretation.node, loan.own, loan.mode⟩ ∧
+      context.storage loan.target.base = some slot ∧
+      environment.store (interpretation.origin loan.target).root = some resident ∧
+      ∀ point, region.Contains point → slot.storageScope.IsPrefix point.scope := by
+  obtain ⟨referent, mode, region, qualification, node, loan, result, found, slot, stored, bound⟩ := safe
+  cases base : loan.target.base with
+  | binder identity =>
+    obtain ⟨resident, present, _, _⟩ := typed.cells identity slot (base ▸ stored)
+    refine ⟨referent, mode, region, qualification, node, loan, slot, resident,
+      result, found, typed.records node loan found, stored, ?_, bound⟩
+    simpa [Interpretation.origin, base] using present
+
+namespace Elaboration
+
+/-- Every explicit or reference-expected reference creation retains its declared
+region and the exact source and runtime owner selected by its producer. -/
+theorem correctness_declared_reference_creation {program : Program} {home : Module}
+    {before after : Point program .executable} {held : List (Payload .executable)}
+    {expression : Expr} {result : Result .executable} {plan : CorePlan} {expected : Option Ty}
+    (admitted : HasType program .executable home before held expression result after plan expected)
+    (creation : (∃ mode place, expression = .borrow mode place) ∨ (∃ mode, plan = .reborrow mode))
+    {interpretation : Interpretation} {environment : Environment} {values : List Value}
+    (state : StateTyped program interpretation (before.source rfl) (sourcePayloads held rfl) environment values) :
+    ∃ value final last, Evaluates program environment ⟨expression, plan⟩ value final ∧
+      ResultTyped program last (after.source rfl) (result.source rfl) value ∧
+      StateTyped program last (after.source rfl) (sourcePayloads held rfl ++ [result.payload.source rfl])
+        final (values ++ [value]) ∧
+      (result.source rfl).BorrowRegion (after.source rfl) ∧
+      ∃ (referent : Ty) (resultMode : BorrowMode) (region : Region)
+        (qualification : QualifiedTy Region referent) (node : Nat) (loan : SourceLoan)
+        (slot : Grounded.Slot) (resident : Value),
+        result.source rfl = ⟨.reference referent resultMode, .reference node, .reference region qualification resultMode⟩ ∧
+        (after.source rfl).loans[node]? = some loan ∧
+        final.loans[last.node node]? =
+          some ⟨last.origin loan.target, loan.parent.map last.node, loan.own, loan.mode⟩ ∧
+        (after.source rfl).storage loan.target.base = some slot ∧
+        final.store (last.origin loan.target).root = some resident ∧
+        ∀ point, region.Contains point → slot.storageScope.IsPrefix point.scope := by
+  obtain ⟨value, final, last, evaluated, resident, finalTyped, _⟩ := correctness admitted state
+  have safe : (result.source rfl).BorrowRegion (after.source rfl) := by
+    rcases creation with ⟨mode, place, same⟩ | ⟨mode, same⟩
+    · exact admitted.borrow_region mode place same rfl
+    · exact admitted.reborrow_region mode same rfl
+  exact ⟨value, final, last, evaluated, resident, finalTyped, safe,
+    finalTyped.toStoreTyped.borrow_region_owner safe⟩
+
+end Elaboration
+end Grounded

@@ -141,14 +141,13 @@ even with nested omitted lifetimes. Constants resolve under the empty root
 scope. General normalization, phase erasure and execution proofs consume the
 migrated annotation and preparation judgments.
 
-Runtime region-validity interpretation and owner-root lexical scope integration
-remain open. Declared lifetime constraints 'a:'b resolve into the signature
-product and are discharged exactly at each call, but decoded lifetime and bound
-syntax is not yet populated by a source parser. Return provenance is derived
-from checked loan parents and interpreted source products without a singleton
-input restriction. Neither that ancestry nor a discharged outlives bound proves
-runtime validity for the declared region; full declared-lifetime conformance
-is not claimed.
+Owner-root lexical scopes now come from binding and invocation producers;
+canonical import and context correspondence retain them. Direct reference
+creation derives its declared-region bound against that actual storage root.
+General region validity through nested payloads, Copy, returns and retirement
+remains open. Declared outlives constraints are discharged at each call, but
+decoded lifetime and bound syntax is not yet populated by a source parser.
+Return provenance alone does not establish full declared-lifetime conformance.
 
 ### A single produced payload and authoritative storage
 
@@ -325,14 +324,17 @@ Separation or restoration needing unresolved external alias/storage contracts
 is not established by these positive local judgments. These cutovers close
 permission, access selection and resource transport, not general executable realization.
 
-Reborrow admission now bounds the result region by the actual selected carrier
-region. `HasType.borrow` consumes `Access.ParentOutlives`; both explicit borrowed
-subaddresses and expected-reference reborrows use this producer. Its carrier
-theorem proves inclusion of every permitted result use in that carrier region,
-and lifetime shortening preserves the bound. Erasure retains the obligation;
-the general execution and cleanup proofs consume the strengthened admission.
-Owned-root scope bounds and runtime interpretation of these regions remain open;
-this parent-lifetime check does not establish either of them.
+`HasType.borrow` consumes `Access.ParentOutlives`: every result region is bounded
+by the canonical owner root's `storageScope`, and reborrows additionally retain
+the selected carrier's region bound. Dereference checks membership of the current
+use point in that carrier region. Binding and call entry produce lexical scope
+coordinates; cleanup retires them and return restores the caller scope.
+`ContextMeaning` transports the same scope metadata, including through own-ending.
+`correctness_declared_reference_creation` connects the admitted creation to the
+actual runtime loan and resident owner. Preparation excludes caller-scope uses
+of fresh call-local roots, and cleanup excludes new borrows of retired roots.
+These are creation and scope guarantees, not general nested-reference region
+preservation or a completed checking-to-execution realization theorem.
 
 Pending arguments and returned nested references retain Own and restored-target
 obligations. Ordinary ending resolves the **current** carrier field, including
@@ -474,7 +476,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **8,003
+warnings as errors. The exhaustive defining-module audit covered **8,062
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
