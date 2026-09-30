@@ -16,10 +16,70 @@ reference, not developed in parallel. No old theorem is automatically a theorem
 of this development. No temporary code, assumed bridge, or placeholder Lean
 project is introduced by this reset. Subagent use remains paused.
 
-Current semantic coverage: none in this folder. There is no public Lean theorem
-or semantic proof-checking checkpoint here yet. This initial checkpoint records
-requirements and open design obligations only; it establishes no language
-soundness guarantee. Existing proofs have not been reverified as part of it.
+## Recovered, verified baseline
+
+At the user's request, `Grounded.lean` is restored byte-for-byte from commit
+`d182ea2a` ("Derive ordered pattern dispatch from structural coverage"), the
+1,081-line early second-revision milestone. Its small Lean project is independent
+of the reference trees, uses Lean 4.33.1, and imports no prior specification
+modules. The package is named `languageSemantics`; the original `Grounded`
+module/namespace is retained to avoid an unrelated source rewrite.
+
+Covered: target-bounded integer and Unicode scalar literals; immutable lexical
+binding and sequencing; tuples, fixed arrays and projections; decoded aliases
+and structural constants; finite-layout duplicable nominal data with visibility
+checks; direct noncapturing calls with finite body-typing derivations; and
+immediate ordered pattern application with structural coverage and usefulness.
+
+The public theorem is `Grounded.correctness`:
+
+```lean
+HasType program home context expression type →
+EnvironmentTyped program environment context →
+∃ value, Evaluates program environment expression value ∧
+  ValueHasType program value type ∧
+  ∀ other, Evaluates program environment expression other → other = value
+```
+
+`Grounded.closed_correctness` discharges the entry environment using the empty
+environment constructor. The general induction constructs binding and parameter
+environments and invokes the same evaluation relation for constants, calls,
+and selected pattern bodies. No executable-realization, future evaluation,
+successful cleanup, or run-level progress premise is supplied.
+
+Premise-producer map:
+
+| Premise | Meaning and producer | Actual consumer |
+| --- | --- | --- |
+| `HasType` | Ordinary rules check decoded syntax, declarations, visibility, bounds and permitted duplicable operations. Calls include a finite derivation for their declared body. | `correctness` inducts on these rules and their list/arm derivations. |
+| `EnvironmentTyped` | Legitimate current values agree with lexical types. Empty entry constructs it; binding, parameter zipping and pattern binding preserve it. | Lookup and recursive body correctness. |
+| `Covers` | Structural constructor-space coverage, not an evaluation-success certificate. | `Covers.selectArm` constructs selection after argument evaluation. |
+| `PatternType` | Static constructor/field typing, access and legal duplicable disposal. | `PatternType.bindings` derives the selected body's typed environment. |
+| `Useful` | A typed datum distinguishes a clause from preceding clauses; it does not assert evaluation of the subject. | `ArmsType.clause` admits only useful clauses. |
+
+This is a logical terminating AST-to-value theorem, not whole-language
+soundness, a source parser/typechecker implementation, or machine progress.
+Inductive body typing does not admit general recursive calls. Immutable values
+model no mutable storage, loans, captures, physical allocation, exhaustion,
+nonlocal control or custom destructors. No later reference/admission machinery
+was restored. The old pending/view defects below are constraints on future
+extensions, not defects asserted to exist in this recovered fragment.
+
+Verification performed in `formal/semantics`:
+
+- `cmp Grounded.lean <(git show d182ea2a:formal/grounded-spec/Grounded.lean)`
+  passed: exact historical source, not a reconstructed approximation.
+- `lake build` passed with `autoImplicit=false` and `warningAsError=true`
+  configured in `lakefile.toml`.
+- A strict Lean defining-module audit checked all 1,135 declarations, including
+  28 private declarations and generated declarations. The only transitive
+  axioms were `propext` and `Quot.sound`. The public correctness, closed
+  correctness, coverage-selection and pattern-binding results were also
+  inspected individually. No concrete examples or unit tests were added.
+
+The recovered proof is the first semantic checkpoint here. It supplies a
+connected base to extend, not permission to replay the later development's
+assumed bridges or to treat its finite terminating subset as the full language.
 
 ## Destination contract
 
@@ -44,14 +104,15 @@ following are design obligations, not asserted Lean propositions or axioms:
   interfaces explicitly. Do not label an abstract language theorem as physical
   allocation, ABI, or compiler correctness.
 
-Before implementing semantic definitions, refine this destination into precise
-public theorem signatures and a premise-producer map for the first coherent
-boundary. Record the covered fragment and unsupported constructs explicitly;
-partial coverage is not approval to reduce the full-language goal.
+Before extending the recovered fragment, refine the destination into precise
+public theorem signatures and a premise-producer map for the next coherent
+boundary. Record unsupported constructs explicitly; partial coverage is not
+approval to reduce the full-language goal.
 
-## First design boundary: coherent checking-to-execution contracts
+## Required design boundary before stateful extensions
 
-Resolve these interacting questions together before a broad proof rewrite:
+Resolve these interacting questions together before extending the baseline with
+mutable storage, resource-bearing references, or their execution contracts:
 
 1. **Pending resources and initialization holes.** Separate resource
    correspondence and ownership from current readiness. Determine exactly when
@@ -96,10 +157,12 @@ Implement the settled boundary as a connected vertical slice:
 4. Close the general preservation/progress or correctness result for the stated
    boundary and connect its public entry consumers.
 
-Organize modules around these semantic responsibilities rather than copying the
-old monolith or introducing a generic framework in advance. Reused proofs must
-have audited hypotheses and real consumers. No extra evaluator, resource walker,
-compatibility layer, or callback may stand in for a missing proof.
+Extend the recovered connected source through modules with actual semantic
+responsibilities, rather than growing another monolith or creating a generic
+framework in advance. Source organization changes must preserve the existing
+public result. Reused proofs need audited hypotheses and real consumers; no
+extra evaluator, resource walker, compatibility layer, or callback may stand in
+for a missing proof.
 
 The older `checked_correctness.realized` premise, run-level `ResourceAdmissionAt`,
 eager executable arm evidence, and raw-target opaque-view discriminator must not
@@ -118,10 +181,11 @@ At each meaningful checkpoint update this document with:
   theorems distinguished from discharged guarantees, and unsupported features.
 - The exact next obligation on the same dependency chain.
 
-Current next obligation: settle the four contract questions above against the
-normative language and state the first precise public theorem and its
-premise-producer map. No supporting-lemma inventory or full-language completion
-claim replaces that obligation.
+Current next obligation: use the recovered general theorem as the starting
+point, specifying the next coherent extension and its premise-producer map.
+Before a stateful extension, settle the four contract questions above against
+the normative language. Preserve the proved immutable fragment through actual
+consumers; do not accumulate detached helper proofs or assume realization.
 
 Whole-language completion additionally requires an explicit normative coverage
 and consumer audit. Features absent from this new folder remain unproved,
