@@ -44,6 +44,92 @@ For Lean specification work, this section overrides the routine positive and
 negative testing guidance below; that guidance still applies to compiler
 implementation work.
 
+## Lean specification reset: mandatory durable requirements
+
+The active specification development is `formal/semantics/`. Its single
+authoritative proof plan is [PROOF-PLAN.md](formal/semantics/PROOF-PLAN.md).
+The existing `formal/spec/`, `formal/grounded-spec/`, and `formal/lean/` trees
+are preserved reference work, not concurrent development tracks or evidence
+that the new development has proved their guarantees. Do not delete them or
+resume work there without explicit user direction. Reuse code only after
+auditing its semantics, premises, producers, and actual consumers. Do not copy
+an old admission architecture into the new folder to obtain a quick build.
+
+### No temporary work
+
+- Every implemented definition, proof, and interface must be intended as a
+  permanent part of the correct solution. Iteration extends correct coverage;
+  it must not accumulate shortcuts to replace later. Necessary corrections to
+  newly discovered mistakes are not permission to knowingly introduce them.
+- No temporary assumptions, `sorry`, `admit`, unapproved axioms, placeholder
+  implementations, fake fallbacks, special cases, duplicate semantic paths,
+  or weakened guarantees to get a proof through. Do not hide an unproved
+  obligation behind a structure field, callback, typeclass, or admission
+  predicate and describe the consumer as having discharged it.
+- Incomplete coverage must remain explicitly unproved. A target theorem may
+  be recorded as a design obligation in the proof plan, never installed as an
+  axiom or admitted declaration. Conditional lemmas are legitimate only when
+  their premises are explicit and their intended producers are identified;
+  they do not close a boundary until those producers are connected.
+- Repair an incorrect contract and migrate its real consumers coherently.
+  Remove mechanisms superseded by that cutover; do not retain compatibility
+  wrappers around known-wrong interfaces. Preserve unrelated work.
+
+### Modular, extensible proofs
+
+- Separate facts that have different preservation conditions: resource
+  correspondence, ownership/provenance, initialization/readiness, and current
+  operation permission. Do not require readiness at every intermediate state
+  merely because that makes an induction easier. Derive its exact use, call,
+  transfer, and cleanup requirements from the normative language semantics.
+- Each operation contract must state its current-state requirements, actual
+  transition, preserved invariants, resource changes, and effects on unrelated
+  resources and previously produced values. Use authoritative storage and loan
+  relations, not a second proof-only analysis of the same facts.
+- Factor genuine composition boundaries such as sequencing, argument/capture
+  evaluation, selected-branch execution, and ordered cleanup. Do not create a
+  generic framework merely to make proofs look modular. Organize files around
+  semantic responsibilities once their contracts are understood.
+- Work in vertical slices: checking rule -> operation construction -> invariant
+  preservation -> general theorem case -> public consumer. Supporting lemmas
+  are intermediate work, not substitutes for closing that chain.
+
+### Mandatory acceptance gates
+
+1. At session start, read this file, the architecture contract, the relevant
+   normative specification, and the single active proof plan. Inspect the
+   public theorem and its premises when it exists, the current semantic
+   boundary, and the latest verified checkpoint before editing. Never infer
+   completion from an archived summary or a successful build.
+2. Before implementation, state the intended public theorem, legitimate entry
+   evidence, covered language fragment, and outcome distinctions. Do not
+   reduce the full-language goal silently or confuse big-step termination
+   results with progress for recursion and divergence.
+3. For each contract change, explain the defect, its normative justification,
+   and the affected producers and consumers. Resolve interacting invariant
+   defects together before launching another broad proof rewrite.
+4. For every added premise, identify its authoritative producer and where it
+   is discharged. Future execution, successful cleanup, progress, and
+   successor-state correspondence must not be assumed in place of proving
+   them. Legitimate external and current-state assumptions must be explicit.
+5. A semantic completion checkpoint must show a connected producer-to-consumer
+   result, with strict Lean checking and axiom inspection of the affected
+   public result. A checked theorem can still state the wrong contract: review
+   premise and signature changes as well as proof acceptance.
+6. Record assumptions removed, guarantees established, exercised verification,
+   and exact remaining obligations in the proof plan. Distinguish proved
+   results, conditional results, suspected defects, and unsupported features.
+   Lemma counts, build counts, worker activity, and passing examples are not
+   measures of semantic completion. Do not create competing status/handoff
+   documents as alternative sources of truth.
+7. Keep one owner of the semantic core. Subagent use is paused and must not
+   resume without explicit user approval. Any later delegation requires
+   demonstrably independent scope and stable shared interfaces.
+8. Before claiming whole-language completion, audit normative coverage, public
+   theorem premises, real consumers, and remaining external contracts. No
+   compiler implementation or unrelated feature expansion substitutes for
+   completing the semantic specification.
+
 ## Shared semantics, explicit transformations
 
 - Prefer typed, inspectable data products and composable transformation or
