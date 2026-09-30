@@ -10287,6 +10287,21 @@ theorem StateTyped.selectedCut {interpretation : Interpretation} {context : Cont
     have same := typed.binderDistinct second binder (.inl ⟨resident, otherStored⟩) (.inl ⟨slot, stored⟩) components.1
     exact ⟨by simp only [base, same], ⟨suffix, components.2.symm⟩⟩
 
+theorem StateTyped.selected_unprotected {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {binder : Nat} {slot : Slot} {fields : List Nat} {payload : SourcePayload}
+    (stored : context.storage (.binder binder) = some slot)
+    (selected : slot.payload.select fields = some payload) :
+    ∀ node ∈ payload.nodes, node ∉ payloadNodes heldPayloads := by
+  intro node member
+  obtain ⟨value, found, _, related⟩ := typed.cells binder slot stored
+  obtain ⟨suffix, occurrence⟩ := SourcePayload.mem_nodes_iff.mp member
+  apply typed.stored_unprotected (root := interpretation.binder binder) (fields := fields ++ suffix)
+  change (environment.store _ >>= fun value => value.readIndices _) = _
+  simp only [found]
+  exact related.occurs_readIndices (SourcePayload.select_occurs selected occurrence)
+
 /-- Custody ties an observed inner handle to its actual carrier. Positive
 carrier separation therefore excludes observation without alias injectivity. -/
 theorem StateTyped.stored_unobserved {interpretation : Interpretation} {context : Context} {environment : Environment}
@@ -17826,7 +17841,29 @@ theorem ContextMeaning.access_at {home : Module} {checked : Checked.Context} {so
   cases same
   exact constructed
 
-/-- Selected resources follow the same canonical cell and payload projection as access. -/
+/-- Current selection has one occurrence-to-handle projection for all resource consumers. -/
+theorem ContextMeaning.selectedNodes {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} {payload : Checked.Payload} {type : Ty}
+    (stored : checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload type)
+    {actual : Origin} (image : symbols.address source target = some actual)
+    {resident : Grounded.Slot} (actualStored : source.storage actual.base = some resident)
+    (path : CanonicalPath program resident.type actual.fields type)
+    {concrete : SourcePayload} (read : resident.payload.select actual.fields = some concrete) :
+    ∀ node ∈ concrete.nodes, ∃ reference, payload.Occurs program reference ∧
+      symbols.reference reference = some node := by
+  cases target with
+  | mk base fields =>
+      cases base with
+      | referent reference => rw [meaning.noOpaqueCells reference] at stored; cases stored
+      | binder binder =>
+          obtain ⟨actualSlot, found, shape, _, _, _, product⟩ := meaning.cells _ _ _ stored rfl
+          cases image
+          cases Option.some.inj (found.symm.trans actualStored)
+          have typeEq : resident.type = slot.type := congrArg (fun entry => entry.1) shape
+          exact fun _ member => product.at_node selected (typeEq ▸ path) read member
+
 theorem ContextMeaning.selectedResources {checked : Checked.Context} {source : Grounded.Context}
     (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
     {slot : Checked.Slot} {payload : Checked.Payload} {type : Ty}
@@ -17837,18 +17874,23 @@ theorem ContextMeaning.selectedResources {checked : Checked.Context} {source : G
     {resident : Grounded.Slot} (actualStored : source.storage actual.base = some resident)
     (path : CanonicalPath program resident.type actual.fields type)
     {concrete : SourcePayload} (read : resident.payload.select actual.fields = some concrete) :
-    source.PayloadAvailable concrete := by
-  cases target with
-  | mk base fields =>
-      cases base with
-      | referent reference => rw [meaning.noOpaqueCells reference] at stored; cases stored
-      | binder binder =>
-          obtain ⟨actualSlot, found, shape, _, _, _, product⟩ := meaning.cells _ _ _ stored rfl
-          cases image
-          cases Option.some.inj (found.symm.trans actualStored)
-          have typeEq : resident.type = slot.type := congrArg (fun entry => entry.1) shape
-          exact meaning.resourcesAvailableNodes
-            (fun _ member => product.at_node selected (typeEq ▸ path) read member) available
+    source.PayloadAvailable concrete :=
+  meaning.resourcesAvailableNodes (meaning.selectedNodes stored selected image actualStored path read) available
+
+theorem ContextMeaning.selectedRestored {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} {payload : Checked.Payload} {type : Ty}
+    (stored : checked.storage target.base = some slot)
+    (selected : Checked.Payload.At program slot.payload slot.type target.fields payload type)
+    (ready : ∀ reference, payload.Occurs program reference → checked.EndReady (program := program) reference)
+    {actual : Origin} (image : symbols.address source target = some actual)
+    {resident : Grounded.Slot} (actualStored : source.storage actual.base = some resident)
+    (path : CanonicalPath program resident.type actual.fields type)
+    {concrete : SourcePayload} (read : resident.payload.select actual.fields = some concrete) :
+    ∀ node ∈ concrete.nodes, source.Restored node := by
+  intro node member
+  obtain ⟨reference, occurs, mapped⟩ := meaning.selectedNodes stored selected image actualStored path read node member
+  exact meaning.endReady (ready reference occurs) mapped
 
 theorem ContextMeaning.targetResources {checked : Checked.Context} {source : Grounded.Context}
     (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
@@ -18041,9 +18083,9 @@ structure EndingStep (program : Program) {phase : Phase} (before after : Point p
       slotIndex fields (after.source executable))
 
 
-structure SourceWrite (program : Program) (home : Module) (before : Grounded.Context)
+structure SourceWrite (program : Program) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
-    (held : List SourcePayload) (place : AccessPlace) (replacement : ResultType) (after : Grounded.Context) where
+    (replacement : ResultType) (after : Grounded.Context) where
   target : Origin
   parent : Option Nat
   slot : Grounded.Slot
@@ -18057,13 +18099,11 @@ structure SourceWrite (program : Program) (home : Module) (before : Grounded.Con
   path : CanonicalPath program slot.type target.fields replacement.type
   selected : slot.payload.select target.fields = some old
   discard : StorageDisposition program state replacement.type
-  unprotected : ∀ node ∈ old.nodes, node ∉ payloadNodes (held ++ [replacement.payload])
-  ready : ∀ node ∈ old.nodes, before.Restored node
   written : SourcePayload.Write program slot.type target.fields slot.payload replacement.payload updatedPayload
   updated : after = (before.dispose old).writeTarget target .full updatedPayload
 
 structure WriteStep (program : Program) (home : Module) {phase : Phase}
-    (before after : Point program phase) (held : List (Payload phase)) (place : AccessPlace)
+    (before after : Point program phase) (place : AccessPlace)
     (replacement : Result phase) where
   target : Checked.Address
   parent : Option Checked.Reference
@@ -18077,14 +18117,12 @@ structure WriteStep (program : Program) (home : Module) {phase : Phase}
   mask : slot.initialization.Access target.fields state
   selected : Checked.Payload.At program slot.payload slot.type target.fields old replacement.type
   discard : StorageDisposition program state replacement.type
-  unprotected : ∀ reference, old.Occurs program reference →
-    ¬ Checked.heldOccurs (program := program) (checkedPayloads (held ++ [replacement.payload])) reference
-  ready : ∀ reference, old.Occurs program reference → before.checked.NotKnownUnrestored reference
+  ready : ∀ reference, old.Occurs program reference → before.checked.EndReady (program := program) reference
   written : Checked.Payload.Write program slot.payload slot.type target.fields replacement.payload.checked updatedPayload
   updated : after.checked = (before.checked.endPayload old).writeTarget target .full updatedPayload
   stable : PointsStable before after
-  actual : Required phase fun executable => Nonempty (SourceWrite program home
-    (before.source executable) (before.symbols executable) target parent (sourcePayloads held executable) place
+  actual : Required phase fun executable => Nonempty (SourceWrite program
+    (before.source executable) (before.symbols executable) target parent
     (replacement.source executable) (after.source executable))
 
 structure ProjectionStep (program : Program) (home : Module) {phase : Phase}
@@ -18354,14 +18392,14 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
   | assign {phase : Phase} {home : Module} {before middle written after : Point program phase} {held : List (Payload phase)}
       {place : Place} {value rest : Expr} {replacement result : Result phase} {valuePlan restPlan : CorePlan} {expected : Option Ty}
       (resident : HasType program phase home before held value replacement middle valuePlan (some replacement.type))
-      (write : WriteStep program home middle written held (.owner place) replacement)
+      (write : WriteStep program home middle written (.owner place) replacement)
       (continued : HasType program phase home written held rest result after restPlan expected) :
       HasType program phase home before held (.assign place value rest) result after (.binary valuePlan restPlan) expected
   | assignIndirect {phase : Phase} {home : Module} {before middle written after : Point program phase} {held : List (Payload phase)}
       {reference : Place} {fields : List FieldKey} {value rest : Expr} {replacement result : Result phase}
       {valuePlan restPlan : CorePlan} {expected : Option Ty}
       (resident : HasType program phase home before held value replacement middle valuePlan (some replacement.type))
-      (write : WriteStep program home middle written held (.dereference reference fields) replacement)
+      (write : WriteStep program home middle written (.dereference reference fields) replacement)
       (continued : HasType program phase home written held rest result after restPlan expected) :
       HasType program phase home before held (.assignIndirect reference fields value rest) result after (.binary valuePlan restPlan) expected
   | endOwn {phase : Phase} {home : Module} {before ended after : Point program phase} {held : List (Payload phase)}
@@ -18852,9 +18890,10 @@ theorem SourceWrite.execute {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {place : AccessPlace} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
-    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads place replacement after)
+    (write : SourceWrite program before symbols checkedTarget checkedParent replacement after)
     (access : AccessType program home before .unique place write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
+    (restored : ∀ node ∈ write.old.nodes, before.Restored node)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18887,6 +18926,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
       exact ⟨binder, base⟩
   obtain ⟨binder, base⟩ := baseExists
   have stored : before.storage (.binder binder) = some write.slot := by simpa only [base] using write.stored
+  have unprotected := typed.selected_unprotected stored write.selected
   have separated : ∀ (node : Nat) (loan : SourceLoan), before.loans[node]? = some loan → loan.own = true →
       (write.target.Within loan.target ∧ loan.mode = .unique) ∨ write.target.Apart loan.target := by
     intro node loan found own
@@ -18900,7 +18940,7 @@ theorem SourceWrite.execute {program : Program} {home : Module}
     · exact .inr apart
   obtain ⟨resident, disposed, updated, read, disposal, written, state, progress⟩ :=
     typed.assignTarget valueTyped base stored write.path write.mask write.selected write.discard
-      write.unprotected write.ready write.written separated
+      unprotected restored write.written separated
   obtain ⟨root, rootStored, rootTyped, rootRelated⟩ := typed.cells binder write.slot stored
   obtain ⟨old, oldRead, oldTyped⟩ := write.path.resident rootTyped write.mask
   have oldAt : environment.at (interpretation.origin write.target) = some old := by
@@ -18910,13 +18950,13 @@ theorem SourceWrite.execute {program : Program} {home : Module}
   have related := rootRelated.select write.selected oldRead
   have payloadTyped := (typed.source.allocated binder write.slot stored).2.2.2.select write.path write.selected
   obtain ⟨disposed', disposal', disposedTyped⟩ := typed.toStoreTyped.dispose related
-    (fun _ member => payloadTyped.node_bound member) write.ready (write.discard.realized oldTyped)
+    (fun _ member => payloadTyped.node_bound member) restored (write.discard.realized oldTyped)
   have sameDisposed := disposal'.deterministic disposal
   subst disposed'
   have replacementTyped := valueTyped.transport (Context.History.dispose before write.old) (.refl _ _)
   have usable : disposed.ResultUsable value := replacementTyped.usable disposedTyped
     (fun node member => (typed.heldOwn node (by simp [payloadNodes_append, payloadNodes, member])).dispose_of_not_mem
-      (fun old => write.unprotected node old (by simp [payloadNodes_append, payloadNodes, member])))
+      (fun old => unprotected node old (by simp [payloadNodes_append, payloadNodes, member])))
     (fun node member => (typed.heldReady node (by simp [payloadNodes_append, payloadNodes, member])).dispose write.old)
   exact ⟨resident, disposed, updated, resolved, typed.toStoreTyped.carrierPermits access,
     authority, typed.toStoreTyped.permits known permission, read, disposal, usable, written,
@@ -18927,9 +18967,10 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {place : Place} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
-    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.owner place) replacement after)
+    (write : SourceWrite program before symbols checkedTarget checkedParent replacement after)
     (access : AccessType program home before .unique (.owner place) write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
+    (restored : ∀ node ∈ write.old.nodes, before.Restored node)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18943,7 +18984,7 @@ theorem SourceWrite.executeOwner {program : Program} {home : Module}
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
   obtain ⟨resident, disposed, updated, resolved, _, _, permitted, read, disposal, usable, written, state, progress⟩ :=
-    write.execute access permission typed valueTyped
+    write.execute access permission restored typed valueTyped
   have parentNone : ∀ {target type parent}, AccessType program home before .unique (.owner place) target type parent → parent = none := by
     intro target type parent access
     cases access
@@ -18966,9 +19007,10 @@ theorem SourceWrite.executeIndirect {program : Program} {home : Module}
     {before after : Grounded.Context} {heldPayloads : List SourcePayload}
     {reference : Place} {fields : List FieldKey} {replacement : ResultType}
     {symbols : Symbols} {checkedTarget : Checked.Address} {checkedParent : Option Checked.Reference}
-    (write : SourceWrite program home before symbols checkedTarget checkedParent heldPayloads (.dereference reference fields) replacement after)
+    (write : SourceWrite program before symbols checkedTarget checkedParent replacement after)
     (access : AccessType program home before .unique (.dereference reference fields) write.target replacement.type write.parent)
     (permission : before.Permits .unique write.parent write.target)
+    (restored : ∀ node ∈ write.old.nodes, before.Restored node)
     {interpretation : Interpretation} {environment : Environment} {held : List Value} {value : Value}
     (typed : StateTyped program interpretation before (heldPayloads ++ [replacement.payload]) environment (held ++ [value]))
     (valueTyped : ResultTyped program interpretation before replacement value) :
@@ -18983,7 +19025,7 @@ theorem SourceWrite.executeIndirect {program : Program} {home : Module}
       disposed.writeAddress access.address value = some updated ∧
       StateTyped program interpretation after heldPayloads updated held ∧
       StateProgress before after environment updated interpretation interpretation := by
-  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute access permission typed valueTyped
+  obtain ⟨resident, disposed, updated, fragments⟩ := write.execute access permission restored typed valueTyped
   exact ⟨_, resident, disposed, updated, fragments⟩
 
 
@@ -19520,7 +19562,7 @@ theorem Executes.field {before middle after : Point program phase} {held : List 
 theorem Executes.assign {before middle written after : Point program phase} {held : List (Payload phase)}
     {place : Place} {value rest : Expr} {replacement result : Result phase} {valuePlan restPlan : CorePlan}
     (resident : Executes before held value replacement middle valuePlan)
-    (write : WriteStep program home middle written held (.owner place) replacement)
+    (write : WriteStep program home middle written (.owner place) replacement)
     (continued : Executes written held rest result after restPlan) :
     Executes before held (.assign place value rest) result after (.binary valuePlan restPlan) := by
   intro executable interpretation environment values state
@@ -19529,8 +19571,10 @@ theorem Executes.assign {before middle written after : Point program phase} {hel
   have permission := (middle.related executable).permits
     (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
   have sourceAccess := (middle.related executable).access_at initialState.toStoreTyped write.access write.stored write.mask step.targetImage step.parentImage
+  have restored := (middle.related executable).selectedRestored write.stored write.selected write.ready
+    step.targetImage step.stored step.path step.selected
   obtain ⟨old, disposed, updated, resolved, free, read, disposal, usable, changed, updatedState, writeProgress⟩ :=
-    step.executeOwner sourceAccess permission initialState replacementTyped
+    step.executeOwner sourceAccess permission restored initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -19542,7 +19586,7 @@ theorem Executes.assignIndirect {before middle written after : Point program pha
     {reference : Place} {fields : List FieldKey} {value rest : Expr} {replacement result : Result phase}
     {valuePlan restPlan : CorePlan}
     (resident : Executes before held value replacement middle valuePlan)
-    (write : WriteStep program home middle written held (.dereference reference fields) replacement)
+    (write : WriteStep program home middle written (.dereference reference fields) replacement)
     (continued : Executes written held rest result after restPlan) :
     Executes before held (.assignIndirect reference fields value rest) result after (.binary valuePlan restPlan) := by
   intro executable interpretation environment values state
@@ -19551,8 +19595,10 @@ theorem Executes.assignIndirect {before middle written after : Point program pha
   have permission := (middle.related executable).permits
     (fun binder base => Or.inl ⟨write.slot, base ▸ write.stored⟩) step.targetImage step.parentImage write.permitted
   have sourceAccess := (middle.related executable).access_at initialState.toStoreTyped write.access write.stored write.mask step.targetImage step.parentImage
+  have restored := (middle.related executable).selectedRestored write.stored write.selected write.ready
+    step.targetImage step.stored step.path step.selected
   obtain ⟨access, old, disposed, updated, resolved, carrier, authority, permitted, read, disposal, usable, changed,
-    updatedState, writeProgress⟩ := step.executeIndirect sourceAccess permission initialState replacementTyped
+    updatedState, writeProgress⟩ := step.executeIndirect sourceAccess permission restored initialState replacementTyped
   obtain ⟨resultValue, final, last, bodyEval, resultTyped, finalState, bodyProgress⟩ := continued executable updatedState
   have supply : initial.nextRoot ≤ updated.nextRoot := by
     simp only [(Environment.writeAddress_update changed).supply, disposal.storage.supply, Nat.le_refl]
@@ -20185,12 +20231,11 @@ def EndingStep.erase {before after : Point program phase} {held : List (Payload 
     EndingStep program before.erase after.erase (held.map Payload.erase) slot fields :=
   ⟨step.binding, step.symbol, step.referent, step.mode, step.selected, step.stored, step.handle,
     by simpa using step.permitted, step.updated, checkingStable, checkingRequired⟩
-def WriteStep.erase {before after : Point program phase} {held : List (Payload phase)} {place : AccessPlace} {result : Result phase}
-    (step : WriteStep program home before after held place result) :
-    WriteStep program home before.erase after.erase (held.map Payload.erase) place result.erase :=
+def WriteStep.erase {before after : Point program phase} {place : AccessPlace} {result : Result phase}
+    (step : WriteStep program home before after place result) :
+    WriteStep program home before.erase after.erase place result.erase :=
   ⟨step.target, step.parent, step.slot, step.state, step.old, step.updatedPayload,
     step.access, step.permitted, step.stored, step.mask, step.selected, step.discard,
-    by simpa [checkedPayloads, Payload.erase, Result.erase, Function.comp_def] using step.unprotected,
     step.ready, step.written, step.updated, checkingStable, checkingRequired⟩
 def ProjectionStep.erase {before after : Point program phase} {held : List (Payload phase)} {parent result : Result phase} {key : FieldKey}
     (step : ProjectionStep program home before after held parent key result) :

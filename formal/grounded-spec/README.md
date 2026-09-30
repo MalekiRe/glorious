@@ -309,6 +309,13 @@ residual disposal after preserving the extracted value; its source product no
 longer assumes disposal legality. General pattern-disposal and ordered-cleanup
 admission still contain separate source obligations pending their producer cutover.
 
+Assignment uses the same `selectedNodes` projection: guarded `EndReady` checks
+derive restoration of overwritten resources, and `StateTyped.selected_unprotected`
+derives pending-value exclusion from custody. `SourceWrite` no longer supplies
+either fact. Direct and indirect assignment consume these derivations through
+the general execution theorem; writes can still restore initialization holes.
+The unused held-list exclusion check and its product indices were removed.
+
 Absent `.plain` source products at vacant/maybe masks require checked `NoHandles`;
 they cannot hide a mapped ghost reference. This allows `mapped_occurs` to reflect
 actual resources independently of mask completeness, while full-reference
@@ -467,7 +474,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **8,004
+warnings as errors. The exhaustive defining-module audit covered **8,003
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
