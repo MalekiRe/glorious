@@ -72,10 +72,21 @@ derives well-formedness and closure for every admitted named call, including
 administrative and expected-type wrappers. The existing general execution-
 correctness theorem consumes the migrated producer.
 
-This closes signature resolution, not lifetime-qualified body or return checking.
-Binding views, invocation substitutions and source return provenance still need
-to consume the resolved qualifiers. The bounded return rule below remains; no
-multi-input lifetime safety or complete declared-lifetime conformance is claimed.
+Source and checked slots, expression results, pattern fields and aggregate
+results now carry intrinsic qualified types. Binding and preparation retain
+them; storage joins preserve qualification alongside canonical type and owner
+identity. Reads and dereferences preserve the selected qualified type. Moves,
+borrows, writes and field extraction consume qualified paths/projections from
+the same declaration product. Pattern decomposition instantiates the qualified
+constructor fields rather than inventing erased field types. Checked-to-source
+cell correspondence requires equality of the complete qualified type; canonical
+entry import and phase erasure preserve that correspondence. The general
+execution and cleanup correctness proofs consume these migrated producers.
+
+Invocation substitutions, qualified annotations/coercions, region-validity
+interpretation and source return provenance remain open. A carried qualifier is
+not yet a proof of its lifetime bound. The bounded return rule below remains;
+no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
 
 ### A single produced payload and authoritative storage
 
@@ -212,8 +223,9 @@ positively handle-free result needs no reference input. Otherwise the current
 bounded rule permits at most one simultaneous input reference occurrence, and
 every result node must derive from it. Mutually exclusive variants do not count
 as simultaneous runtime occurrences. This is **not** full declared-lifetime
-return checking: signatures now resolve lifetime parameters, but body bindings
-and `ReturnStep` still use canonical `Ty`. `correctness_return_cleanup` connects general
+return checking: signatures resolve lifetime parameters and bindings retain
+qualified types, but calls do not yet instantiate those signatures and
+`ReturnStep` still checks bounded provenance. `correctness_return_cleanup` connects general
 body execution, actual cleanup, returned usability and runtime ancestry at every
 nested returned occurrence; cleanup does not auto-end the returned handles.
 Every active target after cleanup is backed by storage already present before
@@ -309,8 +321,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,627
-declarations, including 277 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,718
+declarations, including 291 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no

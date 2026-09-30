@@ -1037,10 +1037,11 @@ termination_by _ path => path.length
 structure Slot extends BindingType where
   binder : Nat
   payload : SourcePayload
+  qualification : QualifiedTy Region type
 
 /-- Declaration identity excludes mutable resident provenance. -/
-def Slot.metadata (slot : Slot) : Ty × Bool × Nat :=
-  (slot.type, slot.mutable, slot.binder)
+def Slot.metadata (slot : Slot) : ((shape : Ty) × QualifiedTy Region shape) × Bool × Nat :=
+  (⟨slot.type, slot.qualification⟩, slot.mutable, slot.binder)
 
 structure Context where
   names : List (String × Nat)
@@ -1057,6 +1058,11 @@ def Context.bindings (context : Context) : List (String × Slot) :=
 structure ResultType where
   type : Ty
   payload : SourcePayload
+  qualification : QualifiedTy Region type
+
+def ResultType.qualifications : (results : List ResultType) → QualifiedTys Region (results.map ResultType.type)
+  | [] => .nil
+  | result :: results => .cons result.qualification (qualifications results)
 
 /-- This is source-level explicit dereference, not an owned temporary projection. -/
 inductive AccessPlace where
@@ -4028,7 +4034,7 @@ def bind (context : Context) (name : String) (mutable : Bool) (result : ResultTy
   { context with
     names := (name, context.nextBinder) :: context.names
     storage := fun origin => if origin = .binder context.nextBinder then
-      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload⟩
+      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩
       else context.storage origin
     nextBinder := context.nextBinder + 1 }
 
@@ -4102,7 +4108,7 @@ theorem WellFormed.bindings_binders {context : Context} (valid : context.WellFor
 theorem WellFormed.bindings_bind {context : Context} (valid : context.WellFormed program)
     (name : String) (mutable : Bool) (result : ResultType) :
     (context.bind name mutable result).bindings =
-      (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload⟩) :: context.bindings := by
+      (name, ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩) :: context.bindings := by
   simp only [Context.bindings, Context.bind, List.filterMap_cons, ↓reduceIte, Option.map_some]
   congr 1
   apply filterMap_congr_mem
@@ -4197,14 +4203,172 @@ end Context
 
 
 
+def QualifiedDataDecl.constructor (declaration : QualifiedDataDecl) (tag : Option Nat) :
+    Option (QualifiedFields (Option (Fin declaration.regions))) :=
+  match declaration.shape, tag with
+  | .structure fields, none => some fields
+  | .enumeration variants, some index => variants[index]?
+  | _, _ => none
+
+theorem QualifiedDataDecl.constructor_erase (declaration : QualifiedDataDecl) (tag : Option Nat) :
+    declaration.erase.constructor tag = (declaration.constructor tag).map QualifiedFields.erase := by
+  cases declaration with
+  | mk home visibility regions shape restriction =>
+    cases shape <;> cases tag <;>
+      simp [QualifiedDataDecl.erase, QualifiedDataShape.erase, DataDecl.constructor,
+        QualifiedDataDecl.constructor, List.getElem?_map]
+
+theorem QualifiedDataDecl.constructor_fields {declaration : QualifiedDataDecl} {tag : Option Nat}
+    {schema : QualifiedFields (Option (Fin declaration.regions))}
+    (selected : declaration.constructor tag = some schema)
+    {field : QualifiedField (Option (Fin declaration.regions))} (member : field ∈ schema.residents) :
+    field ∈ declaration.fields := by
+  cases declaration with
+  | mk home visibility regions shape restriction =>
+    cases shape with
+    | «structure» fields =>
+      cases tag <;> simp [QualifiedDataDecl.constructor] at selected
+      subst schema
+      exact member
+    | enumeration variants =>
+      cases tag with
+      | none => simp [QualifiedDataDecl.constructor] at selected
+      | some index =>
+        exact List.mem_flatMap.mpr ⟨schema, List.mem_of_getElem? selected, member⟩
+
+def QualifiedTys.fromFields {R S : Type} (substitute : R → S) :
+    (fields : List (QualifiedField R)) → QualifiedTys S (fields.map QualifiedField.shape)
+  | [] => .nil
+  | field :: fields => .cons (field.type.map substitute) (fromFields substitute fields)
+
+def QualifiedTys.replicate {R : Type} {shape : Ty} (type : QualifiedTy R shape) :
+    (count : Nat) → QualifiedTys R (List.replicate count shape)
+  | 0 => .nil
+  | count + 1 => .cons type (replicate type count)
+
+/-- Constructor typing retains the instantiated qualified fields. Physical
+constructor metadata is its erasure, not an independent source of field views. -/
+inductive QualifiedHeadType {R : Type} (program : Program) (static : R) :
+    Head → {shape : Ty} → QualifiedTy R shape →
+    {fields : List Ty} → QualifiedTys R fields → Prop where
+  | unit : QualifiedHeadType program static .unit .unit .nil
+  | integer {type : IntegerType} {number : Int} (fits : type.Contains program.target number) :
+      QualifiedHeadType program static (.integer type number) (.integer type) .nil
+  | character {number : Nat} (valid : UnicodeScalar number) :
+      QualifiedHeadType program static (.character number) .character .nil
+  | tuple {head : Ty} {tail : List Ty} (first : QualifiedTy R head) (rest : QualifiedTys R tail) :
+      QualifiedHeadType program static .tuple (.tuple first rest) (.cons first rest)
+  | array {shape : Ty} (element : QualifiedTy R shape) (length : Nat) :
+      QualifiedHeadType program static .array (.array element length) (QualifiedTys.replicate element length)
+  | nominal {identity : Nat} {tag : Option Nat} {declaration : QualifiedDataDecl}
+      {schema : QualifiedFields (Option (Fin declaration.regions))} {arguments : List R}
+      (declared : program.declarations identity = some declaration)
+      (arity : arguments.length = declaration.regions)
+      (chosen : declaration.constructor tag = some schema) :
+      QualifiedHeadType program static (.nominal identity tag) (.nominal identity arguments)
+        (QualifiedTys.fromFields (declaration.substitution static arguments arity) schema.residents)
+
+theorem QualifiedHeadType.erase {R : Type} {program : Program} {static : R} {head : Head}
+    {shape : Ty} {type : QualifiedTy R shape} {fields : List Ty} {types : QualifiedTys R fields}
+    (typed : QualifiedHeadType program static head type types) : HeadType program head shape fields := by
+  cases typed with
+  | unit => exact .unit
+  | integer fits => exact .integer fits
+  | character valid => exact .character valid
+  | tuple first rest => exact .tuple _ _
+  | array element length => exact .array _ _
+  | @nominal identity tag declaration schema arguments declared arity chosen =>
+    have canonical := HeadType.nominal (program := program) (identity := identity) (tag := tag) (declaration := declaration.erase)
+      (schema := schema.erase) (by simp [Program.data, QualifiedDeclarations.erase, declared])
+      (by rw [declaration.constructor_erase, chosen]; rfl)
+    simpa [QualifiedFields.erase_residents, List.map_map, QualifiedField.erase, Function.comp_def] using canonical
+
+theorem QualifiedTys.fromFields_view {R S : Type} {nominal : QualifiedTy.NominalRelation S}
+    {outlives : S → S → Prop} (fields : List (QualifiedField R)) (first second : R → S)
+    (related : ∀ field ∈ fields, QualifiedTy.View nominal outlives (field.type.map first) (field.type.map second)) :
+    QualifiedTy.Views nominal outlives (fromFields first fields) (fromFields second fields) := by
+  induction fields with
+  | nil => trivial
+  | cons field fields ih =>
+    exact ⟨related field (List.mem_cons_self ..),
+      ih (fun field member => related field (List.mem_cons_of_mem _ member))⟩
+
+theorem QualifiedTys.replicate_view {R : Type} {nominal : QualifiedTy.NominalRelation R}
+    {outlives : R → R → Prop} {shape : Ty} {first second : QualifiedTy R shape}
+    (related : QualifiedTy.View nominal outlives first second) (count : Nat) :
+    QualifiedTy.Views nominal outlives (replicate first count) (replicate second count) := by
+  induction count with
+  | zero => trivial
+  | succ count ih => exact ⟨related, ih⟩
+
+theorem QualifiedHeadType.view {R : Type} {program : Program} {static : R} {outlives : R → R → Prop}
+    {shape : Ty} {first second : QualifiedTy R shape} {head : Head} {fields : List Ty}
+    {types : QualifiedTys R fields}
+    (related : QualifiedTy.View (NominalView program.declarations static outlives) outlives first second)
+    (typed : QualifiedHeadType program static head second types) :
+    ∃ original, QualifiedHeadType program static head first original ∧
+      QualifiedTy.Views (NominalView program.declarations static outlives) outlives original types := by
+  cases typed with
+  | unit => cases first; exact ⟨.nil, .unit, True.intro⟩
+  | integer fits => cases first; exact ⟨.nil, .integer fits, True.intro⟩
+  | character valid => cases first; exact ⟨.nil, .character valid, True.intro⟩
+  | tuple head tail =>
+    cases first with
+    | tuple first rest => exact ⟨.cons first rest, .tuple first rest, related⟩
+  | array element length =>
+    cases first with
+    | array first _ => exact ⟨_, .array first length, QualifiedTys.replicate_view (first := first) (second := element) related length⟩
+  | @nominal identity tag declaration schema arguments declared arity chosen =>
+    cases first with
+    | nominal _ original =>
+      obtain ⟨actual, found, originalArity, _, fields⟩ := NominalView.unfold related
+      cases Option.some.inj (declared.symm.trans found)
+      refine ⟨_, .nominal declared originalArity chosen, ?_⟩
+      exact QualifiedTys.fromFields_view _ _ _ (fun field member =>
+        fields field (QualifiedDataDecl.constructor_fields chosen member))
+
+theorem QualifiedTys.fromFields_wellFormed {R S : Type} {declarations : QualifiedDeclarations}
+    (fields : List (QualifiedField R)) (substitute : R → S)
+    (valid : ∀ field ∈ fields, field.type.WellFormed declarations) :
+    (fromFields substitute fields).WellFormed declarations := by
+  induction fields with
+  | nil => trivial
+  | cons field fields ih =>
+    exact ⟨(valid field (List.mem_cons_self ..)).map substitute,
+      ih (fun field member => valid field (List.mem_cons_of_mem _ member))⟩
+
+theorem QualifiedTys.replicate_wellFormed {R : Type} {declarations : QualifiedDeclarations}
+    {shape : Ty} {type : QualifiedTy R shape} (valid : type.WellFormed declarations) (count : Nat) :
+    (replicate type count).WellFormed declarations := by
+  induction count with
+  | zero => trivial
+  | succ count ih => exact ⟨valid, ih⟩
+
+theorem QualifiedHeadType.fields_wellFormed {R : Type} {program : Program} {static : R} {head : Head}
+    {shape : Ty} {type : QualifiedTy R shape} {fields : List Ty} {types : QualifiedTys R fields}
+    (typed : QualifiedHeadType program static head type types)
+    (closed : program.declarations.WellFormed) (valid : type.WellFormed program.declarations) :
+    types.WellFormed program.declarations := by
+  cases typed with
+  | unit | integer | character => trivial
+  | tuple first rest => exact valid
+  | array element length => exact QualifiedTys.replicate_wellFormed (type := element) valid length
+  | nominal declared arity chosen =>
+    exact QualifiedTys.fromFields_wellFormed _ _ (fun field member =>
+      closed _ _ declared field (QualifiedDataDecl.constructor_fields chosen member))
+
 inductive PatternOutcome where
   | impossible
   | produced (bindings : List (String × ResultType)) (after : Context)
 
 def bindingPayloads (bindings : List (String × ResultType)) : List SourcePayload := bindings.map (·.2.payload)
-def plainResults (types : List Ty) : List ResultType := types.map (fun type => ⟨type, .plain⟩)
-def fieldResults (types : List Ty) (payloads : List SourcePayload) : List ResultType :=
-  List.zipWith (fun type payload => ⟨type, payload⟩) types payloads
+def plainResults {types : List Ty} : QualifiedTys Region types → List ResultType
+  | .nil => []
+  | .cons type types => ⟨_, .plain, type⟩ :: plainResults types
+def fieldResults {types : List Ty} : QualifiedTys Region types → List SourcePayload → List ResultType
+  | .nil, _ => []
+  | .cons type types, payload :: payloads => ⟨_, payload, type⟩ :: fieldResults types payloads
+  | .cons _ _, [] => []
 
 mutual
 inductive PatternType (program : Program) (home : Module) :
@@ -4219,23 +4383,28 @@ inductive PatternType (program : Program) (home : Module) :
       (legal : before.PayloadDisposable program held result.payload) :
       PatternType program home held before (.literal (some result.type) value) result (.produced [] (before.dispose result.payload))
   | plain {held : List SourcePayload} {before : Context} {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty}
-      {outcome : PatternOutcome} (shape : HeadType program head type fields) (access : head.Accessible program home)
-      (children : PatternsType program home held before patterns (plainResults fields) outcome) :
-      PatternType program home held before (.node head patterns) ⟨type, .plain⟩ outcome
+      {qualification : QualifiedTy Region type} {qualifications : QualifiedTys Region fields}
+      {outcome : PatternOutcome} (shape : QualifiedHeadType program Region.static head qualification qualifications)
+      (access : head.Accessible program home)
+      (children : PatternsType program home held before patterns (plainResults qualifications) outcome) :
+      PatternType program home held before (.node head patterns) ⟨type, .plain, qualification⟩ outcome
   | aggregate {held : List SourcePayload} {before : Context} {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty}
       {payloads : List SourcePayload} {outcome : PatternOutcome}
-      (shape : HeadType program head type fields) (access : head.Accessible program home)
-      (children : PatternsType program home held before patterns (fieldResults fields payloads) outcome) :
-      PatternType program home held before (.node head patterns) ⟨type, .aggregate head payloads⟩ outcome
+      {qualification : QualifiedTy Region type} {qualifications : QualifiedTys Region fields}
+      (shape : QualifiedHeadType program Region.static head qualification qualifications) (access : head.Accessible program home)
+      (children : PatternsType program home held before patterns (fieldResults qualifications payloads) outcome) :
+      PatternType program home held before (.node head patterns) ⟨type, .aggregate head payloads, qualification⟩ outcome
   /-- A fully owned reference cannot have plain correspondence. Vacant slots are not subjects. -/
   | plainReference {held : List SourcePayload} {before : Context} {pattern : Pattern}
-      {referent : Ty} {mode : BorrowMode} :
-      PatternType program home held before pattern ⟨.reference referent mode, .plain⟩ .impossible
+      {referent : Ty} {mode : BorrowMode} {qualification : QualifiedTy Region (.reference referent mode)} :
+      PatternType program home held before pattern ⟨.reference referent mode, .plain, qualification⟩ .impossible
   | impossible {held : List SourcePayload} {before : Context} {head active : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty}
       {payloads : List SourcePayload} {checked : PatternOutcome}
-      (different : head ≠ active) (shape : HeadType program head type fields) (access : head.Accessible program home)
-      (children : PatternsType program home held before patterns (plainResults fields) checked) :
-      PatternType program home held before (.node head patterns) ⟨type, .aggregate active payloads⟩ .impossible
+      {qualification : QualifiedTy Region type} {qualifications : QualifiedTys Region fields}
+      (different : head ≠ active) (shape : QualifiedHeadType program Region.static head qualification qualifications)
+      (access : head.Accessible program home)
+      (children : PatternsType program home held before patterns (plainResults qualifications) checked) :
+      PatternType program home held before (.node head patterns) ⟨type, .aggregate active payloads, qualification⟩ .impossible
 inductive PatternsType (program : Program) (home : Module) :
     List SourcePayload → Context → List Pattern → List ResultType → PatternOutcome → Prop where
   | nil {held : List SourcePayload} (before : Context) : PatternsType program home held before [] [] (.produced [] before)
@@ -5137,10 +5306,12 @@ end
 structure Result where
   type : Ty
   payload : Payload
+  qualification : QualifiedTy Region type
 
 structure Slot extends BindingType where
   binder : Nat
   payload : Payload
+  qualification : QualifiedTy Region type
 
 structure Loan where
   reference : Reference
@@ -5281,7 +5452,7 @@ def Context.bind (context : Context) (name : String) (mutable : Bool) (result : 
   { context with
     names := (name, context.nextBinder) :: context.names
     storage := fun base => if base = .binder context.nextBinder then
-      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload⟩ else context.storage base
+      some ⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩ else context.storage base
     nextBinder := context.nextBinder + 1 }
 
 def Context.writeTarget (context : Context) (target : Address)
@@ -5341,6 +5512,7 @@ structure PlaceSelection (program : Program) (home : Module) (context : Context)
   access : slot.initialization.Access indices state
   complete : state.Complete
   selected : Payload.Select program home slot.payload slot.type place.fields indices result.payload result.type
+  qualified : QualifiedPath program.declarations Region.static home slot.qualification place.fields indices result.qualification
   typed : result.payload.Typed program result.type
 
 /-- Common Copy checking retains all positive type and local resource premises.
@@ -6890,10 +7062,11 @@ inductive SlotsJoin (program : Program) : List (String × Slot) → List (String
   | nil : SlotsJoin program [] []
   | cons {name : String} {type : Ty} {mutable : Bool} {before after : Initialization}
       {binder : Nat} {beforePayload afterPayload : SourcePayload} {slots joined : List (String × Slot)}
+      {qualification : QualifiedTy Region type}
       (head : Initialization.Joins program.data type before after)
       (payloadJoins : beforePayload.Joins afterPayload) (tail : SlotsJoin program slots joined) :
-      SlotsJoin program ((name, ⟨⟨type, mutable, before⟩, binder, beforePayload⟩) :: slots)
-        ((name, ⟨⟨type, mutable, after⟩, binder, afterPayload⟩) :: joined)
+      SlotsJoin program ((name, ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification⟩) :: slots)
+        ((name, ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification⟩) :: joined)
 
 /-- Initialization may weaken, but payload abstraction may erase only empty
 reference-free constructor shells, preserving the complete ordered node list. -/
@@ -6901,10 +7074,11 @@ inductive CellJoin (program : Program) : Option Slot → Option Slot → Prop wh
   | absent : CellJoin program none none
   | resident {type : Ty} {mutable : Bool} {before after : Initialization}
       {binder : Nat} {beforePayload afterPayload : SourcePayload}
+      {qualification : QualifiedTy Region type}
       (state : Initialization.Joins program.data type before after)
       (payloadJoins : beforePayload.Joins afterPayload) :
-      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, beforePayload⟩)
-        (some ⟨⟨type, mutable, after⟩, binder, afterPayload⟩)
+      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, beforePayload, qualification⟩)
+        (some ⟨⟨type, mutable, after⟩, binder, afterPayload, qualification⟩)
 
 theorem CellJoin.forward {before after : Option Slot} (joined : CellJoin program before after)
     {slot : Slot} (found : before = some slot) :
@@ -6995,7 +7169,7 @@ theorem WellFormed.bind {context : Context} (valid : context.WellFormed program)
     omega
   · intro entry member
     rcases List.mem_cons.mp member with rfl | member
-    · exact ⟨⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload⟩, by simp [Context.bind]⟩
+    · exact ⟨⟨⟨result.type, mutable, .full⟩, context.nextBinder, result.payload, result.qualification⟩, by simp [Context.bind]⟩
     · obtain ⟨slot, found⟩ := valid.named entry member
       have different := Nat.ne_of_lt (valid.allocated entry.2 slot found).2.1
       exact ⟨slot, by simpa [Context.bind, different] using found⟩
@@ -7329,9 +7503,8 @@ theorem Joins.wellFormed {before after : Context} (joined : Joins program before
     obtain ⟨original, found, metadata, _⟩ := (joined.storage (.binder binder)).backward stored
     obtain ⟨identity, bound, supported, reference⟩ := valid.allocated binder original found
     have payloadJoins := (joined.storage (.binder binder)).payloadJoins found stored
-    rcases (show slot.type = original.type ∧ slot.mutable = original.mutable ∧
-        slot.binder = original.binder from
-      by simpa only [Slot.metadata, Prod.mk.injEq] using metadata) with ⟨type, _, binderEq⟩
+    have type : slot.type = original.type := congrArg (fun entry => entry.1.1) metadata
+    have binderEq : slot.binder = original.binder := congrArg (fun entry => entry.2.2) metadata
     refine ⟨binderEq.trans identity, Nat.lt_of_lt_of_le bound joined.supply, type.symm ▸ supported, ?_⟩
     simpa only [joined.loans, type] using payloadJoins.typed reference
   · intro node loan parent ancestor found derived parentFound unique
@@ -8499,10 +8672,11 @@ theorem StoreTyped.targetPayload {interpretation : Interpretation} {context : Co
 
 theorem ResultTyped.newBorrow {interpretation : Interpretation} {context : Context} {environment : Environment}
     {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode}
+    {qualification : QualifiedTy Region (.reference referent mode)}
     (finite : FiniteLayout program.target program.data referent) :
     ResultTyped program (interpretation.addNode context.loans.length environment.loans.length)
       (context.borrow target referent parent mode)
-      ⟨.reference referent mode, .reference context.loans.length⟩ (.reference environment.loans.length) := by
+      ⟨.reference referent mode, .reference context.loans.length, qualification⟩ (.reference environment.loans.length) := by
   refine ⟨.reference _ finite, .reference (Context.borrow_last context target referent parent mode), ?_⟩
   simpa only [Interpretation.addNode, ↓reduceIte] using
     (SourcePayload.Corresponds.reference (node := (interpretation.addNode context.loans.length environment.loans.length).node) context.loans.length)
@@ -9073,7 +9247,7 @@ theorem TargetPayload.join_nodes_back {before after : Context} (joined : Joins p
   cases target with
   | @cell slot type payload stored path selected =>
     obtain ⟨original, found, metadata, _⟩ := (joined.storage origin.base).backward stored
-    have typeEq : slot.type = original.type := congrArg Prod.fst metadata
+    have typeEq : slot.type = original.type := congrArg (fun entry => entry.1.1) metadata
     have payloadJoin := (joined.storage origin.base).payloadJoins found stored
     obtain ⟨previous, oldSelected, oldMember⟩ := payloadJoin.select_nodes_back selected member
     exact ⟨previous, .cell found (typeEq ▸ path) oldSelected, oldMember⟩
@@ -10132,7 +10306,7 @@ theorem Context.TargetPayload.joins {before after : Context} {origin : Origin} {
   | cell stored path selected =>
     obtain ⟨slot, found, metadata, _⟩ := (joined.storage origin.base).forward stored
     obtain ⟨current, selectedAfter, payloadJoins⟩ := ((joined.storage origin.base).payloadJoins stored found).select selected
-    have typeEqual := congrArg (fun metadata => metadata.1) metadata
+    have typeEqual := congrArg (fun metadata => metadata.1.1) metadata
     change slot.type = _ at typeEqual
     exact ⟨current, .cell found (typeEqual ▸ path) selectedAfter, payloadJoins⟩
 
@@ -10145,7 +10319,7 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
       intro binder slot stored
       obtain ⟨original, sourceStored, metadata, state⟩ := (joined.storage (.binder binder)).backward stored
       obtain ⟨value, found, resident, corresponds⟩ := typed.cells binder original sourceStored
-      have sameType : slot.type = original.type := congrArg (fun metadata => metadata.1) metadata
+      have sameType : slot.type = original.type := congrArg (fun metadata => metadata.1.1) metadata
       have payloadJoins := (joined.storage (.binder binder)).payloadJoins sourceStored stored
       refine ⟨value, found, ?_, ?_⟩
       · simpa only [SlotTyped, sameType] using resident.join state
@@ -10171,7 +10345,7 @@ theorem StoreTyped.join {interpretation : Interpretation} {context afterContext 
         | binder binder =>
           obtain ⟨slot, stored, path, state, access⟩ := (by simpa [Context.Target, base] using target)
           obtain ⟨current, currentStored, metadata, _⟩ := (joined.storage (.binder binder)).forward stored
-          have type : current.type = slot.type := congrArg Prod.fst metadata
+          have type : current.type = slot.type := congrArg (fun metadata => metadata.1.1) metadata
           obtain ⟨next, nextAccess, _⟩ := joined.targetMasks node loan oldFound own binder slot current state base stored currentStored access
           simp only [Context.Target, base]
           exact ⟨current, currentStored, type ▸ path, next, nextAccess⟩
@@ -10322,7 +10496,8 @@ variable {program : Program} {home : Module} {interpretation : Interpretation} {
 
 /-- This contradiction concerns owned results, not possibly vacant reference slots. -/
 theorem ResultTyped.plainReference_impossible {referent : Ty} {mode : BorrowMode} {value : Value}
-    (typed : ResultTyped program interpretation context ⟨.reference referent mode, .plain⟩ value) : False := by
+    {qualification : QualifiedTy Region (.reference referent mode)}
+    (typed : ResultTyped program interpretation context ⟨.reference referent mode, .plain, qualification⟩ value) : False := by
   obtain ⟨resident, _, corresponds⟩ := typed
   cases resident
   cases corresponds with
@@ -10375,35 +10550,50 @@ theorem BindingResultsTyped.preserve {before after : Context} {results : List (S
   | nil => exact .nil
   | cons head tail ih => exact .cons ⟨head.resident, preserved _ _ head.payload, head.corresponds⟩ ih
 theorem ResultsTyped.plain {context : Context} {types : List Ty} {values : List Value}
+    (qualifications : QualifiedTys Region types)
     (typed : ValuesHaveTypes program values types) (free : ∀ value ∈ values, value.ReferenceFree) :
-    ResultsTyped program interpretation context (plainResults types) values := by
+    ResultsTyped program interpretation context (plainResults qualifications) values := by
   induction values generalizing types with
-  | nil => cases typed; exact .nil
-  | cons value values ih => cases typed with | cons head tail => exact .cons ⟨head, .plain _, .plain (free _ (by simp))⟩ (ih tail (fun value member => free value (by simp [member])))
+  | nil => cases typed; cases qualifications; exact .nil
+  | cons value values ih =>
+    cases typed with
+    | cons head tail =>
+      cases qualifications with
+      | cons first rest =>
+        exact .cons ⟨head, .plain _, .plain (free _ (by simp))⟩
+          (ih rest tail (fun value member => free value (by simp [member])))
 
 theorem ResultsTyped.fields {context : Context} {types : List Ty} {payloads : List SourcePayload} {values : List Value}
+    (qualifications : QualifiedTys Region types)
     (typed : ValuesHaveTypes program values types) (payloadTyped : PayloadsTyped program context.loans payloads types)
     (corresponds : PayloadsCorrespond interpretation.node payloads values) :
-    ResultsTyped program interpretation context (fieldResults types payloads) values := by
+    ResultsTyped program interpretation context (fieldResults qualifications payloads) values := by
   induction values generalizing types payloads with
-  | nil => cases corresponds; cases typed; exact .nil
+  | nil => cases corresponds; cases typed; cases qualifications; exact .nil
   | cons value values ih =>
     cases typed with | cons head tail =>
-      cases corresponds with | cons first rest =>
-        cases payloadTyped with | cons firstTyped restTyped =>
-          exact .cons ⟨head, firstTyped, first⟩ (ih tail restTyped rest)
+      cases qualifications with | cons firstType restTypes =>
+        cases corresponds with | cons first rest =>
+          cases payloadTyped with | cons firstTyped restTyped =>
+            exact .cons ⟨head, firstTyped, first⟩ (ih restTypes tail restTyped rest)
 
 theorem ResultsTyped.field_nodes {context : Context} {types : List Ty} {payloads : List SourcePayload}
+    (qualifications : QualifiedTys Region types)
     (typed : PayloadsTyped program context.loans payloads types) :
-    payloadNodes ((fieldResults types payloads).map ResultType.payload) = payloadNodes payloads := by
+    payloadNodes ((fieldResults qualifications payloads).map ResultType.payload) = payloadNodes payloads := by
   induction payloads generalizing types with
-  | nil => cases typed; rfl
-  | cons payload payloads ih => cases typed with | cons head tail => simpa [fieldResults, payloadNodes] using congrArg (payload.nodes ++ ·) (ih tail)
+  | nil => cases typed; cases qualifications; rfl
+  | cons payload payloads ih =>
+    cases typed with | cons head tail =>
+      cases qualifications with | cons first rest =>
+        simpa [fieldResults, payloadNodes] using congrArg (payload.nodes ++ ·) (ih rest tail)
 
-theorem plainResults.nodes (types : List Ty) : payloadNodes ((plainResults types).map ResultType.payload) = [] := by
-  induction types with
+theorem plainResults.nodes {types : List Ty} (qualifications : QualifiedTys Region types) :
+    payloadNodes ((plainResults qualifications).map ResultType.payload) = [] := by
+  cases qualifications with
   | nil => rfl
-  | cons head tail ih => simpa only [plainResults, List.map_cons, payloadNodes, SourcePayload.nodes, List.nil_append] using ih
+  | cons head tail =>
+    simpa only [plainResults, List.map_cons, payloadNodes, SourcePayload.nodes, List.nil_append] using plainResults.nodes tail
 
 def PatternOutcome.Realized (program : Program) (interpretation : Interpretation) (before : Context)
     (environment : Environment) (pattern : Pattern) (value : Value) (bindings : BindingValues) : PatternOutcome → Prop
@@ -10480,39 +10670,39 @@ theorem PatternType.consume {held : List SourcePayload} {before : Context} {patt
         (subject.resident.disposable discard)
       exact ⟨after, _, .literal disposed, afterAgreement, .nil, fun _ _ typed => typed.dispose _⟩
     next different => contradiction
-  | @plain held before head patterns type fields outcome shape access children ih =>
+  | @plain held before head patterns type fields qualification qualifications outcome shape access children ih =>
     simp only [Pattern.matchValue] at matched
     split at matched
     next same =>
       obtain ⟨actual, actualShape, residents⟩ := subject.resident.decompose
       rw [← same] at actualShape
-      have aligned := shape.fields_unique actualShape
+      have aligned := shape.erase.fields_unique actualShape
       subst actual
       cases subject.corresponds with
       | plain free =>
-        exact (ih interpretation environment value.children bindings (ResultsTyped.plain residents (valuesReferenceFree_iff.mp (Value.referenceFree_iff_head_children.mp free).2))
+        exact (ih interpretation environment value.children bindings (ResultsTyped.plain qualifications residents (valuesReferenceFree_iff.mp (Value.referenceFree_iff_head_children.mp free).2))
           agreement matched).node (by simpa only [same] using (Value.referenceFree_iff_head_children.mp free).1) same
     next different => contradiction
-  | @aggregate held before head patterns type fields payloads outcome shape access children ih =>
+  | @aggregate held before head patterns type fields payloads outcome qualification qualifications shape access children ih =>
     simp only [Pattern.matchValue] at matched
     split at matched
     next same =>
       obtain ⟨actual, actualShape, residents⟩ := subject.resident.decompose
       rw [← same] at actualShape
-      have aligned := shape.fields_unique actualShape
+      have aligned := shape.erase.fields_unique actualShape
       subst actual
       cases subject.payload with
       | aggregate source payloadShape payloadTyped =>
-        have aligned := shape.fields_unique payloadShape
+        have aligned := shape.erase.fields_unique payloadShape
         subst_vars
         cases subject.corresponds with
         | aggregate source constructor payloadCorresponds =>
           exact (ih interpretation environment value.children bindings
-            (ResultsTyped.fields residents payloadTyped payloadCorresponds) agreement
+            (ResultsTyped.fields qualifications residents payloadTyped payloadCorresponds) agreement
             matched).node source rfl
     next different => contradiction
   | plainReference => exact subject.plainReference_impossible.elim
-  | @impossible held before head active patterns type fields payloads checked different shape access children ih =>
+  | @impossible held before head active patterns type fields payloads checked qualification qualifications different shape access children ih =>
     cases subject.corresponds with
     | aggregate source constructor payloadCorresponds =>
       simp [Pattern.matchValue, constructor, different] at matched
@@ -10753,11 +10943,11 @@ theorem Context.NodesAvailable.disposeProtected {context : Context} {held : List
   have heldAvailable := available node member
   exact ⟨heldAvailable.1.dispose_of_not_mem (fun disposed => legal.excludes node disposed member), heldAvailable.2.dispose payload⟩
 
-theorem fieldResults.nodes_subset (types : List Ty) (payloads : List SourcePayload) :
-    ∀ node ∈ payloadNodes ((fieldResults types payloads).map ResultType.payload), node ∈ payloadNodes payloads := by
-  induction types generalizing payloads with
+theorem fieldResults.nodes_subset {types : List Ty} (qualifications : QualifiedTys Region types) (payloads : List SourcePayload) :
+    ∀ node ∈ payloadNodes ((fieldResults qualifications payloads).map ResultType.payload), node ∈ payloadNodes payloads := by
+  cases qualifications with
   | nil => simp [fieldResults, payloadNodes]
-  | cons type types ih =>
+  | cons type types =>
     cases payloads with
     | nil => simp [fieldResults, payloadNodes]
     | cons payload payloads =>
@@ -10765,7 +10955,7 @@ theorem fieldResults.nodes_subset (types : List Ty) (payloads : List SourcePaylo
       change node ∈ payload.nodes ++ payloadNodes ((fieldResults types payloads).map ResultType.payload) at member
       rcases List.mem_append.mp member with first | rest
       · exact List.mem_append_left _ first
-      · exact List.mem_append_right _ (ih payloads node rest)
+      · exact List.mem_append_right _ (fieldResults.nodes_subset types payloads node rest)
 
 def PatternOutcome.Resources (program : Program) (held : List SourcePayload) : PatternOutcome → Prop
   | .impossible => True
@@ -11079,10 +11269,11 @@ theorem StateTyped.copyResult {before after : Context} {source copied : SourcePa
     (copy : Context.CopyPayload before source copied after)
     {interpretation : Interpretation} {heldPayloads : List SourcePayload} {environment : Environment} {held : List Value}
     (typed : StateTyped program interpretation before heldPayloads environment held)
-    {type : Ty} {value : Value} (resident : ResultTyped program interpretation before ⟨type, source⟩ value) :
+    {type : Ty} {qualification : QualifiedTy Region type} {value : Value}
+    (resident : ResultTyped program interpretation before ⟨type, source, qualification⟩ value) :
     ∃ final last result, Environment.Copies environment value result final ∧
       StateTyped program last after (heldPayloads ++ [copied]) final (held ++ [result]) ∧
-      ResultTyped program last after ⟨type, copied⟩ result ∧
+      ResultTyped program last after ⟨type, copied, qualification⟩ result ∧
       StateProgress before after environment final interpretation last := by
   obtain ⟨final, last, result, copiedValue, state, payloadTyped, related, progress⟩ :=
     typed.copyPayload copy resident.payload resident.corresponds
@@ -13366,7 +13557,8 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
   binders : concrete.nextBinder = symbols.binder checked.nextBinder
   cells : ∀ base slot actualBase, checked.storage base = some slot →
     symbols.base base = some actualBase →
-    ∃ actual, concrete.storage actualBase = some actual ∧ actual.type = slot.type ∧
+    ∃ actual, concrete.storage actualBase = some actual ∧
+      (⟨actual.type, actual.qualification⟩ : (type : Ty) × QualifiedTy Region type) = ⟨slot.type, slot.qualification⟩ ∧
       actual.mutable = slot.mutable ∧ actual.binder = symbols.binder slot.binder ∧
       actual.initialization = slot.initialization ∧
       PayloadMeaning program symbols slot.initialization slot.payload slot.type actual.payload
@@ -13402,6 +13594,7 @@ structure Payload (phase : Phase) where
 structure Result (phase : Phase) where
   type : Ty
   payload : Payload phase
+  qualification : QualifiedTy Region type
 
 def Point.source {program : Program} {phase : Phase} (point : Point program phase)
     (executable : phase = .executable) : Grounded.Context := by
@@ -13419,10 +13612,10 @@ def Payload.source {phase : Phase} (payload : Payload phase)
   | .executable, rfl, meaning => meaning
 
 def Result.checked {phase : Phase} (result : Result phase) : Checked.Result :=
-  ⟨result.type, result.payload.checked⟩
+  ⟨result.type, result.payload.checked, result.qualification⟩
 
 def Result.source {phase : Phase} (result : Result phase) (executable : phase = .executable) : ResultType :=
-  ⟨result.type, result.payload.source executable⟩
+  ⟨result.type, result.payload.source executable, result.qualification⟩
 
 def Result.Interpreted {program : Program} {phase : Phase}
     (point : Point program phase) (result : Result phase) : Prop :=
@@ -13436,13 +13629,28 @@ def Payload.erase {phase : Phase} (payload : Payload phase) : Payload .checking 
   ⟨payload.checked, PUnit.unit⟩
 
 def Result.erase {phase : Phase} (result : Result phase) : Result .checking :=
-  ⟨result.type, result.payload.erase⟩
+  ⟨result.type, result.payload.erase, result.qualification⟩
 
 @[simp] theorem Point.erase_checked {program : Program} {phase : Phase} (point : Point program phase) :
     point.erase.checked = point.checked := rfl
 
 @[simp] theorem Result.erase_checked {phase : Phase} (result : Result phase) :
     result.erase.checked = result.checked := rfl
+
+def Result.qualifications {phase : Phase} :
+    (results : List (Result phase)) → QualifiedTys Region (results.map Result.type)
+  | [] => .nil
+  | result :: results => .cons result.qualification (qualifications results)
+
+theorem Result.qualifications_erase {phase : Phase} (results : List (Result phase)) :
+    (⟨_, Result.qualifications (results.map Result.erase)⟩ : (types : List Ty) × QualifiedTys Region types) =
+      ⟨_, Result.qualifications results⟩ := by
+  induction results with
+  | nil => rfl
+  | cons result results ih =>
+    exact congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      (⟨result.type :: entry.1, .cons result.qualification entry.2⟩ :
+        (types : List Ty) × QualifiedTys Region types)) ih
 
 end Grounded.Elaboration
 
@@ -13564,7 +13772,8 @@ def aggregate {phase : Phase} (head : Head) (fields : List (Payload phase)) : Pa
 
 end Payload
 
-def Result.data (phase : Phase) (type : Ty) : Result phase := ⟨type, .plain phase⟩
+def Result.data (phase : Phase) (type : Ty) (qualification : QualifiedTy Region type) : Result phase :=
+  ⟨type, .plain phase, qualification⟩
 
 def sourcePayloads {phase : Phase} (held : List (Payload phase))
     (executable : phase = .executable) : List SourcePayload := held.map (fun payload => payload.source executable)
@@ -13590,8 +13799,8 @@ def checkedResults {phase : Phase} (results : List (Result phase)) : List Checke
 @[simp] theorem sourcePayloads_nil {phase : Phase} (executable : phase = .executable) :
     sourcePayloads ([] : List (Payload phase)) executable = [] := rfl
 
-@[simp] theorem Result.data_source (type : Ty) :
-    (Result.data .executable type).source rfl = ⟨type, .plain⟩ := rfl
+@[simp] theorem Result.data_source (type : Ty) (qualification : QualifiedTy Region type) :
+    (Result.data .executable type qualification).source rfl = ⟨type, .plain, qualification⟩ := rfl
 
 /-- Common typing is independent of actual world existence. Resource realization
 is a separate phase-specific obligation of the same selected product. -/
@@ -14240,6 +14449,7 @@ theorem StateTyped.borrowAccess {interpretation : Interpretation} {context : Con
     {heldPayloads : List SourcePayload} {held : List Value}
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {place : AccessPlace} {target : Origin} {referent : Ty} {parent : Option Nat} {mode : BorrowMode} {payload : SourcePayload}
+    {qualification : QualifiedTy Region (.reference referent mode)}
     (access : AccessType program home context mode place target referent parent)
     (ready : context.AccessReady target parent) (permitted : context.Permits mode parent target)
     (finite : FiniteLayout program.target program.data referent)
@@ -14256,7 +14466,7 @@ theorem StateTyped.borrowAccess {interpretation : Interpretation} {context : Con
         (held ++ [.reference environment.loans.length]) ∧
       ResultTyped program (interpretation.addNode context.loans.length environment.loans.length)
         (context.borrow target referent parent mode)
-        ⟨.reference referent mode, .reference context.loans.length⟩ (.reference environment.loans.length) ∧
+        ⟨.reference referent mode, .reference context.loans.length, qualification⟩ (.reference environment.loans.length) ∧
       StateProgress context (context.borrow target referent parent mode) environment
         (environment.addLoan ⟨interpretation.origin target, parent.map interpretation.node⟩ mode)
         interpretation (interpretation.addNode context.loans.length environment.loans.length) := by
@@ -14286,6 +14496,7 @@ theorem StateTyped.moveTarget {interpretation : Interpretation} {context : Conte
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {origin : Origin} {binder : Nat} {slot : Slot} {referent : Ty} {state : Initialization}
     {payload remainder : SourcePayload}
+    {qualification : QualifiedTy Region referent}
     (base : origin.base = .binder binder) (stored : context.storage (.binder binder) = some slot)
     (path : CanonicalPath program slot.type origin.fields referent)
     (access : slot.initialization.Access origin.fields state) (complete : state.Complete)
@@ -14298,7 +14509,7 @@ theorem StateTyped.moveTarget {interpretation : Interpretation} {context : Conte
     ∃ value after, environment.takeAddress (interpretation.origin origin) = some (value, after) ∧
       StateTyped program interpretation (context.writeTarget origin .vacant remainder)
         (heldPayloads ++ [payload]) after (held ++ [value]) ∧
-      ResultTyped program interpretation (context.writeTarget origin .vacant remainder) ⟨referent, payload⟩ value ∧
+      ResultTyped program interpretation (context.writeTarget origin .vacant remainder) ⟨referent, payload, qualification⟩ value ∧
       StateProgress context (context.writeTarget origin .vacant remainder) environment after interpretation interpretation := by
   obtain ⟨root, rootStored, rootTyped, rootRelated⟩ := typed.cells binder slot stored
   obtain ⟨value, read, residentTyped⟩ := path.resident rootTyped access
@@ -14406,6 +14617,7 @@ theorem StateTyped.executesRead
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {place : Place} {slot : Slot} {type : Ty} {indices : List Nat} {state : Initialization}
     {payload copied : SourcePayload}
+    {qualification : QualifiedTy Region type}
     (selected : lookup place.root context.bindings = some slot)
     (access : slot.initialization.Access indices state) (initialized : state.Complete)
     (path : PathType program home slot.type place.fields indices type)
@@ -14415,7 +14627,7 @@ theorem StateTyped.executesRead
     (copy : Context.CopyPayload context payload copied afterCtx) :
     ∃ value after last,
       Evaluates program environment ⟨.read place, .leaf⟩ value after ∧
-      ResultTyped program last afterCtx ⟨type, copied⟩ value ∧
+      ResultTyped program last afterCtx ⟨type, copied, qualification⟩ value ∧
       StateTyped program last afterCtx (heldPayloads ++ [copied]) after (held ++ [value]) ∧
       StateProgress context afterCtx environment after interpretation last := by
   obtain ⟨resident, resolved, raw, residentTyped⟩ := typed.toStoreTyped.resolvePlace selected access path
@@ -14438,6 +14650,7 @@ theorem StateTyped.executesMove
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {place : Place} {slot : Slot} {type : Ty} {indices : List Nat} {state : Initialization}
     {payload remainder : SourcePayload}
+    {qualification : QualifiedTy Region type}
     (selected : lookup place.root context.bindings = some slot)
     (access : slot.initialization.Access indices state) (initialized : state.Complete)
     (path : PathType program home slot.type place.fields indices type)
@@ -14447,7 +14660,7 @@ theorem StateTyped.executesMove
     ∃ value after last,
       Evaluates program environment ⟨.move place, .leaf⟩ value after ∧
       ResultTyped program last (context.writeTarget ⟨.binder slot.binder, indices⟩ .vacant remainder)
-        ⟨type, payload⟩ value ∧
+        ⟨type, payload, qualification⟩ value ∧
       StateTyped program last (context.writeTarget ⟨.binder slot.binder, indices⟩ .vacant remainder)
         (heldPayloads ++ [payload]) after (held ++ [value]) ∧
       StateProgress context (context.writeTarget ⟨.binder slot.binder, indices⟩ .vacant remainder)
@@ -14472,13 +14685,14 @@ theorem StateTyped.executesDereference
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {reference : Place} {fields : List FieldKey} {target : Origin} {type : Ty} {parent : Option Nat}
     {payload copied : SourcePayload}
+    {qualification : QualifiedTy Region type}
     (access : AccessType program home context .shared (.dereference reference fields) target type parent)
     (ready : context.AccessReady target parent) (permitted : context.Permits .shared parent target)
     (provenance : context.TargetPayload program target type payload) (available : context.PayloadAvailable payload)
     (_copyable : Duplicable program.data type) (copy : Context.CopyPayload context payload copied afterCtx) :
     ∃ value after last,
       Evaluates program environment ⟨.dereference reference fields, .leaf⟩ value after ∧
-      ResultTyped program last afterCtx ⟨type, copied⟩ value ∧
+      ResultTyped program last afterCtx ⟨type, copied, qualification⟩ value ∧
       StateTyped program last afterCtx (heldPayloads ++ [copied]) after (held ++ [value]) ∧
       StateProgress context afterCtx environment after interpretation last := by
   obtain ⟨known, _, _, resident, resolved, authority, selected, residentTyped⟩ :=
@@ -14505,12 +14719,13 @@ theorem StateTyped.executesMoveIndirect
     (stored : context.storage target.base = some slot)
     (path : CanonicalPath program slot.type target.fields type)
     (provenance : slot.payload.select target.fields = some payload) (available : context.PayloadAvailable payload)
+    {qualification : QualifiedTy Region type}
     (pending : ∀ heldNode ∈ payloadNodes (heldPayloads ++ [payload]), ∀ loan,
       context.loans[heldNode]? = some loan → loan.own = true → target.Apart loan.target)
     (cleared : SourcePayload.Write program slot.type target.fields slot.payload .plain remainder) :
     ∃ value after last,
       Evaluates program environment ⟨.moveIndirect reference fields, .leaf⟩ value after ∧
-      ResultTyped program last (context.writeTarget target .vacant remainder) ⟨type, payload⟩ value ∧
+      ResultTyped program last (context.writeTarget target .vacant remainder) ⟨type, payload, qualification⟩ value ∧
       StateTyped program last (context.writeTarget target .vacant remainder)
         (heldPayloads ++ [payload]) after (held ++ [value]) ∧
       StateProgress context (context.writeTarget target .vacant remainder)
@@ -14551,6 +14766,7 @@ theorem StateTyped.executesBorrow
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {place : AccessPlace} {target : Origin} {referent : Ty} {parent : Option Nat}
     {mode : BorrowMode} {payload : SourcePayload}
+    {qualification : QualifiedTy Region (.reference referent mode)}
     (access : AccessType program home context mode place target referent parent)
     (ready : context.AccessReady target parent) (permitted : context.Permits mode parent target)
     (finite : FiniteLayout program.target program.data referent)
@@ -14558,7 +14774,7 @@ theorem StateTyped.executesBorrow
     ∃ value after last,
       Evaluates program environment ⟨.borrow mode place, .leaf⟩ value after ∧
       ResultTyped program last (context.borrow target referent parent mode)
-        ⟨.reference referent mode, .reference context.loans.length⟩ value ∧
+        ⟨.reference referent mode, .reference context.loans.length, qualification⟩ value ∧
       StateTyped program last (context.borrow target referent parent mode)
         (heldPayloads ++ [.reference context.loans.length]) after (held ++ [value]) ∧
       StateProgress context (context.borrow target referent parent mode)
@@ -14576,6 +14792,7 @@ theorem StateTyped.executesReborrow
     (typed : StateTyped program interpretation context heldPayloads environment held)
     {place : Place} {target : Origin} {referent : Ty} {parent : Option Nat}
     {mode : BorrowMode} {payload : SourcePayload}
+    {qualification : QualifiedTy Region (.reference referent mode)}
     (access : AccessType program home context mode (.dereference place []) target referent parent)
     (ready : context.AccessReady target parent) (permitted : context.Permits mode parent target)
     (finite : FiniteLayout program.target program.data referent)
@@ -14583,7 +14800,7 @@ theorem StateTyped.executesReborrow
     ∃ value after last,
       Evaluates program environment ⟨.read place, .reborrow mode⟩ value after ∧
       ResultTyped program last (context.borrow target referent parent mode)
-        ⟨.reference referent mode, .reference context.loans.length⟩ value ∧
+        ⟨.reference referent mode, .reference context.loans.length, qualification⟩ value ∧
       StateTyped program last (context.borrow target referent parent mode)
         (heldPayloads ++ [.reference context.loans.length]) after (held ++ [value]) ∧
       StateProgress context (context.borrow target referent parent mode)
@@ -14606,23 +14823,25 @@ def Context.TargetReady (context : Context) (target : Address) : Prop :=
     ∃ state, slot.initialization.Access target.fields state ∧ state.Complete
 
 inductive Access (program : Program) (home : Module) (context : Context) :
-    BorrowMode → AccessPlace → Address → Ty → Option Reference → Type where
+    BorrowMode → AccessPlace → Address → {type : Ty} → QualifiedTy Region type → Option Reference → Type where
   | owned {mode : BorrowMode} {place : Place} {slot : Slot} {indices : List Nat} {type : Ty}
+      {qualification : QualifiedTy Region type}
       (found : lookup place.root context.bindings = some slot)
-      (path : PathType program home slot.type place.fields indices type)
+      (path : QualifiedPath program.declarations Region.static home slot.qualification place.fields indices qualification)
       (writable : mode = .unique → slot.mutable = true) :
-      Access program home context mode (.owner place) ⟨.binder slot.binder, indices⟩ type none
+      Access program home context mode (.owner place) ⟨.binder slot.binder, indices⟩ qualification none
   | dereference {mode ownerMode : BorrowMode} {reference : Place} {fields : List FieldKey}
-      {symbol : Reference} {referent type : Ty} {indices : List Nat}
+      {symbol : Reference} {referent type : Ty} {indices : List Nat} {region : Region}
+      {referentQualification : QualifiedTy Region referent} {qualification : QualifiedTy Region type}
       (carrier : PlaceSelection program home context reference
-        ⟨.reference referent ownerMode, .reference symbol referent ownerMode⟩)
+        ⟨.reference referent ownerMode, .reference symbol referent ownerMode, .reference region referentQualification ownerMode⟩)
       (live : context.NotEnded (program := program) symbol)
       (authority : mode = .unique → ownerMode = .unique)
       (carrierPermits : context.LocalPermits (program := program) mode none
         ⟨.binder carrier.slot.binder, carrier.indices⟩)
-      (path : PathType program home referent fields indices type) :
+      (path : QualifiedPath program.declarations Region.static home referentQualification fields indices qualification) :
       Access program home context mode (.dereference reference fields)
-        ((context.referenceTarget symbol).extend indices) type (some symbol)
+        ((context.referenceTarget symbol).extend indices) qualification (some symbol)
 
 end Grounded.Checked
 namespace Grounded.Elaboration
@@ -14674,7 +14893,8 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   finite : FiniteLayout program.target program.data referent
   provenance : before.TargetPayload program target referent payload
   available : before.PayloadAvailable payload
-  produced : result = ⟨.reference referent mode, .reference before.loans.length⟩
+  qualification : QualifiedTy Region (.reference referent mode)
+  produced : result = ⟨.reference referent mode, .reference before.loans.length, qualification⟩
   updated : after = before.borrow target referent parent mode
 
 structure SourceDereference (program : Program) (home : Module) (before : Grounded.Context)
@@ -14755,16 +14975,23 @@ structure PatternDisposal (program : Program) (held : List (Payload phase))
 
 /-- Decomposition is of the selected product, not a second pattern checker. -/
 inductive PatternFields : Checked.Result → Head → List Ty → List Checked.Result → Prop where
-  | plain (type : Ty) (head : Head) (types : List Ty) :
-      PatternFields ⟨type, .plain⟩ head types (types.map fun type => ⟨type, .plain⟩)
-  | aggregate (type : Ty) (head : Head) (fields : List Checked.Result) :
-      PatternFields ⟨type, .aggregate head (fields.map Checked.Result.payload)⟩ head
+  | plain {type : Ty} (qualification : QualifiedTy Region type) (head : Head) (fields : List Checked.Result)
+      (plain : ∀ field ∈ fields, field.payload = .plain) :
+      PatternFields ⟨type, .plain, qualification⟩ head (fields.map Checked.Result.type) fields
+  | aggregate {type : Ty} (qualification : QualifiedTy Region type) (head : Head) (fields : List Checked.Result) :
+      PatternFields ⟨type, .aggregate head (fields.map Checked.Result.payload), qualification⟩ head
         (fields.map Checked.Result.type) fields
-  | schema (owner : Nat) (path : List Checked.Component) (type : Ty) (copies : List Nat)
-      (knowledge : Checked.SchemaKnowledge) (head : Head) (types : List Ty) :
-      PatternFields ⟨type, .schema owner path type copies knowledge⟩ head types
-        (types.zipIdx.map fun entry =>
-          ⟨entry.1, Checked.Payload.input owner (path ++ [.constructor head, .field entry.2]) entry.1 copies knowledge⟩)
+  | schema (owner : Nat) (path : List Checked.Component) {type : Ty} (qualification : QualifiedTy Region type)
+      (copies : List Nat) (knowledge : Checked.SchemaKnowledge) (head : Head) (fields : List Checked.Result)
+      (selected : ∀ index field, fields[index]? = some field →
+        field.payload = Checked.Payload.input owner (path ++ [.constructor head, .field index]) field.type copies knowledge) :
+      PatternFields ⟨type, .schema owner path type copies knowledge, qualification⟩ head
+        (fields.map Checked.Result.type) fields
+
+theorem PatternFields.types {result : Checked.Result} {head : Head} {types : List Ty}
+    {fields : List Checked.Result} (decomposition : PatternFields result head types fields) :
+    fields.map Checked.Result.type = types := by
+  cases decomposition <;> rfl
 
 structure PatternDecomposition (program : Program) (home : Module)
     (before : Point program phase) (result : Result phase) (head : Head)
@@ -14772,14 +14999,22 @@ structure PatternDecomposition (program : Program) (home : Module)
   typed : result.payload.checked.Typed program result.type
   interpreted : result.Interpreted before
   sourceHead : head.Source
-  shape : HeadType program head result.type types
+  qualifiedShape : QualifiedHeadType program Region.static head result.qualification (Result.qualifications fields)
   access : head.Accessible program home
   checked : PatternFields result.checked head types (fields.map Result.checked)
   actual : Required phase fun executable =>
     (result.payload.source executable = .plain ∧
-      fields.map (fun field => field.source executable) = plainResults types) ∨
+      fields.map (fun field => field.source executable) = plainResults (Result.qualifications fields)) ∨
     ∃ payloads, result.payload.source executable = .aggregate head payloads ∧
-      fields.map (fun field => field.source executable) = fieldResults types payloads
+      fields.map (fun field => field.source executable) = fieldResults (Result.qualifications fields) payloads
+
+theorem PatternDecomposition.shape {before : Point program phase} {result : Result phase}
+    {head : Head} {types : List Ty} {fields : List (Result phase)}
+    (decomposition : PatternDecomposition program home before result head types fields) :
+    HeadType program head result.type types := by
+  have typesEqual : fields.map Result.type = types := by
+    simpa [Function.comp_def, Result.checked] using decomposition.checked.types
+  exact typesEqual ▸ decomposition.qualifiedShape.erase
 
 mutual
 /-- Both phases choose the same bindings and local state transitions. Inactive
@@ -14852,15 +15087,15 @@ theorem PatternProduces.source {held : List (Payload phase)} {before after : Poi
     have childrenSource := children.source executable
     rcases decomposition.actual executable with ⟨plain, fields⟩ | ⟨payloads, aggregate, fields⟩
     · rw [fields] at childrenSource
-      have resultEq : result.source executable = ⟨result.type, .plain⟩ := by
+      have resultEq : result.source executable = ⟨result.type, .plain, result.qualification⟩ := by
         simp only [Result.source, plain]
       rw [resultEq]
-      exact .plain decomposition.shape decomposition.access childrenSource
+      exact .plain decomposition.qualifiedShape decomposition.access childrenSource
     · rw [fields] at childrenSource
-      have resultEq : result.source executable = ⟨result.type, .aggregate head payloads⟩ := by
+      have resultEq : result.source executable = ⟨result.type, .aggregate head payloads, result.qualification⟩ := by
         simp only [Result.source, aggregate]
       rw [resultEq]
-      exact .aggregate decomposition.shape decomposition.access childrenSource
+      exact .aggregate decomposition.qualifiedShape decomposition.access childrenSource
 
 theorem PatternsProduce.source {held : List (Payload phase)} {before after : Point program phase}
     {patterns : List Pattern} {results : List (Result phase)} {bindings : List (String × Result phase)}
@@ -14939,7 +15174,10 @@ theorem PatternDecomposition.erase {before : Point program phase} {result : Resu
   typed := decomposition.typed
   interpreted := fun executable => nomatch executable
   sourceHead := decomposition.sourceHead
-  shape := decomposition.shape
+  qualifiedShape := by
+    have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      QualifiedHeadType program Region.static head result.qualification entry.2) (Result.qualifications_erase fields)
+    exact same.mpr decomposition.qualifiedShape
   access := decomposition.access
   checked := by simpa only [List.map_map, Function.comp_def, Result.erase_checked] using decomposition.checked
   actual := fun executable => nomatch executable
@@ -14992,21 +15230,22 @@ end
 
 /-- Each declared input consumes one producer identity, not a guessed runtime
 inhabitant. The complete caller resource state is retained. -/
-def declareInput (caller : Checked.Context) (type : Ty) : Point program .checking × Result .checking :=
+def declareInput (caller : Checked.Context) {type : Ty} (qualification : QualifiedTy Region type) :
+    Point program .checking × Result .checking :=
   (⟨caller.advanceSymbol, PUnit.unit⟩,
-   ⟨type, ⟨Checked.Payload.input caller.nextSymbol [] type, PUnit.unit⟩⟩)
+   ⟨type, ⟨Checked.Payload.input caller.nextSymbol [] type, PUnit.unit⟩, qualification⟩)
 
-theorem declareInput_typed (caller : Checked.Context) (type : Ty) :
-    (declareInput (program := program) caller type).2.payload.checked.Typed program type :=
+theorem declareInput_typed (caller : Checked.Context) {type : Ty} (qualification : QualifiedTy Region type) :
+    (declareInput (program := program) caller qualification).2.payload.checked.Typed program type :=
   Checked.Payload.input_typed _ _ _ _
 
-theorem declareInput_caller (caller : Checked.Context) (type : Ty) :
-    (declareInput (program := program) caller type).1.checked.names = caller.names ∧
-    (declareInput (program := program) caller type).1.checked.storage = caller.storage ∧
-    (declareInput (program := program) caller type).1.checked.loans = caller.loans ∧
-    (declareInput (program := program) caller type).1.checked.ended = caller.ended ∧
-    (declareInput (program := program) caller type).1.checked.nextBinder = caller.nextBinder ∧
-    (declareInput (program := program) caller type).1.checked.nextSymbol = caller.nextSymbol + 1 :=
+theorem declareInput_caller (caller : Checked.Context) {type : Ty} (qualification : QualifiedTy Region type) :
+    (declareInput (program := program) caller qualification).1.checked.names = caller.names ∧
+    (declareInput (program := program) caller qualification).1.checked.storage = caller.storage ∧
+    (declareInput (program := program) caller qualification).1.checked.loans = caller.loans ∧
+    (declareInput (program := program) caller qualification).1.checked.ended = caller.ended ∧
+    (declareInput (program := program) caller qualification).1.checked.nextBinder = caller.nextBinder ∧
+    (declareInput (program := program) caller qualification).1.checked.nextSymbol = caller.nextSymbol + 1 :=
   ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 /-- Source-order introduction retains the caller rather than supplying a fresh
@@ -15071,13 +15310,6 @@ def patternBodyPoint (after : Point program .checking) (bindings : List (String 
 
 
 
-theorem PatternFields.types {result : Checked.Result} {head : Head} {types : List Ty}
-    {fields : List Checked.Result} (decomposition : PatternFields result head types fields) :
-    fields.map Checked.Result.type = types := by
-  cases decomposition with
-  | plain => simp [Function.comp_def]
-  | aggregate => rfl
-  | schema => simp [Function.comp_def]
 
 theorem PatternDecomposition.types {before : Point program phase} {result : Result phase}
     {head : Head} {types : List Ty} {fields : List (Result phase)}
@@ -15086,7 +15318,7 @@ theorem PatternDecomposition.types {before : Point program phase} {result : Resu
   simpa [Function.comp_def, Result.checked] using decomposition.checked.types
 
 private def plainBindings (bindings : List (String × Result phase)) : List (String × ResultType) :=
-  bindings.map fun entry => (entry.1, ⟨entry.2.type, .plain⟩)
+  bindings.map fun entry => (entry.1, ⟨entry.2.type, .plain, entry.2.qualification⟩)
 
 mutual
 /-- A plain witness is used only below to build the canonical impossible branch.
@@ -15096,30 +15328,29 @@ private theorem PatternProduces.plainTransition {held : List (Payload phase)}
     {bindings : List (String × Result phase)}
     (product : PatternProduces program home phase held before pattern result bindings after)
     (actualHeld : List SourcePayload) (actualBefore : Grounded.Context) :
-    Grounded.PatternType program home actualHeld actualBefore pattern ⟨result.type, .plain⟩
+    Grounded.PatternType program home actualHeld actualBefore pattern ⟨result.type, .plain, result.qualification⟩
       (.produced (plainBindings bindings) actualBefore) := by
   cases product with
   | wildcard disposal => exact .wildcard disposal.discard trivial
   | binder => exact .binder _ _ _
-  | literal typed disposal => exact .literal (result := ⟨result.type, .plain⟩) typed disposal.discard trivial
+  | literal typed disposal => exact .literal (result := ⟨result.type, .plain, result.qualification⟩) typed disposal.discard trivial
   | node decomposition children =>
     have projected := children.plainTransition actualHeld actualBefore
-    rw [decomposition.types] at projected
-    exact .plain decomposition.shape decomposition.access projected
+    exact .plain decomposition.qualifiedShape decomposition.access projected
 
 private theorem PatternsProduce.plainTransition {held : List (Payload phase)}
     {before after : Point program phase} {patterns : List Pattern} {results : List (Result phase)}
     {bindings : List (String × Result phase)}
     (product : PatternsProduce program home phase held before patterns results bindings after)
     (actualHeld : List SourcePayload) (actualBefore : Grounded.Context) :
-    Grounded.PatternsType program home actualHeld actualBefore patterns (plainResults (results.map Result.type))
+    Grounded.PatternsType program home actualHeld actualBefore patterns (plainResults (Result.qualifications results))
       (.produced (plainBindings bindings) actualBefore) := by
   cases product with
   | nil => exact .nil _
   | @cons held before middle after pattern patterns result results front back tail first _ =>
     have tailSource := tail.plainTransition (.plain :: actualHeld) actualBefore
     have firstSource := first.plainTransition (bindingPayloads (plainBindings back) ++ actualHeld) actualBefore
-    simpa only [plainBindings, List.map_append, plainResults, List.map_cons] using Grounded.PatternsType.cons tailSource firstSource
+    simpa only [plainBindings, List.map_append, plainResults, Result.qualifications, List.map_cons] using Grounded.PatternsType.cons tailSource firstSource
 end
 
 /-- Inactive alternatives still carry the same complete checking product. Only
@@ -15132,12 +15363,11 @@ theorem PatternProduces.impossibleSource {held : List (Payload .checking)}
     (actualHeld : List SourcePayload) (actualBefore : Grounded.Context) (payloads : List SourcePayload)
     (different : head ≠ active) :
     Grounded.PatternType program home actualHeld actualBefore (.node head patterns)
-      ⟨result.type, .aggregate active payloads⟩ .impossible := by
+      ⟨result.type, .aggregate active payloads, result.qualification⟩ .impossible := by
   cases product with
   | node decomposition children =>
     have projected := children.plainTransition actualHeld actualBefore
-    rw [decomposition.types] at projected
-    exact .impossible different decomposition.shape decomposition.access projected
+    exact .impossible different decomposition.qualifiedShape decomposition.access projected
 
 structure PatternCheckedEffects (before after : Checked.Context) : Prop where
   names : after.names = before.names
@@ -15231,20 +15461,21 @@ theorem PatternProduces.impossiblePlainSource {held : List (Payload phase)}
     {bindings : List (String × Result phase)}
     {product : PatternProduces program home phase held before pattern result bindings after}
     (failure : product.PlainImpossible) (actualHeld : List SourcePayload) (actualBefore : Grounded.Context) :
-    Grounded.PatternType program home actualHeld actualBefore pattern ⟨result.type, .plain⟩ .impossible := by
+    Grounded.PatternType program home actualHeld actualBefore pattern ⟨result.type, .plain, result.qualification⟩ .impossible := by
   cases failure with
-  | reference same => rw [same]; exact .plainReference
+  | reference same =>
+    cases result with
+    | mk type payload qualification => cases same; exact .plainReference
   | @node held before after result head types fields patterns bindings decomposition children nested =>
     have projected := PatternsProduce.impossiblePlainSource nested actualHeld actualBefore
-    rw [decomposition.types] at projected
-    exact .plain decomposition.shape decomposition.access projected
+    exact .plain decomposition.qualifiedShape decomposition.access projected
 
 theorem PatternsProduce.impossiblePlainSource {held : List (Payload phase)}
     {before after : Point program phase} {patterns : List Pattern} {results : List (Result phase)}
     {bindings : List (String × Result phase)}
     {product : PatternsProduce program home phase held before patterns results bindings after}
     (failure : product.PlainImpossible) (actualHeld : List SourcePayload) (actualBefore : Grounded.Context) :
-    Grounded.PatternsType program home actualHeld actualBefore patterns (plainResults (results.map Result.type)) .impossible := by
+    Grounded.PatternsType program home actualHeld actualBefore patterns (plainResults (Result.qualifications results)) .impossible := by
   cases failure with
   | @head held before middle after pattern patterns result results front back tail first distinct nested =>
     have tailSource := tail.plainTransition (.plain :: actualHeld) actualBefore
@@ -15363,11 +15594,12 @@ set_option autoImplicit false
 variable {program : Program}
 
 def argumentResult : List ResultType → ResultType
-  | [] => ⟨.unit, .plain⟩
+  | [] => ⟨.unit, .plain, .unit⟩
   | [result] => result
   | first :: next :: rest =>
       ⟨.tuple first.type ((next :: rest).map ResultType.type),
-        .aggregate .tuple (first.payload :: (next :: rest).map ResultType.payload)⟩
+        .aggregate .tuple (first.payload :: (next :: rest).map ResultType.payload),
+        .tuple first.qualification (ResultType.qualifications (next :: rest))⟩
 
 theorem ResultTyped.tuple {interpretation : Interpretation} {context : Context}
     {first : ResultType} {rest : List ResultType} {value : Value} {values : List Value}
@@ -15375,19 +15607,21 @@ theorem ResultTyped.tuple {interpretation : Interpretation} {context : Context}
     (tail : ResultsTyped program interpretation context rest values) :
     ResultTyped program interpretation context
       ⟨.tuple first.type (rest.map ResultType.type),
-        .aggregate .tuple (first.payload :: rest.map ResultType.payload)⟩ (.tuple value values) :=
+        .aggregate .tuple (first.payload :: rest.map ResultType.payload),
+        .tuple first.qualification (ResultType.qualifications rest)⟩ (.tuple value values) :=
   ⟨.tuple head.resident tail.residents,
     .aggregate (by trivial) (.tuple _ _) (.cons head.payload tail.payloads),
     .aggregate (by trivial) rfl (.cons head.corresponds tail.corresponds)⟩
 
 theorem ResultsTyped.array {interpretation : Interpretation} {context : Context}
     {results : List ResultType} {values : List Value} {element : Ty} {length : Nat}
+    {qualification : QualifiedTy Region (.array element length)}
     (typed : ResultsTyped program interpretation context results values)
     (types : results.map ResultType.type = List.replicate length element)
     (finite : FiniteLayout program.target program.data element)
     (size : length < 2 ^ program.target.pointerBits) :
     ResultTyped program interpretation context
-      ⟨.array element length, .aggregate .array (results.map ResultType.payload)⟩ (.array values) :=
+      ⟨.array element length, .aggregate .array (results.map ResultType.payload), qualification⟩ (.array values) :=
   ⟨.array (types ▸ typed.residents) finite size,
     .aggregate (by trivial) (.array _ _) (types ▸ typed.payloads),
     .aggregate (by trivial) rfl typed.corresponds⟩
@@ -15395,13 +15629,14 @@ theorem ResultsTyped.array {interpretation : Interpretation} {context : Context}
 theorem ResultsTyped.nominal {interpretation : Interpretation} {context : Context}
     {results : List ResultType} {values : List Value} {identity : Nat} {tag : Option Nat}
     {declaration : DataDecl} {schema : Fields}
+    {qualification : QualifiedTy Region (.nominal identity)}
     (typed : ResultsTyped program interpretation context results values)
     (declared : program.data identity = some declaration)
     (chosen : declaration.constructor tag = some schema)
     (finite : FiniteLayout program.target program.data (.nominal identity))
     (types : results.map ResultType.type = schema.residents.map Field.type) :
     ResultTyped program interpretation context
-      ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map ResultType.payload)⟩
+      ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map ResultType.payload), qualification⟩
       (.nominal identity tag values) :=
   ⟨.nominal declared chosen finite (types ▸ typed.residents),
     .aggregate (by trivial) (.nominal declared chosen) (types ▸ typed.payloads),
@@ -15484,6 +15719,7 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
     {heldPayloads : List SourcePayload} {held : List Value} {environment : Environment}
     {parent : ResultType} {value : Value} {key : FieldKey} {index : Nat} {type : Ty}
     {selected remainder : SourcePayload}
+    {qualification : QualifiedTy Region type}
     (typed : StateTyped program interpretation context (heldPayloads ++ [parent.payload])
       environment (held ++ [value]))
     (resident : ResultTyped program interpretation context parent value)
@@ -15497,7 +15733,7 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
       value.takeField program key = some residual ∧
       value.writeIndices [index] .vacant = some residual ∧
       Environment.Disposes program environment residual after ∧
-      ResultTyped program interpretation (context.dispose remainder) ⟨type, selected⟩ extracted ∧
+      ResultTyped program interpretation (context.dispose remainder) ⟨type, selected, qualification⟩ extracted ∧
       StateTyped program interpretation (context.dispose remainder) (heldPayloads ++ [selected])
         after (held ++ [extracted]) ∧
       StateProgress context (context.dispose remainder) environment after interpretation interpretation := by
@@ -15508,7 +15744,7 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
   have written : value.writeIndices [index] .vacant = some residual := by
     simp [Value.writeIndices, found, replaced]
   have selectedRelated := resident.corresponds.select selection read
-  have selectedResult : ResultTyped program interpretation context ⟨type, selected⟩ extracted :=
+  have selectedResult : ResultTyped program interpretation context ⟨type, selected, qualification⟩ extracted :=
     ⟨selectedTyped, resident.payload.select canonical selection, selectedRelated⟩
   have residualRelated := write.corresponds resident.resident (Initialization.Access.full [index])
     resident.corresponds (SourcePayload.Corresponds.plain (node := interpretation.node) (by trivial)) written
@@ -15677,21 +15913,21 @@ set_option autoImplicit false
 /-- Hypothetical checking metadata only. Executable ContextMeaning forbids
 referent cells; actual views query existing canonical binder storage instead. -/
 def Context.installView (context : Context) (original : Reference) (referent : Ty)
-    (mutable : Bool) (payload : Payload) : Context :=
+    (qualification : QualifiedTy Region referent) (mutable : Bool) (payload : Payload) : Context :=
   { context with
     storage := fun base => if base = .referent original then
-      some ⟨⟨referent, mutable, .full⟩, 0, payload⟩ else context.storage base }
+      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification⟩ else context.storage base }
 
 @[simp] theorem Context.installView_storage_self (context : Context) (original : Reference)
-    (referent : Ty) (mutable : Bool) (payload : Payload) :
-    (context.installView original referent mutable payload).storage (.referent original) =
-      some ⟨⟨referent, mutable, .full⟩, 0, payload⟩ := by
+    (referent : Ty) (qualification : QualifiedTy Region referent) (mutable : Bool) (payload : Payload) :
+    (context.installView original referent qualification mutable payload).storage (.referent original) =
+      some ⟨⟨referent, mutable, .full⟩, 0, payload, qualification⟩ := by
   simp [Context.installView]
 
 @[simp] theorem Context.installView_storage_other (context : Context) (original : Reference)
-    (referent : Ty) (mutable : Bool) (payload : Payload) (base : Base)
+    (referent : Ty) (qualification : QualifiedTy Region referent) (mutable : Bool) (payload : Payload) (base : Base)
     (different : base ≠ .referent original) :
-    (context.installView original referent mutable payload).storage base = context.storage base := by
+    (context.installView original referent qualification mutable payload).storage base = context.storage base := by
   simp [Context.installView, different]
 
 end Grounded.Checked
@@ -15707,13 +15943,15 @@ structure OpaqueViewStep (program : Program) (home : Module) {phase : Phase}
   original : Checked.Reference
   referent : Ty
   mode : BorrowMode
+  region : Region
+  qualification : QualifiedTy Region referent
   selection : Checked.PlaceSelection program home before.checked referencePlace
-    ⟨.reference referent mode, .reference symbol referent mode⟩
+    ⟨.reference referent mode, .reference symbol referent mode, .reference region qualification mode⟩
   available : before.checked.ResourcesAvailable (program := program) (.reference symbol referent mode)
   canonical : before.checked.referenceTarget symbol = ⟨.referent original, []⟩
   absent : before.checked.storage (.referent original) = none
   checked : after.checked =
-    (before.checked.installView original referent (mode == .unique)
+    (before.checked.installView original referent qualification (mode == .unique)
       (Checked.Payload.input before.checked.nextSymbol [] referent [] .unknown)).advanceSymbol
   stable : PointsStable before after
 
@@ -15725,8 +15963,10 @@ structure CanonicalView (program : Program) (home : Module) {phase : Phase}
   symbol : Checked.Reference
   referent : Ty
   mode : BorrowMode
+  region : Region
+  qualification : QualifiedTy Region referent
   selection : Checked.PlaceSelection program home point.checked referencePlace
-    ⟨.reference referent mode, .reference symbol referent mode⟩
+    ⟨.reference referent mode, .reference symbol referent mode, .reference region qualification mode⟩
   available : point.checked.NotEnded (program := program) symbol
   binder : Nat
   fields : List Nat
@@ -15757,6 +15997,8 @@ def erase (step : OpaqueViewStep program home before after referencePlace) :
   original := step.original
   referent := step.referent
   mode := step.mode
+  region := step.region
+  qualification := step.qualification
   selection := step.selection
   available := step.available
   canonical := step.canonical
@@ -15767,7 +16009,7 @@ def erase (step : OpaqueViewStep program home before after referencePlace) :
 theorem installed (step : OpaqueViewStep program home before after referencePlace) :
     after.checked.storage (.referent step.original) =
       some ⟨⟨step.referent, step.mode == .unique, .full⟩, 0,
-        Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown⟩ := by
+        Checked.Payload.input before.checked.nextSymbol [] step.referent [] .unknown, step.qualification⟩ := by
   rw [step.checked]
   simp [Checked.Context.advanceSymbol]
 
@@ -15827,6 +16069,8 @@ def erase (view : CanonicalView program home point referencePlace) :
   symbol := view.symbol
   referent := view.referent
   mode := view.mode
+  region := view.region
+  qualification := view.qualification
   selection := view.selection
   available := view.available
   binder := view.binder
@@ -15843,7 +16087,8 @@ per-reference mask. No restoration or complete-mask premise is required. -/
 theorem exact_view (view : CanonicalView program home point referencePlace)
     (executable : phase = .executable) :
     ∃ actual, (point.source executable).storage (.binder ((point.symbols executable).binder view.binder)) = some actual ∧
-      actual.type = view.root.type ∧ actual.initialization = view.root.initialization ∧
+      (⟨actual.type, actual.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+        ⟨view.root.type, view.root.qualification⟩ ∧ actual.initialization = view.root.initialization ∧
       actual.initialization.Access view.fields view.state := by
   cases executable
   obtain ⟨actual, stored, type, _, _, mask, _⟩ :=
@@ -16397,9 +16642,10 @@ inductive CellJoin (program : Program) : Option Checked.Slot → Option Checked.
   | absent : CellJoin program none none
   | resident {type : Ty} {mutable : Bool} {before after : Initialization} {binder : Nat}
       {first last : Checked.Payload}
+      {qualification : QualifiedTy Region type}
       (masks : Initialization.Joins program.data type before after) (payloads : PayloadJoin first last) :
-      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, first⟩)
-        (some ⟨⟨type, mutable, after⟩, binder, last⟩)
+      CellJoin program (some ⟨⟨type, mutable, before⟩, binder, first, qualification⟩)
+        (some ⟨⟨type, mutable, after⟩, binder, last, qualification⟩)
 
 structure JoinStep (program : Program) {phase : Phase} (before after : Point program phase) : Prop where
   names : before.checked.names = after.checked.names
@@ -16466,7 +16712,7 @@ structure WriteStep (program : Program) (home : Module) {phase : Phase}
   state : Initialization
   old : Checked.Payload
   updatedPayload : Checked.Payload
-  access : Checked.Access program home before.checked .unique place target replacement.type parent
+  access : Checked.Access program home before.checked .unique place target replacement.qualification parent
   permitted : before.checked.LocalPermits (program := program) .unique parent target
   stored : before.checked.storage target.base = some slot
   mask : slot.initialization.Access target.fields state
@@ -16487,7 +16733,7 @@ structure ProjectionStep (program : Program) (home : Module) {phase : Phase}
     (parent : Result phase) (key : FieldKey) (result : Result phase) where
   index : Nat
   remainder : Checked.Payload
-  selected : ProjectionType program home parent.type key index result.type
+  selected : QualifiedProjection program.declarations Region.static home parent.qualification key index result.qualification
   source : Checked.Payload.At program parent.payload.checked parent.type [index] result.payload.checked result.type
   cleared : Checked.Payload.Write program parent.payload.checked parent.type [index] .plain remainder
   discard : StorageDisposition program (Initialization.full.setChild index .vacant) parent.type
@@ -16512,10 +16758,11 @@ structure ReturnStep (program : Program) {phase : Phase} (before : Point program
       (before.source executable).Derived node input
 
 def argumentResult {phase : Phase} : List (Result phase) → Result phase
-  | [] => .data phase .unit
+  | [] => .data phase .unit .unit
   | [result] => result
   | first :: second :: rest => ⟨.tuple first.type ((second :: rest).map Result.type),
-      .aggregate .tuple (first.payload :: (second :: rest).map Result.payload)⟩
+      .aggregate .tuple (first.payload :: (second :: rest).map Result.payload),
+      .tuple first.qualification (Result.qualifications (second :: rest))⟩
 
 mutual
 /-- One producer owns ordinary checking, source products and executable
@@ -16523,13 +16770,13 @@ realization. Phase is an index so dormant bodies use the same checking producer.
 inductive HasType (program : Program) : (phase : Phase) → Module → Point program phase →
     List (Payload phase) → Expr → Result phase → Point program phase → CorePlan → Option Ty → Type where
   | unit {phase : Phase} {home : Module} {before : Point program phase} {held : List (Payload phase)} :
-      HasType program phase home before held .unit (.data phase .unit) before .leaf none
+      HasType program phase home before held .unit (.data phase .unit .unit) before .leaf none
   | integer {phase : Phase} {home : Module} {before : Point program phase} {held : List (Payload phase)}
       {type : IntegerType} {magnitude : Nat} (fits : type.Contains program.target magnitude) :
-      HasType program phase home before held (.integer type magnitude) (.data phase (.integer type)) before .leaf none
+      HasType program phase home before held (.integer type magnitude) (.data phase (.integer type) (.integer type)) before .leaf none
   | character {phase : Phase} {home : Module} {before : Point program phase} {held : List (Payload phase)}
       {number : Nat} (valid : UnicodeScalar number) :
-      HasType program phase home before held (.character number) (.data phase .character) before .leaf none
+      HasType program phase home before held (.character number) (.data phase .character .character) before .leaf none
   | group {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {body : Expr} {result : Result phase} {plan : CorePlan} {expected : Option Ty}
       (bodyTyped : HasType program phase home before held body result after plan expected) :
@@ -16537,7 +16784,8 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
   | read {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {place : Place} {selected result : Result phase}
       (selection : Checked.CopySelection program home before.checked place selected.checked)
-      (sameType : result.type = selected.type)
+      (sameType : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+        ⟨selected.type, selected.qualification⟩)
       (copy : Checked.CopyPayload before.checked selected.payload.checked result.payload.checked after.checked)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceRead program home
@@ -16562,14 +16810,16 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
   | borrow {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {mode : BorrowMode} {place : AccessPlace} {target : Checked.Address} {parent : Option Checked.Reference}
       {referent : Ty} {result : Result phase} {slot : Checked.Slot} {payload : Checked.Payload}
-      (access : Checked.Access program home before.checked mode place target referent parent)
+      {region : Region} {qualification : QualifiedTy Region referent}
+      (access : Checked.Access program home before.checked mode place target qualification parent)
       (ready : before.checked.TargetReady target)
       (stored : before.checked.storage target.base = some slot)
       (selected : Checked.Payload.At program slot.payload slot.type target.fields payload referent)
       (available : before.checked.ResourcesAvailable (program := program) payload)
       (finite : FiniteLayout program.target program.data referent)
       (permitted : before.checked.LocalPermits (program := program) mode parent target)
-      (produced : result.checked = ⟨.reference referent mode, .reference (.borrowed before.checked.nextSymbol) referent mode⟩)
+      (produced : result.checked = ⟨.reference referent mode, .reference (.borrowed before.checked.nextSymbol) referent mode,
+        .reference region qualification mode⟩)
       (updated : after.checked = before.checked.borrow target referent mode parent)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceBorrow program home
@@ -16583,14 +16833,15 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
   | dereference {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {reference : Place} {fields : List FieldKey} {target : Checked.Address} {parent : Option Checked.Reference}
       {selected result : Result phase} {slot : Checked.Slot}
-      (access : Checked.Access program home before.checked .shared (.dereference reference fields) target selected.type parent)
+      (access : Checked.Access program home before.checked .shared (.dereference reference fields) target selected.qualification parent)
       (ready : before.checked.TargetReady target)
       (stored : before.checked.storage target.base = some slot)
       (provenance : Checked.Payload.At program slot.payload slot.type target.fields selected.payload.checked selected.type)
       (permission : Duplicable program.data selected.type)
       (available : before.checked.ResourcesAvailable (program := program) selected.payload.checked)
       (permitted : before.checked.LocalPermits (program := program) .shared parent target)
-      (sameType : result.type = selected.type)
+      (sameType : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+        ⟨selected.type, selected.qualification⟩)
       (copy : Checked.CopyPayload before.checked selected.payload.checked result.payload.checked after.checked)
       (evidence : ResultEvidence program before after result)
       (actual : Required phase fun executable => Nonempty (SourceDereference program home
@@ -16599,7 +16850,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
   | moveIndirect {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {reference : Place} {fields : List FieldKey} {target : Checked.Address} {parent : Checked.Reference}
       {slot : Checked.Slot} {result : Result phase} {remainder : Checked.Payload}
-      (access : Checked.Access program home before.checked .unique (.dereference reference fields) target result.type (some parent))
+      (access : Checked.Access program home before.checked .unique (.dereference reference fields) target result.qualification (some parent))
       (ready : before.checked.TargetReady target)
       (permitted : before.checked.LocalPermits (program := program) .unique (some parent) target)
       (stored : before.checked.storage target.base = some slot)
@@ -16621,27 +16872,32 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
         (expected.map fun _ => rest.map Result.type))
       (supported : StorageType program.target program.data (.tuple first.type (rest.map Result.type))) :
       HasType program phase home before held (.tuple head tail)
-        ⟨.tuple first.type (rest.map Result.type), .aggregate .tuple (first.payload :: rest.map Result.payload)⟩
+        ⟨.tuple first.type (rest.map Result.type), .aggregate .tuple (first.payload :: rest.map Result.payload),
+          .tuple first.qualification (Result.qualifications rest)⟩
         after (.batch (headPlan :: tailPlans)) expected
   | array {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {element : Ty} {elements : List Expr} {results : List (Result phase)} {plans : List CorePlan} {expected : Option Ty}
+      {qualification : QualifiedTy Region element}
       (contextual : expected = none ∨ expected = some (.array element elements.length))
       (typed : HasTypes program phase home before held elements results after plans
         (expected.map fun _ => List.replicate elements.length element))
-      (types : results.map Result.type = List.replicate elements.length element)
+      (types : (⟨_, Result.qualifications results⟩ : (shapes : List Ty) × QualifiedTys Region shapes) =
+        ⟨_, QualifiedTys.replicate qualification elements.length⟩)
       (elementValid : FiniteLayout program.target program.data element)
       (size : elements.length < 2 ^ program.target.pointerBits) :
       HasType program phase home before held (.array elements)
-        ⟨.array element elements.length, .aggregate .array (results.map Result.payload)⟩ after (.batch plans) expected
+        ⟨.array element elements.length, .aggregate .array (results.map Result.payload),
+          .array qualification elements.length⟩ after (.batch plans) expected
   | construct {phase : Phase} {home : Module} {before after : Point program phase} {held : List (Payload phase)}
       {identity : Nat} {tag : Option Nat} {fields : List Expr} {results : List (Result phase)} {plans : List CorePlan}
-      (shape : HeadType program (.nominal identity tag) (.nominal identity) (results.map Result.type))
+      {qualification : QualifiedTy Region (.nominal identity)}
+      (shape : QualifiedHeadType program Region.static (.nominal identity tag) qualification (Result.qualifications results))
       (visible : (Head.nominal identity tag).Accessible program home)
       (typed : HasTypes program phase home before held fields results after plans (some (results.map Result.type)))
       (finite : FiniteLayout program.target program.data (.nominal identity))
       (capability : UsePermission program.data (.nominal identity) .exact) :
       HasType program phase home before held (.construct identity tag fields)
-        ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map Result.payload)⟩ after (.batch plans) none
+        ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map Result.payload), qualification⟩ after (.batch plans) none
   | view {phase : Phase} {home : Module} {before viewed after : Point program phase} {held : List (Payload phase)}
       {reference : Place} {expression : Expr} {result : Result phase} {plan : CorePlan} {expected : Option Ty}
       (view : ViewStep program home before viewed reference)
@@ -16804,8 +17060,8 @@ inductive ArmsType (program : Program) : (phase : Phase) → Module → Point pr
       {patternAfter bodyAfter cleaned : Point program .checking}
       {bindings : List (String × Result .checking)} {hypotheticalResult : Result .checking}
       (patternTyped : PatternProduces program home .checking (held.map Payload.erase)
-        (declareInput (program := program) before.checked subject.type).1 pattern
-        (declareInput (program := program) before.checked subject.type).2 bindings patternAfter)
+        (declareInput (program := program) before.checked subject.qualification).1 pattern
+        (declareInput (program := program) before.checked subject.qualification).2 bindings patternAfter)
       (impossible : patternTyped.ImpossibleAgainst subject.payload.checked)
       (interpreted : subject.Interpreted before)
       (useful : Useful program subject.type previous pattern)
@@ -16952,13 +17208,15 @@ theorem HasType.structural_evaluates {program : Program} {phase : Phase} {home :
     cases structural with
     | array elements =>
       obtain ⟨last, values, evaluated, residents, plain⟩ := typed.structural_evaluates elements empty
-      exact ⟨last, _, .array evaluated (.of_plain plain), .array (types ▸ residents) finite size, plain⟩
+      have typesEqual := congrArg Sigma.fst types
+      dsimp only at typesEqual
+      exact ⟨last, _, .array evaluated (.of_plain plain), .array (typesEqual ▸ residents) finite size, plain⟩
   | .construct shape visible typed finite capability =>
     intro structural empty
     cases structural with
     | construct identity tag elements =>
       obtain ⟨last, values, evaluated, residents, plain⟩ := typed.structural_evaluates elements empty
-      exact ⟨last, _, .construct evaluated (.of_plain plain), nominalResident shape finite residents, plain⟩
+      exact ⟨last, _, .construct evaluated (.of_plain plain), nominalResident shape.erase finite residents, plain⟩
   | .view view body =>
     intro structural empty
     obtain ⟨_, found⟩ := view.selection_found
@@ -16976,7 +17234,7 @@ theorem HasType.structural_evaluates {program : Program} {phase : Phase} {home :
     cases structural with
     | field body key =>
       obtain ⟨middle, parent, evaluated, resident, plain⟩ := source.structural_evaluates body empty
-      obtain ⟨value, indexed, found, selectedTyped, replace⟩ := projection.selected.access resident
+      obtain ⟨value, indexed, found, selectedTyped, replace⟩ := projection.selected.erase.access resident
       obtain ⟨residual, replaced, residualTyped⟩ := replace .vacant .vacant .vacant
       have valuePlain := plain.children found
       have residualPlain := referenceFree_replaceChild plain (show Value.ReferenceFree .vacant from trivial) replaced
@@ -17376,6 +17634,16 @@ def ExecutesArms (before : Point program phase) (held : List (Payload phase)) (s
 
 @[simp] theorem sourcePayloads_singleton (payload : Payload phase) (executable : phase = .executable) :
     sourcePayloads [payload] executable = [payload.source executable] := rfl
+theorem sourceResults_qualifications (results : List (Result phase)) (executable : phase = .executable) :
+    (⟨_, ResultType.qualifications (sourceResults results executable)⟩ : (types : List Ty) × QualifiedTys Region types) =
+      ⟨_, Result.qualifications results⟩ := by
+  induction results with
+  | nil => rfl
+  | cons result results ih =>
+    exact congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      (⟨result.type :: entry.1, .cons result.qualification entry.2⟩ :
+        (types : List Ty) × QualifiedTys Region types)) ih
+
 @[simp] theorem sourceResults_types (results : List (Result phase)) (executable : phase = .executable) :
     (sourceResults results executable).map ResultType.type = results.map Result.type := by
   simp [sourceResults, Result.source]
@@ -17461,7 +17729,7 @@ set_option autoImplicit false
 variable {program : Program} {phase : Phase} {home : Module}
   {before after : Point program phase} {held : List (Payload phase)} {result : Result phase}
 
-theorem Executes.unit : Executes before held .unit (.data phase .unit) before .leaf := by
+theorem Executes.unit : Executes before held .unit (.data phase .unit .unit) before .leaf := by
   intro executable
   cases executable
   intro interpretation environment values state
@@ -17469,7 +17737,7 @@ theorem Executes.unit : Executes before held .unit (.data phase .unit) before .l
     state.appendPlain (by trivial), .refl state.source⟩
 
 theorem Executes.integer {type : IntegerType} {number : Nat} (fits : type.Contains program.target number) :
-    Executes before held (.integer type number) (.data phase (.integer type)) before .leaf := by
+    Executes before held (.integer type number) (.data phase (.integer type) (.integer type)) before .leaf := by
   intro executable
   cases executable
   intro interpretation environment values state
@@ -17477,7 +17745,7 @@ theorem Executes.integer {type : IntegerType} {number : Nat} (fits : type.Contai
     ⟨.integer fits, .plain _, .plain (by trivial)⟩, state.appendPlain (by trivial), .refl state.source⟩
 
 theorem Executes.character {number : Nat} (valid : UnicodeScalar number) :
-    Executes before held (.character number) (.data phase .character) before .leaf := by
+    Executes before held (.character number) (.data phase .character .character) before .leaf := by
   intro executable
   cases executable
   intro interpretation environment values state
@@ -17589,7 +17857,8 @@ theorem Executes.tuple {head : Expr} {tail : List Expr} {first : Result phase} {
     (headExec : Executes before held head first middle headPlan)
     (tailExec : ExecutesList middle (held ++ [first.payload]) tail rest after tailPlans) :
     Executes before held (.tuple head tail)
-      ⟨.tuple first.type (rest.map Result.type), .aggregate .tuple (first.payload :: rest.map Result.payload)⟩
+      ⟨.tuple first.type (rest.map Result.type), .aggregate .tuple (first.payload :: rest.map Result.payload),
+        .tuple first.qualification (Result.qualifications rest)⟩
       after (.batch (headPlan :: tailPlans)) := by
   intro executable
   cases executable
@@ -17608,29 +17877,37 @@ theorem Executes.tuple {head : Expr} {tail : List Expr} {first : Result phase} {
     firstProgress.trans tailProgress (headEval.storage state.residents.valid).2.supply⟩
   · change ResultTyped program last (after.source rfl)
       ⟨.tuple first.type (rest.map Result.type),
-        .aggregate .tuple (first.payload.source rfl :: sourcePayloads (rest.map Result.payload) rfl)⟩ (.tuple value residents)
-    simpa only [Result.source, sourceResults_types, sourceResults_payloads] using resident
+        .aggregate .tuple (first.payload.source rfl :: sourcePayloads (rest.map Result.payload) rfl),
+        .tuple first.qualification (Result.qualifications rest)⟩ (.tuple value residents)
+    have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      (⟨.tuple first.type entry.1,
+        .aggregate .tuple (first.payload.source rfl :: sourcePayloads (rest.map Result.payload) rfl),
+        .tuple first.qualification entry.2⟩ : ResultType)) (sourceResults_qualifications rest rfl)
+    exact same ▸ (by simpa only [Result.source, sourceResults_payloads] using resident)
   · change StateTyped program last (after.source rfl)
       (sourcePayloads held rfl ++ [.aggregate .tuple (first.payload.source rfl :: sourcePayloads (rest.map Result.payload) rfl)])
       final (values ++ [.tuple value residents])
     simpa only [Result.source, sourceResults_payloads] using packed
 
 theorem Executes.array {element : Ty} {elements : List Expr} {results : List (Result phase)} {plans : List CorePlan}
+    {qualification : QualifiedTy Region element}
     (body : ExecutesList before held elements results after plans)
     (types : results.map Result.type = List.replicate elements.length element)
     (finite : FiniteLayout program.target program.data element)
     (size : elements.length < 2 ^ program.target.pointerBits) :
     Executes before held (.array elements)
-      ⟨.array element elements.length, .aggregate .array (results.map Result.payload)⟩ after (.batch plans) := by
+      ⟨.array element elements.length, .aggregate .array (results.map Result.payload),
+        .array qualification elements.length⟩ after (.batch plans) := by
   intro executable
   cases executable
   intro interpretation environment values state
   obtain ⟨residents, final, last, evaluated, residentsTyped, finalTyped, progress⟩ := body rfl state
-  have resident := residentsTyped.array (by simpa using types) finite size
+  have resident := residentsTyped.array (qualification := .array qualification elements.length) (by simpa using types) finite size
   have packed := finalTyped.pack resident.corresponds
   refine ⟨.array residents, final, last, .array evaluated (pendingResultUsable packed), ?_, ?_, progress⟩
   · change ResultTyped program last (after.source rfl)
-      ⟨.array element elements.length, .aggregate .array (sourcePayloads (results.map Result.payload) rfl)⟩ (.array residents)
+      ⟨.array element elements.length, .aggregate .array (sourcePayloads (results.map Result.payload) rfl),
+        .array qualification elements.length⟩ (.array residents)
     simpa only [sourceResults_payloads] using resident
   · change StateTyped program last (after.source rfl)
       (sourcePayloads held rfl ++ [.aggregate .array (sourcePayloads (results.map Result.payload) rfl)])
@@ -17639,11 +17916,12 @@ theorem Executes.array {element : Ty} {elements : List Expr} {results : List (Re
 
 theorem Executes.construct {identity : Nat} {tag : Option Nat} {fields : List Expr}
     {results : List (Result phase)} {plans : List CorePlan}
+    {qualification : QualifiedTy Region (.nominal identity)}
     (shape : HeadType program (.nominal identity tag) (.nominal identity) (results.map Result.type))
     (body : ExecutesList before held fields results after plans)
     (finite : FiniteLayout program.target program.data (.nominal identity)) :
     Executes before held (.construct identity tag fields)
-      ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map Result.payload)⟩ after (.batch plans) := by
+      ⟨.nominal identity, .aggregate (.nominal identity tag) (results.map Result.payload), qualification⟩ after (.batch plans) := by
   intro executable
   cases executable
   intro interpretation environment values state
@@ -17651,11 +17929,11 @@ theorem Executes.construct {identity : Nat} {tag : Option Nat} {fields : List Ex
   generalize typesEq : results.map Result.type = types at shape
   cases shape with
   | nominal declared chosen =>
-    have resident := residentsTyped.nominal declared chosen finite (by simpa only [sourceResults_types] using typesEq)
+    have resident := residentsTyped.nominal (qualification := qualification) declared chosen finite (by simpa only [sourceResults_types] using typesEq)
     have packed := finalTyped.pack resident.corresponds
     refine ⟨.nominal identity tag residents, final, last, .construct evaluated (pendingResultUsable packed), ?_, ?_, progress⟩
     · change ResultTyped program last (after.source rfl)
-        ⟨.nominal identity, .aggregate (.nominal identity tag) (sourcePayloads (results.map Result.payload) rfl)⟩
+        ⟨.nominal identity, .aggregate (.nominal identity tag) (sourcePayloads (results.map Result.payload) rfl), qualification⟩
         (.nominal identity tag residents)
       simpa only [sourceResults_payloads] using resident
     · change StateTyped program last (after.source rfl)
@@ -17704,7 +17982,7 @@ theorem Executes.field {before middle after : Point program phase} {held : List 
   obtain ⟨value, initial, firstMap, evaluated, parentTyped, initialState, sourceProgress⟩ := source executable state
   obtain ⟨remainder, selected, written, legal, updated⟩ := projection.actual executable
   obtain ⟨extracted, residual, final, read, taken, _, disposal, resultTyped, finalState, projectionProgress⟩ :=
-    initialState.field parentTyped projection.selected selected written projection.discard
+    initialState.field parentTyped projection.selected.erase selected written projection.discard
       (by simpa only [sourcePayloads_append, sourcePayloads_singleton] using legal)
   rw [← updated] at resultTyped finalState projectionProgress
   exact ⟨extracted, final, firstMap, .field evaluated read taken disposal (pendingResultUsable finalState),
@@ -18130,10 +18408,15 @@ variable {program : Program} {phase : Phase} {home : Module}
     cases rest with
     | nil => rfl
     | cons second tail =>
-      simp [argumentResult, Grounded.argumentResult, sourceResults, Result.source,
-        Payload.source, Payload.aggregate, List.map_map, Function.comp_def]
-      exact congrArg (List.cons first.payload.meaning)
-        (congrArg (List.cons second.payload.meaning) (List.map_map ..))
+      have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+        (⟨.tuple first.type entry.1,
+          .aggregate .tuple ((first.source rfl).payload :: (sourceResults (second :: tail) rfl).map ResultType.payload),
+          .tuple first.qualification entry.2⟩ : ResultType)) (sourceResults_qualifications (second :: tail) rfl)
+      change (⟨.tuple first.type ((second :: tail).map Result.type),
+        .aggregate .tuple (first.payload.source rfl :: sourcePayloads ((second :: tail).map Result.payload) rfl),
+        .tuple first.qualification (Result.qualifications (second :: tail))⟩ : ResultType) = _
+      rw [← sourceResults_payloads (second :: tail) rfl]
+      exact same.symm
 
 theorem ExecutesArms.empty {before after : Point program phase} {held : List (Payload phase)}
     {subject result : Result phase} : ExecutesArms before held subject result [] after := by
@@ -18148,8 +18431,8 @@ theorem ExecutesArms.dormant
     {patternAfter bodyAfter cleaned : Point program .checking}
     {bindings : List (String × Result .checking)} {hypotheticalResult : Result .checking}
     (patternTyped : PatternProduces program home .checking (held.map Payload.erase)
-      (declareInput (program := program) before.checked subject.type).1 pattern
-      (declareInput (program := program) before.checked subject.type).2 bindings patternAfter)
+      (declareInput (program := program) before.checked subject.qualification).1 pattern
+      (declareInput (program := program) before.checked subject.qualification).2 bindings patternAfter)
     (impossible : patternTyped.ImpossibleAgainst subject.payload.checked)
     (interpreted : subject.Interpreted before)
     (_useful : Useful program subject.type previous pattern)
@@ -18322,7 +18605,13 @@ variable {program : Program} {phase : Phase} {home : Module}
   | nil => rfl
   | cons a rs => cases rs with
     | nil => rfl
-    | cons b rs => simp [argumentResult, Result.erase, Payload.erase, Payload.aggregate, Function.comp_def]
+    | cons b rs =>
+      have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+        (⟨.tuple a.type (b.type :: entry.1),
+          .aggregate .tuple (a.erase.payload :: ((b :: rs).map Result.erase).map Result.payload),
+          .tuple a.qualification (.cons b.qualification entry.2)⟩ : Result .checking)) (Result.qualifications_erase rs)
+      simp only [argumentResult, Result.erase, Payload.erase, Payload.aggregate, List.map_cons, List.map_map, Function.comp_def, Result.qualifications] at same ⊢
+      exact same
 
 private theorem checkingRequired {condition : Phase.checking = .executable → Prop} :
     Required .checking condition := fun executable => nomatch executable
@@ -18401,14 +18690,25 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .moveIndirect access ready permitted stored selected available cleared updated evidence actual =>
     exact .moveIndirect access ready permitted stored selected available cleared updated evidence.erase checkingRequired
   | @HasType.tuple _ phase home before middle after held h t first rest hp tp expected contextual head tail supported =>
-    simpa [Result.erase, Payload.erase, Payload.aggregate, Function.comp_def] using
-      HasType.tuple (rest := rest.map Result.erase) (by simpa only [resultTypes_erase, Result.erase_type] using contextual) head.erase (by simpa only [List.map_append, List.map_cons, List.map_nil, resultTypes_erase, Result.erase_payload] using tail.erase) (by simpa only [resultTypes_erase, Result.erase_type] using supported)
+    have product := HasType.tuple (rest := rest.map Result.erase)
+      (by simpa only [resultTypes_erase, Result.erase_type] using contextual) head.erase
+      (by simpa only [List.map_append, List.map_cons, List.map_nil, resultTypes_erase, Result.erase_payload] using tail.erase)
+      (by simpa only [resultTypes_erase, Result.erase_type] using supported)
+    have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      (⟨.tuple first.type entry.1,
+        .aggregate .tuple (first.erase.payload :: (rest.map Result.erase).map Result.payload),
+        .tuple first.qualification entry.2⟩ : Result .checking)) (Result.qualifications_erase rest)
+    have transported := same ▸ product
+    simpa [Result.erase, Payload.erase, Payload.aggregate, Function.comp_def] using transported
   | .array contextual body types finite size =>
     simpa [Result.erase, Payload.erase, Payload.aggregate, Function.comp_def] using
-      HasType.array contextual body.erase (by simpa only [resultTypes_erase] using types) finite size
-  | @HasType.construct _ phase home before after held identity tag fields results plans shape visible body finite capability =>
+      HasType.array contextual body.erase ((Result.qualifications_erase _).trans types) finite size
+  | @HasType.construct _ phase home before after held identity tag fields results plans qualification shape visible body finite capability =>
+    have same := congrArg (fun (entry : (types : List Ty) × QualifiedTys Region types) =>
+      QualifiedHeadType program Region.static (.nominal identity tag) qualification entry.2) (Result.qualifications_erase results)
     simpa [Result.erase, Payload.erase, Payload.aggregate, Function.comp_def] using
-      HasType.construct (results := results.map Result.erase) (by simpa only [resultTypes_erase] using shape) visible (by simpa only [resultTypes_erase] using body.erase) finite capability
+      HasType.construct (results := results.map Result.erase) (same.mpr shape) visible
+        (by simpa only [resultTypes_erase] using body.erase) finite capability
   | .view view body => exact .view view.erase body.erase
   | .sequence head dispose tail => exact .sequence head.erase dispose.erase tail.erase
   | .bind initial annotated binding body cleanup stable =>
@@ -18594,7 +18894,7 @@ structure Cells (program : Program) (source : Grounded.Context) where
 
 def Cells.slot {program : Program} {source : Grounded.Context}
     (cells : Cells program source) (origin : OriginBase) (slot : Grounded.Slot) : Checked.Slot :=
-  ⟨slot.toBindingType, slot.binder, cells.payload origin slot⟩
+  ⟨slot.toBindingType, slot.binder, cells.payload origin slot, slot.qualification⟩
 
 def Cells.context {program : Program} {source : Grounded.Context}
     (cells : Cells program source) : Checked.Context where
@@ -19091,14 +19391,16 @@ theorem Cells.canonicalView {program : Program} {home : Module} {source : Ground
     (store : StoreTyped program interpretation source environment)
     {place : Place} {slot : Grounded.Slot} {indices : List Nat} {state : Initialization}
     {node : Nat} {actual : SourceLoan}
+    {region : Region} {qualification : QualifiedTy Region actual.referent}
     (found : lookup place.root source.bindings = some slot)
     (access : slot.initialization.Access indices state) (complete : state.Complete)
-    (path : PathType program home slot.type place.fields indices (.reference actual.referent actual.mode))
+    (path : QualifiedPath program.declarations Region.static home slot.qualification place.fields indices
+      (.reference region qualification actual.mode))
     (selected : slot.payload.select indices = some (.reference node))
     (loanFound : source.loans[node]? = some actual) (own : actual.own = true) :
     Nonempty (CanonicalView program home cells.point place) := by
   have slotStored := store.source.member_stored _ (lookup_member found)
-  obtain ⟨selection⟩ := (cells.produced _ _ slotStored).selectReference path selected
+  obtain ⟨selection⟩ := (cells.produced _ _ slotStored).selectReference path.erase selected
   have target := (store.sourceTargets node actual loanFound own).1
   cases base : actual.target.base with
   | binder binder =>
@@ -19107,6 +19409,8 @@ theorem Cells.canonicalView {program : Program} {home : Module} {source : Ground
       symbol := .existing node
       referent := actual.referent
       mode := actual.mode
+      region := region
+      qualification := qualification
       selection := {
         slot := cells.slot (.binder slot.binder) slot
         indices := indices
@@ -19115,6 +19419,7 @@ theorem Cells.canonicalView {program : Program} {home : Module} {source : Ground
         access := access
         complete := complete
         selected := selection
+        qualified := path
         typed := .reference .. }
       available := (cells.notEnded loanFound).mpr own
       binder := binder
@@ -19141,9 +19446,11 @@ theorem CanonicalEntry.view {program : Program} {home : Module} {interpretation 
     (entry : CanonicalEntry program interpretation source pendingPayloads environment pending)
     {place : Place} {slot : Grounded.Slot} {indices : List Nat} {state : Initialization}
     {node : Nat} {actual : SourceLoan}
+    {region : Region} {qualification : QualifiedTy Region actual.referent}
     (found : lookup place.root source.bindings = some slot)
     (access : slot.initialization.Access indices state) (complete : state.Complete)
-    (path : PathType program home slot.type place.fields indices (.reference actual.referent actual.mode))
+    (path : QualifiedPath program.declarations Region.static home slot.qualification place.fields indices
+      (.reference region qualification actual.mode))
     (selected : slot.payload.select indices = some (.reference node))
     (loanFound : source.loans[node]? = some actual) (own : actual.own = true) :
     ∃ view : CanonicalView program home entry.point place,
@@ -19157,7 +19464,7 @@ theorem Cells.resident_plain {program : Program} {source : Grounded.Context} (ce
     {origin : OriginBase} {slot : Grounded.Slot} (found : source.storage origin = some slot)
     (plain : slot.payload = .plain) :
     cells.context.storage (base origin) = some
-      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree⟩ := by
+      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree, slot.qualification⟩ := by
   rw [cells.storage, found]
   simp only [Option.map_some, Cells.slot, cells.plain_knowledge found plain]
 
@@ -19165,7 +19472,7 @@ theorem Cells.erased_plain {program : Program} {source : Grounded.Context} (cell
     {origin : OriginBase} {slot : Grounded.Slot} (found : source.storage origin = some slot)
     (plain : slot.payload = .plain) :
     cells.point.erase.checked.storage (base origin) = some
-      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree⟩ :=
+      ⟨slot.toBindingType, slot.binder, .schema (owner origin) [] slot.type [] .referenceFree, slot.qualification⟩ :=
   cells.resident_plain found plain
 
 theorem mixed_plain_target_cell {program : Program} {source : Grounded.Context}
@@ -19332,8 +19639,8 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .dereference _ _ _ _ _ _ _ _ _ _ actual => exact Executes.dereference actual
   | .moveIndirect _ _ _ _ _ _ _ _ _ actual => exact Executes.moveIndirect actual
   | .tuple _ first rest _ => exact Executes.tuple first.execution_correctness rest.execution_correctness
-  | .array _ body types finite size => exact Executes.array body.execution_correctness types finite size
-  | .construct shape _ body finite _ => exact Executes.construct shape body.execution_correctness finite
+  | .array _ body types finite size => exact Executes.array body.execution_correctness (congrArg Sigma.fst types) finite size
+  | .construct shape _ body finite _ => exact Executes.construct shape.erase body.execution_correctness finite
   | .view view body => exact Executes.view view body.execution_correctness
   | .sequence head dispose tail => exact Executes.sequence head.execution_correctness dispose tail.execution_correctness
   | .bind initialized _ binding continued cleanup _ =>
@@ -19807,7 +20114,11 @@ theorem HasType.read_leaf_duplicable {before after : Point program phase}
     {place : Place} :
     expression = .read place → plan = .leaf → Duplicable program.data result.type := by
   match typed with
-  | .read selection sameType _ _ _ => intro _ _; exact sameType ▸ selection.permission
+  | .read selection sameType _ _ _ =>
+    intro _ _
+    have typeEqual := congrArg Sigma.fst sameType
+    dsimp only at typeEqual
+    exact typeEqual ▸ selection.permission
   | .view _ body => exact body.read_leaf_duplicable
   | .raiseSupply body _ _ _ _ => exact body.read_leaf_duplicable
   | .expectedData body _ _ => exact body.read_leaf_duplicable
@@ -20086,7 +20397,7 @@ namespace Grounded.Elaboration
 set_option autoImplicit false
 
 /-- Every admitted named call, including through administrative and expected-type
-rules, has a well-formed source-resolved signature with no out-of-range lifetime variables.
+rules, has one source-resolved signature with no out-of-range lifetime variables.
 This does not assert that body views already enforce those lifetime bounds. -/
 theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
