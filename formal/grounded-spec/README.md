@@ -101,8 +101,17 @@ The general execution, phase-erasure, reference-read selection and call-signatur
 proofs consume this constructor. Successive coercions compose rather than
 recovering a longer lifetime from canonical storage.
 
-Qualified annotation resolution, region-validity interpretation and source
-return provenance remain open. A carried qualifier is
+Decoded `TypeExpr` annotations and aliases now retain qualified semantic regions.
+`ResolvesType` produces the full qualified type in one traversal; its canonical
+shape is the result index, not a second resolution. Its determinism theorem
+proves equality of the complete qualified product. Explicit local bindings and
+constants consume this result without discarding qualifiers. Constant inversion
+tracks any outer shortening, and pattern-constant normalization derives its
+canonical literal type from that same qualified resolution. These changes are
+consumed by the general normalization, erasure and execution proofs.
+
+Body-annotation lifetime-name resolution into semantic regions, region-validity
+interpretation and source return provenance remain open. A carried qualifier is
 not yet a proof of its lifetime bound. The bounded return rule below remains;
 no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
 

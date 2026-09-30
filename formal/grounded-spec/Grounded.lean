@@ -90,42 +90,6 @@ theorem typesDataShape_iff (types : List Ty) : typesDataShape types ↔ ∀ type
   | nil => simp [typesDataShape]
   | cons first rest ih => simp [typesDataShape, ih]
 
-/-- Decoded type expressions retain alias references until static resolution. -/
-inductive TypeExpr where
-  | concrete (type : Ty)
-  | alias (name : String)
-  | tuple (head : TypeExpr) (tail : List TypeExpr)
-  | array (element : TypeExpr) (length : Nat)
-
-abbrev Aliases := String → Option TypeExpr
-
-
-mutual
-/-- Alias expansion is finite and independent of declaration order. No alias
-identity survives in the resolved type (§4.3). -/
-inductive ResolvesType (aliases : Aliases) : TypeExpr → Ty → Prop where
-  | concrete (type : Ty) : ResolvesType aliases (.concrete type) type
-  | alias {name : String} {body : TypeExpr} {type : Ty}
-      (declared : aliases name = some body) (expanded : ResolvesType aliases body type) :
-      ResolvesType aliases (.alias name) type
-  | tuple {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
-      (firstType : ResolvesType aliases head first) (restTypes : ResolvesTypes aliases tail rest) :
-      ResolvesType aliases (.tuple head tail) (.tuple first rest)
-  | array {element : TypeExpr} {type : Ty} (length : Nat)
-      (resolved : ResolvesType aliases element type) :
-      ResolvesType aliases (.array element length) (.array type length)
-
-inductive ResolvesTypes (aliases : Aliases) : List TypeExpr → List Ty → Prop where
-  | nil : ResolvesTypes aliases [] []
-  | cons {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
-      (firstType : ResolvesType aliases head first) (restTypes : ResolvesTypes aliases tail rest) :
-      ResolvesTypes aliases (head :: tail) (first :: rest)
-end
-
-inductive Annotation (aliases : Aliases) : Option TypeExpr → Ty → Prop where
-  | inferred (type : Ty) : Annotation aliases none type
-  | explicit {source : TypeExpr} {type : Ty} (resolved : ResolvesType aliases source type) :
-      Annotation aliases (some source) type
 
 /-- Resolved module identity, including the package boundary (§2.2). -/
 structure Module where
@@ -619,6 +583,43 @@ theorem NominalView.unfold {R : Type} {declarations : QualifiedDeclarations} {st
 end Grounded
 
 namespace Grounded
+/-- Decoded type expressions retain qualified semantic regions and alias references.
+Lifetime-name resolution into these regions is an earlier source obligation. -/
+inductive TypeExpr where
+  | concrete {shape : Ty} (type : QualifiedTy Region shape)
+  | alias (name : String)
+  | tuple (head : TypeExpr) (tail : List TypeExpr)
+  | array (element : TypeExpr) (length : Nat)
+
+abbrev Aliases := String → Option TypeExpr
+
+mutual
+/-- One alias expansion produces the full qualified type, including its canonical index. -/
+inductive ResolvesType (aliases : Aliases) : TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
+  | concrete {shape : Ty} (type : QualifiedTy Region shape) : ResolvesType aliases (.concrete type) type
+  | alias {name : String} {body : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
+      (declared : aliases name = some body) (expanded : ResolvesType aliases body type) :
+      ResolvesType aliases (.alias name) type
+  | tuple {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
+      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
+      (headResolved : ResolvesType aliases head firstType) (tailResolved : ResolvesTypes aliases tail restTypes) :
+      ResolvesType aliases (.tuple head tail) (.tuple firstType restTypes)
+  | array {element : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape} (length : Nat)
+      (resolved : ResolvesType aliases element type) :
+      ResolvesType aliases (.array element length) (.array type length)
+inductive ResolvesTypes (aliases : Aliases) : List TypeExpr → {shapes : List Ty} → QualifiedTys Region shapes → Prop where
+  | nil : ResolvesTypes aliases [] .nil
+  | cons {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
+      {firstType : QualifiedTy Region first} {restTypes : QualifiedTys Region rest}
+      (headResolved : ResolvesType aliases head firstType) (tailResolved : ResolvesTypes aliases tail restTypes) :
+      ResolvesTypes aliases (head :: tail) (.cons firstType restTypes)
+end
+
+inductive Annotation (aliases : Aliases) : Option TypeExpr → {shape : Ty} → QualifiedTy Region shape → Prop where
+  | inferred {shape : Ty} (type : QualifiedTy Region shape) : Annotation aliases none type
+  | explicit {source : TypeExpr} {shape : Ty} {type : QualifiedTy Region shape}
+      (resolved : ResolvesType aliases source type) : Annotation aliases (some source) type
+
 
 
 /-- Inline expansion checks every variant; a reference is a finite handle and
@@ -11562,7 +11563,8 @@ inductive NormalizesPattern (program : Program) : PatternSource → PatternPlan 
       (fields : NormalizesPatterns program source plans result) :
       NormalizesPattern program (.node head source) (.node plans) (.node head result)
   | constantValue {name : String} {declaration : ConstantDecl} {type : Ty} {value : Value} {plan : CorePlan}
-      (declared : program.constants name = some declaration) (resolved : ResolvesType program.aliases declaration.type type)
+      {qualification : QualifiedTy Region type}
+      (declared : program.constants name = some declaration) (resolved : ResolvesType program.aliases declaration.type qualification)
       {constantAfter : Environment} (evaluated : Evaluates program .empty ⟨.constant name, plan⟩ value constantAfter) :
       NormalizesPattern program (.constant name) (.constant plan) (.literal (some type) value)
 inductive NormalizesPatterns (program : Program) : List PatternSource → List PatternPlan → List Pattern → Prop where
@@ -12669,11 +12671,15 @@ theorem Cleans.deterministic {before firstAfter secondAfter : Environment} {coun
   | retire first => cases right with
     | retire second => obtain ⟨rfl, rfl⟩ := first.deterministic second; exact ⟨rfl, rfl⟩
 
-theorem ResolvesType.deterministic {aliases : Aliases} {source : TypeExpr} {first second : Ty}
-    (left : ResolvesType aliases source first) (right : ResolvesType aliases source second) : first = second := by
+theorem ResolvesType.deterministic {aliases : Aliases} {source : TypeExpr} {firstShape secondShape : Ty}
+    {first : QualifiedTy Region firstShape} {second : QualifiedTy Region secondShape}
+    (left : ResolvesType aliases source first) (right : ResolvesType aliases source second) :
+    (⟨_, first⟩ : (shape : Ty) × QualifiedTy Region shape) = ⟨_, second⟩ := by
   induction left using ResolvesType.rec
-    (motive_2 := fun sources types _ => ∀ others, ResolvesTypes aliases sources others → types = others)
-    generalizing second with
+    (motive_2 := fun sources shapes types _ => ∀ {otherShapes} (others : QualifiedTys Region otherShapes),
+      ResolvesTypes aliases sources others →
+        (⟨shapes, types⟩ : (shapes : List Ty) × QualifiedTys Region shapes) = ⟨_, others⟩)
+    generalizing secondShape with
   | concrete => cases right; rfl
   | alias declared expanded ih =>
     cases right with
@@ -17025,7 +17031,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       {mutable : Bool} {name : String} {annotation : Option TypeExpr} {initial body : Expr}
       {localType result : Result phase} {initialPlan bodyPlan : CorePlan} {expected : Option Ty}
       (initialized : HasType program phase home before held initial localType middle initialPlan (annotation.map fun _ => localType.type))
-      (annotated : Annotation program.aliases annotation localType.type)
+      (annotated : Annotation program.aliases annotation localType.qualification)
       (binding : BindStep program middle bound name mutable localType)
       (continued : HasType program phase home bound held body result bodyAfter bodyPlan expected)
       (cleanup : CleanupStep program bodyAfter after (held ++ [result.payload]) 1)
@@ -17035,7 +17041,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       {name : String} {declaration : ConstantDecl} {result : Result phase} {plan : CorePlan}
       (declared : program.constants name = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
-      (resolved : ResolvesType program.aliases declaration.type result.type)
+      (resolved : ResolvesType program.aliases declaration.type result.qualification)
       (structural : Structural declaration.body)
       (hiddenStep : HideStep program before hidden)
       (initialized : HasType program phase declaration.home hidden held declaration.body result constantAfter plan none)
@@ -17411,18 +17417,36 @@ termination_by structural typed
 end
 
 
-/-- Administrative wrappers cannot manufacture a constant declaration or alter
-its resolved result type. This inversion consumes the same typing derivation. -/
+/-- Wrappers preserve the declaration and its resolved qualified type. Only
+declaration-derived lifetime shortening may change the visible result view. -/
 theorem HasType.constantDeclaration {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)}
     {expression : Expr} {result : Result phase} {plan : CorePlan} {expected : Option Ty}
     (typed : HasType program phase home before held expression result after plan expected) :
     ∀ name, expression = .constant name → ∃ declaration,
-      program.constants name = some declaration ∧ ResolvesType program.aliases declaration.type result.type := by
+      program.constants name = some declaration ∧
+        ∃ qualification : QualifiedTy Region result.type,
+          ResolvesType program.aliases declaration.type qualification ∧
+          (qualification = result.qualification ∨
+            QualifiedTy.View (NominalView program.declarations Region.static Region.Outlives)
+              Region.Outlives qualification result.qualification) := by
   match typed with
-  | .shorten body _ => exact body.constantDeclaration
+  | .shorten body conversion =>
+    intro name same
+    obtain ⟨declaration, declared, qualification, resolved, converted⟩ := body.constantDeclaration name same
+    refine ⟨declaration, declared, qualification, resolved, Or.inr ?_⟩
+    rcases converted with equal | converted
+    · exact equal ▸ conversion
+    · exact QualifiedTy.view_compose
+        (first := NominalView program.declarations Region.static Region.Outlives)
+        (second := NominalView program.declarations Region.static Region.Outlives)
+        (third := NominalView program.declarations Region.static Region.Outlives)
+        (outlives := Region.Outlives)
+        (fun _ _ _ _ front back => NominalView.trans (outlives := Region.Outlives)
+          (fun {a b c} first second => @Region.Outlives.trans a b c first second) front back)
+        (fun {a b c} front back => @Region.Outlives.trans a b c front back) _ _ _ converted conversion
   | .constant declared _ resolved _ _ _ _ _ _ _ =>
-    intro name same; cases same; exact ⟨_, declared, resolved⟩
+    intro name same; cases same; exact ⟨_, declared, _, resolved, Or.inl rfl⟩
   | .view _ body => exact body.constantDeclaration
   | .endOwn _ body => exact body.constantDeclaration
   | .endAfter body _ => exact body.constantDeclaration
@@ -17450,7 +17474,7 @@ theorem PatternConstantsTyped.normalizes {program : Program} {phase : Phase} {ho
     obtain ⟨normalized, normalization⟩ := constants.normalizes
     exact ⟨_, .node normalization⟩
   | .constant beforeEmpty actualEmpty typed =>
-    obtain ⟨declaration, declared, resolved⟩ := typed.constantDeclaration _ rfl
+    obtain ⟨declaration, declared, qualification, resolved, _⟩ := typed.constantDeclaration _ rfl
     obtain ⟨_, value, evaluated, _, _⟩ :=
       typed.structural_evaluates (.constant _) (beforeEmpty ▸ EmptyResources.empty)
     exact ⟨_, .constantValue declared resolved evaluated⟩
