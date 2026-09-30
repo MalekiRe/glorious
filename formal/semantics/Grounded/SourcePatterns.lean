@@ -1,4 +1,4 @@
-import Grounded.Core
+import Grounded.Execution
 
 /-!
 Structural constant patterns (§4.3). Closed constant checking produces each
@@ -43,7 +43,7 @@ inductive NormalizesPattern (program : Program) (home : Module) : SourcePattern 
       NormalizesPattern program home (.node head fields) (.node head patterns)
   | constant {name : String} {type : Ty} {value : Value}
       (typed : HasType program home [] (.constant name) type)
-      (evaluated : Evaluates program [] (.constant name) value) :
+      (evaluated : Evaluates program [] (.constant name) value []) :
       NormalizesPattern program home (.constant name) (.literal (some type) value)
 inductive NormalizesPatterns (program : Program) (home : Module) :
     List SourcePattern → List Pattern → Prop where
@@ -85,7 +85,7 @@ theorem NormalizesPattern.unique {source : SourcePattern} {pattern : Pattern}
     | constant otherTyped otherEvaluated =>
       obtain ⟨value, evaluation, valueTyped, unique⟩ := closed_correctness typed
       have sameType := constant_type_unique typed otherTyped
-      have sameValue := (unique _ otherEvaluated).trans (unique _ evaluated).symm
+      have sameValue := (unique _ [] otherEvaluated).1.trans (unique _ [] evaluated).1.symm
       rw [sameType, sameValue]
   | nil => rename_i others found; cases found; rfl
   | cons first rest firstIH restIH =>
@@ -171,9 +171,9 @@ theorem SourceArmsChecked.normalizes {source : List (SourcePattern × Expr)}
   | cons first rest ih => exact .cons first.normalizes ih
 
 /-- Source checking → derived normalization → ordinary ordered dispatch →
-unique typed evaluation. No execution or normalization witness is supplied. -/
+unique typed value and successor store. No execution or normalization witness is supplied. -/
 theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
-    {context : List (String × Ty)} {environment : List (String × Value)}
+    {context : List (String × BindingType)} {environment : List (String × Value)}
     {arguments : List Expr} {inputs : List Ty} {result : Ty}
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs)
@@ -183,10 +183,11 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     (environmentTyped : EnvironmentTyped program environment context) :
     NormalizesArms program home source checked.normalize ∧
       (∀ other, NormalizesArms program home source other → other = checked.normalize) ∧
-      ∃ value, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) value ∧
-        ValueHasType program value result ∧
-        ∀ other, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) other →
-          other = value := by
+      ∃ value after, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) value after ∧
+        ValueHasType program value result ∧ EnvironmentTyped program after context ∧
+        EnvironmentFrame context environment after ∧
+        ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) other otherAfter →
+          other = value ∧ otherAfter = after := by
   have normalizedNonempty : checked.normalize ≠ [] := by
     cases checked with
     | nil => exact False.elim (nonempty rfl)

@@ -83,14 +83,14 @@ assumed bridges or to treat its finite terminating subset as the full language.
 
 ## Structural constant-pattern boundary
 
-The authoritative entry remains `Grounded.lean`. It now imports two modules:
-`Grounded/Core.lean` owns decoded typing, coverage, evaluation and general
-correctness; `Grounded/SourcePatterns.lean` owns source-pattern normalization
-and its application consumer. There is no second evaluator or copied admission
-framework. The public `Grounded.correctness` signature is unchanged.
+At checkpoint `9f29766c`, the development separated core semantics from source
+pattern normalization while preserving the original public theorem signature.
+The subsequent stateful cutover below gives execution and lexical preservation
+their own modules and strengthens that signature. There remains one evaluator
+and no copied admission framework.
 
-Normative scope: §4.3 structural constant patterns, composed with §6.3 ordered
-pattern application. Normalized constants retain their resolved declared type
+Normative scope: §4.3 structural constant patterns, composed with §§6.1–6.4
+ordered pattern application. Normalized constants retain their resolved declared type
 and compare complete structural values without invoking user-defined Eq.
 Nominal identity, constructor tags, scalar kinds and aggregate shape participate
 in equality. The existing coverage-selection and binding theorems now handle
@@ -232,12 +232,12 @@ At each meaningful checkpoint update this document with:
   theorems distinguished from discharged guarantees, and unsupported features.
 - The exact next obligation on the same dependency chain.
 
-Current next obligation: specify mutable lexical storage and assignment
-(§5.2) as an extension of the existing checking-to-evaluation theorem. Settle
-the current-state, successor-state and framing contracts before adding rules;
-derive actual successor storage from checking, not a supplied realization.
-Keep the four stateful contract questions above explicit, and preserve the
-proved immutable and constant-pattern consumers.
+Current next obligation: extend the same storage and framing pipeline to
+projected reads and assignment through visible tuple/record fields (§5.3).
+Construct the actual selected resident and updated aggregate from static
+projection typing; preserve siblings and propagate the real successor through
+general correctness. Do not introduce references or initialization holes without
+settling their remaining authority/restoration contracts.
 
 Whole-language completion additionally requires an explicit normative coverage
 and consumer audit. Features absent from this new folder remain unproved,
@@ -245,3 +245,66 @@ including recursion/divergence, general callables/captures, effects and handlers
 nonlocal control, replay/cancellation, generics/traits, full lifetime and custom
 Drop checking, physical allocation/exhaustion, unsafe operations, and
 foreign/ABI/compiler composition. This list is not an exhaustive coverage audit.
+
+## Verified mutable lexical storage boundary
+
+Covered: §5.2 evaluation order and §5.3 mutable binding/whole-local assignment,
+within the existing duplicable, fully initialized, reference-free fragment.
+The one evaluator returns an actual final lexical store. Ordinary `HasType` plus
+current `EnvironmentTyped` now imply evaluation, typed result and final store,
+immutable-cell framing, and uniqueness of both value and final store.
+No successor-state, frame-preservation or successful-write premise is supplied.
+
+- `BindingType` records declared type and mutability. Assignment is a statement
+  with a continuation, evaluates its RHS first, and replaces only the nearest
+  lexical binding. Checking requires that binding to be mutable and its old
+  resident duplicable/discardable. Projected assignment and initialization-hole
+  restoration remain separate, unimplemented language cases, not implicit rules.
+- Sequencing, aggregate constituents and argument lists thread the actual
+  intermediate store left-to-right. Scope exit removes precisely the introduced
+  prefix; it must not restore an obsolete snapshot of outer values. Named calls
+  evaluate arguments in caller storage, then use a separate parameter store.
+- Immediate contextual clauses use the actual selected arm after argument
+  evaluation. Pattern bindings are immutable and local to that arm. This is not
+  a specification of independently materialized/escaping capture environments.
+- The four stateful questions above are resolved for this cutover as follows:
+  there are no reference/loan carriers or holes in the admitted syntax; no
+  dormant references, invented referent roots or separation claims are added;
+  only the selected branch executes; entry supplies actual typed resident values,
+  and every intermediate/result value comes from the same correctness induction.
+  These facts do not solve the later resource-bearing versions of the questions.
+- Constant normalization consumes closed execution ending in the empty store.
+  Source application correctness exports the actual typed/framed successor
+  store and uniqueness; it does not erase the new state contract.
+
+Producer/consumer chain: static destination lookup and current store typing
+construct `replaceBinding` success; its preservation proof feeds continuation
+correctness; typed scope-prefix removal feeds enclosing correctness; the closed
+and source-pattern entry theorems consume the same general result.
+
+
+Verified public result in `Grounded/Execution.lean`:
+
+`HasType` and current `EnvironmentTyped` construct evaluation, result typing,
+final-store typing, `EnvironmentFrame context before after`, and uniqueness of
+both result and final store. The frame preserves every immutable resident,
+including shadowed slots, and the lexical slot/name structure. It is composed
+through the actual RHS, write, continuation and selected-branch transitions;
+it is not an entry assumption. `closed_correctness` derives the empty final
+store. `SourceArmsChecked.correctness` exports the same typed/framed successor.
+
+Module ownership: `Core` holds decoded syntax, static checking and coverage;
+`Lexical` holds the one replacement operation and its typing/framing producer;
+`Execution` holds the one evaluator and general correctness induction;
+`SourcePatterns` holds normalization and source application. The old stateless
+evaluation signature and replacement proof were removed, not retained as shims.
+The historical state-threading proof was reused only after removing its obsolete
+normalization callbacks; immutable-cell framing is proved in the new pipeline.
+
+Verification: strict `lake build` passed. The all-defining-module axiom audit
+covered all four modules (1,490 declarations, 72 private/generated-private).
+Only `propext`, `Quot.sound`, and the normalization product's existing standard
+`Classical.choice` occur. General/closed stateful correctness use only
+`propext` and `Quot.sound`; write preservation uses `propext`; frame composition
+uses no axioms. No concrete examples, unit tests or admitted proofs were added.
+
