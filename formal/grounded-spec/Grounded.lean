@@ -1465,8 +1465,57 @@ structure QualifiedBindingType (R : Type) where
 def QualifiedBindingType.erase {R : Type} (binding : QualifiedBindingType R) : BindingType :=
   ⟨binding.shape, binding.mutable, binding.initialization⟩
 
+/-- An explicit declared outlives constraint `'a : 'b` between two lifetime
+spellings. `'static` is admitted on either side; `.omitted` is not a declarable
+bound name and receives no resolution derivation. -/
+structure OutlivesBound where
+  long : LifetimeSyntax
+  short : LifetimeSyntax
+  deriving DecidableEq
+
+/-- A declared bound reuses the authoritative input-lifetime resolver: each name
+resolves exactly as a parameter occurrence of that name, and the variable index
+is not advanced. An omitted spelling therefore cannot masquerade as a bound. -/
+abbrev ResolvesOutlivesBound (environment : LifetimeEnvironment)
+    (bound : OutlivesBound) (resolved : RegionTerm × RegionTerm) : Prop :=
+  ResolvesInputLifetime environment environment.count bound.long resolved.1 environment.count ∧
+  ResolvesInputLifetime environment environment.count bound.short resolved.2 environment.count
+
+inductive ResolvesOutlivesBounds (environment : LifetimeEnvironment) :
+    List OutlivesBound → List (RegionTerm × RegionTerm) → Prop where
+  | nil : ResolvesOutlivesBounds environment [] []
+  | cons {bound : OutlivesBound} {resolved : RegionTerm × RegionTerm}
+      {bounds : List OutlivesBound} {resolveds : List (RegionTerm × RegionTerm)}
+      (head : ResolvesOutlivesBound environment bound resolved)
+      (tail : ResolvesOutlivesBounds environment bounds resolveds) :
+      ResolvesOutlivesBounds environment (bound :: bounds) (resolved :: resolveds)
+
+theorem ResolvesOutlivesBound.deterministic {environment : LifetimeEnvironment}
+    {bound : OutlivesBound} {first second : RegionTerm × RegionTerm}
+    (left : ResolvesOutlivesBound environment bound first)
+    (right : ResolvesOutlivesBound environment bound second) : first = second := by
+  obtain ⟨leftLong, leftShort⟩ := left
+  obtain ⟨rightLong, rightShort⟩ := right
+  obtain ⟨sameLong, _⟩ := ResolvesInputLifetime.deterministic leftLong rightLong
+  obtain ⟨sameShort, _⟩ := ResolvesInputLifetime.deterministic leftShort rightShort
+  exact Prod.ext sameLong sameShort
+
+theorem ResolvesOutlivesBounds.deterministic {environment : LifetimeEnvironment}
+    {bounds : List OutlivesBound} {first second : List (RegionTerm × RegionTerm)}
+    (left : ResolvesOutlivesBounds environment bounds first)
+    (right : ResolvesOutlivesBounds environment bounds second) : first = second := by
+  induction left generalizing second with
+  | nil => cases right; rfl
+  | cons head tail ih =>
+    cases right with
+    | cons otherHead otherTail =>
+      obtain ⟨rfl⟩ := head.deterministic otherHead
+      obtain ⟨rfl⟩ := ih otherTail
+      rfl
+
 structure FunctionSignature where
   lifetimes : LifetimeEnvironment
+  bounds : List OutlivesBound := []
   parameters : List (String × QualifiedBindingType LifetimeSyntax)
   result : (shape : Ty) × QualifiedTy LifetimeSyntax shape := ⟨.unit, .unit⟩
 
@@ -1477,23 +1526,28 @@ def qualifiedParameterTypes : (parameters : List (String × QualifiedBindingType
 
 /-- Source signature resolution precedes invocation. The supply starts beyond
 all named binders; result elision uses resolved source lifetimes, never an active
-constructor or the number of runtime loan nodes. -/
+constructor or the number of runtime loan nodes. Declared outlives bounds are
+resolved into the same finite formal-region product; they are not caller scope
+requirements and impose no coverage of the whole invocation. -/
 structure ResolvedSignature (signature : FunctionSignature) where
   inputs : QualifiedTys RegionTerm (signature.parameters.map fun parameter => parameter.2.shape)
   result : QualifiedTy RegionTerm signature.result.1
+  bounds : List (RegionTerm × RegionTerm)
   supply : Nat
   inputResolution : ResolvesInputTypes signature.lifetimes signature.lifetimes.count
     (qualifiedParameterTypes signature.parameters) inputs supply
   resultResolution : ResolvesOutputType signature.lifetimes inputs.regions signature.result.2 result
+  boundsResolution : ResolvesOutlivesBounds signature.lifetimes signature.bounds bounds
 
 theorem ResolvedSignature.unique {signature : FunctionSignature} (first second : ResolvedSignature signature) :
     first = second := by
   cases first with
-  | mk firstInputs firstResult firstSupply firstResolution firstOutput =>
+  | mk firstInputs firstResult firstBounds firstSupply firstResolution firstOutput firstBoundsResolution =>
     cases second with
-    | mk secondInputs secondResult secondSupply secondResolution secondOutput =>
+    | mk secondInputs secondResult secondBounds secondSupply secondResolution secondOutput secondBoundsResolution =>
       obtain ⟨rfl, rfl⟩ := firstResolution.deterministic secondResolution
       cases firstOutput.deterministic secondOutput
+      cases ResolvesOutlivesBounds.deterministic firstBoundsResolution secondBoundsResolution
       rfl
 
 
@@ -1627,11 +1681,36 @@ theorem ResolvesOutputTypes.closed {environment : LifetimeEnvironment} {inputs :
     · exact tail.closed namedBound inputBound region member
 end
 
+/-- Every declared bound resolves to in-range formal regions: the same finite
+index product used by inputs and results, with no local scopes or compounds. -/
+theorem ResolvesOutlivesBounds.closed {environment : LifetimeEnvironment}
+    {bounds : List OutlivesBound} {resolveds : List (RegionTerm × RegionTerm)}
+    (resolved : ResolvesOutlivesBounds environment bounds resolveds) :
+    ∀ pair ∈ resolveds, pair.1.SignatureBound environment.count ∧ pair.2.SignatureBound environment.count := by
+  induction resolved with
+  | nil => simp
+  | cons head tail ih =>
+    intro pair member
+    rcases List.mem_cons.mp member with rfl | member
+    · obtain ⟨long, short⟩ := head
+      exact ⟨long.closed (Nat.le_refl _), short.closed (Nat.le_refl _)⟩
+    · exact ih pair member
+
 theorem ResolvedSignature.closed {source : FunctionSignature} (signature : ResolvedSignature source) :
     (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
     (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
   have inputs := signature.inputResolution.closed (Nat.le_refl _)
   exact ⟨inputs, signature.resultResolution.closed signature.inputResolution.monotone inputs⟩
+
+/-- Every resolved declared bound carries in-range formal indices at the
+signature supply. -/
+theorem ResolvedSignature.bounds_closed {source : FunctionSignature} (signature : ResolvedSignature source) :
+    ∀ long short, (long, short) ∈ signature.bounds →
+      long.SignatureBound signature.supply ∧ short.SignatureBound signature.supply := by
+  intro long short member
+  obtain ⟨longBound, shortBound⟩ := signature.boundsResolution.closed (long, short) member
+  exact ⟨longBound.mono signature.inputResolution.monotone,
+    shortBound.mono signature.inputResolution.monotone⟩
 mutual
 /-- Substitution is defined only on the regions actually carried by the type.
 No out-of-range index receives a fallback region. -/
@@ -1680,6 +1759,17 @@ def ResolvedSignature.instantiateResult {source : FunctionSignature} (signature 
     (parameters : Fin signature.supply → Region) : QualifiedTy Region source.result.1 :=
   signature.result.mapBounded (RegionTerm.SignatureBound signature.supply)
     (RegionTerm.instantiateBound signature.supply parameters) signature.closed.2
+
+/-- The caller's exact finite substitution satisfies every declared outlives
+constraint. This is the only declared-region requirement: it relates the
+substituted regions pairwise and imposes no whole-invocation coverage or caller
+scope requirement on unrelated formal regions. -/
+def ResolvedSignature.Satisfies {source : FunctionSignature} (signature : ResolvedSignature source)
+    (parameters : Fin signature.supply → Region) : Prop :=
+  ∀ (long short : RegionTerm) (member : (long, short) ∈ signature.bounds),
+    Region.Outlives
+      (long.instantiateBound signature.supply parameters (signature.bounds_closed long short member).1)
+      (short.instantiateBound signature.supply parameters (signature.bounds_closed long short member).2)
 
 
 
@@ -17077,6 +17167,7 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (body : HasType program phase declaration.home prepared held declaration.body result bodyAfter bodyPlan (some declaration.result))
       (resultType : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
         ⟨_, signature.instantiateResult lifetimes⟩)
+      (satisfies : signature.Satisfies lifetimes)
       (origin : ReturnStep program bodyAfter argumentTypes result)
       (cleanup : CleanupStep program bodyAfter cleaned (held ++ [result.payload]) declaration.parameters.length)
       (resume : ResumeStep program middle cleaned after)
@@ -18869,9 +18960,9 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .constant declared visible resolved structural hidden body resume referenceFree interpreted empty =>
     exact .constant declared visible resolved structural hidden.erase body.erase resume.erase referenceFree checkingRequired checkingRequired
   | .field body projection evidence => exact .field body.erase projection.erase evidence.erase
-  | .call declared visible distinct initialized signature signatureTypes lifetimes inputQualifications inputs hide prepare body resultType origin cleanup resume stable =>
+  | .call declared visible distinct initialized signature signatureTypes lifetimes inputQualifications inputs hide prepare body resultType satisfies origin cleanup resume stable =>
     exact .call declared visible distinct initialized signature signatureTypes lifetimes
-      ((Result.qualifications_erase _).trans inputQualifications) inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
+      ((Result.qualifications_erase _).trans inputQualifications) inputs.erase hide.erase prepare.erase body.erase resultType satisfies origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
   | .assign resident write continued => exact .assign resident.erase write.erase continued.erase
   | .assignIndirect resident write continued => exact .assignIndirect resident.erase write.erase continued.erase
   | .endOwn ending body => exact .endOwn ending.erase body.erase
@@ -19808,7 +19899,7 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .constant declared _ _ _ hidden initialized resume _ _ empty =>
     exact Executes.constant declared hidden initialized.execution_correctness resume empty
   | .field body projection _ => exact Executes.field body.execution_correctness projection
-  | .call declared _ _ _ _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
+  | .call declared _ _ _ _ _ _ _ inputs hide prepare body _ _ _ cleanup resume _ =>
     exact Executes.call declared inputs.execution_correctness (inputs.expected_types _ rfl) hide prepare
       body.execution_correctness cleanup resume
   | .assign resident write continued => exact Executes.assign resident.execution_correctness write continued.execution_correctness
@@ -20564,8 +20655,10 @@ set_option autoImplicit false
 
 /-- Every admitted named call uses a finite instance of its source-resolved
 signature. Outer coercions may shorten that instance through the declaration-
-derived qualified view relation; they preserve nominal well-formedness.
-Runtime interpretation of the declared region bounds is a separate obligation. -/
+derived qualified view relation; they preserve nominal well-formedness. The exact
+declared outlives bounds are resolved into the same finite product and the exact
+substitution satisfies them. Runtime provenance/interpretation of the declared
+region bounds remains a separate obligation. -/
 theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
     {result : Result phase} {plan : CorePlan} {expected : Option Ty}
@@ -20577,6 +20670,8 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
             signature.result.WellFormed program.declarations) ∧
           (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
           (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) ∧
+          (∀ long short, (long, short) ∈ signature.bounds →
+            long.SignatureBound signature.supply ∧ short.SignatureBound signature.supply) ∧
           ∃ lifetimes : Fin signature.supply → Region,
             ∃ original : QualifiedTy Region result.type,
               (⟨result.type, original⟩ : (type : Ty) × QualifiedTy Region type) =
@@ -20585,22 +20680,24 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
                 QualifiedTy.View (NominalView program.declarations Region.static Region.Outlives)
                   Region.Outlives original result.qualification) ∧
               (signature.instantiateInputs lifetimes).WellFormed program.declarations ∧
-              result.qualification.WellFormed program.declarations := by
+              result.qualification.WellFormed program.declarations ∧
+              signature.Satisfies lifetimes := by
   match typed with
-  | .call declared _ _ _ signature signatureTypes lifetimes _ _ _ _ _ resultType _ _ _ _ =>
+  | .call declared _ _ _ signature signatureTypes lifetimes _ _ _ _ _ resultType satisfies _ _ _ _ =>
     intro identity arguments same
     cases same
     have instantiated := signature.instantiate_wellFormed signatureTypes lifetimes
     refine ⟨_, declared, signature, signatureTypes, signature.closed.1, signature.closed.2,
-      lifetimes, _, resultType, Or.inl rfl, instantiated.1, ?_⟩
+      signature.bounds_closed, lifetimes, _, resultType, Or.inl rfl, instantiated.1, ?_, satisfies⟩
     exact (congrArg (fun entry : (type : Ty) × QualifiedTy Region type =>
       entry.2.WellFormed program.declarations) resultType).mpr instantiated.2
   | .shorten body conversion =>
     intro identity arguments same
-    obtain ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound,
-      lifetimes, original, instantiated, converted, inputsValid, resultValid⟩ := body.call_signature identity arguments same
-    refine ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound,
-      lifetimes, original, instantiated, Or.inr ?_, inputsValid, QualifiedTy.view_wellFormed conversion resultValid⟩
+    obtain ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound, boundsBound,
+      lifetimes, original, instantiated, converted, inputsValid, resultValid, satisfies⟩ :=
+        body.call_signature identity arguments same
+    refine ⟨declaration, declared, signature, signatureTypes, inputsBound, resultBound, boundsBound,
+      lifetimes, original, instantiated, Or.inr ?_, inputsValid, QualifiedTy.view_wellFormed conversion resultValid, satisfies⟩
     rcases converted with equal | converted
     · exact equal ▸ conversion
     · exact QualifiedTy.view_compose

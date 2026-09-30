@@ -78,6 +78,28 @@ coercion derives a valid qualified view. Both preserve nominal well-formedness,
 including under administrative and expected-type wrappers. The general
 execution-correctness theorem consumes the migrated producer.
 
+Declared outlives constraints `'a:'b` are now part of the authoritative product.
+`FunctionSignature.bounds` carries the decoded constraints; `ResolvesOutlivesBound`
+resolves each side with the same `ResolvesInputLifetime` traversal at the fixed
+declaration index, so a bound name denotes exactly the formal region its parameter
+occurrence denotes and an omitted spelling receives no derivation. No second
+resolver or name lookup is introduced. `ResolvedSignature.bounds` and
+`boundsResolution` hold the resolved pair product; `ResolvesOutlivesBounds.deterministic`
+proves it is a deterministic finite-index product, `.closed` and
+`ResolvedSignature.bounds_closed` place every bound term within `signature.supply`,
+and `ResolvedSignature.unique` extends its determinism to the bound product.
+
+The actual `HasType.call` carries `satisfies : signature.Satisfies lifetimes`
+alongside the exact `Fin signature.supply → Region` substitution. `Satisfies`
+requires only the declared pairs to satisfy semantic `Region.Outlives` inclusion;
+it imposes no whole-invocation coverage, no caller-scope membership for unrelated
+formal regions, and no disjointness or reference-symbol injectivity assumption.
+An empty bound set is satisfied trivially. `HasType.call_signature` exports both
+the resolved bound closure and the substitution satisfaction for every admitted
+named call, and phase erasure preserves satisfaction unchanged. This is a bounded
+declared-constraint guarantee: it discharges the declared bound relation, not
+runtime lifetime validity or referent provenance.
+
 Source and checked slots, expression results, pattern fields and aggregate
 results now carry intrinsic qualified types. Binding and preparation retain
 them; storage joins preserve qualification alongside canonical type and owner
@@ -111,8 +133,12 @@ canonical literal type from that same qualified resolution. These changes are
 consumed by the general normalization, erasure and execution proofs.
 
 Body-annotation lifetime-name resolution into semantic regions, region-validity
-interpretation and source return provenance remain open. A carried qualifier is
-not yet a proof of its lifetime bound. The bounded return rule below remains;
+interpretation and source return provenance remain open. Declared lifetime
+constraints `'a:'b` now resolve into the signature product and are discharged
+exactly at each call, but the decoded bound syntax is not yet populated from
+source, and no theorem yet turns a discharged outlives bound into runtime referent
+provenance or lifetime validity. A carried qualifier is still not a proof of its
+lifetime bound. The bounded return rule below remains;
 no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
 
 ### A single produced payload and authoritative storage
@@ -348,7 +374,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,774
+warnings as errors. The exhaustive defining-module audit covered **7,821
 declarations, including 299 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
