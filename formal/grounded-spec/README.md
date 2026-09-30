@@ -285,10 +285,13 @@ checked loan table. A batch records its source schema and fresh stamp; its rows
 are interpreted only where the partial source-product projection has an image.
 Permission, ending and disposal checks consume that same table. General Copy
 framing proves that no unique loan is created, including by a schema batch.
-`CopyPayload.schema_origins` derives checked ancestry from the Copy producer and
-positive Copy permission. `ReturnStep.schemaCopy` consumes it in return admission
-with unrestricted other inputs, without an active-input or concrete-ancestry
-callback. This is provenance, not declared-region validity. General constructive
+`CopyPayload.origins` and `CopyPayloads.origins` derive ancestry recursively
+through direct references, aggregates and opaque schemas. Ordered Copy retains
+earlier loan records, so a later field cannot erase an earlier field's ancestry.
+`ReturnStep.copy` consumes this proof and positive Copy permission in general
+return admission, with unrestricted other inputs and shared aliases. It replaces
+the schema-only constructor; no active-input or concrete-ancestry callback is
+required. This is provenance, not declared-region validity. General constructive
 realization of checking products remains separate from these interpretation
 and execution theorems.
 
@@ -385,7 +388,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,878
+warnings as errors. The exhaustive defining-module audit covered **7,886
 declarations, including 312 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.

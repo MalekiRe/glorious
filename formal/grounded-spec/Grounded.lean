@@ -20722,29 +20722,93 @@ theorem ReferencePath.duplicable_shared {type referent : Ty} {path : List Compon
   | shared => rfl
   | unique => exact False.elim ((reference.unique_nonduplicable rfl).not_duplicable permission)
 
-/-- Every declared occurrence of an opaque schema Copy uses the parent recorded
-by that Copy batch. Copy permission excludes unique occurrences even in inactive
-alternatives; concrete interpretation subsequently selects the active paths. -/
-theorem CopyPayload.schema_origins {before after : Context} {owner : Nat}
-    {path : List Component} {type : Ty} {copies : List Nat} {knowledge : SchemaKnowledge}
-    {copied : Payload}
-    (copy : CopyPayload before (.schema owner path type copies knowledge) copied after)
-    (permission : Duplicable program.data type) :
-    ∀ reference, copied.Occurs program reference →
-      ∃ ancestor, (Payload.schema owner path type copies knowledge).Occurs program ancestor ∧
-        after.Derived (program := program) reference ancestor := by
+mutual
+theorem CopyPayload.loan_entries {before after : Context} {payload copied : Payload}
+    (copy : CopyPayload before payload copied after) : before.loans ⊆ after.loans := by
   cases copy with
-  | schema context owner path type copies knowledge =>
+  | plain => exact fun _ member => member
+  | reference | schema => exact fun _ member => List.mem_append_left _ member
+  | aggregate _ children => exact children.loan_entries
+theorem CopyPayloads.loan_entries {before after : Context} {payloads copied : List Payload}
+    (copy : CopyPayloads before payloads copied after) : before.loans ⊆ after.loans := by
+  cases copy with
+  | nil => exact fun _ member => member
+  | cons first rest => exact fun _ member => rest.loan_entries (first.loan_entries member)
+end
+
+theorem Context.Derived.copy_frame {before after : Context} {reference ancestor : Reference}
+    (derived : before.Derived (program := program) reference ancestor)
+    (retained : before.loans ⊆ after.loans) : after.Derived (program := program) reference ancestor := by
+  induction derived with
+  | refl reference => exact .refl reference
+  | parent member parent _ ih =>
+    obtain ⟨entry, member, row⟩ := member
+    exact .parent ⟨entry, retained member, row⟩ parent ih
+
+mutual
+/-- The recursive producer supplies ancestry for every nested copied occurrence.
+The non-unique premise below is derived from positive Copy permission by the
+return consumer, not used to infer permission to copy or move. -/
+theorem CopyPayload.origins {before after : Context} {payload copied : Payload}
+    (copy : CopyPayload before payload copied after) {type : Ty}
+    (typed : copied.Typed program type) (nonunique : ¬ Nonduplicable program.data type) :
+    ∀ reference, copied.Occurs program reference →
+      ∃ ancestor, payload.Occurs program ancestor ∧ after.Derived (program := program) reference ancestor := by
+  cases copy with
+  | plain => intro reference occurs; cases occurs
+  | reference context parent referent =>
+    intro reference occurs
+    cases occurs
+    have row := LoanEntry.Row.direct (program := program)
+      ⟨.copied before.nextSymbol parent, before.referenceTarget parent, referent, .shared, some parent⟩
+    exact ⟨parent, .reference _ _ _, .parent
+      ⟨_, List.mem_append_right _ (List.mem_singleton_self _), row⟩ rfl (.refl _)⟩
+  | aggregate source children =>
+    cases typed with
+    | aggregate _ shape childrenTyped =>
+      intro reference occurs
+      cases occurs with
+      | child member nested =>
+        obtain ⟨field, member, ancestor, origin, derived⟩ := children.origins childrenTyped
+          (fun child member unique => nonunique (shape.nonduplicable_child member unique)) member nested
+        exact ⟨ancestor, .child member origin, derived⟩
+  | schema context owner path schemaType copies knowledge =>
+    cases typed
     intro reference occurs
     cases occurs with
-    | schema declared =>
-      have shared := declared.duplicable_shared permission
+    | @schema _ _ suffix _ referent mode _ _ declared =>
+      have shared : mode = .shared := by
+        cases mode with
+        | shared => rfl
+        | unique => exact False.elim (nonunique (declared.unique_nonduplicable rfl))
       cases shared
       have row := LoanEntry.Row.schemaCopy (stamp := before.nextSymbol)
         (owner := owner) (path := path) (copies := copies) declared
-      refine ⟨_, .schema declared, ?_⟩
-      exact Context.Derived.parent
-        ⟨_, List.mem_append_right _ (List.mem_singleton_self _), row⟩ rfl (.refl _)
+      exact ⟨_, .schema declared, .parent
+        ⟨_, List.mem_append_right _ (List.mem_singleton_self _), row⟩ rfl (.refl _)⟩
+
+theorem CopyPayloads.origins {before after : Context} {payloads copied : List Payload}
+    (copy : CopyPayloads before payloads copied after) {types : List Ty}
+    (typed : PayloadsTyped program copied types)
+    (nonunique : ∀ type ∈ types, ¬ Nonduplicable program.data type)
+    {field : Payload} {reference : Reference} (member : field ∈ copied)
+    (occurs : field.Occurs program reference) :
+    ∃ original ∈ payloads, ∃ ancestor, original.Occurs program ancestor ∧
+      after.Derived (program := program) reference ancestor := by
+  cases copy with
+  | nil => cases member
+  | cons first rest =>
+    cases typed with
+    | cons headTyped tailTyped =>
+      rcases List.mem_cons.mp member with equal | member
+      · subst field
+        obtain ⟨ancestor, origin, derived⟩ := first.origins headTyped
+          (nonunique _ (List.mem_cons_self)) reference occurs
+        exact ⟨_, List.mem_cons_self, ancestor, origin, derived.copy_frame rest.loan_entries⟩
+      · obtain ⟨original, member, ancestor, origin, derived⟩ := rest.origins tailTyped
+          (fun type member => nonunique type (List.mem_cons_of_mem _ member)) member occurs
+        exact ⟨original, List.mem_cons_of_mem _ member, ancestor, origin, derived⟩
+end
 
 
 mutual
@@ -20792,25 +20856,23 @@ end Checked
 namespace Elaboration
 variable {program : Program} {phase : Phase} {home : Module}
 
-/-- A schema Copy can return through the general multi-input boundary using its
-producer-owned loan batch. No concrete ancestry or active-input callback is
-supplied by the caller. Other arguments and shared aliases remain unrestricted. -/
-theorem ReturnStep.schemaCopy {program : Program} {phase : Phase}
+/-- Any recursively copied product can return through the multi-input boundary.
+Positive Copy permission and the producer's recorded loan edges supply checked
+ancestry; no concrete ancestry or active-input callback is supplied. -/
+theorem ReturnStep.copy {program : Program} {phase : Phase}
     {caller before : Point program phase} {arguments : List (Result phase)}
-    {argument result : Result phase} {owner : Nat} {path : List Checked.Component}
-    {type : Ty} {copies : List Nat} {knowledge : Checked.SchemaKnowledge}
-    (member : argument ∈ arguments)
-    (schema : argument.payload.checked = .schema owner path type copies knowledge)
+    {argument result : Result phase} (member : argument ∈ arguments)
     (copy : Checked.CopyPayload caller.checked argument.payload.checked result.payload.checked before.checked)
-    (permission : Duplicable program.data type)
+    (typed : result.Checked program) (permission : Duplicable program.data result.type)
     (interpreted : result.Interpreted before)
     (inputs : ∀ input ∈ arguments, input.Interpreted before) :
     ReturnStep program before arguments result := by
   refine ⟨.inr ?_, interpreted, inputs⟩
-  rw [schema] at copy
   intro reference occurs
-  obtain ⟨ancestor, origin, derived⟩ := copy.schema_origins permission reference occurs
-  exact ⟨argument, member, ancestor, schema.symm ▸ origin, derived⟩
+  obtain ⟨ancestor, origin, derived⟩ := copy.origins typed
+    (fun noncopy => noncopy.not_duplicable permission) reference occurs
+  exact ⟨argument, member, ancestor, origin, derived⟩
+
 
 
 /-- The ordinary read consumer applies the recursive uniqueness bound to the
