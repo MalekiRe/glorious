@@ -65,12 +65,17 @@ output elision have no resolution derivation. Omitted function results are unit.
 The actual `HasType.call` constructor carries this resolved product in both
 phases and checks qualified input/result well-formedness against the same
 `Program.declarations`, including nominal existence and lifetime-argument arity.
-Erasure preserves both resolution and well-formedness evidence.
-`ResolvedSignature.unique` proves determinism; `ResolvedSignature.closed` bounds
-every input and result region by the produced supply. `HasType.call_signature`
-derives well-formedness and closure for every admitted named call, including
-administrative and expected-type wrappers. The existing general execution-
-correctness theorem consumes the migrated producer.
+One finite `Fin signature.supply → Region` substitution instantiates both the
+actual argument qualifiers and the body result qualifier. No missing or
+out-of-range parameter receives a fallback region. Preparation retains those
+argument qualifiers. Phase erasure preserves the same substitution and complete
+qualified-type equalities. `ResolvedSignature.unique` proves resolution
+determinism; `ResolvedSignature.closed` bounds all formal regions.
+`ResolvedSignature.instantiate_wellFormed` preserves declared nominal validity.
+`HasType.call_signature` derives closure, an instantiated qualified result and
+its well-formedness for every admitted named call, including administrative and
+expected-type wrappers. The general execution-correctness theorem consumes
+the migrated producer.
 
 Source and checked slots, expression results, pattern fields and aggregate
 results now carry intrinsic qualified types. Binding and preparation retain
@@ -83,8 +88,8 @@ cell correspondence requires equality of the complete qualified type; canonical
 entry import and phase erasure preserve that correspondence. The general
 execution and cleanup correctness proofs consume these migrated producers.
 
-Invocation substitutions, qualified annotations/coercions, region-validity
-interpretation and source return provenance remain open. A carried qualifier is
+Qualified annotations/coercions, region-validity interpretation and source
+return provenance remain open. A carried qualifier is
 not yet a proof of its lifetime bound. The bounded return rule below remains;
 no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
 
@@ -223,9 +228,9 @@ positively handle-free result needs no reference input. Otherwise the current
 bounded rule permits at most one simultaneous input reference occurrence, and
 every result node must derive from it. Mutually exclusive variants do not count
 as simultaneous runtime occurrences. This is **not** full declared-lifetime
-return checking: signatures resolve lifetime parameters and bindings retain
-qualified types, but calls do not yet instantiate those signatures and
-`ReturnStep` still checks bounded provenance. `correctness_return_cleanup` connects general
+return checking: signatures are instantiated at calls and bindings retain their
+qualified types, but `ReturnStep` still checks bounded provenance rather than
+the interpretation of declared regions. `correctness_return_cleanup` connects general
 body execution, actual cleanup, returned usability and runtime ancestry at every
 nested returned occurrence; cleanup does not auto-end the returned handles.
 Every active target after cleanup is backed by storage already present before
@@ -321,8 +326,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,718
-declarations, including 291 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,764
+declarations, including 299 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no

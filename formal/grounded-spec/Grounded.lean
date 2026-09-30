@@ -1631,6 +1631,55 @@ theorem ResolvedSignature.closed {source : FunctionSignature} (signature : Resol
     (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
   have inputs := signature.inputResolution.closed (Nat.le_refl _)
   exact ⟨inputs, signature.resultResolution.closed signature.inputResolution.monotone inputs⟩
+mutual
+/-- Substitution is defined only on the regions actually carried by the type.
+No out-of-range index receives a fallback region. -/
+def QualifiedTy.mapBounded {R S : Type} (predicate : R → Prop)
+    (replace : ∀ region, predicate region → S) {shape : Ty} (type : QualifiedTy R shape)
+    (valid : ∀ region ∈ type.regions, predicate region) : QualifiedTy S shape :=
+  match type with
+  | .unit => .unit
+  | .integer type => .integer type
+  | .character => .character
+  | .tuple first rest => .tuple
+      (first.mapBounded predicate replace (fun region member => valid region (List.mem_append_left _ member)))
+      (rest.mapBounded predicate replace (fun region member => valid region (List.mem_append_right _ member)))
+  | .array element length => .array (element.mapBounded predicate replace valid) length
+  | .nominal identity arguments => .nominal identity
+      (arguments.attach.map fun region => replace region.val (valid region.val region.property))
+  | .reference region referent mode => .reference
+      (replace region (valid region (List.mem_cons_self ..)))
+      (referent.mapBounded predicate replace (fun inner member => valid inner (List.mem_cons_of_mem _ member))) mode
+def QualifiedTys.mapBounded {R S : Type} (predicate : R → Prop)
+    (replace : ∀ region, predicate region → S) {shapes : List Ty} (types : QualifiedTys R shapes)
+    (valid : ∀ region ∈ types.regions, predicate region) : QualifiedTys S shapes :=
+  match types with
+  | .nil => .nil
+  | .cons first rest => .cons
+      (first.mapBounded predicate replace (fun region member => valid region (List.mem_append_left _ member)))
+      (rest.mapBounded predicate replace (fun region member => valid region (List.mem_append_right _ member)))
+end
+
+
+def RegionTerm.instantiateBound (count : Nat) (parameters : Fin count → Region) :
+    (region : RegionTerm) → region.SignatureBound count → Region
+  | .parameter index, bound => parameters ⟨index, bound⟩
+  | .static, _ => .static
+  | .local _, impossible => False.elim impossible
+  | .intersection _ _, impossible => False.elim impossible
+  | .union _ _, impossible => False.elim impossible
+
+def ResolvedSignature.instantiateInputs {source : FunctionSignature} (signature : ResolvedSignature source)
+    (parameters : Fin signature.supply → Region) :
+    QualifiedTys Region (source.parameters.map fun parameter => parameter.2.shape) :=
+  signature.inputs.mapBounded (RegionTerm.SignatureBound signature.supply)
+    (RegionTerm.instantiateBound signature.supply parameters) signature.closed.1
+
+def ResolvedSignature.instantiateResult {source : FunctionSignature} (signature : ResolvedSignature source)
+    (parameters : Fin signature.supply → Region) : QualifiedTy Region source.result.1 :=
+  signature.result.mapBounded (RegionTerm.SignatureBound signature.supply)
+    (RegionTerm.instantiateBound signature.supply parameters) signature.closed.2
+
 
 
 /-- Direct, noncapturing, effect-free functions; omitted results denote unit. -/
@@ -1843,6 +1892,41 @@ def QualifiedTys.WellFormed {R : Type} (declarations : QualifiedDeclarations) {s
   | .nil => True
   | .cons first rest => first.WellFormed declarations ∧ rest.WellFormed declarations
 end
+mutual
+theorem QualifiedTy.WellFormed.mapBounded {R S : Type} {declarations : QualifiedDeclarations}
+    {shape : Ty} {type : QualifiedTy R shape} (typed : type.WellFormed declarations)
+    (predicate : R → Prop) (replace : ∀ region, predicate region → S)
+    (valid : ∀ region ∈ type.regions, predicate region) :
+    (type.mapBounded predicate replace valid).WellFormed declarations := by
+  cases type with
+  | unit | integer | character => trivial
+  | tuple first rest =>
+    exact ⟨typed.1.mapBounded (type := first) predicate replace _,
+      typed.2.mapBounded (types := rest) predicate replace _⟩
+  | array element length => exact typed.mapBounded (type := element) predicate replace _
+  | nominal identity arguments =>
+    simpa [QualifiedTy.mapBounded, QualifiedTy.WellFormed] using typed
+  | reference region referent mode => exact typed.mapBounded (type := referent) predicate replace _
+theorem QualifiedTys.WellFormed.mapBounded {R S : Type} {declarations : QualifiedDeclarations}
+    {shapes : List Ty} {types : QualifiedTys R shapes} (typed : types.WellFormed declarations)
+    (predicate : R → Prop) (replace : ∀ region, predicate region → S)
+    (valid : ∀ region ∈ types.regions, predicate region) :
+    (types.mapBounded predicate replace valid).WellFormed declarations := by
+  cases types with
+  | nil => trivial
+  | cons first rest =>
+    exact ⟨typed.1.mapBounded (type := first) predicate replace _,
+      typed.2.mapBounded (types := rest) predicate replace _⟩
+end
+
+theorem ResolvedSignature.instantiate_wellFormed {source : FunctionSignature}
+    {declarations : QualifiedDeclarations} (signature : ResolvedSignature source)
+    (valid : signature.inputs.WellFormed declarations ∧ signature.result.WellFormed declarations)
+    (parameters : Fin signature.supply → Region) :
+    (signature.instantiateInputs parameters).WellFormed declarations ∧
+      (signature.instantiateResult parameters).WellFormed declarations :=
+  ⟨valid.1.mapBounded _ _ _, valid.2.mapBounded _ _ _⟩
+
 
 mutual
 theorem QualifiedTy.WellFormed.map {R S : Type} {declarations : QualifiedDeclarations}
@@ -16948,12 +17032,17 @@ inductive HasType (program : Program) : (phase : Phase) → Module → Point pro
       (signature : ResolvedSignature declaration.signature)
       (signatureTypes : signature.inputs.WellFormed program.declarations ∧
         signature.result.WellFormed program.declarations)
+      (lifetimes : Fin signature.supply → Region)
+      (inputQualifications :
+        (⟨_, Result.qualifications argumentTypes⟩ : (types : List Ty) × QualifiedTys Region types) =
+          ⟨_, signature.instantiateInputs lifetimes⟩)
       (inputs : HasTypes program phase home before held arguments argumentTypes middle argumentPlans
         (some (declaration.parameters.map fun parameter => parameter.2.type)))
       (hide : HideStep program middle hidden)
       (prepare : PrepareStep program hidden prepared declaration.parameters argumentTypes)
       (body : HasType program phase declaration.home prepared held declaration.body result bodyAfter bodyPlan (some declaration.result))
-      (resultType : result.type = declaration.result)
+      (resultType : (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+        ⟨_, signature.instantiateResult lifetimes⟩)
       (origin : ReturnStep program bodyAfter argumentTypes result)
       (cleanup : CleanupStep program bodyAfter cleaned (held ++ [result.payload]) declaration.parameters.length)
       (resume : ResumeStep program middle cleaned after)
@@ -18716,8 +18805,9 @@ def HasType.erase {phase : Phase} {home : Module} {before after : Point program 
   | .constant declared visible resolved structural hidden body resume referenceFree interpreted empty =>
     exact .constant declared visible resolved structural hidden.erase body.erase resume.erase referenceFree checkingRequired checkingRequired
   | .field body projection evidence => exact .field body.erase projection.erase evidence.erase
-  | .call declared visible distinct initialized signature signatureTypes inputs hide prepare body resultType origin cleanup resume stable =>
-    exact .call declared visible distinct initialized signature signatureTypes inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
+  | .call declared visible distinct initialized signature signatureTypes lifetimes inputQualifications inputs hide prepare body resultType origin cleanup resume stable =>
+    exact .call declared visible distinct initialized signature signatureTypes lifetimes
+      ((Result.qualifications_erase _).trans inputQualifications) inputs.erase hide.erase prepare.erase body.erase resultType origin.erase (by simpa using cleanup.erase) resume.erase checkingStable
   | .assign resident write continued => exact .assign resident.erase write.erase continued.erase
   | .assignIndirect resident write continued => exact .assignIndirect resident.erase write.erase continued.erase
   | .endOwn ending body => exact .endOwn ending.erase body.erase
@@ -19648,7 +19738,7 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .constant declared _ _ _ hidden initialized resume _ _ empty =>
     exact Executes.constant declared hidden initialized.execution_correctness resume empty
   | .field body projection _ => exact Executes.field body.execution_correctness projection
-  | .call declared _ _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
+  | .call declared _ _ _ _ _ _ _ inputs hide prepare body _ _ cleanup resume _ =>
     exact Executes.call declared inputs.execution_correctness (inputs.expected_types _ rfl) hide prepare
       body.execution_correctness cleanup resume
   | .assign resident write continued => exact Executes.assign resident.execution_correctness write continued.execution_correctness
@@ -20396,9 +20486,10 @@ end Grounded.Elaboration
 namespace Grounded.Elaboration
 set_option autoImplicit false
 
-/-- Every admitted named call, including through administrative and expected-type
-rules, has one source-resolved signature with no out-of-range lifetime variables.
-This does not assert that body views already enforce those lifetime bounds. -/
+/-- Every admitted named call uses a finite instance of its source-resolved
+signature, including under administrative and expected-type wrappers. The
+actual result has that qualified type and preserves nominal well-formedness.
+Runtime interpretation of the declared region bounds is a separate obligation. -/
 theorem HasType.call_signature {program : Program} {phase : Phase} {home : Module}
     {before after : Point program phase} {held : List (Payload phase)} {expression : Expr}
     {result : Result phase} {plan : CorePlan} {expected : Option Ty}
@@ -20409,12 +20500,21 @@ theorem HasType.call_signature {program : Program} {phase : Phase} {home : Modul
           (signature.inputs.WellFormed program.declarations ∧
             signature.result.WellFormed program.declarations) ∧
           (∀ region ∈ signature.inputs.regions, region.SignatureBound signature.supply) ∧
-          (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) := by
+          (∀ region ∈ signature.result.regions, region.SignatureBound signature.supply) ∧
+          ∃ lifetimes : Fin signature.supply → Region,
+            (⟨result.type, result.qualification⟩ : (type : Ty) × QualifiedTy Region type) =
+              ⟨_, signature.instantiateResult lifetimes⟩ ∧
+            (signature.instantiateInputs lifetimes).WellFormed program.declarations ∧
+            result.qualification.WellFormed program.declarations := by
   match typed with
-  | .call declared _ _ _ signature signatureTypes _ _ _ _ _ _ _ _ _ =>
+  | .call declared _ _ _ signature signatureTypes lifetimes _ _ _ _ _ resultType _ _ _ _ =>
     intro identity arguments same
     cases same
-    exact ⟨_, declared, signature, signatureTypes, signature.closed⟩
+    have instantiated := signature.instantiate_wellFormed signatureTypes lifetimes
+    refine ⟨_, declared, signature, signatureTypes, signature.closed.1, signature.closed.2,
+      lifetimes, resultType, instantiated.1, ?_⟩
+    exact (congrArg (fun entry : (type : Ty) × QualifiedTy Region type =>
+      entry.2.WellFormed program.declarations) resultType).mpr instantiated.2
   | .view _ body | .endOwn _ body | .endAfter body _ | .raiseSupply body _ _ _ _ |
       .expectedData body _ _ | .expectedCall body => exact body.call_signature
   | .unit | .integer .. | .character .. | .group .. | .read .. | .move .. | .implicitMove .. |
