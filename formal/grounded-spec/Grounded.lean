@@ -15455,7 +15455,7 @@ structure SourceBorrow (program : Program) (home : Module) (before : Grounded.Co
   parent : Option Nat
   payload : SourcePayload
   access : AccessType program home before mode place target referent parent
-  ready : before.AccessReady target parent
+  parentReady : ∀ node loan, parent = some node → before.loans[node]? = some loan → before.Ready loan.target
   targetImage : symbols.address before checkedTarget = some target
   parentImage : checkedParent.map symbols.reference = parent.map some
   finite : FiniteLayout program.target program.data referent
@@ -15472,7 +15472,7 @@ structure SourceDereference (program : Program) (home : Module) (before : Ground
   parent : Option Nat
   payload : SourcePayload
   access : AccessType program home before .shared (.dereference reference fields) target result.type parent
-  ready : before.AccessReady target parent
+  parentReady : ∀ node loan, parent = some node → before.loans[node]? = some loan → before.Ready loan.target
   targetImage : symbols.address before checkedTarget = some target
   parentImage : checkedParent.map symbols.reference = parent.map some
   provenance : before.TargetPayload program target result.type payload
@@ -15489,7 +15489,7 @@ structure SourceMoveIndirect (program : Program) (home : Module) (before : Groun
   slot : Grounded.Slot
   remainder : SourcePayload
   access : AccessType program home before .unique (.dereference reference fields) target result.type (some node)
-  ready : before.AccessReady target (some node)
+  parentReady : ∀ parent loan, some node = some parent → before.loans[parent]? = some loan → before.Ready loan.target
   targetImage : symbols.address before checkedTarget = some target
   parentImage : symbols.reference checkedParent = some node
   stored : before.storage target.base = some slot
@@ -17083,6 +17083,28 @@ theorem ContextMeaning.free {checked : Checked.Context} {source : Grounded.Conte
   · cases shared.1
   · cases impossible
   · exact apart
+/-- A checked readiness query becomes actual readiness only when its canonical
+cell exists. An absent opaque cell never makes this implication vacuous. -/
+theorem ContextMeaning.ready {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
+    {slot : Checked.Slot} (stored : checked.storage target.base = some slot)
+    (ready : checked.TargetReady target) {actualTarget : Origin}
+    (image : symbols.address source target = some actualTarget) : source.Ready actualTarget := by
+  cases target with
+  | mk base fields =>
+      cases base with
+      | referent reference =>
+          have absent := meaning.noOpaqueCells reference
+          rw [absent] at stored
+          cases stored
+      | binder identity =>
+          obtain ⟨actual, found, _, _, _, mask, _⟩ := meaning.cells _ _ _ stored rfl
+          have equal : (⟨.binder (symbols.binder identity), fields⟩ : Origin) = actualTarget :=
+            Option.some.inj image
+          cases equal
+          obtain ⟨state, access, complete⟩ := ready slot stored
+          exact ⟨actual, state, found, mask ▸ access, complete⟩
+
 
 mutual
 theorem Payload.NoHandles.nodes_eq_nil {payload : Checked.Payload} {state : Initialization}
@@ -18445,6 +18467,7 @@ theorem Executes.implicitMove {place : Place} (body : Executes before held (.mov
 theorem Executes.borrow {mode : BorrowMode} {place : AccessPlace} {referent : Ty}
     {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
     (stored : before.checked.storage target.base = some slot)
+    (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) mode parent target)
     (actual : Required phase fun executable => Nonempty (SourceBorrow program home
       (before.source executable) (before.symbols executable) target parent
@@ -18459,7 +18482,8 @@ theorem Executes.borrow {mode : BorrowMode} {place : AccessPlace} {referent : Ty
   have payload : result.payload.source rfl = .reference (before.source rfl).loans.length :=
     congrArg ResultType.payload step.produced
   simpa only [step.updated, step.produced, payload] using
-    state.executesBorrow step.access step.ready permission step.finite step.provenance step.available
+    state.executesBorrow step.access ⟨before.meaning.related.ready stored ready step.targetImage, step.parentReady⟩
+      permission step.finite step.provenance step.available
 
 theorem Executes.reborrow {mode : BorrowMode} {place : Place}
     (body : Executes before held (.borrow mode (.dereference place [])) result after .leaf) :
@@ -18475,6 +18499,7 @@ theorem Executes.reborrow {mode : BorrowMode} {place : Place}
 theorem Executes.dereference {reference : Place} {fields : List FieldKey}
     {target : Checked.Address} {parent : Option Checked.Reference} {slot : Checked.Slot}
     (stored : before.checked.storage target.base = some slot)
+    (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) .shared parent target)
     (actual : Required phase fun executable => Nonempty (SourceDereference program home
       (before.source executable) (before.symbols executable) target parent
@@ -18484,11 +18509,14 @@ theorem Executes.dereference {reference : Place} {fields : List FieldKey}
   obtain ⟨step⟩ := actual executable
   have permission := (before.related executable).permits
     (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage step.parentImage permitted
-  exact state.executesDereference step.access step.ready permission step.provenance step.available step.permission step.copied
+  exact state.executesDereference step.access
+    ⟨(before.related executable).ready stored ready step.targetImage, step.parentReady⟩
+    permission step.provenance step.available step.permission step.copied
 
 theorem Executes.moveIndirect {reference : Place} {fields : List FieldKey}
     {target : Checked.Address} {parent : Checked.Reference} {slot : Checked.Slot}
     (stored : before.checked.storage target.base = some slot)
+    (ready : before.checked.TargetReady target)
     (permitted : before.checked.LocalPermits (program := program) .unique (some parent) target)
     (actual : Required phase fun executable => Nonempty (SourceMoveIndirect program home
       (before.source executable) (before.symbols executable) target parent
@@ -18501,7 +18529,8 @@ theorem Executes.moveIndirect {reference : Place} {fields : List FieldKey}
     (fun binder base => Or.inl ⟨slot, base ▸ stored⟩) step.targetImage
     (congrArg some step.parentImage) permitted
   rw [step.updated]
-  exact state.executesMoveIndirect step.access step.ready permission step.stored step.path
+  exact state.executesMoveIndirect step.access
+    ⟨(before.related executable).ready stored ready step.targetImage, step.parentReady⟩ permission step.stored step.path
     step.provenance step.available step.pending step.cleared
 
 end Grounded.Elaboration
@@ -20352,10 +20381,10 @@ theorem HasType.execution_correctness {phase : Phase} {home : Module}
   | .read selection _ _ _ actual => exact Executes.read selection actual
   | .move selection _ free _ _ _ actual => exact Executes.move selection free actual
   | .implicitMove body _ => exact Executes.implicitMove body.execution_correctness
-  | .borrow _ _ _ stored _ _ _ permitted _ _ _ actual => exact Executes.borrow stored permitted actual
+  | .borrow _ _ ready stored _ _ _ permitted _ _ _ actual => exact Executes.borrow stored ready permitted actual
   | .reborrow body _ => exact Executes.reborrow body.execution_correctness
-  | .dereference _ _ stored _ _ _ permitted _ _ _ actual => exact Executes.dereference stored permitted actual
-  | .moveIndirect _ _ permitted stored _ _ _ _ _ actual => exact Executes.moveIndirect stored permitted actual
+  | .dereference _ ready stored _ _ _ permitted _ _ _ actual => exact Executes.dereference stored ready permitted actual
+  | .moveIndirect _ ready permitted stored _ _ _ _ _ actual => exact Executes.moveIndirect stored ready permitted actual
   | .tuple _ first rest _ => exact Executes.tuple first.execution_correctness rest.execution_correctness
   | .array _ body types finite size => exact Executes.array body.execution_correctness (congrArg Sigma.fst types) finite size
   | .construct shape _ body finite _ => exact Executes.construct shape.erase body.execution_correctness finite
