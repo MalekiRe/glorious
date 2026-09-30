@@ -132,14 +132,14 @@ tracks any outer shortening, and pattern-constant normalization derives its
 canonical literal type from that same qualified resolution. These changes are
 consumed by the general normalization, erasure and execution proofs.
 
-Body-annotation lifetime-name resolution into semantic regions, region-validity
-interpretation and source return provenance remain open. Declared lifetime
-constraints `'a:'b` now resolve into the signature product and are discharged
-exactly at each call, but the decoded bound syntax is not yet populated from
-source, and no theorem yet turns a discharged outlives bound into runtime referent
-provenance or lifetime validity. A carried qualifier is still not a proof of its
-lifetime bound. The bounded return rule below remains;
-no multi-input lifetime safety or complete declared-lifetime conformance is claimed.
+Body-annotation lifetime-name resolution into semantic regions and region-validity
+interpretation remain open. Declared lifetime constraints 'a:'b now resolve into
+the signature product and are discharged exactly at each call, but the decoded
+bound syntax is not yet populated from source. Return provenance is now derived
+from checked loan parents and interpreted source products without a singleton
+input restriction. Neither that ancestry nor a discharged outlives bound proves
+runtime validity for the declared region; full declared-lifetime conformance
+is not claimed.
 
 ### A single produced payload and authoritative storage
 
@@ -270,17 +270,28 @@ and resume the caller from actual post-storage. `Environment.Evolution` frames
 outside incoming owner/live-unique roots and proves fresh-root retirement; it
 never grants access authority.
 
-Every returned nested node must satisfy the actual input-origin rule.
-`ReturnStep` also checks this locally for declared symbolic occurrences. A
-positively handle-free result needs no reference input. Otherwise the current
-bounded rule permits at most one simultaneous input reference occurrence, and
-every result node must derive from it. Mutually exclusive variants do not count
-as simultaneous runtime occurrences. This is **not** full declared-lifetime
-return checking: signatures are instantiated at calls and bindings retain their
-qualified types, but `ReturnStep` still checks bounded provenance rather than
-the interpretation of declared regions. `correctness_return_cleanup` connects general
-body execution, actual cleanup, returned usability and runtime ancestry at every
-nested returned occurrence; cleanup does not auto-end the returned handles.
+Every returned nested node derives from an actual occurrence in an input.
+`ReturnStep` checks declared symbolic origins and current input/result
+interpretation; it no longer assumes concrete ancestry or bounds input count.
+Partial symbol interpretation projects constructor-sensitive source products,
+so an inactive variant cannot introduce a usable input node. Aliases remain legal.
+`ContextMeaning.derived` follows recorded loan parents; Copy-stamp syntax alone
+is not ancestry evidence. `ReturnStep.source_origins` derives the concrete origin,
+and `correctness_return_cleanup` carries it through body execution and ordered
+cleanup to every nested runtime return occurrence.
+
+Ordinary borrows, direct Copy loans and opaque schema Copy batches share one
+checked loan table. A batch records its source schema and fresh stamp; its rows
+are interpreted only where the partial source-product projection has an image.
+Permission, ending and disposal checks consume that same table. General Copy
+framing proves that no unique loan is created, including by a schema batch.
+`CopyPayload.schema_origins` derives checked ancestry from the Copy producer and
+positive Copy permission. `ReturnStep.schemaCopy` consumes it in return admission
+with unrestricted other inputs, without an active-input or concrete-ancestry
+callback. This is provenance, not declared-region validity. General constructive
+realization of checking products remains separate from these interpretation
+and execution theorems.
+
 Every active target after cleanup is backed by storage already present before
 body evaluation and lies outside the retired parameter roots. This is derived
 from actual execution, canonical target addressability and retirement, not an
@@ -358,8 +369,8 @@ allocation success, or a complete recursive-type semantics.
 External unique references use the same canonical mutation/restoration rules as
 source-derived callers, including initially masked targets. Entry requires
 genuine canonical backing-root evidence; arbitrary value-shape-only external
-worlds are not claimed to supply it. The return boundary remains the bounded
-singleton-origin rule above. Reference-free agreement is not observational
+worlds are not claimed to supply it. Multi-input return provenance does not prove
+declared-region validity. Reference-free agreement is not observational
 equivalence of all loan-bearing worlds or proof that every surface program
 elaborates.
 
@@ -374,8 +385,8 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,821
-declarations, including 299 private declarations** and all generated
+warnings as errors. The exhaustive defining-module audit covered **7,878
+declarations, including 312 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.
 Verification rests on general theorems and exhaustive axiom auditing; no

@@ -5523,16 +5523,40 @@ structure Loan where
   mode : BorrowMode
   parent : Option Reference
 
+/-- Ordinary loans and opaque Copy batches share the authoritative loan table.
+A batch retains the exact source schema and fresh Copy stamp, not guessed nodes. -/
+inductive LoanEntry where
+  | direct (loan : Loan)
+  | schemaCopy (stamp owner : Nat) (path : List Component) (type : Ty) (copies : List Nat)
+
+inductive LoanEntry.Row (program : Program) : LoanEntry → Loan → Prop where
+  | direct (loan : Loan) : Row program (.direct loan) loan
+  | schemaCopy {stamp owner : Nat} {path suffix : List Component} {type referent : Ty} {copies : List Nat}
+      (declared : ReferencePath program type suffix referent .shared) :
+      Row program (.schemaCopy stamp owner path type copies)
+        ⟨(Reference.parameter owner (path ++ suffix)).rename (copies ++ [stamp]),
+          ⟨.referent ((Reference.parameter owner (path ++ suffix)).rename copies), []⟩,
+          referent, .shared, some ((Reference.parameter owner (path ++ suffix)).rename copies)⟩
+
+
 /-- Ended occurrences and created loans are authoritative checking state.
 Unknown external support is discharged by realization, never inferred from a
 possible-initialization mask. -/
 structure Context where
   names : List (String × Nat)
   storage : Base → Option Slot
-  loans : List Loan
+  loans : List LoanEntry
   ended : List Payload
   nextBinder : Nat
   nextSymbol : Nat
+
+def Context.directLoans (context : Context) : List Loan :=
+  context.loans.filterMap fun entry => match entry with
+    | .direct loan => some loan
+    | .schemaCopy _ _ _ _ _ => none
+
+def Context.HasLoan (context : Context) (program : Program) (loan : Loan) : Prop :=
+  ∃ entry ∈ context.loans, entry.Row program loan
 
 variable {program : Program}
 
@@ -5605,7 +5629,7 @@ def Address.KnownOverlap (left right : Address) : Prop :=
   left.base = right.base ∧ ¬ CoordinatesApart left.fields right.fields
 
 def Context.loan (context : Context) (reference : Reference) : Option Loan :=
-  context.loans.find? (fun loan => loan.reference == reference)
+  context.directLoans.find? (fun loan => loan.reference == reference)
 
 def Context.referenceTarget (context : Context) : Reference → Address
   | .copied _ parent => context.referenceTarget parent
@@ -5614,19 +5638,17 @@ def Context.referenceTarget (context : Context) : Reference → Address
       | some loan => loan.target
       | none => ⟨.referent reference, []⟩
 
-inductive Context.Derived (context : Context) : Reference → Reference → Prop where
-  | refl (reference : Reference) : Derived context reference reference
-  | copied (identity : Nat) {parent ancestor : Reference} (rest : Derived context parent ancestor) :
-      Derived context (.copied identity parent) ancestor
-  | borrowed {reference parent ancestor : Reference} {loan : Loan}
-      (found : context.loan reference = some loan) (original : loan.parent = some parent)
-      (rest : Derived context parent ancestor) : Derived context reference ancestor
+inductive Context.Derived {program : Program} (context : Context) : Reference → Reference → Prop where
+  | refl (reference : Reference) : Derived (program := program) context reference reference
+  | parent {ancestor original : Reference} {loan : Loan}
+      (found : context.HasLoan program loan) (selected : loan.parent = some original)
+      (rest : Derived (program := program) context original ancestor) : Derived (program := program) context loan.reference ancestor
 
 /-- Canonical views survive exactly while the original authority or a known
 descendant still refers to them. Ended handle rows are not mutable mask caches. -/
 def Context.ViewNeeded (context : Context) (reference : Reference) : Prop :=
   context.NotEnded (program := program) reference ∨
-    ∃ loan ∈ context.loans, context.NotEnded (program := program) loan.reference ∧
+    ∃ loan, context.HasLoan program loan ∧ context.NotEnded (program := program) loan.reference ∧
       (context.referenceTarget loan.reference).base = .referent reference
 
 /-- Absence of a symbolic cell records lack of local information, not actual
@@ -5642,8 +5664,8 @@ def Context.ResourcesAvailable (context : Context) (payload : Payload) : Prop :=
 
 def Context.LocalPermits (context : Context) (mode : BorrowMode)
     (parent : Option Reference) (target : Address) : Prop :=
-  ∀ loan ∈ context.loans, context.NotEnded (program := program) loan.reference →
-    (∃ reference, parent = some reference ∧ context.Derived reference loan.reference) ∨
+  ∀ loan, context.HasLoan program loan → context.NotEnded (program := program) loan.reference →
+    (∃ reference, parent = some reference ∧ context.Derived (program := program) reference loan.reference) ∨
       (mode = .shared ∧ loan.mode = .shared) ∨ ¬ target.KnownOverlap loan.target
 
 def Context.hide (context : Context) : Context := { context with names := [] }
@@ -5669,7 +5691,7 @@ def Context.writeTarget (context : Context) (target : Address)
 def Context.borrow (context : Context) (target : Address) (referent : Ty)
     (mode : BorrowMode) (parent : Option Reference) : Context :=
   { context with
-    loans := context.loans ++ [⟨.borrowed context.nextSymbol, target, referent, mode, parent⟩]
+    loans := context.loans ++ [.direct ⟨.borrowed context.nextSymbol, target, referent, mode, parent⟩]
     nextSymbol := context.nextSymbol + 1 }
 
 /-- Copy renamings use a fresh stamp; this operation alone is not Copy admission. -/
@@ -13672,6 +13694,89 @@ theorem Evaluates.endAfter_transparent {before after : Environment} {expression 
 
 end Grounded
 
+namespace Grounded
+set_option autoImplicit false
+/-- Projection of a symbolic constructor/field coordinate in the selected source
+product. A reference-free subtree remains reference-free without guessing a tag. -/
+def SourcePayload.component (payload : SourcePayload) : Checked.Component → Option SourcePayload
+  | .constructor expected => match payload with
+    | .plain => some .plain
+    | .reference _ => none
+    | .aggregate actual _ => if actual = expected then some payload else none
+  | .field index => match payload with
+    | .plain => some .plain
+    | .reference _ => none
+    | .aggregate _ fields => fields[index]?
+
+def SourcePayload.projectComponents (payload : SourcePayload) : List Checked.Component → Option SourcePayload
+  | [] => some payload
+  | component :: rest => (payload.component component).bind fun child => child.projectComponents rest
+
+@[simp] theorem SourcePayload.projectComponents_plain (path : List Checked.Component) :
+    SourcePayload.plain.projectComponents path = some .plain := by
+  induction path with
+  | nil => rfl
+  | cons component rest ih => cases component <;> simpa [projectComponents, SourcePayload.component] using ih
+
+theorem SourcePayload.projectComponents_append (payload : SourcePayload)
+    (front back : List Checked.Component) :
+    payload.projectComponents (front ++ back) =
+      (payload.projectComponents front).bind (fun selected => selected.projectComponents back) := by
+  induction front generalizing payload with
+  | nil => rfl
+  | cons component rest ih =>
+    simp only [List.cons_append, projectComponents]
+    cases selected : payload.component component with
+    | none => rfl
+    | some child => simpa using ih child
+
+theorem SourcePayload.component_nodes {payload selected : SourcePayload} {component : Checked.Component}
+    (found : payload.component component = some selected) : selected.nodes ⊆ payload.nodes := by
+  cases payload with
+  | plain => cases component <;> simp [SourcePayload.component] at found <;> subst selected <;> exact fun _ h => h
+  | reference node => cases component <;> simp [SourcePayload.component] at found
+  | aggregate head fields =>
+    cases component with
+    | constructor expected =>
+      simp only [SourcePayload.component] at found
+      split at found
+      · cases Option.some.inj found; exact fun _ h => h
+      · contradiction
+    | field index =>
+      intro node member
+      have included : selected ∈ fields := List.mem_of_getElem? found
+      change node ∈ payloadNodes fields
+      clear found
+      induction fields with
+      | nil => cases included
+      | cons first rest ih =>
+        rcases List.mem_cons.mp included with rfl | included
+        · exact List.mem_append_left _ member
+        · exact List.mem_append_right _ (ih included)
+
+theorem SourcePayload.projectComponents_nodes {payload selected : SourcePayload} {path : List Checked.Component}
+    (found : payload.projectComponents path = some selected) : selected.nodes ⊆ payload.nodes := by
+  induction path generalizing payload with
+  | nil => cases Option.some.inj found; exact fun _ h => h
+  | cons component rest ih =>
+    simp only [projectComponents] at found
+    cases stepped : payload.component component with
+    | none => simp [stepped] at found
+    | some child =>
+      have nested : child.projectComponents rest = some selected := by simpa [stepped] using found
+      exact fun node member => component_nodes stepped (ih nested member)
+
+/-- A prefix and its descendant are interpreted by the same selected product;
+no numeric injectivity or independent branch-activity hypothesis is required. -/
+theorem SourcePayload.projectComponents_descendant {payload selected : SourcePayload}
+    {front suffix : List Checked.Component} {node : Nat}
+    (stemFound : payload.projectComponents front = some selected)
+    (leaf : payload.projectComponents (front ++ suffix) = some (.reference node)) :
+    node ∈ selected.nodes := by
+  rw [projectComponents_append, stemFound] at leaf
+  exact projectComponents_nodes leaf (List.mem_singleton_self _)
+end Grounded
+
 /- Section: ElaborationData -/
 namespace Grounded.Elaboration
 set_option autoImplicit false
@@ -13691,9 +13796,85 @@ local resource checks remain premises of the common elaboration constructor. -/
 def Required (phase : Phase) (condition : phase = .executable → Prop) : Prop :=
   ∀ executable, condition executable
 
+def schemaCoordinates : Checked.Reference → Option (Nat × List Checked.Component × List Nat)
+  | .parameter owner path => some (owner, path, [])
+  | .copied stamp parent => (schemaCoordinates parent).map fun (owner, path, copies) => (owner, path, copies ++ [stamp])
+  | .existing _ | .borrowed _ => none
+
+theorem schemaCoordinates_rename (reference : Checked.Reference) (copies : List Nat) :
+    schemaCoordinates (reference.rename copies) =
+      (schemaCoordinates reference).map (fun (owner, path, previous) => (owner, path, previous ++ copies)) := by
+  induction copies generalizing reference with
+  | nil => simp [Checked.Reference.rename]
+  | cons stamp rest ih =>
+    change schemaCoordinates ((Checked.Reference.copied stamp reference).rename rest) = _
+    rw [ih]
+    simp [schemaCoordinates, Option.map_map, Function.comp_def, List.append_assoc]
+
 structure Symbols where
-  reference : Checked.Reference → Nat
+  handles : Checked.Reference → Option Nat
+  schemas : Nat → List Nat → Option SourcePayload
   binder : Nat → Nat
+
+def Symbols.schema (symbols : Symbols) (owner : Nat) (path : List Checked.Component)
+    (copies : List Nat) : Option SourcePayload :=
+  (symbols.schemas owner copies).bind fun root => root.projectComponents path
+
+def referenceNode : SourcePayload → Option Nat
+  | .reference node => some node
+  | .plain | .aggregate _ _ => none
+
+def Symbols.reference (symbols : Symbols) (reference : Checked.Reference) : Option Nat :=
+  match schemaCoordinates reference with
+  | none => symbols.handles reference
+  | some (owner, path, copies) => (symbols.schema owner path copies).bind referenceNode
+
+theorem Symbols.parameter_reference (symbols : Symbols) (owner : Nat)
+    (path : List Checked.Component) (copies : List Nat) :
+    symbols.reference ((Checked.Reference.parameter owner path).rename copies) =
+      (symbols.schema owner path copies).bind referenceNode := by
+  simp [Symbols.reference, schemaCoordinates_rename, schemaCoordinates]
+
+theorem Symbols.schema_descendant {symbols : Symbols} {owner : Nat}
+    {stem suffix : List Checked.Component} {copies : List Nat} {payload : SourcePayload} {node : Nat}
+    (selected : symbols.schema owner stem copies = some payload)
+    (reference : symbols.reference ((Checked.Reference.parameter owner (stem ++ suffix)).rename copies) = some node) :
+    node ∈ payload.nodes := by
+  rw [Symbols.parameter_reference] at reference
+  unfold Symbols.schema at selected reference
+  cases original : symbols.schemas owner copies with
+  | none => simp [original] at selected
+  | some root =>
+    have first : root.projectComponents stem = some payload := by simpa [original] using selected
+    have last : (root.projectComponents (stem ++ suffix)).bind referenceNode = some node := by
+      simpa [original] using reference
+    cases projected : root.projectComponents (stem ++ suffix) with
+    | none => simp [projected] at last
+    | some leaf =>
+      cases leaf with
+      | plain => simp [projected, referenceNode] at last
+      | aggregate head fields => simp [projected, referenceNode] at last
+      | reference actual =>
+        have same : actual = node := by simpa [projected, referenceNode] using last
+        subst actual
+        exact SourcePayload.projectComponents_descendant first projected
+
+theorem Symbols.schema_append (symbols : Symbols) (owner : Nat) (path suffix : List Checked.Component)
+    (copies : List Nat) : symbols.schema owner (path ++ suffix) copies =
+      (symbols.schema owner path copies).bind (fun payload => payload.projectComponents suffix) := by
+  unfold Symbols.schema
+  cases root : symbols.schemas owner copies with
+  | none => rfl
+  | some payload => exact payload.projectComponents_append path suffix
+
+theorem Symbols.schema_child {symbols : Symbols} {owner : Nat} {path : List Checked.Component}
+    {copies : List Nat} {head : Head} {fields : List SourcePayload} {index : Nat} {child : SourcePayload}
+    (selected : symbols.schema owner path copies = some (.aggregate head fields))
+    (found : fields[index]? = some child) :
+    symbols.schema owner (path ++ [.constructor head, .field index]) copies = some child := by
+  rw [Symbols.schema_append, selected]
+  simp [SourcePayload.projectComponents, SourcePayload.component, found]
+
 
 mutual
 /-- A masked interpretation relates the chosen symbolic payload product to the
@@ -13705,9 +13886,10 @@ inductive PayloadMeaning (program : Program) (symbols : Symbols) :
   | plain {state : Initialization} {type : Ty}
       (free : ReferenceFreeLayout program.target program.data type) :
       PayloadMeaning program symbols state .plain type .plain
-  | reference {state : Initialization} (reference : Checked.Reference) (referent : Ty) (mode : BorrowMode) :
+  | reference {state : Initialization} (reference : Checked.Reference) (referent : Ty) (mode : BorrowMode)
+      {node : Nat} (mapped : symbols.reference reference = some node) :
       PayloadMeaning program symbols state (.reference reference referent mode)
-        (.reference referent mode) (.reference (symbols.reference reference))
+        (.reference referent mode) (.reference node)
   | aggregate {state : Initialization} {head : Head} {payloads : List Checked.Payload}
       {type : Ty} {types : List Ty} {concrete : List SourcePayload}
       (source : head.Source) (shape : HeadType program head type types)
@@ -13716,16 +13898,18 @@ inductive PayloadMeaning (program : Program) (symbols : Symbols) :
   | schemaPlain {state : Initialization} {owner : Nat} {path : List Checked.Component}
       {type : Ty} {copies : List Nat} {knowledge : Checked.SchemaKnowledge}
       (known : knowledge = .referenceFree ∨ ReferenceFreeLayout program.target program.data type)
-      (notHandle : state.Complete → ∀ referent mode, type ≠ .reference referent mode) :
+      (notHandle : state.Complete → ∀ referent mode, type ≠ .reference referent mode)
+      (selected : symbols.schema owner path copies = some .plain) :
       PayloadMeaning program symbols state (.schema owner path type copies knowledge) type .plain
   | schemaReference {state : Initialization} {owner : Nat} {path : List Checked.Component}
-      {referent : Ty} {mode : BorrowMode} {copies : List Nat} :
+      {referent : Ty} {mode : BorrowMode} {copies : List Nat} {node : Nat}
+      (mapped : symbols.reference ((Checked.Reference.parameter owner path).rename copies) = some node) :
       PayloadMeaning program symbols state (.schema owner path (.reference referent mode) copies .unknown)
-        (.reference referent mode)
-        (.reference (symbols.reference ((Checked.Reference.parameter owner path).rename copies)))
+        (.reference referent mode) (.reference node)
   | schemaAggregate {state : Initialization} {owner : Nat} {path : List Checked.Component}
       {type : Ty} {copies : List Nat} {head : Head} {types : List Ty} {concrete : List SourcePayload}
       (source : head.Source) (shape : HeadType program head type types)
+      (selected : symbols.schema owner path copies = some (.aggregate head concrete))
       (fields : PayloadMeanings program symbols state.child
         (types.zipIdx.map fun entry => Checked.Payload.input owner
           (path ++ [.constructor head, .field entry.2]) entry.1 copies) types concrete) :
@@ -13751,13 +13935,32 @@ def Symbols.address (symbols : Symbols) (context : Grounded.Context)
   match address.base with
   | .binder identity => some ⟨.binder (symbols.binder identity), address.fields⟩
   | .referent reference =>
-      (context.loans[symbols.reference reference]?).map (fun loan => loan.target.extend address.fields)
+      (symbols.reference reference).bind fun node =>
+        (context.loans[node]?).map (fun loan => loan.target.extend address.fields)
 
 /-- A root identity remains represented while its cell or a retained loan target
 mentions it. Reference aliases do not introduce a second identity. -/
 def _root_.Grounded.Checked.Context.RootRepresented (checked : Checked.Context) (identity : Nat) : Prop :=
   (∃ slot, checked.storage (.binder identity) = some slot) ∨
-    ∃ loan ∈ checked.loans, loan.target.base = .binder identity
+    ∃ loan ∈ checked.directLoans, loan.target.base = .binder identity
+
+def LoanRowMeaning (program : Program) (symbols : Symbols) (checked : Checked.Context)
+    (source : Grounded.Context) (loan : Checked.Loan) (node : Nat) : Prop :=
+  ∃ actual, source.loans[node]? = some actual ∧
+    symbols.address source loan.target = some actual.target ∧
+    actual.referent = loan.referent ∧ actual.mode = loan.mode ∧
+    loan.parent.map symbols.reference = actual.parent.map some ∧
+    (actual.own = true ↔ checked.NotEnded (program := program) loan.reference)
+
+/-- Direct rows have a defined image. Batch rows are realized only at the paths
+selected by their source product; inactive alternatives create no source loan. -/
+def LoanEntryMeaning (program : Program) (symbols : Symbols) (checked : Checked.Context)
+    (source : Grounded.Context) : Checked.LoanEntry → Prop
+  | .direct loan => ∃ node, symbols.reference loan.reference = some node ∧
+      LoanRowMeaning program symbols checked source loan node
+  | entry@(.schemaCopy _ _ _ _ _) => ∀ loan, entry.Row program loan → ∀ node,
+      symbols.reference loan.reference = some node → LoanRowMeaning program symbols checked source loan node
+
 
 structure ContextMeaning (program : Program) (symbols : Symbols)
     (checked : Checked.Context) (concrete : Grounded.Context) : Prop where
@@ -13779,12 +13982,7 @@ structure ContextMeaning (program : Program) (symbols : Symbols)
   not references or their potentially aliased target paths. -/
   rootIdentity : ∀ first second, checked.RootRepresented first → checked.RootRepresented second →
     symbols.binder first = symbols.binder second → first = second
-  loans : ∀ loan ∈ checked.loans, ∃ actual,
-    concrete.loans[symbols.reference loan.reference]? = some actual ∧
-      symbols.address concrete loan.target = some actual.target ∧
-      actual.referent = loan.referent ∧ actual.mode = loan.mode ∧
-      actual.parent = loan.parent.map symbols.reference ∧
-      (actual.own = true ↔ checked.NotEnded (program := program) loan.reference)
+  loans : ∀ entry ∈ checked.loans, LoanEntryMeaning program symbols checked concrete entry
 
 structure Meaning (program : Program) (checked : Checked.Context) where
   context : Grounded.Context
@@ -13932,7 +14130,7 @@ def Context.LocalFree (context : Context) (target : Address) : Prop :=
   context.LocalPermits (program := program) .unique none target
 
 def Context.LocalUnobserved (context : Context) (reference : Reference) : Prop :=
-  ∀ loan ∈ context.loans, context.NotEnded (program := program) loan.reference →
+  ∀ loan, context.HasLoan program loan → context.NotEnded (program := program) loan.reference →
     loan.reference ≠ reference → ∀ slot payload,
     context.storage loan.target.base = some slot →
     Nonempty (Payload.At program slot.payload slot.type loan.target.fields payload loan.referent) →
@@ -14049,28 +14247,29 @@ theorem PayloadMeaning.reference_full {reference : Checked.Reference} {referent 
     {mode : BorrowMode} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols .full (.reference reference referent mode)
       (.reference referent mode) concrete) :
-    concrete = .reference (symbols.reference reference) := by
-  cases meaning
-  rfl
+    ∃ node, symbols.reference reference = some node ∧ concrete = .reference node := by
+  cases meaning with
+  | reference _ _ _ mapped => exact ⟨_, mapped, rfl⟩
 
 /-- Complete reference-typed schemas also expose an explicit symbolic identity. -/
 theorem PayloadMeaning.full_reference_inv {payload : Checked.Payload} {referent : Ty}
     {mode : BorrowMode} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols .full payload (.reference referent mode) concrete) :
-    ∃ reference, payload.Occurs program reference ∧ concrete = .reference (symbols.reference reference) := by
+    ∃ reference node, payload.Occurs program reference ∧ symbols.reference reference = some node ∧
+      concrete = .reference node := by
   cases meaning with
   | plain free => cases free
-  | reference reference referent mode => exact ⟨reference, .reference .., rfl⟩
+  | reference reference referent mode mapped => exact ⟨reference, _, .reference .., mapped, rfl⟩
   | aggregate source shape fields => exact False.elim (source_head_not_reference source shape _ _ rfl)
-  | schemaPlain _ notHandle => exact False.elim (notHandle .full _ _ rfl)
-  | schemaReference => exact ⟨_, .schema (.here _ _), by simp⟩
-  | schemaAggregate source shape fields => exact False.elim (source_head_not_reference source shape _ _ rfl)
+  | schemaPlain _ notHandle _ => exact False.elim (notHandle .full _ _ rfl)
+  | schemaReference mapped => exact ⟨_, _, .schema (.here _ _), by simpa using mapped, rfl⟩
+  | schemaAggregate source shape _ fields => exact False.elim (source_head_not_reference source shape _ _ rfl)
 
 theorem PayloadMeaning.aggregate_source {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {head : Head} {fields : List SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type (.aggregate head fields)) : head.Source := by
   cases meaning with
-  | aggregate source _ _ | schemaAggregate source _ _ => exact source
+  | aggregate source _ _ | schemaAggregate source _ _ _ => exact source
 
 mutual
 /-- Only leaves selected by this exact meaning are active. A schema's dormant
@@ -14078,8 +14277,9 @@ constructor alternatives are deliberately absent from this relation. -/
 inductive PayloadMeaning.Active :
     {state : Initialization} → {payload : Checked.Payload} → {type : Ty} → {concrete : SourcePayload} →
     PayloadMeaning program symbols state payload type concrete → Checked.Reference → Prop where
-  | reference {state : Initialization} (reference : Checked.Reference) (referent : Ty) (mode : BorrowMode) :
-      PayloadMeaning.Active (PayloadMeaning.reference (state := state) reference referent mode) reference
+  | reference {state : Initialization} (reference : Checked.Reference) (referent : Ty) (mode : BorrowMode)
+      {node : Nat} (mapped : symbols.reference reference = some node) :
+      PayloadMeaning.Active (PayloadMeaning.reference (state := state) reference referent mode mapped) reference
   | aggregate {state : Initialization} {head : Head} {payloads : List Checked.Payload}
       {type : Ty} {types : List Ty} {concrete : List SourcePayload} {reference : Checked.Reference}
       {source : head.Source} {shape : HeadType program head type types}
@@ -14087,18 +14287,20 @@ inductive PayloadMeaning.Active :
       (active : PayloadMeanings.Active fields reference) :
       PayloadMeaning.Active (PayloadMeaning.aggregate source shape fields) reference
   | schemaReference {state : Initialization} {owner : Nat} {path : List Checked.Component}
-      {referent : Ty} {mode : BorrowMode} {copies : List Nat} :
+      {referent : Ty} {mode : BorrowMode} {copies : List Nat} {node : Nat}
+      (mapped : symbols.reference ((Checked.Reference.parameter owner path).rename copies) = some node) :
       PayloadMeaning.Active (PayloadMeaning.schemaReference (state := state) (owner := owner) (path := path)
-        (referent := referent) (mode := mode) (copies := copies))
+        (referent := referent) (mode := mode) (copies := copies) mapped)
         ((Checked.Reference.parameter owner path).rename copies)
   | schemaAggregate {state : Initialization} {owner : Nat} {path : List Checked.Component}
       {type : Ty} {copies : List Nat} {head : Head} {types : List Ty} {concrete : List SourcePayload}
       {reference : Checked.Reference} {source : head.Source} {shape : HeadType program head type types}
+      {selected : symbols.schema owner path copies = some (.aggregate head concrete)}
       {fields : PayloadMeanings program symbols state.child
         (types.zipIdx.map fun entry => Checked.Payload.input owner
           (path ++ [.constructor head, .field entry.2]) entry.1 copies) types concrete}
       (active : PayloadMeanings.Active fields reference) :
-      PayloadMeaning.Active (PayloadMeaning.schemaAggregate source shape fields) reference
+      PayloadMeaning.Active (PayloadMeaning.schemaAggregate source shape selected fields) reference
 inductive PayloadMeanings.Active :
     {states : Nat → Initialization} → {payloads : List Checked.Payload} → {types : List Ty} →
     {concretes : List SourcePayload} →
@@ -14122,26 +14324,26 @@ theorem PayloadMeaning.active_node {state : Initialization} {payload : Checked.P
     {type : Ty} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type concrete) {node : Nat}
     (member : node ∈ concrete.nodes) :
-    ∃ reference, meaning.Active reference ∧ symbols.reference reference = node := by
+    ∃ reference, meaning.Active reference ∧ symbols.reference reference = some node := by
   cases meaning with
   | vacant | plain | schemaPlain => simp [SourcePayload.nodes] at member
-  | reference reference referent mode =>
+  | reference reference referent mode mapped =>
       simp only [SourcePayload.nodes, List.mem_singleton] at member
-      exact ⟨reference, .reference .., member.symm⟩
+      exact ⟨reference, .reference reference referent mode mapped, mapped.trans (congrArg some member.symm)⟩
   | aggregate source shape fields =>
       obtain ⟨reference, active, equal⟩ := fields.active_node member
       exact ⟨reference, .aggregate (source := source) (shape := shape) active, equal⟩
-  | schemaReference =>
+  | schemaReference mapped =>
       simp only [SourcePayload.nodes, List.mem_singleton] at member
-      exact ⟨_, .schemaReference, member.symm⟩
-  | schemaAggregate source shape fields =>
+      exact ⟨_, .schemaReference mapped, mapped.trans (congrArg some member.symm)⟩
+  | schemaAggregate source shape selected fields =>
       obtain ⟨reference, active, equal⟩ := fields.active_node member
-      exact ⟨reference, .schemaAggregate (source := source) (shape := shape) active, equal⟩
+      exact ⟨reference, .schemaAggregate (source := source) (shape := shape) (selected := selected) active, equal⟩
 theorem PayloadMeanings.active_node {states : Nat → Initialization} {payloads : List Checked.Payload}
     {types : List Ty} {concretes : List SourcePayload}
     (meaning : PayloadMeanings program symbols states payloads types concretes) {node : Nat}
     (member : node ∈ payloadNodes concretes) :
-    ∃ reference, meaning.Active reference ∧ symbols.reference reference = node := by
+    ∃ reference, meaning.Active reference ∧ symbols.reference reference = some node := by
   cases meaning with
   | nil => simp [payloadNodes] at member
   | cons first rest =>
@@ -14155,25 +14357,25 @@ end
 theorem PayloadMeaning.Active.node {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {concrete : SourcePayload} {meaning : PayloadMeaning program symbols state payload type concrete}
     {reference : Checked.Reference} (active : meaning.Active reference) :
-    symbols.reference reference ∈ concrete.nodes := by
+    ∃ node, symbols.reference reference = some node ∧ node ∈ concrete.nodes := by
   induction active using PayloadMeaning.Active.rec
-    (motive_2 := fun {_ _ _ concretes} _ reference _ => symbols.reference reference ∈ payloadNodes concretes) with
-  | reference | schemaReference => exact List.mem_singleton_self _
+    (motive_2 := fun {_ _ _ concretes} _ reference _ => ∃ node, symbols.reference reference = some node ∧ node ∈ payloadNodes concretes) with
+  | reference _ _ _ mapped | schemaReference mapped => exact ⟨_, mapped, List.mem_singleton_self _⟩
   | aggregate _ ih | schemaAggregate _ ih => exact ih
-  | head _ ih => exact List.mem_append_left _ ih
-  | tail _ ih => exact List.mem_append_right _ ih
+  | head _ ih => obtain ⟨node, mapped, member⟩ := ih; exact ⟨node, mapped, List.mem_append_left _ member⟩
+  | tail _ ih => obtain ⟨node, mapped, member⟩ := ih; exact ⟨node, mapped, List.mem_append_right _ member⟩
 
 theorem PayloadMeanings.Active.node {states : Nat → Initialization} {payloads : List Checked.Payload}
     {types : List Ty} {concretes : List SourcePayload}
     {meaning : PayloadMeanings program symbols states payloads types concretes}
     {reference : Checked.Reference} (active : meaning.Active reference) :
-    symbols.reference reference ∈ payloadNodes concretes := by
+    ∃ node, symbols.reference reference = some node ∧ node ∈ payloadNodes concretes := by
   induction active using PayloadMeanings.Active.rec
-    (motive_1 := fun {_ _ _ concrete} _ reference _ => symbols.reference reference ∈ concrete.nodes) with
-  | reference | schemaReference => exact List.mem_singleton_self _
+    (motive_1 := fun {_ _ _ concrete} _ reference _ => ∃ node, symbols.reference reference = some node ∧ node ∈ concrete.nodes) with
+  | reference _ _ _ mapped | schemaReference mapped => exact ⟨_, mapped, List.mem_singleton_self _⟩
   | aggregate _ ih | schemaAggregate _ ih => exact ih
-  | head _ ih => exact List.mem_append_left _ ih
-  | tail _ ih => exact List.mem_append_right _ ih
+  | head _ ih => obtain ⟨node, mapped, member⟩ := ih; exact ⟨node, mapped, List.mem_append_left _ member⟩
+  | tail _ ih => obtain ⟨node, mapped, member⟩ := ih; exact ⟨node, mapped, List.mem_append_right _ member⟩
 
 theorem input_occurs_path {owner : Nat} {path : List Checked.Component} {type : Ty}
     {copies : List Nat} {knowledge : Checked.SchemaKnowledge} {reference : Checked.Reference}
@@ -14216,7 +14418,7 @@ theorem PayloadMeaning.Active.occurs {state : Initialization} {payload : Checked
       obtain ⟨payload, selected, nested⟩ := ih
       exact .child selected nested
   | schemaReference => simpa using (Checked.Payload.Occurs.schema (Checked.ReferencePath.here _ _))
-  | @schemaAggregate state owner path type copies head types concrete reference source shape fields active ih =>
+  | @schemaAggregate state owner path type copies head types concrete reference source shape selected fields active ih =>
       exact schema_child_occurs source shape ih
   | head active ih => exact ⟨_, List.mem_cons_self, ih⟩
   | tail active ih =>
@@ -14227,7 +14429,7 @@ theorem PayloadMeaning.node_mapped {state : Initialization} {payload : Checked.P
     {type : Ty} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type concrete) {node : Nat}
     (member : node ∈ concrete.nodes) :
-    ∃ reference, payload.Occurs program reference ∧ symbols.reference reference = node := by
+    ∃ reference, payload.Occurs program reference ∧ symbols.reference reference = some node := by
   obtain ⟨reference, active, mapped⟩ := meaning.active_node member
   exact ⟨reference, active.occurs, mapped⟩
 
@@ -14237,8 +14439,8 @@ def PayloadMeaning.OwnCoupled {state : Initialization} {payload : Checked.Payloa
     {type : Ty} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type concrete)
     (checked : Checked.Context) (source : Grounded.Context) : Prop :=
-  ∀ reference, meaning.Active reference →
-    (source.Own (symbols.reference reference) ↔ checked.NotEnded (program := program) reference)
+  ∀ reference node, meaning.Active reference → symbols.reference reference = some node →
+    (source.Own node ↔ checked.NotEnded (program := program) reference)
 
 /-- A retained plain source product has no active leaves, even when its checked
 schema still has hypothetical reference paths. -/
@@ -14246,7 +14448,8 @@ theorem PayloadMeaning.plain_no_active {state : Initialization} {payload : Check
     (meaning : PayloadMeaning program symbols state payload type .plain)
     (reference : Checked.Reference) : ¬ meaning.Active reference := by
   intro active
-  exact List.not_mem_nil active.node
+  obtain ⟨node, _, member⟩ := active.node
+  exact List.not_mem_nil member
 
 /-- Retained reference-free knowledge fixes the actual source subtree to plain;
 it makes no assertion that hypothetical schema occurrences disappear. -/
@@ -14268,7 +14471,7 @@ theorem PayloadMeaning.schema_referenceFree_no_active {state : Initialization} {
 theorem PayloadMeaning.OwnCoupled.of_plain {state : Initialization} {payload : Checked.Payload} {type : Ty}
     (meaning : PayloadMeaning program symbols state payload type .plain)
     (checked : Checked.Context) (source : Grounded.Context) : meaning.OwnCoupled checked source :=
-  fun reference active => False.elim (meaning.plain_no_active reference active)
+  fun reference _ active _ => False.elim (meaning.plain_no_active reference active)
 
 theorem PayloadMeaning.OwnCoupled.own {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {concrete : SourcePayload} {meaning : PayloadMeaning program symbols state payload type concrete}
@@ -14276,7 +14479,7 @@ theorem PayloadMeaning.OwnCoupled.own {state : Initialization} {payload : Checke
     (coupled : meaning.OwnCoupled checked source) (available : checked.Available (program := program) payload)
     {node : Nat} (member : node ∈ concrete.nodes) : source.Own node := by
   obtain ⟨reference, active, mapped⟩ := meaning.active_node member
-  exact mapped ▸ (coupled reference active).mpr (available reference active.occurs)
+  exact (coupled reference node active mapped).mpr (available reference active.occurs)
 
 theorem PayloadMeaning.OwnCoupled.available {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {concrete : SourcePayload} {meaning : PayloadMeaning program symbols state payload type concrete}
@@ -14285,11 +14488,26 @@ theorem PayloadMeaning.OwnCoupled.available {state : Initialization} {payload : 
     (restored : ∀ node ∈ concrete.nodes, source.Restored node) : source.PayloadAvailable concrete :=
   fun node member => ⟨coupled.own available member, restored node member⟩
 
+theorem ContextMeaning.row {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {loan : Checked.Loan}
+    (member : checked.HasLoan program loan) {node : Nat}
+    (mapped : symbols.reference loan.reference = some node) :
+    LoanRowMeaning program symbols checked source loan node := by
+  obtain ⟨entry, member, row⟩ := member
+  have interpreted := meaning.loans entry member
+  cases row with
+  | direct loan =>
+      obtain ⟨actualNode, image, actual⟩ := interpreted
+      cases Option.some.inj (image.symm.trans mapped)
+      exact actual
+  | schemaCopy declared => exact interpreted _ (.schemaCopy declared) _ mapped
+
+
 theorem ContextMeaning.loan_own {checked : Checked.Context} {source : Grounded.Context}
     (meaning : ContextMeaning program symbols checked source) {loan : Checked.Loan}
-    (member : loan ∈ checked.loans) :
-    source.Own (symbols.reference loan.reference) ↔ checked.NotEnded (program := program) loan.reference := by
-  obtain ⟨actual, found, _, _, _, _, coupled⟩ := meaning.loans loan member
+    (member : checked.HasLoan program loan) {node : Nat} (mapped : symbols.reference loan.reference = some node) :
+    source.Own node ↔ checked.NotEnded (program := program) loan.reference := by
+  obtain ⟨actual, found, _, _, _, _, coupled⟩ := meaning.row member mapped
   constructor
   · rintro ⟨other, stored, own⟩
     cases Option.some.inj (found.symm.trans stored)
@@ -14315,23 +14533,36 @@ theorem ReferenceEstablished.mono {before after : Nat} (growth : before ≤ afte
 
 /-- Point-to-point identity preservation. Aliased references retain their existing
 canonical targets; only new local stamps may be remapped. -/
+theorem Symbols.schema_preserved {before after : Symbols}
+    (agrees : ∀ owner copies payload, before.schemas owner copies = some payload → after.schemas owner copies = some payload)
+    {owner : Nat} {path : List Checked.Component} {copies : List Nat} {payload : SourcePayload}
+    (selected : before.schema owner path copies = some payload) : after.schema owner path copies = some payload := by
+  cases root : before.schemas owner copies with
+  | none => simp [Symbols.schema, root] at selected
+  | some tree => simpa [Symbols.schema, agrees owner copies tree root] using
+      (show tree.projectComponents path = some payload by simpa [Symbols.schema, root] using selected)
+
+
 structure Symbols.Stable (checked : Checked.Context) (before after : Symbols) : Prop where
   reference : ∀ reference, ReferenceEstablished checked.nextSymbol reference →
     after.reference reference = before.reference reference
   binder : ∀ identity, identity < checked.nextBinder → after.binder identity = before.binder identity
+  schemas : ∀ owner copies payload, before.schemas owner copies = some payload → after.schemas owner copies = some payload
 
 theorem Symbols.Stable.refl (checked : Checked.Context) (symbols : Symbols) :
-    Symbols.Stable checked symbols symbols := ⟨fun _ _ => rfl, fun _ _ => rfl⟩
+    Symbols.Stable checked symbols symbols := ⟨fun _ _ => rfl, fun _ _ => rfl, fun _ _ _ found => found⟩
 
 theorem Symbols.Stable.trans {before middle : Checked.Context} {first second third : Symbols}
     (left : Symbols.Stable before first second) (right : Symbols.Stable middle second third)
     (symbols : before.nextSymbol ≤ middle.nextSymbol) (binders : before.nextBinder ≤ middle.nextBinder) :
     Symbols.Stable before first third := by
-  refine ⟨?_, ?_⟩
+  refine ⟨?_, ?_, ?_⟩
   · intro reference established
     exact (right.reference reference (established.mono symbols)).trans (left.reference reference established)
   · intro identity established
     exact (right.binder identity (Nat.lt_of_lt_of_le established binders)).trans (left.binder identity established)
+  · intro owner copies payload found
+    exact right.schemas owner copies payload (left.schemas owner copies payload found)
 
 def PointsStable {phase : Phase} (before after : Point program phase) : Prop :=
   Required phase fun executable => Symbols.Stable before.checked
@@ -14352,41 +14583,41 @@ theorem PointsStable.erase {phase : Phase} {before after : Point program phase} 
   cases executable
 
 mutual
-/-- Transport uses only identities of realized leaves; no dormant schema map
-agreement is required. -/
+/-- Transport preserves existing producer snapshots as well as realized leaves.
+Fresh schemas may be installed only at previously undefined coordinates. -/
 theorem PayloadMeaning.congr {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type concrete) {after : Symbols}
-    (agrees : ∀ reference, meaning.Active reference → after.reference reference = symbols.reference reference) :
+    (agrees : ∀ reference, meaning.Active reference → after.reference reference = symbols.reference reference)
+    (schemas : ∀ owner copies payload, symbols.schemas owner copies = some payload → after.schemas owner copies = some payload) :
     PayloadMeaning program after state payload type concrete := by
   cases meaning with
   | vacant => exact .vacant
   | plain free => exact .plain free
-  | reference reference referent mode =>
-      simpa only [agrees reference (.reference ..)] using
-        (PayloadMeaning.reference (symbols := after) (state := state) reference referent mode)
+  | reference reference referent mode mapped =>
+      exact .reference reference referent mode ((agrees reference (.reference reference referent mode mapped)).trans mapped)
   | aggregate source shape fields =>
-      exact .aggregate source shape (fields.congr fun reference active =>
-        agrees reference (.aggregate (source := source) (shape := shape) active))
-  | schemaPlain known notHandle => exact .schemaPlain known notHandle
-  | @schemaReference state owner path referent mode copies =>
-      simpa only [agrees _ .schemaReference] using
-        (PayloadMeaning.schemaReference (symbols := after) (state := state) (owner := owner)
-          (path := path) (referent := referent) (mode := mode) (copies := copies))
-  | schemaAggregate source shape fields =>
-      exact .schemaAggregate source shape (fields.congr fun reference active =>
-        agrees reference (.schemaAggregate (source := source) (shape := shape) active))
+      exact .aggregate source shape (fields.congr (fun reference active =>
+        agrees reference (.aggregate (source := source) (shape := shape) active)) schemas)
+  | schemaPlain known notHandle selected =>
+      exact .schemaPlain known notHandle (Symbols.schema_preserved schemas selected)
+  | schemaReference mapped => exact .schemaReference ((agrees _ (.schemaReference mapped)).trans mapped)
+  | schemaAggregate source shape selected fields =>
+      exact .schemaAggregate source shape (Symbols.schema_preserved schemas selected)
+        (fields.congr (fun reference active =>
+          agrees reference (.schemaAggregate (source := source) (shape := shape) (selected := selected) active)) schemas)
 theorem PayloadMeanings.congr {states : Nat → Initialization} {payloads : List Checked.Payload}
     {types : List Ty} {concretes : List SourcePayload}
     (meaning : PayloadMeanings program symbols states payloads types concretes) {after : Symbols}
-    (agrees : ∀ reference, meaning.Active reference → after.reference reference = symbols.reference reference) :
+    (agrees : ∀ reference, meaning.Active reference → after.reference reference = symbols.reference reference)
+    (schemas : ∀ owner copies payload, symbols.schemas owner copies = some payload → after.schemas owner copies = some payload) :
     PayloadMeanings program after states payloads types concretes := by
   cases meaning with
   | nil => exact .nil _
   | cons first rest =>
       exact .cons
-        (first.congr fun reference active => agrees reference (.head (rest := rest) active))
-        (rest.congr fun reference active => agrees reference (.tail (first := first) active))
+        (first.congr (fun reference active => agrees reference (.head (rest := rest) active)) schemas)
+        (rest.congr (fun reference active => agrees reference (.tail (first := first) active)) schemas)
 end
 
 theorem Symbols.Stable.payload {checked : Checked.Context} {before after : Symbols}
@@ -14395,7 +14626,7 @@ theorem Symbols.Stable.payload {checked : Checked.Context} {before after : Symbo
     (meaning : PayloadMeaning program before state payload type concrete)
     (established : ∀ reference, meaning.Active reference → ReferenceEstablished checked.nextSymbol reference) :
     PayloadMeaning program after state payload type concrete :=
-  meaning.congr fun reference active => stable.reference reference (established reference active)
+  meaning.congr (fun reference active => stable.reference reference (established reference active)) stable.schemas
 
 /-- The source borrow constructor supplies the fresh node and its actual record.
 There is no runtime allocation premise. -/
@@ -14485,10 +14716,11 @@ theorem copied_symbol_fresh {before after : Grounded.Context} {payload copied : 
     {state : Initialization} {checked : Checked.Payload} {type : Ty}
     {meaning : PayloadMeaning program symbols state checked type copied} {reference : Checked.Reference}
     (active : meaning.Active reference) :
-    before.loans.length ≤ symbols.reference reference ∧
-      symbols.reference reference < after.loans.length ∧ after.Own (symbols.reference reference) :=
-  ⟨(source_copy_fresh copy).2 _ active.node |>.1,
-    (source_copy_fresh copy).2 _ active.node |>.2, source_copy_own copy _ active.node⟩
+    ∃ node, symbols.reference reference = some node ∧ before.loans.length ≤ node ∧
+      node < after.loans.length ∧ after.Own node := by
+  obtain ⟨node, mapped, member⟩ := active.node
+  exact ⟨node, mapped, (source_copy_fresh copy).2 _ member |>.1,
+    (source_copy_fresh copy).2 _ member |>.2, source_copy_own copy _ member⟩
 
 end Grounded.Elaboration
 
@@ -14507,7 +14739,7 @@ inductive CopyPayload : Context → Payload → Payload → Context → Type whe
       CopyPayload context (.reference parent referent .shared)
         (.reference (.copied context.nextSymbol parent) referent .shared)
         { context with
-          loans := context.loans ++ [⟨.copied context.nextSymbol parent,
+          loans := context.loans ++ [.direct ⟨.copied context.nextSymbol parent,
             context.referenceTarget parent, referent, .shared, some parent⟩]
           nextSymbol := context.nextSymbol + 1 }
   | aggregate {before after : Context} {head : Head} {fields copied : List Payload}
@@ -14517,7 +14749,9 @@ inductive CopyPayload : Context → Payload → Payload → Context → Type whe
       (copies : List Nat) (knowledge : SchemaKnowledge) :
       CopyPayload context (.schema owner path type copies knowledge)
         (.schema owner path type (copies ++ [context.nextSymbol]) knowledge)
-        context.advanceSymbol
+        { context with
+          loans := context.loans ++ [.schemaCopy context.nextSymbol owner path type copies]
+          nextSymbol := context.nextSymbol + 1 }
 inductive CopyPayloads : Context → List Payload → List Payload → Context → Type where
   | nil (context : Context) : CopyPayloads context [] [] context
   | cons {before middle after : Context} {field copied : Payload} {fields copies : List Payload}
@@ -14640,7 +14874,7 @@ ends it earlier. Caller observers and actual pending values remain protected. -/
 def Context.CanDispose (context : Context) (held : List Payload) (payload : Payload) : Prop :=
   ∀ reference, payload.Occurs program reference →
     ¬ heldOccurs (program := program) held reference ∧ context.NotKnownUnrestored reference ∧
-    ∀ loan ∈ context.loans, context.NotEnded (program := program) loan.reference →
+    ∀ loan, context.HasLoan program loan → context.NotEnded (program := program) loan.reference →
       loan.reference ≠ reference → ∀ slot observed,
       context.storage loan.target.base = some slot →
       Nonempty (Payload.At program slot.payload slot.type loan.target.fields observed loan.referent) →
@@ -16563,84 +16797,72 @@ namespace Grounded.Elaboration
 set_option autoImplicit false
 variable {program : Program} {symbols : Symbols}
 
-/-- Constructor alternatives are exclusive only below the same exact prefix.
-Different field positions are simultaneous, even when their symbols alias. -/
-inductive ConstructorExclusive : List Checked.Component → List Checked.Component → Prop where
-  | choice {left right : Head} {first second : List Checked.Component}
-      (different : left ≠ right) :
-      ConstructorExclusive (.constructor left :: first) (.constructor right :: second)
-  | common (component : Checked.Component) {first second : List Checked.Component}
-      (nested : ConstructorExclusive first second) :
-      ConstructorExclusive (component :: first) (component :: second)
-
-private theorem ConstructorExclusive.strip {component : Checked.Component}
-    {first second : List Checked.Component}
-    (exclusive : ConstructorExclusive (component :: first) (component :: second)) :
-    ConstructorExclusive first second := by
-  cases exclusive with
-  | choice different => exact False.elim (different rfl)
-  | common _ nested => exact nested
-
-private theorem ConstructorExclusive.field_eq {left right : Nat}
-    {first second : List Checked.Component}
-    (exclusive : ConstructorExclusive (.field left :: first) (.field right :: second)) :
-    left = right := by
-  cases exclusive
-  rfl
-
-/-- The declared paths may select different constructor alternatives, but cannot
-select two different simultaneously resident reference occurrences. -/
-def DeclaredReturnCapacity (program : Program) (type : Ty) : Prop :=
-  ∀ {first second : List Checked.Component} {left right : Ty} {leftMode rightMode : BorrowMode},
-    Checked.ReferencePath program type first left leftMode →
-    Checked.ReferencePath program type second right rightMode →
-    first = second ∨ ConstructorExclusive first second
-
-private theorem DeclaredReturnCapacity.child {type child : Ty} {head : Head} {types : List Ty}
-    {index : Nat} (capacity : DeclaredReturnCapacity program type)
-    (source : head.Source) (shape : HeadType program head type types)
-    (selected : types[index]? = some child) : DeclaredReturnCapacity program child := by
-  intro first second left right leftMode rightMode firstPath secondPath
-  rcases capacity (.child source shape selected firstPath) (.child source shape selected secondPath) with
-    same | exclusive
-  · exact Or.inl (List.cons.inj (List.cons.inj same).2).2
-  · exact Or.inr exclusive.strip.strip
-
-private theorem DeclaredReturnCapacity.field_unique {type left right : Ty} {head : Head}
-    {types : List Ty} {first second : Nat} {leftPath rightPath : List Checked.Component}
-    {leftReferent rightReferent : Ty} {leftMode rightMode : BorrowMode}
-    (capacity : DeclaredReturnCapacity program type)
-    (source : head.Source) (shape : HeadType program head type types)
-    (leftSelected : types[first]? = some left) (rightSelected : types[second]? = some right)
-    (leftFound : Checked.ReferencePath program left leftPath leftReferent leftMode)
-    (rightFound : Checked.ReferencePath program right rightPath rightReferent rightMode) :
-    first = second := by
-  rcases capacity (.child source shape leftSelected leftFound)
-      (.child source shape rightSelected rightFound) with same | exclusive
-  · exact Checked.Component.field.inj (List.cons.inj (List.cons.inj same).2).1
-  · exact exclusive.strip.field_eq
-
 mutual
-/-- Positive occurrence capacity. Source-empty knowledge counts zero, one
-explicit reference counts one, and aggregate field positions are retained. -/
-inductive Payload.ReturnCapacity (program : Program) : Checked.Payload → Prop where
-  | empty {payload : Checked.Payload} (free : Payload.NoHandles payload) : Payload.ReturnCapacity program payload
-  | reference (reference : Checked.Reference) (referent : Ty) (mode : BorrowMode) :
-      Payload.ReturnCapacity program (.reference reference referent mode)
-  | aggregate {head : Head} {fields : List Checked.Payload}
-      (children : PayloadsReturnCapacity program fields) : Payload.ReturnCapacity program (.aggregate head fields)
-  | schema {owner : Nat} {path : List Checked.Component} {type : Ty} {copies : List Nat}
-      (declared : DeclaredReturnCapacity program type) :
-      Payload.ReturnCapacity program (.schema owner path type copies .unknown)
-inductive PayloadsReturnCapacity (program : Program) : List Checked.Payload → Prop where
-  | nil : PayloadsReturnCapacity program []
-  | head {first : Checked.Payload} {rest : List Checked.Payload}
-      (capacity : Payload.ReturnCapacity program first) (free : PayloadsNoHandles rest) :
-      PayloadsReturnCapacity program (first :: rest)
-  | tail {first : Checked.Payload} {rest : List Checked.Payload}
-      (free : Payload.NoHandles first) (capacity : PayloadsReturnCapacity program rest) :
-      PayloadsReturnCapacity program (first :: rest)
+/-- A declared occurrence can reach a node only through the selected source
+product. Inactive constructor paths have no image, even if other references alias. -/
+theorem PayloadMeaning.mapped_occurs {state : Initialization} {payload : Checked.Payload}
+    {type : Ty} {concrete : SourcePayload}
+    (meaning : PayloadMeaning program symbols state payload type concrete)
+    (complete : state.Complete) {reference : Checked.Reference} {node : Nat}
+    (occurs : payload.Occurs program reference) (mapped : symbols.reference reference = some node) :
+    node ∈ concrete.nodes := by
+  cases meaning with
+  | vacant => cases complete
+  | plain => cases occurs
+  | reference reference referent mode image =>
+      cases occurs
+      have same := Option.some.inj (mapped.symm.trans image)
+      exact List.mem_singleton.mpr same
+  | aggregate source shape fields =>
+      cases occurs with
+      | child member nested => exact fields.mapped_occurs complete.child member nested mapped
+  | schemaPlain known notHandle selected =>
+      cases occurs with
+      | schema path => exact Symbols.schema_descendant selected mapped
+  | schemaReference image =>
+      cases occurs with
+      | schema path =>
+          cases path with
+          | here =>
+              simp only [List.append_nil] at mapped
+              exact List.mem_singleton.mpr (Option.some.inj (mapped.symm.trans image))
+          | child source shape _ _ => exact False.elim (source_head_not_reference source shape _ _ rfl)
+  | schemaAggregate source shape selected fields =>
+      cases occurs with
+      | schema path => exact Symbols.schema_descendant selected mapped
+
+theorem PayloadMeanings.mapped_occurs {states : Nat → Initialization} {payloads : List Checked.Payload}
+    {types : List Ty} {concretes : List SourcePayload}
+    (meaning : PayloadMeanings program symbols states payloads types concretes)
+    (complete : ∀ index, (states index).Complete) {payload : Checked.Payload}
+    (member : payload ∈ payloads) {reference : Checked.Reference} {node : Nat}
+    (occurs : payload.Occurs program reference) (mapped : symbols.reference reference = some node) :
+    node ∈ payloadNodes concretes := by
+  cases meaning with
+  | nil => cases member
+  | cons first rest =>
+      rcases List.mem_cons.mp member with rfl | member
+      · exact List.mem_append_left _ (first.mapped_occurs (complete 0) occurs mapped)
+      · exact List.mem_append_right _ (rest.mapped_occurs (fun index => complete (index + 1)) member occurs mapped)
 end
+
+/-- Every non-reflexive ancestry edge is the parent recorded in the shared loan
+row. No ancestry is manufactured from the spelling of a Copy stamp. -/
+theorem ContextMeaning.derived {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source)
+    {reference ancestor : Checked.Reference} (derived : checked.Derived (program := program) reference ancestor)
+    {node : Nat} (mapped : symbols.reference reference = some node) :
+    ∃ original, symbols.reference ancestor = some original ∧ source.Derived node original := by
+  induction derived generalizing node with
+  | refl reference => exact ⟨node, mapped, .same node⟩
+  | @parent ancestor parent loan found original rest ih =>
+      obtain ⟨actual, stored, _, _, _, parents, _⟩ := meaning.row found mapped
+      cases actualParent : actual.parent with
+      | none => simp [original, actualParent] at parents
+      | some previous =>
+          have parentImage : symbols.reference parent = some previous := by simpa [original, actualParent] using parents
+          obtain ⟨origin, originImage, ancestry⟩ := ih parentImage
+          exact ⟨origin, originImage, .child stored actualParent ancestry⟩
 
 mutual
 theorem Payload.NoHandles.nodes_eq_nil {payload : Checked.Payload} {state : Initialization}
@@ -16675,7 +16897,7 @@ theorem PayloadMeaning.node_declared {payload : Checked.Payload} {state : Initia
   cases meaning with
   | vacant | plain | schemaPlain => simp [SourcePayload.nodes] at member
   | reference | schemaReference => exact ⟨[], _, _, .here ..⟩
-  | aggregate source shape fields | schemaAggregate source shape fields =>
+  | aggregate source shape fields | schemaAggregate source shape _ fields =>
       obtain ⟨index, child, path, referent, mode, selected, nested⟩ := fields.node_declared member
       exact ⟨_, _, _, .child source shape selected nested⟩
 
@@ -16695,109 +16917,6 @@ theorem PayloadMeanings.node_declared {payloads : List Checked.Payload} {states 
         exact ⟨index + 1, child, path, referent, mode, selected, declared⟩
 end
 
-mutual
-/-- Declared capacity bounds occurrences, rather than distinct interpreted node
-numbers. The proof therefore needs no injectivity of symbolic interpretation. -/
-theorem PayloadMeaning.declared_nodes_length_le_one {payload : Checked.Payload} {state : Initialization}
-    {type : Ty} {concrete : SourcePayload}
-    (meaning : PayloadMeaning program symbols state payload type concrete)
-    (capacity : DeclaredReturnCapacity program type) : concrete.nodes.length ≤ 1 := by
-  cases meaning with
-  | vacant | plain | schemaPlain => simp [SourcePayload.nodes]
-  | reference | schemaReference => simp [SourcePayload.nodes]
-  | aggregate source shape fields | schemaAggregate source shape fields =>
-      exact fields.declared_nodes_length_le_one
-        (fun _ _ selected => capacity.child source shape selected)
-        (fun _ _ _ _ _ _ _ _ _ _ selectedLeft selectedRight leftPath rightPath =>
-          capacity.field_unique source shape selectedLeft selectedRight leftPath rightPath)
-
-private theorem PayloadMeanings.declared_nodes_length_le_one
-    {payloads : List Checked.Payload} {states : Nat → Initialization}
-    {types : List Ty} {concretes : List SourcePayload}
-    (meaning : PayloadMeanings program symbols states payloads types concretes)
-    (capacities : ∀ (index : Nat) child, types[index]? = some child → DeclaredReturnCapacity program child)
-    (oneField : ∀ (first second : Nat) left right leftPath rightPath leftReferent rightReferent leftMode rightMode,
-      types[first]? = some left → types[second]? = some right →
-      Checked.ReferencePath program left leftPath leftReferent leftMode →
-      Checked.ReferencePath program right rightPath rightReferent rightMode → first = second) :
-    (payloadNodes concretes).length ≤ 1 := by
-  cases meaning with
-  | nil => simp [payloadNodes]
-  | @cons states payload payloads type types concrete concretes first rest =>
-      have firstBound := first.declared_nodes_length_le_one (capacities 0 type rfl)
-      have restBound := rest.declared_nodes_length_le_one
-        (fun index child selected => capacities (index + 1) child selected)
-        (fun left right leftType rightType leftPath rightPath leftRef rightRef leftMode rightMode
-            leftSelected rightSelected leftFound rightFound =>
-          Nat.add_right_cancel (oneField (left + 1) (right + 1) leftType rightType
-            leftPath rightPath leftRef rightRef leftMode rightMode leftSelected rightSelected leftFound rightFound))
-      by_cases empty : concrete.nodes = []
-      · simpa [payloadNodes, empty] using restBound
-      · have restEmpty : payloadNodes concretes = [] := by
-          apply Classical.byContradiction
-          intro nonempty
-          obtain ⟨firstNode, firstMember⟩ := List.exists_mem_of_ne_nil _ empty
-          obtain ⟨restNode, restMember⟩ := List.exists_mem_of_ne_nil _ nonempty
-          obtain ⟨leftPath, leftRef, leftMode, leftFound⟩ := first.node_declared firstMember
-          obtain ⟨index, rightType, rightPath, rightRef, rightMode, selected, rightFound⟩ :=
-            rest.node_declared restMember
-          have impossible := oneField 0 (index + 1) type rightType leftPath rightPath leftRef rightRef
-            leftMode rightMode rfl selected leftFound rightFound
-          omega
-        simpa [payloadNodes, restEmpty] using firstBound
-end
-
-mutual
-theorem Payload.ReturnCapacity.nodes_length_le_one {payload : Checked.Payload} {state : Initialization}
-    {type : Ty} {concrete : SourcePayload} (capacity : Payload.ReturnCapacity program payload)
-    (meaning : PayloadMeaning program symbols state payload type concrete) : concrete.nodes.length ≤ 1 := by
-  cases capacity with
-  | empty free => simp [free.nodes_eq_nil meaning]
-  | reference => cases meaning <;> simp [SourcePayload.nodes]
-  | aggregate children =>
-      cases meaning with
-      | vacant => simp [SourcePayload.nodes]
-      | aggregate _ _ fields => exact children.nodes_length_le_one fields
-  | schema declared =>
-      cases meaning with
-      | vacant => simp [SourcePayload.nodes]
-      | schemaPlain => simp [SourcePayload.nodes]
-      | schemaReference => simp [SourcePayload.nodes]
-      | schemaAggregate source shape fields =>
-          exact (PayloadMeaning.schemaAggregate source shape fields).declared_nodes_length_le_one declared
-
-theorem PayloadsReturnCapacity.nodes_length_le_one {payloads : List Checked.Payload}
-    {states : Nat → Initialization} {types : List Ty} {concretes : List SourcePayload}
-    (capacity : PayloadsReturnCapacity program payloads)
-    (meaning : PayloadMeanings program symbols states payloads types concretes) :
-    (payloadNodes concretes).length ≤ 1 := by
-  cases capacity with
-  | nil => cases meaning; simp [payloadNodes]
-  | head first rest =>
-      cases meaning with
-      | cons head tail => simpa [payloadNodes, rest.nodes_eq_nil tail] using first.nodes_length_le_one head
-  | tail first rest =>
-      cases meaning with
-      | cons head tail => simpa [payloadNodes, first.nodes_eq_nil head] using rest.nodes_length_le_one tail
-end
-
-/-- A witnessed member turns an occurrence bound into the exact argument
-inventory required by concrete return checking, even when symbols alias. -/
-theorem singleton_of_length_le_one_of_mem {α : Type} {items : List α} {item : α}
-    (capacity : items.length ≤ 1) (member : item ∈ items) : items = [item] := by
-  cases items with
-  | nil => simp at member
-  | cons first rest =>
-      cases rest with
-      | nil => have same := List.mem_singleton.mp member; subst item; rfl
-      | cons next tail => simp only [List.length_cons] at capacity; omega
-
-theorem PayloadsReturnCapacity.nodes_eq_singleton {payloads : List Checked.Payload}
-    {states : Nat → Initialization} {types : List Ty} {concretes : List SourcePayload} {node : Nat}
-    (capacity : PayloadsReturnCapacity program payloads)
-    (meaning : PayloadMeanings program symbols states payloads types concretes)
-    (member : node ∈ payloadNodes concretes) : payloadNodes concretes = [node] :=
-  singleton_of_length_le_one_of_mem (capacity.nodes_length_le_one meaning) member
 
 end Grounded.Elaboration
 
@@ -16957,13 +17076,31 @@ structure ProjectionStep (program : Program) (home : Module) {phase : Phase}
 structure ReturnStep (program : Program) {phase : Phase} (before : Point program phase)
     (arguments : List (Result phase)) (result : Result phase) : Prop where
   checked : Payload.NoHandles result.payload.checked ∨
-    (PayloadsReturnCapacity program (arguments.map fun argument => argument.payload.checked) ∧
-      ∀ reference, result.payload.checked.Occurs program reference →
-        ∃ argument ∈ arguments, ∃ ancestor, argument.payload.checked.Occurs program ancestor ∧
-          before.checked.Derived reference ancestor)
-  actual : Required phase fun executable => ∀ node ∈ (result.payload.source executable).nodes,
-    ∃ input, payloadNodes ((sourceResults arguments executable).map ResultType.payload) = [input] ∧
-      (before.source executable).Derived node input
+    (∀ reference, result.payload.checked.Occurs program reference →
+      ∃ argument ∈ arguments, ∃ ancestor, argument.payload.checked.Occurs program ancestor ∧
+        before.checked.Derived (program := program) reference ancestor)
+  interpreted : result.Interpreted before
+  inputs : ∀ argument ∈ arguments, argument.Interpreted before
+
+/-- Current product interpretation and recorded checked ancestry determine an
+actual input occurrence. Neither input cardinality nor post-execution readiness
+nor a concrete ancestry conclusion is an admission premise. -/
+theorem ReturnStep.source_origins {program : Program} {phase : Phase} {before : Point program phase}
+    {arguments : List (Result phase)} {result : Result phase}
+    (step : ReturnStep program before arguments result) (executable : phase = .executable)
+    {node : Nat} (member : node ∈ (result.payload.source executable).nodes) :
+    ∃ argument ∈ arguments, ∃ input ∈ (argument.payload.source executable).nodes,
+      (before.source executable).Derived node input := by
+  cases executable
+  have meaning := step.interpreted rfl
+  rcases step.checked with free | origins
+  · have empty := free.nodes_eq_nil meaning
+    rw [empty] at member
+    cases member
+  · obtain ⟨reference, active, mapped⟩ := meaning.active_node member
+    obtain ⟨argument, selected, ancestor, occurs, ancestry⟩ := origins reference active.occurs
+    obtain ⟨input, image, actual⟩ := before.meaning.related.derived ancestry mapped
+    exact ⟨argument, selected, input, (step.inputs argument selected rfl).mapped_occurs .full occurs image, actual⟩
 
 def argumentResult {phase : Phase} : List (Result phase) → Result phase
   | [] => .data phase .unit .unit
@@ -18900,13 +19037,14 @@ theorem ReturnStep.erase {before : Point program phase} {arguments : List (Resul
     (step : ReturnStep program before arguments result) :
     ReturnStep program before.erase (arguments.map Result.erase) result.erase where
   checked := by
-    rcases step.checked with free | ⟨capacity, origins⟩
+    rcases step.checked with free | origins
     · exact .inl free
-    · refine .inr ⟨by simpa [Result.erase, Payload.erase, Function.comp_def] using capacity, ?_⟩
+    · refine .inr ?_
       intro reference occurs
       obtain ⟨argument, member, ancestor, active, derived⟩ := origins reference occurs
       exact ⟨argument.erase, List.mem_map.mpr ⟨argument, member, rfl⟩, ancestor, active, derived⟩
-  actual := checkingRequired
+  interpreted := checkingRequired
+  inputs := fun _ _ => checkingRequired
 
 mutual
 /-- Structural computation keeps expression and plan indices unchanged. Phase
@@ -19056,10 +19194,13 @@ set_option autoImplicit false
 
 namespace SourceImport
 
-def symbols : Symbols where
-  reference := fun reference => match reference with
-    | .existing node => node
-    | _ => 0
+def symbols (source : Grounded.Context) : Symbols where
+  handles := fun reference => match reference with
+    | .existing node => some node
+    | _ => none
+  schemas := fun owner copies => match copies with
+    | [] => (source.storage (.binder owner)).map Grounded.Slot.payload
+    | _ :: _ => none
   binder := id
 
 def base : OriginBase → Checked.Base
@@ -19113,22 +19254,27 @@ inductive PayloadsProduced (program : Program) (ownerId : Nat) :
 end
 
 mutual
-theorem PayloadProduced.meaning {program : Program} {state : Initialization} {concrete : SourcePayload}
-    {ownerId : Nat} {path : List Checked.Component}
-    {type : Ty} {checked : Checked.Payload} (produced : PayloadProduced program ownerId path state concrete type checked) :
-    PayloadMeaning program symbols state checked type concrete := by
+theorem PayloadProduced.meaning {program : Program} {context : Grounded.Context}
+    {state : Initialization} {concrete : SourcePayload} {ownerId : Nat} {path : List Checked.Component}
+    {type : Ty} {checked : Checked.Payload} (produced : PayloadProduced program ownerId path state concrete type checked)
+    (selected : (symbols context).schema ownerId path [] = some concrete) :
+    PayloadMeaning program (symbols context) state checked type concrete := by
   cases produced with
-  | plain notHandle => exact .schemaPlain (.inl rfl) notHandle
-  | reference => exact .reference ..
-  | aggregate source shape fields => exact .aggregate source shape fields.meaning
-theorem PayloadsProduced.meaning {program : Program} {states : Nat → Initialization}
+  | plain notHandle => exact .schemaPlain (.inl rfl) notHandle selected
+  | reference => exact .reference _ _ _ rfl
+  | aggregate source shape fields =>
+      exact .aggregate source shape (fields.meaning fun _ _ found => Symbols.schema_child selected found)
+theorem PayloadsProduced.meaning {program : Program} {context : Grounded.Context} {states : Nat → Initialization}
     {ownerId : Nat} {paths : Nat → List Checked.Component}
     {concrete : List SourcePayload} {types : List Ty} {checked : List Checked.Payload}
-    (produced : PayloadsProduced program ownerId paths states concrete types checked) :
-    PayloadMeanings program symbols states checked types concrete := by
+    (produced : PayloadsProduced program ownerId paths states concrete types checked)
+    (selected : ∀ index payload, concrete[index]? = some payload → (symbols context).schema ownerId (paths index) [] = some payload) :
+    PayloadMeanings program (symbols context) states checked types concrete := by
   cases produced with
   | nil paths states => exact .nil states
-  | cons first rest => exact .cons first.meaning rest.meaning
+  | cons first rest =>
+      exact .cons (first.meaning (selected 0 _ rfl))
+        (rest.meaning fun index payload found => selected (index + 1) payload found)
 end
 
 /-- The source cell is the producer input in both phases, not an executable-only
@@ -19148,7 +19294,7 @@ def Cells.context {program : Program} {source : Grounded.Context}
   storage := fun checked => match checked with
     | .binder identity => (source.storage (.binder identity)).map (cells.slot (.binder identity))
     | .referent _ => none
-  loans := source.loans.zipIdx.map loan
+  loans := (source.loans.zipIdx.map loan).map Checked.LoanEntry.direct
   ended := source.loans.zipIdx.map ended
   nextBinder := source.nextBinder
   nextSymbol := symbolSupply source
@@ -19190,13 +19336,13 @@ theorem Cells.notEnded {program : Program} {source : Grounded.Context} (cells : 
     exact Bool.noConfusion (own.symm.trans (equal ▸ dead))
 
 @[simp] theorem address_meaning (source : Grounded.Context) (origin : Origin) :
-    symbols.address source (address origin) = some origin := by
+    (symbols source).address source (address origin) = some origin := by
   cases origin with | mk origin fields => cases origin <;> rfl
 
 
 
 theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : Cells program source) :
-    ContextMeaning program symbols cells.context source where
+    ContextMeaning program (symbols source) cells.context source where
   names := by simp [Cells.context, symbols]
   binders := rfl
   cells := by
@@ -19207,7 +19353,8 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
       obtain ⟨actual, found, equal⟩ := Option.map_eq_some_iff.mp stored
       cases equal
       cases mapped
-      exact ⟨actual, found, rfl, rfl, rfl, rfl, (cells.produced _ _ found).meaning⟩
+      refine ⟨actual, found, rfl, rfl, rfl, rfl, (cells.produced _ _ found).meaning ?_⟩
+      simp [Symbols.schema, symbols, owner, found, SourcePayload.projectComponents]
   noOpaqueCells := fun _ => rfl
   rootCoverage := by
     intro binder slot stored
@@ -19217,27 +19364,35 @@ theorem Cells.meaning {program : Program} {source : Grounded.Context} (cells : C
   rootIdentity := by intro first second _ _ same; exact same
   loans := by
     intro imported member
-    change imported ∈ source.loans.zipIdx.map loan at member
-    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan)).mp member
+    change imported ∈ (source.loans.zipIdx.map loan).map Checked.LoanEntry.direct at member
+    obtain ⟨direct, directMember, equal⟩ := List.mem_map.mp member
     subst imported
+    obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan)).mp directMember
+    subst direct
     have found := List.mem_zipIdx_iff_getElem?.mp indexed
-    refine ⟨entry.1, found, address_meaning source entry.1.target, rfl, rfl, ?_, ?_⟩
-    · simp [loan, symbols, Option.map_map, Function.comp_def]
+    refine ⟨entry.2, rfl, entry.1, found, address_meaning source entry.1.target, rfl, rfl, ?_, ?_⟩
+    · simp [loan, symbols, Symbols.reference, schemaCoordinates, Option.map_map, Function.comp_def]
     · exact (cells.notEnded found).symm
 
 /-- Import uses each existing source root and loan identity exactly once. No
 referent mirror, ownership grant, alias injectivity, or runtime premise is added. -/
 def Cells.point {program : Program} {source : Grounded.Context} (cells : Cells program source) :
-    Point program .executable := ⟨cells.context, ⟨source, symbols, cells.meaning⟩⟩
+    Point program .executable := ⟨cells.context, ⟨source, symbols source, cells.meaning⟩⟩
 
 @[simp] theorem Cells.point_source {program : Program} {source : Grounded.Context}
     (cells : Cells program source) : cells.point.source rfl = source := rfl
 
+@[simp] theorem Cells.directLoans {program : Program} {source : Grounded.Context}
+    (cells : Cells program source) : cells.context.directLoans = source.loans.zipIdx.map loan := by
+  simp [Checked.Context.directLoans, Cells.context, List.filterMap_map, Function.comp_def]
+
+
 theorem Cells.loan_found {program : Program} {source : Grounded.Context} (cells : Cells program source)
     {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual) :
     cells.context.loan (.existing node) = some (loan (actual, node)) := by
-  have member : loan (actual, node) ∈ cells.context.loans :=
-    List.mem_map.mpr ⟨_, List.mem_zipIdx_iff_getElem?.mpr found, rfl⟩
+  have member : loan (actual, node) ∈ cells.context.directLoans := by
+    rw [cells.directLoans]
+    exact List.mem_map.mpr ⟨_, List.mem_zipIdx_iff_getElem?.mpr found, rfl⟩
   cases selected : cells.context.loan (.existing node) with
   | none =>
     have absent := List.find?_eq_none.mp selected _ member
@@ -19245,7 +19400,8 @@ theorem Cells.loan_found {program : Program} {source : Grounded.Context} (cells 
   | some imported =>
     have same := List.find?_some selected
     have included := List.mem_of_find?_eq_some selected
-    change imported ∈ source.loans.zipIdx.map loan at included
+    change imported ∈ cells.context.directLoans at included
+    rw [cells.directLoans] at included
     obtain ⟨entry, indexed, equal⟩ := (List.mem_map (f := loan)).mp included
     subst imported
     have identity : entry.2 = node := by simpa [loan] using same
@@ -19734,7 +19890,7 @@ theorem mixed_plain_target_cell {program : Program} {source : Grounded.Context}
 theorem Cells.referenceTarget_source {program : Program} {source : Grounded.Context}
     (cells : Cells program source) {node : Nat} {actual : SourceLoan}
     (found : source.loans[node]? = some actual) :
-    symbols.address source (cells.context.referenceTarget (.existing node)) = some actual.target := by
+    (symbols source).address source (cells.context.referenceTarget (.existing node)) = some actual.target := by
   rw [cells.referenceTarget found]
   exact address_meaning source actual.target
 
@@ -19744,7 +19900,7 @@ theorem pointOfStore_target {program : Program} {interpretation : Interpretation
     (store : StoreTyped program interpretation source environment)
     {node : Nat} {actual : SourceLoan} (found : source.loans[node]? = some actual)
     (own : actual.own = true) :
-    symbols.address source ((pointOfStore store).checked.referenceTarget (.existing node)) = some actual.target ∧
+    (symbols source).address source ((pointOfStore store).checked.referenceTarget (.existing node)) = some actual.target ∧
     source.Target program actual.target actual.referent :=
   ⟨(Cells.ofStoreTyped store).referenceTarget_source found, (store.sourceTargets node actual found own).1⟩
 
@@ -19981,7 +20137,7 @@ namespace Elaboration
 variable {program : Program}
 
 /-- Every returned handle occurrence, not merely the result's outer type, has
-actual runtime ancestry in the single admitted argument occurrence. -/
+actual runtime ancestry in an occurrence of its selected admitted input. -/
 theorem ReturnStep.runtime_origins {before after : Point program .executable}
     {arguments : List (Result .executable)} {result : Result .executable}
     (step : ReturnStep program before arguments result)
@@ -19990,17 +20146,17 @@ theorem ReturnStep.runtime_origins {before after : Point program .executable}
     (stored : StoreTyped program interpretation (after.source rfl) environment)
     (related : (result.payload.source rfl).Corresponds interpretation.node value)
     {path : List Nat} {node : Nat} (occurrence : value.readIndices path = some (.reference node)) :
-    ∃ input, payloadNodes ((sourceResults arguments rfl).map ResultType.payload) = [input] ∧
+    ∃ argument ∈ arguments, ∃ input ∈ (argument.payload.source rfl).nodes,
       environment.Derived node (interpretation.node input) := by
   obtain ⟨identity, selected, equal⟩ := related.readIndices_reference_iff.mp occurrence
-  obtain ⟨input, singleton, derived⟩ := step.actual rfl identity
+  obtain ⟨argument, admitted, input, member, derived⟩ := step.source_origins rfl
     (SourcePayload.mem_nodes_iff.mpr ⟨path, selected⟩)
-  exact ⟨input, singleton, equal.symm ▸ stored.derived (history.derived derived)⟩
+  exact ⟨argument, admitted, input, member, equal.symm ▸ stored.derived (history.derived derived)⟩
 
 /-- General execution followed by actual ordered cleanup keeps every nested
 returned handle owned/restored and retains its admitted input ancestry. Every
 active target is backed by an entry root outside the retired parameter roots.
-The singleton ancestry rule still does not model arbitrary declared lifetimes. -/
+Declared-region validity is separate from this unrestricted input-ancestry result. -/
 theorem correctness_return_cleanup {home : Module} {before after cleaned : Point program .executable}
     {held : List (Payload .executable)} {expression : Expr} {result : Result .executable}
     {arguments : List (Result .executable)} {plan : CorePlan} {expected : Option Ty} {count : Nat}
@@ -20020,7 +20176,7 @@ theorem correctness_return_cleanup {home : Module} {before after cleaned : Point
         (∃ original, environment.store loan.target.root = some original) ∧
         loan.target.root < environment.nextRoot) ∧
       ∀ path node, value.readIndices path = some (.reference node) →
-        ∃ input, payloadNodes ((sourceResults arguments rfl).map ResultType.payload) = [input] ∧
+        ∃ argument ∈ arguments, ∃ input ∈ (argument.payload.source rfl).nodes,
           final.Derived node (last.node input) := by
   obtain ⟨value, localAfter, last, evaluated, resident, localState, _⟩ := admitted.execution_correctness rfl state
   obtain ⟨final, trace, cleanedEval, finalState⟩ := cleanup.cleanup rfl (by
@@ -20566,24 +20722,54 @@ theorem ReferencePath.duplicable_shared {type referent : Ty} {path : List Compon
   | shared => rfl
   | unique => exact False.elim ((reference.unique_nonduplicable rfl).not_duplicable permission)
 
+/-- Every declared occurrence of an opaque schema Copy uses the parent recorded
+by that Copy batch. Copy permission excludes unique occurrences even in inactive
+alternatives; concrete interpretation subsequently selects the active paths. -/
+theorem CopyPayload.schema_origins {before after : Context} {owner : Nat}
+    {path : List Component} {type : Ty} {copies : List Nat} {knowledge : SchemaKnowledge}
+    {copied : Payload}
+    (copy : CopyPayload before (.schema owner path type copies knowledge) copied after)
+    (permission : Duplicable program.data type) :
+    ∀ reference, copied.Occurs program reference →
+      ∃ ancestor, (Payload.schema owner path type copies knowledge).Occurs program ancestor ∧
+        after.Derived (program := program) reference ancestor := by
+  cases copy with
+  | schema context owner path type copies knowledge =>
+    intro reference occurs
+    cases occurs with
+    | schema declared =>
+      have shared := declared.duplicable_shared permission
+      cases shared
+      have row := LoanEntry.Row.schemaCopy (stamp := before.nextSymbol)
+        (owner := owner) (path := path) (copies := copies) declared
+      refine ⟨_, .schema declared, ?_⟩
+      exact Context.Derived.parent
+        ⟨_, List.mem_append_right _ (List.mem_singleton_self _), row⟩ rfl (.refl _)
+
+
 mutual
-/-- Recursive checked Copy retains old loan rows and can add only shared rows.
-Opaque schema stamps create no rows; their declared modes obey Copy permission. -/
+/-- Recursive checked Copy retains old rows and creates only shared rows,
+including the selected members of opaque schema batches. -/
 theorem CopyPayload.shared_loans {before after : Context} {payload copied : Payload}
     (copy : CopyPayload before payload copied after) :
-    ∀ loan ∈ after.loans, loan ∈ before.loans ∨ loan.mode = .shared := by
+    ∀ loan, after.HasLoan program loan → before.HasLoan program loan ∨ loan.mode = .shared := by
   cases copy with
-  | plain | schema => intro loan member; exact .inl member
+  | plain => intro loan member; exact .inl member
   | reference =>
-    intro loan member
+    rintro loan ⟨entry, member, row⟩
     rcases List.mem_append.mp member with previous | created
-    · exact .inl previous
-    · cases List.mem_singleton.mp created; exact .inr rfl
+    · exact .inl ⟨entry, previous, row⟩
+    · cases List.mem_singleton.mp created; cases row; exact .inr rfl
+  | schema =>
+    rintro loan ⟨entry, member, row⟩
+    rcases List.mem_append.mp member with previous | created
+    · exact .inl ⟨entry, previous, row⟩
+    · cases List.mem_singleton.mp created; cases row; exact .inr rfl
   | aggregate _ children => exact children.shared_loans
 
 theorem CopyPayloads.shared_loans {before after : Context} {payloads copied : List Payload}
     (copy : CopyPayloads before payloads copied after) :
-    ∀ loan ∈ after.loans, loan ∈ before.loans ∨ loan.mode = .shared := by
+    ∀ loan, after.HasLoan program loan → before.HasLoan program loan ∨ loan.mode = .shared := by
   cases copy with
   | nil => intro loan member; exact .inl member
   | cons first rest =>
@@ -20595,8 +20781,8 @@ end
 
 theorem CopyPayload.no_unique_creation {before after : Context} {payload copied : Payload}
     (copy : CopyPayload before payload copied after)
-    {loan : Loan} (member : loan ∈ after.loans) (unique : loan.mode = .unique) :
-    loan ∈ before.loans := by
+    {loan : Loan} (member : after.HasLoan program loan) (unique : loan.mode = .unique) :
+    before.HasLoan program loan := by
   rcases copy.shared_loans loan member with previous | shared
   · exact previous
   · rw [unique] at shared; cases shared
@@ -20605,6 +20791,27 @@ end Checked
 
 namespace Elaboration
 variable {program : Program} {phase : Phase} {home : Module}
+
+/-- A schema Copy can return through the general multi-input boundary using its
+producer-owned loan batch. No concrete ancestry or active-input callback is
+supplied by the caller. Other arguments and shared aliases remain unrestricted. -/
+theorem ReturnStep.schemaCopy {program : Program} {phase : Phase}
+    {caller before : Point program phase} {arguments : List (Result phase)}
+    {argument result : Result phase} {owner : Nat} {path : List Checked.Component}
+    {type : Ty} {copies : List Nat} {knowledge : Checked.SchemaKnowledge}
+    (member : argument ∈ arguments)
+    (schema : argument.payload.checked = .schema owner path type copies knowledge)
+    (copy : Checked.CopyPayload caller.checked argument.payload.checked result.payload.checked before.checked)
+    (permission : Duplicable program.data type)
+    (interpreted : result.Interpreted before)
+    (inputs : ∀ input ∈ arguments, input.Interpreted before) :
+    ReturnStep program before arguments result := by
+  refine ⟨.inr ?_, interpreted, inputs⟩
+  rw [schema] at copy
+  intro reference occurs
+  obtain ⟨ancestor, origin, derived⟩ := copy.schema_origins permission reference occurs
+  exact ⟨argument, member, ancestor, schema.symm ▸ origin, derived⟩
+
 
 /-- The ordinary read consumer applies the recursive uniqueness bound to the
 actual admitted result type, not just a top-level reference or a sample value. -/
