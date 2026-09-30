@@ -299,7 +299,20 @@ no longer contain independent availability premises. The general execution
 theorem passes the original checked resource obligations into these proofs.
 `ContextMeaning.endOwn` constructs correspondence after ending a recorded handle;
 its identity invariant distinguishes handles without forbidding aliased targets.
-The remaining ending and ordered-cleanup admission cutover is not yet complete.
+`EndReady` requires a recorded loan and checks canonical restoration when that
+handle is not ended. Carrier separation checks every live observer; source
+ending derives restoration and nonobservation through correspondence and custody.
+`SourceEnding` no longer supplies restoration, pending exclusion or nonobservation.
+`StateTyped.result_disposable` and `slot_disposable` derive legal reverse-order
+resource disposal from the current custody invariant. Field projection derives
+residual disposal after preserving the extracted value; its source product no
+longer assumes disposal legality. General pattern-disposal and ordered-cleanup
+admission still contain separate source obligations pending their producer cutover.
+
+Absent `.plain` source products at vacant/maybe masks require checked `NoHandles`;
+they cannot hide a mapped ghost reference. This allows `mapped_occurs` to reflect
+actual resources independently of mask completeness, while full-reference
+inversion still excludes absent products.
 
 Separation or restoration needing unresolved external alias/storage contracts
 is not established by these positive local judgments. These cutovers close
@@ -454,7 +467,7 @@ soundness is neither small-step progress nor full language completion.
 ## Verification
 
 Strict standalone checking passed with auto-implicit variables disabled and
-warnings as errors. The exhaustive defining-module audit covered **7,990
+warnings as errors. The exhaustive defining-module audit covered **8,004
 declarations, including 320 private declarations** and all generated
 declarations. Its only transitive axioms were the standard `propext`,
 `Classical.choice` and `Quot.sound`; no admitted or unapproved axiom was present.

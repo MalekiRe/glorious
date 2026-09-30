@@ -7221,6 +7221,25 @@ theorem carrierBound (typed : StateTyped program interpretation context heldPayl
     obtain ⟨loan, loanFound, _⟩ := typed.heldOwn identity member
     rw [same]
     exact (List.getElem?_eq_some_iff.mp (typed.records identity loan loanFound)).1
+/-- A stored handle cannot also occur in a protected pending payload. This uses
+the existing single-custodian invariant, not injectivity of symbolic aliases. -/
+theorem stored_unprotected (typed : StateTyped program interpretation context heldPayloads environment held)
+    {node root : Nat} {fields : List Nat}
+    (stored : Carries environment held (interpretation.node node) (.stored root fields)) :
+    node ∉ payloadNodes heldPayloads := by
+  intro member
+  obtain ⟨loan, found, own⟩ := typed.heldOwn node member
+  obtain ⟨payload, included, inside⟩ := payloadNodes_mem.mp member
+  obtain ⟨index, selected⟩ := List.mem_iff_getElem?.mp included
+  obtain ⟨value, actual, related⟩ := (typed.heldShape.select index).1 payload selected
+  obtain ⟨path, occurrence⟩ := SourcePayload.mem_nodes_iff.mp inside
+  have pending : Carries environment held (interpretation.node node) (.held index path) := by
+    change (held[index]? >>= fun value => value.readIndices path) = _
+    simp only [actual]
+    exact related.occurs_readIndices occurrence
+  obtain ⟨location, _, unique⟩ := typed.custody _ _ (typed.records node loan found) own
+  have impossible := (unique _ stored).trans (unique _ pending).symm
+  cases impossible
 
 theorem heldUsable (typed : StateTyped program interpretation context heldPayloads environment held)
     {index : Nat} {value : Value} (found : held[index]? = some value) : environment.ResultUsable value := by
@@ -10078,13 +10097,88 @@ set_option autoImplicit false
 variable {program : Program}
 
 
+/-- Initial nonobservation is preserved by the prescribed reverse ending order. -/
+theorem Context.NodesDisposable.of_unobserved {context : Context} {held : List SourcePayload} {nodes : List Nat}
+    (unprotected : ∀ node ∈ nodes, node ∉ payloadNodes held)
+    (ready : ∀ node ∈ nodes, context.Restored node)
+    (unobserved : ∀ node ∈ nodes, context.Unobserved program node) :
+    Context.NodesDisposable program held context nodes := by
+  induction nodes generalizing context with
+  | nil => trivial
+  | cons node nodes ih =>
+    refine ⟨unprotected node (by simp), ready node (by simp), unobserved node (by simp), ?_⟩
+    exact ih (fun other member => unprotected other (by simp [member]))
+      (fun other member => (ready other (by simp [member])).endOwn node)
+      (fun other member => (unobserved other (by simp [member])).endOwn)
+
+theorem StateTyped.held_unobserved {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {node : Nat} (member : node ∈ payloadNodes heldPayloads) : context.Unobserved program node := by
+  intro outer loan found own distinct payload target included
+  cases target with
+  | cell stored path selected =>
+    cases base : loan.target.base with
+    | binder binder =>
+      obtain ⟨value, actual, _, related⟩ := typed.cells binder _ (by simpa [base] using stored)
+      obtain ⟨suffix, occurrence⟩ := SourcePayload.mem_nodes_iff.mp included
+      have carried : Carries environment held (interpretation.node node)
+          (.stored (interpretation.binder binder) (loan.target.fields ++ suffix)) := by
+        change (environment.store _ >>= fun value => value.readIndices _) = _
+        simp only [actual]
+        exact related.occurs_readIndices (SourcePayload.select_occurs selected occurrence)
+      exact typed.stored_unprotected carried member
+
+theorem StateTyped.pending_disjoint {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {first second : Nat} {left right : SourcePayload}
+    (leftAt : heldPayloads[first]? = some left) (rightAt : heldPayloads[second]? = some right)
+    (different : first ≠ second) {node : Nat} (leftMember : node ∈ left.nodes) : node ∉ right.nodes := by
+  intro rightMember
+  obtain ⟨loan, found, own⟩ := typed.heldOwn node (payloadNodes_of_get leftAt leftMember)
+  obtain ⟨leftValue, leftFound, leftRelated⟩ := (typed.heldShape.select first).1 left leftAt
+  obtain ⟨rightValue, rightFound, rightRelated⟩ := (typed.heldShape.select second).1 right rightAt
+  obtain ⟨leftPath, leftOccurrence⟩ := SourcePayload.mem_nodes_iff.mp leftMember
+  obtain ⟨rightPath, rightOccurrence⟩ := SourcePayload.mem_nodes_iff.mp rightMember
+  have leftCarrier : Carries environment held (interpretation.node node) (.held first leftPath) := by
+    change (held[first]? >>= fun value => value.readIndices _) = _
+    simp only [leftFound]
+    exact leftRelated.occurs_readIndices leftOccurrence
+  have rightCarrier : Carries environment held (interpretation.node node) (.held second rightPath) := by
+    change (held[second]? >>= fun value => value.readIndices _) = _
+    simp only [rightFound]
+    exact rightRelated.occurs_readIndices rightOccurrence
+  obtain ⟨location, _, unique⟩ := typed.custody _ _ (typed.records node loan found) own
+  exact different (Carrier.held.inj ((unique _ leftCarrier).trans (unique _ rightCarrier).symm)).1
+
+theorem StateTyped.result_disposable {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value} {payload : SourcePayload} {value : Value}
+    (typed : StateTyped program interpretation context (heldPayloads ++ [payload]) environment (held ++ [value])) :
+    context.PayloadDisposable program heldPayloads payload := by
+  have selected : (heldPayloads ++ [payload])[heldPayloads.length]? = some payload := by simp
+  apply Context.NodesDisposable.of_unobserved
+  · intro node included pendingMember
+    have inside : node ∈ payload.nodes := List.mem_reverse.mp included
+    obtain ⟨other, member, otherInside⟩ := payloadNodes_mem.mp pendingMember
+    obtain ⟨index, found⟩ := List.mem_iff_getElem?.mp member
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    have actual : (heldPayloads ++ [payload])[index]? = some other := by
+      rw [List.getElem?_append_left bound]; exact found
+    exact typed.pending_disjoint selected actual (Ne.symm (Nat.ne_of_lt bound)) inside otherInside
+  · intro node included
+    exact typed.heldReady node (payloadNodes_of_get selected (List.mem_reverse.mp included))
+  · intro node included
+    exact typed.held_unobserved (payloadNodes_of_get selected (List.mem_reverse.mp included))
+
 theorem StateTyped.disposeResult {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value} {value : Value} {result : ResultType}
     (typed : StateTyped program interpretation context (heldPayloads ++ [result.payload]) environment (held ++ [value]))
     (resident : ResultTyped program interpretation context result value)
-    (drop : MayDiscard program.data result.type) (legal : context.PayloadDisposable program heldPayloads result.payload) :
+    (drop : MayDiscard program.data result.type) :
     ∃ after, Environment.Disposes program environment value after ∧
       StateTyped program interpretation (context.dispose result.payload) heldPayloads after held := by
+  have legal := typed.result_disposable
   obtain ⟨after, disposed, stored⟩ := typed.toStoreTyped.dispose resident.corresponds (fun _ member => resident.payload.node_bound member)
     legal.restored (resident.resident.disposable drop)
   have length : heldPayloads.length = held.length := by
@@ -10097,7 +10191,6 @@ theorem StateTyped.disposeResult {interpretation : Interpretation} {context : Co
     heldReady := fun node member => (typed.heldReady node (by simp [payloadNodes_append, member])).dispose result.payload
     observedOwn := typed.observedOwn.dispose legal
     custody := typed.custody.disposePending disposed }⟩
-
 theorem StateTyped.disposeResident {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value} {value : Value} {payload : SourcePayload} {type : Ty}
     (typed : StateTyped program interpretation context heldPayloads environment held)
@@ -10163,18 +10256,111 @@ theorem StoreTyped.member {interpretation : Interpretation} {context : Context} 
   cases same
   exact typed.cells slot.binder slot (by rw [(typed.source.allocated entry.2 slot stored).1]; exact stored)
 
+theorem StateTyped.selectedCut {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {origin : Origin} {binder : Nat} {slot : Slot} {old : SourcePayload}
+    (base : origin.base = .binder binder) (stored : context.storage (.binder binder) = some slot)
+    (selected : slot.payload.select origin.fields = some old) :
+    ∀ node ∈ old.nodes, context.Own node → ∀ other resident fields,
+      context.storage other = some resident → resident.payload.Occurs fields node →
+        other = origin.base ∧ origin.fields.IsPrefix fields := by
+  intro node member own other resident fields otherStored occurrence
+  obtain ⟨loan, found, ownBit⟩ := own
+  obtain ⟨suffix, inside⟩ := SourcePayload.mem_nodes_iff.mp member
+  obtain ⟨value, runtimeStored, _, related⟩ := typed.cells binder slot stored
+  have carried : Carries environment held (interpretation.node node)
+      (.stored (interpretation.binder binder) (origin.fields ++ suffix)) := by
+    change (environment.store (interpretation.binder binder) >>= fun value => value.readIndices (origin.fields ++ suffix)) = _
+    simp only [runtimeStored]
+    exact related.occurs_readIndices (SourcePayload.select_occurs selected inside)
+  obtain ⟨place, _, unique⟩ := typed.custody (interpretation.node node) _ (typed.records node loan found) ownBit
+  cases other with
+  | binder second =>
+    obtain ⟨otherValue, otherRuntimeStored, _, otherRelated⟩ := typed.cells second resident otherStored
+    have otherCarried : Carries environment held (interpretation.node node) (.stored (interpretation.binder second) fields) := by
+      change (environment.store (interpretation.binder second) >>= fun value => value.readIndices fields) = _
+      simp only [otherRuntimeStored]
+      exact otherRelated.occurs_readIndices occurrence
+    have equality := (unique _ otherCarried).trans (unique _ carried).symm
+    have components := Carrier.stored.inj equality
+    have same := typed.binderDistinct second binder (.inl ⟨resident, otherStored⟩) (.inl ⟨slot, stored⟩) components.1
+    exact ⟨by simp only [base, same], ⟨suffix, components.2.symm⟩⟩
+
+/-- Custody ties an observed inner handle to its actual carrier. Positive
+carrier separation therefore excludes observation without alias injectivity. -/
+theorem StateTyped.stored_unobserved {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {binder node : Nat} {slot : Slot} {fields : List Nat}
+    (stored : context.storage (.binder binder) = some slot)
+    (handle : slot.payload.select fields = some (.reference node))
+    (separated : ∀ outer loan, context.loans[outer]? = some loan → loan.own = true → outer ≠ node →
+      (⟨.binder binder, fields⟩ : Origin).Apart loan.target) : context.Unobserved program node := by
+  intro outer loan found own distinct payload target member
+  have active := typed.observedOwn outer loan found own payload target node member
+  have apart := separated outer loan found own distinct
+  cases target with
+  | cell targetStored path selected =>
+    cases base : loan.target.base with
+    | binder targetBinder =>
+      have cut := typed.selectedCut base (by simpa [base] using targetStored) selected node member active
+        (.binder binder) slot fields stored (SourcePayload.occurs_iff_select.mpr handle)
+      have same : binder = targetBinder := OriginBase.binder.inj (cut.1.trans base)
+      have coordinates : CoordinatesApart fields loan.target.fields := by
+        simpa [Origin.Apart, base, same] using apart
+      have symmetric : ∀ {first second : List Nat}, CoordinatesApart first second → CoordinatesApart second first := by
+        intro first second separated
+        induction separated with
+        | siblings different => exact .siblings (Ne.symm different)
+        | descend _ ih => exact .descend ih
+      exact CoordinatesApart.notPrefix (symmetric coordinates) cut.2
+
+theorem StateTyped.slot_disposable {interpretation : Interpretation} {context : Context} {environment : Environment}
+    {heldPayloads : List SourcePayload} {held : List Value}
+    (typed : StateTyped program interpretation context heldPayloads environment held)
+    {binder : Nat} {slot : Slot} (stored : context.storage (.binder binder) = some slot)
+    (free : context.Free ⟨.binder binder, []⟩)
+    (ready : ∀ node ∈ slot.payload.nodes, context.Restored node) :
+    context.PayloadDisposable program heldPayloads slot.payload := by
+  apply Context.NodesDisposable.of_unobserved
+  · intro node member
+    obtain ⟨fields, occurrence⟩ := SourcePayload.mem_nodes_iff.mp (List.mem_reverse.mp member)
+    obtain ⟨value, found, _, related⟩ := typed.cells binder slot stored
+    apply typed.stored_unprotected (root := interpretation.binder binder) (fields := fields)
+    change (environment.store _ >>= fun value => value.readIndices _) = _
+    simp only [found]
+    exact related.occurs_readIndices occurrence
+  · intro node member; exact ready node (List.mem_reverse.mp member)
+  · intro node member outer loan found own distinct payload target included
+    have active := typed.observedOwn outer loan found own payload target node included
+    cases target with
+    | cell observed path selected =>
+      obtain ⟨suffix, occurrence⟩ := SourcePayload.mem_nodes_iff.mp included
+      have cut := typed.selectedCut (origin := ⟨.binder binder, []⟩) rfl stored (by simp [SourcePayload.select])
+        node (List.mem_reverse.mp member) active loan.target.base _ (loan.target.fields ++ suffix)
+        observed (SourcePayload.select_occurs selected occurrence)
+      have apart := free outer loan found own
+      have impossible : CoordinatesApart [] loan.target.fields := by
+        simpa [Origin.Apart, cut.1] using apart
+      cases impossible
+
 theorem StateTyped.disposeSlot {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value}
     (typed : StateTyped program interpretation context heldPayloads environment held) {binding : String × Slot}
     (member : binding ∈ context.bindings) (allowed : binding.2.toBindingType.Disposable program)
-    (legal : context.PayloadDisposable program heldPayloads binding.2.payload) :
+    (free : context.Free ⟨.binder binding.2.binder, []⟩)
+    (ready : ∀ node ∈ binding.2.payload.nodes, context.Restored node) :
     ∃ value after, environment.store (interpretation.binder binding.2.binder) = some value ∧
       Environment.Disposes program environment value after ∧
       StateTyped program interpretation (context.dispose binding.2.payload) heldPayloads after held := by
   obtain ⟨value, stored, resident, related⟩ := typed.toStoreTyped.member member
+  have sourceStored := typed.source.member_stored binding member
+  have legal := typed.slot_disposable sourceStored free ready
   obtain ⟨after, disposed, afterTyped⟩ := typed.disposeResident (typed.source.slots binding member).2 related
     (resident.disposable allowed) legal
   exact ⟨value, after, stored, disposed, afterTyped⟩
+
 
 theorem Environment.Disposes.ownerFree {before after : Environment} {value : Value}
     (disposed : Disposes program before value after) {address : Address} (free : before.OwnerFree address) :
@@ -10214,7 +10400,7 @@ theorem StateTyped.disposeSlots {interpretation : Interpretation} {context : Con
     have member := members binding (by simp)
     have known : (Origin.mk (.binder binding.2.binder) []).Known context := typed.source.member_known binding member
     have runtimeFree := typed.toStoreTyped.ownerFree known free
-    obtain ⟨value, middle, found, disposed, middleTyped⟩ := typed.disposeSlot member drop legal
+    obtain ⟨value, middle, found, disposed, middleTyped⟩ := typed.disposeSlot member drop free legal.restored
     have tailMembers : ∀ slot ∈ slots, slot ∈ (context.dispose binding.2.payload).bindings := by
       intro slot included
       simpa only [Context.dispose_bindings] using members slot (by simp [included])
@@ -13944,14 +14130,26 @@ theorem Symbols.schema_child {symbols : Symbols} {owner : Nat} {path : List Chec
   rw [Symbols.schema_append, selected]
   simp [SourcePayload.projectComponents, SourcePayload.component, found]
 
-
+mutual
+inductive Payload.NoHandles : Checked.Payload → Prop where
+  | plain : Payload.NoHandles .plain
+  | aggregate {head : Head} {fields : List Checked.Payload} (children : PayloadsNoHandles fields) :
+      Payload.NoHandles (.aggregate head fields)
+  | schema (owner : Nat) (path : List Checked.Component) (type : Ty) (copies : List Nat) :
+      Payload.NoHandles (.schema owner path type copies .referenceFree)
+inductive PayloadsNoHandles : List Checked.Payload → Prop where
+  | nil : PayloadsNoHandles []
+  | cons {head : Checked.Payload} {tail : List Checked.Payload}
+      (first : Payload.NoHandles head) (rest : PayloadsNoHandles tail) : PayloadsNoHandles (head :: tail)
+end
 mutual
 /-- A masked interpretation relates the chosen symbolic payload product to the
 canonical source product. It never asserts runtime existence or usable Own. -/
 inductive PayloadMeaning (program : Program) (symbols : Symbols) :
     Initialization → Checked.Payload → Ty → SourcePayload → Prop where
-  | vacant {payload : Checked.Payload} {type : Ty} :
-      PayloadMeaning program symbols .vacant payload type .plain
+  | vacant {state : Initialization} {payload : Checked.Payload} {type : Ty}
+      (absent : state = .vacant ∨ state = .maybe) (free : Payload.NoHandles payload) :
+      PayloadMeaning program symbols state payload type .plain
   | plain {state : Initialization} {type : Ty}
       (free : ReferenceFreeLayout program.target program.data type) :
       PayloadMeaning program symbols state .plain type .plain
@@ -14215,17 +14413,20 @@ def heldOccurs (held : List Payload) (reference : Reference) : Prop :=
 
 def Context.LocalFree (context : Context) (target : Address) : Prop :=
   context.LocalPermits (program := program) .unique none target
-
-def Context.LocalUnobserved (context : Context) (reference : Reference) : Prop :=
+/-- Ending checks the selected carrier against every live observer target.
+Unknown aliases are not absence of observation; the same handle is exempt. -/
+def Context.LocalUnobserved (context : Context) (reference : Reference) (carrier : Address) : Prop :=
   ∀ loan, context.HasLoan program loan → context.NotEnded (program := program) loan.reference →
-    loan.reference ≠ reference → ∀ slot payload,
-    context.storage loan.target.base = some slot →
-    Nonempty (Payload.At program slot.payload slot.type loan.target.fields payload loan.referent) →
-    ¬ payload.Occurs program reference
+    loan.reference ≠ reference → carrier.Apart loan.target
 
-def Context.CanEnd (context : Context) (held : List Payload) (reference : Reference) : Prop :=
+/-- Inert history remains endable; missing loan records do not prove inertness. -/
+def Context.EndReady (context : Context) (reference : Reference) : Prop :=
+  (∃ loan, context.HasLoan program loan ∧ loan.reference = reference) ∧
+  (context.NotEnded (program := program) reference → context.ResourceReady program reference)
+
+def Context.CanEnd (context : Context) (held : List Payload) (reference : Reference) (carrier : Address) : Prop :=
   ¬ heldOccurs (program := program) held reference ∧
-    context.NotKnownUnrestored reference ∧ context.LocalUnobserved (program := program) reference
+    context.EndReady (program := program) reference ∧ context.LocalUnobserved (program := program) reference carrier
 
 def Context.retire (context : Context) (count : Nat) : Context :=
   { context with
@@ -14311,18 +14512,6 @@ is a separate phase-specific obligation of the same selected product. -/
 def Result.Checked {phase : Phase} (program : Program) (result : Result phase) : Prop :=
   result.payload.checked.Typed program result.type
 
-mutual
-inductive Payload.NoHandles : Checked.Payload → Prop where
-  | plain : Payload.NoHandles .plain
-  | aggregate {head : Head} {fields : List Checked.Payload} (children : PayloadsNoHandles fields) :
-      Payload.NoHandles (.aggregate head fields)
-  | schema (owner : Nat) (path : List Checked.Component) (type : Ty) (copies : List Nat) :
-      Payload.NoHandles (.schema owner path type copies .referenceFree)
-inductive PayloadsNoHandles : List Checked.Payload → Prop where
-  | nil : PayloadsNoHandles []
-  | cons {head : Checked.Payload} {tail : List Checked.Payload}
-      (first : Payload.NoHandles head) (rest : PayloadsNoHandles tail) : PayloadsNoHandles (head :: tail)
-end
 
 end Grounded.Elaboration
 
@@ -14347,6 +14536,7 @@ theorem PayloadMeaning.reference_full {reference : Checked.Reference} {referent 
       (.reference referent mode) concrete) :
     ∃ node, symbols.reference reference = some node ∧ concrete = .reference node := by
   cases meaning with
+  | vacant absent => cases absent with | _ absent => cases absent
   | reference _ _ _ mapped => exact ⟨_, mapped, rfl⟩
 
 /-- Complete reference-typed schemas also expose an explicit symbolic identity. -/
@@ -14356,6 +14546,7 @@ theorem PayloadMeaning.full_reference_inv {payload : Checked.Payload} {referent 
     ∃ reference node, payload.Occurs program reference ∧ symbols.reference reference = some node ∧
       concrete = .reference node := by
   cases meaning with
+  | vacant absent => cases absent with | _ absent => cases absent
   | plain free => cases free
   | reference reference referent mode mapped => exact ⟨reference, _, .reference .., mapped, rfl⟩
   | aggregate source shape fields => exact False.elim (source_head_not_reference source shape _ _ rfl)
@@ -14763,7 +14954,7 @@ theorem PayloadMeaning.congr {state : Initialization} {payload : Checked.Payload
     (schemas : ∀ owner copies payload, symbols.schemas owner copies = some payload → after.schemas owner copies = some payload) :
     PayloadMeaning program after state payload type concrete := by
   cases meaning with
-  | vacant => exact .vacant
+  | vacant absent free => exact .vacant absent free
   | plain free => exact .plain free
   | reference reference referent mode mapped =>
       exact .reference reference referent mode ((agrees reference (.reference reference referent mode mapped)).trans mapped)
@@ -15580,15 +15771,15 @@ structure SourceMoveIndirect (program : Program) (home : Module) (before : Groun
   cleared : SourcePayload.Write program slot.type target.fields slot.payload .plain remainder
   updated : after = before.writeTarget target .vacant remainder
 
-structure SourceEnding (program : Program) (before : Grounded.Context) (held : List SourcePayload)
+structure SourceEnding (program : Program) (before : Grounded.Context)
+    (symbols : Symbols) (reference : Checked.Reference) (carrier : Checked.Address)
     (slotIndex : Nat) (fields : List Nat) (after : Grounded.Context) where
   binding : String × Grounded.Slot
   node : Nat
   selected : before.bindings[slotIndex]? = some binding
   handle : binding.2.payload.select fields = some (.reference node)
-  unprotected : node ∉ payloadNodes held
-  ready : before.Restored node
-  unobserved : before.Unobserved program node
+  mapped : symbols.reference reference = some node
+  carrierImage : symbols.address before carrier = some ⟨.binder binding.2.binder, fields⟩
   updated : after = before.endOwn node
 
 end Grounded.Elaboration
@@ -16377,8 +16568,7 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
     (projection : ProjectionType program home parent.type key index type)
     (selection : parent.payload.select [index] = some selected)
     (write : SourcePayload.Write program parent.type [index] parent.payload .plain remainder)
-    (discard : StorageDisposition program (Initialization.full.setChild index .vacant) parent.type)
-    (legal : context.PayloadDisposable program (heldPayloads ++ [selected]) remainder) :
+    (discard : StorageDisposition program (Initialization.full.setChild index .vacant) parent.type) :
     ∃ extracted residual after,
       value.readField program key = some extracted ∧
       value.takeField program key = some residual ∧
@@ -16400,10 +16590,6 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
   have residualRelated := write.corresponds resident.resident (Initialization.Access.full [index])
     resident.corresponds (SourcePayload.Corresponds.plain (node := interpretation.node) (by trivial)) written
   have residualPayload := write.typed resident.payload canonical (.plain type)
-  obtain ⟨after, disposed, stored⟩ := typed.toStoreTyped.dispose residualRelated
-    (fun _ member => residualPayload.node_bound member) legal.restored (discard.realized residualTyped)
-  have progress : StateProgress context (context.dispose remainder) environment after interpretation interpretation :=
-    StateProgress.dispose typed.source disposed
   have length : heldPayloads.length = held.length := by
     simpa only [List.length_append, List.length_singleton, Nat.add_right_cancel_iff] using typed.heldShape.length
   have front := (typed.heldShape.append_inv length).1
@@ -16426,6 +16612,28 @@ theorem StateTyped.field {interpretation : Interpretation} {context : Context} {
       simpa only [List.append_assoc, List.singleton_append] using
         (pending_extract found).append_left held)
   have custody := rearranged.pack sourceResidual
+  have pendingMembers : ∀ node ∈ payloadNodes ((heldPayloads ++ [selected]) ++ [remainder]),
+      node ∈ payloadNodes (heldPayloads ++ [parent.payload]) := by
+    intro node member
+    simp only [payloadNodes_append, payloadNodes, List.append_nil, List.mem_append] at member
+    rcases member with previous | remaining
+    · exact memberBefore node (by simpa only [payloadNodes_append, payloadNodes, List.append_nil, List.mem_append] using previous)
+    · have old : node ∈ parent.payload.nodes := by
+        simpa only [SourcePayload.nodes, List.not_mem_nil, or_false] using write.nodes_subset remaining
+      simp only [payloadNodes_append, payloadNodes, List.append_nil, List.mem_append]
+      exact Or.inr old
+  have pending : StateTyped program interpretation context ((heldPayloads ++ [selected]) ++ [remainder])
+      environment ((held ++ [extracted]) ++ [residual]) := { typed.toStoreTyped with
+    heldShape := (front.append (.cons selectedRelated .nil)).append (.cons residualRelated .nil)
+    heldOwn := fun node member => typed.heldOwn node (pendingMembers node member)
+    heldReady := fun node member => typed.heldReady node (pendingMembers node member)
+    observedOwn := typed.observedOwn
+    custody := custody }
+  have legal := pending.result_disposable
+  obtain ⟨after, disposed, stored⟩ := typed.toStoreTyped.dispose residualRelated
+    (fun _ member => residualPayload.node_bound member) legal.restored (discard.realized residualTyped)
+  have progress : StateProgress context (context.dispose remainder) environment after interpretation interpretation :=
+    StateProgress.dispose typed.source disposed
   refine ⟨extracted, residual, after, ?_, ?_, written, disposed,
     selectedResult.transport progress.history progress.interpretation, ?_, progress⟩
   · simp [Value.readField, indexed, found]
@@ -16937,12 +17145,14 @@ theorem PatternProduces.impossibleAgainstNoMatch
   cases failure with
   | different different =>
     cases meaning with
+    | vacant absent => cases absent with | _ absent => cases absent
     | aggregate source shape fields =>
       cases corresponds with
       | aggregate source constructor children =>
         simp [Pattern.matchValue, constructor, different]
   | plain failure =>
     cases meaning with
+    | vacant absent => cases absent with | _ absent => cases absent
     | plain layout =>
       cases corresponds with
       | plain free => exact PatternProduces.plainImpossibleNoMatch failure typed free
@@ -16953,6 +17163,7 @@ theorem PatternProduces.impossibleAgainstNoMatch
     | plain free => exact PatternProduces.plainImpossibleNoMatch failure typed free
   | @node held before after result head types fields patterns bindings actualFields decomposition children nested =>
     cases meaning with
+    | vacant absent => cases absent with | _ absent => cases absent
     | aggregate source shape fieldsMeaning =>
       have aligned := decomposition.shape.fields_unique shape
       cases aligned
@@ -17005,6 +17216,26 @@ end Grounded.Elaboration
 namespace Grounded.Elaboration
 set_option autoImplicit false
 variable {program : Program} {symbols : Symbols}
+mutual
+theorem Payload.NoHandles.not_occurs {program : Program} {payload : Checked.Payload}
+    (free : Payload.NoHandles payload) {reference : Checked.Reference}
+    (occurs : payload.Occurs program reference) : False := by
+  cases free with
+  | plain | schema => cases occurs
+  | aggregate children =>
+      cases occurs with
+      | child member nested => exact children.not_occurs member nested
+
+theorem PayloadsNoHandles.not_occurs {program : Program} {payloads : List Checked.Payload}
+    (free : PayloadsNoHandles payloads) {payload : Checked.Payload} (member : payload ∈ payloads)
+    {reference : Checked.Reference} (occurs : payload.Occurs program reference) : False := by
+  cases free with
+  | nil => cases member
+  | cons first rest =>
+      rcases List.mem_cons.mp member with rfl | member
+      · exact first.not_occurs occurs
+      · exact rest.not_occurs member occurs
+end
 
 mutual
 /-- A declared occurrence can reach a node only through the selected source
@@ -17012,11 +17243,11 @@ product. Inactive constructor paths have no image, even if other references alia
 theorem PayloadMeaning.mapped_occurs {state : Initialization} {payload : Checked.Payload}
     {type : Ty} {concrete : SourcePayload}
     (meaning : PayloadMeaning program symbols state payload type concrete)
-    (complete : state.Complete) {reference : Checked.Reference} {node : Nat}
+    {reference : Checked.Reference} {node : Nat}
     (occurs : payload.Occurs program reference) (mapped : symbols.reference reference = some node) :
     node ∈ concrete.nodes := by
   cases meaning with
-  | vacant => cases complete
+  | vacant _ free => exact False.elim (free.not_occurs occurs)
   | plain => cases occurs
   | reference reference referent mode image =>
       cases occurs
@@ -17024,7 +17255,7 @@ theorem PayloadMeaning.mapped_occurs {state : Initialization} {payload : Checked
       exact List.mem_singleton.mpr same
   | aggregate source shape fields =>
       cases occurs with
-      | child member nested => exact fields.mapped_occurs complete.child member nested mapped
+      | child member nested => exact fields.mapped_occurs member nested mapped
   | schemaPlain known notHandle selected =>
       cases occurs with
       | schema path => exact Symbols.schema_descendant selected mapped
@@ -17043,7 +17274,7 @@ theorem PayloadMeaning.mapped_occurs {state : Initialization} {payload : Checked
 theorem PayloadMeanings.mapped_occurs {states : Nat → Initialization} {payloads : List Checked.Payload}
     {types : List Ty} {concretes : List SourcePayload}
     (meaning : PayloadMeanings program symbols states payloads types concretes)
-    (complete : ∀ index, (states index).Complete) {payload : Checked.Payload}
+    {payload : Checked.Payload}
     (member : payload ∈ payloads) {reference : Checked.Reference} {node : Nat}
     (occurs : payload.Occurs program reference) (mapped : symbols.reference reference = some node) :
     node ∈ payloadNodes concretes := by
@@ -17051,8 +17282,8 @@ theorem PayloadMeanings.mapped_occurs {states : Nat → Initialization} {payload
   | nil => cases member
   | cons first rest =>
       rcases List.mem_cons.mp member with rfl | member
-      · exact List.mem_append_left _ (first.mapped_occurs (complete 0) occurs mapped)
-      · exact List.mem_append_right _ (rest.mapped_occurs (fun index => complete (index + 1)) member occurs mapped)
+      · exact List.mem_append_left _ (first.mapped_occurs occurs mapped)
+      · exact List.mem_append_right _ (rest.mapped_occurs member occurs mapped)
 end
 
 /-- Every non-reflexive ancestry edge is the parent recorded in the shared loan
@@ -17150,6 +17381,25 @@ theorem ContextMeaning.permits {checked : Checked.Context} {source : Grounded.Co
   · exact .inl ⟨shared.1, modeEq.trans shared.2⟩
   · exact .inr (.inr (meaning.apart known (fun _ base => loan_root_represented member base)
       targetImage address apart))
+
+theorem ContextMeaning.unobservedTargets {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {reference : Checked.Reference}
+    {carrier : Checked.Address} {actualCarrier : Origin} {node : Nat}
+    (known : ∀ binder, carrier.base = .binder binder → checked.RootRepresented binder)
+    (image : symbols.address source carrier = some actualCarrier)
+    (mapped : symbols.reference reference = some node)
+    (unobserved : checked.LocalUnobserved (program := program) reference carrier) :
+    ∀ outer loan, source.loans[outer]? = some loan → loan.own = true → outer ≠ node →
+      actualCarrier.Apart loan.target := by
+  intro outer actual found own distinct
+  obtain ⟨loan, member, outerImage⟩ := meaning.activeCoverage outer actual found own
+  obtain ⟨represented, stored, address, _, _, _, coupled⟩ := meaning.row member outerImage
+  cases Option.some.inj (stored.symm.trans found)
+  have different : loan.reference ≠ reference := by
+    intro same
+    exact distinct (Option.some.inj ((same ▸ outerImage).symm.trans mapped))
+  exact meaning.apart known (fun _ base => loan_root_represented member base) image address
+    (unobserved loan member (coupled.mp own) different)
 
 theorem ContextMeaning.free {checked : Checked.Context} {source : Grounded.Context}
     (meaning : ContextMeaning program symbols checked source) {target : Checked.Address}
@@ -17253,6 +17503,17 @@ theorem ContextMeaning.resourceRestored {checked : Checked.Context} {source : Gr
   exact meaning.ready stored (fun other same => by
     cases Option.some.inj (stored.symm.trans same)
     exact ⟨mask, access, complete⟩) (meaning.resolve_address resolved address)
+
+theorem ContextMeaning.endReady {checked : Checked.Context} {source : Grounded.Context}
+    (meaning : ContextMeaning program symbols checked source) {reference : Checked.Reference}
+    (ready : checked.EndReady (program := program) reference) {node : Nat}
+    (mapped : symbols.reference reference = some node) : source.Restored node := by
+  obtain ⟨⟨loan, recorded, identity⟩, ready⟩ := ready
+  have image : symbols.reference loan.reference = some node := identity ▸ mapped
+  intro actual found own
+  have live : checked.NotEnded (program := program) reference := identity ▸
+    (meaning.loan_own recorded image).mp ⟨actual, found, own⟩
+  exact meaning.resourceRestored (ready live) mapped actual found own
 
 /-- Resource transport needs only the realized occurrence projection. This is
 also usable for selected subtrees whose absent reference-free leaves carry no
@@ -17769,13 +18030,16 @@ structure EndingStep (program : Program) {phase : Phase} (before after : Point p
   referent : Ty
   mode : BorrowMode
   selected : before.checked.bindings[slotIndex]? = some binding
+  stored : before.checked.storage (.binder binding.2.binder) = some binding.2
   handle : Checked.Payload.At program binding.2.payload binding.2.type fields
     (.reference symbol referent mode) (.reference referent mode)
-  permitted : before.checked.CanEnd (program := program) (checkedPayloads held) symbol
+  permitted : before.checked.CanEnd (program := program) (checkedPayloads held) symbol ⟨.binder binding.2.binder, fields⟩
   updated : after.checked = before.checked.endPayload (.reference symbol referent mode)
   stable : PointsStable before after
   actual : Required phase fun executable => Nonempty (SourceEnding program
-    (before.source executable) (sourcePayloads held executable) slotIndex fields (after.source executable))
+    (before.source executable) (before.symbols executable) symbol ⟨.binder binding.2.binder, fields⟩
+      slotIndex fields (after.source executable))
+
 
 structure SourceWrite (program : Program) (home : Module) (before : Grounded.Context)
     (symbols : Symbols) (checkedTarget : Checked.Address) (checkedParent : Option Checked.Reference)
@@ -17838,7 +18102,6 @@ structure ProjectionStep (program : Program) (home : Module) {phase : Phase}
   actual : Required phase fun executable => ∃ rest,
     (parent.payload.source executable).select [index] = some (result.payload.source executable) ∧
     SourcePayload.Write program parent.type [index] (parent.payload.source executable) .plain rest ∧
-    (before.source executable).PayloadDisposable program (sourcePayloads (held ++ [result.payload]) executable) rest ∧
     after.source executable = (before.source executable).dispose rest
 
 structure ReturnStep (program : Program) {phase : Phase} (before : Point program phase)
@@ -17868,7 +18131,7 @@ theorem ReturnStep.source_origins {program : Program} {phase : Phase} {before : 
   · obtain ⟨reference, active, mapped⟩ := meaning.active_node member
     obtain ⟨argument, selected, ancestor, occurs, ancestry⟩ := origins reference active.occurs
     obtain ⟨input, image, actual⟩ := before.meaning.related.derived ancestry mapped
-    exact ⟨argument, selected, input, (step.inputs argument selected rfl).mapped_occurs .full occurs image, actual⟩
+    exact ⟨argument, selected, input, (step.inputs argument selected rfl).mapped_occurs occurs image, actual⟩
 
 def argumentResult {phase : Phase} : List (Result phase) → Result phase
   | [] => .data phase .unit .unit
@@ -18519,36 +18782,6 @@ namespace Grounded
 set_option autoImplicit false
 variable {program : Program}
 
-theorem StateTyped.selectedCut {interpretation : Interpretation} {context : Context} {environment : Environment}
-    {heldPayloads : List SourcePayload} {held : List Value}
-    (typed : StateTyped program interpretation context heldPayloads environment held)
-    {origin : Origin} {binder : Nat} {slot : Slot} {old : SourcePayload}
-    (base : origin.base = .binder binder) (stored : context.storage (.binder binder) = some slot)
-    (selected : slot.payload.select origin.fields = some old) :
-    ∀ node ∈ old.nodes, context.Own node → ∀ other resident fields,
-      context.storage other = some resident → resident.payload.Occurs fields node →
-        other = origin.base ∧ origin.fields.IsPrefix fields := by
-  intro node member own other resident fields otherStored occurrence
-  obtain ⟨loan, found, ownBit⟩ := own
-  obtain ⟨suffix, inside⟩ := SourcePayload.mem_nodes_iff.mp member
-  obtain ⟨value, runtimeStored, _, related⟩ := typed.cells binder slot stored
-  have carried : Carries environment held (interpretation.node node)
-      (.stored (interpretation.binder binder) (origin.fields ++ suffix)) := by
-    change (environment.store (interpretation.binder binder) >>= fun value => value.readIndices (origin.fields ++ suffix)) = _
-    simp only [runtimeStored]
-    exact related.occurs_readIndices (SourcePayload.select_occurs selected inside)
-  obtain ⟨place, _, unique⟩ := typed.custody (interpretation.node node) _ (typed.records node loan found) ownBit
-  cases other with
-  | binder second =>
-    obtain ⟨otherValue, otherRuntimeStored, _, otherRelated⟩ := typed.cells second resident otherStored
-    have otherCarried : Carries environment held (interpretation.node node) (.stored (interpretation.binder second) fields) := by
-      change (environment.store (interpretation.binder second) >>= fun value => value.readIndices fields) = _
-      simp only [otherRuntimeStored]
-      exact otherRelated.occurs_readIndices occurrence
-    have equality := (unique _ otherCarried).trans (unique _ carried).symm
-    have components := Carrier.stored.inj equality
-    have same := typed.binderDistinct second binder (.inl ⟨resident, otherStored⟩) (.inl ⟨slot, stored⟩) components.1
-    exact ⟨by simp only [base, same], ⟨suffix, components.2.symm⟩⟩
 
 theorem StateTyped.assignTarget {interpretation : Interpretation} {context : Context} {environment : Environment}
     {heldPayloads : List SourcePayload} {held : List Value} {replacement : ResultType} {value : Value}
@@ -18862,7 +19095,12 @@ theorem SlotsCorrespond.index {interpretation : Interpretation} {store : Store}
 namespace Elaboration
 
 theorem SourceEnding.execute {before after : Grounded.Context} {heldPayloads : List SourcePayload}
-    {slot : Nat} {fields : List Nat} (ending : SourceEnding program before heldPayloads slot fields after)
+    {symbols : Symbols} {reference : Checked.Reference}
+    {carrier : Checked.Address}
+    {slot : Nat} {fields : List Nat} (ending : SourceEnding program before symbols reference carrier slot fields after)
+    (ready : before.Restored ending.node)
+    (separated : ∀ outer loan, before.loans[outer]? = some loan → loan.own = true → outer ≠ ending.node →
+      (⟨.binder ending.binding.2.binder, fields⟩ : Origin).Apart loan.target)
     {interpretation : Interpretation} {environment : Environment} {held : List Value}
     (typed : StateTyped program interpretation before heldPayloads environment held) :
     ∃ final, environment.endSlot slot fields = some final ∧
@@ -18875,9 +19113,16 @@ theorem SourceEnding.execute {before after : Grounded.Context} {heldPayloads : L
   have selected := (correspondence value found).occurs_readIndices occurrence
   have member := SourcePayload.mem_nodes_iff.mpr ⟨fields, occurrence⟩
   obtain ⟨loan, sourceFound⟩ := (typed.source.slots ending.binding (List.mem_of_getElem? ending.selected)).2.node_found member
-  obtain ⟨final, ended, state⟩ := typed.endOwn sourceFound ending.unprotected ending.unobserved
+  have unprotected : ending.node ∉ payloadNodes heldPayloads := by
+    apply typed.stored_unprotected (root := (interpretation.binder ending.binding.2.binder)) (fields := fields)
+    change (environment.store _ >>= fun value => value.readIndices fields) = _
+    simp only [found]
+    exact selected
+  have unobserved := typed.stored_unobserved
+    (typed.source.member_stored ending.binding (List.mem_of_getElem? ending.selected)) ending.handle separated
+  obtain ⟨final, ended, state⟩ := typed.endOwn sourceFound unprotected unobserved
   have runtimeFound := typed.records ending.node loan sourceFound
-  have restored := typed.toStoreTyped.restored sourceFound ending.ready
+  have restored := typed.toStoreTyped.restored sourceFound ready
   have endSlot : environment.endSlot slot fields = some final := by
     simp only [Environment.endSlot, indexed, Bind.bind, Option.bind_some, found, selected, runtimeFound]
     by_cases own : loan.own = true
@@ -19247,7 +19492,7 @@ theorem Executes.sequence {before middle disposed after : Point program phase} {
     Executes before held (.sequence first rest) result after (.binary firstPlan restPlan) := by
   intro executable interpretation environment values state
   obtain ⟨resident, initial, firstMap, headEval, residentTyped, initialState, headProgress⟩ := head executable state
-  obtain ⟨disposedEnv, disposal, disposedState⟩ := initialState.disposeResult residentTyped dispose.discard (dispose.actual executable).1
+  obtain ⟨disposedEnv, disposal, disposedState⟩ := initialState.disposeResult residentTyped dispose.discard
   have disposalProgress := StateProgress.dispose (interpretation := firstMap)
     (reference := discarded.payload.source executable) initialState.source disposal
   simp only [Result.source] at disposedState
@@ -19264,13 +19509,13 @@ theorem Executes.field {before middle after : Point program phase} {held : List 
     Executes before held (.field body key) result after (.unary plan) := by
   intro executable interpretation environment values state
   obtain ⟨value, initial, firstMap, evaluated, parentTyped, initialState, sourceProgress⟩ := source executable state
-  obtain ⟨remainder, selected, written, legal, updated⟩ := projection.actual executable
+  obtain ⟨remainder, selected, written, updated⟩ := projection.actual executable
   obtain ⟨extracted, residual, final, read, taken, _, disposal, resultTyped, finalState, projectionProgress⟩ :=
     initialState.field parentTyped projection.selected.erase selected written projection.discard
-      (by simpa only [sourcePayloads_append, sourcePayloads_singleton] using legal)
   rw [← updated] at resultTyped finalState projectionProgress
   exact ⟨extracted, final, firstMap, .field evaluated read taken disposal (pendingResultUsable finalState),
     resultTyped, finalState, sourceProgress.trans projectionProgress (evaluated.storage state.residents.valid).2.supply⟩
+
 
 theorem Executes.assign {before middle written after : Point program phase} {held : List (Payload phase)}
     {place : Place} {value rest : Expr} {replacement result : Result phase} {valuePlan restPlan : CorePlan}
@@ -19323,7 +19568,11 @@ theorem Executes.endOwn {before ended after : Point program phase} {held : List 
     Executes before held expression result after (.endOwn slot plan fields) := by
   intro executable interpretation environment values state
   obtain ⟨step⟩ := ending.actual executable
-  obtain ⟨endedEnv, actual, endedState, endingProgress⟩ := step.execute state
+  have ready := (before.related executable).endReady ending.permitted.2.1 step.mapped
+  have separated := (before.related executable).unobservedTargets
+    (fun binder base => Or.inl ⟨ending.binding.2, by cases Checked.Base.binder.inj base; exact ending.stored⟩)
+    step.carrierImage step.mapped ending.permitted.2.2
+  obtain ⟨endedEnv, actual, endedState, endingProgress⟩ := step.execute ready separated state
   obtain ⟨value, final, last, evaluated, resident, finalState, bodyProgress⟩ := continued executable endedState
   exact ⟨value, final, last, .endOwn actual evaluated, resident, finalState,
     endingProgress.trans bodyProgress (by simp only [(Environment.endSlot_storage actual).supply, Nat.le_refl])⟩
@@ -19336,7 +19585,11 @@ theorem Executes.endAfter {before middle after : Point program phase} {held : Li
   intro executable interpretation environment values state
   obtain ⟨value, initial, firstMap, evaluated, resident, initialState, bodyProgress⟩ := body executable state
   obtain ⟨step⟩ := ending.actual executable
-  obtain ⟨final, actual, finalState, endingProgress⟩ := step.execute (by
+  have ready := (middle.related executable).endReady ending.permitted.2.1 step.mapped
+  have separated := (middle.related executable).unobservedTargets
+    (fun binder base => Or.inl ⟨ending.binding.2, by cases Checked.Base.binder.inj base; exact ending.stored⟩)
+    step.carrierImage step.mapped ending.permitted.2.2
+  obtain ⟨final, actual, finalState, endingProgress⟩ := step.execute ready separated (by
     simpa only [sourcePayloads_append, sourcePayloads_singleton] using initialState)
   have pending : StateTyped program firstMap (after.source executable)
       (sourcePayloads held executable ++ [result.payload.source executable]) final (values ++ [value]) := by
@@ -19930,7 +20183,7 @@ theorem JoinStep.erase {before after : Point program phase} (step : JoinStep pro
 def EndingStep.erase {before after : Point program phase} {held : List (Payload phase)} {slot : Nat} {fields : List Nat}
     (step : EndingStep program before after held slot fields) :
     EndingStep program before.erase after.erase (held.map Payload.erase) slot fields :=
-  ⟨step.binding, step.symbol, step.referent, step.mode, step.selected, step.handle,
+  ⟨step.binding, step.symbol, step.referent, step.mode, step.selected, step.stored, step.handle,
     by simpa using step.permitted, step.updated, checkingStable, checkingRequired⟩
 def WriteStep.erase {before after : Point program phase} {held : List (Payload phase)} {place : AccessPlace} {result : Result phase}
     (step : WriteStep program home before after held place result) :
