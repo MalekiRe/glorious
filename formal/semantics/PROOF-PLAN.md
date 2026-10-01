@@ -687,6 +687,25 @@ axiom audit checked 2,936 `Grounded` declarations and found only `propext`,
 progress and framing proofs and finite-call construction use only `propext`
 and `Quot.sound`. No unit tests or concrete examples were added or run.
 
+The addressed source-realization boundary now also constructs a complete
+same-path move/restoration sequence. `AddressedEnvironment.Realizes.take_restore`
+derives the moved value, an actual intermediate hole that rejects another take,
+and actual restoration/readback of a typed replacement. It reconstructs final
+source realization by composing the authoritative mask and binding-context
+updates. It does not assume that the intermediate source context is initialized.
+The same result preserves immutable cells, caller cells and caller typing across
+both transitions; neither transition allocates or changes the activation supply.
+
+The general same-path mask overwrite law and binding replacement laws are
+consumed by this composition, including nested aggregate paths. Strict
+`lake build Grounded.SourceDeclarations` passed (25 jobs). The imported-declaration
+audit checked 2,942 `Grounded` declarations and found only standard Lean axioms;
+the new composition uses only `propext` and `Quot.sound`. No examples or unit tests
+were added or run. This is a storage-to-realization result, not source admission
+of move syntax: the checking and continuation cutover described below remains
+open.
+
+
 Remaining boundary: flow-sensitive moves and restoration must extend the same
 checking, control/continuation realization and source-admission chain. The
 current source fragment still requires initialized residents and duplicable

@@ -443,4 +443,27 @@ theorem Initialization.select_ready {program : Program} {parent : Ty}
     obtain ⟨⟨index, child, types⟩, _, current, found, selected⟩ := selected
     exact ih ((ready.openFields types.length).select found) selected
 
+/-- Replacing the same path again removes the first update, including when
+opening a whole resident exposed nested initialization fields. -/
+theorem Initialization.write_overwrite {program : Program} {parent : Ty}
+    {before middle after first second : Initialization} {path : List FieldKey}
+    (written : before.writeFields program parent path first = some middle)
+    (rewritten : middle.writeFields program parent path second = some after) :
+    before.writeFields program parent path second = some after := by
+  induction path generalizing parent before middle after with
+  | nil => exact rewritten
+  | cons key rest ih =>
+    simp only [Initialization.writeFields, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, current, found, updated, tail, same⟩ := written
+    subst middle
+    have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
+    simp only [Initialization.openFields] at atIndex
+    simp only [Initialization.writeFields, info, Option.bind_some, Initialization.openFields, atIndex,
+      Option.map_eq_some_iff] at rewritten
+    obtain ⟨final, rewrittenTail, same⟩ := rewritten
+    subst after
+    simp [Initialization.writeFields, info, found, ih tail rewrittenTail]
+    rfl
+
+
 end Grounded

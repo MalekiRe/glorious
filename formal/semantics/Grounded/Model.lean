@@ -335,4 +335,42 @@ theorem lookup.of_mem {α : Type} {name : BindingId} {value : α} {entries : Lis
       simpa [lookup, different] using ih parts.2 tailMember
 
 
+theorem replaceBinding.lookup_after {α : Type} {name : BindingId} {value : α}
+    {before after : List (BindingId × α)} (written : replaceBinding name value before = some after) :
+    lookup name after = some value := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    rcases entry with ⟨key, old⟩
+    simp only [replaceBinding] at written
+    split at written
+    next same => cases written; simp [lookup, same]
+    next different =>
+      obtain ⟨tail, replaced, same⟩ := Option.map_eq_some_iff.mp written
+      subst after
+      simp [lookup, Ne.symm different, ih replaced]
+
+theorem replaceBinding.overwrite {α : Type} {name : BindingId} {first second : α}
+    {before middle after : List (BindingId × α)}
+    (written : replaceBinding name first before = some middle)
+    (rewritten : replaceBinding name second middle = some after) :
+    replaceBinding name second before = some after := by
+  induction before generalizing middle after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    rcases entry with ⟨key, old⟩
+    simp only [replaceBinding] at written
+    split at written
+    next same =>
+      cases written
+      simpa only [replaceBinding, if_pos same] using rewritten
+    next different =>
+      obtain ⟨tail, replaced, same⟩ := Option.map_eq_some_iff.mp written
+      subst middle
+      simp only [replaceBinding, if_neg different] at rewritten
+      obtain ⟨final, replacedAgain, same⟩ := Option.map_eq_some_iff.mp rewritten
+      subst after
+      simp [replaceBinding, different, ih replaced replacedAgain]
+
+
 end Grounded

@@ -512,4 +512,77 @@ theorem AddressedScope.Realizes.allocate_preserves {scope : AddressedScope} {hea
   exact typed.allocate_preserves owner inputs
 
 
+/-- Execute a real move, observe the resulting hole, then restore the same
+path. Final source readiness is derived from mask updates, not assumed for the
+intermediate state. This storage composition does not admit new source syntax. -/
+theorem AddressedEnvironment.Realizes.take_restore {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} {slot : BindingType}
+    (realized : current.Realizes program context)
+    (resolved : lookup place.root context = some slot)
+    (checked : PathType program home slot.type place.fields type)
+    (writable : slot.mutable = true)
+    {replacement : Value} (replacementTyped : ValueHasType program replacement type) :
+    ∃ value middle after,
+      current.take program place = some (value, middle) ∧ ValueHasType program value type ∧
+      middle.take program place = none ∧ middle.write program place replacement = some after ∧
+      after.Realizes program context ∧ after.read program place = some replacement ∧
+      AddressedEnvironment.Frames context current after ∧
+      middle.scope = current.scope ∧ middle.supply = current.supply ∧
+      after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
+      (∀ (caller : AddressedScope) states,
+        BindingMap.Typed program current.heap caller.activation caller.bindings states →
+        caller.activation ≠ current.activation →
+        BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd,
+            after.heap.read identity = current.heap.read identity)) := by
+  have sourceResolved := resolved
+  obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
+  rw [← slots, lookup.map] at resolved
+  change BindingMap.Typed program current.heap current.activation current.bindings states at typed
+  obtain ⟨state, selected, sameSlot⟩ := Option.map_eq_some_iff.mp resolved
+  have checkedState : PathType program home state.slot.type place.fields type := by
+    rw [sameSlot]; exact checked
+  have rootReady := ready (place.root, state) (lookup.mem selected)
+  obtain ⟨identity, cell, _, _, _, declared, resident, _⟩ := typed.lookup selected
+  have checkedCell : PathType program home cell.type place.fields type := by
+    simpa only [declared] using checkedState
+  obtain ⟨part, selectedState, stateFound, _, _⟩ := checkedCell.select_partial resident.2
+  rw [declared] at stateFound
+  obtain ⟨movedIdentity, value, movedHeap, movedState, movedContext, mapped, maskTaken, contextTaken,
+    taken, valueTyped, movedTyped, noRetake, movedNext, movedFrame, movedRetained⟩ :=
+    BindingMap.take.progress typed selected checkedState stateFound
+      (Initialization.select_ready rootReady stateFound)
+  have movedSelected := replaceBinding.lookup_after contextTaken
+  obtain ⟨restoredIdentity, restoredHeap, restoredState, restoredContext, mappedAgain, maskRestored,
+    contextRestored, restored, restoredTyped, readback, restoredNext, restoredFrame, _, restoredRetained⟩ :=
+    BindingMap.restore.progress movedTyped movedSelected checkedState replacementTyped
+  have sameIdentity : restoredIdentity = movedIdentity := Option.some.inj (mappedAgain.symm.trans mapped)
+  subst restoredIdentity
+  have finalMask := Initialization.write_overwrite maskTaken maskRestored
+  have finalContext := replaceBinding.overwrite contextTaken contextRestored
+  have projected := replaceBinding.map_same BindingState.slot selected finalContext rfl
+  have finalReady := replaceBinding.all (predicate := fun state : BindingState => state.initialization.Ready)
+    finalContext ready (Initialization.write_ready rootReady .present finalMask)
+  refine ⟨value, { current with heap := movedHeap }, { current with heap := restoredHeap },
+    by simp [AddressedEnvironment.take, taken], valueTyped,
+    by simp [AddressedEnvironment.take, noRetake],
+    by simp [AddressedEnvironment.write, restored],
+    ⟨⟨restoredContext, restoredTyped, projected.trans slots, finalReady⟩, issued⟩,
+    readback, ⟨rfl, ?_⟩, rfl, rfl, rfl, restoredNext.trans movedNext, ?_⟩
+  · intro name otherSlot otherIdentity otherSelected immutable otherMapped
+    have different : otherIdentity ≠ movedIdentity := by
+      intro same
+      rw [same] at otherMapped
+      have sameRoot := lookup.unique_key typed.addresses_distinct otherMapped mapped
+      rw [sameRoot, sourceResolved] at otherSelected
+      cases Option.some.inj otherSelected
+      simp_all
+    exact (restoredFrame otherIdentity different).trans (movedFrame otherIdentity different)
+  · intro caller callerStates callerTyped different
+    obtain ⟨middleTyped, middlePreserved⟩ := movedRetained caller callerStates callerTyped different
+    obtain ⟨afterTyped, afterPreserved⟩ := restoredRetained caller callerStates middleTyped different
+    exact ⟨afterTyped, fun identity member =>
+      (afterPreserved identity member).trans (middlePreserved identity member)⟩
+
+
 end Grounded
