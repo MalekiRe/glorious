@@ -2321,3 +2321,32 @@ tests or concrete example files were added. Full-language completion remains
 open, including custom destruction, correlated branches, borrowing and the other
 tracked boundaries.
 
+
+## Actual mutation framing for disjoint fields of shared storage
+
+`PathDisjoint` expresses pre-state separation using resolved field indices from
+`ProjectionType`, not source spelling or an assumed post-state observation.
+Its recursive descent permits arbitrary shared prefixes before distinct fields.
+`write_frame` proves that actual partial-value replacement preserves the exact
+selection result at the disjoint path, including failed observations and partial
+ancestors. No post-state typing or read-success premise is supplied.
+
+The proof is consumed by actual heap move/restore operations, binding-map access,
+and `Step.assignment_frame_disjoint` / `Step.move_frame_disjoint`. These
+machine theorems preserve complete read results even when both lexical places
+resolve to the same storage identity. They complement the existing distinct-root
+assignment guarantee rather than blanket-banning shared storage. Readiness,
+Copy, disposal and execution remain separate contracts; this geometry does not
+grant access permission or establish borrowing semantics.
+
+`lake build Grounded` passed all 30 jobs, including general preservation,
+progress and public source soundness. Exhaustive axiom inspection covered 3,838
+declarations and found only standard Lean axioms. Explicit inspection included
+physical writes, heap transfers/restoration and both actual machine framing
+results. No unit tests or concrete example files were added.
+
+The full specification remains incomplete. This closes disjoint tuple/struct
+field mutation framing in the logical model, not loan compatibility, custom
+cleanup, correlated control state, physical memory or the other tracked
+whole-language obligations.
+

@@ -320,4 +320,38 @@ theorem Run.outer_scope {before after : Configuration} (run : Run program before
   | step head tail ih => exact ih.trans head.outer_scope
 
 
+/-- An actual assignment preserves disjoint field observations even when the
+lexical places resolve to the same storage identity. -/
+theorem Step.assignment_frame_disjoint {before : Environment} {after : Configuration}
+    {stack : List Frame} {place other : Place} {rest : Expr} {value : Value}
+    {identity : StorageId} {cell : StorageCell} {home : Module}
+    (mapped : lookup place.root before.bindings = some identity)
+    (otherMapped : lookup other.root before.bindings = some identity)
+    (found : before.heap.read identity = some cell)
+    (apart : PathDisjoint program home cell.type place.fields other.fields)
+    (step : Step program ⟨before, .result value, .assign place rest :: stack⟩ after) :
+    after.environment.read program other = before.read program other := by
+  cases step with
+  | assignResult written =>
+    obtain ⟨heap, stored, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    exact BindingMap.restore.read_disjoint mapped otherMapped found apart stored
+
+/-- Moving one owned field does not consume any pre-state-disjoint field. -/
+theorem Step.move_frame_disjoint {before : Environment} {after : Configuration}
+    {stack : List Frame} {place other : Place}
+    {identity : StorageId} {cell : StorageCell} {home : Module}
+    (mapped : lookup place.root before.bindings = some identity)
+    (otherMapped : lookup other.root before.bindings = some identity)
+    (found : before.heap.read identity = some cell)
+    (apart : PathDisjoint program home cell.type place.fields other.fields)
+    (step : Step program ⟨before, .expression (.move place), stack⟩ after) :
+    after.environment.read program other = before.read program other := by
+  cases step with
+  | move taken =>
+    obtain ⟨⟨owner, heap⟩, stored, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    exact BindingMap.take.read_disjoint mapped otherMapped found apart stored
+
+
 end Grounded

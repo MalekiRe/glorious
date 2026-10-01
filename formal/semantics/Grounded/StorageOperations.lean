@@ -148,4 +148,36 @@ theorem takeStorage.restore {program : Program} {home : Module} {heap : RuntimeH
     fun other different => (lastFrame other different).trans (firstFrame other different)⟩
 
 
+/-- Restoration changes only its selected physical path within the cell. -/
+theorem restoreStorage.read_disjoint {program : Program} {home : Module}
+    {before after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell}
+    {path observed : List FieldKey} {value : Value}
+    (found : before.read identity = some cell)
+    (apart : PathDisjoint program home cell.type path observed)
+    (restored : restoreStorage program before identity path value = some after) :
+    ((after.read identity).bind fun current =>
+      (current.resident.selectFields program current.type observed).bind PartialValue.read) =
+      (cell.resident.selectFields program cell.type observed).bind PartialValue.read := by
+  simp only [restoreStorage, found, Option.bind_some, Option.bind_eq_some_iff] at restored
+  obtain ⟨updated, written, stored⟩ := restored
+  rw [RuntimeHeap.write_read stored]
+  exact congrArg (fun selected => selected.bind PartialValue.read) (apart.write_frame written)
+
+/-- Clearing a moved path preserves every disjoint observation in the same cell. -/
+theorem takeStorage.read_disjoint {program : Program} {home : Module}
+    {before after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell}
+    {path observed : List FieldKey} {value : Value}
+    (found : before.read identity = some cell)
+    (apart : PathDisjoint program home cell.type path observed)
+    (taken : takeStorage program before identity path = some (value, after)) :
+    ((after.read identity).bind fun current =>
+      (current.resident.selectFields program current.type observed).bind PartialValue.read) =
+      (cell.resident.selectFields program cell.type observed).bind PartialValue.read := by
+  simp only [takeStorage, found, Option.bind_some, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+  obtain ⟨selected, selectedAt, owner, read, updated, written, heap, stored, same⟩ := taken
+  cases same
+  rw [RuntimeHeap.write_read stored]
+  exact congrArg (fun selected => selected.bind PartialValue.read) (apart.write_frame written)
+
+
 end Grounded

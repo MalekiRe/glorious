@@ -71,6 +71,21 @@ theorem ProjectionType.use_permission {program : Program} {home : Module} {paren
       exact fields _ (by simp [DataDecl.schemas, shape]) _ (List.mem_of_getElem? selected)
 
 
+/-- Pre-state separation uses resolved field indices from the shared projection
+judgment. Neither a future read nor a successful write is part of the witness. -/
+inductive PathDisjoint (program : Program) (home : Module) : Ty → List FieldKey → List FieldKey → Prop where
+  | fork {parent left right : Ty} {leftKey rightKey : FieldKey} {leftIndex rightIndex : Nat}
+      {leftTail rightTail : List FieldKey}
+      (leftField : ProjectionType program home parent leftKey leftIndex left)
+      (rightField : ProjectionType program home parent rightKey rightIndex right)
+      (different : leftIndex ≠ rightIndex) :
+      PathDisjoint program home parent (leftKey :: leftTail) (rightKey :: rightTail)
+  | descend {parent child : Ty} {key : FieldKey} {index : Nat} {left right : List FieldKey}
+      (field : ProjectionType program home parent key index child)
+      (apart : PathDisjoint program home child left right) :
+      PathDisjoint program home parent (key :: left) (key :: right)
+
+
 /-- Resolve one tuple/struct field; enum payloads are not unchecked places. -/
 def Value.projectField (program : Program) (value : Value) (key : FieldKey) : Option (Nat × Value) :=
   match value, key with

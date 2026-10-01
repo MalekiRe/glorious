@@ -52,6 +52,14 @@ def PartialValue.closeFields (type : Ty) (fields : List PartialValue) : Option P
   | .nominal identity, fields => some (.nominal identity none fields)
   | _, _ => none
 
+theorem PartialValue.closeFields_open {program : Program} {parent : Ty}
+    {fields : List PartialValue} {after : PartialValue}
+    (closed : PartialValue.closeFields parent fields = some after) :
+    after.openFields program parent = some fields := by
+  cases parent <;> cases fields <;> simp [PartialValue.closeFields] at closed
+  all_goals subst after; simp [PartialValue.openFields]
+
+
 theorem PartialValuesTyped.length {program : Program} {values : List PartialValue}
     {types : List Ty} {states : List Initialization}
     (typed : PartialValuesTyped program values types states) :
@@ -543,6 +551,45 @@ theorem ProjectionType.cleanup_safe {program : Program} {home : Module} {parent 
   obtain ⟨selected, found, selectedTyped, _⟩ := projection.access resident
   exact ⟨parent, type, index, selected, remainder, resident, found, selectedTyped,
     written, absent, discard.realizes remainderTyped⟩
+
+
+theorem ProjectionType.fieldInfo_exists {program : Program} {home : Module} {parent child : Ty}
+    {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child) :
+    ∃ types, parent.fieldInfo program key = some (index, child, types) := by
+  cases projection with
+  | @tuple first rest index child selected =>
+    exact ⟨first :: rest, by simp [Ty.fieldInfo, Ty.fieldTypes, Ty.fieldIndex, selected]⟩
+  | @nominal identity index declaration schema field key declared shape indexed selected visible =>
+    exact ⟨schema.residents.map Field.type, by
+      simp [Ty.fieldInfo, Ty.fieldTypes, Ty.fieldIndex, declared, DataDecl.constructor, shape,
+        indexed, List.getElem?_map, selected]⟩
+
+/-- Physical replacement frames every disjoint path, including failed reads and
+partially consumed ancestors. No post-state typing premise is required. -/
+theorem PathDisjoint.write_frame {program : Program} {home : Module} {parent : Ty}
+    {writtenPath observedPath : List FieldKey}
+    (apart : PathDisjoint program home parent writtenPath observedPath)
+    {before after replacement : PartialValue}
+    (written : before.writeFields program parent writtenPath replacement = some after) :
+    after.selectFields program parent observedPath = before.selectFields program parent observedPath := by
+  induction apart generalizing before after with
+  | fork leftField rightField different =>
+    obtain ⟨leftTypes, leftInfo⟩ := leftField.fieldInfo_exists
+    obtain ⟨rightTypes, rightInfo⟩ := rightField.fieldInfo_exists
+    rw [PartialValue.writeFields, leftInfo] at written
+    simp only [Option.bind_some, Option.bind_eq_some_iff] at written
+    obtain ⟨fields, opened, resident, found, updated, changed, closed⟩ := written
+    have afterOpened := PartialValue.closeFields_open (program := program) closed
+    simp [PartialValue.selectFields, rightInfo, afterOpened, opened, List.getElem?_set_ne different]
+  | descend field apart ih =>
+    obtain ⟨types, info⟩ := field.fieldInfo_exists
+    rw [PartialValue.writeFields, info] at written
+    simp only [Option.bind_some, Option.bind_eq_some_iff] at written
+    obtain ⟨fields, opened, resident, found, updated, changed, closed⟩ := written
+    have afterOpened := PartialValue.closeFields_open (program := program) closed
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    simpa only [PartialValue.selectFields, info, Option.bind_some, afterOpened, opened, found,
+      List.getElem?_set_self bound] using ih changed
 
 
 end Grounded

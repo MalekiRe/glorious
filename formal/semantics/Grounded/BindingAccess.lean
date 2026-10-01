@@ -786,4 +786,29 @@ theorem AddressedEnvironment.ConsumptionFrame.drop {before after : AddressedEnvi
   exact typed.context_distinct
 
 
+theorem BindingMap.restore.read_disjoint
+    {after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell} {other : Place} {value : Value}
+    (mapped : Grounded.lookup place.root bindings = some identity)
+    (otherMapped : Grounded.lookup other.root bindings = some identity)
+    (found : heap.read identity = some cell)
+    (apart : PathDisjoint program home cell.type place.fields other.fields)
+    (changed : bindings.restore program heap place value = some after) :
+    bindings.read program after other = bindings.read program heap other := by
+  simp only [BindingMap.restore, mapped, Option.bind_some] at changed
+  simpa [BindingMap.read, otherMapped, found] using
+    restoreStorage.read_disjoint found apart changed
+
+theorem BindingMap.take.read_disjoint
+    {after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell} {other : Place} {value : Value}
+    (mapped : Grounded.lookup place.root bindings = some identity)
+    (otherMapped : Grounded.lookup other.root bindings = some identity)
+    (found : heap.read identity = some cell)
+    (apart : PathDisjoint program home cell.type place.fields other.fields)
+    (changed : bindings.take program heap place = some (value, after)) :
+    bindings.read program after other = bindings.read program heap other := by
+  simp only [BindingMap.take, mapped, Option.bind_some] at changed
+  simpa [BindingMap.read, otherMapped, found] using
+    takeStorage.read_disjoint found apart changed
+
+
 end Grounded
