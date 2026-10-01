@@ -2058,3 +2058,27 @@ custom destruction hooks or establish ordered/diverging destruction, correlated
 branch masks, loans, cancellation/nonlocal cleanup, physical allocation limits
 or the remaining normative language and compiler obligations.
 
+
+## Verified direct-discard safety for actual execution prefixes
+
+The existing MayDiscard check on sequence results now feeds the shared runtime
+cleanup predicate. `ConfigurationTyped.storage_cleanup_safe` proves disposal
+permission for the actual value about to be discarded by `Step.sequenceResult`.
+All existing public source/function soundness consumers inherit this conclusion;
+source admission and execution rules are unchanged.
+
+`PartialValue.Disposable.not_exact_resident` excludes every live nominal value
+whose declaration has an explicit exact restriction, including zero-field
+payloads. Such a value is not confused with an empty partial shell.
+`HasType.no_exact_discard` consumes the general prefix soundness theorem to prove
+that no checked execution reaches a direct discard of such a value. The result
+requires neither termination nor a completed evaluation.
+
+`lake build Grounded` passed (30 jobs). Explicit axiom inspection covered the
+runtime exclusion, general reachable-state exclusion, preservation, progress and
+public source soundness; exhaustive inspection covered 3,792 declarations with
+only standard Lean axioms. No concrete examples, unit tests, new axioms or proof
+placeholders were added. This is direct-discard safety in the modeled fragment,
+not complete destruction semantics or whole-language soundness. The previously
+recorded custom-hook, borrowing, nonlocal-control and other obligations remain.
+

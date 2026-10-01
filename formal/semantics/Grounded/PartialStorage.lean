@@ -244,6 +244,25 @@ theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identit
     cases Option.some.inj (found.symm.trans declared)
     simp [UsePermission.Allows, restricted] at restriction
 
+/-- A live exact nominal value is never an empty shell, even with zero fields. -/
+theorem PartialValue.Disposable.not_exact_resident {program : Program} {identity : Nat}
+    {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration)
+    (restricted : declaration.restriction = some .exact) :
+    ¬ (PartialValue.resident (.nominal identity tag fields)).Disposable program := by
+  intro permission
+  cases permission with
+  | empty absent => simp [PartialValue.Empty] at absent
+  | permitted typed allowed =>
+    cases typed with
+    | resident typed =>
+      cases typed with
+      | nominal found chosen finite residents =>
+        cases allowed with
+        | nominal other restriction fields =>
+          cases Option.some.inj (other.symm.trans declared)
+          simp [UsePermission.Allows, restricted] at restriction
+
 
 structure StorageCell where
   activation : ActivationId

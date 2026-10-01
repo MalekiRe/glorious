@@ -23,6 +23,23 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.storage_cleanup_safe⟩
 
+/-- No checked execution prefix reaches a direct discard of a live exact
+nominal owner. This includes empty nominal payloads, not just inhabited fields. -/
+theorem HasType.no_exact_discard (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration)
+    (restricted : declaration.restriction = some .exact) {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result (.nominal identity tag fields), .sequence rest :: stack⟩) : False := by
+  exact PartialValue.Disposable.not_exact_resident declared restricted
+    (checked.soundness checkedProgram store issued run).2.2.2.2
+
+
 /-- Completed execution realizes exactly the declared output masks. No completed
 run or future readiness is a premise of checking or progress. -/
 theorem HasType.evaluation_soundness (checkedProgram : program.Checked)
