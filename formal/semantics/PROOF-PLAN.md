@@ -2261,3 +2261,34 @@ source-function soundness found only standard Lean axioms. No unit tests or
 concrete example files were introduced. The full-language obligations remain
 open; these results concern the current hook-free logical ownership semantics.
 
+
+## Live descendant protection inside partially consumed storage
+
+`PathType.disposable` now carries the canonical residual permission through
+arbitrary-depth checked tuple/struct field paths. It follows the existing
+physical field-opening and selection operations. Whole permission, empty masks,
+mixed tuple masks and nominal constructor masks all use the same authoritative
+permission rules. No ancestor readability assumption or parallel resource walk
+is added.
+
+`selected_permission` derives MayDiscard for an actually readable descendant.
+The real retirement and overwrite consumers now use it. The public scope/caller
+retirement theorems preserve the entire containing heap cell whenever a checked
+path observes a live nondiscardable owner, even if other fields are holes. The
+public overwrite theorem likewise excludes replacing a partially consumed
+ancestor of such an owner after RHS evaluation. Their former whole-root cases
+are instances with empty descendant paths; the existing APIs were generalized
+rather than retaining a second proof path.
+
+`lake build Grounded` passed all 30 jobs. Exhaustive imported axiom inspection
+covered 3,808 Grounded declarations and found only standard Lean axioms. Explicit
+inspection included path disposal preservation, actual scope/caller retirement,
+partial-destination overwrite exclusion, preservation, progress and public
+source-function soundness. No concrete examples or unit tests were added.
+
+These proofs strengthen the current hook-free logical ownership contract. They
+do not establish custom destruction or its ordering/divergence, correlated
+branch cleanup, borrowing, nonlocal control, physical allocation or the other
+remaining whole-language boundaries. None of the broad completion tasks is
+claimed complete.
+

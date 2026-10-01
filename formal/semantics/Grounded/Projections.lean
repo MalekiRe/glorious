@@ -51,6 +51,26 @@ theorem PathType.result_unique {program : Program} {home otherHome : Module}
       exact ih otherTail
 
 
+theorem ProjectionType.use_permission {program : Program} {home : Module} {parent child : Ty}
+    {key : FieldKey} {index : Nat} {permission : UsePermission}
+    (projection : ProjectionType program home parent key index child)
+    (allowed : UsePermitted program.data permission parent) :
+    UsePermitted program.data permission child := by
+  cases projection with
+  | tuple selected =>
+    cases allowed with
+    | tuple first rest =>
+      have member := List.mem_of_getElem? selected
+      cases member with
+      | head => exact first
+      | tail _ member => exact rest _ member
+  | nominal declared shape indexed selected visible =>
+    cases allowed with
+    | nominal otherDeclared restriction fields =>
+      cases Option.some.inj (otherDeclared.symm.trans declared)
+      exact fields _ (by simp [DataDecl.schemas, shape]) _ (List.mem_of_getElem? selected)
+
+
 /-- Resolve one tuple/struct field; enum payloads are not unchecked places. -/
 def Value.projectField (program : Program) (value : Value) (key : FieldKey) : Option (Nat × Value) :=
   match value, key with

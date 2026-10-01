@@ -18,6 +18,20 @@ def Initialization.openFields (state : Initialization) (count : Nat) : List Init
   | .present => List.replicate count .present
   | .fields states => states
 
+theorem Initialization.Empty.open_field {before after : Initialization} {count index : Nat}
+    (empty : before.Empty) (selected : (before.openFields count)[index]? = some after) : after.Empty := by
+  have member := List.mem_of_getElem? selected
+  cases before with
+  | absent =>
+    have same : after = .absent := (List.mem_replicate.mp member).2
+    subst after
+    trivial
+  | present => simp [Initialization.Empty] at empty
+  | fields states =>
+    simp only [Initialization.Empty] at empty
+    exact empty.2 after member
+
+
 def PartialValue.openFields (program : Program) (type : Ty) (value : PartialValue) :
     Option (List PartialValue) :=
   match type, value with
@@ -358,7 +372,47 @@ theorem PathType.select_partial {program : Program} {home : Module} {parent chil
       by simp [Initialization.selectFields, info, stateFound, staticSelected],
       by simp [PartialValue.selectFields, info, opened, found, dynamicSelected], selectedTyped⟩
 
+/-- A disposable residual owner cannot contain a nondisposable selected child.
+The proof follows the existing checked path and actual field-opening operation. -/
+theorem PathType.disposable {program : Program} {home : Module} {parent child : Ty}
+    {path : List FieldKey} (checked : PathType program home parent path child)
+    {before : PartialValue} (permission : before.Disposable program parent) :
+    ∃ selected, before.selectFields program parent path = some selected ∧
+      selected.Disposable program child := by
+  induction checked generalizing before with
+  | here type => exact ⟨before, rfl, permission⟩
+  | @step parent childType result key index rest projection path ih =>
+    obtain ⟨beforeState, typed, disposition⟩ := permission
+    obtain ⟨types, layout, fields, selected, opened, fieldsTyped⟩ := projection.open_partial typed
+    obtain ⟨resident, state, found, stateFound, residentTyped⟩ := fieldsTyped.select selected
+    have selectedPermission : resident.Disposable program childType := by
+      refine Initialization.Disposable.realizes ?_ residentTyped
+      cases disposition with
+      | empty absent => exact .empty (absent.open_field stateFound)
+      | permitted allowed => exact .permitted (projection.use_permission allowed)
+      | tuple head tail =>
+        simp only [Ty.fieldTypes, Option.some.injEq] at layout
+        subst types
+        exact (InitializationsDisposable.cons head tail).select selected stateFound
+      | nominal declared restriction fieldPermissions =>
+        simp only [Ty.fieldTypes, declared, Option.bind_some, Option.map_eq_some_iff] at layout
+        obtain ⟨schema, chosen, rfl⟩ := layout
+        exact (fieldPermissions none schema chosen).select selected stateFound
+    obtain ⟨result, resultSelected, resultPermission⟩ := ih selectedPermission
+    have info := projection.fieldInfo layout selected
+    exact ⟨result, by simp [PartialValue.selectFields, info, opened, found, resultSelected], resultPermission⟩
 
+/-- An observed descendant inherits disposal permission even when its ancestor
+is only partially initialized and cannot itself be read. -/
+theorem PartialValue.Disposable.selected_permission {program : Program} {home : Module}
+    {parent child : Ty} {fields : List FieldKey} {before : PartialValue} {owner : Value}
+    (permission : before.Disposable program parent)
+    (path : PathType program home parent fields child)
+    (read : ((before.selectFields program parent fields).bind PartialValue.read) = some owner) :
+    UsePermitted program.data .discard child := by
+  obtain ⟨selected, found, disposable⟩ := path.disposable permission
+  rw [found] at read
+  exact disposable.read_permission read
 
 /-- Static restoration reestablishes the selected path's exact availability;
 this is an algebraic property of the checking transformation, not a runtime

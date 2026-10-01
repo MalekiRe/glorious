@@ -207,6 +207,21 @@ inductive InitializationsDisposable (data : DataDeclarations) : List Ty → List
       InitializationsDisposable data (type :: types) (state :: states)
 end
 
+theorem InitializationsDisposable.select {data : DataDeclarations} {types : List Ty}
+    {states : List Initialization} (permission : InitializationsDisposable data types states)
+    {index : Nat} {type : Ty} {state : Initialization}
+    (selectedType : types[index]? = some type) (selectedState : states[index]? = some state) :
+    state.Disposable data type := by
+  induction types generalizing states index with
+  | nil => simp at selectedType
+  | cons first rest ih =>
+    cases permission with
+    | cons head tail =>
+      cases index with
+      | zero => cases selectedType; cases selectedState; exact head
+      | succ index => exact ih tail selectedType selectedState
+
+
 /-- One runtime interpretation of the authoritative residual permission. Its
 mask describes this actual resident at its storage type, not a future source state. -/
 def PartialValue.Disposable (program : Program) (value : PartialValue) (type : Ty) : Prop :=

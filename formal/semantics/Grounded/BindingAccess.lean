@@ -33,23 +33,26 @@ def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCe
     (∃ home, PathType program home cell.type place.fields type) ∧
     resident.Disposable program type
 
-/-- An actual readable selected owner must permit discard at its uniquely
-resolved type. Reconstructing fields cannot erase inherited principal constraints. -/
+/-- Replacement cannot discard a live nondiscardable descendant of the old
+destination, even when the destination itself is only partially initialized. -/
 theorem BindingMap.ReplacementSafe.not_nondiscardable
     (safe : BindingMap.ReplacementSafe program heap bindings place)
     {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
     (path : PathType program selectedHome cell.type place.fields selectedType)
+    {descendantHome : Module} {descendantType : Ty} {fields : List FieldKey}
+    (descendant : PathType program descendantHome selectedType fields descendantType)
     {owner : Value}
-    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard selectedType) : False := by
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
+      (old.selectFields program selectedType fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard descendantType) : False := by
   obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
     actualSelected, ⟨home, actualPath⟩, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   cases actualPath.result_unique path
   rw [actualSelected] at selected
-  exact required (permission.read_permission selected)
+  exact required (permission.selected_permission descendant selected)
 
 
 theorem BindingMap.ReplacementSafe.not_exact

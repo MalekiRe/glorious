@@ -57,8 +57,8 @@ theorem HasType.no_exact_discard (checkedProgram : program.Checked)
   exact PartialValue.Disposable.not_exact_read (tag := tag) (fields := fields)
     declared restricted (by simp [PartialValue.read]) permission
 
-/-- A checked prefix and actual scope step preserve every readable owner whose
-structural type forbids discard, not only explicitly restricted nominal types. -/
+/-- Actual lexical retirement preserves every cell with a live nondiscardable
+descendant, without requiring the containing aggregate to remain readable. -/
 theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -70,8 +70,11 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
       ⟨current, .result value, .scope count :: stack⟩)
     (step : Step program ⟨current, .result value, .scope count :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
-    {owner : Value} (resident : cell.resident.read = some owner)
-    (required : ¬ UsePermitted program.data .discard cell.type) :
+    {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields selectedType)
+    {owner : Value}
+    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard selectedType) :
     after.environment.heap.read address = some cell := by
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
@@ -79,10 +82,10 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at retired
     obtain ⟨heap, released, same⟩ := retired
     subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found resident required
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
 
-/-- A checked prefix and actual restore step preserve every readable owner whose
-structural type forbids discard, not only explicitly restricted nominal types. -/
+/-- Actual caller restoration preserves live nondiscardable descendants,
+including those retained inside partially consumed aggregates. -/
 theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -94,8 +97,11 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
       ⟨current, .result value, .restore caller :: stack⟩)
     (step : Step program ⟨current, .result value, .restore caller :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
-    {owner : Value} (resident : cell.resident.read = some owner)
-    (required : ¬ UsePermitted program.data .discard cell.type) :
+    {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields selectedType)
+    {owner : Value}
+    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard selectedType) :
     after.environment.heap.read address = some cell := by
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
@@ -103,7 +109,7 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
     simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at retired
     obtain ⟨heap, released, same⟩ := retired
     subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found resident required
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
 
 
 /-- An actual lexical retirement after a checked prefix cannot retire or alter a
@@ -177,8 +183,8 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found declared restricted selected
 
 
-/-- No checked prefix can overwrite a readable owner of any structurally
-nondiscardable type. The observation is made after RHS evaluation. -/
+/-- After RHS evaluation, no checked prefix overwrites an ancestor of a live
+nondiscardable owner, even if the old destination cannot itself be read. -/
 theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -191,11 +197,14 @@ theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
     {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
     (path : PathType program selectedHome cell.type place.fields selectedType)
+    {descendantHome : Module} {descendantType : Ty} {fields : List FieldKey}
+    (descendant : PathType program descendantHome selectedType fields descendantType)
     {owner : Value}
-    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) = some owner)
-    (required : ¬ UsePermitted program.data .discard selectedType) : False := by
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
+      (old.selectFields program selectedType fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard descendantType) : False := by
   exact BindingMap.ReplacementSafe.not_nondiscardable
-    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path selected required
+    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path descendant selected required
 
 
 /-- Completed execution realizes exactly the declared output masks. No completed

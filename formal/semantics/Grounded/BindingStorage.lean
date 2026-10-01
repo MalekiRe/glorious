@@ -233,20 +233,23 @@ theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activat
 def releaseBindings (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Option (RuntimeHeap StorageCell) :=
   heap.retireMany (bindings.map Prod.snd)
 
-/-- Whole owners whose structural principal forbids discard survive retirement,
-including principals inherited from fields or inactive nominal variants. -/
+/-- A live nondiscardable descendant protects its entire containing cell from
+retirement, including when other fields have been consumed. -/
 theorem BindingMap.Disposable.release_preserves_nondiscardable
     (disposition : BindingMap.Disposable program heap bindings)
     {after : RuntimeHeap StorageCell} (released : releaseBindings heap bindings = some after)
     {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
-    {value : Value} (resident : cell.resident.read = some value)
-    (required : ¬ UsePermitted program.data .discard cell.type) :
+    {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields selectedType)
+    {owner : Value}
+    (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard selectedType) :
     after.read address = some cell := by
   have outside : address ∉ bindings.map Prod.snd := by
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact required (permission.read_permission resident)
+    exact required (permission.selected_permission path resident)
   exact (RuntimeHeap.retireMany_outside released outside).trans found
 
 
