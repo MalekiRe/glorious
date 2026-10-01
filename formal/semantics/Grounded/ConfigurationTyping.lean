@@ -47,8 +47,10 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (.tuple first types))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
       FrameTyped program heap supply activation context (.many types) (.tupleTail head) context (.one (.tuple first types))
-  | project {home context parent result key index}
-      (discard : UsePermitted program.data .discard parent) (selected : ProjectionType program home parent key index result) :
+  | project {home context parent result key index residual}
+      (discard : residual.Disposable program.data parent)
+      (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
+      (selected : ProjectionType program home parent key index result) :
       FrameTyped program heap supply activation context (.one parent) (.project key) context (.one result)
   | array {context element length} (finite : FiniteLayout program.target program.data element)
       (size : length < 2 ^ program.target.pointerBits) :
@@ -153,7 +155,7 @@ theorem ConfigurationTyped.progress {context result state}
       | sequence head discard tail => exact ⟨_, .sequence⟩
       | bind initial discard body fresh => exact ⟨_, .bind⟩
       | tuple head tail => exact ⟨_, .tuple⟩
-      | project source discard selected => exact ⟨_, .project⟩
+      | project source discard mask selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
       | construct declared chosen finite visible access residents => exact ⟨_, .construct⟩
@@ -180,7 +182,7 @@ theorem ConfigurationTyped.progress {context result state}
           obtain ⟨after, _, _, written, _⟩ := AddressedEnvironment.write.progress store selected path resident
           exact ⟨_, .assignResult written⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
-        | project discard projection =>
+        | project discard mask projection =>
           obtain ⟨value, selected, _, _⟩ := projection.access resident
           exact ⟨_, .projectResult selected⟩
         | restore locals discard retained callerIssued older =>
@@ -333,12 +335,12 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
           cases frame with | tupleTail head => exact .intro store issued (.result (.tuple head residents)) tail
     | project =>
       cases code with | expression checked =>
-        cases checked with | project source discard selected =>
-          exact .intro store issued (.expression source) (.cons (.project discard selected) continuation)
+        cases checked with | project source discard mask selected =>
+          exact .intro store issued (.expression source) (.cons (.project discard mask selected) continuation)
     | projectResult selected =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | project discard projection =>
+          cases frame with | project discard mask projection =>
             obtain ⟨value, found, valueTyped, _⟩ := projection.access resident
             cases Option.some.inj (selected.symm.trans found)
             exact .intro store issued (.result valueTyped) tail
@@ -663,8 +665,8 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
 
-/-- Before storage retirement or replacement, every selected old resident has
-legal residual disposition. This is a current-state assertion, not readiness. -/
+/-- Stored residents and discarded temporary remainders have legal residual
+disposition. This is a current-state assertion, not future readiness. -/
 def Configuration.StorageCleanupSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
   | .result _, .scope count :: _ =>
@@ -673,6 +675,7 @@ def Configuration.StorageCleanupSafe (program : Program) (state : Configuration)
       BindingMap.Disposable program state.environment.heap state.environment.bindings
   | .result _, .assign place _ :: _ =>
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
+  | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
   | _, _ => True
 
 theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result : ResultType}
@@ -691,6 +694,8 @@ theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result 
         case restore => exact store.disposable (by assumption)
         case assign =>
           exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
+        case project =>
+          exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
 
 end Grounded
 

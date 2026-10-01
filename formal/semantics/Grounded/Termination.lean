@@ -46,7 +46,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
       obtain ⟨middle, headRun, headScope, headHeap⟩ := heads environment
       obtain ⟨after, tailRun, tailScope, tailHeap⟩ := tails middle
       exact ⟨after, .tuple headRun tailRun, tailScope.trans headScope, tailHeap.trans headHeap⟩
-  | project source discard selected ih =>
+  | project source discard mask selected ih =>
     intro closed
     cases closed with | project inner =>
       obtain ⟨aggregate, resident, runs⟩ := ih inner
@@ -210,7 +210,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨value, middle, headRun, _, middleTyped, middleIssued, _⟩ := ih _ .tupleHead head store issued
       obtain ⟨values, after, tailRun, _⟩ := many tail (fun _ member => .tupleTail member) middleTyped middleIssued
       exact ⟨_, after, .tuple headRun tailRun⟩
-    | project source discard selected =>
+    | project source discard mask selected =>
       obtain ⟨aggregate, after, run, resident, _⟩ := ih _ .project source store issued
       obtain ⟨value, found, _⟩ := selected.access resident
       exact ⟨value, after, .project run found⟩
