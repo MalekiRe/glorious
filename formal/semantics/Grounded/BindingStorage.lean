@@ -347,11 +347,24 @@ theorem AddressedEnvironment.restore.progress {current : AddressedEnvironment} {
       after.activation = caller.activation ∧ after.bindings = caller.bindings ∧
       after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
-      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
-  obtain ⟨heap, released, retained, next, retired, preserved⟩ :=
-    localTyped.release_retained callerTyped (callerTyped.apart_activations localTyped different)
+      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
+      (∀ (retained : AddressedScope) states,
+        BindingMap.Typed program current.heap retained.activation retained.bindings states →
+        retained.activation ≠ current.activation →
+        BindingMap.Typed program after.heap retained.activation retained.bindings states ∧
+        (∀ identity ∈ retained.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) := by
+  obtain ⟨heap, released, next, retired, outside⟩ := localTyped.release
+  have retain : ∀ (scope : AddressedScope) states,
+      BindingMap.Typed program current.heap scope.activation scope.bindings states →
+      scope.activation ≠ current.activation →
+      BindingMap.Typed program heap scope.activation scope.bindings states ∧
+      (∀ identity ∈ scope.bindings.map Prod.snd, heap.read identity = current.heap.read identity) := by
+    intro scope states typed apart
+    have preserved := fun identity member => outside identity (typed.apart_activations localTyped apart identity member)
+    exact ⟨typed.frame preserved, preserved⟩
+  obtain ⟨retained, preserved⟩ := retain caller callerContext callerTyped different
   exact ⟨{ current with activation := caller.activation, bindings := caller.bindings, heap := heap },
-    by simp [AddressedEnvironment.restore, released], retained, rfl, rfl, rfl, next, retired, preserved⟩
+    by simp [AddressedEnvironment.restore, released], retained, rfl, rfl, rfl, next, retired, preserved, retain⟩
 
 /-- Dynamic invocation entry consumes the activation supply, even for an empty
 argument list. Lexical declaration IDs do not determine either dynamic identity. -/

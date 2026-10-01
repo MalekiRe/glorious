@@ -367,10 +367,14 @@ theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
       after.scope = caller ∧ after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
       (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
-      (∀ place, after.read program place = caller.bindings.read program current.heap place) := by
+      (∀ place, after.read program place = caller.bindings.read program current.heap place) ∧
+      (∀ retained retainedContext, AddressedScope.Realizes retained program current.heap retainedContext →
+        retained.activation ≠ current.activation →
+        retained.Realizes program after.heap retainedContext ∧
+        (∀ identity ∈ retained.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) := by
   obtain ⟨⟨states, typed, _, _⟩, _⟩ := realized
   obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
-  obtain ⟨after, restored, afterTyped, activation, bindings, supply, next, retired, preserved⟩ :=
+  obtain ⟨after, restored, afterTyped, activation, bindings, supply, next, retired, preserved, retained⟩ :=
     AddressedEnvironment.restore.progress typed callerTyped different
   have realizedAfter : after.Realizes program context := by
     refine ⟨⟨callerStates, ?_, callerSlots, callerReady⟩, ?_⟩
@@ -379,13 +383,17 @@ theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
       exact afterTyped
     · rw [supply, activation]
       exact callerIssued
-  refine ⟨after, restored, realizedAfter, ?_, supply, next, retired, preserved, ?_⟩
+  refine ⟨after, restored, realizedAfter, ?_, supply, next, retired, preserved, ?_, ?_⟩
   · change (⟨after.activation, after.bindings⟩ : AddressedScope) = caller
     rw [activation, bindings]
   · intro place
     change after.bindings.read program after.heap place = _
     rw [bindings]
     exact BindingMap.read.frame preserved
+  · intro scope scopeContext scopeRealized apart
+    obtain ⟨scopeStates, scopeTyped, scopeSlots, scopeReady⟩ := scopeRealized
+    obtain ⟨scopeAfter, scopePreserved⟩ := retained scope scopeStates scopeTyped apart
+    exact ⟨⟨scopeStates, scopeAfter, scopeSlots, scopeReady⟩, scopePreserved⟩
 
 
 end Grounded

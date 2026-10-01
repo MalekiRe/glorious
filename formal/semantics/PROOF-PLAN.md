@@ -641,6 +641,14 @@ The 26-job source gate and imported-declaration axiom audit passed. This
 closes retained-value framing for these addressed operations, but not the
 expression-machine and continuation consumer cutover below.
 
+Caller restoration additionally frames every retained scope whose activation
+differs from the retiring activation, not just the immediate return target.
+The proof derives all address separation from live-cell ownership and uses
+the same actual retirement result for all callers. The source-realization
+consumer carries exact cell equality and retained readiness for those deeper
+callers. No assumption that deeper callers survive appears in the premise.
+The 26-job source gate and imported-declaration axiom audit passed.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation
