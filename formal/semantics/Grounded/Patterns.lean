@@ -1,5 +1,5 @@
 import Grounded.Matching
-import Grounded.Lexical
+import Grounded.BindingStorage
 
 /-! Static pattern admission, constructor-space coverage and their runtime contracts.
 Selection and binding are derived for the actual subject, not supplied by checking. -/

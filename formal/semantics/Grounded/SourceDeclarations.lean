@@ -104,12 +104,12 @@ theorem NamedFunctionsAdmitted.soundness {source : List NamedFunction} {program 
     (admitted : NamedFunctionsAdmitted source program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
-    {environment : Environment} (store : EnvironmentTyped program environment scope.context)
+    {environment : Environment} (store : environment.Realizes program scope.context)
     {state : Configuration} (run : Run program ⟨environment, .expression core, []⟩ state) :
     ConfigurationTyped program scope.context (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame scope.context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   elaborated.soundness admitted.checked store run
 
 /-- A resolved source name selects the same list position used for the emitted
@@ -153,10 +153,10 @@ theorem NamedFunctionsAdmitted.evaluation_soundness {source : List NamedFunction
     {expression : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
     {environment after : Environment} {value : Value}
-    (store : EnvironmentTyped program environment scope.context)
+    (store : environment.Realizes program scope.context)
     (evaluated : Evaluates program environment core value after) :
-    ValueHasType program value type ∧ EnvironmentTyped program after scope.context ∧
-      EnvironmentFrame scope.context environment after :=
+    ValueHasType program value type ∧ after.Realizes program scope.context ∧
+      AddressedEnvironment.Frames scope.context environment after :=
   elaborated.evaluation_soundness admitted.checked store evaluated
 
 theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {program : Program}
@@ -164,9 +164,9 @@ theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {progra
     {expression : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
     (finite : FiniteCalls program core) {environment : Environment}
-    (store : EnvironmentTyped program environment scope.context) :
+    (store : environment.Realizes program scope.context) :
     ∃ value after, Evaluates program environment core value after ∧ ValueHasType program value type ∧
-      EnvironmentTyped program after scope.context ∧ EnvironmentFrame scope.context environment after ∧
+      after.Realizes program scope.context ∧ AddressedEnvironment.Frames scope.context environment after ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter →
         other = value ∧ otherAfter = after :=
   elaborated.correctness admitted.checked finite store

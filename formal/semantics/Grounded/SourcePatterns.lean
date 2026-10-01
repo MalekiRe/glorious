@@ -42,9 +42,9 @@ inductive NormalizesPattern (program : Program) (home : Module) : SourcePattern 
   | node {head : Head} {fields : List SourcePattern} {patterns : List Pattern}
       (fieldsNormalize : NormalizesPatterns program home fields patterns) :
       NormalizesPattern program home (.node head fields) (.node head patterns)
-  | constant {name : String} {type : Ty} {value : Value}
+  | constant {name : String} {type : Ty} {value : Value} {after : Environment}
       (typed : HasType program home [] (.constant name) type)
-      (evaluated : Evaluates program [] (.constant name) value []) :
+      (evaluated : Evaluates program AddressedEnvironment.empty (.constant name) value after) :
       NormalizesPattern program home (.constant name) (.literal (some type) value)
 inductive NormalizesPatterns (program : Program) (home : Module) :
     List SourcePattern → List Pattern → Prop where
@@ -84,9 +84,9 @@ theorem NormalizesPattern.unique {source : SourcePattern} {pattern : Pattern}
     intro other found
     cases found with
     | constant otherTyped otherEvaluated =>
-      obtain ⟨value, evaluation, valueTyped, unique⟩ := constant_correctness typed
+      obtain ⟨value, after, evaluation, valueTyped, unique⟩ := constant_correctness typed
       have sameType := constant_type_unique typed otherTyped
-      have sameValue := (unique _ [] otherEvaluated).1.trans (unique _ [] evaluated).1.symm
+      have sameValue := (unique _ _ otherEvaluated).1.trans (unique _ _ evaluated).1.symm
       rw [sameType, sameValue]
   | nil => rename_i others found; cases found; rfl
   | cons first rest firstIH restIH =>
@@ -109,7 +109,7 @@ def SourcePattern.Checked.normalize {source : SourcePattern}
     ⟨.node head result.val, .node result.property⟩
   | .constant type typed =>
     ⟨.literal (some type) (Classical.choose (constant_correctness typed)),
-      .constant typed (Classical.choose_spec (constant_correctness typed)).1⟩
+      .constant typed (Classical.choose_spec (Classical.choose_spec (constant_correctness typed))).1⟩
 def SourcePatternsChecked.normalize {sources : List SourcePattern}
     (checked : SourcePatternsChecked program home sources) :
     {patterns // NormalizesPatterns program home sources patterns} :=
@@ -183,19 +183,19 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     (argumentsTyped : HasTypes program home context arguments inputs) (nonempty : source ≠ [])
     (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val)
-    (store : EnvironmentTyped program environment context) {state : Configuration}
+    (store : environment.Realizes program context) {state : Configuration}
     (run : Run program ⟨environment, .expression (.applyPatterns inputs arguments checked.normalize.val), []⟩ state) :
     ConfigurationTyped program context (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   (checked.admits argumentsTyped nonempty covered bodies).soundness checkedProgram store run
 
 
 /-- The optional finite-call contract additionally constructs a unique typed
 value and successor store. Ordinary source safety does not require FiniteCalls. -/
 theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
-    {context : List (BindingId × BindingType)} {environment : List (BindingId × Value)}
+    {context : List (BindingId × BindingType)} {environment : Environment}
     {arguments : List Expr} {inputs : List Ty} {result : Ty}
     (checkedProgram : program.Checked)
     (checked : SourceArmsChecked program home source)
@@ -204,12 +204,12 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val)
     (finite : FiniteCalls program (.applyPatterns inputs arguments checked.normalize.val))
-    (environmentTyped : EnvironmentTyped program environment context) :
+    (environmentTyped : environment.Realizes program context) :
     NormalizesArms program home source checked.normalize.val ∧
       (∀ other, NormalizesArms program home source other → other = checked.normalize.val) ∧
       ∃ value after, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) value after ∧
-        ValueHasType program value result ∧ EnvironmentTyped program after context ∧
-        EnvironmentFrame context environment after ∧
+        ValueHasType program value result ∧ after.Realizes program context ∧
+        AddressedEnvironment.Frames context environment after ∧
         ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) other otherAfter →
           other = value ∧ otherAfter = after := by
   exact ⟨checked.normalize.property, checked.normalize.property.unique,

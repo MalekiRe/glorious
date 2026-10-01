@@ -11,12 +11,12 @@ variable {program : Program} {home : Module}
 not assumptions attached to source admission. Recursive calls are permitted. -/
 theorem HasType.soundness (checkedProgram : program.Checked) {context : StaticContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type) {environment : Environment}
-    (store : EnvironmentTyped program environment context) {state : Configuration}
+    (store : environment.Realizes program context) {state : Configuration}
     (run : Run program ⟨environment, .expression expression, []⟩ state) :
     ConfigurationTyped program context (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup := by
+      AddressedEnvironment.Frames context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup := by
   have entry := ConfigurationTyped.entry checked store
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.frame_run checkedProgram run, current.bindings_distinct⟩
@@ -27,10 +27,10 @@ well-founded call expansion. -/
 theorem HasType.evaluation_soundness (checkedProgram : program.Checked)
     {context : StaticContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type) {environment after : Environment} {value : Value}
-    (store : EnvironmentTyped program environment context)
+    (store : environment.Realizes program context)
     (evaluated : Evaluates program environment expression value after) :
-    ValueHasType program value type ∧ EnvironmentTyped program after context ∧
-      EnvironmentFrame context environment after := by
+    ValueHasType program value type ∧ after.Realizes program context ∧
+      AddressedEnvironment.Frames context environment after := by
   have entry := ConfigurationTyped.entry checked store
   have current := entry.run checkedProgram evaluated
   have framed := entry.frame_run checkedProgram evaluated
@@ -46,20 +46,24 @@ immutable framing and uniqueness. FiniteCalls is not required for general safety
 theorem correctness (checkedProgram : program.Checked) {context : List (BindingId × BindingType)}
     {expression : Expr} {type : Ty} (admitted : HasType program home context expression type)
     (finite : FiniteCalls program expression) {environment : Environment}
-    (environmentTyped : EnvironmentTyped program environment context) :
+    (environmentTyped : environment.Realizes program context) :
     ∃ value after, Evaluates program environment expression value after ∧ ValueHasType program value type ∧
-      EnvironmentTyped program after context ∧ EnvironmentFrame context environment after ∧
+      after.Realizes program context ∧ AddressedEnvironment.Frames context environment after ∧
       ∀ other otherAfter, Evaluates program environment expression other otherAfter → other = value ∧ otherAfter = after := by
   obtain ⟨value, after, run, valueTyped, afterTyped, framed⟩ := admitted.executes checkedProgram finite environmentTyped
   exact ⟨value, after, run, valueTyped, afterTyped, framed, fun _ _ other => run.unique other⟩
 
+theorem AddressedEnvironment.empty_realizes : AddressedEnvironment.empty.Realizes program [] :=
+  (BindingInputsTyped.enter (program := program) (inputs := []) .nil RuntimeHeap.empty ⟨0⟩).1
+
 theorem closed_correctness (checkedProgram : program.Checked) {expression : Expr} {type : Ty}
     (admitted : HasType program home [] expression type) (finite : FiniteCalls program expression) :
-    ∃ value, Evaluates program [] expression value [] ∧ ValueHasType program value type ∧
-      ∀ other after, Evaluates program [] expression other after → other = value ∧ after = [] := by
-  obtain ⟨value, after, evaluated, typed, afterTyped, afterFrame, unique⟩ := correctness checkedProgram admitted finite .nil
-  cases afterTyped
-  exact ⟨value, evaluated, typed, unique⟩
+    ∃ value after, Evaluates program AddressedEnvironment.empty expression value after ∧ ValueHasType program value type ∧
+      after.Realizes program [] ∧ AddressedEnvironment.Frames [] AddressedEnvironment.empty after ∧
+      ∀ other otherAfter, Evaluates program AddressedEnvironment.empty expression other otherAfter →
+        other = value ∧ otherAfter = after :=
+  correctness checkedProgram admitted finite AddressedEnvironment.empty_realizes
+
 
 /-- Exact admission boundary, in every lexical context and at every width. -/
 theorem integer_admission (context : List (BindingId × BindingType)) (type : IntegerType) (magnitude : Nat) :
@@ -83,7 +87,7 @@ theorem character_admission (context : List (BindingId × BindingType)) (number 
 
 /-- The original unit subset retains precisely its admission and evaluation meaning. -/
 theorem unit_agreement : HasType program home [] .unit .unit ∧
-    ∀ value, Evaluates program [] .unit value [] ↔ value = .unit := by
+    ∀ value, Evaluates program AddressedEnvironment.empty .unit value AddressedEnvironment.empty ↔ value = .unit := by
   refine ⟨.unit, fun value => ⟨?_, ?_⟩⟩
   · intro evaluation
     exact (Evaluates.unique Evaluates.unit evaluation).1

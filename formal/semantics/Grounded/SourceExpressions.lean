@@ -174,12 +174,12 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
     {scope : SourceScope} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope source core type)
     (checkedProgram : program.Checked) {environment : Environment}
-    (store : EnvironmentTyped program environment scope.context) {state : Configuration}
+    (store : environment.Realizes program scope.context) {state : Configuration}
     (run : Run program ⟨environment, .expression core, []⟩ state) :
     ConfigurationTyped program scope.context (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame scope.context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   elaborated.checked.soundness checkedProgram store run
 
 /-- Completed executions preserve the declared result and caller environment;
@@ -189,10 +189,10 @@ theorem NamedExpr.Elaborates.evaluation_soundness {program : Program} {home : Mo
     {scope : SourceScope} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope source core type)
     (checkedProgram : program.Checked) {environment after : Environment} {value : Value}
-    (store : EnvironmentTyped program environment scope.context)
+    (store : environment.Realizes program scope.context)
     (evaluated : Evaluates program environment core value after) :
-    ValueHasType program value type ∧ EnvironmentTyped program after scope.context ∧
-      EnvironmentFrame scope.context environment after :=
+    ValueHasType program value type ∧ after.Realizes program scope.context ∧
+      AddressedEnvironment.Frames scope.context environment after :=
   elaborated.checked.evaluation_soundness checkedProgram store evaluated
 
 /-- Finite-call termination remains an optional theorem about the same selected
@@ -202,9 +202,9 @@ theorem NamedExpr.Elaborates.correctness {program : Program} {home : Module}
     {scope : SourceScope} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope source core type)
     (checkedProgram : program.Checked) (finite : FiniteCalls program core)
-    {environment : Environment} (store : EnvironmentTyped program environment scope.context) :
+    {environment : Environment} (store : environment.Realizes program scope.context) :
     ∃ value after, Evaluates program environment core value after ∧ ValueHasType program value type ∧
-      EnvironmentTyped program after scope.context ∧ EnvironmentFrame scope.context environment after ∧
+      after.Realizes program scope.context ∧ AddressedEnvironment.Frames scope.context environment after ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter →
         other = value ∧ otherAfter = after :=
   Grounded.correctness checkedProgram elaborated.checked finite store

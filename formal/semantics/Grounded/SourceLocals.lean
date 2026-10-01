@@ -106,10 +106,12 @@ theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spe
     {binding : SourceBinding} (resolved : scope.resolve spelling = some binding)
     {program : Program} {fields outerFields : List FieldKey} {value : Value}
     {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
+    {context : StaticContext} (store : before.Realizes program context)
     (step : Step program ⟨before, .result value, .assign ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
-    readPlace program ⟨binding.identity, outerFields⟩ after.environment =
-      readPlace program ⟨binding.identity, outerFields⟩ before := by
-  apply Step.assignment_frame step
+    after.environment.read program ⟨binding.identity, outerFields⟩ =
+      before.read program ⟨binding.identity, outerFields⟩ := by
+  obtain ⟨⟨states, typed, _, _⟩, _⟩ := store
+  apply Step.assignment_frame typed.addresses_distinct step
   intro equal
   change binding.identity = (⟨scope.next⟩ : BindingId) at equal
   have member : binding.identity ∈ scope.bindings.map SourceBinding.identity :=
@@ -167,24 +169,24 @@ theorem SourceScope.bind_soundness (checkedProgram : program.Checked)
     (initialized : HasType program home scope.context initial localType)
     (discard : Duplicable program.data localType)
     (continued : HasType program home (scope.enter spelling ⟨localType, mutable⟩).context body result)
-    {environment : Environment} (store : EnvironmentTyped program environment scope.context) {state : Configuration}
+    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
     (run : Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ state) :
     ConfigurationTyped program scope.context (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame scope.context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   (scope.bind_checked spelling mutable initialized discard continued).soundness checkedProgram store run
 
 theorem SourceScope.read_soundness (checkedProgram : program.Checked)
     {scope : SourceScope} {spelling : String} {fields : List FieldKey} {binding : SourceBinding} {type : Ty}
     (resolved : scope.resolve spelling = some binding)
     (path : PathType program home binding.slot.type fields type) (copyable : Duplicable program.data type)
-    {environment : Environment} (store : EnvironmentTyped program environment scope.context) {state : Configuration}
+    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
     (run : Run program ⟨environment, .expression (.read ⟨binding.identity, fields⟩), []⟩ state) :
     ConfigurationTyped program scope.context (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame scope.context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   (scope.read_checked resolved path copyable).soundness checkedProgram store run
 
 theorem SourceScope.assign_soundness (checkedProgram : program.Checked)
@@ -193,12 +195,12 @@ theorem SourceScope.assign_soundness (checkedProgram : program.Checked)
     (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
     (discard : Duplicable program.data type) (resident : HasType program home scope.context value type)
     (continued : HasType program home scope.context rest result)
-    {environment : Environment} (store : EnvironmentTyped program environment scope.context) {state : Configuration}
+    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
     (run : Run program ⟨environment, .expression (.assign ⟨binding.identity, fields⟩ value rest), []⟩ state) :
     ConfigurationTyped program scope.context (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame scope.context environment state.outerEnvironment ∧
-      (state.environment.map Prod.fst).Nodup :=
+      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      (state.environment.bindings.map Prod.fst).Nodup :=
   (scope.assign_checked resolved path writable discard resident continued).soundness checkedProgram store run
 
 

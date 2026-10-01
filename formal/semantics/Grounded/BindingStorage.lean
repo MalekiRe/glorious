@@ -380,6 +380,8 @@ theorem enterBindings.typed {inputs : List BindingInput} (typed : BindingInputsT
       (enterBindings heap supply inputs).bindings (inputs.map BindingInput.state) :=
   allocateBindings.typed typed heap supply.allocate.1
 
+def AddressedEnvironment.empty : AddressedEnvironment := enterBindings RuntimeHeap.empty ⟨0⟩ []
+
 theorem enterBindings.fresh_activation (heap : RuntimeHeap StorageCell) (supply : ActivationSupply)
     (inputs : List BindingInput) :
     (enterBindings heap supply inputs).activation.index = supply.next ∧

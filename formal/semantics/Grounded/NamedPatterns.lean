@@ -64,7 +64,7 @@ theorem NamedPattern.Elaborates.checked {program : Program} {home : Module}
   | wildcard discard => exact ⟨.wildcard discard, rfl⟩
   | binder name discard => exact ⟨.binder _ discard, rfl⟩
   | constant typed discard =>
-    exact ⟨.literal (Classical.choose_spec (constant_correctness typed)).2.1 discard, rfl⟩
+    exact ⟨.literal (Classical.choose_spec (Classical.choose_spec (constant_correctness typed))).2.1 discard, rfl⟩
   | node shape access _ ih => exact ⟨.node shape access ih.1, ih.2⟩
   | nil => exact ⟨.nil, rfl⟩
   | cons _ _ tail head => exact ⟨.cons head.1 tail.1, by rw [head.2, tail.2, List.append_assoc]⟩

@@ -318,4 +318,21 @@ theorem replaceBinding.all {α : Type} {name : BindingId} {value : α}
         · exact ih replaced tail entry member
 
 
+theorem lookup.of_mem {α : Type} {name : BindingId} {value : α} {entries : List (BindingId × α)}
+    (distinct : (entries.map Prod.fst).Nodup) (member : (name, value) ∈ entries) :
+    lookup name entries = some value := by
+  induction entries with
+  | nil => cases member
+  | cons entry rest ih =>
+    rcases entry with ⟨key, resident⟩
+    rcases List.mem_cons.mp member with same | tailMember
+    · cases same; simp [lookup]
+    · have parts := List.nodup_cons.mp distinct
+      have different : name ≠ key := by
+        intro same
+        subst key
+        exact parts.1 (List.mem_map.mpr ⟨(name, value), tailMember, rfl⟩)
+      simpa [lookup, different] using ih parts.2 tailMember
+
+
 end Grounded

@@ -25,12 +25,12 @@ General source safety is defined in `Grounded/Soundness.lean`:
 ```lean
 program.Checked →
 HasType program home context expression type →
-EnvironmentTyped program environment context →
+environment.Realizes program context →
 Run program ⟨environment, .expression expression, []⟩ state →
 ConfigurationTyped program context (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
-  EnvironmentFrame context environment state.outerEnvironment ∧
-  (state.environment.map Prod.fst).Nodup
+  AddressedEnvironment.Frames context environment state.outerEnvironment ∧
+  (state.environment.bindings.map Prod.fst).Nodup
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
@@ -59,8 +59,9 @@ consumer separately requires finite call expansion.
 
 The admitted logical fragment still requires fully initialized storage and
 copyable/disposable expression operations. Mutable lexical storage, checked
-projected writes and recursive declared functions are covered. Moves, holes,
-loans, resolved storage identities and physical memory remain outside it.
+projected writes and recursive declared functions now use resolved storage and
+generative activation identities over one shared logical heap. Source-level
+moves, holes, loans and physical memory remain outside the admitted fragment.
 
 
 
@@ -69,9 +70,8 @@ loans, resolved storage identities and physical memory remain outside it.
 | `Model` | Decoded vocabulary, declarations and identity-indexed lookup/replacement; no checking/execution certificates |
 | `Types` | Alias resolution, finite layout and duplicability |
 | `Values` | Structural value equality, resident typing and indexed access |
-| `Lexical` | Existing value-environment realization, replacement proofs and immutable framing; pending addressed-store migration |
 | `Projections` | Shared field/path authority and value selection/replacement, independent of lexical storage |
-| `Places` | Rooted lexical place contracts and actual reads/writes |
+| `Places` | Rooted lexical place contracts using the shared checked field path |
 | `BindingStorage` | Addressed binding realization, actual allocation/activation entry, scope extension and retirement |
 | `BindingAccess` | Resolved address reads, moves and restoration through shared path/heap operations |
 | `Matching` | Runtime matching, subject interpretation and first-arm selection |
@@ -359,10 +359,15 @@ has been added or assumed.
 
 
 
-## Storage cutover in progress: logical heap kernel
+## Addressed storage and shared-heap machine cutover
 
-`Grounded/RuntimeHeap.lean` supplies the storage operations needed by the
-pending machine cutover. Storage identities are monotone and are distinct from
+The following prerequisite checkpoints record the path to the integrated
+machine theorem described at the end of this section. Earlier pending-cutover
+statements in those checkpoints are superseded by that result, not by source
+move admission, which remains open.
+
+`Grounded/RuntimeHeap.lean` supplies the authoritative logical storage operations.
+Storage identities are monotone and are distinct from
 lexical binding identities. A retired cell is absent below the allocation
 frontier; a live initialization hole must instead be represented inside a cell
 payload. Writes cannot recreate a retired cell.
@@ -649,19 +654,47 @@ consumer carries exact cell equality and retained readiness for those deeper
 callers. No assumption that deeper callers survive appears in the premise.
 The 26-job source gate and imported-declaration axiom audit passed.
 
-Required consumer cutover remains: `Execution` must replace its value-bearing
-environments with address maps over one shared heap; restoration frames must
-retain caller maps and activation IDs, not heap snapshots. Its continuation
-realization must preserve retained-cell liveness and separation through every
-actual transition. Checking and source admission must then consume the same
-outgoing availability states. The binding modules alone do not complete this
-boundary or establish source-level move soundness.
+The shared-heap expression-machine cutover is now integrated. Runtime
+`Environment` is the authoritative `AddressedEnvironment`: lexical IDs map
+to storage IDs; the shared heap and activation supply are never saved inside
+restoration frames. Those frames retain only caller activation IDs and maps.
+`FrameTyped` and `ContinuationTyped` realize every retained caller in the
+current heap, with strictly older activation identities at return boundaries.
+Actual allocation, writes, scope retirement and return retirement preserve
+these facts. General preservation, progress and arbitrary-run framing consume
+the same invariant, including recursive calls and nested retained scopes.
 
-These storage results are not language-level permission to discard residents,
-bypass ownership/loans, or execute unchecked projections. The expression
-machine, flow-sensitive admission and public source theorem are not yet
-migrated. Projected operations now have proved producers, but that remaining
-consumer cutover is mandatory before claiming source coverage of moves.
+`AddressedEnvironment.Frames` preserves exact immutable heap cells and scope
+identity; preservation of all projected reads follows from that relation.
+The source shadow-assignment theorem now derives address separation from
+current realization instead of treating distinct lexical names as sufficient.
+`HasType.executes` constructs finite-call execution through actual allocation
+and retirement; caller restoration follows from the preserved continuation,
+not an assumed successful cleanup. Its postconditions use general machine
+preservation rather than a second preservation argument.
+
+All named-source safety, evaluation and finite-call correctness consumers now
+use this addressed realization. Structural constants produce one typed value
+for every caller heap and supply, preserve the caller scope and heap, and run
+through the same machine. Closed execution and constant normalization expose
+the actual final environment because invocation advances the supply. The old
+`Lexical` runtime, value-environment typing/framing and list-based place
+read/write operations have been removed, not retained as compatibility paths.
+
+The complete source-consumer gate passed (25 jobs). An imported-declaration
+axiom audit checked 2,936 `Grounded` declarations and found only `propext`,
+`Quot.sound` and `Classical.choice`. The general machine preservation,
+progress and framing proofs and finite-call construction use only `propext`
+and `Quot.sound`. No unit tests or concrete examples were added or run.
+
+Remaining boundary: flow-sensitive moves and restoration must extend the same
+checking, control/continuation realization and source-admission chain. The
+current source fragment still requires initialized residents and duplicable
+operations; storage-level move proofs do not yet establish source-level move
+soundness. Logical allocation is unbounded: this result does not establish
+physical exhaustion, loans, destruction hooks, nonlocal cleanup, foreign
+runtime correctness or whole-language soundness.
+
 
 Verification: strict `lake build Grounded.StorageOperations` passed. The
 all-defining-module audit of `RuntimeHeap`, `PartialStorage`,

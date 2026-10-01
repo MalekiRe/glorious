@@ -230,41 +230,76 @@ theorem AddressedEnvironment.Realizes.read {current : AddressedEnvironment}
     (Initialization.select_ready rootReady stateFound)
 
 
+theorem BindingMap.restore.cell_other {after : RuntimeHeap StorageCell} {name : BindingId} {other : StorageId} {value : Value}
+    (distinct : (bindings.map Prod.snd).Nodup)
+    (written : bindings.restore program heap place value = some after)
+    (otherMapped : lookup name bindings = some other) (different : name ≠ place.root) :
+    after.read other = heap.read other := by
+  simp only [BindingMap.restore, restoreStorage, Option.bind_eq_some_iff] at written
+  obtain ⟨identity, mapped, cell, _, updated, _, stored⟩ := written
+  apply RuntimeHeap.write_other stored
+  intro same
+  subst other
+  exact different (lookup.unique_key distinct otherMapped mapped)
+
 theorem BindingMap.restore.read_other {after : RuntimeHeap StorageCell} {other : Place} {value : Value}
     (distinct : (bindings.map Prod.snd).Nodup)
     (written : bindings.restore program heap place value = some after)
     (different : other.root ≠ place.root) :
     bindings.read program after other = bindings.read program heap other := by
-  simp only [BindingMap.restore, restoreStorage, Option.bind_eq_some_iff] at written
-  obtain ⟨identity, mapped, cell, _, updated, _, stored⟩ := written
   cases otherMapped : lookup other.root bindings with
   | none => simp [BindingMap.read, otherMapped]
-  | some otherIdentity =>
-    have apart : otherIdentity ≠ identity := by
-      intro same
-      subst otherIdentity
-      exact different (lookup.unique_key distinct otherMapped mapped)
-    simp [BindingMap.read, otherMapped, RuntimeHeap.write_other stored apart]
+  | some identity =>
+    simp [BindingMap.read, otherMapped, BindingMap.restore.cell_other distinct written otherMapped different]
 
-/-- Observational framing preserves storage identities and all reads rooted in
-immutable source bindings. It contains no runtime snapshot or duplicated values. -/
-def AddressedEnvironment.Frames (program : Program) (context : List (BindingId × BindingType))
+/-- Frame exact immutable cells. Every source read is a consequence, not a
+separately maintained value snapshot. -/
+def AddressedEnvironment.Frames (context : List (BindingId × BindingType))
     (before after : AddressedEnvironment) : Prop :=
   after.scope = before.scope ∧
-    ∀ (place : Place) (slot : BindingType), lookup place.root context = some slot → slot.mutable = false →
-      after.read program place = before.read program place
+    ∀ (name : BindingId) (slot : BindingType) (identity : StorageId),
+      lookup name context = some slot → slot.mutable = false → lookup name before.bindings = some identity →
+      after.heap.read identity = before.heap.read identity
+
+theorem AddressedEnvironment.Frames.refl (context : List (BindingId × BindingType)) (current : AddressedEnvironment) :
+    Frames context current current := ⟨rfl, fun _ _ _ _ _ _ => rfl⟩
+
+theorem AddressedEnvironment.Frames.trans {context : List (BindingId × BindingType)}
+    {before middle after : AddressedEnvironment} (first : Frames context before middle)
+    (second : Frames context middle after) : Frames context before after := by
+  refine ⟨second.1.trans first.1, ?_⟩
+  intro name slot identity selected immutable mapped
+  have maps := congrArg AddressedScope.bindings first.1
+  simp only [AddressedEnvironment.scope] at maps
+  exact (second.2 name slot identity selected immutable (by rw [maps]; exact mapped)).trans
+    (first.2 name slot identity selected immutable mapped)
+
+theorem AddressedEnvironment.Frames.read {context : List (BindingId × BindingType)}
+    {before after : AddressedEnvironment} (framed : Frames context before after)
+    {place : Place} {slot : BindingType} (selected : lookup place.root context = some slot)
+    (immutable : slot.mutable = false) : after.read program place = before.read program place := by
+  have maps := congrArg AddressedScope.bindings framed.1
+  simp only [AddressedEnvironment.scope] at maps
+  simp only [AddressedEnvironment.read]
+  rw [maps]
+  unfold BindingMap.read
+  cases mapped : lookup place.root before.bindings with
+  | none => rfl
+  | some identity =>
+    change (after.heap.read identity).bind _ = (before.heap.read identity).bind _
+    rw [framed.2 place.root slot identity selected immutable mapped]
 
 theorem AddressedEnvironment.write.frame {current after : AddressedEnvironment}
     {context : List (BindingId × BindingType)} {slot : BindingType} {value : Value}
     (realized : current.Realizes program context) (resolved : lookup place.root context = some slot)
     (writable : slot.mutable = true) (written : current.write program place value = some after) :
-    AddressedEnvironment.Frames program context current after := by
+    AddressedEnvironment.Frames context current after := by
   obtain ⟨⟨states, typed, _, _⟩, _⟩ := realized
   obtain ⟨heap, restored, same⟩ := Option.map_eq_some_iff.mp written
   subst after
   refine ⟨rfl, ?_⟩
-  intro other otherSlot selected immutable
-  apply BindingMap.restore.read_other typed.addresses_distinct restored
+  intro other otherSlot identity selected immutable mapped
+  apply BindingMap.restore.cell_other typed.addresses_distinct restored mapped
   intro sameRoot
   rw [sameRoot, resolved] at selected
   cases Option.some.inj selected
@@ -279,7 +314,7 @@ theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
     (writable : slot.mutable = true)
     {value : Value} (resident : ValueHasType program value type) :
     ∃ after, current.write program place value = some after ∧ after.Realizes program context ∧
-      after.read program place = some value ∧ AddressedEnvironment.Frames program context current after ∧
+      after.read program place = some value ∧ AddressedEnvironment.Frames context current after ∧
       after.supply = current.supply ∧
       after.heap.next = current.heap.next ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
@@ -394,6 +429,87 @@ theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
     obtain ⟨scopeStates, scopeTyped, scopeSlots, scopeReady⟩ := scopeRealized
     obtain ⟨scopeAfter, scopePreserved⟩ := retained scope scopeStates scopeTyped apart
     exact ⟨⟨scopeStates, scopeAfter, scopeSlots, scopeReady⟩, scopePreserved⟩
+
+
+theorem AddressedEnvironment.Realizes.keys {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} (realized : current.Realizes program context) :
+    current.bindings.map Prod.fst = context.map Prod.fst := by
+  obtain ⟨⟨states, typed, slots, _⟩, _⟩ := realized
+  rw [← slots, List.map_map]
+  exact typed.keys
+
+theorem AddressedEnvironment.Realizes.distinct {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} (realized : current.Realizes program context) :
+    (context.map Prod.fst).Nodup := by
+  obtain ⟨⟨states, typed, slots, ready⟩, _⟩ := realized
+  rw [← slots, List.map_map]
+  have distinct : (states.map Prod.fst).Nodup := by
+    clear slots ready
+    generalize current.scope.bindings = bindings at typed
+    induction typed with
+    | nil => exact .nil
+    | cons found owner declared resident tail freshName freshStorage ih =>
+      exact List.nodup_cons.mpr ⟨freshName, ih⟩
+  exact distinct
+
+theorem BindingInputsTyped.enter {inputs : List BindingInput} (typed : BindingInputsTyped program inputs)
+    (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
+    (enterBindings heap supply inputs).Realizes program (inputs.map fun input => (input.name, input.slot)) ∧
+    (∀ caller context, AddressedScope.Realizes caller program heap context →
+      caller.Realizes program (enterBindings heap supply inputs).heap context ∧
+      (∀ identity ∈ caller.bindings.map Prod.snd, (enterBindings heap supply inputs).heap.read identity = heap.read identity)) := by
+  refine ⟨⟨⟨inputs.map BindingInput.state, enterBindings.typed typed heap supply, ?_, ?_⟩,
+    supply.allocate_issued⟩, ?_⟩
+  · simp [BindingInput.state, List.map_map, Function.comp_def]
+  · intro entry member
+    obtain ⟨input, _, same⟩ := List.mem_map.mp member
+    subst entry
+    exact .present
+  · intro caller context realized
+    obtain ⟨states, callerTyped, slots, ready⟩ := realized
+    exact ⟨⟨states, callerTyped.allocate supply.allocate.1 inputs, slots, ready⟩,
+      callerTyped.allocate_preserves supply.allocate.1 inputs⟩
+
+
+/-- Realize a scope view without retiring storage. Execution still uses exitScope. -/
+theorem AddressedEnvironment.Realizes.drop {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} (realized : current.Realizes program context) (count : Nat) :
+    ({ current with bindings := current.bindings.drop count } : AddressedEnvironment).Realizes program (context.drop count) := by
+  obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
+  refine ⟨⟨states.drop count, typed.drop count, ?_, ?_⟩, issued⟩
+  · rw [List.map_drop, slots]
+  · intro entry member
+    exact ready entry (List.mem_of_mem_drop member)
+
+theorem AddressedEnvironment.Frames.drop {before after : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} (realized : before.Realizes program context)
+    (framed : Frames context before after) (count : Nat) :
+    Frames (context.drop count) { before with bindings := before.bindings.drop count }
+      { after with bindings := after.bindings.drop count } := by
+  refine ⟨congrArg (fun scope : AddressedScope =>
+    (⟨scope.activation, scope.bindings.drop count⟩ : AddressedScope)) framed.1, ?_⟩
+  intro name slot identity selected immutable mapped
+  apply framed.2 name slot identity
+    (lookup.of_mem realized.distinct (List.mem_of_mem_drop (lookup.mem selected))) immutable
+  apply lookup.of_mem _ (List.mem_of_mem_drop (lookup.mem mapped))
+  rw [realized.keys]
+  exact realized.distinct
+
+
+theorem AddressedEnvironment.Frames.of_cells {context : List (BindingId × BindingType)}
+    {before after : AddressedEnvironment} (scope : after.scope = before.scope)
+    (preserved : ∀ identity ∈ before.bindings.map Prod.snd, after.heap.read identity = before.heap.read identity) :
+    Frames context before after := by
+  refine ⟨scope, ?_⟩
+  intro name slot identity selected immutable mapped
+  exact preserved identity (List.mem_map.mpr ⟨(name, identity), lookup.mem mapped, rfl⟩)
+
+theorem AddressedScope.Realizes.allocate_preserves {scope : AddressedScope} {heap : RuntimeHeap StorageCell}
+    {context : List (BindingId × BindingType)} (realized : scope.Realizes program heap context)
+    (owner : ActivationId) (inputs : List BindingInput) :
+    ∀ identity ∈ scope.bindings.map Prod.snd, (allocateBindings heap owner inputs).2.read identity = heap.read identity := by
+  obtain ⟨states, typed, _, _⟩ := realized
+  exact typed.allocate_preserves owner inputs
 
 
 end Grounded

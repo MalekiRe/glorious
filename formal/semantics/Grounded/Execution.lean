@@ -1,12 +1,13 @@
 import Grounded.Places
 import Grounded.Matching
+import Grounded.BindingAccess
 
-/-! One explicit-frame operational semantics. Frames retain actual pending values,
-caller environments and scope boundaries. No checking or execution certificate
-occurs in a runtime configuration. Storage is still the logical lexical store. -/
+/-! One shared-heap explicit-frame operational semantics. Retained callers carry
+only activation identities and address maps. Allocation, access and retirement
+use the authoritative addressed operations; no checking certificates occur here. -/
 namespace Grounded
 
-abbrev Environment := List (BindingId × Value)
+abbrev Environment := AddressedEnvironment
 
 inductive Control where
   | expression (expression : Expr)
@@ -26,17 +27,24 @@ inductive Frame where
   | construct (identity : Nat) (tag : Option Nat)
   | call (declaration : FunctionDecl)
   | patterns (arms : List (Pattern × Expr))
-  | restore (environment : Environment)
+  | restore (scope : AddressedScope)
   | argumentHead (tail : List Expr)
   | argumentTail (head : Value)
 
-/-- The environment exposed outside a frame. This is the same scope/return
-operation used by execution; it does not execute any pending expression. -/
-def Frame.environment (frame : Frame) (current : Environment) : Environment :=
+def Frame.activation (frame : Frame) (current : ActivationId) : ActivationId :=
   match frame with
-  | .scope count => current.drop count
-  | .restore caller => caller
+  | .restore caller => caller.activation
   | _ => current
+
+/-- The observable outer scope in the current shared heap. This is a view,
+not a retirement operation and not a saved heap or allocation supply. -/
+def Frame.environment (frame : Frame) (current : Environment) : Environment :=
+  { current with
+    activation := frame.activation current.activation
+    bindings := match frame with
+      | .scope count => current.bindings.drop count
+      | .restore caller => caller.bindings
+      | _ => current.bindings }
 
 def continuationEnvironment (current : Environment) : List Frame → Environment
   | [] => current
@@ -72,7 +80,7 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | group {env : Environment} {stack : List Frame} {body : Expr} :
       Step program ⟨env, .expression (.group body), stack⟩ ⟨env, .expression body, stack⟩
   | read {env : Environment} {stack : List Frame} {place : Place} {value : Value}
-      (selected : readPlace program place env = some value) :
+      (selected : env.read program place = some value) :
       Step program ⟨env, .expression (.read place), stack⟩ ⟨env, .result value, stack⟩
   | sequence {env : Environment} {stack : List Frame} {first rest : Expr} :
       Step program ⟨env, .expression (.sequence first rest), stack⟩
@@ -85,15 +93,16 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
         ⟨env, .expression initial, .bind name ⟨localType, mutable⟩ body :: stack⟩
   | bindResult {env : Environment} {stack : List Frame} {name : BindingId} {slot : BindingType} {body : Expr} {value : Value} :
       Step program ⟨env, .result value, .bind name slot body :: stack⟩
-        ⟨(name, value) :: env, .expression body, .scope 1 :: stack⟩
-  | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value} :
+        ⟨env.extend [⟨name, slot, value⟩], .expression body, .scope 1 :: stack⟩
+  | scope {env after : Environment} {stack : List Frame} {count : Nat} {value : Value}
+      (exited : env.exitScope count = some after) :
       Step program ⟨env, .result value, .scope count :: stack⟩
-        ⟨(Frame.scope count).environment env, .result value, stack⟩
+        ⟨after, .result value, stack⟩
   | assign {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
       Step program ⟨env, .expression (.assign place value rest), stack⟩
         ⟨env, .expression value, .assign place rest :: stack⟩
   | assignResult {env after : Environment} {stack : List Frame} {place : Place} {rest : Expr} {value : Value}
-      (written : writePlace program place value env = some after) :
+      (written : env.write program place value = some after) :
       Step program ⟨env, .result value, .assign place rest :: stack⟩ ⟨after, .expression rest, stack⟩
   | tuple {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
       Step program ⟨env, .expression (.tuple head tail), stack⟩
@@ -116,10 +125,11 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | constant {env : Environment} {stack : List Frame} {name : String} {declaration : ConstantDecl}
       (declared : program.constants name = some declaration) :
       Step program ⟨env, .expression (.constant name), stack⟩
-        ⟨[], .expression declaration.body, .restore env :: stack⟩
-  | restore {env caller : Environment} {stack : List Frame} {value : Value} :
+        ⟨enterBindings env.heap env.supply [], .expression declaration.body, .restore env.scope :: stack⟩
+  | restore {env after : Environment} {caller : AddressedScope} {stack : List Frame} {value : Value}
+      (restored : env.restore caller = some after) :
       Step program ⟨env, .result value, .restore caller :: stack⟩
-        ⟨(Frame.restore caller).environment env, .result value, stack⟩
+        ⟨after, .result value, stack⟩
   | construct {env : Environment} {stack : List Frame} {identity : Nat} {tag : Option Nat} {fields : List Expr} :
       Step program ⟨env, .expression (.construct identity tag fields), stack⟩
         ⟨env, .arguments fields, .construct identity tag :: stack⟩
@@ -133,7 +143,7 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | callInputs {env : Environment} {stack : List Frame} {declaration : FunctionDecl} {values : List Value}
       {inputs : List BindingInput} (prepared : prepareBindings declaration.parameters values = some inputs) :
       Step program ⟨env, .results values, .call declaration :: stack⟩
-        ⟨inputs.map (fun input => (input.name, input.value)), .expression declaration.body, .restore env :: stack⟩
+        ⟨enterBindings env.heap env.supply inputs, .expression declaration.body, .restore env.scope :: stack⟩
   | applyPatterns {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
       Step program ⟨env, .expression (.applyPatterns inputs arguments arms), stack⟩
         ⟨env, .arguments arguments, .patterns arms :: stack⟩
@@ -141,7 +151,7 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       {arms : List (Pattern × Expr)} {body : Expr}
       (selected : selectArm (argumentValue values) arms = some (bindings, body)) :
       Step program ⟨env, .results values, .patterns arms :: stack⟩
-        ⟨bindings.map (fun input => (input.name, input.value)) ++ env, .expression body, .scope bindings.length :: stack⟩
+        ⟨env.extend bindings, .expression body, .scope bindings.length :: stack⟩
   | nil {env : Environment} {stack : List Frame} :
       Step program ⟨env, .arguments [], stack⟩ ⟨env, .results [], stack⟩
   | cons {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
@@ -161,15 +171,19 @@ inductive Run (program : Program) : Configuration → Configuration → Prop whe
 
 variable {program : Program}
 
-/-- The destination-write step preserves every differently rooted place in the
-post-RHS environment. It makes no claim about earlier RHS effects. -/
+/-- Distinct lexical roots frame reads only when their storage identities are
+distinct. This is a pre-state separation condition, not a post-state promise. -/
 theorem Step.assignment_frame {before : Environment} {after : Configuration} {stack : List Frame}
     {place other : Place} {rest : Expr} {value : Value}
+    (distinct : (before.bindings.map Prod.snd).Nodup)
     (step : Step program ⟨before, .result value, .assign place rest :: stack⟩ after)
     (different : other.root ≠ place.root) :
-    readPlace program other after.environment = readPlace program other before := by
+    after.environment.read program other = before.read program other := by
   cases step with
-  | assignResult written => exact writePlace.read_other written different
+  | assignResult written =>
+    obtain ⟨heap, stored, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    exact BindingMap.restore.read_other distinct stored different
 
 
 /-- Raw malformed invocations cannot enter a body by silently dropping either
@@ -224,5 +238,15 @@ theorem Run.unique {before first second : Configuration} (left : Run program bef
     | step other rest =>
       cases head.unique other
       exact ih rest leftDone rightDone
+
+theorem Frame.scope_extension (current : Environment) (inputs : List BindingInput) :
+    (Frame.scope inputs.length).environment (current.extend inputs) =
+      { current with heap := (allocateBindings current.heap current.activation inputs).2 } := by
+  have length := congrArg List.length (allocateBindings.keys current.heap current.activation inputs)
+  simp only [List.length_map] at length
+  simp only [Frame.environment, Frame.activation, AddressedEnvironment.extend]
+  rw [← length]
+  simp
+
 
 end Grounded
