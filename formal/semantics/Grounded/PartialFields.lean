@@ -280,6 +280,15 @@ def Ty.fieldInfo (program : Program) (parent : Ty) (key : FieldKey) : Option (Na
     (parent.fieldIndex program key).bind fun index =>
       types[index]?.map fun child => (index, child, types)
 
+theorem Ty.fieldInfo_layout {program : Program} {parent child : Ty} {key : FieldKey}
+    {index : Nat} {types : List Ty}
+    (info : parent.fieldInfo program key = some (index, child, types)) :
+    parent.fieldTypes program = some types := by
+  simp only [Ty.fieldInfo, Option.bind_eq_some_iff, Option.map_eq_some_iff] at info
+  obtain ⟨actual, layout, position, indexed, selected, found, same⟩ := info
+  cases same
+  exact layout
+
 theorem ProjectionType.fieldIndex {program : Program} {home : Module} {parent child : Ty}
     {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child) :
     parent.fieldIndex program key = some index := by
@@ -590,6 +599,37 @@ theorem PathDisjoint.write_frame {program : Program} {home : Module} {parent : T
     have bound := (List.getElem?_eq_some_iff.mp found).1
     simpa only [PartialValue.selectFields, info, Option.bind_some, afterOpened, opened, found,
       List.getElem?_set_self bound] using ih changed
+
+/-- The same pre-state geometry frames the authoritative initialization mask. -/
+theorem PathDisjoint.initialization_frame {program : Program} {home : Module} {parent : Ty}
+    {writtenPath observedPath : List FieldKey}
+    (apart : PathDisjoint program home parent writtenPath observedPath)
+    {before after replacement : Initialization}
+    (written : before.writeFields program parent writtenPath replacement = some after) :
+    after.selectFields program parent observedPath = before.selectFields program parent observedPath := by
+  induction apart generalizing before after with
+  | fork leftField rightField different =>
+    obtain ⟨leftTypes, leftInfo⟩ := leftField.fieldInfo_exists
+    obtain ⟨rightTypes, rightInfo⟩ := rightField.fieldInfo_exists
+    have layouts := Option.some.inj (Ty.fieldInfo_layout leftInfo |>.symm.trans (Ty.fieldInfo_layout rightInfo))
+    subst rightTypes
+    rw [Initialization.writeFields, leftInfo] at written
+    simp only [Option.bind_some, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+    obtain ⟨resident, found, updated, changed, same⟩ := written
+    cases same
+    simp [Initialization.selectFields, rightInfo, Initialization.openFields,
+      List.getElem?_set_ne different]
+  | descend field apart ih =>
+    obtain ⟨types, info⟩ := field.fieldInfo_exists
+    rw [Initialization.writeFields, info] at written
+    simp only [Option.bind_some, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+    obtain ⟨resident, found, updated, changed, same⟩ := written
+    cases same
+    have bound := (List.getElem?_eq_some_iff.mp found).1
+    simp only [Initialization.openFields] at found bound
+    simp only [Initialization.selectFields, info, Option.bind_some, Initialization.openFields]
+    rw [List.getElem?_set_self bound, found]
+    exact ih changed
 
 
 end Grounded

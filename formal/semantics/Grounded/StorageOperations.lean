@@ -112,40 +112,7 @@ theorem restoreStorage.retired {program : Program} {heap : RuntimeHeap StorageCe
   simp [restoreStorage, retired.2]
 
 
-/-- The same cell supports a complete checked move/restoration sequence at any
-field depth. The checking state records absent then present; no new storage
-identity or activation is allocated, and no second transfer is admitted in the
-intermediate hole. -/
-theorem takeStorage.restore {program : Program} {home : Module} {heap : RuntimeHeap StorageCell}
-    {identity : StorageId} {cell : StorageCell} {state selectedState : Initialization}
-    {path : List FieldKey} {type : Ty} {replacement : Value}
-    (found : heap.read identity = some cell) (typed : cell.Typed program state)
-    (checked : PathType program home cell.type path type)
-    (selected : state.selectFields program cell.type path = some selectedState)
-    (ready : selectedState.Ready) (replacementTyped : ValueHasType program replacement type) :
-    ∃ value empty after movedState afterState updated,
-      state.writeFields program cell.type path .absent = some movedState ∧
-      movedState.writeFields program cell.type path .present = some afterState ∧
-      takeStorage program heap identity path = some (value, empty) ∧
-      ValueHasType program value type ∧
-      takeStorage program empty identity path = none ∧
-      restoreStorage program empty identity path replacement = some after ∧
-      after.read identity = some { cell with resident := updated } ∧
-      StorageCell.Typed program { cell with resident := updated } afterState ∧
-      updated.selectFields program cell.type path = some (.resident replacement) ∧
-      afterState.selectFields program cell.type path = some .present ∧
-      after.next = heap.next ∧
-      (∀ other, other ≠ identity → after.read other = heap.read other) := by
-  obtain ⟨value, empty, emptied, movedState, moved, taken, valueTyped, _, holeTyped,
-    holeFound, noRetake, emptyNext, firstFrame⟩ :=
-    takeStorage.progress found typed checked selected ready
-  obtain ⟨after, updated, afterState, restoredState, restored, _, restoredTyped,
-    restoredFound, readback, afterNext, lastFrame⟩ :=
-    restoreStorage.progress holeFound holeTyped checked replacementTyped
-  exact ⟨value, empty, after, movedState, afterState, updated, moved, restoredState,
-    taken, valueTyped, noRetake, restored, restoredFound, restoredTyped, readback,
-    Initialization.write_select restoredState, afterNext.trans emptyNext,
-    fun other different => (lastFrame other different).trans (firstFrame other different)⟩
+
 
 
 /-- Restoration changes only its selected physical path within the cell. -/
@@ -178,6 +145,56 @@ theorem takeStorage.read_disjoint {program : Program} {home : Module}
   cases same
   rw [RuntimeHeap.write_read stored]
   exact congrArg (fun selected => selected.bind PartialValue.read) (apart.write_frame written)
+
+/-- The same cell supports a complete checked move/restoration sequence at any
+field depth. The checking state records absent then present; no new storage
+identity or activation is allocated, and no second transfer is admitted in the
+intermediate hole. Every disjoint mask and read survives both transitions. -/
+theorem takeStorage.restore {program : Program} {home : Module} {heap : RuntimeHeap StorageCell}
+    {identity : StorageId} {cell : StorageCell} {state selectedState : Initialization}
+    {path : List FieldKey} {type : Ty} {replacement : Value}
+    (found : heap.read identity = some cell) (typed : cell.Typed program state)
+    (checked : PathType program home cell.type path type)
+    (selected : state.selectFields program cell.type path = some selectedState)
+    (ready : selectedState.Ready) (replacementTyped : ValueHasType program replacement type) :
+    ∃ value empty after movedState afterState updated,
+      state.writeFields program cell.type path .absent = some movedState ∧
+      movedState.writeFields program cell.type path .present = some afterState ∧
+      takeStorage program heap identity path = some (value, empty) ∧
+      ValueHasType program value type ∧
+      takeStorage program empty identity path = none ∧
+      restoreStorage program empty identity path replacement = some after ∧
+      after.read identity = some { cell with resident := updated } ∧
+      StorageCell.Typed program { cell with resident := updated } afterState ∧
+      updated.selectFields program cell.type path = some (.resident replacement) ∧
+      afterState.selectFields program cell.type path = some .present ∧
+      after.next = heap.next ∧
+      (∀ other, other ≠ identity → after.read other = heap.read other) ∧
+      (∀ observed, PathDisjoint program home cell.type path observed →
+        movedState.selectFields program cell.type observed = state.selectFields program cell.type observed ∧
+        afterState.selectFields program cell.type observed = state.selectFields program cell.type observed ∧
+        ((empty.read identity).bind fun current =>
+          (current.resident.selectFields program current.type observed).bind PartialValue.read) =
+          (cell.resident.selectFields program cell.type observed).bind PartialValue.read ∧
+        ((after.read identity).bind fun current =>
+          (current.resident.selectFields program current.type observed).bind PartialValue.read) =
+          (cell.resident.selectFields program cell.type observed).bind PartialValue.read) := by
+  obtain ⟨value, empty, emptied, movedState, moved, taken, valueTyped, _, holeTyped,
+    holeFound, noRetake, emptyNext, firstFrame⟩ :=
+    takeStorage.progress found typed checked selected ready
+  obtain ⟨after, updated, afterState, restoredState, restored, _, restoredTyped,
+    restoredFound, readback, afterNext, lastFrame⟩ :=
+    restoreStorage.progress holeFound holeTyped checked replacementTyped
+  refine ⟨value, empty, after, movedState, afterState, updated, moved, restoredState,
+    taken, valueTyped, noRetake, restored, restoredFound, restoredTyped, readback,
+    Initialization.write_select restoredState, afterNext.trans emptyNext,
+    (fun other different => (lastFrame other different).trans (firstFrame other different)), ?_⟩
+  intro observed apart
+  have intermediate := takeStorage.read_disjoint found apart taken
+  refine ⟨apart.initialization_frame moved,
+    (apart.initialization_frame restoredState).trans (apart.initialization_frame moved), intermediate, ?_⟩
+  exact (restoreStorage.read_disjoint holeFound apart restored).trans
+    (by simpa only [holeFound, Option.bind_some] using intermediate)
 
 
 end Grounded

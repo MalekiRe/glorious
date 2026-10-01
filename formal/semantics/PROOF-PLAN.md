@@ -2350,3 +2350,25 @@ field mutation framing in the logical model, not loan compatibility, custom
 cleanup, correlated control state, physical memory or the other tracked
 whole-language obligations.
 
+
+## Disjoint readiness through constructive move/restoration
+
+The existing `takeStorage.restore` progress contract now derives unchanged
+initialization-mask selections and runtime reads for every pre-state-disjoint
+path, both in its intermediate moved-out heap and in its restored heap.
+`PathDisjoint.initialization_frame` uses the same resolved projection geometry
+as physical framing. `Ty.fieldInfo_layout` establishes that different fields
+open the same canonical parent layout; no independent shape reconstruction or
+post-state readiness assumption is introduced.
+
+The existing typed result, absent/present updates, intermediate repeat-move
+rejection, identity preservation and outside-cell framing remain part of the
+contract. Thus any previously ready disjoint mask remains ready through both
+actual transitions. This is not a proof of general input-batch admission with
+loans, custody or allocation claims; those boundaries remain open.
+
+Verification: `lake build Grounded` passed all 30 jobs, including general
+preservation/progress and source soundness. Exhaustive imported axiom inspection
+covered 3,844 declarations with only standard Lean axioms. Both the static
+framing theorem and its composed progress consumer received explicit inspection.
+
