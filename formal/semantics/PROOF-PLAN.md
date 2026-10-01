@@ -232,12 +232,12 @@ At each meaningful checkpoint update this document with:
   theorems distinguished from discharged guarantees, and unsupported features.
 - The exact next obligation on the same dependency chain.
 
-Current next obligation: extend the same storage and framing pipeline to
-projected reads and assignment through visible tuple/record fields (§5.3).
-Construct the actual selected resident and updated aggregate from static
-projection typing; preserve siblings and propagate the real successor through
-general correctness. Do not introduce references or initialization holes without
-settling their remaining authority/restoration contracts.
+Current next obligation: move/initialization-state transitions under §§5.3 and
+7.5. Define one flow-sensitive checking/current-storage contract which permits
+holes, rejects unavailable reads, and proves legal restoration and scope exit.
+The current all-initialized context cannot simply be retained with an assumed
+post-state. Preserve projected write/readback and framing while migrating the
+general theorem and source entry consumers together.
 
 Whole-language completion additionally requires an explicit normative coverage
 and consumer audit. Features absent from this new folder remain unproved,
@@ -307,4 +307,49 @@ Only `propext`, `Quot.sound`, and the normalization product's existing standard
 `Classical.choice` occur. General/closed stateful correctness use only
 `propext` and `Quot.sound`; write preservation uses `propext`; frame composition
 uses no axioms. No concrete examples, unit tests or admitted proofs were added.
+
+## Verified projected storage boundary
+
+Covered §§4.2 and 5.3 with one `ProjectionType` relation and one runtime field
+selector for tuple and visible nominal-struct fields. Enum payloads are not
+numeric places. `PathType` and rooted `PlaceType` compose that relation; these
+are shared by place reads and writes. Rvalue projection uses the same
+single-field producer rather than separate tuple/nominal rules.
+
+The whole-local-only read/write constructors were replaced, not supplemented.
+A place read requires the selected type to be duplicable, not a copied enclosing
+aggregate. Assignment requires a mutable root and legal disposal of the selected
+old resident. The RHS executes first; field resolution/update then consumes its
+actual successor store. Recursive updates preserve siblings, outer constructor
+identity and declared field types. The operation producer derives read/write
+success and updated typing; general correctness and immutable framing consume
+that producer. No references, unchecked enum projection, overloaded indexing,
+or initialization holes are introduced by this extension.
+
+
+
+Verified consumers: `ProjectionType.access` constructs selection and typed
+replacement with exact readback. `PathType.read` and `PathType.write` compose
+it through arbitrary finite field paths. `writeFields_siblings` proves that
+actual nested writes preserve siblings at each selected prefix. Rooted
+`EnvironmentTyped.writePlace` constructs the updated store, typing, immutable
+frame and exact place readback. `Grounded.correctness` consumes these producers
+for both reads and assignment; `SourceArmsChecked.correctness` retains the full
+successor-store contract. No successful access/update is supplied to checking.
+
+The old whole-local read and separate nominal-field expression/rules were
+removed. `Expr.read` uses a rooted `Place`; whole-local access is its empty
+field path. Rvalue tuple and nominal projection use one `Expr.project`,
+`ProjectionType`, and `Value.projectField`. `Grounded/Places.lean` owns the
+shared runtime access/update producers; no compatibility constructors remain.
+
+Strict `lake build` passed. The exhaustive defining-module audit now covers
+all five modules (1,580 declarations, 86 private/generated-private). Field/path
+access, rooted updates and sibling preservation depend only on `propext`.
+General and closed correctness still use only `propext` and `Quot.sound`;
+standard `Classical.choice` remains confined to extraction of the previously
+proved constant normal form and its source consumer. No tests, examples,
+custom axioms, assumed execution bridges or unfinished proof declarations were
+introduced. This remains a fully initialized logical-storage fragment, not a
+proof of move/hole, borrowing, cleanup, machine or whole-language correctness.
 

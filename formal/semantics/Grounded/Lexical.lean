@@ -11,6 +11,27 @@ def replaceBinding {α : Type} (name : String) (value : α) : List (String × α
       if key = name then some ((key, value) :: rest)
       else ((key, old) :: ·) <$> replaceBinding name value rest
 
+theorem replaceBinding.lookup_after {α : Type} {name : String} {value : α}
+    {before after : List (String × α)} (written : replaceBinding name value before = some after) :
+    lookup name after = some value := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    rcases entry with ⟨key, old⟩
+    simp only [replaceBinding] at written
+    split at written
+    next same =>
+      cases written
+      simp [lookup, same]
+    next different =>
+      cases tailWrite : replaceBinding name value rest with
+      | none => simp [tailWrite] at written
+      | some tail =>
+        simp [tailWrite] at written
+        subst after
+        simp [lookup, Ne.symm different, ih tailWrite]
+
+
 /-- Preserve lexical slots and every immutable resident, including shadowed slots. -/
 inductive EnvironmentFrame : List (String × BindingType) →
     List (String × Value) → List (String × Value) → Prop where

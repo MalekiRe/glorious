@@ -1,4 +1,4 @@
-import Grounded.Lexical
+import Grounded.Places
 
 /-! One state-threaded evaluator and its checking-to-execution theorem.
 Lexical mutation is logical storage, not physical allocation or loan semantics. -/
@@ -15,9 +15,9 @@ inductive Evaluates (program : Program) : List (String × Value) → Expr → Va
   | group {environment after : List (String × Value)} {body : Expr} {value : Value}
       (evaluated : Evaluates program environment body value after) :
       Evaluates program environment (.group body) value after
-  | local {environment : List (String × Value)} {name : String} {value : Value}
-      (selected : lookup name environment = some value) :
-      Evaluates program environment (.local name) value environment
+  | read {environment : List (String × Value)} {place : Place} {value : Value}
+      (selected : readPlace program place environment = some value) :
+      Evaluates program environment (.read place) value environment
   | sequence {environment middle after : List (String × Value)} {first rest : Expr}
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
       (tail : Evaluates program middle rest value after) :
@@ -27,21 +27,21 @@ inductive Evaluates (program : Program) : List (String × Value) → Expr → Va
       (initialized : Evaluates program environment initial resident middle)
       (continued : Evaluates program ((name, resident) :: middle) body value after) :
       Evaluates program environment (.bind mutable name annotation initial body) value (after.drop 1)
-  | assign {environment middle updated after : List (String × Value)} {name : String}
+  | assign {environment middle updated after : List (String × Value)} {place : Place}
       {expression rest : Expr} {resident value : Value}
       (evaluated : Evaluates program environment expression resident middle)
-      (written : replaceBinding name resident middle = some updated)
+      (written : writePlace program place resident middle = some updated)
       (continued : Evaluates program updated rest value after) :
-      Evaluates program environment (.assign name expression rest) value after
+      Evaluates program environment (.assign place expression rest) value after
   | tuple {environment middle after : List (String × Value)} {head : Expr} {tail : List Expr}
       {first : Value} {rest : List Value} (headEval : Evaluates program environment head first middle)
       (tailEval : EvaluatesMany program middle tail rest after) :
       Evaluates program environment (.tuple head tail) (.tuple first rest) after
-  | project {environment after : List (String × Value)} {body : Expr} {index : Nat}
-      {first value : Value} {rest : List Value}
-      (source : Evaluates program environment body (.tuple first rest) after)
-      (selected : (first :: rest)[index]? = some value) :
-      Evaluates program environment (.project body index) value after
+  | project {environment after : List (String × Value)} {body : Expr} {key : FieldKey} {index : Nat}
+      {aggregate value : Value}
+      (source : Evaluates program environment body aggregate after)
+      (selected : aggregate.projectField program key = some (index, value)) :
+      Evaluates program environment (.project body key) value after
   | array {environment after : List (String × Value)} {elements : List Expr} {values : List Value}
       (residents : EvaluatesMany program environment elements values after) :
       Evaluates program environment (.array elements) (.array values) after
@@ -52,13 +52,6 @@ inductive Evaluates (program : Program) : List (String × Value) → Expr → Va
   | construct {environment after : List (String × Value)} {identity : Nat} {tag : Option Nat}
       {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values after) :
       Evaluates program environment (.construct identity tag fields) (.nominal identity tag values) after
-  | field {environment after : List (String × Value)} {body : Expr} {key : FieldKey} {identity index : Nat}
-      {declaration : DataDecl} {schema : Fields} {values : List Value} {value : Value}
-      (source : Evaluates program environment body (.nominal identity none values) after)
-      (declared : program.data identity = some declaration)
-      (structureOnly : declaration.shape = .structure schema)
-      (indexed : schema.index key = some index) (selected : values[index]? = some value) :
-      Evaluates program environment (.field body key) value after
   | call {environment middle localAfter : List (String × Value)} {identity : Nat} {arguments : List Expr}
       {declaration : FunctionDecl} {values : List Value} {value : Value}
       (declared : program.functions identity = some declaration)
@@ -177,22 +170,12 @@ theorem correctness {context : List (String × BindingType)} {expression : Expr}
     intro other otherAfter evaluation
     cases evaluation with
     | group inner => exact unique _ _ inner
-  | @«local» home context name type selected copyable =>
-    have resident : ∃ value, lookup name environment = some value ∧ ValueHasType program value type.type := by
-      induction environmentTyped with
-      | nil => simp [lookup] at selected
-      | @cons name value type environment context valueTyped rest ih =>
-        simp only [lookup] at selected ⊢
-        split at selected
-        · cases selected
-          exact ⟨value, by simp_all, valueTyped⟩
-        · obtain ⟨found, selection, typed⟩ := ih selected
-          exact ⟨found, by simp_all, typed⟩
-    obtain ⟨value, selectedValue, valueTyped⟩ := resident
-    refine ⟨value, environment, .local selectedValue, valueTyped, environmentTyped, environmentTyped.frame_refl, ?_⟩
+  | read selected copyable =>
+    obtain ⟨value, selectedValue, valueTyped⟩ := environmentTyped.readPlace selected
+    refine ⟨value, environment, .read selectedValue, valueTyped, environmentTyped, environmentTyped.frame_refl, ?_⟩
     intro other otherAfter evaluated
     cases evaluated with
-    | «local» found => exact ⟨Option.some.inj (found.symm.trans selectedValue), rfl⟩
+    | read found => exact ⟨Option.some.inj (found.symm.trans selectedValue), rfl⟩
   | sequence head drop tail headIH tailIH =>
     obtain ⟨discarded, middle, headEval, _, middleTyped, middleFrame, headUnique⟩ := headIH environmentTyped
     obtain ⟨value, after, tailEval, valueTyped, afterTyped, afterFrame, unique⟩ := tailIH middleTyped
@@ -212,9 +195,9 @@ theorem correctness {context : List (String × BindingType)} {expression : Expr}
       obtain ⟨rfl, rfl⟩ := initialUnique _ _ otherInitial
       obtain ⟨rfl, rfl⟩ := bodyUnique _ _ otherBody
       exact ⟨rfl, rfl⟩
-  | assign selected writable discard resident continued residentIH bodyIH =>
+  | assign selected discard resident continued residentIH bodyIH =>
     obtain ⟨replacement, middle, evaluated, residentTyped, middleTyped, middleFrame, residentUnique⟩ := residentIH environmentTyped
-    obtain ⟨updated, written, updatedTyped, updatedFrame⟩ := middleTyped.replace selected writable residentTyped
+    obtain ⟨updated, written, updatedTyped, updatedFrame, _⟩ := middleTyped.writePlace selected residentTyped
     obtain ⟨value, after, bodyEval, valueTyped, afterTyped, afterFrame, bodyUnique⟩ := bodyIH updatedTyped
     refine ⟨value, after, .assign evaluated written bodyEval, valueTyped, afterTyped, middleFrame.trans (updatedFrame.trans afterFrame), ?_⟩
     intro other otherAfter evaluation
@@ -242,18 +225,16 @@ theorem correctness {context : List (String × BindingType)} {expression : Expr}
     | array elements =>
       obtain ⟨rfl, rfl⟩ := unique _ _ elements
       exact ⟨rfl, rfl⟩
-  | @project home context body index first type rest source discard selected sourceIH =>
+  | project source discard selected sourceIH =>
     obtain ⟨aggregate, after, sourceEval, aggregateTyped, afterTyped, afterFrame, sourceUnique⟩ := sourceIH environmentTyped
-    cases aggregateTyped with
-    | tuple headTyped tailTyped =>
-      obtain ⟨value, fieldSelected, valueTyped⟩ := ValuesHaveTypes.select (.cons headTyped tailTyped) index type selected
-      refine ⟨value, after, .project sourceEval fieldSelected, valueTyped, afterTyped, afterFrame, ?_⟩
-      intro other otherAfter evaluated
-      cases evaluated with
-      | project otherSource otherSelected =>
-        obtain ⟨same, rfl⟩ := sourceUnique _ _ otherSource
-        cases same
-        exact ⟨Option.some.inj (otherSelected.symm.trans fieldSelected), rfl⟩
+    obtain ⟨value, fieldSelected, valueTyped, _⟩ := selected.access aggregateTyped
+    refine ⟨value, after, .project sourceEval fieldSelected, valueTyped, afterTyped, afterFrame, ?_⟩
+    intro other otherAfter evaluated
+    cases evaluated with
+    | project otherSource otherSelected =>
+      obtain ⟨same, rfl⟩ := sourceUnique _ _ otherSource
+      cases same
+      exact ⟨congrArg Prod.snd (Option.some.inj (otherSelected.symm.trans fieldSelected)), rfl⟩
   | construct declared chosen finite copyable visible access residents ih =>
     obtain ⟨values, after, evaluated, typed, afterTyped, afterFrame, unique⟩ := ih environment environmentTyped
     refine ⟨_, after, .construct evaluated, .nominal declared chosen finite typed, afterTyped, afterFrame, ?_⟩
@@ -262,32 +243,6 @@ theorem correctness {context : List (String × BindingType)} {expression : Expr}
     | construct otherFields =>
       obtain ⟨rfl, rfl⟩ := unique _ _ otherFields
       exact ⟨rfl, rfl⟩
-  | @field home context body key identity index declaration schema field source discard declared structureOnly indexed selected visible ih =>
-    obtain ⟨aggregate, after, evaluated, typed, afterTyped, afterFrame, unique⟩ := ih environmentTyped
-    cases typed with
-    | @nominal _ tag otherDeclaration otherSchema values otherDeclared chosen finite residents =>
-      have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
-      subst otherDeclaration
-      cases tag with
-      | some tag => simp [DataDecl.constructor, structureOnly] at chosen
-      | none =>
-        have sameSchema : otherSchema = schema := by simpa [DataDecl.constructor, structureOnly] using chosen.symm
-        subst otherSchema
-        have selectedType : (schema.residents.map Field.type)[index]? = some field.type := by simp [List.getElem?_map, selected]
-        obtain ⟨value, valueSelected, valueTyped⟩ := residents.select index field.type selectedType
-        refine ⟨value, after, .field evaluated declared structureOnly indexed valueSelected, valueTyped, afterTyped, afterFrame, ?_⟩
-        intro other otherAfter evaluation
-        cases evaluation with
-        | field otherSource otherDeclared otherStructure otherIndex otherSelected =>
-          obtain ⟨sameValue, rfl⟩ := unique _ _ otherSource
-          cases sameValue
-          have sameDeclaration := Option.some.inj (otherDeclared.symm.trans declared)
-          cases sameDeclaration
-          have sameSchema := DataShape.structure.inj (otherStructure.symm.trans structureOnly)
-          cases sameSchema
-          have sameIndex := Option.some.inj (otherIndex.symm.trans indexed)
-          cases sameIndex
-          exact ⟨Option.some.inj (otherSelected.symm.trans valueSelected), rfl⟩
   | nil =>
     rename_i environment environmentTyped
     refine ⟨[], environment, .nil, .nil, environmentTyped, environmentTyped.frame_refl, ?_⟩

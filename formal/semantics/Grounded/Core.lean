@@ -137,6 +137,10 @@ inductive FieldKey where
   | named (name : String)
   | positional (index : Nat)
 
+structure Place where
+  root : String
+  fields : List FieldKey := []
+
 structure Field where
   type : Ty
   visibility : Visibility := .private
@@ -279,17 +283,16 @@ inductive Expr where
   | integer (type : IntegerType) (magnitude : Nat)
   | character (number : Nat)
   | group (body : Expr)
-  | local (name : String)
+  | read (place : Place)
   | sequence (first rest : Expr)
   | bind (mutable : Bool) (name : String) (annotation : Option TypeExpr) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
-  | project (body : Expr) (index : Nat)
+  | project (body : Expr) (key : FieldKey)
   | array (elements : List Expr)
   | constant (name : String)
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
-  | field (body : Expr) (key : FieldKey)
   | call (identity : Nat) (arguments : List Expr)
-  | assign (name : String) (value rest : Expr)
+  | assign (place : Place) (value rest : Expr)
   | applyPatterns (inputs : List Ty) (arguments : List Expr) (arms : List (Pattern × Expr))
 /-- This restricts constant syntax, not a second evaluator. Constant dependencies
 are checked by the same typing derivation and use the same evaluation relation. -/
@@ -302,12 +305,11 @@ inductive Structural : Expr → Prop where
       (rest : ∀ expression ∈ tail, Structural expression) : Structural (.tuple head tail)
   | array {elements : List Expr} (residents : ∀ expression ∈ elements, Structural expression) :
       Structural (.array elements)
-  | project {body : Expr} (closed : Structural body) (index : Nat) : Structural (.project body index)
+  | project {body : Expr} (closed : Structural body) (key : FieldKey) : Structural (.project body key)
   | constant (name : String) : Structural (.constant name)
   | construct {fields : List Expr} (identity : Nat) (tag : Option Nat)
       (residents : ∀ expression ∈ fields, Structural expression) :
       Structural (.construct identity tag fields)
-  | field {body : Expr} (closed : Structural body) (key : FieldKey) : Structural (.field body key)
 structure ConstantDecl where
   home : Module
   visibility : Visibility := .private
@@ -511,6 +513,33 @@ def Useful (program : Program) (type : Ty) (previous : List Pattern) (pattern : 
     ∀ earlier ∈ previous, earlier.matchValue value = none
 
 
+/-- One checked field projection, shared by rvalue projection and rooted places. -/
+inductive ProjectionType (program : Program) (home : Module) : Ty → FieldKey → Nat → Ty → Prop where
+  | tuple {first : Ty} {rest : List Ty} {index : Nat} {type : Ty}
+      (selected : (first :: rest)[index]? = some type) :
+      ProjectionType program home (.tuple first rest) (.positional index) index type
+  | nominal {identity index : Nat} {declaration : DataDecl} {schema : Fields} {field : Field} {key : FieldKey}
+      (declared : program.data identity = some declaration)
+      (structureOnly : declaration.shape = .structure schema)
+      (indexed : schema.index key = some index) (selected : schema.residents[index]? = some field)
+      (visible : field.visibility.Allows declaration.home home) :
+      ProjectionType program home (.nominal identity) key index field.type
+
+inductive PathType (program : Program) (home : Module) : Ty → List FieldKey → Ty → Prop where
+  | here (type : Ty) : PathType program home type [] type
+  | step {parent child result : Ty} {key : FieldKey} {index : Nat} {rest : List FieldKey}
+      (field : ProjectionType program home parent key index child)
+      (tail : PathType program home child rest result) :
+      PathType program home parent (key :: rest) result
+
+inductive PlaceType (program : Program) (home : Module) (context : List (String × BindingType)) :
+    Place → Ty → Bool → Prop where
+  | root {name : String} {fields : List FieldKey} {parent result : Ty} {mutable : Bool}
+      (selected : lookup name context = some ⟨parent, mutable⟩)
+      (path : PathType program home parent fields result) :
+      PlaceType program home context ⟨name, fields⟩ result mutable
+
+
 mutual
 inductive HasType (program : Program) : Module → List (String × BindingType) → Expr → Ty → Prop where
   | unit {home : Module} {context : List (String × BindingType)} : HasType program home context .unit .unit
@@ -522,9 +551,9 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       HasType program home context (.character number) .character
   | group {home : Module} {context : List (String × BindingType)} {body : Expr} {type : Ty}
       (typed : HasType program home context body type) : HasType program home context (.group body) type
-  | local {home : Module} {context : List (String × BindingType)} {name : String} {type : BindingType}
-      (selected : lookup name context = some type) (copyable : Duplicable program.data type.type) :
-      HasType program home context (.local name) type.type
+  | read {home : Module} {context : List (String × BindingType)} {place : Place} {type : Ty} {mutable : Bool}
+      (selected : PlaceType program home context place type mutable) (copyable : Duplicable program.data type) :
+      HasType program home context (.read place) type
   | sequence {home : Module} {context : List (String × BindingType)} {first rest : Expr} {discarded type : Ty}
       (head : HasType program home context first discarded) (drop : Duplicable program.data discarded)
       (tail : HasType program home context rest type) : HasType program home context (.sequence first rest) type
@@ -537,10 +566,10 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
       (tailTyped : HasTypes program home context tail rest) :
       HasType program home context (.tuple head tail) (.tuple first rest)
-  | project {home : Module} {context : List (String × BindingType)} {body : Expr} {index : Nat}
-      {first type : Ty} {rest : List Ty} (source : HasType program home context body (.tuple first rest))
-      (discard : Duplicable program.data (.tuple first rest)) (selected : (first :: rest)[index]? = some type) :
-      HasType program home context (.project body index) type
+  | project {home : Module} {context : List (String × BindingType)} {body : Expr} {key : FieldKey}
+      {parent type : Ty} {index : Nat} (source : HasType program home context body parent)
+      (discard : Duplicable program.data parent) (selected : ProjectionType program home parent key index type) :
+      HasType program home context (.project body key) type
   | array {home : Module} {context : List (String × BindingType)} {elements : List Expr} {element : Ty} {length : Nat}
       (residents : HasTypes program home context elements (List.replicate length element))
       (elementValid : FiniteLayout program.target program.data element)
@@ -562,15 +591,6 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
       (residents : HasTypes program home context fields (schema.residents.map Field.type)) :
       HasType program home context (.construct identity tag fields) (.nominal identity)
-  | field {home : Module} {context : List (String × BindingType)} {body : Expr} {key : FieldKey}
-      {identity index : Nat} {declaration : DataDecl} {schema : Fields} {field : Field}
-      (source : HasType program home context body (.nominal identity))
-      (discard : Duplicable program.data (.nominal identity))
-      (declared : program.data identity = some declaration)
-      (structureOnly : declaration.shape = .structure schema)
-      (indexed : schema.index key = some index) (selected : schema.residents[index]? = some field)
-      (visible : field.visibility.Allows declaration.home home) :
-      HasType program home context (.field body key) field.type
   | call {home : Module} {context : List (String × BindingType)} {identity : Nat}
       {arguments : List Expr} {declaration : FunctionDecl}
       (declared : program.functions identity = some declaration)
@@ -580,13 +600,13 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type)))
       (body : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
       HasType program home context (.call identity arguments) declaration.result
-  | assign {home : Module} {context : List (String × BindingType)} {name : String}
-      {value rest : Expr} {slot : BindingType} {result : Ty}
-      (selected : lookup name context = some slot) (writable : slot.mutable = true)
-      (discard : Duplicable program.data slot.type)
-      (resident : HasType program home context value slot.type)
+  | assign {home : Module} {context : List (String × BindingType)} {place : Place}
+      {value rest : Expr} {type result : Ty}
+      (selected : PlaceType program home context place type true)
+      (discard : Duplicable program.data type)
+      (resident : HasType program home context value type)
       (continued : HasType program home context rest result) :
-      HasType program home context (.assign name value rest) result
+      HasType program home context (.assign place value rest) result
   | applyPatterns {home : Module} {context : List (String × BindingType)} {inputs : List Ty}
       {arguments : List Expr} {arms : List (Pattern × Expr)} {result : Ty}
       (argumentsTyped : HasTypes program home context arguments inputs)
