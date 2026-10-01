@@ -36,7 +36,8 @@ ConfigurationTyped program final (.one type) state ∧
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
 checks nominal layout and manual-principal validity, alias expansion and layout,
-function-interface layouts, and each body against its interface. It contains no termination,
+structural constant declarations, function-interface layouts, and each function
+body against its interface. It contains no termination,
 future-state readiness or execution-success premise. Recursive calls are therefore
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
@@ -2650,4 +2651,35 @@ were inspected explicitly. No unit tests or concrete examples were added.
 This covers the current decoded nongeneric alias model. Generic substitution,
 alias-qualified trait coherence, namespace/visibility resolution for source type
 names, and the remaining whole-language obligations remain open.
+
+
+## Declaration-wide structural constant admission and normalization
+
+A general pre-repair proof showed that valid nominal/alias declarations and an
+empty function table admitted arbitrary unchecked constants. The program and
+named-source admission contracts now require `Program.ConstantsChecked` for
+all decoded constants, including unused declarations. `ConstantChecked` uses
+exactly the existing structural-syntax, alias-resolution and body-typing
+premises of constant access; it assumes no completed evaluation.
+
+`SourceClosure.Admitted.constant_correctness` consumes this declaration
+checking through the actual `HasType.constant` rule and the shared structural
+normalization theorem. It constructs a typed value and actual evaluation from
+any caller environment, proves preservation of that caller's lexical scope and
+heap, and proves uniqueness of both returned value and final environment.
+Function termination is not required. No alternate evaluator was introduced.
+
+Fresh source-only verification in
+`/tmp/grandiose-declaration-admission-verified.btT50s` passed all 30 Lean build
+jobs. Exhaustive imported axiom inspection covered 4,040 declarations; only
+standard Lean axioms occurred. Constant normalization, alias expansion,
+layout validity, general preservation/progress and public source-function
+soundness were inspected explicitly. No unit tests or concrete examples were
+added.
+
+This validates decoded nongeneric constants; it does not supply source constant
+declaration elaboration, generic constant schemes, additional namespaces or
+trait coherence. Physical memory, loans, custom cleanup and the other tracked
+whole-language obligations remain open. None of the 15 broad completion tasks
+is closed by this boundary repair.
 

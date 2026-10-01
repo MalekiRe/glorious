@@ -232,6 +232,17 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
         exact ⟨locals, localsAfter, branchAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
           disposable, bodyTyped, localSlots, distinct, joined⟩
 
+/-- Constant declarations use the same structural syntax and expression typing
+as constant occurrences. No completed initialization is an admission premise. -/
+structure ConstantChecked (program : Program) (declaration : ConstantDecl) : Prop where
+  structural : Structural declaration.body
+  body : ∃ type, ResolvesType program.aliases declaration.type type ∧
+    HasType program declaration.home [] declaration.body type []
+
+def Program.ConstantsChecked (program : Program) : Prop :=
+  ∀ name declaration, program.constants name = some declaration → ConstantChecked program declaration
+
+
 /-- Bodies certify disposition from their final masks, never from a completed run. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
   distinct : (declaration.parameters.map Prod.fst).Nodup
@@ -244,6 +255,7 @@ structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Pro
 structure Program.Checked (program : Program) : Prop where
   data : program.data.Valid program.target
   aliases : program.aliases.Valid program.target program.data
+  constants : program.ConstantsChecked
   functions : ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
 
 theorem HasTypes.slots {program : Program} {home : Module} {before after : FlowContext}

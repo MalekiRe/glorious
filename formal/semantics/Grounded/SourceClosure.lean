@@ -632,6 +632,31 @@ theorem SourceClosure.Admitted.no_unresolved_alias {packages : List PackageSourc
   cases found
 
 
+/-- Every admitted decoded constant materializes a unique typed value through
+actual evaluation, preserving the caller's heap and lexical scope. Termination
+is derived from structural checking, including unused declarations. -/
+theorem SourceClosure.Admitted.constant_correctness {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {name : String} {declaration : ConstantDecl} {home : Module}
+    (declared : program.constants name = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home) :
+    ∃ type value, ResolvesType program.aliases declaration.type type ∧ ValueHasType program value type ∧
+      ∀ environment : Environment, ∃ after,
+        Evaluates program environment (.constant name) value after ∧
+        after.scope = environment.scope ∧ after.heap = environment.heap ∧
+        ∀ other otherAfter, Evaluates program environment (.constant name) other otherAfter →
+          other = value ∧ otherAfter = after := by
+  have checked := admitted.checked.constants name declaration declared
+  obtain ⟨type, resolved, initialized⟩ := checked.body
+  have access : HasType program home [] (.constant name) type [] :=
+    .constant declared visible resolved checked.structural initialized
+  obtain ⟨value, resident, runs⟩ := access.structural_value (.constant name)
+  refine ⟨type, value, resolved, resident, ?_⟩
+  intro environment
+  obtain ⟨after, run, scope, heap⟩ := runs environment
+  exact ⟨after, run, scope, heap, fun _ _ other => run.unique other⟩
+
+
 /-- Import-path authorization comes from actual source admission over the
 complete elaborated import product, not an independently supplied namespace. -/
 theorem SourceClosure.Admitted.source_import_access {packages : List PackageSource}
