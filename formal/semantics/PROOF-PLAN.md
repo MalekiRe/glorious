@@ -31,7 +31,7 @@ Run program ⟨environment, .expression expression, []⟩ state →
 ConfigurationTyped program final (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
   AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-  (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program
+  (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
@@ -1925,7 +1925,7 @@ Wildcard and literal-pattern disposal still require MayDiscard; reads still
 require Copy. Moves retain their original definite-initialization requirements.
 
 `BindingMap.Typed.disposable` connects static disposition to the actual cells
-selected for retirement. `ConfigurationTyped.storage_cleanup_safe` proves that
+selected for retirement. `ConfigurationTyped.ownership_safe` proves that
 before each lexical-scope or caller-restoration cleanup, every selected live
 cell is empty or its type permits discard. This is now a conclusion of the
 general prefix soundness theorem, propagated through named expressions, source
@@ -1965,8 +1965,8 @@ uses `PathType.select_partial` to identify the actual selected old resident in
 the same heap path that restoration overwrites, then proves it empty or legally
 discardable. No independent path reconstruction or future-state premise occurs.
 
-The public predicate is now `Configuration.StorageCleanupSafe`, with the general
-`ConfigurationTyped.storage_cleanup_safe` proof covering both retirement and
+The public predicate is now `Configuration.OwnershipSafe`, with the general
+`ConfigurationTyped.ownership_safe` proof covering both retirement and
 replacement. All source, declaration, package-closure, imported-call and prelude
 soundness consumers expose this strengthened conclusion. The previous
 scope-only names were removed rather than retained as aliases.
@@ -1999,7 +1999,7 @@ actual typed residual value. This latter relation interprets permission for
 runtime residents; it does not reconstruct source flow or supply checking facts.
 The existing binding-map retirement and selected-replacement consumers now use
 this proof. Consequently the general preservation/progress and public
-`StorageCleanupSafe` results cover mixed residual aggregates in the modeled
+`OwnershipSafe` results cover mixed residual aggregates in the modeled
 hook-free fragment, including source/function/package/import consumers.
 
 `present_iff` proves that whole initialized values still require exactly their
@@ -2039,7 +2039,7 @@ is derived through `Initialization.Disposable.realizes`. This is an
 interpretation of the discarded temporary value, not a new heap mutation or
 source-flow analysis. Runtime projection and evaluation order are unchanged.
 
-The general `StorageCleanupSafe` predicate now includes projection continuations.
+The general `OwnershipSafe` predicate now includes projection continuations.
 Its proof and all public source/function/package soundness consumers therefore
 cover projection remainder disposal in addition to scope retirement and
 assignment replacement. Preservation, progress, structural normalization and
@@ -2062,7 +2062,7 @@ or the remaining normative language and compiler obligations.
 ## Verified direct-discard safety for actual execution prefixes
 
 The existing MayDiscard check on sequence results now feeds the shared runtime
-cleanup predicate. `ConfigurationTyped.storage_cleanup_safe` proves disposal
+cleanup predicate. `ConfigurationTyped.ownership_safe` proves disposal
 permission for the actual value about to be discarded by `Step.sequenceResult`.
 All existing public source/function soundness consumers inherit this conclusion;
 source admission and execution rules are unchanged.

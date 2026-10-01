@@ -642,7 +642,7 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
 
@@ -836,7 +836,7 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
           ConfigurationTyped program final (.one declaration.result) state ∧
           (Terminal state ∨ ∃ next, Step program state next) ∧
           AddressedEnvironment.ConsumptionFrame program final.slots entry state.outerEnvironment ∧
-          (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program := by
+          (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   obtain ⟨loaded, included, source, member, owner, elaborated⟩ := admitted.declaration selected
   have checked := elaborated.checked
   obtain ⟨final, body, disposable⟩ := checked.body
@@ -895,7 +895,7 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
     ConfigurationTyped program after (.one declaration.result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program := by
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   have dependencies := admitted.2.1 package packageIncluded
   have selectedDependency := dependencies.resolve_existing dependencyIncluded decoded
   have allowed : PackageAccess packages home.package dependency.target :=
@@ -1193,7 +1193,7 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
             ConfigurationTyped program after (.one declaration.result) state ∧
               (Terminal state ∨ ∃ next, Step program state next) ∧
               AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
-              (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program := by
+              (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   have entryMember := closure.import_emitted included sourceIncluded path emitted
   have member : edge ∈ closure.imports :=
     List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
@@ -1326,7 +1326,7 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
             ConfigurationTyped program after (.one declaration.result) state ∧
               (Terminal state ∨ ∃ next, Step program state next) ∧
               AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
-              (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program := by
+              (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   let source : FunctionImportSyntax := ⟨path, .item .glob, .private⟩
   have request : resolvePackagePrelude packages loaded.home.package = some source := by
     rw [← owner, resolvePackagePrelude.existing admitted.1 packageIncluded]

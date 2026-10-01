@@ -118,6 +118,30 @@ theorem BindingMap.read.progress (typed : BindingMap.Typed program heap activati
   obtain ⟨value, read, valueTyped⟩ := partialTyped.read ready
   exact ⟨value, by simp [BindingMap.read, mapped, found, partialFound, read], valueTyped⟩
 
+/-- The actual read result carries structural Copy permission. -/
+def BindingMap.CopySafe (program : Program) (heap : RuntimeHeap StorageCell)
+    (bindings : BindingMap) (place : Place) : Prop :=
+  ∃ value type, bindings.read program heap place = some value ∧
+    ValueHasType program value type ∧ UsePermitted program.data .copy type
+
+theorem BindingMap.Typed.copy_safe (store : BindingMap.Typed program heap activation bindings context)
+    (resolved : Grounded.lookup place.root context = some state)
+    (path : PathType program home state.slot.type place.fields type)
+    {available : Initialization}
+    (selected : state.initialization.selectFields program state.slot.type place.fields = some available)
+    (ready : available.Ready) (permission : UsePermitted program.data .copy type) :
+    BindingMap.CopySafe program heap bindings place := by
+  obtain ⟨value, read, typed⟩ := BindingMap.read.progress store resolved path selected ready
+  exact ⟨value, type, read, typed, permission⟩
+
+theorem BindingMap.CopySafe.read_permission (safe : BindingMap.CopySafe program heap bindings place)
+    {value : Value} {other : Ty} (read : bindings.read program heap place = some value)
+    (typed : ValueHasType program value other) : UsePermitted program.data .copy other := by
+  obtain ⟨actual, type, found, resident, permission⟩ := safe
+  cases Option.some.inj (found.symm.trans read)
+  exact resident.use_permission typed permission
+
+
 /-- A move changes the checking state and the actual resident together. The
 same binding map survives; every other storage identity is framed. -/
 theorem BindingMap.take.progress (typed : BindingMap.Typed program heap activation bindings context)

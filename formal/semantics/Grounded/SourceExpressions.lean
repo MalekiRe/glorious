@@ -288,7 +288,7 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   (elaborated.checked slots).soundness checkedProgram store issued run
 
 /-- Completed executions preserve the declared result and caller environment;

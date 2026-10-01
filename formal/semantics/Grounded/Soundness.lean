@@ -18,10 +18,30 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program := by
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   have entry := ConfigurationTyped.entry checked store issued
   have current := entry.run checkedProgram run
-  exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.storage_cleanup_safe⟩
+  exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.ownership_safe⟩
+
+/-- No checked execution can duplicate a value whose principal forbids Copy.
+The claim is about the actual read transition, not merely a source annotation. -/
+theorem HasType.no_noncopyable_read (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {place : Place} {stack : List Frame} {owner : Value} {ownerType : Ty}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .expression (.read place), stack⟩)
+    (step : Step program ⟨current, .expression (.read place), stack⟩
+      ⟨current, .result owner, stack⟩)
+    (resident : ValueHasType program owner ownerType)
+    (required : ¬ UsePermitted program.data .copy ownerType) : False := by
+  have permission := (checked.soundness checkedProgram store issued run).2.2.2.2
+  cases step with
+  | read selected => exact required (BindingMap.CopySafe.read_permission permission selected resident)
+
 
 /-- Direct disposal cannot erase any nondiscardable principal, including one
 inherited through aggregates or inactive nominal variants. -/

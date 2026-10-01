@@ -665,10 +665,12 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
 
-/-- Stored residents and discarded temporary remainders have legal residual
-disposition. This is a current-state assertion, not future readiness. -/
-def Configuration.StorageCleanupSafe (program : Program) (state : Configuration) : Prop :=
+/-- Actual copy reads and all modeled disposal sites respect the same structural
+owned-use authority. These are current-state facts, not future readiness. -/
+def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
+  | .expression (.read place), _ =>
+      BindingMap.CopySafe program state.environment.heap state.environment.bindings place
   | .result _, .scope count :: _ =>
       BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings)
   | .result _, .restore _ :: _ =>
@@ -679,12 +681,16 @@ def Configuration.StorageCleanupSafe (program : Program) (state : Configuration)
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
   | _, _ => True
 
-theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result : ResultType}
+theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : ResultType}
     {state : Configuration} (typed : ConfigurationTyped program context result state) :
-    state.StorageCleanupSafe program := by
+    state.OwnershipSafe program := by
   cases typed with
   | intro store issued code continuation =>
     cases code <;> try trivial
+    case expression checked =>
+      cases checked <;> try trivial
+      case read =>
+        exact store.copy_safe (by assumption) (by assumption) (by assumption) (by assumption) (by assumption)
     case result resident =>
       cases continuation
       · trivial
