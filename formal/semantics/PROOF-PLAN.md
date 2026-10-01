@@ -1233,3 +1233,32 @@ preservation-record wrapper was not added: it would introduce constructors and
 transport methods without removing the existing case-proof structure. Semantic
 coverage and the next move/initialization-state obligation are unchanged.
 
+
+## Verified lexical shadowing at direct calls
+
+The named-call elaboration rule previously selected the global function table
+even when the same spelling resolved to a lexical value binding. A general
+Lean proof reproduced that admission for arbitrary scopes, argument lists,
+and matching global declarations. This violated the lexical precedence rule
+in normative §2.3; argument and result types cannot select a hidden function.
+
+`NamedExpr.Elaborates.call` now requires absence from the authoritative
+`SourceScope.resolve` lookup before consulting the global function table.
+`call_not_shadowed` proves this property for every admitted direct call. The
+existing recursive named-expression checking theorem and named-function
+soundness/correctness consumers use the repaired rule; no alternate resolver
+or runtime name lookup was added. The new premise is an incoming lexical
+lookup result, not an execution-success or future-state assumption.
+
+Strict `lake build Grounded.SourceDeclarations` passed (25 jobs). A general
+stdin proof established that any matching lexical binding excludes every
+direct-global-call elaboration, independently of argument and result types.
+The repaired rule theorem and public named-source soundness/correctness
+axiom inspections contain only standard Lean axioms. No concrete examples
+or unit tests were added or run.
+
+This repairs shadowing in the currently admitted direct-call fragment. Local
+callable invocation remains unsupported rather than falling back to a hidden
+global declaration. Complete source closure, qualified path/import resolution,
+namespace separation, lexical decoding and the full callable semantics remain
+open. The whole-language completion task is not discharged by this repair.

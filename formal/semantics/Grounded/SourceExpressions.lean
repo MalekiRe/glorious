@@ -89,6 +89,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : String → Option Na
       (residents : NamedExprsElaborate program names home scope before source core (schema.residents.map Field.type) after) :
       NamedExpr.Elaborates program names home scope before (.construct identity tag source) (.construct identity tag core) (.nominal identity) after
   | call {scope before after name identity declaration source core}
+      (unshadowed : scope.resolve name = none)
       (resolved : names name = some identity) (declared : program.functions identity = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
       (inputs : NamedExprsElaborate program names home scope before source core
@@ -131,6 +132,18 @@ inductive NamedArmsElaborate (program : Program) (names : String → Option Nat)
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 end
 
+/-- Local value bindings hide direct-function names regardless of the expected
+result or argument types. Local callable invocation is a separate language
+operation; failure to support it must not expose the hidden declaration. -/
+theorem NamedExpr.Elaborates.call_not_shadowed {program : Program}
+    {names : String → Option Nat} {home : Module} {scope : SourceScope}
+    {before after : FlowContext} {name : String} {arguments : List NamedExpr}
+    {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program names home scope before
+      (.call name arguments) core type after) : scope.resolve name = none := by
+  cases elaborated with
+  | call unshadowed _ _ _ _ => exact unshadowed
+
 /-- Elaboration preserves the authoritative flow checking judgment. The static
 name scope and flow context agree on declarations, not on future readiness. -/
 theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names : String → Option Nat}
@@ -168,7 +181,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     | constant declared visible resolved structural initialized => exact .constant declared visible resolved structural initialized
   | construct declared chosen finite copyable visible access _ ih =>
     exact .construct declared chosen finite copyable visible access (ih slots)
-  | call _ declared visible _ ih => exact .call declared visible (ih slots)
+  | call _ _ declared visible _ ih => exact .call declared visible (ih slots)
   | assign resolved _ selected path writable discard mask context _ first rest =>
     have resident := first slots
     apply SourceScope.assign_checked resolved slots resident selected path writable discard mask context
