@@ -1,5 +1,5 @@
 import Grounded.SourceExpressions
-import Grounded.BindingStorage
+import Grounded.BindingAccess
 
 /-! Named direct-function declarations supply Program.Checked. Signatures are
 available to recursive calls independently of body elaboration. Names here are
@@ -181,15 +181,17 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
     (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
     HasType program declaration.home declaration.parameters declaration.body declaration.result ∧
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
-      BindingMap.Typed program entry.heap entry.activation entry.bindings (initializedContext declaration.parameters) ∧
+      entry.Realizes program declaration.parameters ∧
       entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧
-      (¬supply.Issued entry.activation) ∧ entry.supply.Issued entry.activation ∧
+      (¬supply.Issued entry.activation) ∧
       (∀ previous, supply.Issued previous → entry.supply.Issued previous ∧ previous ≠ entry.activation) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.heap owner caller callerContext ∧
         ∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) := by
   have checked := admitted.checked identity declaration declared
-  exact ⟨checked.body, enterFunction.progress arguments checked.distinct heap supply⟩
+  obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, older, callers⟩ :=
+    enterFunction.progress arguments checked.distinct heap supply
+  exact ⟨checked.body, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩
 
 
 end Grounded

@@ -168,4 +168,77 @@ theorem AddressedEnvironment.write.progress {current : AddressedEnvironment}
     readback, rfl, rfl, next, initialized, retained⟩
 
 
+/-- The initialized source fragment is realized by the authoritative partial
+cell typing. Readiness is a property of its masks, not another resident store. -/
+def AddressedScope.Realizes (scope : AddressedScope) (program : Program)
+    (heap : RuntimeHeap StorageCell) (context : List (BindingId × BindingType)) : Prop :=
+  ∃ states, BindingMap.Typed program heap scope.activation scope.bindings states ∧
+    (states.map fun entry => (entry.1, entry.2.slot)) = context ∧
+    (∀ entry ∈ states, entry.2.initialization.Ready)
+
+def AddressedEnvironment.Realizes (current : AddressedEnvironment) (program : Program)
+    (context : List (BindingId × BindingType)) : Prop :=
+  current.scope.Realizes program current.heap context ∧ current.supply.Issued current.activation
+
+theorem AddressedEnvironment.Realizes.initialized {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)}
+    (typed : BindingMap.Typed program current.heap current.activation current.bindings (initializedContext context))
+    (issued : current.supply.Issued current.activation) : current.Realizes program context := by
+  refine ⟨⟨initializedContext context, typed, ?_, ?_⟩, issued⟩
+  · simp [initializedContext, List.map_map, Function.comp_def]
+  · intro entry member
+    obtain ⟨parameter, _, same⟩ := List.mem_map.mp member
+    subst entry
+    exact .present
+
+theorem AddressedEnvironment.Realizes.read {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} {slot : BindingType}
+    (realized : current.Realizes program context)
+    (resolved : lookup place.root context = some slot)
+    (checked : PathType program home slot.type place.fields type) :
+    ∃ value, current.read program place = some value ∧ ValueHasType program value type := by
+  obtain ⟨⟨states, typed, slots, ready⟩, _⟩ := realized
+  rw [← slots, lookup.map] at resolved
+  obtain ⟨state, selected, sameSlot⟩ := Option.map_eq_some_iff.mp resolved
+  have rootReady := ready (place.root, state) (lookup.mem selected)
+  have checkedState : PathType program home state.slot.type place.fields type := by
+    rw [sameSlot]; exact checked
+  obtain ⟨identity, cell, _, _, _, declared, resident, _⟩ := typed.lookup selected
+  have checkedCell : PathType program home cell.type place.fields type := by
+    simpa only [declared] using checkedState
+  obtain ⟨part, selectedState, stateFound, _, _⟩ := checkedCell.select_partial resident.2
+  rw [declared] at stateFound
+  exact AddressedEnvironment.read.progress typed selected checkedState stateFound
+    (Initialization.select_ready rootReady stateFound)
+
+
+theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} {slot : BindingType}
+    (realized : current.Realizes program context)
+    (resolved : lookup place.root context = some slot)
+    (checked : PathType program home slot.type place.fields type)
+    {value : Value} (resident : ValueHasType program value type) :
+    ∃ after, current.write program place value = some after ∧ after.Realizes program context ∧
+      after.read program place = some value ∧ after.scope = current.scope ∧ after.supply = current.supply ∧
+      after.heap.next = current.heap.next ∧
+      (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
+        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+  obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
+  rw [← slots, lookup.map] at resolved
+  obtain ⟨state, selected, sameSlot⟩ := Option.map_eq_some_iff.mp resolved
+  have checkedState : PathType program home state.slot.type place.fields type := by
+    rw [sameSlot]; exact checked
+  obtain ⟨after, nextState, nextContext, written, stateWritten, replaced, afterTyped,
+    readback, scope, supply, next, initialized, retained⟩ :=
+    AddressedEnvironment.write.progress typed selected checkedState resident
+  have projected := replaceBinding.map_same BindingState.slot selected replaced rfl
+  have nextReady := replaceBinding.all (predicate := fun state : BindingState => state.initialization.Ready) replaced ready
+    (initialized (ready (place.root, state) (lookup.mem selected)))
+  have activation : after.activation = current.activation := congrArg AddressedScope.activation scope
+  refine ⟨after, written, ⟨⟨nextContext, afterTyped, projected.trans slots, nextReady⟩, ?_⟩,
+    readback, scope, supply, next, retained⟩
+  rw [supply, activation]
+  exact issued
+
+
 end Grounded

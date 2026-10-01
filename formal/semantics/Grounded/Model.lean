@@ -205,11 +205,88 @@ def lookup {α : Type} (name : BindingId) : List (BindingId × α) → Option α
   | [] => none
   | (key, value) :: rest => if name = key then some value else lookup name rest
 
+theorem lookup.map {α β : Type} (name : BindingId) (transform : α → β)
+    (entries : List (BindingId × α)) :
+    lookup name (entries.map fun entry => (entry.1, transform entry.2)) =
+      (lookup name entries).map transform := by
+  induction entries with
+  | nil => rfl
+  | cons entry rest ih =>
+    cases entry
+    simp only [List.map_cons, lookup]
+    split <;> simp_all
+
+theorem lookup.mem {α : Type} {name : BindingId} {value : α} {entries : List (BindingId × α)}
+    (found : lookup name entries = some value) : (name, value) ∈ entries := by
+  induction entries with
+  | nil => simp [lookup] at found
+  | cons entry rest ih =>
+    cases entry with
+    | mk key old =>
+      simp only [lookup] at found
+      split at found
+      next same => subst key; cases found; exact List.mem_cons_self
+      next different => exact List.mem_cons_of_mem _ (ih found)
+
 /-- Replace the selected lexical payload without changing binding identities. -/
 def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId × α) → Option (List (BindingId × α))
   | [] => none
   | (key, old) :: rest =>
       if key = name then some ((key, value) :: rest)
       else ((key, old) :: ·) <$> replaceBinding name value rest
+
+theorem replaceBinding.map_same {α β : Type} {name : BindingId} {old value : α}
+    {before after : List (BindingId × α)} (transform : α → β)
+    (selected : lookup name before = some old)
+    (written : replaceBinding name value before = some after) (same : transform value = transform old) :
+    (after.map fun entry => (entry.1, transform entry.2)) =
+      (before.map fun entry => (entry.1, transform entry.2)) := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    cases entry with
+    | mk key resident =>
+      simp only [replaceBinding] at written
+      split at written
+      next equal =>
+        subst key
+        simp [lookup] at selected
+        subst resident
+        cases written
+        simp only [List.map_cons, same]
+      next different =>
+        simp only [lookup, if_neg (Ne.symm different)] at selected
+        obtain ⟨tail, replaced, equal⟩ := Option.map_eq_some_iff.mp written
+        subst after
+        exact congrArg (List.cons (key, transform resident)) (ih selected replaced)
+
+theorem replaceBinding.all {α : Type} {name : BindingId} {value : α}
+    {before after : List (BindingId × α)} {predicate : α → Prop}
+    (written : replaceBinding name value before = some after)
+    (current : ∀ entry ∈ before, predicate entry.2) (replacement : predicate value) :
+    ∀ entry ∈ after, predicate entry.2 := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    cases entry with
+    | mk key resident =>
+      have head := current (key, resident) (List.mem_cons_self)
+      have tail : ∀ entry ∈ rest, predicate entry.2 := fun entry member => current entry (List.mem_cons_of_mem _ member)
+      simp only [replaceBinding] at written
+      split at written
+      next equal =>
+        cases written
+        intro entry member
+        rcases List.mem_cons.mp member with same | member
+        · subst entry; exact replacement
+        · exact tail entry member
+      next different =>
+        obtain ⟨remaining, replaced, equal⟩ := Option.map_eq_some_iff.mp written
+        subst after
+        intro entry member
+        rcases List.mem_cons.mp member with same | member
+        · subst entry; exact head
+        · exact ih replaced tail entry member
+
 
 end Grounded

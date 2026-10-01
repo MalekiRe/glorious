@@ -570,6 +570,22 @@ analysis or post-state readiness premise is used. The combined 26-job gate
 and imported-declaration axiom audit passed. These access mechanisms remain
 to be connected to expression stepping and its continuation realization.
 
+`AddressedScope.Realizes` specializes authoritative partial-cell typing to
+the initialized source fragment: masks are ready and their declared slots
+project to the source context. It stores no second resident representation.
+`AddressedEnvironment.Realizes` also requires the current activation to have
+been issued. Named source admission now constructs this realization at
+entry, replacing the raw initialized-mask typing output.
+
+General checked-path reads derive selected readiness from whole-owner
+readiness and execute the actual addressed read. Checked writes preserve
+the same source context despite changing the internal mask shape, using
+exact slot projection and readiness preservation through `replaceBinding`.
+They also preserve retained callers, supplies and readback. The 26-job
+source gate and imported-declaration axiom audit passed. These results
+prepare the initialized-fragment machine migration; they do not establish
+flow-sensitive move admission or replace the outstanding machine proof.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

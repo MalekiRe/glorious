@@ -432,4 +432,15 @@ theorem Initialization.write_ready {program : Program} {parent : Ty}
     exact .fields (fields.set index (ih (fields.select found) tail))
 
 
+theorem Initialization.select_ready {program : Program} {parent : Ty}
+    {before selectedState : Initialization} {path : List FieldKey}
+    (ready : before.Ready)
+    (selected : before.selectFields program parent path = some selectedState) : selectedState.Ready := by
+  induction path generalizing parent before with
+  | nil => cases selected; exact ready
+  | cons key rest ih =>
+    simp only [Initialization.selectFields, Option.bind_eq_some_iff] at selected
+    obtain ⟨⟨index, child, types⟩, _, current, found, selected⟩ := selected
+    exact ih ((ready.openFields types.length).select found) selected
+
 end Grounded
