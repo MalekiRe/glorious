@@ -2017,9 +2017,44 @@ declarations; only standard Lean axioms occurred. No concrete examples, unit
 tests, additional axioms or proof placeholders were added.
 
 This closes mixed residual disposition for the currently modeled tuple/struct
-storage paths, not full ownership or language soundness. Rvalue projection still
-requires whole-parent discard permission rather than permission for just its
-unselected remainder. Custom hooks, destruction order/divergence, correlated
-branch masks, loans, nonlocal exits and the remaining tracked boundaries stay
-open. Unresolved constructor-dependent masks are not assumed compatible.
+storage paths, not full ownership or language soundness. The following checkpoint
+repairs rvalue projection permission. Custom hooks, destruction order/divergence,
+correlated branch masks, loans, nonlocal exits and the remaining tracked boundaries
+stay open. Unresolved constructor-dependent masks are not assumed compatible.
+
+
+## Verified owned rvalue projection with residual cleanup
+
+Rvalue projection no longer requires MayDiscard for the entire parent, which
+incorrectly included the selected owner being transferred. Source elaboration,
+core checking and projection continuations now consume the existing residual
+mask obtained by clearing only the selected field. Only that remainder must
+satisfy `Initialization.Disposable`. Field visibility and the shared
+`ProjectionType` authority are unchanged.
+
+`ProjectionType.cleanup_safe` constructs the actual typed selected value and
+the remaining partial aggregate using the existing field operations. The
+selected slot is proved absent from the remainder, whose resident disposition
+is derived through `Initialization.Disposable.realizes`. This is an
+interpretation of the discarded temporary value, not a new heap mutation or
+source-flow analysis. Runtime projection and evaluation order are unchanged.
+
+The general `StorageCleanupSafe` predicate now includes projection continuations.
+Its proof and all public source/function/package soundness consumers therefore
+cover projection remainder disposal in addition to scope retirement and
+assignment replacement. Preservation, progress, structural normalization and
+finite execution consume the migrated checking rules.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). General Lean proofs
+admitted projection of an arbitrary selected owner without Copy or MayDiscard
+for that owner, derived actual execution from finite source expansion, and
+proved cleanup safety for every execution prefix. A general exclusion proof
+rejected projection when its unselected sibling lacks MayDiscard. Exhaustive
+imported axiom inspection covered 3,790 declarations; only standard Lean axioms
+occurred. No concrete examples, unit tests, new axioms or placeholders were added.
+
+Full language completion remains open. In particular, these proofs do not model
+custom destruction hooks or establish ordered/diverging destruction, correlated
+branch masks, loans, cancellation/nonlocal cleanup, physical allocation limits
+or the remaining normative language and compiler obligations.
 
