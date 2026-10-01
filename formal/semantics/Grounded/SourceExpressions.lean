@@ -137,7 +137,6 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
   | construct {scope before after identity tag declaration schema source core}
       (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some schema)
       (finite : FiniteLayout program.target program.data (.nominal identity))
-      (copyable : Duplicable program.data (.nominal identity))
       (visible : declaration.visibility.Allows declaration.home home)
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
       (residents : NamedExprsElaborate program names home scope before source core (schema.residents.map Field.type) after) :
@@ -234,8 +233,8 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | array _ finite size ih => exact .array (ih slots) finite size
   | constant checked => cases checked with
     | constant declared visible resolved structural initialized => exact .constant declared visible resolved structural initialized
-  | construct declared chosen finite copyable visible access _ ih =>
-    exact .construct declared chosen finite copyable visible access (ih slots)
+  | construct declared chosen finite visible access _ ih =>
+    exact .construct declared chosen finite visible access (ih slots)
   | call _ _ declared visible _ ih => exact .call declared visible (ih slots)
   | assign resolved _ selected path writable discard mask context _ first rest =>
     have resident := first slots

@@ -54,7 +54,6 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
   | construct {home context identity tag declaration schema}
       (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some schema)
       (finite : FiniteLayout program.target program.data (.nominal identity))
-      (copyable : Duplicable program.data (.nominal identity))
       (visible : declaration.visibility.Allows declaration.home home)
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home) :
       FrameTyped program heap supply activation context (.many (schema.residents.map Field.type))
@@ -155,7 +154,7 @@ theorem ConfigurationTyped.progress {context result state}
       | project source discard selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
-      | construct declared chosen finite copyable visible access residents => exact ⟨_, .construct⟩
+      | construct declared chosen finite visible access residents => exact ⟨_, .construct⟩
       | call declared visible inputs => exact ⟨_, .call declared⟩
       | assign resident selected path writable discard mask context rest => exact ⟨_, .assign⟩
       | applyPatterns arguments nonempty covered bodies => exact ⟨_, .applyPatterns⟩
@@ -195,7 +194,7 @@ theorem ConfigurationTyped.progress {context result state}
         cases frame with
         | tupleTail head => exact ⟨_, .tupleTail⟩
         | array finite size => exact ⟨_, .arrayResult⟩
-        | construct declared chosen finite copyable visible access => exact ⟨_, .constructResult⟩
+        | construct declared chosen finite visible access => exact ⟨_, .constructResult⟩
         | call declared =>
           obtain ⟨inputs, prepared⟩ := prepareBindings.exists residents
           exact ⟨_, .callInputs prepared⟩
@@ -371,12 +370,12 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
               intro same; have := congrArg ActivationId.index same; simp only [Frame.activation] at oldest; omega)).1
     | construct =>
       cases code with | expression checked =>
-        cases checked with | construct declared chosen finite copyable visible access residents =>
-          exact .intro store issued (.arguments residents) (.cons (.construct declared chosen finite copyable visible access) continuation)
+        cases checked with | construct declared chosen finite visible access residents =>
+          exact .intro store issued (.arguments residents) (.cons (.construct declared chosen finite visible access) continuation)
     | constructResult =>
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
-          cases frame with | construct declared chosen finite copyable visible access =>
+          cases frame with | construct declared chosen finite visible access =>
             exact .intro store issued (.result (.nominal declared chosen finite residents)) tail
     | call declared =>
       cases code with | expression checked =>

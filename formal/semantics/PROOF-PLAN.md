@@ -72,7 +72,7 @@ consumer separately requires finite call expansion.
 The admitted logical fragment supports initialized and partially consumed storage,
 named moves, restoration, mutable lexical storage, projected access and recursive
 declared functions over one shared heap with generative activation identities.
-Disposal and construction still carry duplicability restrictions; principal
+Owned nominal construction no longer requires Copy. Disposal still carries duplicability restrictions; principal
 ownership, destruction, loans and physical memory remain open.
 
 
@@ -1831,4 +1831,40 @@ examples, proof placeholders or additional axioms were added.
 
 The previously listed module-alias, namespace, parsing, library/runtime and
 whole-language obligations remain open.
+
+
+## Verified owned nominal construction without a Copy requirement
+
+The former `HasType.construct` rule implied `Duplicable` for every constructed
+nominal type; a general inversion proof confirmed that restriction before the
+change. Construction owns its already-evaluated fields and does not copy the
+result. The restriction was not required by resident typing or the actual
+constructor transition.
+
+Removed the constructor-only Copy premise from source elaboration, Core checking
+and constructor continuation typing. Migrated their consumers in general
+preservation/progress, flow-slot preservation, structural constant execution and
+finite-call execution. The actual constructor transition and its evaluation
+order are unchanged. Layout, constructor selection, declared field types,
+declaration visibility and field access remain required. Copy, projection,
+assignment and disposal permissions were not relaxed.
+
+The general source correctness theorem now applies to construction without a
+Copy premise, including exact-restricted nominal types. A universally quantified
+proof checked via Lean stdin constructed source elaboration and derived actual
+finite execution, nominal result typing, exact output masks, immutable consumption
+framing and result/state uniqueness. Separate general proofs confirmed that
+reads still require Copy and exact-restricted nominal types cannot derive Copy.
+These were proof checks, not concrete examples or unit tests; no temporary proof
+files or duplicated permanent theorems were added.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,684 declarations; only standard Lean axioms occur.
+General preservation, progress, execution and public source/function correctness
+received explicit axiom inspection.
+
+This corrects owned construction, not the remaining ownership/disposal boundary.
+Local binding, parameter and pattern-binding cleanup still impose duplicability
+restrictions. They require a shared residual-ownership disposition contract and
+actual cleanup correctness; whole-language ownership soundness remains open.
 

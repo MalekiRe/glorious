@@ -84,7 +84,6 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
   | construct {home before after identity tag declaration schema fields}
       (declared : program.data identity = some declaration) (chosen : declaration.constructor tag = some schema)
       (finite : FiniteLayout program.target program.data (.nominal identity))
-      (copyable : Duplicable program.data (.nominal identity))
       (visible : declaration.visibility.Allows declaration.home home)
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
       (residents : HasTypes program home before fields (schema.residents.map Field.type) after) :
@@ -135,7 +134,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
     (motive_2 := fun _ before _ _ after _ => after.slots = before.slots)
     (motive_3 := fun _ before _ _ _ arms after _ => arms ≠ [] → after.slots = before.slots) with
   | unit | integer | character | read | constant => rfl
-  | group _ ih | project _ _ _ ih | array _ _ _ ih | construct _ _ _ _ _ _ _ ih | call _ _ _ ih => exact ih
+  | group _ ih | project _ _ _ ih | array _ _ _ ih | construct _ _ _ _ _ _ ih | call _ _ _ ih => exact ih
   | move selected path selection ready mask context =>
     exact replaceBinding.map_same BindingState.slot selected context rfl
   | sequence head drop tail headIH tailIH => exact tailIH.trans headIH

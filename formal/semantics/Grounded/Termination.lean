@@ -74,7 +74,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     have restored : localAfter.restore environment.scope = some after := by
       simp [AddressedEnvironment.restore, releaseBindings, RuntimeHeap.retireMany, empty, after, AddressedEnvironment.scope]
     exact ⟨after, .constant declared run restored, rfl, heap⟩
-  | construct declared chosen finite copyable visible access residents ih =>
+  | construct declared chosen finite visible access residents ih =>
     intro closed
     cases closed with | construct identity tag fields =>
       obtain ⟨values, residents, runs⟩ := ih fields
@@ -221,7 +221,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨value, _, runs⟩ := whole.structural_value (.constant _)
       obtain ⟨after, run, _⟩ := runs environment
       exact ⟨value, after, run⟩
-    | construct declared chosen finite copyable visible access residents =>
+    | construct declared chosen finite visible access residents =>
       obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .construct member) store issued
       exact ⟨_, after, .construct run⟩
     | @call home before afterContext identity arguments declaration declared visible inputs =>
