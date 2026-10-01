@@ -160,6 +160,15 @@ theorem EnvironmentTyped.replace (typed : EnvironmentTyped program before contex
       exact ⟨_, by simp [replaceBinding, Ne.symm different, replaced],
         .cons oldTyped afterTyped fresh, .cons (fun _ => rfl) framed⟩
 
+theorem BindingInputsTyped.environment {inputs : List BindingInput}
+    (typed : BindingInputsTyped program inputs) :
+    EnvironmentTyped program (inputs.map fun input => (input.name, input.value))
+      (inputs.map fun input => (input.name, input.slot)) := by
+  induction typed with
+  | nil => exact .nil
+  | cons resident tail fresh ih =>
+    exact .cons resident ih (by simpa only [List.map_map, Function.comp_def] using fresh)
+
 /-- The current lexical machine consumes the same prepared inputs as the
 addressed allocator. Preparation is derived, not an admission premise. -/
 theorem EnvironmentTyped.parameters (parameters : List (BindingId × BindingType)) (values : List Value)
@@ -168,18 +177,10 @@ theorem EnvironmentTyped.parameters (parameters : List (BindingId × BindingType
     ∃ inputs, prepareBindings parameters values = some inputs ∧
       EnvironmentTyped program (inputs.map fun input => (input.name, input.value)) parameters := by
   obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress typed distinct
-  have realize : ∀ {entries : List BindingInput}, BindingInputsTyped program entries →
-      EnvironmentTyped program (entries.map fun input => (input.name, input.value))
-        (entries.map fun input => (input.name, input.slot)) := by
-    intro entries typedEntries
-    induction typedEntries with
-    | nil => exact .nil
-    | cons resident tail fresh ih =>
-      exact .cons resident ih (by simpa only [List.map_map, Function.comp_def] using fresh)
   have slots := congrArg (List.map fun entry => (entry.1, entry.2.slot)) states
   have same : (inputs.map fun input => (input.name, input.slot)) = parameters := by
     simpa [BindingInput.state, initializedContext, List.map_map, Function.comp_def] using slots
-  exact ⟨inputs, prepared, same ▸ realize inputsTyped⟩
+  exact ⟨inputs, prepared, same ▸ inputsTyped.environment⟩
 
 
 end Grounded

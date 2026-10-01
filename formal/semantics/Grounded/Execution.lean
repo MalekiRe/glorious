@@ -137,11 +137,11 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | applyPatterns {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
       Step program ⟨env, .expression (.applyPatterns inputs arguments arms), stack⟩
         ⟨env, .arguments arguments, .patterns arms :: stack⟩
-  | selectedPattern {env bindings : Environment} {stack : List Frame} {values : List Value}
+  | selectedPattern {env : Environment} {bindings : List BindingInput} {stack : List Frame} {values : List Value}
       {arms : List (Pattern × Expr)} {body : Expr}
       (selected : selectArm (argumentValue values) arms = some (bindings, body)) :
       Step program ⟨env, .results values, .patterns arms :: stack⟩
-        ⟨bindings ++ env, .expression body, .scope bindings.length :: stack⟩
+        ⟨bindings.map (fun input => (input.name, input.value)) ++ env, .expression body, .scope bindings.length :: stack⟩
   | nil {env : Environment} {stack : List Frame} :
       Step program ⟨env, .arguments [], stack⟩ ⟨env, .results [], stack⟩
   | cons {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :

@@ -120,9 +120,10 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
     {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
     (checked : ArmsType program home context subject result previous arms)
     {value : Value} (resident : ValueHasType program value subject)
-    {bindings : List (BindingId × Value)} {body : Expr}
+    {bindings : List BindingInput} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
-    ∃ locals pattern, (pattern, body) ∈ arms ∧ EnvironmentTyped program bindings locals ∧
+    ∃ locals pattern, (pattern, body) ∈ arms ∧
+      EnvironmentTyped program (bindings.map fun input => (input.name, input.value)) locals ∧
       (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
       HasType program home (locals ++ context) body result ∧ ((locals ++ context).map Prod.fst).Nodup := by
   induction arms generalizing previous with
@@ -134,9 +135,10 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
       split at selected
       next matched found =>
         cases Option.some.inj selected
+        obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
+          (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
         exact ⟨_, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          patternTyped.bindings resident found (List.nodup_append.mp
-            (by simpa only [List.map_append] using distinct)).1, patternTyped.disposable, bodyTyped, distinct⟩
+          slots ▸ inputsTyped.environment, patternTyped.disposable, bodyTyped, distinct⟩
       next missed =>
         obtain ⟨locals, pattern, member, localTyped, disposable, bodyTyped, distinct⟩ := ih tailTyped selected
         exact ⟨locals, pattern, List.mem_cons_of_mem _ member, localTyped, disposable, bodyTyped, distinct⟩

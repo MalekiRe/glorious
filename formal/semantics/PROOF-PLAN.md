@@ -502,6 +502,19 @@ these inputs until the addressed-machine cutover; it is not an allocated heap.
 The 25-job source gate and full imported-declaration axiom audit passed after
 this migration, including general preservation, progress and source soundness.
 
+Pattern matching now produces `BindingInput` values too, retaining each
+binder’s resolved slot instead of discarding its type during matching.
+`PatternType.bindings` proves both `BindingInputsTyped` and exact agreement
+with the checked local context. The first-match coverage theorem, actual
+`Step.selectedPattern` transition, selected-body admission, scope preservation
+and finite-evaluation proof consume the migrated product. Direct and pattern
+invocations share `BindingInputsTyped.environment` for the current lexical
+realization; the old local proof copy has been removed. The 25-job source
+gate and imported-declaration axiom audit passed, including general
+preservation/progress and named-source soundness/correctness. This preserves
+allocation metadata end to end but does not yet allocate the expression
+machine’s locals in the addressed heap.
+
 Activation generativity is now explicit in the source-entry result:
 `ActivationSupply.Issued` includes every ID below the persistent supply
 frontier, including activations with no allocated cells. Actual entry produces

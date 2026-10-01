@@ -102,10 +102,10 @@ theorem Evaluates.call {environment middle localAfter : List (BindingId × Value
 
 theorem Evaluates.applyPatterns {environment middle after : List (BindingId × Value)} {inputs : List Ty} {arguments : List Expr}
       {arms : List (Pattern × Expr)} {values : List Value}
-      {bindings : List (BindingId × Value)} {body : Expr} {value : Value}
+      {bindings : List BindingInput} {body : Expr} {value : Value}
       (argumentsEval : EvaluatesMany program environment arguments values middle)
       (selected : selectArm (argumentValue values) arms = some (bindings, body))
-      (bodyEval : Evaluates program (bindings ++ middle) body value after) :
+      (bodyEval : Evaluates program (bindings.map (fun input => (input.name, input.value)) ++ middle) body value after) :
       Evaluates program environment (.applyPatterns inputs arguments arms) value (after.drop bindings.length) :=
   .step .applyPatterns ((Run.extend argumentsEval [.patterns arms]).trans
     (.step (.selectedPattern selected) ((Run.extend bodyEval [.scope bindings.length]).trans

@@ -189,8 +189,12 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
       obtain ⟨value, after, bodyRun, resident, afterTyped, afterFrame⟩ :=
         ih _ (.patternBody member) bodyTyped (bindingsTyped.append middleTyped distinct)
       refine ⟨value, after.drop bindings.length, .applyPatterns argumentsRun selected bodyRun, resident, ?_, middleFrame.trans ?_⟩
-      · simpa [bindingsTyped.length] using afterTyped.drop bindings.length
-      · simpa [bindingsTyped.length] using afterFrame.drop bindings.length
+      · have length := bindingsTyped.length
+        simp only [List.length_map] at length
+        simpa [length] using afterTyped.drop bindings.length
+      · have length := bindingsTyped.length
+        simp only [List.length_map] at length
+        simpa [length] using afterFrame.drop bindings.length
 
 
 end Grounded

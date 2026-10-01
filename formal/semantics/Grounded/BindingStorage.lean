@@ -23,6 +23,16 @@ inductive BindingInputsTyped (program : Program) : List BindingInput → Prop wh
       (fresh : input.name ∉ rest.map BindingInput.name) :
       BindingInputsTyped program (input :: rest)
 
+theorem BindingInputsTyped.append {program : Program} {front back : List BindingInput}
+    (first : BindingInputsTyped program front) (rest : BindingInputsTyped program back)
+    (distinct : ((front ++ back).map BindingInput.name).Nodup) :
+    BindingInputsTyped program (front ++ back) := by
+  induction first with
+  | nil => exact rest
+  | cons resident tail fresh ih =>
+    have parts := List.nodup_cons.mp distinct
+    exact .cons resident (ih parts.2) parts.1
+
 def BindingInput.cell (input : BindingInput) (activation : ActivationId) : StorageCell :=
   ⟨activation, input.slot.type, .resident input.value⟩
 
