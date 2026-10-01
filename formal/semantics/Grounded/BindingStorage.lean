@@ -412,12 +412,17 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
       BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
       entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
+      (¬supply.Issued entry.1) ∧ entry.2.1.Issued entry.1 ∧
+      (∀ previous, supply.Issued previous → entry.2.1.Issued previous ∧ previous ≠ entry.1) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.2.2.2 owner caller callerContext ∧
         ∀ identity ∈ entry.2.2.1.map Prod.snd, identity ∉ caller.map Prod.snd) := by
   obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress arguments distinct
-  refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl, ?_⟩
+  refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl,
+    supply.allocate_fresh, supply.allocate_issued, ?_, ?_⟩
   · rw [← states]; exact enterBindings.typed inputsTyped heap supply
+  · intro previous issued
+    exact ⟨ActivationSupply.allocate_preserves issued, ActivationSupply.allocate_distinct issued⟩
   · intro caller callerContext owner callerTyped
     exact ⟨callerTyped.allocate supply.allocate.1 inputs,
       fun identity member oldMember => callerTyped.allocate_apart supply.allocate.1 inputs identity member identity oldMember rfl⟩

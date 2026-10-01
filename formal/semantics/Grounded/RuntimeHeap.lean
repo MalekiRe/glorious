@@ -18,6 +18,26 @@ structure ActivationSupply where
 def ActivationSupply.allocate (supply : ActivationSupply) : ActivationId × ActivationSupply :=
   (⟨supply.next⟩, ⟨supply.next + 1⟩)
 
+/-- The monotone supply records every issued activation, including activations
+with no storage cells. Heap liveness alone cannot establish generativity. -/
+def ActivationSupply.Issued (supply : ActivationSupply) (activation : ActivationId) : Prop :=
+  activation.index < supply.next
+
+theorem ActivationSupply.allocate_fresh (supply : ActivationSupply) :
+    ¬supply.Issued supply.allocate.1 := Nat.lt_irrefl _
+
+theorem ActivationSupply.allocate_issued (supply : ActivationSupply) :
+    supply.allocate.2.Issued supply.allocate.1 := Nat.lt_succ_self _
+
+theorem ActivationSupply.allocate_preserves {supply : ActivationSupply} {activation : ActivationId}
+    (issued : supply.Issued activation) : supply.allocate.2.Issued activation :=
+  Nat.lt_succ_of_lt issued
+
+theorem ActivationSupply.allocate_distinct {supply : ActivationSupply} {activation : ActivationId}
+    (issued : supply.Issued activation) : activation ≠ supply.allocate.1 := by
+  intro same
+  exact supply.allocate_fresh (same ▸ issued)
+
 /-- A finite extensional store. The bound rules out invented cells above the
 allocation frontier. A missing payload below the frontier is retired storage,
 not a live uninitialized resident. -/

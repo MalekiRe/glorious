@@ -183,6 +183,8 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
       BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
       entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
+      (¬supply.Issued entry.1) ∧ entry.2.1.Issued entry.1 ∧
+      (∀ previous, supply.Issued previous → entry.2.1.Issued previous ∧ previous ≠ entry.1) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.2.2.2 owner caller callerContext ∧
         ∀ identity ∈ entry.2.2.1.map Prod.snd, identity ∉ caller.map Prod.snd) := by

@@ -491,6 +491,16 @@ audit found only standard Lean axioms. No future execution or successful
 allocation is a premise. Logical allocation still makes no physical-resource
 exhaustion claim.
 
+Activation generativity is now explicit in the source-entry result:
+`ActivationSupply.Issued` includes every ID below the persistent supply
+frontier, including activations with no allocated cells. Actual entry produces
+an ID not previously issued, records it as issued, preserves issuance of all
+older IDs, and proves the new ID differs from each of them. This property
+cannot be recovered from live heap cells alone. The 26-job source/storage
+gate passed; the primitive supply proofs use no axioms and the composed entry
+results use only standard Lean axioms. Propagation of that supply through the
+expression machine and returns is still part of the required cutover below.
+
 `Initialization.write_ready` proves that replacing a selected subtree with
 initialized contents preserves whole-owner readiness when the owner was
 already initialized. `BindingMap.restore.progress` consumes that result,
