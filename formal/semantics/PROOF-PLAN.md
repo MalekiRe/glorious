@@ -478,8 +478,9 @@ axioms. The new allocation, scope-extension and access results use only
 
 `prepareBindings` pairs arguments with the actual resolved declaration slots
 and rejects arity mismatch. Its progress proof derives typed transient inputs
-and exact initialized-context correspondence from argument typing and declared
-parameter distinctness. `enterFunction` consumes those inputs through the same
+and exact declared-slot correspondence from argument typing and declared
+parameter distinctness. `enterFunction` derives initialized storage states at
+the allocation boundary and consumes those inputs through the same
 activation/storage allocator. `NamedFunctionsAdmitted.enter` now derives
 checked body admission and actual addressed entry from source admission,
 including preservation of every previously realized caller map and derived
@@ -618,6 +619,13 @@ success and without advancing the activation supply for lexical locals.
 The 26-job source gate and full imported-declaration axiom audit passed.
 This closes the addressed pattern-entry contract, not body execution in
 the still-unmigrated expression machine.
+
+Ordinary input preparation now exposes the same typed-input and exact-slot
+contract as pattern selection. Separate name and initialization-mask outputs
+were removed from `prepareBindings.progress`; the addressed entry consumer
+derives its initialization masks from those slots, while the current lexical
+consumer directly projects the typed inputs. The 26-job source gate and
+imported-declaration axiom audit passed after migrating both consumers.
 
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must

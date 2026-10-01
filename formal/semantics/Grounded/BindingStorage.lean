@@ -491,20 +491,20 @@ theorem prepareBindings.progress {parameters : List (BindingId × BindingType)} 
     (typed : ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type)))
     (distinct : (parameters.map Prod.fst).Nodup) :
     ∃ inputs, prepareBindings parameters values = some inputs ∧ BindingInputsTyped program inputs ∧
-      inputs.map BindingInput.name = parameters.map Prod.fst ∧
-      inputs.map BindingInput.state = initializedContext parameters := by
+      (inputs.map fun input => (input.name, input.slot)) = parameters := by
   induction parameters generalizing values with
-  | nil => cases typed; exact ⟨[], rfl, .nil, rfl, rfl⟩
+  | nil => cases typed; exact ⟨[], rfl, .nil, rfl⟩
   | cons parameter parameters ih =>
     cases typed with
     | cons head tail =>
       have parts := List.nodup_cons.mp distinct
-      obtain ⟨inputs, prepared, inputsTyped, names, states⟩ := ih tail parts.2
-      refine ⟨⟨parameter.1, parameter.2, _⟩ :: inputs, ?_, .cons head inputsTyped ?_, ?_, ?_⟩
+      obtain ⟨inputs, prepared, inputsTyped, slots⟩ := ih tail parts.2
+      have names := congrArg (List.map Prod.fst) slots
+      simp only [List.map_map, Function.comp_def] at names
+      refine ⟨⟨parameter.1, parameter.2, _⟩ :: inputs, ?_, .cons head inputsTyped ?_, ?_⟩
       · cases parameter; simp [prepareBindings, prepared]
       · rw [names]; exact parts.1
-      · exact congrArg (List.cons parameter.1) names
-      · exact congrArg (List.cons (parameter.1, ⟨parameter.2, .present⟩)) states
+      · exact congrArg (List.cons parameter) slots
 
 /-- Direct function entry uses the declaration's resolved slots and the common
 invocation allocator. The entry result contains no checking certificate. -/
@@ -525,10 +525,13 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.heap owner caller callerContext ∧
         ∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) := by
-  obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress arguments distinct
+  obtain ⟨inputs, prepared, inputsTyped, slots⟩ := prepareBindings.progress arguments distinct
   refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl,
     supply.allocate_fresh, supply.allocate_issued, ?_, ?_⟩
-  · rw [← states]; exact enterBindings.typed inputsTyped heap supply
+  · have states : inputs.map BindingInput.state = initializedContext declaration.parameters := by
+      rw [← slots]
+      simp [initializedContext, BindingInput.state, List.map_map, Function.comp_def]
+    rw [← states]; exact enterBindings.typed inputsTyped heap supply
   · intro previous issued
     exact ⟨ActivationSupply.allocate_preserves issued, ActivationSupply.allocate_distinct issued⟩
   · intro caller callerContext owner callerTyped

@@ -176,11 +176,8 @@ theorem EnvironmentTyped.parameters (parameters : List (BindingId × BindingType
     (distinct : (parameters.map Prod.fst).Nodup) :
     ∃ inputs, prepareBindings parameters values = some inputs ∧
       EnvironmentTyped program (inputs.map fun input => (input.name, input.value)) parameters := by
-  obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress typed distinct
-  have slots := congrArg (List.map fun entry => (entry.1, entry.2.slot)) states
-  have same : (inputs.map fun input => (input.name, input.slot)) = parameters := by
-    simpa [BindingInput.state, initializedContext, List.map_map, Function.comp_def] using slots
-  exact ⟨inputs, prepared, same ▸ inputsTyped.environment⟩
+  obtain ⟨inputs, prepared, inputsTyped, slots⟩ := prepareBindings.progress typed distinct
+  exact ⟨inputs, prepared, slots ▸ inputsTyped.environment⟩
 
 
 end Grounded
