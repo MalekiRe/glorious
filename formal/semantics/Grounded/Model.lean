@@ -165,7 +165,7 @@ inductive Expr where
   | group (body : Expr)
   | read (place : Place)
   | sequence (first rest : Expr)
-  | bind (mutable : Bool) (name : BindingId) (annotation : Option TypeExpr) (initial body : Expr)
+  | bind (mutable : Bool) (name : BindingId) (localType : Ty) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
   | project (body : Expr) (key : FieldKey)
   | array (elements : List Expr)

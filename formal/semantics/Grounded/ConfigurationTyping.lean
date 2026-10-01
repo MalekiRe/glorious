@@ -31,7 +31,7 @@ inductive FrameTyped (program : Program) : StaticContext → ResultType → Fram
       (discard : Duplicable program.data localType)
       (checked : HasType program home ((name, ⟨localType, mutable⟩) :: context) body result)
       (fresh : name ∉ context.map Prod.fst) :
-      FrameTyped program context (.one localType) (.bind name body) context (.one result)
+      FrameTyped program context (.one localType) (.bind name localType body) context (.one result)
   | scope {context : StaticContext} (locals : StaticContext) {result : Ty}
       (discard : ∀ binding ∈ locals, Duplicable program.data binding.2.type) :
       FrameTyped program (locals ++ context) (.one result) (.scope locals.length) context (.one result)
@@ -139,7 +139,7 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
           cases frame with | sequence discard checked => exact .intro store (.expression checked) tail
     | bind =>
       cases code with | expression checked =>
-        cases checked with | bind initial discard annotation body fresh =>
+        cases checked with | bind initial discard body fresh =>
           exact .intro store (.expression initial) (.cons (.bind discard body fresh) continuation)
     | bindResult =>
       cases code with | result resident =>
@@ -273,7 +273,7 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
         obtain ⟨value, selected, _⟩ := store.readPlace place
         exact ⟨_, .read selected⟩
       | sequence head discard tail => exact ⟨_, .sequence⟩
-      | bind initial discard annotated body fresh => exact ⟨_, .bind⟩
+      | bind initial discard body fresh => exact ⟨_, .bind⟩
       | tuple head tail => exact ⟨_, .tuple⟩
       | project source discard selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩

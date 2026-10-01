@@ -50,7 +50,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : String → Option Na
       (annotated : Annotation program.aliases annotation localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter name ⟨localType, mutable⟩) body rest type) :
       NamedExpr.Elaborates program names home scope (.bind mutable name annotation initial body)
-        (.bind mutable ⟨scope.next⟩ annotation first rest) type
+        (.bind mutable ⟨scope.next⟩ localType first rest) type
   | tuple {scope head tail first rest type types}
       (initial : NamedExpr.Elaborates program names home scope head first type)
       (continued : NamedExprsElaborate program names home scope tail rest types) :
@@ -136,7 +136,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module}
   | group _ ih => exact .group ih
   | read resolved path copyable => exact SourceScope.read_checked resolved path copyable
   | sequence _ discard _ head tail => exact .sequence head discard tail
-  | bind _ discard annotated _ first rest => exact SourceScope.bind_checked _ _ _ first discard annotated rest
+  | bind _ discard _ _ first rest => exact SourceScope.bind_checked _ _ _ first discard rest
   | tuple _ _ head tail => exact .tuple head tail
   | project _ discard selected ih => exact .project ih discard selected
   | array _ finite size ih => exact .array ih finite size

@@ -26,7 +26,7 @@ theorem HasType.structural_value {context : List (BindingId × BindingType)} {ex
       exact ⟨value, .group run, resident⟩
   | read selected copyable => intro closed; cases closed
   | sequence head discard tail headIH tailIH => intro closed; cases closed
-  | bind initial discard annotated body fresh initialIH bodyIH => intro closed; cases closed
+  | bind initial discard body fresh initialIH bodyIH => intro closed; cases closed
   | tuple head tail headIH tailIH =>
     intro closed
     cases closed with | tuple first rest =>
@@ -79,10 +79,10 @@ inductive EvaluationDependency (program : Program) : Expr → Expr → Prop wher
   | group {body : Expr} : EvaluationDependency program body (.group body)
   | sequenceFirst {first rest : Expr} : EvaluationDependency program first (.sequence first rest)
   | sequenceRest {first rest : Expr} : EvaluationDependency program rest (.sequence first rest)
-  | bindInitial {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr} :
-      EvaluationDependency program initial (.bind mutable name annotation initial body)
-  | bindBody {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr} :
-      EvaluationDependency program body (.bind mutable name annotation initial body)
+  | bindInitial {mutable : Bool} {name : BindingId} {localType : Ty} {initial body : Expr} :
+      EvaluationDependency program initial (.bind mutable name localType initial body)
+  | bindBody {mutable : Bool} {name : BindingId} {localType : Ty} {initial body : Expr} :
+      EvaluationDependency program body (.bind mutable name localType initial body)
   | tupleHead {head : Expr} {tail : List Expr} : EvaluationDependency program head (.tuple head tail)
   | tupleTail {head expression : Expr} {tail : List Expr} (member : expression ∈ tail) :
       EvaluationDependency program expression (.tuple head tail)
@@ -146,7 +146,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
       obtain ⟨value, middle, headRun, _, middleTyped, middleFrame⟩ := ih _ .sequenceFirst head store
       obtain ⟨result, after, tailRun, resident, afterTyped, afterFrame⟩ := ih _ .sequenceRest tail middleTyped
       exact ⟨result, after, .sequence headRun tailRun, resident, afterTyped, middleFrame.trans afterFrame⟩
-    | bind initial discard annotated body fresh =>
+    | bind initial discard body fresh =>
       obtain ⟨value, middle, initialRun, resident, middleTyped, middleFrame⟩ := ih _ .bindInitial initial store
       obtain ⟨result, after, bodyRun, resultTyped, afterTyped, afterFrame⟩ := ih _ .bindBody body (.cons resident middleTyped fresh)
       exact ⟨result, after.drop 1, .bind initialRun bodyRun, resultTyped,

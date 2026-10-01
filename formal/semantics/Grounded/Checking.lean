@@ -39,12 +39,12 @@ inductive HasType (program : Program) : Module → List (BindingId × BindingTyp
   | sequence {home : Module} {context : List (BindingId × BindingType)} {first rest : Expr} {discarded type : Ty}
       (head : HasType program home context first discarded) (drop : Duplicable program.data discarded)
       (tail : HasType program home context rest type) : HasType program home context (.sequence first rest) type
-  | bind {home : Module} {context : List (BindingId × BindingType)} {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr}
+  | bind {home : Module} {context : List (BindingId × BindingType)} {mutable : Bool} {name : BindingId} {initial body : Expr}
       {localType type : Ty} (initialized : HasType program home context initial localType)
-      (drop : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
+      (drop : Duplicable program.data localType)
       (continued : HasType program home ((name, ⟨localType, mutable⟩) :: context) body type)
       (fresh : name ∉ context.map Prod.fst) :
-      HasType program home context (.bind mutable name annotation initial body) type
+      HasType program home context (.bind mutable name localType initial body) type
   | tuple {home : Module} {context : List (BindingId × BindingType)} {head : Expr} {tail : List Expr}
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
       (tailTyped : HasTypes program home context tail rest) :

@@ -415,6 +415,18 @@ depth: the static state changes to absent then present, a second intermediate
 take fails, and no new identity is allocated. Retired storage rejects both
 operations.
 
+Core local bindings now carry their resolved `Ty`, rather than an optional
+source `TypeExpr`. Named elaboration still checks annotations and emits this
+type; `HasType.bind` checks the initializer against it. `Step.bind` carries
+the same type into `Frame.bind`, and frame realization ties its incoming
+value to that type. Source checking, evaluation composition, termination,
+preservation/progress and named-declaration consumers were migrated together.
+This supplies declared layout metadata for the pending cell-allocation
+cutover; it does not yet allocate a runtime cell. Strict checking of
+`Grounded.SourceDeclarations` and `Grounded.StorageOperations` passed
+(23 jobs). The source closure audit inspected 2,265 `Grounded` declarations
+and found only standard Lean axioms.
+
 These storage results are not language-level permission to discard residents,
 bypass ownership/loans, or execute unchecked projections. The expression
 machine, flow-sensitive admission and public source theorem are not yet

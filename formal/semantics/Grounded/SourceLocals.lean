@@ -151,29 +151,29 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : String} {fi
   exact .assign place discard resident continued
 
 theorem SourceScope.bind_checked (scope : SourceScope) (spelling : String) (mutable : Bool)
-    {annotation : Option TypeExpr} {initial body : Expr} {localType result : Ty}
+    {initial body : Expr} {localType result : Ty}
     (initialized : HasType program home scope.context initial localType)
-    (discard : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
+    (discard : Duplicable program.data localType)
     (continued : HasType program home (scope.enter spelling ⟨localType, mutable⟩).context body result) :
-    HasType program home scope.context (.bind mutable ⟨scope.next⟩ annotation initial body) result := by
-  refine .bind initialized discard annotated continued ?_
+    HasType program home scope.context (.bind mutable ⟨scope.next⟩ localType initial body) result := by
+  refine .bind initialized discard continued ?_
   simpa [context, List.map_map, Function.comp_def] using scope.fresh
 
 /-- Actual named-local elaboration constructs core admission and then consumes
 ordinary machine soundness. No completed execution or successor readiness is supplied. -/
 theorem SourceScope.bind_soundness (checkedProgram : program.Checked)
     (scope : SourceScope) (spelling : String) (mutable : Bool)
-    {annotation : Option TypeExpr} {initial body : Expr} {localType result : Ty}
+    {initial body : Expr} {localType result : Ty}
     (initialized : HasType program home scope.context initial localType)
-    (discard : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
+    (discard : Duplicable program.data localType)
     (continued : HasType program home (scope.enter spelling ⟨localType, mutable⟩).context body result)
     {environment : Environment} (store : EnvironmentTyped program environment scope.context) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ annotation initial body), []⟩ state) :
+    (run : Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ state) :
     ConfigurationTyped program scope.context (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       EnvironmentFrame scope.context environment state.outerEnvironment ∧
       (state.environment.map Prod.fst).Nodup :=
-  (scope.bind_checked spelling mutable initialized discard annotated continued).soundness checkedProgram store run
+  (scope.bind_checked spelling mutable initialized discard continued).soundness checkedProgram store run
 
 theorem SourceScope.read_soundness (checkedProgram : program.Checked)
     {scope : SourceScope} {spelling : String} {fields : List FieldKey} {binding : SourceBinding} {type : Ty}
