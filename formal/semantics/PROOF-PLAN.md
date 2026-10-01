@@ -14,7 +14,9 @@ assumed realization bridges and incompatible invariants. Existing work in
 `formal/spec/`, `formal/grounded-spec/`, and `formal/lean/` is preserved as
 reference, not developed in parallel. No old theorem is automatically a theorem
 of this development. No temporary code, assumed bridge, or placeholder Lean
-project is introduced by this reset. Subagent use remains paused.
+project is introduced by this reset. All work must be performed by the lead
+assistant, serially, without subagents or delegated proof/implementation lanes.
+See the durable serial-work-only rule in `AGENTS.md`.
 
 ## Current proved contract and ownership
 

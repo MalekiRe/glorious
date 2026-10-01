@@ -16,6 +16,14 @@ fact table, duplicated analysis, or isolated passing test is not that repair.
 Incremental work is appropriate only when it advances that same coherent
 pipeline correction, with the remaining integration stated explicitly.
 
+## Serial work only: no subagents
+
+Do all work yourself, serially. Do not launch subagents, delegate proof or
+implementation work, or run parallel worker lanes. The user explicitly requires
+this because subagent output has introduced sloppiness and integration risk.
+This rule applies across sessions and may change only with explicit user approval;
+requests to continue or finish all work do not authorize delegation.
+
 ## Lean specification: purpose and working method
 
 The goal is to provide a semantic Lean definition of the compiler's intended
@@ -122,9 +130,8 @@ an old admission architecture into the new folder to obtain a quick build.
    Lemma counts, build counts, worker activity, and passing examples are not
    measures of semantic completion. Do not create competing status/handoff
    documents as alternative sources of truth.
-7. Keep one owner of the semantic core. Subagent use is paused and must not
-   resume without explicit user approval. Any later delegation requires
-   demonstrably independent scope and stable shared interfaces.
+7. Keep one owner of the semantic core. Follow the serial-work-only rule above;
+   independent tasks or stable interfaces do not authorize subagent use.
 8. Before claiming whole-language completion, audit normative coverage, public
    theorem premises, real consumers, and remaining external contracts. No
    compiler implementation or unrelated feature expansion substitutes for
