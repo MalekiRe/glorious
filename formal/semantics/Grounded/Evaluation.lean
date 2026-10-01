@@ -130,6 +130,95 @@ theorem EvaluatesMany.cons {environment middle after : Environment} {head : Expr
   .step .cons ((Run.extend headEval [.argumentHead tail]).trans
     (.step .argumentHead ((Run.extend tailEval [.argumentTail first]).trans (.step .argumentTail (.refl _)))))
 
+
+/-- A completed direct invocation necessarily ran the ordered argument list,
+then the selected body in fresh parameter storage, then caller restoration.
+This extracts executions; it never asserts that a recursive body terminates. -/
+theorem Evaluates.call_iff {environment after : Environment} {identity : Nat}
+    {arguments : List Expr} {value : Value} :
+    Evaluates program environment (.call identity arguments) value after ↔
+      ∃ declaration values middle bindings localAfter,
+        program.functions identity = some declaration ∧
+        EvaluatesMany program environment arguments values middle ∧
+        prepareBindings declaration.parameters values = some bindings ∧
+        Evaluates program (enterBindings middle.heap middle.supply bindings) declaration.body value localAfter ∧
+        localAfter.restore middle.scope = some after := by
+  constructor
+  · intro evaluated
+    cases evaluated with
+    | step head rest =>
+      cases head with
+      | call declared =>
+        obtain ⟨done, terminal, inputs, continued⟩ := rest.unextend
+          ⟨environment, .arguments arguments, []⟩ [_] rfl (by simp)
+        cases terminal with
+        | result middle argument =>
+          cases continued with
+          | step head rest => cases head
+        | results middle values =>
+          cases continued with
+          | step head rest =>
+            cases head with
+            | callInputs prepared =>
+              obtain ⟨done, terminal, body, returned⟩ := rest.unextend
+                ⟨_, .expression _, []⟩ [_] rfl (by simp)
+              cases terminal with
+              | results localAfter results =>
+                cases returned with
+                | step head rest => cases head
+              | result localAfter result =>
+                cases returned with
+                | step head rest =>
+                  cases head with
+                  | restore restored =>
+                    cases rest with
+                    | refl => exact ⟨_, _, _, _, _, declared, inputs, prepared, body, restored⟩
+                    | step head rest => cases head
+  · rintro ⟨declaration, values, middle, bindings, localAfter, declared, inputs, prepared, body, restored⟩
+    exact .call declared prepared inputs body restored
+
+/-- The first argument completes before the tail starts, in its actual output
+heap. The result pack has exactly that first value followed by the tail pack. -/
+theorem EvaluatesMany.cons_iff {environment after : Environment} {head : Expr}
+    {tail : List Expr} {values : List Value} :
+    EvaluatesMany program environment (head :: tail) values after ↔
+      ∃ first rest middle, values = first :: rest ∧
+        Evaluates program environment head first middle ∧
+        EvaluatesMany program middle tail rest after := by
+  constructor
+  · intro evaluated
+    cases evaluated with
+    | step first remaining =>
+      cases first with
+      | cons =>
+        obtain ⟨done, terminal, headRun, continued⟩ := remaining.unextend
+          ⟨environment, .expression head, []⟩ [_] rfl (by simp)
+        cases terminal with
+        | results middle values =>
+          cases continued with
+          | step first remaining => cases first
+        | result middle value =>
+          cases continued with
+          | step first remaining =>
+            cases first with
+            | argumentHead =>
+              obtain ⟨done, terminal, tailRun, continued⟩ := remaining.unextend
+                ⟨middle, .arguments tail, []⟩ [_] rfl (by simp)
+              cases terminal with
+              | result last value =>
+                cases continued with
+                | step first remaining => cases first
+              | results last values =>
+                cases continued with
+                | step first remaining =>
+                  cases first with
+                  | argumentTail =>
+                    cases remaining with
+                    | refl => exact ⟨_, _, _, rfl, headRun, tailRun⟩
+                    | step first remaining => cases first
+  · rintro ⟨first, rest, middle, rfl, headRun, tailRun⟩
+    exact .cons headRun tailRun
+
 /-- Determinism is an operational property, independent of admission. -/
 theorem Evaluates.unique {environment firstAfter secondAfter : Environment} {expression : Expr}
     {first second : Value} (left : Evaluates program environment expression first firstAfter)
@@ -146,5 +235,54 @@ theorem EvaluatesMany.unique {environment firstAfter secondAfter : Environment} 
   have same := Run.unique left right (fun _ step => by cases step) (fun _ step => by cases step)
   cases same
   exact ⟨rfl, rfl⟩
+
+
+/-- Every argument-list cut is an actual sequential execution cut. In
+particular, a later argument cannot run before the complete preceding prefix. -/
+theorem EvaluatesMany.append_iff {environment after : Environment}
+    {front back : List Expr} {values : List Value} :
+    EvaluatesMany program environment (front ++ back) values after ↔
+      ∃ first rest middle, values = first ++ rest ∧
+        EvaluatesMany program environment front first middle ∧
+        EvaluatesMany program middle back rest after := by
+  induction front generalizing environment values with
+  | nil =>
+    constructor
+    · intro run
+      exact ⟨[], values, environment, rfl, .nil, run⟩
+    · rintro ⟨first, rest, middle, rfl, initial, final⟩
+      have same := EvaluatesMany.unique EvaluatesMany.nil initial
+      rcases same with ⟨rfl, rfl⟩
+      exact final
+  | cons head tail ih =>
+    constructor
+    · intro run
+      obtain ⟨value, rest, middle, rfl, headRun, tailRun⟩ := EvaluatesMany.cons_iff.mp run
+      obtain ⟨first, last, next, rfl, frontRun, backRun⟩ := ih.mp tailRun
+      exact ⟨value :: first, last, next, rfl, .cons headRun frontRun, backRun⟩
+    · rintro ⟨first, rest, middle, rfl, initial, final⟩
+      obtain ⟨value, front, next, rfl, headRun, tailRun⟩ := EvaluatesMany.cons_iff.mp initial
+      exact .cons headRun (ih.mpr ⟨front, rest, middle, rfl, tailRun, final⟩)
+
+
+/-- Noncompletion of the body selected after the actual arguments implies
+noncompletion of its invocation. This raw theorem does not conflate absence
+of a completed run with progress; admitted-prefix safety supplies progress. -/
+theorem Evaluates.call_body_noncompletion {environment middle : Environment}
+    {identity : Nat} {arguments : List Expr} {declaration : FunctionDecl}
+    {values : List Value} {bindings : List BindingInput}
+    (declared : program.functions identity = some declaration)
+    (inputs : EvaluatesMany program environment arguments values middle)
+    (prepared : prepareBindings declaration.parameters values = some bindings)
+    (noncompletion : ∀ value after,
+      ¬ Evaluates program (enterBindings middle.heap middle.supply bindings) declaration.body value after) :
+    ∀ value after, ¬ Evaluates program environment (.call identity arguments) value after := by
+  intro value after completed
+  obtain ⟨actual, actualValues, actualMiddle, actualBindings, localAfter,
+    selected, inputRun, preparation, body, _⟩ := Evaluates.call_iff.mp completed
+  cases Option.some.inj (declared.symm.trans selected)
+  obtain ⟨rfl, rfl⟩ := inputs.unique inputRun
+  cases Option.some.inj (prepared.symm.trans preparation)
+  exact noncompletion _ _ body
 
 end Grounded

@@ -2683,3 +2683,93 @@ trait coherence. Physical memory, loans, custom cleanup and the other tracked
 whole-language obligations remain open. None of the 15 broad completion tasks
 is closed by this boundary repair.
 
+## Explicit-import declaration privacy
+
+The source-closure audit against §§2.1–2.3 and §3.1 found an admission defect:
+an explicit import checked the target binding's visibility but not the original
+declaration's visibility. A public alias could therefore admit an unused import
+of a private function into another package. Call elaboration already rejected
+invoking that function; deferring the import error until invocation was wrong.
+
+`FunctionImportsValid` now checks the exact source declaration identity selected
+by every explicit import, including unused imports. `explicit_binding` carries
+that authority together with its existing seeded candidate. `explicit_origin`
+proves that any visible candidate for the admitted explicit import has the same
+authorized original identity, for arbitrary finite alias/re-export chains.
+
+`SourceClosure.Admitted.source_import_origin_visibility` transfers that guarantee
+to the actual emitted `FunctionDecl`, using inclusion-assigned module ownership,
+grouped-import emission, and named declaration elaboration. The existing
+`imported_call_soundness` consumer now also exports original-declaration authority
+at the import's owner while preserving its full execution-prefix safety result.
+An arbitrary later caller must still have its own declaration authority; public
+aliases cannot enlarge private authority. Public declarations re-exported through
+hidden module paths retain the existing identity-preserving behavior.
+
+Strict scoped `lake build Grounded.SourceClosure` passed in an isolated source-only
+workspace. Transient parametric Lean proofs established that the previous
+contract admitted the private-function/public-alias/cross-package-import graph
+for arbitrary declarations and names, and the repaired contract rejects the
+same graph. These diagnostic proofs were removed, not installed as routine
+examples. Axiom inspection of the new general import guarantees, imported-call
+soundness and source-function soundness found only `propext`, `Classical.choice`
+and `Quot.sound`.
+
+Identifier classification remains unchanged: the existing checked decoder and
+grammar theorem exactly implement ASCII identifiers with wildcard exclusion.
+Decoded identifiers are not a proof of UTF-8 decoding, token boundaries, nested
+comments, structural-word grammar, or spans. Source inclusion still follows only
+declared inline/external modules and the self-named-directory rule; existing file
+permutation and module-owner proofs remain checked. Other namespaces, module
+aliases, parser/source-map obligations, library profiles, and whole-language
+semantics remain open. Automatic preludes still share the glob candidate kind;
+separate priority against authored glob imports is not established here.
+
+## Ordered admitted-call execution decomposition
+
+The direct-call boundary now has an elimination theorem as well as execution
+constructors. Previously the evaluation API composed supplied argument/body
+runs but did not recover those phases from an arbitrary completed invocation.
+Under normative §5.2, order is a property of every actual execution, not merely
+of a chosen construction of one execution.
+
+`Step.unextend` and `Run.unextend` prove that retained caller frames cannot
+participate before the computation above them reaches terminal control.
+`Evaluates.call_iff` uses this operational boundary to extract the complete
+argument evaluation, exact parameter preparation, selected body execution in
+fresh storage, and caller restoration from any completed direct call.
+`EvaluatesMany.cons_iff` and `EvaluatesMany.append_iff` recover actual sequential
+runs at each argument and arbitrary argument-list cuts. No second evaluator or
+proof-only evaluation-order relation is introduced.
+
+`HasType.call_signature` connects the uniquely selected declaration to the
+ordered checking judgment. `HasTypes.evaluation_soundness` derives typed
+argument values, output storage masks, issued activation, and consumption-only
+framing from the actual argument run. The public
+`HasType.call_evaluation_soundness` consumes these producers and exports all
+three invocation phases, typed parameter bindings, argument-phase and returned
+state safety, and every prefix-before-suffix argument cut. Its completion
+premise is the observed run being characterized, not an admission requirement.
+
+`Evaluates.call_body_noncompletion` proves that a body with no completed run
+after the actual arguments cannot yield a completed call. This raw statement
+is not by itself a divergence/progress theorem; existing admitted-prefix
+soundness excludes stuck prefixes. `Program.Checked`, `FiniteCalls`,
+`HasType.call_entry` and its constructive mixed-place consumer are unchanged:
+recursive bodies still need no termination certificate, while finite argument
+execution remains constructed rather than supplied to the admitted-entry API.
+
+Scoped Lean checking in `/tmp/grandiose-function-evaluation-IPAZyY` passed
+`lake build Grounded.Soundness`. Explicit axiom inspection of the nine new
+theorems and both existing entry consumers reported only `propext`,
+`Classical.choice` and `Quot.sound`. No examples or unit tests were introduced.
+
+This closes the general completed direct-call/order boundary in the existing
+fragment, not full callable application. `Expr.call` still selects a numeric
+declaration identity rather than evaluating a callee expression; `Ty` and
+`Value` contain no callable/environment representation. First-class function
+items, closures, callee-expression evaluation, capture formation/invocation,
+callable evidence and nonlocal control therefore still require an authoritative
+model extension and corresponding checking/preservation/source consumers.
+Pattern application retains its existing machine and safety semantics; this
+new direct-call decomposition does not claim a pattern-application inverse.

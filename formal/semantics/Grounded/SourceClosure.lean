@@ -1289,6 +1289,7 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
     (bindingVisible : edge.visibility.Allows edge.home caller) :
     ∃ identity declaration, closure.functionNames caller name = some identity ∧
       program.functions identity = some declaration ∧
+      declaration.visibility.Allows declaration.home edge.home ∧
       ∀ {scope : SourceScope} {before after : FlowContext} {arguments : List NamedExpr} {inputs : List Expr},
         name.Unshadowed scope → declaration.visibility.Allows declaration.home caller →
         NamedExprsElaborate program closure.functionNames caller scope before arguments inputs
@@ -1306,7 +1307,7 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
   have member : edge ∈ closure.imports :=
     List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
   have valid := admitted.2.2.2.1
-  obtain ⟨identity, candidate⟩ := valid.explicit_binding member kind
+  obtain ⟨identity, candidate, origin, originSelected, originVisible⟩ := valid.explicit_binding member kind
   have selectedBinding := valid.resolve_existing (valid.2.2.1 edge member).1
     ⟨edge.visibility, candidate, bindingVisible⟩
   have selected : closure.functionNames caller name = some identity := by
@@ -1314,8 +1315,13 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
     refine ⟨edge.home, namespaceResolved, access, reachable, ?_⟩
     rw [spelling]
     exact Grounded.functionNames.selected_iff.mp selectedBinding
-  obtain ⟨_, declaration, _, declared, _⟩ := admitted.resolves selected
-  refine ⟨identity, declaration, selected, declared, ?_⟩
+  obtain ⟨actual, declaration, sourceSelected, declared, elaborated⟩ := admitted.resolves selected
+  have originEq := Option.some.inj (originSelected.symm.trans sourceSelected)
+  subst actual
+  have authorized : declaration.visibility.Allows declaration.home edge.home := by
+    cases elaborated
+    exact originVisible
+  refine ⟨identity, declaration, selected, declared, authorized, ?_⟩
   intro scope before after arguments inputs unshadowed visible argumentsTyped slots environment store issued state run
   have elaborated : NamedExpr.Elaborates program closure.functionNames caller scope before
       (.call name arguments) (.call identity inputs) declaration.result after :=
@@ -1471,6 +1477,36 @@ theorem SourceClosure.Admitted.import_request_visibility {packages : List Packag
   · obtain ⟨package, _, _, selected⟩ := resolvePackagePrelude.origin automatic
     obtain ⟨_, _, target, _, rfl⟩ := (package.preludeRequest_selected source).mp selected
     simp [Visibility.ValidAt, Visibility.Allows]
+
+
+/-- Every explicit source import checks the original emitted declaration's
+authority, even when unused or reached through public aliases. This consumes
+the same inclusion, grouped-import emission and function elaboration products
+as invocation; no file-based or alias-based privacy authority is substituted. -/
+theorem SourceClosure.Admitted.source_import_origin_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : FunctionImportSyntax} (sourceIncluded : source ∈ loaded.importRequests packages)
+    {target : Module}
+    (path : source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target)
+    {edge : FunctionImport}
+    (emitted : ImportSelection.Emits loaded.home source.visibility target source.selection (.binding edge))
+    {sourceName localName : Identifier} (kind : edge.kind = .explicit sourceName localName)
+    {identity : Nat}
+    (candidate : VisibleFunctionCandidate closure.functions closure.imports edge.home edge.target sourceName identity)
+    {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
+    declaration.visibility.Allows declaration.home loaded.home := by
+  have entryMember := closure.import_emitted included sourceIncluded path emitted
+  have member : edge ∈ closure.imports :=
+    List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
+  obtain ⟨_, cores, elaborated, functions, _⟩ := admitted.2.2.2.2.1
+  rw [functions] at declared
+  obtain ⟨origin, found, body⟩ := elaborated.selected_core declared
+  have authorized := admitted.2.2.2.1.explicit_origin member kind candidate found
+  have owner : edge.home = loaded.home := emitted.home
+  rw [owner] at authorized
+  cases body
+  exact authorized
 
 
 end Grounded

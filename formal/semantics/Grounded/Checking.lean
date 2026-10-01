@@ -133,6 +133,21 @@ inductive ArmsType (program : Program) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
 
+
+/-- A resolved direct call preserves the selected declaration's complete input
+pack and result type; expected results cannot select another callable. -/
+theorem HasType.call_signature {program : Program} {home : Module}
+    {before after : FlowContext} {identity : Nat} {arguments : List Expr}
+    {type : Ty} {declaration : FunctionDecl}
+    (checked : HasType program home before (.call identity arguments) type after)
+    (declared : program.functions identity = some declaration) :
+    type = declaration.result ∧ declaration.visibility.Allows declaration.home home ∧
+      HasTypes program home before arguments (declaration.parameters.map fun parameter => parameter.2.type) after := by
+  cases checked with
+  | call selected visible inputs =>
+    cases Option.some.inj (declared.symm.trans selected)
+    exact ⟨rfl, visible, inputs⟩
+
 theorem HasType.no_uncertain_read {program : Program} {home : Module} {before after : FlowContext}
     {place : Place} {type : Ty} {state : BindingState}
     (checked : HasType program home before (.read place) type after)

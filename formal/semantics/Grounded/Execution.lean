@@ -222,6 +222,48 @@ theorem Run.trans {first middle last : Configuration} (front : Run program first
   | refl state => exact back
   | step head rest ih => exact .step head (ih back)
 
+/-- Until a subcomputation has a terminal control, its caller frames cannot
+participate in a transition. This is an operational fact, not admission evidence. -/
+theorem Step.unextend {before after : Configuration} {tail : List Frame}
+    (step : Step program (before.extend tail) after)
+    (active : ¬ Terminal before) :
+    ∃ next, Step program before next ∧ after = next.extend tail := by
+  rcases before with ⟨environment, control, stack⟩
+  cases stack with
+  | nil =>
+    cases control with
+    | result value => exact False.elim (active (.result _ _))
+    | results values => exact False.elim (active (.results _ _))
+    | expression expression =>
+      cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
+    | arguments arguments =>
+      cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
+  | cons frame stack =>
+    cases control <;> cases frame <;> cases step <;>
+      exact ⟨_, by constructor <;> assumption, rfl⟩
+
+/-- Any run that consumes a retained frame first completes the computation
+above it. Extract both actual runs, without a termination assumption. -/
+theorem Run.unextend {before after : Configuration} (run : Run program before after) :
+    ∀ (base : Configuration) (tail : List Frame), before = base.extend tail →
+      after.continuation.length < tail.length →
+      ∃ done, Terminal done ∧ Run program base done ∧ Run program (done.extend tail) after := by
+  induction run with
+  | refl state =>
+    intro base tail same shorter
+    subst state
+    simp only [Configuration.extend, List.length_append] at shorter
+    omega
+  | step head rest ih =>
+    intro base tail same shorter
+    subst_vars
+    by_cases terminal : Terminal base
+    · exact ⟨base, terminal, .refl _, .step head rest⟩
+    · obtain ⟨next, step, same⟩ := head.unextend terminal
+      obtain ⟨done, terminal, front, back⟩ := ih next tail same shorter
+      exact ⟨done, terminal, .step step front, back⟩
+
+
 theorem Step.unique {before first second : Configuration} (left : Step program before first)
     (right : Step program before second) : second = first := by
   cases left <;> cases right <;> simp_all

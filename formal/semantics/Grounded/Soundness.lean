@@ -117,6 +117,31 @@ theorem HasType.compatible_call_soundness (checkedProgram : program.Checked)
   obtain ⟨final, checked⟩ := HasType.call_compatible_inputs declared visible arguments compatible admitted
   exact ⟨final, checked, fun _ _ store issued run => checked.soundness checkedProgram store issued run⟩
 
+/-- Actual argument execution realizes the ordered checking output, even when
+static call expansion is infinite. Completion is observed, not admitted. -/
+theorem HasTypes.evaluation_soundness (checkedProgram : program.Checked)
+    {context final : FlowContext} {expressions : List Expr} {types : List Ty}
+    (checked : HasTypes program home context expressions types final)
+    {environment after : Environment} {values : List Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    (evaluated : EvaluatesMany program environment expressions values after) :
+    ValuesHaveTypes program values types ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after := by
+  have entry : ConfigurationTyped program final (.many types)
+      ⟨environment, .arguments expressions, []⟩ :=
+    .intro store issued (.arguments checked) .nil
+  have current := entry.run checkedProgram evaluated
+  have framed := entry.consumption_run checkedProgram evaluated
+  cases current with
+  | intro residents afterIssued code continuation =>
+    cases continuation
+    cases code with
+    | results residentsTyped => exact ⟨residentsTyped, residents, afterIssued, framed⟩
+
+
 /-- Argument termination reaches actual fresh callee entry even when the callee
 itself is recursive. Allocation, preparation and the entered state are results. -/
 theorem HasType.call_entry (checkedProgram : program.Checked)
@@ -433,6 +458,51 @@ theorem HasType.evaluation_soundness (checkedProgram : program.Checked)
     cases continuation
     cases code with
     | result resident => exact ⟨resident, residents, afterIssued, framed⟩
+
+/-- Completed admitted calls expose their actual argument/body/restoration
+phases and every left-to-right argument cut, with checked parameter values and
+post-state safety. No static call-expansion or body-termination certificate is
+needed: the supplied completed run is decomposed, not postulated by admission. -/
+theorem HasType.call_evaluation_soundness (checkedProgram : program.Checked)
+    {context final : FlowContext} {identity : Nat} {arguments : List Expr} {type : Ty}
+    (checked : HasType program home context (.call identity arguments) type final)
+    {environment after : Environment} {value : Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    (evaluated : Evaluates program environment (.call identity arguments) value after) :
+    ∃ declaration values middle bindings localAfter,
+      program.functions identity = some declaration ∧ type = declaration.result ∧
+      EvaluatesMany program environment arguments values middle ∧
+      ValuesHaveTypes program values (declaration.parameters.map fun parameter => parameter.2.type) ∧
+      BindingMap.Typed program middle.heap middle.activation middle.bindings final ∧
+      middle.supply.Issued middle.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment middle ∧
+      prepareBindings declaration.parameters values = some bindings ∧ BindingInputsTyped program bindings ∧
+      Evaluates program (enterBindings middle.heap middle.supply bindings) declaration.body value localAfter ∧
+      localAfter.restore middle.scope = some after ∧
+      ValueHasType program value type ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      ∀ front back, arguments = front ++ back →
+        ∃ first rest next, values = first ++ rest ∧
+          EvaluatesMany program environment front first next ∧
+          EvaluatesMany program next back rest middle := by
+  obtain ⟨declaration, values, middle, bindings, localAfter, declared, inputRun, prepared, bodyRun, restored⟩ :=
+    Evaluates.call_iff.mp evaluated
+  have ⟨result, _, inputs⟩ := checked.call_signature declared
+  have ⟨residents, middleTyped, middleIssued, middleFramed⟩ :=
+    inputs.evaluation_soundness checkedProgram store issued inputRun
+  obtain ⟨actual, produced, typed, _⟩ :=
+    prepareBindings.progress residents (checkedProgram.functions _ _ declared).distinct
+  cases Option.some.inj (prepared.symm.trans produced)
+  have ⟨resident, afterTyped, afterIssued, framed⟩ := checked.evaluation_soundness checkedProgram store issued evaluated
+  refine ⟨declaration, values, middle, bindings, localAfter, declared, result, inputRun, residents,
+    middleTyped, middleIssued, middleFramed, prepared, typed, bodyRun, restored,
+    resident, afterTyped, afterIssued, framed, ?_⟩
+  intro front back same
+  exact EvaluatesMany.append_iff.mp (same ▸ inputRun)
+
 
 /-- Finite-call correctness constructs execution and proves its unique result,
 exact post-state and consumption-only immutable frame. -/

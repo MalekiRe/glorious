@@ -432,14 +432,18 @@ theorem functionNames.imports_congr {sources : List NamedFunction}
 
 
 /-- Module existence is supplied by the source closure, not guessed from the
-presence of functions: an empty declared module is a valid glob target. -/
+presence of functions: an empty declared module is a valid glob target. Explicit
+imports check both their target binding and the original declaration's privacy,
+including unused imports through arbitrarily many aliases and re-exports. -/
 def FunctionImportsValid (modules : List Module) (sources : List NamedFunction)
     (imports : List FunctionImport) : Prop :=
   modules.Nodup ∧
   (∀ declaration ∈ sources, declaration.home ∈ modules) ∧
   (∀ edge ∈ imports, edge.home ∈ modules ∧ edge.target ∈ modules ∧
     ∀ sourceName localName, edge.kind = .explicit sourceName localName →
-      ∃ identity, VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity) ∧
+      ∃ identity, VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity ∧
+        ∃ declaration, sources[identity]? = some declaration ∧
+          declaration.visibility.Allows declaration.home edge.home) ∧
   (∀ caller home, home ∈ modules → ∀ name first second,
     VisibleFunctionCandidate sources imports caller home name first →
     VisibleFunctionCandidate sources imports caller home name second → first = second)
@@ -461,9 +465,12 @@ theorem FunctionImportsValid.explicit_binding {modules : List Module} {sources :
     {imports : List FunctionImport} (valid : FunctionImportsValid modules sources imports)
     {edge : FunctionImport} (member : edge ∈ imports) {sourceName localName : Identifier}
     (kind : edge.kind = .explicit sourceName localName) :
-    ∃ identity, FunctionCandidate sources imports edge.home localName identity edge.visibility := by
-  obtain ⟨identity, visibility, candidate, accessible⟩ := (valid.2.2.1 edge member).2.2 sourceName localName kind
-  exact ⟨identity, .imported member (.explicit kind) candidate accessible⟩
+    ∃ identity, FunctionCandidate sources imports edge.home localName identity edge.visibility ∧
+      ∃ declaration, sources[identity]? = some declaration ∧
+        declaration.visibility.Allows declaration.home edge.home := by
+  obtain ⟨identity, ⟨visibility, candidate, accessible⟩, declaration, found, authorized⟩ :=
+    (valid.2.2.1 edge member).2.2 sourceName localName kind
+  exact ⟨identity, .imported member (.explicit kind) candidate accessible, declaration, found, authorized⟩
 
 
 theorem FunctionImportsValid.imports_congr {modules : List Module} {sources : List NamedFunction}
@@ -471,6 +478,25 @@ theorem FunctionImportsValid.imports_congr {modules : List Module} {sources : Li
     FunctionImportsValid modules sources first ↔ FunctionImportsValid modules sources second := by
   simp only [FunctionImportsValid, same,
     VisibleFunctionCandidate, FunctionCandidate.imports_congr same]
+
+
+/-- An alias cannot launder declaration privacy at an explicit import. The
+candidate may have any finite re-export provenance; uniqueness identifies it
+with the declaration authorized by the actual import admission rule. -/
+theorem FunctionImportsValid.explicit_origin {modules : List Module} {sources : List NamedFunction}
+    {imports : List FunctionImport} (valid : FunctionImportsValid modules sources imports)
+    {edge : FunctionImport} (member : edge ∈ imports) {sourceName localName : Identifier}
+    (kind : edge.kind = .explicit sourceName localName) {identity : Nat}
+    (candidate : VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity)
+    {declaration : NamedFunction} (declared : sources[identity]? = some declaration) :
+    declaration.visibility.Allows declaration.home edge.home := by
+  obtain ⟨other, selected, origin, found, authorized⟩ :=
+    (valid.2.2.1 edge member).2.2 sourceName localName kind
+  have same := valid.2.2.2 edge.home edge.target (valid.2.2.1 edge member).2.1
+    sourceName identity other candidate selected
+  subst other
+  cases Option.some.inj (found.symm.trans declared)
+  exact authorized
 
 
 end Grounded
