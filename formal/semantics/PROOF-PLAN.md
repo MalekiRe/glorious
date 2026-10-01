@@ -395,20 +395,40 @@ retains it after its resident moves out. Tuple and nominal partial residents
 have a structural initialization description. General read construction and
 read preservation connect that description to actual resident reconstruction.
 
-`takeStorage` and `restoreStorage` consume the heap operations above.
-Their constructive progress and preservation theorems prove whole-resident
-transfer, rejection of a second take, same-cell restoration with any correctly
-typed replacement, and preservation of all unrelated cells. Activation and
-declared type survive the updates. Neither operation accepts retired storage.
-These are storage operations, not language-level permission to discard an old
-resident or bypass ownership and loan checks. Projected partial moves and
-restoration, source admission and machine integration are still unproved.
+`PartialFields` now composes the existing `ProjectionType` and `PathType`
+through arbitrary-depth partial-resident selection and restoration. Declared
+layout opens whole holes into absent fields without inventing resident values.
+`PathType.restore_partial` constructs both the static initialization update
+and the actual storage update, with typed reconstruction and exact readback.
+`Initialization.write_select` proves restored availability directly from the
+static transformation. Single-field replacement preserves every sibling's
+partial resident, including its holes.
 
-Verification: strict `lake build Grounded.PartialStorage` passed. An audit
-of all 488 declarations defined by `Values`, `RuntimeHeap` and
-`PartialStorage` found only standard Lean axioms. The move/restoration
-results use `propext` and `Quot.sound`. No source-soundness theorem
-was changed, and no examples or unit tests were added or run.
+`StorageOperations` owns the path-based `takeStorage` and `restoreStorage`
+operations. Their former root-only definitions and consumers were removed;
+empty paths are the whole-owner case of the same operations. General progress
+and preservation consume checked paths, current cell typing and, for moves,
+current source-state readiness. They prove same-cell updates, preserved
+activation/type, global resident typing and outside-cell framing.
+`takeStorage.restore` composes an actual move and restoration at any field
+depth: the static state changes to absent then present, a second intermediate
+take fails, and no new identity is allocated. Retired storage rejects both
+operations.
+
+These storage results are not language-level permission to discard residents,
+bypass ownership/loans, or execute unchecked projections. The expression
+machine, flow-sensitive admission and public source theorem are not yet
+migrated. Projected operations now have proved producers, but that remaining
+consumer cutover is mandatory before claiming source coverage of moves.
+
+Verification: strict `lake build Grounded.StorageOperations` passed. The
+all-defining-module audit of `RuntimeHeap`, `PartialStorage`,
+`PartialFields` and `StorageOperations` inspected 516 declarations and found
+only standard Lean axioms. The path, heap-progress/preservation and composed
+move/restoration results use `propext` and `Quot.sound`. An import audit
+confirmed absence of `HasType`, `correctness` and `SourceScope` from the
+storage runtime closure. No examples or unit tests were added or run.
+
 
 
 ## Migration contracts and premise producers
