@@ -491,6 +491,17 @@ audit found only standard Lean axioms. No future execution or successful
 allocation is a premise. Logical allocation still makes no physical-resource
 exhaustion claim.
 
+The actual `Step.callInputs` transition now consumes `prepareBindings` too;
+its truncating `List.zip` implementation has been removed. Typed arguments
+construct preparation for progress, and preservation uses the resulting
+typed inputs. Evaluation composition and the finite-termination proof consume
+the same preparation result. `Step.call_arity` proves for every raw call-entry
+transition, independently of source admission, that parameter and argument
+counts agree. The current value-bearing environment remains a projection of
+these inputs until the addressed-machine cutover; it is not an allocated heap.
+The 25-job source gate and full imported-declaration axiom audit passed after
+this migration, including general preservation, progress and source soundness.
+
 Activation generativity is now explicit in the source-entry result:
 `ActivationSupply.Issued` includes every ID below the persistent supply
 frontier, including activations with no allocated cells. Actual entry produces
@@ -676,8 +687,8 @@ Premise-producer map:
 
 | Premise | Meaning and producer | Actual consumer |
 | --- | --- | --- |
-| `HasType` | Ordinary rules check decoded syntax, declarations, visibility, bounds and permitted duplicable operations. Calls include a finite derivation for their declared body. | `correctness` inducts on these rules and their list/arm derivations. |
-| `EnvironmentTyped` | Legitimate current values agree with lexical types. Empty entry constructs it; binding, parameter zipping and pattern binding preserve it. | Lookup and recursive body correctness. |
+| `HasType` | Ordinary rules check decoded syntax, declarations, visibility, bounds and permitted duplicable operations. Calls check the declared signature; `Program.Checked` separately supplies body checking. | Configuration preservation and source soundness; finite-call evidence separately supports termination. |
+| `EnvironmentTyped` | Legitimate current values agree with lexical types. Empty entry constructs it; binding, prepared invocation inputs and pattern binding preserve it. | Lookup and recursive body correctness. |
 | `Covers` | Structural constructor-space coverage, not an evaluation-success certificate. | `Covers.selectArm` constructs selection after argument evaluation. |
 | `PatternType` | Static constructor/field typing, access and legal duplicable disposal. | `PatternType.bindings` derives the selected body's typed environment. |
 | `Useful` | A typed datum distinguishes a clause from preceding clauses; it does not assert evaluation of the subject. | `ArmsType.clause` admits only useful clauses. |

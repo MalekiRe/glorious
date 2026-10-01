@@ -91,13 +91,14 @@ theorem Evaluates.construct {environment after : List (BindingId × Value)} {ide
   .step .construct ((Run.extend residents [.construct identity tag]).trans (.step .constructResult (.refl _)))
 
 theorem Evaluates.call {environment middle localAfter : List (BindingId × Value)} {identity : Nat} {arguments : List Expr}
-      {declaration : FunctionDecl} {values : List Value} {value : Value}
+      {declaration : FunctionDecl} {values : List Value} {value : Value} {bindings : List BindingInput}
       (declared : program.functions identity = some declaration)
+      (prepared : prepareBindings declaration.parameters values = some bindings)
       (inputs : EvaluatesMany program environment arguments values middle)
-      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter) :
+      (body : Evaluates program (bindings.map fun input => (input.name, input.value)) declaration.body value localAfter) :
       Evaluates program environment (.call identity arguments) value middle :=
   .step (.call declared) ((Run.extend inputs [.call declaration]).trans
-    (.step .callInputs ((Run.extend body [.restore middle]).trans (.step .restore (.refl _)))))
+    (.step (.callInputs prepared) ((Run.extend body [.restore middle]).trans (.step .restore (.refl _)))))
 
 theorem Evaluates.applyPatterns {environment middle after : List (BindingId × Value)} {inputs : List Ty} {arguments : List Expr}
       {arms : List (Pattern × Expr)} {values : List Value}

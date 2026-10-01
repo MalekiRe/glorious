@@ -376,6 +376,32 @@ def prepareBindings : List (BindingId × BindingType) → List Value → Option 
       (prepareBindings parameters values).map (⟨name, slot, value⟩ :: ·)
   | _, _ => none
 
+theorem prepareBindings.arity {parameters : List (BindingId × BindingType)} {values : List Value}
+    {inputs : List BindingInput} (prepared : prepareBindings parameters values = some inputs) :
+    parameters.length = values.length := by
+  induction parameters generalizing values inputs with
+  | nil => cases values <;> simp_all [prepareBindings]
+  | cons parameter parameters ih =>
+    cases values with
+    | nil => cases parameter; simp [prepareBindings] at prepared
+    | cons value values =>
+      cases parameter
+      simp only [prepareBindings, Option.map_eq_some_iff] at prepared
+      obtain ⟨tail, prepared, _⟩ := prepared
+      exact congrArg Nat.succ (ih prepared)
+
+theorem prepareBindings.exists {parameters : List (BindingId × BindingType)} {values : List Value}
+    (typed : ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type))) :
+    ∃ inputs, prepareBindings parameters values = some inputs := by
+  induction parameters generalizing values with
+  | nil => cases typed; exact ⟨[], rfl⟩
+  | cons parameter parameters ih =>
+    cases typed with
+    | cons head tail =>
+      rename_i value rest
+      obtain ⟨inputs, prepared⟩ := ih tail
+      exact ⟨⟨parameter.1, parameter.2, value⟩ :: inputs, by cases parameter; simp [prepareBindings, prepared]⟩
+
 def initializedContext (parameters : List (BindingId × BindingType)) : List (BindingId × BindingState) :=
   parameters.map fun parameter => (parameter.1, ⟨parameter.2, .present⟩)
 

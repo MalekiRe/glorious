@@ -130,9 +130,10 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       (declared : program.functions identity = some declaration) :
       Step program ⟨env, .expression (.call identity arguments), stack⟩
         ⟨env, .arguments arguments, .call declaration :: stack⟩
-  | callInputs {env : Environment} {stack : List Frame} {declaration : FunctionDecl} {values : List Value} :
+  | callInputs {env : Environment} {stack : List Frame} {declaration : FunctionDecl} {values : List Value}
+      {inputs : List BindingInput} (prepared : prepareBindings declaration.parameters values = some inputs) :
       Step program ⟨env, .results values, .call declaration :: stack⟩
-        ⟨List.zip (declaration.parameters.map Prod.fst) values, .expression declaration.body, .restore env :: stack⟩
+        ⟨inputs.map (fun input => (input.name, input.value)), .expression declaration.body, .restore env :: stack⟩
   | applyPatterns {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
       Step program ⟨env, .expression (.applyPatterns inputs arguments arms), stack⟩
         ⟨env, .arguments arguments, .patterns arms :: stack⟩
@@ -170,6 +171,15 @@ theorem Step.assignment_frame {before : Environment} {after : Configuration} {st
   cases step with
   | assignResult written => exact writePlace.read_other written different
 
+
+/-- Raw malformed invocations cannot enter a body by silently dropping either
+parameters or arguments. This holds independently of source admission. -/
+theorem Step.call_arity {env : Environment} {stack : List Frame} {declaration : FunctionDecl}
+    {values : List Value} {after : Configuration}
+    (step : Step program ⟨env, .results values, .call declaration :: stack⟩ after) :
+    declaration.parameters.length = values.length := by
+  cases step with
+  | callInputs prepared => exact prepareBindings.arity prepared
 
 theorem Terminal.no_step {state next : Configuration} (done : Terminal state) : ¬ Step program state next := by
   intro step

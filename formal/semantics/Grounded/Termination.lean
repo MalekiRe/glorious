@@ -170,10 +170,12 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
       exact ⟨_, after, .construct run, .nominal declared chosen finite typed, afterTyped, frame⟩
     | @call home context identity arguments declaration declared visible inputs =>
       obtain ⟨values, middle, inputRun, residents, middleTyped, middleFrame⟩ := many inputs (fun _ member => .callInput member) store
+      obtain ⟨bindings, prepared, bindingsTyped⟩ :=
+        EnvironmentTyped.parameters _ _ residents (checkedProgram _ _ declared).distinct
       obtain ⟨value, after, bodyRun, resident, _, _⟩ :=
         ih _ (.callBody declared) (checkedProgram _ _ declared).body
-          (EnvironmentTyped.parameters _ _ residents (checkedProgram _ _ declared).distinct)
-      exact ⟨value, middle, .call declared inputRun bodyRun, resident, middleTyped, middleFrame⟩
+          bindingsTyped
+      exact ⟨value, middle, .call declared prepared inputRun bodyRun, resident, middleTyped, middleFrame⟩
     | assign selected discard resident rest =>
       obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleFrame⟩ := ih _ .assignValue resident store
       obtain ⟨updated, written, updatedTyped, updatedFrame, _⟩ := middleTyped.writePlace selected valueTyped

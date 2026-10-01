@@ -219,12 +219,14 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
         cases checked with | call otherDeclared visible inputs =>
           cases Option.some.inj (declared.symm.trans otherDeclared)
           exact .intro store (.arguments inputs) (.cons (.call otherDeclared) continuation)
-    | callInputs =>
+    | callInputs prepared =>
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | call declared =>
             have declaration := checkedProgram _ _ declared
-            exact .intro (EnvironmentTyped.parameters _ _ residents declaration.distinct) (.expression declaration.body)
+            obtain ⟨inputs, preparedInputs, inputsTyped⟩ := EnvironmentTyped.parameters _ _ residents declaration.distinct
+            cases Option.some.inj (prepared.symm.trans preparedInputs)
+            exact .intro inputsTyped (.expression declaration.body)
               (.cons (.restore _ declaration.disposable store) tail)
     | applyPatterns =>
       cases code with | expression checked =>
@@ -314,7 +316,9 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
         | tupleTail head => exact ⟨_, .tupleTail⟩
         | array finite size => exact ⟨_, .arrayResult⟩
         | construct declared chosen finite copyable visible access => exact ⟨_, .constructResult⟩
-        | call declared => exact ⟨_, .callInputs⟩
+        | call declared =>
+          obtain ⟨inputs, prepared⟩ := prepareBindings.exists residents
+          exact ⟨_, .callInputs prepared⟩
         | patterns nonempty covered checked =>
           obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
           exact ⟨_, .selectedPattern selected⟩
