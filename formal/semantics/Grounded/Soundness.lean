@@ -146,7 +146,7 @@ theorem HasType.call_entry (checkedProgram : program.Checked)
     obtain ⟨values, middle, inputRun, residents, middleTyped, middleIssued⟩ :=
       inputs.executes checkedProgram finite store issued
     obtain ⟨bindings, prepared, inputsTyped, slots⟩ :=
-      prepareBindings.progress residents (checkedProgram _ _ declared).distinct
+      prepareBindings.progress residents (checkedProgram.functions _ _ declared).distinct
     have run : Run program ⟨environment, .expression (.call identity arguments), []⟩
         ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ :=
       .step (.call declared) ((Run.extend inputRun [.call declaration]).trans

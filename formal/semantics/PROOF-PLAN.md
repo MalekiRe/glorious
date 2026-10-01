@@ -35,7 +35,8 @@ ConfigurationTyped program final (.one type) state ∧
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
-checks each declaration body against its interface. It contains no termination,
+checks every manual principal against owned fields and each function body against
+its interface. It contains no termination,
 future-state readiness or execution-success premise. Recursive calls are therefore
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
@@ -2537,4 +2538,47 @@ The new projection, access-exclusion and public assignment results were inspecte
 explicitly alongside preservation, progress and public source-function soundness.
 This strengthens the conservative branch-join boundary; relational correlations,
 custom cleanup and all previously listed whole-language obligations remain open.
+
+
+## Manual principal coherence in authoritative program admission
+
+A general pre-repair proof showed that an empty function table satisfied
+`Program.Checked` for arbitrary data declarations. Thus a manual affine or
+duplicable class unsupported by owned fields was not rejected by admission;
+structural permission intersection merely made the resulting type stricter.
+That does not implement a checked declaration of the advertised principal.
+
+`DataDecl.PrincipalValid` now checks explicit duplicable declarations against
+Copy permission for every owned field of every variant, and explicit affine
+declarations against discard permission. An exact restriction requires neither;
+absence of a manual declaration retains structural inference. The validator
+consumes `UsePermitted`, the existing permission producer, rather than introducing
+a second capability analysis.
+
+`Program.Checked` now requires principal validity alongside function-body
+checking. `NamedProgramAdmitted` validates the same decoded declaration product
+and derives the strengthened program contract. Invocation, termination, source
+closure and declaration-resolution consumers were migrated without an old
+function-only admission alias. No runtime progress or execution outcome was
+added as an admission premise.
+
+`DataDeclarations.PrincipalsValid.permission` proves that every admitted
+explicit principal has exactly its advertised permissions.
+`SourceClosure.Admitted.principal_permission` exposes that result at public
+source admission. `no_principal_widening` rejects an unsupported field in any
+variant, including inactive variants and unused declarations. General
+preservation, progress and source-function soundness retain their contracts
+under the repaired admission boundary.
+
+A fresh source-only build in
+`/tmp/grandiose-principal-coherence-verified.hWN6PQ` passed all 30 Lean jobs.
+Exhaustive axiom inspection covered 3,975 declarations; only standard Lean
+axioms occurred. The new principal characterization and source rejection
+proofs, admission producer and general soundness consumers were inspected
+explicitly. No concrete examples or routine unit tests were added.
+
+This repairs coherence of explicit restrictions in the current decoded nominal
+declaration model. Source syntax/elaboration for data declarations, generic
+quantity restrictions, indirection-aware recursive fixed points and custom Drop
+remain separate open obligations; it is not whole-language completion.
 

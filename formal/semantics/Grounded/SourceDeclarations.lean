@@ -68,12 +68,13 @@ def NamedProgramAdmitted (names : Module → FunctionName → Option Nat)
     (source : List NamedFunction) (program : Program) : Prop :=
   (source.map fun declaration => (declaration.home, declaration.name)).Nodup ∧ ∃ core,
     NamedFunctionsElaborate program names source core ∧
-    program.functions = fun identity => core[identity]?
+    program.functions = (fun identity => core[identity]?) ∧ program.data.PrincipalsValid
 
 theorem NamedProgramAdmitted.checked {names : Module → FunctionName → Option Nat}
     {source : List NamedFunction} {program : Program}
     (admitted : NamedProgramAdmitted names source program) : program.Checked := by
-  obtain ⟨_, core, elaborated, functions⟩ := admitted
+  obtain ⟨_, core, elaborated, functions, principals⟩ := admitted
+  refine ⟨principals, ?_⟩
   intro identity declaration selected
   rw [functions] at selected
   exact elaborated.checked declaration (List.mem_of_getElem? selected)
@@ -185,7 +186,7 @@ theorem NamedProgramAdmitted.enter {sources : List NamedFunction} {program : Pro
         BindingMap.Typed program entry.heap owner caller callerContext ∧
         (∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) ∧
         (∀ identity ∈ caller.map Prod.snd, entry.heap.read identity = heap.read identity)) := by
-  have checked := admitted.checked identity declaration declared
+  have checked := admitted.checked.functions identity declaration declared
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, older, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply
   exact ⟨⟨_, checked.body.choose_spec.1⟩, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩

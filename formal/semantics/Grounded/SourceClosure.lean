@@ -549,6 +549,32 @@ theorem SourceClosure.Admitted.checked {packages : List PackageSource} {closure 
     {program : Program} (admitted : closure.Admitted program) : program.Checked :=
   admitted.2.2.2.2.1.checked
 
+/-- Source admission preserves the meaning of every explicit principal class. -/
+theorem SourceClosure.Admitted.principal_permission {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} {principal : Principal}
+    (declared : program.data identity = some declaration)
+    (manual : declaration.restriction = some principal) (permission : UsePermission) :
+    UsePermitted program.data permission (.nominal identity) ↔ permission.Allows (some principal) :=
+  admitted.checked.principals.permission declared manual permission
+
+/-- A manual declaration cannot advertise permission absent from an owned field,
+including a field of an inactive variant or of an unused declaration. -/
+theorem SourceClosure.Admitted.no_principal_widening {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} {principal : Principal}
+    (declared : program.data identity = some declaration)
+    (manual : declaration.restriction = some principal) {permission : UsePermission}
+    (promised : permission.Allows (some principal)) {schema : Fields} {field : Field}
+    (variant : schema ∈ declaration.schemas) (member : field ∈ schema.residents)
+    (unsupported : ¬ UsePermitted program.data permission field.type) : False := by
+  have permitted := (admitted.principal_permission declared manual permission).mpr promised
+  cases permitted with
+  | nominal found restriction fields =>
+    cases Option.some.inj (found.symm.trans declared)
+    exact unsupported (fields schema variant field member)
+
+
 /-- Import-path authorization comes from actual source admission over the
 complete elaborated import product, not an independently supplied namespace. -/
 theorem SourceClosure.Admitted.source_import_access {packages : List PackageSource}
@@ -609,7 +635,7 @@ theorem SourceClosure.Admitted.declaration {packages : List PackageSource} {clos
       declaration.home = loaded.home ∧
       NamedFunction.Elaborates program closure.functionNames
         ⟨source, loaded.home⟩ declaration := by
-  obtain ⟨_, core, elaborated, functions⟩ := admitted.2.2.2.2.1
+  obtain ⟨_, core, elaborated, functions, _⟩ := admitted.2.2.2.2.1
   rw [functions] at selected
   obtain ⟨source, found, body⟩ := elaborated.selected_core selected
   obtain ⟨loaded, included, item, member, same⟩ := closure.function_owner (List.mem_of_getElem? found)
@@ -920,7 +946,7 @@ theorem SourceClosure.Admitted.resolves {packages : List PackageSource} {closure
     (resolved : closure.functionNames caller name = some identity) :
     ∃ source core, closure.functions[identity]? = some source ∧ program.functions identity = some core ∧
       NamedFunction.Elaborates program closure.functionNames source core := by
-  obtain ⟨_, cores, elaborated, functions⟩ := admitted.2.2.2.2.1
+  obtain ⟨_, cores, elaborated, functions, _⟩ := admitted.2.2.2.2.1
   obtain ⟨_, _, _, _, resolution⟩ := closure.functionNames_selected.mp resolved
   have base := Grounded.functionNames.selected_iff.mpr resolution
   obtain ⟨source, selected⟩ := Grounded.functionNames.selected base

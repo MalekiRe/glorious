@@ -391,7 +391,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | call declared =>
-            have declaration := checkedProgram _ _ declared
+            have declaration := checkedProgram.functions _ _ declared
             obtain ⟨inputs, preparedInputs, inputsTyped, slots⟩ := prepareBindings.progress residents declaration.distinct
             cases Option.some.inj (prepared.symm.trans preparedInputs)
             obtain ⟨locals, body, discard⟩ := declaration.body

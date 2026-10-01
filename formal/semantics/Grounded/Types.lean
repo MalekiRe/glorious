@@ -123,5 +123,50 @@ theorem UsePermitted.copy_discard {data : DataDeclarations} {type : Ty}
   | emptyArray element => exact .emptyArray element
   | nominal declared restriction fields ih => exact .nominal declared (UsePermission.copy_allows_discard restriction) ih
 
+/-- A manual class must be supported by every owned field of every variant.
+No declaration means inference; an exact restriction requests no zero-use or
+Copy capability. This uses the same permission producer as expression checking. -/
+def DataDecl.PrincipalValid (data : DataDeclarations) (declaration : DataDecl) : Prop :=
+  match declaration.restriction with
+  | none | some .exact => True
+  | some .duplicable => ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
+      UsePermitted data .copy field.type
+  | some .affine => ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
+      UsePermitted data .discard field.type
+
+def DataDeclarations.PrincipalsValid (data : DataDeclarations) : Prop :=
+  ∀ identity declaration, data identity = some declaration → declaration.PrincipalValid data
+
+/-- An admitted explicit principal denotes exactly its declared permissions;
+structural intersection cannot silently narrow an invalid declaration. -/
+theorem DataDeclarations.PrincipalsValid.permission {data : DataDeclarations}
+    (valid : data.PrincipalsValid) {identity : Nat} {declaration : DataDecl} {principal : Principal}
+    (declared : data identity = some declaration) (manual : declaration.restriction = some principal)
+    (permission : UsePermission) :
+    UsePermitted data permission (.nominal identity) ↔ permission.Allows (some principal) := by
+  constructor
+  · intro permitted
+    cases permitted with
+    | nominal found restriction fields =>
+      cases Option.some.inj (found.symm.trans declared)
+      simpa only [manual] using restriction
+  · intro allowed
+    apply UsePermitted.nominal declared (by simpa only [manual] using allowed)
+    have fields := valid identity declaration declared
+    unfold DataDecl.PrincipalValid at fields
+    rw [manual] at fields
+    intro schema included field member
+    cases principal with
+    | exact => cases permission <;> simp [UsePermission.Allows] at allowed
+    | affine =>
+      cases permission with
+      | copy => simp [UsePermission.Allows] at allowed
+      | discard => exact fields schema included field member
+    | duplicable =>
+      cases permission with
+      | copy => exact fields schema included field member
+      | discard => exact (fields schema included field member).copy_discard
+
+
 
 end Grounded

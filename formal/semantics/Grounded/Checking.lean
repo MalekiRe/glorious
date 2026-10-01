@@ -239,8 +239,9 @@ structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Pro
     declaration.body declaration.result after ∧
     ∀ binding ∈ after, binding.2.Disposable program.data
 
-def Program.Checked (program : Program) : Prop :=
-  ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
+structure Program.Checked (program : Program) : Prop where
+  principals : program.data.PrincipalsValid
+  functions : ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
 
 theorem HasTypes.slots {program : Program} {home : Module} {before after : FlowContext}
     {expressions : List Expr} {types : List Ty} (checked : HasTypes program home before expressions types after) :

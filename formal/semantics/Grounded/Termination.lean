@@ -227,7 +227,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
     | @call home before afterContext identity arguments declaration declared visible inputs =>
       obtain ⟨values, middle, inputRun, residents, middleTyped, middleIssued⟩ :=
         many inputs (fun _ member => .callInput member) store issued
-      have declarationChecked := checkedProgram _ _ declared
+      have declarationChecked := checkedProgram.functions _ _ declared
       obtain ⟨bindings, prepared, inputsTyped, slots⟩ := prepareBindings.progress residents declarationChecked.distinct
       obtain ⟨locals, checkedBody, discard⟩ := declarationChecked.body
       have bodyTyped : HasType program declaration.home (bindings.map BindingInput.state)
