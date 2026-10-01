@@ -476,6 +476,19 @@ of both closures inspected 2,826 declarations and found only standard Lean
 axioms. The new allocation, scope-extension and access results use only
 `propext` and `Quot.sound`. No examples or unit tests were added or run.
 
+`prepareBindings` pairs arguments with the actual resolved declaration slots
+and rejects arity mismatch. Its progress proof derives typed transient inputs
+and exact initialized-context correspondence from argument typing and declared
+parameter distinctness. `enterFunction` consumes those inputs through the same
+activation/storage allocator. `NamedFunctionsAdmitted.enter` now derives
+checked body admission and actual addressed entry from source admission,
+including preservation of every previously realized caller map. This is a
+source-to-storage entry result, not body execution or machine preservation.
+Strict source-declaration checking passed (25 jobs); the full source closure
+audit found only standard Lean axioms. No future execution or successful
+allocation is a premise. Logical allocation still makes no physical-resource
+exhaustion claim.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

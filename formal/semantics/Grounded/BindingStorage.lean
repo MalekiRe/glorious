@@ -361,4 +361,57 @@ theorem BindingMap.Typed.exit_scope (typed : BindingMap.Typed program heap activ
   exact apart identity released identity retained rfl
 
 
+/-- Pair runtime arguments with the already-resolved declared slots. Mismatched
+arity is rejected rather than truncated by a zip. -/
+def prepareBindings : List (BindingId × BindingType) → List Value → Option (List BindingInput)
+  | [], [] => some []
+  | (name, slot) :: parameters, value :: values =>
+      (prepareBindings parameters values).map (⟨name, slot, value⟩ :: ·)
+  | _, _ => none
+
+def initializedContext (parameters : List (BindingId × BindingType)) : List (BindingId × BindingState) :=
+  parameters.map fun parameter => (parameter.1, ⟨parameter.2, .present⟩)
+
+theorem prepareBindings.progress {parameters : List (BindingId × BindingType)} {values : List Value}
+    (typed : ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type)))
+    (distinct : (parameters.map Prod.fst).Nodup) :
+    ∃ inputs, prepareBindings parameters values = some inputs ∧ BindingInputsTyped program inputs ∧
+      inputs.map BindingInput.name = parameters.map Prod.fst ∧
+      inputs.map BindingInput.state = initializedContext parameters := by
+  induction parameters generalizing values with
+  | nil => cases typed; exact ⟨[], rfl, .nil, rfl, rfl⟩
+  | cons parameter parameters ih =>
+    cases typed with
+    | cons head tail =>
+      have parts := List.nodup_cons.mp distinct
+      obtain ⟨inputs, prepared, inputsTyped, names, states⟩ := ih tail parts.2
+      refine ⟨⟨parameter.1, parameter.2, _⟩ :: inputs, ?_, .cons head inputsTyped ?_, ?_, ?_⟩
+      · cases parameter; simp [prepareBindings, prepared]
+      · rw [names]; exact parts.1
+      · exact congrArg (List.cons parameter.1) names
+      · exact congrArg (List.cons (parameter.1, ⟨parameter.2, .present⟩)) states
+
+/-- Direct function entry uses the declaration's resolved slots and the common
+invocation allocator. The entry result contains no checking certificate. -/
+def enterFunction (heap : RuntimeHeap StorageCell) (supply : ActivationSupply)
+    (declaration : FunctionDecl) (values : List Value) :
+    Option (ActivationId × ActivationSupply × BindingMap × RuntimeHeap StorageCell) :=
+  (prepareBindings declaration.parameters values).map (enterBindings heap supply)
+
+theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value}
+    (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
+    (distinct : (declaration.parameters.map Prod.fst).Nodup)
+    (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
+    ∃ entry, enterFunction heap supply declaration values = some entry ∧
+      BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
+      entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
+      (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
+        BindingMap.Typed program entry.2.2.2 owner caller callerContext) := by
+  obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress arguments distinct
+  refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl, ?_⟩
+  · rw [← states]; exact enterBindings.typed inputsTyped heap supply
+  · intro caller callerContext owner callerTyped
+    exact callerTyped.allocate supply.allocate.1 inputs
+
+
 end Grounded

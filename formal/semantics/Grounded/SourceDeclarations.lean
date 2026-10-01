@@ -1,4 +1,5 @@
 import Grounded.SourceExpressions
+import Grounded.BindingStorage
 
 /-! Named direct-function declarations supply Program.Checked. Signatures are
 available to recursive calls independently of body elaboration. Names here are
@@ -169,6 +170,23 @@ theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {progra
       ∀ other otherAfter, Evaluates program environment core other otherAfter →
         other = value ∧ otherAfter = after :=
   elaborated.correctness admitted.checked finite store
+
+
+/-- Source admission derives both body checking and actual addressed invocation
+entry. This is the storage-entry boundary, not execution of the body. -/
+theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : Program}
+    (admitted : NamedFunctionsAdmitted sources program) {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration) {values : List Value}
+    (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
+    (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
+    HasType program declaration.home declaration.parameters declaration.body declaration.result ∧
+    ∃ entry, enterFunction heap supply declaration values = some entry ∧
+      BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
+      entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
+      (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
+        BindingMap.Typed program entry.2.2.2 owner caller callerContext) := by
+  have checked := admitted.checked identity declaration declared
+  exact ⟨checked.body, enterFunction.progress arguments checked.distinct heap supply⟩
 
 
 end Grounded
