@@ -180,13 +180,14 @@ inductive NamedExprsElaborate (program : Program) (names : Module → FunctionNa
 inductive NamedArmsElaborate (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
     SourceScope → FlowContext → Ty → Ty → List Pattern → List (NamedPattern × NamedExpr) → List (Pattern × Expr) → FlowContext → Prop where
   | empty {scope before after subject result previous} : NamedArmsElaborate program names home scope before subject result previous [] [] after
-  | clause {scope localScope before after subject result previous source pattern bindings localsAfter body coreBody tail coreTail}
+  | clause {scope localScope before after branchAfter subject result previous source pattern bindings localsAfter body coreBody tail coreTail}
       (allocated : NamedPattern.Elaborates program home scope source subject pattern bindings localScope)
       (namesDistinct : source.binders.Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : NamedExpr.Elaborates program names home localScope (initializedContext bindings ++ before)
-        body coreBody result (localsAfter ++ after))
+        body coreBody result (localsAfter ++ branchAfter))
       (localSlots : localsAfter.slots = bindings)
       (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
+      (joined : BindingContextApprox branchAfter after)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 end
@@ -255,10 +256,10 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     have first := head slots
     exact .cons first (tail (first.slots.trans slots))
   | empty => exact .empty
-  | clause allocated _ useful _ localSlots disposable _ body tail =>
+  | clause allocated _ useful _ localSlots disposable joined _ body tail =>
     rename_i slots
     apply ArmsType.clause allocated.checked.1 (by rw [slots]; exact allocated.fresh) useful
-      (body ?_) localSlots disposable (tail slots)
+      (body ?_) localSlots disposable joined (tail slots)
     rw [allocated.checked.2]
     simp [FlowContext.slots, initializedContext, List.map_append, List.map_map, Function.comp_def, ← slots]
 

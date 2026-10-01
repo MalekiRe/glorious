@@ -96,7 +96,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     obtain ⟨after, tailRun, tailScope, tailHeap⟩ := tails middle
     exact ⟨after, .cons headRun tailRun, tailScope.trans headScope, tailHeap.trans headHeap⟩
   | empty => trivial
-  | clause patternTyped distinct useful bodyTyped localSlots disposable tailTyped bodyIH tailIH => trivial
+  | clause patternTyped distinct useful bodyTyped localSlots disposable joined tailTyped bodyIH tailIH => trivial
 
 theorem constant_correctness {name : String} {type : Ty}
     (checked : HasType program home [] (.constant name) type []) :
@@ -257,7 +257,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleIssued⟩ :=
         many arguments (fun _ member => .patternInput member) store issued
       obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
-      obtain ⟨locals, localsAfter, pattern, member, inputsTyped, slots, discard, bodyTyped, localSlots, distinct⟩ :=
+      obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined⟩ :=
         bodies.selected residents.argument selected
       obtain ⟨entered, _, _, _⟩ := AddressedEnvironment.extend.typed middleTyped inputsTyped (by
         rw [← slots] at distinct

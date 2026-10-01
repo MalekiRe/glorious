@@ -66,6 +66,44 @@ inductive BindingMap.Typed (program : Program) (heap : RuntimeHeap StorageCell)
       (freshStorage : identity ∉ bindings.map Prod.snd) :
       BindingMap.Typed program heap activation ((name, identity) :: bindings) ((name, state) :: context)
 
+/-- Joined contexts preserve binding identity, declared type and mutability.
+Only initialization evidence may be forgotten. -/
+inductive BindingContextApprox : List (BindingId × BindingState) → List (BindingId × BindingState) → Prop where
+  | nil : BindingContextApprox [] []
+  | cons {name slot before after rest tail}
+      (head : Initialization.Approximates before after) (remaining : BindingContextApprox rest tail) :
+      BindingContextApprox ((name, ⟨slot, before⟩) :: rest) ((name, ⟨slot, after⟩) :: tail)
+
+theorem BindingContextApprox.refl (context : List (BindingId × BindingState)) : BindingContextApprox context context := by
+  induction context with
+  | nil => exact .nil
+  | cons entry rest ih => exact .cons .refl ih
+
+theorem BindingContextApprox.slots {before after : List (BindingId × BindingState)}
+    (approximation : BindingContextApprox before after) :
+    after.map (fun entry => (entry.1, entry.2.slot)) = before.map (fun entry => (entry.1, entry.2.slot)) := by
+  induction approximation with
+  | nil => rfl
+  | cons head remaining ih => simp only [List.map_cons, ih]
+
+theorem BindingContextApprox.keys {before after : List (BindingId × BindingState)}
+    (approximation : BindingContextApprox before after) : after.map Prod.fst = before.map Prod.fst := by
+  simpa only [List.map_map, Function.comp_def] using congrArg (List.map Prod.fst) approximation.slots
+
+theorem BindingMap.Typed.approximate {program : Program} {heap : RuntimeHeap StorageCell}
+    {activation : ActivationId} {bindings : BindingMap} {before after : List (BindingId × BindingState)}
+    (typed : BindingMap.Typed program heap activation bindings before) (approximation : BindingContextApprox before after) :
+    BindingMap.Typed program heap activation bindings after := by
+  induction approximation generalizing bindings with
+  | nil => cases typed; exact .nil
+  | cons head remaining ih =>
+    cases typed with
+    | cons found owner declared resident tail freshName freshStorage =>
+      exact .cons found owner declared ⟨resident.1, resident.2.approximate head⟩ (ih tail)
+        (by simpa only [remaining.keys] using freshName) freshStorage
+
+
+
 variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation : ActivationId}
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
 

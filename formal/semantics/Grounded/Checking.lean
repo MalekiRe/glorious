@@ -121,13 +121,14 @@ inductive HasTypes (program : Program) : Module → FlowContext → List Expr �
 inductive ArmsType (program : Program) :
     Module → FlowContext → Ty → Ty → List Pattern → List (Pattern × Expr) → FlowContext → Prop where
   | empty {home before after subject result previous} : ArmsType program home before subject result previous [] after
-  | clause {home before after subject result previous pattern body rest bindings localsAfter}
+  | clause {home before after branchAfter subject result previous pattern body rest bindings localsAfter}
       (patternTyped : PatternType program home pattern subject bindings)
       (distinct : ((bindings ++ before.slots).map Prod.fst).Nodup)
       (useful : Useful program subject previous pattern)
-      (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ after))
+      (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ branchAfter))
       (localSlots : FlowContext.slots localsAfter = bindings)
       (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
+      (joined : BindingContextApprox branchAfter after)
       (tailTyped : ArmsType program home before subject result (previous ++ [pattern]) rest after) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
@@ -154,7 +155,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
   | nil => rfl
   | cons head tail headIH tailIH => exact tailIH.trans headIH
   | empty => rename_i nonempty; exact False.elim (nonempty rfl)
-  | clause pattern distinct useful body localSlots disposable tail bodyIH tailIH =>
+  | clause pattern distinct useful body localSlots disposable joined tail bodyIH tailIH =>
     simp only [FlowContext.slots, List.map_append] at bodyIH
     change FlowContext.slots _ ++ FlowContext.slots _ = FlowContext.slots _ ++ FlowContext.slots _ at bodyIH
     rw [localSlots] at bodyIH
@@ -162,7 +163,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
       intro bindings
       simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]
     rw [initialized] at bodyIH
-    exact List.append_cancel_left bodyIH
+    exact joined.slots.trans (List.append_cancel_left bodyIH)
 
 
 /-- Recover the selected body's original flow derivation and actual input
@@ -173,29 +174,30 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     {value : Value} (resident : ValueHasType program value subject)
     {bindings : List BindingInput} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
-    ∃ locals localsAfter pattern, (pattern, body) ∈ arms ∧
+    ∃ locals localsAfter branchAfter pattern, (pattern, body) ∈ arms ∧
       BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = locals ∧
       (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
-      HasType program home (initializedContext locals ++ before) body result (localsAfter ++ after) ∧
-      FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup := by
+      HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
+      FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧
+      BindingContextApprox branchAfter after := by
   induction arms generalizing previous with
   | nil => simp [selectArm] at selected
   | cons arm arms ih =>
     cases checked with
-    | clause patternTyped distinct useful bodyTyped localSlots disposable tailTyped =>
+    | clause patternTyped distinct useful bodyTyped localSlots disposable joined tailTyped =>
       simp only [selectArm] at selected
       split at selected
       next matched found =>
         cases Option.some.inj selected
         obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
           (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
-        exact ⟨_, _, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          inputsTyped, slots, disposable, bodyTyped, localSlots, distinct⟩
+        exact ⟨_, _, _, _, by simp only [List.mem_cons]; exact Or.inl rfl,
+          inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined⟩
       next missed =>
-        obtain ⟨locals, localsAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped, localSlots, distinct⟩ :=
+        obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined⟩ :=
           ih tailTyped selected
-        exact ⟨locals, localsAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
-          disposable, bodyTyped, localSlots, distinct⟩
+        exact ⟨locals, localsAfter, branchAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
+          disposable, bodyTyped, localSlots, distinct, joined⟩
 
 /-- Bodies certify disposition from their final masks, never from a completed run. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
@@ -222,11 +224,12 @@ theorem ArmsType.slots {program : Program} {home : Module} {before after : FlowC
     after.slots = before.slots := by
   cases checked with
   | empty => exact False.elim (nonempty rfl)
-  | clause pattern distinct useful body localSlots disposable tail =>
+  | clause pattern distinct useful body localSlots disposable joined tail =>
     have same := body.slots
     simp only [FlowContext.slots, List.map_append] at same
     change FlowContext.slots _ ++ FlowContext.slots _ = FlowContext.slots _ ++ FlowContext.slots _ at same
     rw [localSlots] at same
+    apply joined.slots.trans
     simpa [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] using same
 
 theorem PlaceDisjoint.write_frame {program : Program} {home : Module}

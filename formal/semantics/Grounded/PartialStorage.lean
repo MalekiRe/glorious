@@ -9,6 +9,7 @@ namespace Grounded
 inductive Initialization where
   | absent
   | present
+  | maybe
   | fields (states : List Initialization)
 
 mutual
@@ -22,6 +23,30 @@ inductive InitializationsReady : List Initialization → Prop where
       (first : Initialization.Ready head) (rest : InitializationsReady tail) :
       InitializationsReady (head :: tail)
 end
+
+/-- Uncertainty never supplies the availability required by a source access. -/
+theorem Initialization.maybe_not_ready : ¬ Initialization.Ready .maybe := by
+  intro ready
+  cases ready
+
+
+
+/- Possible occupancy is not definite availability. In particular, a joined
+mask can describe a resident without granting a source read or move. -/
+mutual
+inductive Initialization.MayRead : Initialization → Prop where
+  | present : Initialization.MayRead .present
+  | maybe : Initialization.MayRead .maybe
+  | fields {states : List Initialization} (residents : InitializationsMayRead states) :
+      Initialization.MayRead (.fields states)
+inductive InitializationsMayRead : List Initialization → Prop where
+  | nil : InitializationsMayRead []
+  | cons {head : Initialization} {tail : List Initialization}
+      (first : Initialization.MayRead head) (rest : InitializationsMayRead tail) :
+      InitializationsMayRead (head :: tail)
+end
+
+
 
 inductive PartialValue where
   | hole
@@ -61,6 +86,9 @@ inductive PartialValue.Typed (program : Program) : PartialValue → Ty → Initi
       (finite : FiniteLayout program.target program.data (.nominal identity))
       (residents : PartialValuesTyped program fields (schema.residents.map Field.type) states) :
       PartialValue.Typed program (.nominal identity tag fields) (.nominal identity) (.fields states)
+  | uncertain {value : PartialValue} {type : Ty} {state : Initialization}
+      (typed : PartialValue.Typed program value type state) :
+      PartialValue.Typed program value type .maybe
 inductive PartialValuesTyped (program : Program) : List PartialValue → List Ty → List Initialization → Prop where
   | nil : PartialValuesTyped program [] [] []
   | cons {head : PartialValue} {tail : List PartialValue} {first : Ty} {rest : List Ty}
@@ -69,6 +97,42 @@ inductive PartialValuesTyped (program : Program) : List PartialValue → List Ty
       (tailTyped : PartialValuesTyped program tail rest tailStates) :
       PartialValuesTyped program (head :: tail) (first :: rest) (headState :: tailStates)
 end
+/- Approximation forgets availability, never storage type or ownership. -/
+mutual
+inductive Initialization.Approximates : Initialization → Initialization → Prop where
+  | refl {state} : Initialization.Approximates state state
+  | unknown {state} : Initialization.Approximates state .maybe
+  | fields {before after} (children : InitializationsApproximate before after) :
+      Initialization.Approximates (.fields before) (.fields after)
+inductive InitializationsApproximate : List Initialization → List Initialization → Prop where
+  | nil : InitializationsApproximate [] []
+  | cons {first next rest tail} (head : Initialization.Approximates first next)
+      (remaining : InitializationsApproximate rest tail) :
+      InitializationsApproximate (first :: rest) (next :: tail)
+end
+
+theorem PartialValue.Typed.approximate {program : Program} {value : PartialValue} {type : Ty}
+    {before after : Initialization} (typed : value.Typed program type before)
+    (approximation : before.Approximates after) : value.Typed program type after := by
+  induction approximation using Initialization.Approximates.rec
+    (motive_2 := fun before after _ => ∀ values types, PartialValuesTyped program values types before →
+      PartialValuesTyped program values types after) generalizing value type with
+  | refl => exact typed
+  | unknown => exact .uncertain typed
+  | fields children ih =>
+    cases typed with
+    | tuple head tail =>
+      have residents := ih _ _ (.cons head tail)
+      cases residents with
+      | cons head tail => exact .tuple head tail
+    | nominal declared chosen finite residents => exact .nominal declared chosen finite (ih _ _ residents)
+  | nil => rename_i values types residents; exact residents
+  | cons first remaining firstIH remainingIH =>
+    rename_i values types residents
+    cases residents with
+    | cons head tail => exact .cons (firstIH head) (remainingIH _ _ tail)
+
+
 
 /-- Checking availability constructs the actual read; successful reads are not
 part of the availability premise. -/
@@ -80,6 +144,7 @@ theorem PartialValue.Typed.read {program : Program} {valueState : PartialValue} 
     (motive_2 := fun partials types states _ => InitializationsReady states →
       ∃ values, readPartialValues partials = some values ∧ ValuesHaveTypes program values types) with
   | hole => cases ready
+  | uncertain typed ih => cases ready
   | resident resident => exact ⟨_, by simp [PartialValue.read], resident⟩
   | tuple head tail headIH tailIH =>
     cases ready with
@@ -106,21 +171,37 @@ theorem PartialValue.Typed.read {program : Program} {valueState : PartialValue} 
 /-- No initialization claim can be manufactured from an empty resident. -/
 theorem PartialValue.Typed.hole_unready {program : Program} {type : Ty} {state : Initialization}
     (typed : PartialValue.Typed program .hole type state) : ¬state.Ready := by
-  cases typed
-  intro ready
-  cases ready
+  cases typed <;> intro ready <;> cases ready
 
 /-- An empty shell contains consumed storage. A zero-field aggregate is still
 a whole value, not evidence that an owner has been consumed. -/
 def Initialization.Empty : Initialization → Prop
   | .absent => True
   | .present => False
+  | .maybe => False
   | .fields states => states ≠ [] ∧ ∀ state ∈ states, state.Empty
 
 theorem Initialization.Ready.not_empty {state : Initialization} (ready : state.Ready) : ¬ state.Empty := by
   induction ready using Initialization.Ready.rec
     (motive_2 := fun states _ => ∀ state ∈ states, ¬ state.Empty) with
   | present => simp [Initialization.Empty]
+  | @fields states residents ih =>
+    intro empty
+    simp only [Initialization.Empty] at empty
+    cases states with
+    | nil => exact empty.1 rfl
+    | cons head tail => exact ih head (by simp) (empty.2 head (by simp))
+  | nil => rename_i state member; cases member
+  | cons head tail headIH tailIH =>
+    rename_i state member
+    cases member with
+    | head => exact headIH
+    | tail _ member => exact tailIH state member
+
+theorem Initialization.MayRead.not_empty {state : Initialization} (ready : state.MayRead) : ¬ state.Empty := by
+  induction ready using Initialization.MayRead.rec
+    (motive_2 := fun states _ => ∀ state ∈ states, ¬ state.Empty) with
+  | present | maybe => simp [Initialization.Empty]
   | @fields states residents ih =>
     intro empty
     simp only [Initialization.Empty] at empty
@@ -207,6 +288,18 @@ inductive InitializationsDisposable (data : DataDeclarations) : List Ty → List
       InitializationsDisposable data (type :: types) (state :: states)
 end
 
+/-- Conditional occupancy cannot erase a nondiscardable whole-owner obligation. -/
+theorem Initialization.Disposable.maybe_iff {data : DataDeclarations} {type : Ty} :
+    Initialization.Disposable data type .maybe ↔ UsePermitted data .discard type := by
+  constructor
+  · intro permission
+    cases permission with
+    | empty absent => simp [Initialization.Empty] at absent
+    | permitted allowed => exact allowed
+  · exact .permitted
+
+
+
 theorem InitializationsDisposable.select {data : DataDeclarations} {types : List Ty}
     {states : List Initialization} (permission : InitializationsDisposable data types states)
     {index : Nat} {type : Ty} {state : Initialization}
@@ -235,10 +328,10 @@ theorem Initialization.Disposable.realizes {program : Program} {type : Ty} {stat
 
 /-- Residual disposition cannot weaken the principal of a reconstructed whole
 owner. Every nominal constructor contributes, including inactive variants. -/
-theorem Initialization.Disposable.ready {data : DataDeclarations} {type : Ty} {state : Initialization}
-    (permission : state.Disposable data type) (ready : state.Ready) : UsePermitted data .discard type := by
+theorem Initialization.Disposable.may_read {data : DataDeclarations} {type : Ty} {state : Initialization}
+    (permission : state.Disposable data type) (ready : state.MayRead) : UsePermitted data .discard type := by
   induction permission using Initialization.Disposable.rec
-    (motive_2 := fun types states _ => InitializationsReady states →
+    (motive_2 := fun types states _ => InitializationsMayRead states →
       ∀ type ∈ types, UsePermitted data .discard type) with
   | empty absent => exact False.elim (ready.not_empty absent)
   | permitted permission => exact permission
@@ -290,6 +383,18 @@ theorem Initialization.Disposable.exact_nominal_empty {data : DataDeclarations} 
     cases Option.some.inj (found.symm.trans declared)
     simp [UsePermission.Allows, restricted] at restriction
 
+theorem PartialValue.Typed.nominal_type {program : Program} {value : PartialValue}
+    {type : Ty} {state : Initialization} (typed : value.Typed program type state)
+    {identity : Nat} {tag : Option Nat} {fields : List PartialValue}
+    (shape : value = .nominal identity tag fields) : type = .nominal identity := by
+  induction typed using PartialValue.Typed.rec
+    (motive_2 := fun _ _ _ _ => True) with
+  | hole | resident | tuple => cases shape
+  | nominal => cases shape; rfl
+  | uncertain typed ih => exact ih shape
+  | nil | cons => trivial
+
+
 /-- Exact nominal shells can be retired only when genuinely consumed. -/
 theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identity : Nat}
     {declaration : DataDecl} {tag : Option Nat} {fields : List PartialValue} {type : Ty}
@@ -297,10 +402,9 @@ theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identit
     (permission : (PartialValue.nominal identity tag fields).Disposable program type) :
     (PartialValue.nominal identity tag fields).Empty := by
   obtain ⟨state, typed, disposition⟩ := permission
-  cases typed with
-  | nominal found chosen finite residents =>
-    exact (PartialValue.Typed.nominal found chosen finite residents).empty
-      (disposition.exact_nominal_empty declared restricted)
+  have shape := typed.nominal_type rfl
+  subst type
+  exact typed.empty (disposition.exact_nominal_empty declared restricted)
 
 
 
@@ -317,12 +421,13 @@ def StorageCell.Typed (program : Program) (cell : StorageCell) (state : Initiali
 checking has already established availability. -/
 theorem PartialValue.Typed.read_sound {program : Program} {valueState : PartialValue} {type : Ty}
     {state : Initialization} (typed : valueState.Typed program type state) {value : Value}
-    (read : valueState.read = some value) : ValueHasType program value type ∧ state.Ready := by
+    (read : valueState.read = some value) : ValueHasType program value type ∧ state.MayRead := by
   induction typed using PartialValue.Typed.rec
     (motive_2 := fun partials types states _ => ∀ values,
       readPartialValues partials = some values →
-      ValuesHaveTypes program values types ∧ InitializationsReady states) generalizing value with
+      ValuesHaveTypes program values types ∧ InitializationsMayRead states) generalizing value with
   | hole => simp [PartialValue.read] at read
+  | uncertain typed ih => exact ⟨(ih read).1, .maybe⟩
   | resident resident =>
     simp only [PartialValue.read, Option.some.injEq] at read
     subst value
@@ -359,7 +464,7 @@ theorem PartialValue.Disposable.read_permission {program : Program} {value : Par
     (permission : value.Disposable program type) {owner : Value} (read : value.read = some owner) :
     UsePermitted program.data .discard type := by
   obtain ⟨state, typed, disposition⟩ := permission
-  exact disposition.ready (typed.read_sound read).2
+  exact disposition.may_read (typed.read_sound read).2
 
 /-- Another valid typing of the observed value cannot weaken its owned-use
 principal; this includes the element-type ambiguity of empty arrays. -/
@@ -369,7 +474,7 @@ theorem PartialValue.Disposable.read_permission_as {program : Program} {value : 
     UsePermitted program.data .discard other := by
   obtain ⟨state, actual, disposition⟩ := permission
   obtain ⟨resident, ready⟩ := actual.read_sound read
-  exact resident.use_permission typed (disposition.ready ready)
+  exact resident.use_permission typed (disposition.may_read ready)
 
 
 /-- Reconstructing an aggregate cannot hide a live exact owner from cleanup. -/

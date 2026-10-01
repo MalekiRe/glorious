@@ -1,8 +1,8 @@
 import Grounded.Checking
 import Grounded.Execution
 
-/-! Flow checking supplies the exact masks required when each continuation
-starts. Only retained callers are realized ahead of time, in the current heap. -/
+/-! Flow checking supplies sound masks for each continuation. Arm-local masks
+are approximated at scope retirement; retained callers are realized in the current heap. -/
 namespace Grounded
 
 inductive ResultType where
@@ -30,9 +30,10 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
       FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
-  | scope {context : FlowContext} (locals : FlowContext) {result}
-      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
-      FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) context (.one result)
+  | scope {context after : FlowContext} (locals : FlowContext) {result}
+      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
+      (joined : BindingContextApprox context after) :
+      FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) after (.one result)
   | assign {home before restored after place type result rest state updated available}
       (selected : lookup place.root before = some state)
       (path : PathType program home state.slot.type place.fields type)
@@ -175,7 +176,7 @@ theorem ConfigurationTyped.progress {context result state}
         cases frame with
         | sequence discard checked => exact ⟨_, .sequenceResult⟩
         | bind discard checked fresh => exact ⟨_, .bindResult⟩
-        | scope locals discard =>
+        | scope locals discard joined =>
           obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress store locals.length
           exact ⟨_, .scope exited⟩
         | assign selected path writable selection discard mask context checked =>
@@ -282,17 +283,17 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
               (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons resident .nil (by simp))
               (by simpa using List.nodup_cons.mpr ⟨fresh, contextDistinct⟩)
-            refine .intro entered issued (.expression checked) (.cons (.scope [_] (by simpa [BindingState.Disposable] using discard)) ?_)
+            refine .intro entered issued (.expression checked) (.cons (.scope [_] (by simpa [BindingState.Disposable] using discard) (.refl _)) ?_)
             exact tail.transport (fun _ previous => previous)
               (fun scope states typed _ => (retained scope.activation scope.bindings states typed).1)
     | scope exited =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | scope locals discard =>
+          cases frame with | scope locals discard joined =>
             obtain ⟨after, produced, afterTyped, activation, supply, _, _, retained, _⟩ :=
               AddressedEnvironment.exitScope.progress store locals.length
             cases Option.some.inj (exited.symm.trans produced)
-            refine .intro (by simpa using afterTyped) (by rw [supply, activation]; exact issued) (.result resident) ?_
+            refine .intro ((BindingMap.Typed.approximate (by simpa using afterTyped) joined)) (by rw [supply, activation]; exact issued) (.result resident) ?_
             rw [activation, supply]
             apply tail.transport (fun _ previous => previous)
             intro scope states typed older
@@ -407,7 +408,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, localsAfter, _, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct⟩ :=
+            obtain ⟨locals, localsAfter, branchAfter, _, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined⟩ :=
               checked.selected residents.argument selected
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store inputsTyped (by
               rw [← slots] at distinct
@@ -423,7 +424,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             have localLength := congrArg List.length localSlots
             simp only [FlowContext.slots, List.length_map] at length localLength
             rw [length, ← localLength]
-            exact FrameTyped.scope _ discard
+            exact FrameTyped.scope _ discard joined
     | nil =>
       cases code with | arguments checked => cases checked; exact .intro store issued (.results .nil) continuation
     | cons =>
@@ -487,8 +488,8 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
   | bind discard checked fresh =>
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using store
-  | scope locals discard =>
-    simpa [Frame.environment, Frame.activation, FlowContext.slots] using store.drop locals.length
+  | scope locals discard joined =>
+    simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using store.drop locals.length
   | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using store
@@ -514,8 +515,8 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
   | bind discard checked fresh =>
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using framed
-  | scope locals discard =>
-    simpa [Frame.environment, Frame.activation, FlowContext.slots] using framed.drop store locals.length
+  | scope locals discard joined =>
+    simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using framed.drop store locals.length
   | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using framed
@@ -607,7 +608,7 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
     case scope after stack count value exited =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | scope locals discard =>
+          cases frame with | scope locals discard joined =>
             obtain ⟨producedAfter, produced, _, _, _, _, _, retained, preserved⟩ :=
               AddressedEnvironment.exitScope.progress store locals.length
             cases Option.some.inj (exited.symm.trans produced)
@@ -616,7 +617,7 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
               cases same
               rfl
             refine tail.consumption_frame (before := (Frame.scope locals.length).environment env) (after := after)
-              ⟨_, store.drop locals.length, by simp [FlowContext.slots]⟩ (.of_cells scopeEq ?_) ?_
+              ⟨_, store.drop locals.length, by simpa [FlowContext.slots] using joined.slots.symm⟩ (.of_cells scopeEq ?_) ?_
             · intro identity member
               apply preserved identity
               have maps := congrArg AddressedScope.bindings scopeEq
@@ -696,7 +697,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
       · trivial
       case cons frame tail =>
         cases frame <;> try trivial
-        case scope locals discard =>
+        case scope locals discard joined =>
           exact (store.take locals.length).disposable (by simpa using discard)
         case restore => exact store.disposable (by assumption)
         case assign =>

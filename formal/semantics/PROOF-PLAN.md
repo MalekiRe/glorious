@@ -56,7 +56,7 @@ producer, including nested callable import groups with complete namespace valida
 Selected callable preludes use the same producer and respect suppression flags.
 Module aliases, other namespaces, library/runtime profile contracts and parsing remain open.
 
-`HasType.evaluation_soundness` proves declared result typing, exact output-mask
+`HasType.evaluation_soundness` proves declared result typing, sound output-mask
 realization, issued activation and consumption-only immutable framing for every
 completed execution, including recursive executions. `correctness` constructs a unique completed
 execution when supplied `FiniteCalls program expression`: accessibility of the
@@ -74,8 +74,9 @@ named moves, restoration, mutable lexical storage, projected access and recursiv
 declared functions over one shared heap with generative activation identities.
 Owned nominal construction does not require Copy. Copy and MayDiscard use one
 structural permission producer. Final masks admit fully consumed exact owners
-and field-sensitive residual cleanup. Custom destruction, correlated branch
-states, loans and physical memory remain open.
+and field-sensitive residual cleanup, including conservative maybe-initialized
+branch joins. Custom destruction, relationally correlated branch states, loans
+and physical memory remain open.
 
 
 
@@ -2469,4 +2470,46 @@ Scope remains the current logical heap and direct place-access fragment.
 Physical allocation exhaustion, loan/reborrow permissions, guarded or captured
 inputs, custody, custom cleanup and the remaining whole-language obligations
 are not proved by this result. None of the 15 broad completion tasks is closed.
+
+
+## Source-admitted uncertain branch outputs and conditional cleanup
+
+Pattern arms no longer require identical output masks. Both core and named-source
+arm admission check each body's own output context and a structural
+`BindingContextApprox` into the common continuation context. Approximation
+preserves binding identities, declared types and mutability; it can forget
+initialization at a root or within a partial aggregate. It supplies no runtime
+state, successful execution or cleanup result.
+
+`Initialization.maybe` separates possible occupancy from definite availability.
+`PartialValue.Typed.read_sound` now establishes `MayRead`, not `Ready`:
+a physical read cannot retroactively authorize a source read or move from an
+uncertain mask. `maybe_not_ready` proves this exclusion. `Disposable.maybe_iff`
+proves that uncertain whole-owner cleanup requires the actual type's discard
+permission; uncertainty cannot erase an exact-linear obligation. The former
+`Disposable.ready` consumer is replaced by `Disposable.may_read`.
+
+`PartialValue.Typed.approximate` and `BindingMap.Typed.approximate` prove
+realization transport. `ProjectionType.open_partial` preserves uncertainty
+through the existing projection authority. Selected-arm execution retains the
+body's actual output context until its scope frame retires local storage, then
+transports the surviving heap bindings to the joined context. General
+preservation, progress, ownership safety, immutable consumption framing,
+terminating execution and public source-function soundness consume this path.
+No parallel runtime state or duplicate permission analysis was added.
+
+Fresh source-only verification in
+`/tmp/grandiose-branch-join-verified.EZAmae` passed all 30 Lean build jobs.
+Exhaustive imported axiom inspection covered 3,957 declarations, with only
+`propext`, `Classical.choice` and `Quot.sound`. The approximation producers,
+selected-arm consumer, uncertainty exclusions and general soundness endpoints
+received explicit dependency inspection. No unit tests or concrete examples
+were added.
+
+This closes conservative affine maybe-initialized branch cleanup in the current
+hook-free logical fragment. It does not preserve relational correlations between
+places or recover constructor-dependent availability from later discriminant
+checks. Custom destruction and ordering/divergence, loans, nonlocal cleanup,
+physical memory and the remaining whole-language obligations remain open.
+None of the 15 broad completion tasks is marked complete.
 

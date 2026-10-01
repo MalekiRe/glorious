@@ -16,6 +16,7 @@ def Initialization.openFields (state : Initialization) (count : Nat) : List Init
   match state with
   | .absent => List.replicate count .absent
   | .present => List.replicate count .present
+  | .maybe => List.replicate count .maybe
   | .fields states => states
 
 theorem Initialization.Empty.open_field {before after : Initialization} {count index : Nat}
@@ -26,7 +27,7 @@ theorem Initialization.Empty.open_field {before after : Initialization} {count i
     have same : after = .absent := (List.mem_replicate.mp member).2
     subst after
     trivial
-  | present => simp [Initialization.Empty] at empty
+  | present | maybe => simp [Initialization.Empty] at empty
   | fields states =>
     simp only [Initialization.Empty] at empty
     exact empty.2 after member
@@ -119,11 +120,22 @@ theorem PartialValuesTyped.set {program : Program} {values : List PartialValue}
       | zero => cases selected; exact .cons replacement tail
       | succ index => exact .cons head (ih tail selected)
 
+theorem PartialValuesTyped.uncertain {program : Program} {values : List PartialValue}
+    {types : List Ty} {states : List Initialization} (typed : PartialValuesTyped program values types states) :
+    PartialValuesTyped program values types (List.replicate types.length .maybe) := by
+  induction types generalizing values states with
+  | nil => cases typed; exact .nil
+  | cons first rest ih =>
+    cases typed with
+    | cons head tail => exact .cons (.uncertain head) (ih tail)
+
+
 /-- Opening derives the actual field list and its initialization states from
 the same checked projection. It works for absent, whole, and partial owners. -/
-theorem ProjectionType.open_partial {program : Program} {home : Module} {parent child : Ty}
+private theorem ProjectionType.open_partial_known {program : Program} {home : Module} {parent child : Ty}
     {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
-    {value : PartialValue} {state : Initialization} (typed : value.Typed program parent state) :
+    {value : PartialValue} {state : Initialization} (typed : value.Typed program parent state)
+    (certain : state ≠ .maybe) :
     ∃ types, parent.fieldTypes program = some types ∧
       ∃ fields, types[index]? = some child ∧ value.openFields program parent = some fields ∧
         PartialValuesTyped program fields types (state.openFields types.length) := by
@@ -136,6 +148,7 @@ theorem ProjectionType.open_partial {program : Program} {home : Module} {parent 
       cases resident with
       | tuple head tail => exact ⟨_, selected, rfl, (ValuesHaveTypes.cons head tail).partialResidents⟩
     | tuple head tail => exact ⟨_, selected, rfl, .cons head tail⟩
+    | uncertain => exact False.elim (certain rfl)
   | @nominal identity index declaration schema field key declared structureOnly indexed selected visible =>
     have chosen : declaration.constructor none = some schema := by
       simp [DataDecl.constructor, structureOnly]
@@ -168,6 +181,29 @@ theorem ProjectionType.open_partial {program : Program} {home : Module} {parent 
         have sameSchema := Option.some.inj (otherChosen.symm.trans chosen)
         subst otherSchema
         exact ⟨_, child, by simp [PartialValue.openFields], residents⟩
+    | uncertain => exact False.elim (certain rfl)
+
+/-- Projection preserves uncertainty; it never upgrades possible occupancy to
+readiness. The runtime field list comes from the same checked projection. -/
+theorem ProjectionType.open_partial {program : Program} {home : Module} {parent child : Ty}
+    {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
+    {value : PartialValue} {state : Initialization} (typed : value.Typed program parent state) :
+    ∃ types, parent.fieldTypes program = some types ∧
+      ∃ fields, types[index]? = some child ∧ value.openFields program parent = some fields ∧
+        PartialValuesTyped program fields types (state.openFields types.length) := by
+  induction typed using PartialValue.Typed.rec
+    (motive_2 := fun _ _ _ _ => True) generalizing child key index with
+  | hole => exact projection.open_partial_known (.hole _) (by intro same; cases same)
+  | resident resident => exact projection.open_partial_known (.resident resident) (by intro same; cases same)
+  | tuple head tail headIH tailIH =>
+    exact projection.open_partial_known (.tuple head tail) (by intro same; cases same)
+  | nominal declared chosen finite residents ih =>
+    exact projection.open_partial_known (.nominal declared chosen finite residents) (by intro same; cases same)
+  | uncertain typed ih =>
+    obtain ⟨types, layout, fields, member, opened, residents⟩ := ih projection
+    exact ⟨types, layout, fields, member, opened, residents.uncertain⟩
+  | nil | cons => trivial
+
 
 
 theorem PartialValuesTyped.close {program : Program} {parent : Ty} {types : List Ty}
