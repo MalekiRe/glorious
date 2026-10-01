@@ -53,7 +53,8 @@ dependencies, with checked normalized names and collision rejection, and
 visibility-checked traversal through actual module bindings. Calls and callable
 imports interpret decoded `self`/`crate`/`super`/dependency anchors through the same
 producer, including nested callable import groups with complete namespace validation.
-Module aliases, other namespaces, preludes and parsing remain open.
+Selected callable preludes use the same producer and respect suppression flags.
+Module aliases, other namespaces, library/runtime profile contracts and parsing remain open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1752,4 +1753,52 @@ additional axioms were added.
 This covers the function/import/module source forms currently modeled. Nominal
 source declarations and field visibility elaboration, module aliases, other
 namespaces, preludes, parsing and the remaining whole-language tasks remain open.
+
+
+## Verified automatic callable prelude injection through source soundness
+
+Each decoded `PackageSource` carries the driver-selected standard prelude path
+and the decoded `noStd` / `noImplicitPrelude` controls. A single request
+producer injects that prelude only when a profile supplies a path and neither
+suppression flag is set. It generates a private glob request, feeding the same
+path elaborator, complete import batches, namespace admission, seeded candidate
+relation and callable resolver as authored imports. Prelude and glob candidates
+use the weak tier beneath explicit bindings (§2.3); no special runtime dispatch
+or spelling-based intrinsic authority is introduced.
+
+`preludeRequest_selected` proves the exact enabling condition and generated
+shape. `resolvePackagePrelude.origin` ties every automatic request to its
+supplied owning package. `LoadedModule.importRequests_origin` distinguishes
+authored imports from injected requests. `importRequests_suppressed` proves
+that either suppression flag leaves **exactly** the authored import list: it
+does not erase explicit imports or dependency declarations.
+
+Source closure now constructs its complete import product from these requests.
+The construction criterion includes automatic paths, and admission checks their
+actual namespace accessibility. A missing dependency or inaccessible prelude
+cannot silently become an empty prelude. The declaration visibility proof covers
+both authored and automatically generated requests. General construction,
+provenance, closure uniqueness and file-order admission invariance are migrated;
+file permutation leaves the selected profile and suppression policy unchanged.
+
+`SourceClosure.Admitted.prelude_call_soundness` constructs the actual selected
+callee from the profile, emitted glob and finite visible target candidate, under
+the shared explicit-binding exclusion and static namespace-access check. It
+constructs selection before argument checking and proves configuration typing,
+terminal-or-step progress, consumption framing and binding uniqueness for every
+typed execution prefix. Lexical shadowing and original declaration visibility
+remain mandatory. No completed callable lookup, execution or post-state readiness
+is supplied as an assumption.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,677 declarations; only standard Lean axioms occur.
+Policy equivalence, exact suppression, source provenance, request visibility,
+prelude-call soundness, file-order invariance and public function soundness and
+correctness received explicit axiom inspection. No tests, examples, proof
+placeholders or additional axioms were added.
+
+This establishes decoded **callable prelude injection** and its suppression,
+not the entire library profile contract. Hosted-library acquisition/selection,
+intrinsic/runtime service admission, literal manifests, other namespace preludes,
+attribute parsing, module aliases and the other whole-language tasks remain open.
 
