@@ -23,6 +23,37 @@ variable {program : Program} {home : Module} {heap : RuntimeHeap StorageCell} {a
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
     {place : Place} {state : BindingState} {type : Ty}
 
+/-- The selected old resident, immediately before a write, is empty or has
+MayDiscard. Selection uses the same heap path as restoration itself. -/
+def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCell)
+    (bindings : BindingMap) (place : Place) : Prop :=
+  ∃ identity cell resident type mask,
+    lookup place.root bindings = some identity ∧ heap.read identity = some cell ∧
+    cell.resident.selectFields program cell.type place.fields = some resident ∧
+    resident.Typed program type mask ∧
+    (resident.Empty ∨ UsePermitted program.data .discard type)
+
+theorem BindingMap.Typed.replacement_safe
+    (store : BindingMap.Typed program heap activation bindings context)
+    {available : Initialization}
+    (selected : Grounded.lookup place.root context = some state)
+    (path : PathType program home state.slot.type place.fields type)
+    (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
+    (discard : available.Disposable program.data type) :
+    BindingMap.ReplacementSafe program heap bindings place := by
+  obtain ⟨identity, cell, mapped, found, _, declared, typed, _⟩ := store.lookup selected
+  have actualPath : PathType program home cell.type place.fields type := by
+    rw [declared]; exact path
+  obtain ⟨resident, mask, maskSelected, residentSelected, residentTyped⟩ :=
+    actualPath.select_partial typed.2
+  rw [declared] at maskSelected
+  cases Option.some.inj (maskSelected.symm.trans selection)
+  refine ⟨identity, cell, resident, type, available, mapped, found, residentSelected, residentTyped, ?_⟩
+  rcases discard with empty | permission
+  · exact .inl (residentTyped.empty empty)
+  · exact .inr permission
+
+
 /-- Exact retained cells preserve every projected read, including unsuccessful
 reads. This is independent of the selected path or its source typing. -/
 theorem BindingMap.read.frame {after : RuntimeHeap StorageCell}

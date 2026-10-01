@@ -105,7 +105,7 @@ theorem NamedProgramAdmitted.soundness {source : List NamedFunction} {program : 
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
 

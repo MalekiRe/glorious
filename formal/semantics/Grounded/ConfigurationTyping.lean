@@ -33,10 +33,12 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
   | scope {context : FlowContext} (locals : FlowContext) {result}
       (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
       FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) context (.one result)
-  | assign {home before restored after place type result rest state updated}
+  | assign {home before restored after place type result rest state updated available}
       (selected : lookup place.root before = some state)
       (path : PathType program home state.slot.type place.fields type)
-      (writable : state.slot.mutable = true) (discard : UsePermitted program.data .discard type)
+      (writable : state.slot.mutable = true)
+      (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
+      (discard : available.Disposable program.data type)
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } before = some restored)
       (checked : HasType program home restored rest result after) :
@@ -156,7 +158,7 @@ theorem ConfigurationTyped.progress {context result state}
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
       | construct declared chosen finite visible access residents => exact ⟨_, .construct⟩
       | call declared visible inputs => exact ⟨_, .call declared⟩
-      | assign resident selected path writable discard mask context rest => exact ⟨_, .assign⟩
+      | assign resident selected path writable selection discard mask context rest => exact ⟨_, .assign⟩
       | applyPatterns arguments nonempty covered bodies => exact ⟨_, .applyPatterns⟩
     | arguments checked =>
       right
@@ -174,7 +176,7 @@ theorem ConfigurationTyped.progress {context result state}
         | scope locals discard =>
           obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress store locals.length
           exact ⟨_, .scope exited⟩
-        | assign selected path writable discard mask context checked =>
+        | assign selected path writable selection discard mask context checked =>
           obtain ⟨after, _, _, written, _⟩ := AddressedEnvironment.write.progress store selected path resident
           exact ⟨_, .assignResult written⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
@@ -296,13 +298,13 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             exact (retained scope states typed (by intro same; have := congrArg ActivationId.index same; omega)).1
     | assign =>
       cases code with | expression checked =>
-        cases checked with | assign resident selected path writable discard mask context rest =>
+        cases checked with | assign resident selected path writable selection discard mask context rest =>
           exact .intro store issued (.expression resident)
-            (.cons (.assign selected path writable discard mask context rest) continuation)
+            (.cons (.assign selected path writable selection discard mask context rest) continuation)
     | assignResult written =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | assign selected path writable discard mask context checked =>
+          cases frame with | assign selected path writable selection discard mask context checked =>
             obtain ⟨next, nextMask, nextContext, produced, maskWritten, contextWritten, nextTyped,
               _, scope, supply, _, _, retained⟩ := AddressedEnvironment.write.progress store selected path resident
             cases Option.some.inj (mask.symm.trans maskWritten)
@@ -485,7 +487,7 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     simpa only [Frame.environment, Frame.activation, same] using store
   | scope locals discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots] using store.drop locals.length
-  | assign selected path writable discard mask context checked =>
+  | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using store
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
@@ -512,7 +514,7 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     simpa only [Frame.environment, Frame.activation, same] using framed
   | scope locals discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots] using framed.drop store locals.length
-  | assign selected path writable discard mask context checked =>
+  | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using framed
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using framed
@@ -626,7 +628,7 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
       cases code with | result resident =>
         have original := continuation
         cases continuation with | cons frame tail =>
-          cases frame with | assign selected path writable discard mask context checked =>
+          cases frame with | assign selected path writable selection discard mask context checked =>
             obtain ⟨producedAfter, _, _, produced, _, _, _, _, _, _, _, _, retained⟩ :=
               AddressedEnvironment.write.progress store selected path resident
             cases Option.some.inj (written.symm.trans produced)
@@ -661,19 +663,21 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
 
-/-- Before lexical or invocation retirement, every selected cell is either an
-empty shell or has structural MayDiscard. This is a current-state assertion. -/
-def Configuration.ScopeCleanupSafe (program : Program) (state : Configuration) : Prop :=
+/-- Before storage retirement or replacement, the selected old residents are
+empty or have MayDiscard. This is a current-state assertion, not readiness. -/
+def Configuration.StorageCleanupSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
   | .result _, .scope count :: _ =>
       BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings)
   | .result _, .restore _ :: _ =>
       BindingMap.Disposable program state.environment.heap state.environment.bindings
+  | .result _, .assign place _ :: _ =>
+      BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
   | _, _ => True
 
-theorem ConfigurationTyped.scope_cleanup_safe {context : FlowContext} {result : ResultType}
+theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result : ResultType}
     {state : Configuration} (typed : ConfigurationTyped program context result state) :
-    state.ScopeCleanupSafe program := by
+    state.StorageCleanupSafe program := by
   cases typed with
   | intro store issued code continuation =>
     cases code <;> try trivial
@@ -685,6 +689,8 @@ theorem ConfigurationTyped.scope_cleanup_safe {context : FlowContext} {result : 
         case scope locals discard =>
           exact (store.take locals.length).disposable (by simpa using discard)
         case restore => exact store.disposable (by assumption)
+        case assign =>
+          exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
 
 end Grounded
 

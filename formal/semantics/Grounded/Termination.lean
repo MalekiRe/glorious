@@ -83,7 +83,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
       obtain ⟨after, run, scope, heap⟩ := runs environment
       exact ⟨after, .construct run, scope, heap⟩
   | call declared visible inputs ih => intro closed; cases closed
-  | assign resident selected path writable discard mask context rest residentIH restIH => intro closed; cases closed
+  | assign resident selected path writable selection discard mask context rest residentIH restIH => intro closed; cases closed
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH => intro closed; cases closed
   | nil => exact ⟨[], .nil, fun environment => ⟨environment, .nil, rfl, rfl⟩⟩
   | @cons home before middle after head tail first rest headTyped tailTyped headIH tailIH =>
@@ -242,7 +242,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain done | ⟨next, stepped⟩ := returned.progress
       · cases done
       · cases stepped with | restore restored => exact ⟨value, _, .call declared prepared inputRun bodyRun restored⟩
-    | assign resident selected path writable discard mask context rest =>
+    | assign resident selected path writable selection discard mask context rest =>
       obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleIssued, _⟩ := ih _ .assignValue resident store issued
       obtain ⟨updated, updatedMask, updatedContext, written, maskWritten, contextWritten, updatedTyped,
         _, scope, supply, _, _, _⟩ := AddressedEnvironment.write.progress middleTyped selected path valueTyped

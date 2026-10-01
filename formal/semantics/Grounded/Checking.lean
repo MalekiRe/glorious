@@ -93,11 +93,13 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (visible : declaration.visibility.Allows declaration.home home)
       (inputs : HasTypes program home before arguments (declaration.parameters.map fun parameter => parameter.2.type) after) :
       HasType program home before (.call identity arguments) declaration.result after
-  | assign {home before evaluated restored after place value rest type result state updated}
+  | assign {home before evaluated restored after place value rest type result state updated available}
       (resident : HasType program home before value type evaluated)
       (selected : lookup place.root evaluated = some state)
       (path : PathType program home state.slot.type place.fields type)
-      (writable : state.slot.mutable = true) (discard : UsePermitted program.data .discard type)
+      (writable : state.slot.mutable = true)
+      (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
+      (discard : available.Disposable program.data type)
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } evaluated = some restored)
       (continued : HasType program home restored rest result after) :
@@ -143,7 +145,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
     have outer := congrArg List.tail bodyIH
     exact outer.trans initialIH
   | tuple head tail headIH tailIH => exact tailIH.trans headIH
-  | assign resident selected path writable discard mask context continued residentIH continuedIH =>
+  | assign resident selected path writable selection discard mask context continued residentIH continuedIH =>
     exact continuedIH.trans ((replaceBinding.map_same BindingState.slot selected context rfl).trans residentIH)
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH =>
     exact (bodiesIH nonempty).trans argumentsIH

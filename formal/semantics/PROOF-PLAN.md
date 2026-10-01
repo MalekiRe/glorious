@@ -31,7 +31,7 @@ Run program ⟨environment, .expression expression, []⟩ state →
 ConfigurationTyped program final (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
   AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-  (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program
+  (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
@@ -1925,7 +1925,7 @@ Wildcard and literal-pattern disposal still require MayDiscard; reads still
 require Copy. Moves retain their original definite-initialization requirements.
 
 `BindingMap.Typed.disposable` connects static disposition to the actual cells
-selected for retirement. `ConfigurationTyped.scope_cleanup_safe` proves that
+selected for retirement. `ConfigurationTyped.storage_cleanup_safe` proves that
 before each lexical-scope or caller-restoration cleanup, every selected live
 cell is empty or its type permits discard. This is now a conclusion of the
 general prefix soundness theorem, propagated through named expressions, source
@@ -1943,9 +1943,44 @@ standard Lean axioms. The mask-to-resident bridge, selected-cell disposition,
 cleanup safety and strengthened public source/function soundness received
 explicit axiom inspection.
 
-Remaining disposition obligations are narrower but substantial: mixed residual
-aggregates whose whole type is nondiscardable still need field-sensitive
-residual permission; assignment restoration still requires type-wide discard
-permission. Custom hooks and their order/divergence, conditional ownership,
+At this checkpoint mixed residual aggregates and assignment restoration remained
+restricted. The next checkpoint corrects assignment restoration. Field-sensitive
+residual permission, custom hooks and their order/divergence, conditional ownership,
 loans, nonlocal exits and the other whole-language boundaries remain open.
+
+
+## Verified residual restoration and actual overwritten-resident safety
+
+Assignment now checks the destination's selected residual mask after RHS
+execution, through the existing `Initialization.Disposable` authority. An empty
+exact destination may be restored without granting MayDiscard or Copy to its
+type. Replacing a still-present exact owner remains rejected. Mutability,
+projection typing, definite availability for moves, and RHS-before-write order
+are unchanged.
+
+Migrated source assignment elaboration, lexical resolution, core checking,
+assignment continuations, preservation, progress and finite execution. The
+runtime restoration operation is unchanged. `BindingMap.Typed.replacement_safe`
+uses `PathType.select_partial` to identify the actual selected old resident in
+the same heap path that restoration overwrites, then proves it empty or legally
+discardable. No independent path reconstruction or future-state premise occurs.
+
+The public predicate is now `Configuration.StorageCleanupSafe`, with the general
+`ConfigurationTyped.storage_cleanup_safe` proof covering both retirement and
+replacement. All source, declaration, package-closure, imported-call and prelude
+soundness consumers expose this strengthened conclusion. The previous
+scope-only names were removed rather than retained as aliases.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Universal Lean proofs
+constructed a move/restore/move execution for arbitrary owner types and typed
+input stores, deriving a correctly typed final absent slot and storage cleanup
+safety for every execution prefix. A separate general proof rejected replacement
+permission for every still-present exact nominal owner. Exhaustive imported
+axiom inspection covered 3,741 declarations; only standard Lean axioms occurred.
+No unit tests, concrete examples, new axioms or proof placeholders were added.
+
+Whole-language completeness remains open. Mixed residual aggregates still need
+field-sensitive disposition rather than the current empty-or-whole-type rule.
+Custom destruction and ordering/divergence, correlated branch states, loans,
+nonlocal cleanup and the other tracked semantic boundaries remain unproved.
 

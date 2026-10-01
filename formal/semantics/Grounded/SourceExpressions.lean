@@ -149,12 +149,14 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (inputs : NamedExprsElaborate program names home scope before source core
         (declaration.parameters.map fun parameter => parameter.2.type) after) :
       NamedExpr.Elaborates program names home scope before (.call name source) (.call identity core) declaration.result after
-  | assign {scope before evaluated restored after name fields binding type result value rest coreValue coreRest state updated}
+  | assign {scope before evaluated restored after name fields binding type result value rest coreValue coreRest state updated available}
       (resolved : scope.resolve name = some binding)
       (resident : NamedExpr.Elaborates program names home scope before value coreValue type evaluated)
       (selected : lookup binding.identity evaluated = some state)
       (path : PathType program home binding.slot.type fields type)
-      (writable : binding.slot.mutable = true) (discard : UsePermitted program.data .discard type)
+      (writable : binding.slot.mutable = true)
+      (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+      (discard : available.Disposable program.data type)
       (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
       (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
       (continued : NamedExpr.Elaborates program names home scope restored rest coreRest result after) :
@@ -237,9 +239,9 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | construct declared chosen finite visible access _ ih =>
     exact .construct declared chosen finite visible access (ih slots)
   | call _ _ declared visible _ ih => exact .call declared visible (ih slots)
-  | assign resolved _ selected path writable discard mask context _ first rest =>
+  | assign resolved _ selected path writable selection discard mask context _ first rest =>
     have resident := first slots
-    apply SourceScope.assign_checked resolved slots resident selected path writable discard mask context
+    apply SourceScope.assign_checked resolved slots resident selected path writable selection discard mask context
     apply rest
     exact (replaceBinding.map_same BindingState.slot selected context rfl).trans (resident.slots.trans slots)
   | applyPatterns _ nonempty covered _ inputs bodies =>
@@ -284,7 +286,7 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.StorageCleanupSafe program :=
   (elaborated.checked slots).soundness checkedProgram store issued run
 
 /-- Completed executions preserve the declared result and caller environment;
