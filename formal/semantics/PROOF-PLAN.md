@@ -175,13 +175,12 @@ soundness theorems derive realization, progress, immutable entry-store framing
 and runtime binding uniqueness for every actual execution prefix. RHS order and
 scope exit remain the existing machine transitions, not another source evaluator.
 
-This closes compositional named-local resolution for these three operations.
-It does not implement a parser, recursive whole-source elaborator, type inference,
-or pattern-binder allocation. Subexpressions still supply their core checking
-derivations; `SourcePatterns` still receives resolved binder IDs. The allocation
-bound establishes freshness relative to the source scope, not a globally fresh
-runtime activation or storage address. Those boundaries and flow-sensitive
-moves/restoration remain open.
+This checkpoint closed compositional named-local resolution for three operations.
+The recursive named-expression admission below now supplies their nested core
+checking derivations. Parsing, inference and pattern-binder allocation remain
+open; `SourcePatterns` still receives resolved binder IDs. The allocation bound
+establishes freshness relative to the source scope, not a globally fresh runtime
+activation or storage address. Flow-sensitive moves/restoration remain open.
 
 Verification: strict `lake build` passed (18 jobs). The defining-module audit
 covered 2,011 declarations including private/generated declarations, permitting
@@ -189,6 +188,44 @@ only `propext`, `Quot.sound` and `Classical.choice`. All three named-local
 soundness theorems depend only on `propext` and `Quot.sound`. A runtime-only
 import check confirmed that `SourceScope`, `HasType` and `correctness` are
 absent. No examples, unit tests, new axioms or temporary files were added.
+
+
+## Verified recursive named-expression admission
+
+`SourceExpressions` extends the existing named-local producers to recursively
+nested expressions and ordered argument lists. `NamedExpr.Elaborates` records
+source syntax, the selected core expression and its type. Its general
+`checked` theorem derives `HasType`; callers no longer supply core typing for
+each named expression's initializer, body, RHS or argument. Local resolution,
+projection authority, annotation resolution and declaration signatures reuse
+the existing producers. Closed constant declarations retain their existing core
+checking contract; this is not source declaration elaboration.
+
+The relation covers unit/integer/character literals, grouping, named reads,
+sequencing, bindings, tuples, projections, arrays, constant references, nominal
+construction, resolved direct calls and named assignment statements. Binding
+initializers use the incoming scope; bodies use `SourceScope.enter`. Argument
+lists preserve their exact order. The emitted core is executed by the one
+existing machine; no source evaluator or alternate field analysis is introduced.
+
+The public `soundness` theorem proves preservation, progress, immutable caller
+framing and runtime binding uniqueness for every execution prefix, including
+recursive calls. `evaluation_soundness` proves result and successor-store typing
+for completed execution. `correctness` constructs unique completed execution
+only under the separately supplied finite-call termination criterion.
+
+This is a declarative elaboration relation, not a parser or executable inference
+algorithm. It does not establish elaboration existence or uniqueness for arbitrary
+source text. Named pattern-binder allocation, pattern-callable expression
+elaboration, source declaration/name resolution, dynamic activation/storage
+identity, and flow-sensitive moves/restoration remain open. Lexical IDs are fresh
+relative to the active scope, not globally unique across disjoint scopes.
+
+Verification: strict `lake build` passed (19 jobs). An axiom-closure audit of
+2,060 declarations in the `Grounded` namespace permitted only `propext`,
+`Quot.sound` and `Classical.choice`. The four new expression checking/safety/
+correctness theorems depend only on `propext` and `Quot.sound`. No concrete
+examples or unit tests were added or run.
 
 
 ## Verified post-RHS assignment frame
