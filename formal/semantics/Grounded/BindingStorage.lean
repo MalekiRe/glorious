@@ -241,14 +241,13 @@ theorem BindingMap.Disposable.release_preserves_exact
     {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    (resident : cell.resident.read = some (.nominal identity tag fields)) :
     after.read address = some cell := by
   have outside : address ∉ bindings.map Prod.snd := by
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    rw [resident] at permission
-    exact PartialValue.Disposable.not_exact_resident declared restricted permission
+    exact PartialValue.Disposable.not_exact_read declared restricted resident permission
   exact (RuntimeHeap.retireMany_outside released outside).trans found
 
 

@@ -2111,3 +2111,41 @@ placeholders were added. These results concern the modeled logical heap and
 explicit exact nominal restrictions; they do not establish physical allocation,
 custom hooks, borrowing, nonlocal cleanup or complete language soundness.
 
+
+## Repaired zero-field ownership and representation-independent cleanup safety
+
+A general constructor proof exposed a modeling error: the former vacuous
+`Empty` predicate classified every zero-field partial nominal as consumed while
+`PartialValue.read` still reconstructed its whole value. The runtime disposal
+relation therefore admitted such shells without checking an exact restriction.
+This was a defect in the emptiness contract, not evidence of language soundness.
+
+`Initialization.Empty` and `PartialValue.Empty` now require consumed storage:
+a field shell must have at least one field and every field must itself be empty.
+A zero-field aggregate remains a whole owner; moving the whole owner still leaves
+an ordinary hole. The typed mask-to-resident proof preserves actual list arity.
+`PartialValue.Empty.read_none` proves for every partial representation that
+emptiness excludes a successful read. This general theorem rules out the former
+modeling error rather than special-casing an input program.
+
+`PartialValue.Disposable.not_exact_read` proves exclusion for any representation
+that reads as a live exact nominal, including reconstructed aggregate fields.
+Actual release, source scope/caller retirement and overwrite theorems now consume
+read observations rather than demanding a syntactic `.resident` wrapper.
+The stronger contract has been migrated through its real consumers. Existing
+whole-owner direct-discard protection remains a constituent proof case.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). General proof checking
+established zero-field exact-owner exclusion and incompatibility of typed empty
+storage with read readiness. Mixed residual transfer and owned projection proofs
+still construct actual executions and prefix cleanup safety. Exhaustive imported
+axiom inspection covered 3,804 declarations; only standard Lean axioms occurred.
+The absence/read exclusion and strengthened actual retirement/overwrite results
+received explicit axiom inspection. No unit tests, concrete example files,
+additional axioms or proof placeholders were added.
+
+Whole-language completion remains open. This fixes the hook-free logical
+ownership boundary; it does not supply custom destructors, ordered/diverging
+cleanup, borrowing, correlated control state, nonlocal cleanup, physical memory
+or the other outstanding language/compiler semantics.
+

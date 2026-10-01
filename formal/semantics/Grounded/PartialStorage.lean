@@ -110,17 +110,42 @@ theorem PartialValue.Typed.hole_unready {program : Program} {type : Ty} {state :
   intro ready
   cases ready
 
-/-- No active resident remains, including nested aggregate shells. -/
+/-- An empty shell contains consumed storage. A zero-field aggregate is still
+a whole value, not evidence that an owner has been consumed. -/
 def Initialization.Empty : Initialization → Prop
   | .absent => True
   | .present => False
-  | .fields states => ∀ state ∈ states, state.Empty
+  | .fields states => states ≠ [] ∧ ∀ state ∈ states, state.Empty
 
 def PartialValue.Empty : PartialValue → Prop
   | .hole => True
   | .resident _ => False
   | .tuple head tail => head.Empty ∧ ∀ value ∈ tail, value.Empty
-  | .nominal _ _ fields => ∀ value ∈ fields, value.Empty
+  | .nominal _ _ fields => fields ≠ [] ∧ ∀ value ∈ fields, value.Empty
+
+/-- Absence cannot simultaneously supply a whole value, including zero-sized
+nominal owners. Partial shells may be read only after actual restoration. -/
+theorem PartialValue.Empty.read_none {value : PartialValue} (empty : value.Empty) : value.read = none := by
+  induction value using PartialValue.rec
+    (motive_2 := fun values => values ≠ [] → (∀ value ∈ values, value.Empty) → readPartialValues values = none) with
+  | hole => simp [PartialValue.read]
+  | resident value => simp [PartialValue.Empty] at empty
+  | tuple head tail headIH tailIH =>
+    simp only [PartialValue.Empty] at empty
+    simp [PartialValue.read, headIH empty.1]
+  | nominal identity tag fields ih =>
+    simp only [PartialValue.Empty] at empty
+    simp [PartialValue.read, ih empty.1 empty.2]
+  | nil => rename_i nonempty allEmpty; exact False.elim (nonempty rfl)
+  | cons head tail headIH tailIH =>
+    rename_i nonempty allEmpty
+    simp [readPartialValues, headIH (allEmpty head (by simp))]
+
+
+theorem PartialValuesTyped.state_length {program : Program} {values : List PartialValue}
+    {types : List Ty} {states : List Initialization} (typed : PartialValuesTyped program values types states) :
+    values.length = states.length := by
+  induction typed using PartialValuesTyped.rec (motive_1 := fun _ _ _ _ => True) <;> simp_all
 
 /-- The shared initialization mask certifies actual absence, not just a readable
 value's absence. No resident can hide inside an empty partial aggregate. -/
@@ -135,6 +160,11 @@ theorem PartialValue.Typed.empty {program : Program} {value : PartialValue} {typ
     rcases member with rfl | member
     · exact headEmpty
     · exact tailEmpty value member
+  case nominal =>
+    have lengths := PartialValuesTyped.state_length ‹PartialValuesTyped program _ _ _›
+    intro same
+    simp only [same, List.length_nil] at lengths
+    exact empty.1 (by simpa using lengths.symm)
 
 mutual
 /-- Residual disposition uses initialization masks, not the original whole-owner
@@ -230,9 +260,9 @@ theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identit
     {declaration : DataDecl} {tag : Option Nat} {fields : List PartialValue}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
     (permission : (PartialValue.nominal identity tag fields).Disposable program) :
-    ∀ value ∈ fields, value.Empty := by
+    (PartialValue.nominal identity tag fields).Empty := by
   cases permission with
-  | empty absent => simpa [PartialValue.Empty] using absent
+  | empty absent => exact absent
   | permitted typed allowed =>
     cases typed with
     | nominal found chosen finite residents =>
@@ -262,6 +292,27 @@ theorem PartialValue.Disposable.not_exact_resident {program : Program} {identity
         | nominal other restriction fields =>
           cases Option.some.inj (other.symm.trans declared)
           simp [UsePermission.Allows, restricted] at restriction
+
+/-- Reconstructing an aggregate does not hide a live exact owner from cleanup. -/
+theorem PartialValue.Disposable.not_exact_read {program : Program} {identity : Nat}
+    {declaration : DataDecl} {tag : Option Nat} {fields : List Value} {value : PartialValue}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (observed : value.read = some (.nominal identity tag fields)) : ¬ value.Disposable program := by
+  intro permission
+  cases value with
+  | hole => simp [PartialValue.read] at observed
+  | resident value =>
+    simp only [PartialValue.read, Option.some.injEq] at observed
+    subst value
+    exact PartialValue.Disposable.not_exact_resident declared restricted permission
+  | tuple head tail =>
+    simp [PartialValue.read, Option.bind_eq_some_iff, Option.map_eq_some_iff] at observed
+  | nominal other tag residents =>
+    simp only [PartialValue.read, Option.map_eq_some_iff] at observed
+    obtain ⟨values, read, same⟩ := observed
+    cases same
+    have absent := (permission.exact_nominal_empty declared restricted).read_none
+    simp [PartialValue.read, read] at absent
 
 
 structure StorageCell where

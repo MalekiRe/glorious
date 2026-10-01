@@ -39,13 +39,13 @@ theorem BindingMap.ReplacementSafe.not_exact
     (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (selected : cell.resident.selectFields program cell.type place.fields =
-      some (.resident (.nominal identity tag fields))) : False := by
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
+      some (.nominal identity tag fields)) : False := by
   obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound, actualSelected, _, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
-  cases Option.some.inj (actualSelected.symm.trans selected)
-  exact PartialValue.Disposable.not_exact_resident declared restricted permission
+  rw [actualSelected] at selected
+  exact PartialValue.Disposable.not_exact_read declared restricted selected permission
 
 
 theorem BindingMap.Typed.replacement_safe

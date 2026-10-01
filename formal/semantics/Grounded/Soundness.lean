@@ -54,7 +54,7 @@ theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    (resident : cell.resident.read = some (.nominal identity tag fields)) :
     after.environment.heap.read address = some cell := by
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
@@ -79,7 +79,7 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    (resident : cell.resident.read = some (.nominal identity tag fields)) :
     after.environment.heap.read address = some cell := by
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
@@ -104,8 +104,8 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (selected : cell.resident.selectFields program cell.type place.fields =
-      some (.resident (.nominal identity tag fields))) : False := by
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
+      some (.nominal identity tag fields)) : False := by
   exact BindingMap.ReplacementSafe.not_exact
     (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found declared restricted selected
 
