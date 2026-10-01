@@ -213,6 +213,54 @@ contracts; preserve source normalization and all public consumers; then extend
 those contracts through ownership, control and representation boundaries.
 A module split alone does not complete these semantic migrations.
 
+## Physical, foreign and compiler refinement boundaries
+
+These are obligations for extending the logical specification, not assumed
+Lean fields and not implemented operations. The current `Target` supplies only
+pointer width; `Value`, `Environment` and `Step` do not model byte layouts,
+allocators, foreign calls or compiler output.
+
+- **Representation (§17.1–17.3):** a representation relation must connect a
+  concrete target's allocations and bytes to the logical residents, storage
+  identities, initialization and ownership state. Its target evidence must fix
+  size/alignment, field offsets, array stride, enum layouts, endianness and ABI
+  identity. Zero-sized residents retain distinct logical lifetime/ownership
+  obligations. Equal byte size is not type equality. Reading or updating a
+  shared VM/native object must use the same backing allocation, not a marshalled
+  copy. No such relation is proved by `EnvironmentTyped` today.
+- **Allocation and exhaustion (§18):** the concrete transition must identify
+  the requested size, alignment and allocation domain. Success establishes
+  freshness, valid storage and its representation; exhaustion must describe
+  failure of that same request. Failure of a typing, permission, cleanup or
+  simulation proof is not allocator exhaustion. Release must use the matching
+  domain and preserve unrelated residents. Logical recursion currently makes
+  no claim about concrete stack/memory exhaustion.
+- **Foreign calls (§16):** capability admission, configured symbol resolution,
+  C representation and semantic permission are separate requirements. A host
+  contract may describe actual external reads/writes, ownership transfer and
+  return validity; it must not supply whole-source preservation or future
+  execution success. Synchronous callback loans end with the dynamic call;
+  retained callbacks require a live registration owner. Re-entry must observe
+  current shared storage and preserve unique access. Arbitrary foreign unwind,
+  label transfer and capture/replay of foreign stacks are not admitted. A C
+  callback entry bridge is not a bytecode program counter.
+- **Compiler simulation (§19):** each implemented representation needs entry
+  correspondence and step simulation consuming the authoritative checked
+  identities and contracts. Internal implementation steps may be unobservable,
+  but an unbounded internal loop cannot stand in for required source progress.
+  The relation must preserve observable ordering, results, ownership transfers,
+  cleanup, faults and permitted external outcomes; any silent-step argument
+  must separately justify progress. Physical exhaustion requires the actual
+  allocation obligation above rather than an unconstrained exceptional exit.
+  Closing this boundary also requires stating which source behaviors are
+  observable and proving the concrete compiler transformations—not adding a
+  universal simulation assumption to `Program.Checked`.
+
+The current logical proof imports no compiler implementation or older formal
+model. No placeholder foreign/allocator transition or vacuous refinement theorem
+is introduced. These boundaries do not enlarge the theorem's admitted fragment.
+
+
 ## Recovered, verified baseline
 
 At commit `2958fffc`, `Grounded.lean` was restored byte-for-byte from commit
