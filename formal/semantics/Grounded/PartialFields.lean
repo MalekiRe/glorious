@@ -1,5 +1,5 @@
 import Grounded.PartialStorage
-import Grounded.Places
+import Grounded.Projections
 
 /-! Declared layout opens live holes for field restoration without inventing
 resident values. Projection authority remains the shared ProjectionType. -/

@@ -70,7 +70,8 @@ loans, resolved storage identities and physical memory remain outside it.
 | `Types` | Alias resolution, finite layout and duplicability |
 | `Values` | Structural value equality, resident typing and indexed access |
 | `Lexical` | Binding lookup, lexical realization, replacement and immutable framing |
-| `Places` | Checked projection/path/place contracts and actual reads/writes |
+| `Projections` | Shared field/path authority and value selection/replacement, independent of lexical storage |
+| `Places` | Rooted lexical place contracts and actual reads/writes |
 | `Matching` | Runtime matching, subject interpretation and first-arm selection |
 | `Patterns` | Pattern typing, coverage/usefulness and constructive binding/selection proofs |
 | `Checking` | Expression, argument and arm admission |
@@ -435,6 +436,13 @@ soundness continue to check. Runtime matching still returns lexical values;
 it has not yet been migrated to cell allocation. Strict source-declaration
 checking passed (19 jobs), and the source closure audit found only standard
 Lean axioms.
+
+The shared `ProjectionType`/`PathType` producer and value-level projection
+proofs now live in `Projections`. Both `Places` and `PartialFields` consume
+that producer. Removing the former `PartialFields → Places → Lexical`
+dependency allows addressed lexical storage to consume `StorageOperations`
+without an import cycle. No projection rules or guarantees changed; the
+source-declaration and storage-operation closures check together (24 jobs).
 
 These storage results are not language-level permission to discard residents,
 bypass ownership/loans, or execute unchecked projections. The expression
