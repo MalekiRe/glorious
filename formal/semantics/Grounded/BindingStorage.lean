@@ -51,6 +51,13 @@ def allocateBindings (heap : RuntimeHeap StorageCell) (activation : ActivationId
       let tail := allocateBindings first.2 activation rest
       ((input.name, first.1) :: tail.1, tail.2)
 
+theorem allocateBindings.history (heap : RuntimeHeap StorageCell) (activation : ActivationId)
+    (inputs : List BindingInput) : RuntimeHeap.History heap (allocateBindings heap activation inputs).2 := by
+  induction inputs generalizing heap with
+  | nil => exact .refl _
+  | cons input rest ih => exact .step (.allocate heap (input.cell activation)) (ih _)
+
+
 /-- Availability and declared type describe the actual cell, not a second
 resident copy. Both lexical and storage identities are distinct in a scope. -/
 inductive BindingMap.Typed (program : Program) (heap : RuntimeHeap StorageCell)

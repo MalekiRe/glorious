@@ -707,5 +707,48 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
         case sequence =>
           exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
 
+/-- Every retained scope is realized in the current heap, not merely the active
+scope or the outermost caller. Traversing frames does not execute pending code. -/
+theorem ContinuationTyped.live_scopes {before : Environment} {current final : FlowContext}
+    {input result : ResultType} {stack : List Frame}
+    (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)
+    (store : before.Declares program current.slots) :
+    ∀ front back, stack = front ++ back →
+      ∀ identity ∈ (continuationEnvironment before front).bindings.map Prod.snd,
+        ∃ cell, before.heap.read identity = some cell := by
+  intro front
+  induction front generalizing before current input stack with
+  | nil =>
+    intro back same identity member
+    obtain ⟨states, residents, _⟩ := store
+    exact residents.live identity member
+  | cons frame front ih =>
+    intro back same identity member
+    subst stack
+    cases typed with
+    | cons head tail => exact ih tail (head.declares store) back rfl identity member
+
+theorem ConfigurationTyped.live_scopes {context result state}
+    (typed : ConfigurationTyped program context result state) :
+    ∀ front back, state.continuation = front ++ back →
+      ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
+        ∃ cell, state.environment.heap.read identity = some cell := by
+  cases typed with
+  | intro store issued code continuation =>
+    exact continuation.live_scopes ⟨_, store, code.slots.symm⟩
+
+/-- Retired identities cannot remain in any active or retained caller binding
+map of a well-typed machine configuration. This is not reference-loan typing. -/
+theorem ConfigurationTyped.retired_not_retained {context result state} {identity : StorageId}
+    (typed : ConfigurationTyped program context result state)
+    (retired : state.environment.heap.Retired identity)
+    {front back : List Frame} (split : state.continuation = front ++ back) :
+    identity ∉ (continuationEnvironment state.environment front).bindings.map Prod.snd := by
+  intro member
+  obtain ⟨cell, found⟩ := typed.live_scopes front back split identity member
+  rw [retired.2] at found
+  cases found
+
+
 end Grounded
 

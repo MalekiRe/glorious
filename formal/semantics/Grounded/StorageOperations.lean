@@ -197,4 +197,22 @@ theorem takeStorage.restore {program : Program} {home : Module} {heap : RuntimeH
     (by simpa only [holeFound, Option.bind_some] using intermediate)
 
 
+theorem takeStorage.history {program : Program} {heap after : RuntimeHeap StorageCell}
+    {identity : StorageId} {path : List FieldKey} {value : Value}
+    (taken : takeStorage program heap identity path = some (value, after)) :
+    RuntimeHeap.History heap after := by
+  simp only [takeStorage, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+  obtain ⟨cell, _, selected, _, resident, _, updated, _, next, written, same⟩ := taken
+  cases same
+  exact .step (.write written) (.refl _)
+
+theorem restoreStorage.history {program : Program} {heap after : RuntimeHeap StorageCell}
+    {identity : StorageId} {path : List FieldKey} {value : Value}
+    (restored : restoreStorage program heap identity path value = some after) :
+    RuntimeHeap.History heap after := by
+  simp only [restoreStorage, Option.bind_eq_some_iff] at restored
+  obtain ⟨cell, _, updated, _, written⟩ := restored
+  exact .step (.write written) (.refl _)
+
+
 end Grounded

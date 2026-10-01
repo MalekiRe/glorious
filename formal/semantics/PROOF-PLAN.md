@@ -2847,3 +2847,35 @@ No examples or unit tests were added. First-class pattern callable values,
 captured environments, borrowing and nonlocal control remain separate open
 representation and proof obligations.
 
+
+## Actual execution preserves retirement and retained-scope liveness
+
+The existing `RuntimeHeap.Retired.history` result previously consumed a heap
+history without connecting that history to machine execution. Actual allocation,
+move/write, scope exit and caller restoration now produce that same history:
+`Step.heap_history` and `Run.heap_history` cover every current transition.
+There is no new heap, allocator, evaluator or assumed simulation relation.
+
+`Run.retired` proves non-resurrection through arbitrary actual execution prefixes.
+`Run.retired_inaccessible` carries it through actual lexical read, move and
+restoration operations, including arbitrary descendant paths and stale binding
+maps. `Run.scope_retired` and `Run.return_retired` derive permanent retirement
+from the actual scope-exit/return transitions and the released binding identities.
+
+`ConfigurationTyped.live_scopes` establishes present heap realization at every
+continuation-prefix scope, not only the active or outermost frame. Consequently
+retired identities cannot occur in any of those realized binding maps.
+`SourceClosure.Admitted.storage_lifetime_safety` composes actual function entry,
+source-derived prefix soundness, heap-history production and retained-scope
+liveness. It requires neither termination nor future-state liveness assumptions.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit dependency
+inspection of the new operational and source endpoints and existing general
+preservation/progress found only standard Lean axioms. No examples or unit tests
+were added. No bounded runner was introduced.
+
+This establishes logical storage-identity lifetime safety for the current owned
+fragment. Reference carriers, loan permissions, reborrowing, outlives and return
+provenance, and custom Drop remain unimplemented. Storage liveness alone grants
+no reference access permission; none of the broad completion tasks is closed.
+

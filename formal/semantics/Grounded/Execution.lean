@@ -396,4 +396,90 @@ theorem Step.move_frame_disjoint {before : Environment} {after : Configuration}
     exact BindingMap.take.read_disjoint mapped otherMapped found apart stored
 
 
+/-- Every machine transition uses the existing allocation/write/retirement
+history. This includes callee entry, caller restoration and selected-arm scopes. -/
+theorem Step.heap_history {before after : Configuration} (step : Step program before after) :
+    RuntimeHeap.History before.environment.heap after.environment.heap := by
+  cases step with
+  | move taken =>
+    obtain ⟨⟨value, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    exact takeStorage.history raw
+  | assignResult written =>
+    obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    exact restoreStorage.history raw
+  | scope exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    exact RuntimeHeap.retireMany_history released
+  | restore restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    exact RuntimeHeap.retireMany_history released
+  | bindResult => exact allocateBindings.history _ _ _
+  | selectedPattern _ => exact allocateBindings.history _ _ _
+  | constant _ => exact allocateBindings.history _ _ _
+  | callInputs _ => exact allocateBindings.history _ _ _
+  | _ => exact .refl _
+
+theorem Run.heap_history {before after : Configuration} (run : Run program before after) :
+    RuntimeHeap.History before.environment.heap after.environment.heap := by
+  induction run with
+  | refl => exact .refl _
+  | step head rest ih => exact head.heap_history.trans ih
+
+/-- Once retired, an issued storage identity stays retired through every actual
+execution prefix, including recursive calls and further allocations. -/
+theorem Run.retired {before after : Configuration} {identity : StorageId}
+    (run : Run program before after) (retired : before.environment.heap.Retired identity) :
+    after.environment.heap.Retired identity := retired.history run.heap_history
+
+/-- Reusing a lexical spelling cannot revive its old storage identity. Even an
+untyped stale binding map cannot read, move or restore that retired storage. -/
+theorem Run.retired_inaccessible {before after : Configuration} {identity : StorageId}
+    (run : Run program before after) (retired : before.environment.heap.Retired identity)
+    {place : Place} (mapped : lookup place.root after.environment.bindings = some identity) :
+    after.environment.read program place = none ∧
+    after.environment.take program place = none ∧
+    ∀ value, after.environment.write program place value = none := by
+  have absent := (run.retired retired).2
+  constructor
+  · simp [AddressedEnvironment.read, BindingMap.read, mapped, absent]
+  constructor
+  · simp [AddressedEnvironment.take, BindingMap.take, mapped, takeStorage, absent]
+  · intro value
+    simp [AddressedEnvironment.write, BindingMap.restore, mapped, restoreStorage, absent]
+
+/-- Actual lexical-scope retirement permanently kills every released identity;
+the following run need not return or preserve the original lexical environment. -/
+theorem Run.scope_retired {before : Environment} {middle after : Configuration}
+    {value : Value} {count : Nat} {stack : List Frame}
+    (exit : Step program ⟨before, .result value, .scope count :: stack⟩ middle)
+    (run : Run program middle after) {identity : StorageId}
+    (member : identity ∈ (List.take count before.bindings).map Prod.snd) :
+    after.environment.heap.Retired identity := by
+  cases exit with
+  | scope exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    exact run.retired (RuntimeHeap.retireMany_retired released identity member)
+
+/-- Returning from a function retires its own binding identities, not the
+caller's names; no subsequent execution can allocate those identities again. -/
+theorem Run.return_retired {before : Environment} {middle after : Configuration}
+    {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (exit : Step program ⟨before, .result value, .restore caller :: stack⟩ middle)
+    (run : Run program middle after) {identity : StorageId}
+    (member : identity ∈ before.bindings.map Prod.snd) :
+    after.environment.heap.Retired identity := by
+  cases exit with
+  | restore restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    exact run.retired (RuntimeHeap.retireMany_retired released identity member)
+
+
 end Grounded

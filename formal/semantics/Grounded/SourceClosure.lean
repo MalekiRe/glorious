@@ -956,6 +956,38 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
     fun _ run => body.soundness admitted.checked typed issued run⟩
 
 
+/-- Source admission keeps every active and retained scope live through actual
+execution. Identities retired before entry remain dead and cannot reappear in
+those scopes, even after recursive calls and fresh lexical allocations. -/
+theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : FunctionDecl}
+    (selected : program.functions identity = some declaration) {values : List Value}
+    (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
+    (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
+    ∃ entry, enterFunction heap supply declaration values = some entry ∧
+      ∀ state, Run program ⟨entry, .expression declaration.body, []⟩ state →
+        (∀ front back, state.continuation = front ++ back →
+          ∀ address ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
+            ∃ cell, state.environment.heap.read address = some cell) ∧
+        ∀ address, heap.Retired address → state.environment.heap.Retired address ∧
+          ∀ front back, state.continuation = front ++ back →
+            address ∉ (continuationEnvironment state.environment front).bindings.map Prod.snd := by
+  obtain ⟨_, _, _, _, _, _, _, _, entry, final, entered, _, _, _, _, safe⟩ :=
+    admitted.function_soundness selected arguments heap supply
+  have entryHistory : RuntimeHeap.History heap entry.heap := by
+    obtain ⟨inputs, _, same⟩ := Option.map_eq_some_iff.mp entered
+    rw [← same]
+    exact allocateBindings.history _ _ _
+  refine ⟨entry, entered, ?_⟩
+  intro state run
+  have typed := (safe state run).1
+  refine ⟨typed.live_scopes, ?_⟩
+  intro address retired
+  have dead := retired.history (entryHistory.trans run.heap_history)
+  exact ⟨dead, fun _ _ split => typed.retired_not_retained dead split⟩
+
+
 /-- Every admitted cross-package call namespace has an actual normalized
 binding in the caller's own manifest, not merely a transitively supplied package. -/
 theorem SourceClosure.call_dependency {packages : List PackageSource} {closure : SourceClosure packages}
