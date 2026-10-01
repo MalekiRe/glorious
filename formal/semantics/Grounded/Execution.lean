@@ -1,78 +1,188 @@
 import Grounded.Places
 import Grounded.Matching
 
-/-! State-threaded operational rules, independent of expression checking.
-Logical lexical storage does not model physical allocation or loans. -/
+/-! One explicit-frame operational semantics. Frames retain actual pending values,
+caller environments and scope boundaries. No checking or execution certificate
+occurs in a runtime configuration. Storage is still the logical lexical store. -/
 namespace Grounded
 
-mutual
-inductive Evaluates (program : Program) : List (String × Value) → Expr → Value → List (String × Value) → Prop where
-  | unit {environment : List (String × Value)} : Evaluates program environment .unit .unit environment
-  | integer {environment : List (String × Value)} {type : IntegerType} {magnitude : Nat}
-      (fits : type.Contains program.target magnitude) :
-      Evaluates program environment (.integer type magnitude) (.integer type magnitude) environment
-  | character {environment : List (String × Value)} {number : Nat} (valid : UnicodeScalar number) :
-      Evaluates program environment (.character number) (.character number) environment
-  | group {environment after : List (String × Value)} {body : Expr} {value : Value}
-      (evaluated : Evaluates program environment body value after) :
-      Evaluates program environment (.group body) value after
-  | read {environment : List (String × Value)} {place : Place} {value : Value}
-      (selected : readPlace program place environment = some value) :
-      Evaluates program environment (.read place) value environment
-  | sequence {environment middle after : List (String × Value)} {first rest : Expr}
-      {discarded value : Value} (head : Evaluates program environment first discarded middle)
-      (tail : Evaluates program middle rest value after) :
-      Evaluates program environment (.sequence first rest) value after
-  | bind {environment middle after : List (String × Value)} {mutable : Bool} {name : String}
-      {annotation : Option TypeExpr} {initial body : Expr} {resident value : Value}
-      (initialized : Evaluates program environment initial resident middle)
-      (continued : Evaluates program ((name, resident) :: middle) body value after) :
-      Evaluates program environment (.bind mutable name annotation initial body) value (after.drop 1)
-  | assign {environment middle updated after : List (String × Value)} {place : Place}
-      {expression rest : Expr} {resident value : Value}
-      (evaluated : Evaluates program environment expression resident middle)
-      (written : writePlace program place resident middle = some updated)
-      (continued : Evaluates program updated rest value after) :
-      Evaluates program environment (.assign place expression rest) value after
-  | tuple {environment middle after : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first middle)
-      (tailEval : EvaluatesMany program middle tail rest after) :
-      Evaluates program environment (.tuple head tail) (.tuple first rest) after
-  | project {environment after : List (String × Value)} {body : Expr} {key : FieldKey} {index : Nat}
-      {aggregate value : Value}
-      (source : Evaluates program environment body aggregate after)
-      (selected : aggregate.projectField program key = some (index, value)) :
-      Evaluates program environment (.project body key) value after
-  | array {environment after : List (String × Value)} {elements : List Expr} {values : List Value}
-      (residents : EvaluatesMany program environment elements values after) :
-      Evaluates program environment (.array elements) (.array values) after
-  | constant {environment : List (String × Value)} {name : String} {declaration : ConstantDecl}
-      {value : Value} (declared : program.constants name = some declaration)
-      (initialized : Evaluates program [] declaration.body value []) :
-      Evaluates program environment (.constant name) value environment
-  | construct {environment after : List (String × Value)} {identity : Nat} {tag : Option Nat}
-      {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values after) :
-      Evaluates program environment (.construct identity tag fields) (.nominal identity tag values) after
-  | call {environment middle localAfter : List (String × Value)} {identity : Nat} {arguments : List Expr}
-      {declaration : FunctionDecl} {values : List Value} {value : Value}
-      (declared : program.functions identity = some declaration)
-      (inputs : EvaluatesMany program environment arguments values middle)
-      (body : Evaluates program (List.zip (declaration.parameters.map Prod.fst) values) declaration.body value localAfter) :
-      Evaluates program environment (.call identity arguments) value middle
-  | applyPatterns {environment middle after : List (String × Value)} {inputs : List Ty} {arguments : List Expr}
-      {arms : List (Pattern × Expr)} {values : List Value}
-      {bindings : List (String × Value)} {body : Expr} {value : Value}
-      (argumentsEval : EvaluatesMany program environment arguments values middle)
-      (selected : selectArm (argumentValue values) arms = some (bindings, body))
-      (bodyEval : Evaluates program (bindings ++ middle) body value after) :
-      Evaluates program environment (.applyPatterns inputs arguments arms) value (after.drop bindings.length)
+abbrev Environment := List (String × Value)
 
-inductive EvaluatesMany (program : Program) : List (String × Value) → List Expr → List Value → List (String × Value) → Prop where
-  | nil {environment : List (String × Value)} : EvaluatesMany program environment [] [] environment
-  | cons {environment middle after : List (String × Value)} {head : Expr} {tail : List Expr}
-      {first : Value} {rest : List Value} (headEval : Evaluates program environment head first middle)
-      (tailEval : EvaluatesMany program middle tail rest after) :
-      EvaluatesMany program environment (head :: tail) (first :: rest) after
-end
+inductive Control where
+  | expression (expression : Expr)
+  | arguments (expressions : List Expr)
+  | result (value : Value)
+  | results (values : List Value)
+
+inductive Frame where
+  | sequence (rest : Expr)
+  | bind (name : String) (body : Expr)
+  | scope (count : Nat)
+  | assign (place : Place) (rest : Expr)
+  | tupleHead (tail : List Expr)
+  | tupleTail (head : Value)
+  | project (key : FieldKey)
+  | array
+  | construct (identity : Nat) (tag : Option Nat)
+  | call (declaration : FunctionDecl)
+  | patterns (arms : List (Pattern × Expr))
+  | restore (environment : Environment)
+  | argumentHead (tail : List Expr)
+  | argumentTail (head : Value)
+
+structure Configuration where
+  environment : Environment
+  control : Control
+  continuation : List Frame
+
+inductive Terminal : Configuration → Prop where
+  | result (environment : Environment) (value : Value) : Terminal ⟨environment, .result value, []⟩
+  | results (environment : Environment) (values : List Value) : Terminal ⟨environment, .results values, []⟩
+
+
+/-- Runtime transitions use actual lookup, replacement and first-match results.
+Invalid access has no transition; it is not an exhaustion or abort outcome. -/
+inductive Step (program : Program) : Configuration → Configuration → Prop where
+  | unit {env : Environment} {stack : List Frame} :
+      Step program ⟨env, .expression .unit, stack⟩ ⟨env, .result .unit, stack⟩
+  | integer {env : Environment} {stack : List Frame} {type : IntegerType} {magnitude : Nat}
+      (fits : type.Contains program.target magnitude) :
+      Step program ⟨env, .expression (.integer type magnitude), stack⟩
+        ⟨env, .result (.integer type magnitude), stack⟩
+  | character {env : Environment} {stack : List Frame} {number : Nat}
+      (valid : UnicodeScalar number) :
+      Step program ⟨env, .expression (.character number), stack⟩ ⟨env, .result (.character number), stack⟩
+  | group {env : Environment} {stack : List Frame} {body : Expr} :
+      Step program ⟨env, .expression (.group body), stack⟩ ⟨env, .expression body, stack⟩
+  | read {env : Environment} {stack : List Frame} {place : Place} {value : Value}
+      (selected : readPlace program place env = some value) :
+      Step program ⟨env, .expression (.read place), stack⟩ ⟨env, .result value, stack⟩
+  | sequence {env : Environment} {stack : List Frame} {first rest : Expr} :
+      Step program ⟨env, .expression (.sequence first rest), stack⟩
+        ⟨env, .expression first, .sequence rest :: stack⟩
+  | sequenceResult {env : Environment} {stack : List Frame} {value : Value} {rest : Expr} :
+      Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .expression rest, stack⟩
+  | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : String}
+      {annotation : Option TypeExpr} {initial body : Expr} :
+      Step program ⟨env, .expression (.bind mutable name annotation initial body), stack⟩
+        ⟨env, .expression initial, .bind name body :: stack⟩
+  | bindResult {env : Environment} {stack : List Frame} {name : String} {body : Expr} {value : Value} :
+      Step program ⟨env, .result value, .bind name body :: stack⟩
+        ⟨(name, value) :: env, .expression body, .scope 1 :: stack⟩
+  | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value} :
+      Step program ⟨env, .result value, .scope count :: stack⟩ ⟨env.drop count, .result value, stack⟩
+  | assign {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
+      Step program ⟨env, .expression (.assign place value rest), stack⟩
+        ⟨env, .expression value, .assign place rest :: stack⟩
+  | assignResult {env after : Environment} {stack : List Frame} {place : Place} {rest : Expr} {value : Value}
+      (written : writePlace program place value env = some after) :
+      Step program ⟨env, .result value, .assign place rest :: stack⟩ ⟨after, .expression rest, stack⟩
+  | tuple {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
+      Step program ⟨env, .expression (.tuple head tail), stack⟩
+        ⟨env, .expression head, .tupleHead tail :: stack⟩
+  | tupleHead {env : Environment} {stack : List Frame} {head : Value} {tail : List Expr} :
+      Step program ⟨env, .result head, .tupleHead tail :: stack⟩
+        ⟨env, .arguments tail, .tupleTail head :: stack⟩
+  | tupleTail {env : Environment} {stack : List Frame} {head : Value} {tail : List Value} :
+      Step program ⟨env, .results tail, .tupleTail head :: stack⟩ ⟨env, .result (.tuple head tail), stack⟩
+  | project {env : Environment} {stack : List Frame} {body : Expr} {key : FieldKey} :
+      Step program ⟨env, .expression (.project body key), stack⟩
+        ⟨env, .expression body, .project key :: stack⟩
+  | projectResult {env : Environment} {stack : List Frame} {aggregate value : Value} {key : FieldKey} {index : Nat}
+      (selected : aggregate.projectField program key = some (index, value)) :
+      Step program ⟨env, .result aggregate, .project key :: stack⟩ ⟨env, .result value, stack⟩
+  | array {env : Environment} {stack : List Frame} {elements : List Expr} :
+      Step program ⟨env, .expression (.array elements), stack⟩ ⟨env, .arguments elements, .array :: stack⟩
+  | arrayResult {env : Environment} {stack : List Frame} {values : List Value} :
+      Step program ⟨env, .results values, .array :: stack⟩ ⟨env, .result (.array values), stack⟩
+  | constant {env : Environment} {stack : List Frame} {name : String} {declaration : ConstantDecl}
+      (declared : program.constants name = some declaration) :
+      Step program ⟨env, .expression (.constant name), stack⟩
+        ⟨[], .expression declaration.body, .restore env :: stack⟩
+  | restore {env caller : Environment} {stack : List Frame} {value : Value} :
+      Step program ⟨env, .result value, .restore caller :: stack⟩ ⟨caller, .result value, stack⟩
+  | construct {env : Environment} {stack : List Frame} {identity : Nat} {tag : Option Nat} {fields : List Expr} :
+      Step program ⟨env, .expression (.construct identity tag fields), stack⟩
+        ⟨env, .arguments fields, .construct identity tag :: stack⟩
+  | constructResult {env : Environment} {stack : List Frame} {identity : Nat} {tag : Option Nat} {fields : List Value} :
+      Step program ⟨env, .results fields, .construct identity tag :: stack⟩
+        ⟨env, .result (.nominal identity tag fields), stack⟩
+  | call {env : Environment} {stack : List Frame} {identity : Nat} {arguments : List Expr} {declaration : FunctionDecl}
+      (declared : program.functions identity = some declaration) :
+      Step program ⟨env, .expression (.call identity arguments), stack⟩
+        ⟨env, .arguments arguments, .call declaration :: stack⟩
+  | callInputs {env : Environment} {stack : List Frame} {declaration : FunctionDecl} {values : List Value} :
+      Step program ⟨env, .results values, .call declaration :: stack⟩
+        ⟨List.zip (declaration.parameters.map Prod.fst) values, .expression declaration.body, .restore env :: stack⟩
+  | applyPatterns {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
+      Step program ⟨env, .expression (.applyPatterns inputs arguments arms), stack⟩
+        ⟨env, .arguments arguments, .patterns arms :: stack⟩
+  | selectedPattern {env bindings : Environment} {stack : List Frame} {values : List Value}
+      {arms : List (Pattern × Expr)} {body : Expr}
+      (selected : selectArm (argumentValue values) arms = some (bindings, body)) :
+      Step program ⟨env, .results values, .patterns arms :: stack⟩
+        ⟨bindings ++ env, .expression body, .scope bindings.length :: stack⟩
+  | nil {env : Environment} {stack : List Frame} :
+      Step program ⟨env, .arguments [], stack⟩ ⟨env, .results [], stack⟩
+  | cons {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
+      Step program ⟨env, .arguments (head :: tail), stack⟩
+        ⟨env, .expression head, .argumentHead tail :: stack⟩
+  | argumentHead {env : Environment} {stack : List Frame} {head : Value} {tail : List Expr} :
+      Step program ⟨env, .result head, .argumentHead tail :: stack⟩
+        ⟨env, .arguments tail, .argumentTail head :: stack⟩
+  | argumentTail {env : Environment} {stack : List Frame} {head : Value} {tail : List Value} :
+      Step program ⟨env, .results tail, .argumentTail head :: stack⟩
+        ⟨env, .results (head :: tail), stack⟩
+
+inductive Run (program : Program) : Configuration → Configuration → Prop where
+  | refl (state : Configuration) : Run program state state
+  | step {before middle after : Configuration} (head : Step program before middle)
+      (tail : Run program middle after) : Run program before after
+
+variable {program : Program}
+
+theorem Terminal.no_step {state next : Configuration} (done : Terminal state) : ¬ Step program state next := by
+  intro step
+  cases done <;> cases step
+
+
+def Configuration.extend (state : Configuration) (tail : List Frame) : Configuration :=
+  { state with continuation := state.continuation ++ tail }
+
+theorem Step.extend {before after : Configuration} (step : Step program before after) (tail : List Frame) :
+    Step program (before.extend tail) (after.extend tail) := by
+  cases step <;> constructor <;> assumption
+
+theorem Run.extend {before after : Configuration} (run : Run program before after) (tail : List Frame) :
+    Run program (before.extend tail) (after.extend tail) := by
+  induction run with
+  | refl state => exact .refl _
+  | step head rest ih => exact .step (head.extend tail) ih
+
+theorem Run.trans {first middle last : Configuration} (front : Run program first middle)
+    (back : Run program middle last) : Run program first last := by
+  induction front with
+  | refl state => exact back
+  | step head rest ih => exact .step head (ih back)
+
+theorem Step.unique {before first second : Configuration} (left : Step program before first)
+    (right : Step program before second) : second = first := by
+  cases left <;> cases right <;> simp_all
+
+theorem Run.unique {before first second : Configuration} (left : Run program before first)
+    (right : Run program before second)
+    (leftDone : ∀ state, ¬ Step program first state)
+    (rightDone : ∀ state, ¬ Step program second state) : second = first := by
+  induction left generalizing second with
+  | refl state =>
+    cases right with
+    | refl => rfl
+    | step head tail => exact False.elim (leftDone _ head)
+  | step head tail ih =>
+    cases right with
+    | refl => exact False.elim (rightDone _ head)
+    | step other rest =>
+      cases head.unique other
+      exact ih rest leftDone rightDone
 
 end Grounded

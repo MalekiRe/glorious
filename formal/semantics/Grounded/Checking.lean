@@ -116,4 +116,28 @@ inductive ArmsType (program : Program) :
       ArmsType program home context subject result previous ((pattern, body) :: rest)
 end
 
+/-- Recover the original selected body's admission and actual local realization;
+no alternative's runtime bindings or successful body execution is supplied. -/
+theorem ArmsType.selected {program : Program} {home : Module} {context : List (String × BindingType)}
+    {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
+    (checked : ArmsType program home context subject result previous arms)
+    {value : Value} (resident : ValueHasType program value subject)
+    {bindings : List (String × Value)} {body : Expr}
+    (selected : selectArm value arms = some (bindings, body)) :
+    ∃ locals, EnvironmentTyped program bindings locals ∧
+      (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
+      HasType program home (locals ++ context) body result := by
+  induction arms generalizing previous with
+  | nil => simp [selectArm] at selected
+  | cons arm arms ih =>
+    cases checked with
+    | clause patternTyped distinct useful bodyTyped tailTyped =>
+      simp only [selectArm] at selected
+      split at selected
+      next matched found =>
+        cases Option.some.inj selected
+        exact ⟨_, patternTyped.bindings resident found, patternTyped.disposable, bodyTyped⟩
+      next missed => exact ih tailTyped selected
+
+
 end Grounded

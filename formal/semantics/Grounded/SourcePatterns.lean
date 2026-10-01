@@ -159,6 +159,35 @@ def SourceArmsChecked.normalize {source : List (SourcePattern × Expr)}
     let tail := rest.normalize
     ⟨(head.val, body) :: tail.val, .cons head.property tail.property⟩
 
+/-- The normalized source application consumes ordinary coverage and body checking. -/
+theorem SourceArmsChecked.admits {source : List (SourcePattern × Expr)}
+    {context : StaticContext} {arguments : List Expr} {inputs : List Ty} {result : Ty}
+    (checked : SourceArmsChecked program home source)
+    (argumentsTyped : HasTypes program home context arguments inputs) (nonempty : source ≠ [])
+    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val) :
+    HasType program home context (.applyPatterns inputs arguments checked.normalize.val) result := by
+  have normalizedNonempty : checked.normalize.val ≠ [] := by
+    cases checked with
+    | nil => exact False.elim (nonempty rfl)
+    | cons first rest => simp [SourceArmsChecked.normalize]
+  exact .applyPatterns argumentsTyped normalizedNonempty covered bodies
+
+/-- The actual normalized source program preserves realization and makes progress
+at every reachable machine state, including during arguments and selected bodies. -/
+theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
+    {context : StaticContext} {environment : Environment} {arguments : List Expr} {inputs : List Ty} {result : Ty}
+    (checked : SourceArmsChecked program home source)
+    (argumentsTyped : HasTypes program home context arguments inputs) (nonempty : source ≠ [])
+    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val)
+    (store : EnvironmentTyped program environment context) {state : Configuration}
+    (run : Run program ⟨environment, .expression (.applyPatterns inputs arguments checked.normalize.val), []⟩ state) :
+    ConfigurationTyped program context (.one result) state ∧
+      (Terminal state ∨ ∃ next, Step program state next) :=
+  (checked.admits argumentsTyped nonempty covered bodies).soundness store run
+
+
 /-- Source checking → derived normalization → ordinary ordered dispatch →
 unique typed value and successor store. No execution or normalization witness is supplied. -/
 theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
@@ -177,12 +206,8 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
         EnvironmentFrame context environment after ∧
         ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) other otherAfter →
           other = value ∧ otherAfter = after := by
-  have normalizedNonempty : checked.normalize.val ≠ [] := by
-    cases checked with
-    | nil => exact False.elim (nonempty rfl)
-    | cons first rest => simp [SourceArmsChecked.normalize]
   exact ⟨checked.normalize.property, checked.normalize.property.unique,
-    Grounded.correctness (.applyPatterns argumentsTyped normalizedNonempty covered bodies) environmentTyped⟩
+    Grounded.correctness (checked.admits argumentsTyped nonempty covered bodies) environmentTyped⟩
 
 end
 end Grounded

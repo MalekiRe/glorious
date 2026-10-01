@@ -319,4 +319,22 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
   | none => exact False.elim (armMatches (noneMeansMissing arms selected arm armIncluded))
   | some result => exact ⟨result.1, result.2, rfl⟩
 
+/-- Pattern-bound locals inherit the disposal permission checked at each binder. -/
+theorem PatternType.disposable {program : Program} {home : Module} {pattern : Pattern} {type : Ty}
+    {bindings : List (String × BindingType)} (typed : PatternType program home pattern type bindings) :
+    ∀ binding ∈ bindings, Duplicable program.data binding.2.type := by
+  induction typed using PatternType.rec
+    (motive_2 := fun _ _ bindings _ => ∀ binding ∈ bindings, Duplicable program.data binding.2.type) with
+  | wildcard discard => simp
+  | binder name discard => simpa using discard
+  | literal typed discard => simp
+  | node shape access fields ih => exact ih
+  | nil => rename_i binding member; cases member
+  | cons first rest firstIH restIH =>
+    rename_i binding member
+    rcases List.mem_append.mp member with left | right
+    · exact firstIH _ left
+    · exact restIH _ right
+
+
 end Grounded

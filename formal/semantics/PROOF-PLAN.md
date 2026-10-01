@@ -18,7 +18,7 @@ project is introduced by this reset. Subagent use remains paused.
 
 ## Current proved contract and ownership
 
-The active theorem is defined in `Grounded/Soundness.lean`:
+The terminating-fragment theorem is defined in `Grounded/Soundness.lean`:
 
 ```lean
 HasType program home context expression type →
@@ -38,6 +38,13 @@ covers mutable lexical storage and checked projected writes, but not holes,
 loans, general recursion or physical memory. The unchanged source-pattern
 consumer exports the same result for the certified normalized arm list.
 
+The finite-call theorem below is preserved. In addition,
+`HasType.soundness` and `SourceArmsChecked.soundness` prove that every actual
+execution prefix reaches a realized configuration which is terminal or can
+step. Entry realization, preservation and progress are derived, not supplied
+by source admission.
+
+
 | Module | Authoritative responsibility |
 | --- | --- |
 | `Model` | Decoded vocabulary and declarations; no checking/execution certificates |
@@ -48,28 +55,64 @@ consumer exports the same result for the certified normalized arm list.
 | `Matching` | Runtime matching, subject interpretation and first-arm selection |
 | `Patterns` | Pattern typing, coverage/usefulness and constructive binding/selection proofs |
 | `Checking` | Expression, argument and arm admission |
-| `Execution` | Operational evaluation rules, independent of expression admission |
-| `Soundness` | Composition into the public terminating correctness theorem |
+| `Execution` | Explicit frames, single-step execution, finite runs and operational determinism |
+| `Evaluation` | Terminating execution and composition derived from machine runs |
+| `ConfigurationTyping` | Current-state/continuation realization, entry, preservation and progress |
+| `Soundness` | Prefix safety and the preserved terminating-fragment theorem |
 | `SourcePatterns` | Certified constant normalization and its public source consumer |
 
 The former `Core.lean` is removed, not retained as a compatibility import.
 Checking consumes storage and pattern contracts; execution consumes storage
 operations and matching. Soundness joins the two. Constant normalization
 consumes soundness, so its compile-time evaluation dependency is acyclic.
-All moved semantic definitions and theorem contracts are preserved.
+The original terminating contract is preserved; `Evaluates` now denotes finite machine execution.
 
-Verification of this first architecture checkpoint: strict `lake build` passed
-(14 jobs). Lean audited all 1,599 declarations defined by these eleven modules,
-including generated/private declarations; the transitive axiom union remains
-`propext`, `Quot.sound` and `Classical.choice`. The runtime-only import was
-checked to contain neither `HasType` nor `correctness`. The aggregate contains
-no `Grounded.Core` import, and the defining modules of the eleven public
-boundary declarations were checked. No examples, tests or scaffold were added.
+## Verified explicit-frame migration
 
-This checkpoint completes ownership separation only. The identity,
-flow-sensitive checking, explicit-frame execution and connected
-preservation/progress migrations below remain open; the existing finite-call
-admission rule has not been relabeled as whole-language checking.
+`Execution` now owns `Control`, `Frame`, `Configuration`, `Step`, `Run` and
+`Terminal`. Pending argument values, selected declarations, scope boundaries
+and caller environments are explicit runtime data. Runtime configurations
+contain no typing or future-execution proof. Invalid access has no transition;
+it is not treated as exhaustion or an allowed abort.
+
+`Evaluates` and `EvaluatesMany` are definitions of finite machine runs.
+Their composition theorems execute subcomputations under actual continuation
+frames. The old inductive evaluation rules are removed. `Step.unique`,
+`Run.unique` and evaluation uniqueness are proved independently of checking.
+
+The current-state invariant is `ConfigurationTyped`: actual environment typing,
+current code/value typing and compositional continuation typing. Frames retain
+only checked future code and actual typed held values; they do not assume that
+future evaluation succeeds. `ConfigurationTyped.entry` constructs this invariant
+from `HasType` and the actual entry environment. `preservation` proves it after
+every actual step, `progress` constructs a step or proves normal termination,
+and `run` carries it through arbitrary finite execution prefixes.
+`normal_form` extracts the typed final value/store of a completed expression.
+
+`HasType.soundness` and `SourceArmsChecked.soundness` consume that chain.
+The source theorem uses `SourceArmsChecked.admits`, also consumed by the
+terminating source theorem; normalized arms and their checking products are not
+reselected. `EnvironmentTyped.parameters` is the shared invocation-entry
+producer, while `ArmsType.selected` constructs the actual selected body's
+checking and local realization from the original checked alternatives.
+
+Verification: strict `lake build` passed (16 jobs). A transient general Lean
+proof compared the former evaluator with machine evaluation for every admitted
+expression, actual typed entry store, result and successor store, proving both
+directions. The old relation existed only in stdin for this proof; no legacy
+evaluator or compatibility module remains. Lean audited all 1,858 declarations
+from the thirteen semantic modules, including private/generated declarations;
+only `propext`, `Quot.sound` and `Classical.choice` occur. The runtime-only
+import still contains neither `HasType` nor `correctness`.
+
+This closes the operational migration for the existing fragment, not whole-
+language soundness. Lexical names still identify list bindings, store realization
+still requires full initialization, and call-site typing still embeds body
+typing. Resolving identities, admitting holes/restoration, separating declaration
+checking and admitting recursion remain semantic cutovers, not module cleanup.
+No allocation, loans, control transfer, cancellation or foreign-runtime outcome
+has been added or assumed.
+
 
 
 ## Migration contracts and premise producers

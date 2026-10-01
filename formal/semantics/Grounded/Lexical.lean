@@ -126,4 +126,15 @@ theorem EnvironmentTyped.replace (typed : EnvironmentTyped program before contex
       exact ⟨_, by simp [replaceBinding, Ne.symm different, replaced],
         .cons oldTyped afterTyped, .cons (fun _ => rfl) framed⟩
 
+/-- Invocation constructs its environment from the actual typed argument list. -/
+theorem EnvironmentTyped.parameters (parameters : List (String × BindingType)) (values : List Value)
+    (typed : ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type))) :
+    EnvironmentTyped program (List.zip (parameters.map Prod.fst) values) parameters := by
+  induction parameters generalizing values with
+  | nil => cases typed; exact .nil
+  | cons parameter parameters ih =>
+    cases typed with
+    | cons headTyped tailTyped => exact .cons headTyped (ih _ tailTyped)
+
+
 end Grounded
