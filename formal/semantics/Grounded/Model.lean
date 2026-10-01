@@ -54,6 +54,7 @@ abbrev Aliases := String → Option TypeExpr
 structure Module where
   package : Nat
   path : List Nat
+  deriving DecidableEq
 
 inductive Visibility where
   | «private» | package | parent | «public»

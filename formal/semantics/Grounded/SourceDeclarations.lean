@@ -2,8 +2,8 @@ import Grounded.SourceExpressions
 import Grounded.BindingAccess
 
 /-! Named direct-function declarations supply Program.Checked. Signatures are
-available to recursive calls independently of body elaboration. Names here are
-qualified declaration keys; import/path expansion remains a decoding boundary. -/
+available to recursive calls independently of body elaboration. Names are indexed
+by declaring module; textual import/path expansion remains a decoding boundary. -/
 namespace Grounded
 
 structure NamedParameter where
@@ -42,7 +42,7 @@ theorem NamedParametersElaborate.disposable {program : Program} {parameters : Li
 
 /-- Source parameter names, omitted-unit result semantics and the actual named
 body determine the same declaration consumed by runtime invocation. -/
-inductive NamedFunction.Elaborates (program : Program) (names : String → Option Nat) :
+inductive NamedFunction.Elaborates (program : Program) (names : Module → String → Option Nat) :
     NamedFunction → FunctionDecl → Prop where
   | intro {source scope result body after}
       (parameters : NamedParametersElaborate program source.parameters scope)
@@ -52,7 +52,7 @@ inductive NamedFunction.Elaborates (program : Program) (names : String → Optio
       NamedFunction.Elaborates program names source
         ⟨source.home, source.visibility, scope.context, result, body⟩
 
-theorem NamedFunction.Elaborates.checked {program : Program} {names : String → Option Nat}
+theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → String → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
@@ -62,10 +62,10 @@ theorem NamedFunction.Elaborates.checked {program : Program} {names : String →
 
 /-- Declaration identities are the source-list positions. Duplicate qualified
 names are rejected by program admission rather than resolved by first-wins. -/
-def functionNames (source : List NamedFunction) (name : String) : Option Nat :=
-  source.findIdx? (fun declaration => declaration.name == name)
+def functionNames (source : List NamedFunction) (home : Module) (name : String) : Option Nat :=
+  source.findIdx? (fun declaration => decide (declaration.home = home ∧ declaration.name = name))
 
-inductive NamedFunctionsElaborate (program : Program) (names : String → Option Nat) :
+inductive NamedFunctionsElaborate (program : Program) (names : Module → String → Option Nat) :
     List NamedFunction → List FunctionDecl → Prop where
   | nil : NamedFunctionsElaborate program names [] []
   | cons {source sources core cores}
@@ -73,7 +73,7 @@ inductive NamedFunctionsElaborate (program : Program) (names : String → Option
       (tail : NamedFunctionsElaborate program names sources cores) :
       NamedFunctionsElaborate program names (source :: sources) (core :: cores)
 
-theorem NamedFunctionsElaborate.checked {program : Program} {names : String → Option Nat}
+theorem NamedFunctionsElaborate.checked {program : Program} {names : Module → String → Option Nat}
     {source : List NamedFunction} {core : List FunctionDecl}
     (elaborated : NamedFunctionsElaborate program names source core) :
     ∀ declaration ∈ core, FunctionChecked program declaration := by
@@ -88,7 +88,7 @@ theorem NamedFunctionsElaborate.checked {program : Program} {names : String → 
 /-- Every executable function is an emitted source declaration: no hidden
 unchecked functions, assumed successful runs or progress certificates. -/
 def NamedFunctionsAdmitted (source : List NamedFunction) (program : Program) : Prop :=
-  (source.map NamedFunction.name).Nodup ∧ ∃ core,
+  (source.map fun declaration => (declaration.home, declaration.name)).Nodup ∧ ∃ core,
     NamedFunctionsElaborate program (functionNames source) source core ∧
     program.functions = fun identity => core[identity]?
 
@@ -117,17 +117,18 @@ theorem NamedFunctionsAdmitted.soundness {source : List NamedFunction} {program 
 
 /-- A resolved source name selects the same list position used for the emitted
 runtime declaration, including forward references and mutually recursive calls. -/
-theorem functionNames.selected {source : List NamedFunction} {name : String} {identity : Nat}
-    (resolved : functionNames source name = some identity) :
-    ∃ declaration, source[identity]? = some declaration ∧ declaration.name = name := by
+theorem functionNames.selected {source : List NamedFunction} {home : Module} {name : String} {identity : Nat}
+    (resolved : functionNames source home name = some identity) :
+    ∃ declaration, source[identity]? = some declaration ∧ declaration.home = home ∧ declaration.name = name := by
   obtain ⟨bound, equal, _⟩ := List.findIdx?_eq_some_iff_getElem.mp resolved
   exact ⟨source[identity], List.getElem?_eq_some_iff.mpr ⟨bound, rfl⟩, by simpa using equal⟩
 
-theorem functionNames.missing (source : List NamedFunction) (name : String) :
-    functionNames source name = none ↔ ∀ declaration ∈ source, declaration.name ≠ name := by
+theorem functionNames.missing (source : List NamedFunction) (home : Module) (name : String) :
+    functionNames source home name = none ↔
+      ∀ declaration ∈ source, declaration.home = home → declaration.name ≠ name := by
   simp [functionNames, List.findIdx?_eq_none_iff]
 
-theorem NamedFunctionsElaborate.selected {program : Program} {names : String → Option Nat}
+theorem NamedFunctionsElaborate.selected {program : Program} {names : Module → String → Option Nat}
     {sources : List NamedFunction} {cores : List FunctionDecl}
     (elaborated : NamedFunctionsElaborate program names sources cores)
     {identity : Nat} {source : NamedFunction} (selected : sources[identity]? = some source) :
@@ -140,15 +141,37 @@ theorem NamedFunctionsElaborate.selected {program : Program} {names : String →
     | succ identity => exact ih selected
 
 theorem NamedFunctionsAdmitted.resolves {sources : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted sources program) {name : String} {identity : Nat}
-    (resolved : functionNames sources name = some identity) :
-    ∃ source core, source.name = name ∧ sources[identity]? = some source ∧
+    (admitted : NamedFunctionsAdmitted sources program) {home : Module} {name : String} {identity : Nat}
+    (resolved : functionNames sources home name = some identity) :
+    ∃ source core, source.home = home ∧ source.name = name ∧ sources[identity]? = some source ∧
       program.functions identity = some core ∧
       NamedFunction.Elaborates program (functionNames sources) source core := by
   obtain ⟨_, cores, elaborated, functions⟩ := admitted
-  obtain ⟨source, selected, named⟩ := functionNames.selected resolved
+  obtain ⟨source, selected, owner, named⟩ := functionNames.selected resolved
   obtain ⟨core, emitted, checked⟩ := elaborated.selected selected
-  exact ⟨source, core, named, selected, by rw [functions]; exact emitted, checked⟩
+  exact ⟨source, core, owner, named, selected, by rw [functions]; exact emitted, checked⟩
+
+/-- Source resolution and runtime invocation select one declaration with the
+requested module identity. Qualification never bypasses its visibility. -/
+theorem NamedFunctionsAdmitted.call_resolution {sources : List NamedFunction} {program : Program}
+    (admitted : NamedFunctionsAdmitted sources program) {home : Module} {scope : SourceScope}
+    {before after : FlowContext} {name : FunctionName} {arguments : List NamedExpr}
+    {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program (functionNames sources) home scope before
+      (.call name arguments) core type after) :
+    ∃ identity declaration inputs, core = .call identity inputs ∧
+      program.functions identity = some declaration ∧ declaration.home = name.owner home ∧
+      declaration.visibility.Allows declaration.home home := by
+  cases elaborated with
+  | call _ resolved declared visible _ =>
+    obtain ⟨source, emitted, owner, _, _, found, body⟩ := admitted.resolves resolved
+    have same := Option.some.inj (declared.symm.trans found)
+    subst emitted
+    refine ⟨_, _, _, rfl, declared, ?_, visible⟩
+    calc
+      _ = source.home := by cases body; rfl
+      _ = _ := owner
+
 
 
 theorem NamedFunctionsAdmitted.evaluation_soundness {source : List NamedFunction} {program : Program}

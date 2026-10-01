@@ -1242,9 +1242,9 @@ Lean proof reproduced that admission for arbitrary scopes, argument lists,
 and matching global declarations. This violated the lexical precedence rule
 in normative §2.3; argument and result types cannot select a hidden function.
 
-`NamedExpr.Elaborates.call` now requires absence from the authoritative
-`SourceScope.resolve` lookup before consulting the global function table.
-`call_not_shadowed` proves this property for every admitted direct call. The
+For unqualified calls, `NamedExpr.Elaborates.call` requires absence from the
+authoritative `SourceScope.resolve` lookup before selecting a global function.
+`call_not_shadowed` proves this for every admitted unqualified direct call. The
 existing recursive named-expression checking theorem and named-function
 soundness/correctness consumers use the repaired rule; no alternate resolver
 or runtime name lookup was added. The new premise is an incoming lexical
@@ -1262,3 +1262,39 @@ callable invocation remains unsupported rather than falling back to a hidden
 global declaration. Complete source closure, qualified path/import resolution,
 namespace separation, lexical decoding and the full callable semantics remain
 open. The whole-language completion task is not discharged by this repair.
+
+
+## Verified module-qualified direct-function resolution
+
+Direct function names are no longer flattened string keys.
+`FunctionName` distinguishes unqualified spellings from a spelling qualified
+by a resolved `Module`. Unqualified lookup selects the caller's module and
+requires absence from its lexical scope. Qualified lookup selects the explicit
+module and is independent of lexical shadowing; both forms still check the
+visibility of the actual selected runtime declaration.
+
+`functionNames` now resolves the pair (declaring module, spelling). Source
+admission rejects duplicate pairs, not matching spellings in unrelated modules
+or packages. Function bodies, recursive calls, named patterns, declaration
+elaboration and all public source safety/correctness consumers use this same
+module-indexed producer. The superseded flat callable lookup is removed.
+
+`NamedFunctionsAdmitted.call_resolution` connects every admitted source call
+to its emitted runtime call, selected declaration, exact requested module and
+visibility evidence. It derives module identity from source declaration
+elaboration and list-position selection, not from an assumed correspondence.
+General named-source preservation, progress and finite-call correctness remain
+proved over the unchanged addressed machine.
+
+Fresh source-only `lake build Grounded.SourceDeclarations` passed (25 jobs).
+The complete imported `Grounded` axiom audit covered 3,034 declarations and
+found only standard Lean axioms. General stdin proofs checked qualified-call
+admission in arbitrary lexical scopes and rejection of shadowed unqualified
+calls. No concrete examples or unit tests were added or run.
+
+The qualifier currently contains an already-resolved module identity. Package
+source closure, textual path decoding, import/prelude fixed points and other
+namespaces remain unproved. Constants and type aliases retain their separate
+decoded textual interfaces. This checkpoint does not establish source-text
+resolution or whole-language soundness.
+
