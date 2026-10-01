@@ -23,6 +23,51 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.ownership_safe⟩
 
+/-- An actual checked assignment restores its selected place, including an
+uncertain one. Disjoint masks retain exactly their prior availability. No
+pre-write readiness or post-write realization is supplied. -/
+theorem HasType.assignment_restores (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current after : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {place : Place} {value : Value} {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .assign place rest :: stack⟩)
+    (step : Step program ⟨current, .result value, .assign place rest :: stack⟩
+      ⟨after, .expression rest, stack⟩) :
+    ∃ before next state updated assignmentHome assignedType,
+      BindingMap.Typed program current.heap current.activation current.bindings before ∧
+      lookup place.root before = some state ∧
+      PathType program assignmentHome state.slot.type place.fields assignedType ∧
+      state.initialization.writeFields program state.slot.type place.fields .present = some updated ∧
+      replaceBinding place.root { state with initialization := updated } before = some next ∧
+      BindingMap.Typed program after.heap after.activation after.bindings next ∧
+      after.read program place = some value ∧
+      updated.selectFields program state.slot.type place.fields = some .present ∧
+      (∀ observed, PathDisjoint program assignmentHome state.slot.type place.fields observed →
+        updated.selectFields program state.slot.type observed =
+          state.initialization.selectFields program state.slot.type observed) := by
+  have typed := (checked.soundness checkedProgram store issued run).1
+  cases typed with
+  | intro currentStore currentIssued code continuation =>
+    cases code with
+    | result resident =>
+      cases continuation with
+      | cons frame tail =>
+        cases frame with
+        | assign selected path writable selection discard mask context restTyped =>
+          cases step with
+          | assignResult written =>
+            obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
+              readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident
+            cases Option.some.inj (written.symm.trans produced)
+            exact ⟨_, _, _, _, _, _, currentStore, selected, path, maskWritten, contextWritten,
+              nextTyped, readback, Initialization.write_select maskWritten,
+              fun _ apart => apart.initialization_frame maskWritten⟩
+
+
 /-- Pre-state-compatible owned arguments yield general call-prefix safety,
 including actual argument movement, callee entry, recursive execution and return.
 No intermediate input readiness or completed execution is assumed. -/

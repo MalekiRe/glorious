@@ -407,6 +407,21 @@ def Initialization.selectFields (program : Program) (parent : Ty) (state : Initi
       (state.openFields types.length)[index]?.bind fun current =>
         current.selectFields program child rest
 
+/-- Projecting an uncertain aggregate cannot manufacture definite availability. -/
+theorem Initialization.select_maybe {program : Program} {parent : Ty}
+    {path : List FieldKey} {selected : Initialization}
+    (selection : Initialization.maybe.selectFields program parent path = some selected) : selected = .maybe := by
+  induction path generalizing parent with
+  | nil => exact (Option.some.inj selection).symm
+  | cons key rest ih =>
+    simp only [Initialization.selectFields, Option.bind_eq_some_iff] at selection
+    obtain ⟨⟨index, child, types⟩, info, current, found, tail⟩ := selection
+    have same : current = .maybe := (List.mem_replicate.mp (List.mem_of_getElem? found)).2
+    subst current
+    exact ih tail
+
+
+
 theorem PathType.select_partial {program : Program} {home : Module} {parent child : Ty}
     {path : List FieldKey} (checked : PathType program home parent path child)
     {before : PartialValue} {beforeState : Initialization}

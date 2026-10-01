@@ -133,6 +133,39 @@ inductive ArmsType (program : Program) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
 
+theorem HasType.no_uncertain_read {program : Program} {home : Module} {before after : FlowContext}
+    {place : Place} {type : Ty} {state : BindingState}
+    (checked : HasType program home before (.read place) type after)
+    (resolved : lookup place.root before = some state)
+    (uncertain : state.initialization = .maybe ∨
+      state.initialization.selectFields program state.slot.type place.fields = some .maybe) : False := by
+  cases checked with
+  | read selected path selection ready copyable =>
+    cases Option.some.inj (resolved.symm.trans selected)
+    rcases uncertain with root | selectedMaybe
+    · rw [root] at selection
+      cases Initialization.select_maybe selection
+      exact Initialization.maybe_not_ready ready
+    · cases Option.some.inj (selectedMaybe.symm.trans selection)
+      exact Initialization.maybe_not_ready ready
+
+theorem HasType.no_uncertain_move {program : Program} {home : Module} {before after : FlowContext}
+    {place : Place} {type : Ty} {state : BindingState}
+    (checked : HasType program home before (.move place) type after)
+    (resolved : lookup place.root before = some state)
+    (uncertain : state.initialization = .maybe ∨
+      state.initialization.selectFields program state.slot.type place.fields = some .maybe) : False := by
+  cases checked with
+  | move selected path selection ready mask context =>
+    cases Option.some.inj (resolved.symm.trans selected)
+    rcases uncertain with root | selectedMaybe
+    · rw [root] at selection
+      cases Initialization.select_maybe selection
+      exact Initialization.maybe_not_ready ready
+    · cases Option.some.inj (selectedMaybe.symm.trans selection)
+      exact Initialization.maybe_not_ready ready
+
+
 theorem HasType.slots {program : Program} {home : Module} {before after : FlowContext}
     {expression : Expr} {type : Ty} (checked : HasType program home before expression type after) :
     after.slots = before.slots := by

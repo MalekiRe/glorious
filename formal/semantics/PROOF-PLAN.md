@@ -2513,3 +2513,28 @@ checks. Custom destruction and ordering/divergence, loans, nonlocal cleanup,
 physical memory and the remaining whole-language obligations remain open.
 None of the 15 broad completion tasks is marked complete.
 
+
+## Uncertain descendant access and actual assignment restoration
+
+`Initialization.select_maybe` proves that arbitrarily deep field projection
+cannot turn an uncertain aggregate into definite availability. The general
+`HasType.no_uncertain_read` and `no_uncertain_move` results consume it and
+exclude source accesses when either the root or selected place is uncertain.
+These are statements over arbitrary checking derivations, not concrete examples.
+
+`HasType.assignment_restores` follows an arbitrary checked execution prefix
+through an actual assignment transition. It derives the current binding
+realization, resolved destination type, actual context update, resulting heap
+realization, exact readback of the assigned value, and a present mask at the
+selected path. Every pre-state-disjoint path retains its previous mask, including
+uncertainty. It requires neither old readiness nor supplied post-state typing.
+The proof consumes general soundness, the authoritative assignment producer and
+the existing path-framing theorem; it introduces no separate state analysis.
+
+Verification: `lake build Grounded` passed all 30 jobs. Exhaustive axiom
+inspection covered 3,962 declarations; only standard Lean axioms occurred.
+The new projection, access-exclusion and public assignment results were inspected
+explicitly alongside preservation, progress and public source-function soundness.
+This strengthens the conservative branch-join boundary; relational correlations,
+custom cleanup and all previously listed whole-language obligations remain open.
+
