@@ -35,8 +35,8 @@ ConfigurationTyped program final (.one type) state ∧
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
-checks every manual principal against owned fields and each function body against
-its interface. It contains no termination,
+checks nominal layout and manual-principal validity, function-interface layouts,
+and each function body against its interface. It contains no termination,
 future-state readiness or execution-success premise. Recursive calls are therefore
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
@@ -2581,4 +2581,43 @@ This repairs coherence of explicit restrictions in the current decoded nominal
 declaration model. Source syntax/elaboration for data declarations, generic
 quantity restrictions, indirection-aware recursive fixed points and custom Drop
 remain separate open obligations; it is not whole-language completion.
+
+
+## Declaration-wide layout admission and general inline-cycle exclusion
+
+A general pre-repair proof established that principal validity plus an empty
+function table still admitted arbitrary nominal layouts. Constructor-local
+layout checks therefore did not reject invalid unused declarations. Function
+interfaces also lacked their own layout obligations: nonreturning bodies are
+not evidence that a declared parameter or result type is valid.
+
+`DataDeclarations.Valid` now combines the existing principal validator with
+`FiniteLayout` for every declared nominal identity. `Program.Checked.data`
+and `NamedProgramAdmitted` consume this single declaration-admission product.
+The superseded principal-only program field is removed. `FunctionChecked`
+checks every parameter and result layout. Named parameter and result elaboration
+produce those same obligations, including for recursive or unused functions.
+No body termination premise was introduced.
+
+`InlineChild` describes direct inline containment through tuples, fixed arrays
+and declared nominal fields. It is not a pointer/referent graph.
+`FiniteLayout.accessible` derives well-foundedness from the existing layout
+proof, and `no_inline_cycle` excludes arbitrary nonempty transitive cycles.
+The public source consumers `SourceClosure.Admitted.no_inline_cycle`,
+`interface_layout` and `no_interface_inline_cycle` connect this result to actual
+admitted declaration identities and function signatures. Existing schema
+validity and array bounds remain part of `FiniteLayout`.
+
+Fresh source-only verification in
+`/tmp/grandiose-declaration-layout-verified.KSHWBW` passed all 30 Lean jobs.
+Exhaustive axiom inspection covered 4,001 declarations; only standard Lean
+axioms occurred. Layout accessibility, cycle exclusion, source parameter
+elaboration and public source guarantees were explicitly inspected together
+with general preservation/progress and source-function soundness.
+
+The decoded fragment still has no pointer/reference type constructors;
+indirection-aware recursive representation and capability fixed points remain
+open. This does not establish byte sizes, alignment, physical allocation,
+source data-declaration elaboration or whole-language soundness. The 15 broad
+completion tasks remain open.
 

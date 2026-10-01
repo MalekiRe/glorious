@@ -167,6 +167,61 @@ theorem DataDeclarations.PrincipalsValid.permission {data : DataDeclarations}
       | copy => exact fields schema included field member
       | discard => exact (fields schema included field member).copy_discard
 
+/-- Direct inline containment, not a reference or pointer-referent edge. -/
+inductive InlineChild (data : DataDeclarations) : Ty → Ty → Prop where
+  | tupleHead (first : Ty) (rest : List Ty) : InlineChild data first (.tuple first rest)
+  | tupleTail {first : Ty} {rest : List Ty} {child : Ty} (member : child ∈ rest) :
+      InlineChild data child (.tuple first rest)
+  | array (element : Ty) (length : Nat) : InlineChild data element (.array element length)
+  | nominal {identity : Nat} {declaration : DataDecl} {schema : Fields} {field : Field}
+      (declared : data identity = some declaration) (variant : schema ∈ declaration.schemas)
+      (member : field ∈ schema.residents) : InlineChild data field.type (.nominal identity)
+
+/-- Finite layout witnesses establish well-founded inline containment. -/
+theorem FiniteLayout.accessible {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) : Acc (InlineChild data) type := by
+  induction finite with
+  | unit | integer | character => constructor; intro child edge; cases edge
+  | tuple first rest firstIH restIH =>
+    constructor
+    intro child edge
+    cases edge with
+    | tupleHead => exact firstIH
+    | tupleTail member => exact restIH child member
+  | array resident size ih =>
+    constructor
+    intro child edge
+    cases edge
+    exact ih
+  | nominal declared schemas fields ih =>
+    constructor
+    intro child edge
+    cases edge with
+    | nominal found variant member =>
+      cases Option.some.inj (found.symm.trans declared)
+      exact ih _ variant _ member
+
+private theorem accessible_not_cycle {α : Sort _} {relation : α → α → Prop} {value : α}
+    (accessible : Acc relation value) : ¬ Relation.TransGen relation value value := by
+  induction accessible with
+  | intro value accessible ih =>
+    intro cycle
+    cases cycle with
+    | single edge => exact ih _ edge (.single edge)
+    | tail chain edge => exact ih _ edge ((Relation.TransGen.single edge).trans chain)
+
+theorem FiniteLayout.no_inline_cycle {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) : ¬ Relation.TransGen (InlineChild data) type type :=
+  accessible_not_cycle finite.accessible
+
+/-- One admission product checks all decoded nominal declarations, not only
+those whose constructors are reached by a function body. -/
+structure DataDeclarations.Valid (data : DataDeclarations) (target : Target) : Prop where
+  principals : data.PrincipalsValid
+  layouts : ∀ identity declaration, data identity = some declaration →
+    FiniteLayout target data (.nominal identity)
+
+
 
 
 end Grounded

@@ -556,7 +556,7 @@ theorem SourceClosure.Admitted.principal_permission {packages : List PackageSour
     (declared : program.data identity = some declaration)
     (manual : declaration.restriction = some principal) (permission : UsePermission) :
     UsePermitted program.data permission (.nominal identity) ↔ permission.Allows (some principal) :=
-  admitted.checked.principals.permission declared manual permission
+  admitted.checked.data.principals.permission declared manual permission
 
 /-- A manual declaration cannot advertise permission absent from an owned field,
 including a field of an inactive variant or of an unused declaration. -/
@@ -573,6 +573,34 @@ theorem SourceClosure.Admitted.no_principal_widening {packages : List PackageSou
   | nominal found restriction fields =>
     cases Option.some.inj (found.symm.trans declared)
     exact unsupported (fields schema variant field member)
+
+
+/-- No admitted nominal declaration contains a direct or indirect inline cycle,
+regardless of whether any function constructs a value of that declaration. -/
+theorem SourceClosure.Admitted.no_inline_cycle {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} (declared : program.data identity = some declaration) :
+    ¬ Relation.TransGen (InlineChild program.data) (.nominal identity) (.nominal identity) :=
+  (admitted.checked.data.layouts identity declaration declared).no_inline_cycle
+
+
+/-- Even unused or nonreturning function interfaces have valid decoded layouts. -/
+theorem SourceClosure.Admitted.interface_layout {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
+    (∀ parameter ∈ declaration.parameters, FiniteLayout program.target program.data parameter.2.type) ∧
+      FiniteLayout program.target program.data declaration.result := by
+  have checked := admitted.checked.functions identity declaration declared
+  exact ⟨checked.parametersFinite, checked.resultFinite⟩
+
+theorem SourceClosure.Admitted.no_interface_inline_cycle {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
+    (∀ parameter ∈ declaration.parameters,
+      ¬ Relation.TransGen (InlineChild program.data) parameter.2.type parameter.2.type) ∧
+      ¬ Relation.TransGen (InlineChild program.data) declaration.result declaration.result := by
+  have layouts := admitted.interface_layout declared
+  exact ⟨fun parameter member => (layouts.1 parameter member).no_inline_cycle, layouts.2.no_inline_cycle⟩
 
 
 /-- Import-path authorization comes from actual source admission over the

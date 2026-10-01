@@ -235,12 +235,14 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
 /-- Bodies certify disposition from their final masks, never from a completed run. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
   distinct : (declaration.parameters.map Prod.fst).Nodup
+  parametersFinite : ∀ parameter ∈ declaration.parameters, FiniteLayout program.target program.data parameter.2.type
+  resultFinite : FiniteLayout program.target program.data declaration.result
   body : ∃ after, HasType program declaration.home (initializedContext declaration.parameters)
     declaration.body declaration.result after ∧
     ∀ binding ∈ after, binding.2.Disposable program.data
 
 structure Program.Checked (program : Program) : Prop where
-  principals : program.data.PrincipalsValid
+  data : program.data.Valid program.target
   functions : ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
 
 theorem HasTypes.slots {program : Program} {home : Module} {before after : FlowContext}
