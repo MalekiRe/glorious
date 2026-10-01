@@ -4,6 +4,32 @@ import Grounded.Lexical
 field resolver. Assignment operates on the current aggregate, never an old snapshot. -/
 namespace Grounded
 
+/-- One checked field projection, shared by rvalue projection and rooted places. -/
+inductive ProjectionType (program : Program) (home : Module) : Ty → FieldKey → Nat → Ty → Prop where
+  | tuple {first : Ty} {rest : List Ty} {index : Nat} {type : Ty}
+      (selected : (first :: rest)[index]? = some type) :
+      ProjectionType program home (.tuple first rest) (.positional index) index type
+  | nominal {identity index : Nat} {declaration : DataDecl} {schema : Fields} {field : Field} {key : FieldKey}
+      (declared : program.data identity = some declaration)
+      (structureOnly : declaration.shape = .structure schema)
+      (indexed : schema.index key = some index) (selected : schema.residents[index]? = some field)
+      (visible : field.visibility.Allows declaration.home home) :
+      ProjectionType program home (.nominal identity) key index field.type
+
+inductive PathType (program : Program) (home : Module) : Ty → List FieldKey → Ty → Prop where
+  | here (type : Ty) : PathType program home type [] type
+  | step {parent child result : Ty} {key : FieldKey} {index : Nat} {rest : List FieldKey}
+      (field : ProjectionType program home parent key index child)
+      (tail : PathType program home child rest result) :
+      PathType program home parent (key :: rest) result
+
+inductive PlaceType (program : Program) (home : Module) (context : List (String × BindingType)) :
+    Place → Ty → Bool → Prop where
+  | root {name : String} {fields : List FieldKey} {parent result : Ty} {mutable : Bool}
+      (selected : lookup name context = some ⟨parent, mutable⟩)
+      (path : PathType program home parent fields result) :
+      PlaceType program home context ⟨name, fields⟩ result mutable
+
 /-- Resolve one tuple/struct field; enum payloads are not unchecked places. -/
 def Value.projectField (program : Program) (value : Value) (key : FieldKey) : Option (Nat × Value) :=
   match value, key with

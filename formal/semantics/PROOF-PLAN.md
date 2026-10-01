@@ -16,6 +16,122 @@ reference, not developed in parallel. No old theorem is automatically a theorem
 of this development. No temporary code, assumed bridge, or placeholder Lean
 project is introduced by this reset. Subagent use remains paused.
 
+## Current proved contract and ownership
+
+The active theorem is defined in `Grounded/Soundness.lean`:
+
+```lean
+HasType program home context expression type →
+EnvironmentTyped program environment context →
+∃ value after,
+  Evaluates program environment expression value after ∧
+  ValueHasType program value type ∧
+  EnvironmentTyped program after context ∧
+  EnvironmentFrame context environment after ∧
+  ∀ other otherAfter,
+    Evaluates program environment expression other otherAfter →
+      other = value ∧ otherAfter = after
+```
+
+This is the fully initialized, duplicable, finite-call logical fragment. It
+covers mutable lexical storage and checked projected writes, but not holes,
+loans, general recursion or physical memory. The unchanged source-pattern
+consumer exports the same result for the certified normalized arm list.
+
+| Module | Authoritative responsibility |
+| --- | --- |
+| `Model` | Decoded vocabulary and declarations; no checking/execution certificates |
+| `Types` | Alias resolution, finite layout and duplicability |
+| `Values` | Structural value equality, resident typing and indexed access |
+| `Lexical` | Binding lookup, lexical realization, replacement and immutable framing |
+| `Places` | Checked projection/path/place contracts and actual reads/writes |
+| `Matching` | Runtime matching, subject interpretation and first-arm selection |
+| `Patterns` | Pattern typing, coverage/usefulness and constructive binding/selection proofs |
+| `Checking` | Expression, argument and arm admission |
+| `Execution` | Operational evaluation rules, independent of expression admission |
+| `Soundness` | Composition into the public terminating correctness theorem |
+| `SourcePatterns` | Certified constant normalization and its public source consumer |
+
+The former `Core.lean` is removed, not retained as a compatibility import.
+Checking consumes storage and pattern contracts; execution consumes storage
+operations and matching. Soundness joins the two. Constant normalization
+consumes soundness, so its compile-time evaluation dependency is acyclic.
+All moved semantic definitions and theorem contracts are preserved.
+
+Verification of this first architecture checkpoint: strict `lake build` passed
+(14 jobs). Lean audited all 1,599 declarations defined by these eleven modules,
+including generated/private declarations; the transitive axiom union remains
+`propext`, `Quot.sound` and `Classical.choice`. The runtime-only import was
+checked to contain neither `HasType` nor `correctness`. The aggregate contains
+no `Grounded.Core` import, and the defining modules of the eleven public
+boundary declarations were checked. No examples, tests or scaffold were added.
+
+This checkpoint completes ownership separation only. The identity,
+flow-sensitive checking, explicit-frame execution and connected
+preservation/progress migrations below remain open; the existing finite-call
+admission rule has not been relabeled as whole-language checking.
+
+
+## Migration contracts and premise producers
+
+The restructuring migrates this development; it does not introduce a second
+specification tree. The current terminating theorem remains a preservation
+obligation during the migration, not the destination theorem for recursion.
+The following are design contracts, not assumed Lean declarations.
+
+| Boundary | Required conclusion | Premise producer |
+| --- | --- | --- |
+| Checking | Resolved code, incoming static facts and guarded outgoing contracts | Source resolution, declaration interfaces and compositional checking rules |
+| Entry | A valid initial configuration realizing the checked incoming facts | Actual entry arguments and their legitimate type/resource evidence |
+| Preservation | An actual step preserves configuration realization and its applicable outcome contract | The operational step and the preceding configuration invariant |
+| Progress | A realized nonterminal configuration takes a step or reaches a specifically permitted external boundary | Checking, declaration-body correctness and current-state operation contracts |
+| Terminating behavior | A finite run has the promised result, successor storage and disposition | Preservation along that run; termination proved separately where required |
+| Structural constants | Checking constructs a unique terminating constant run and normal form | Structural syntax and well-founded constant dependencies, not general function termination |
+| Refinement | A concrete implementation preserves permitted observable behaviors | Explicit representation and step-simulation proofs, not a source-admission field |
+
+Static facts, runtime state and their realization are separate responsibilities.
+Realization must describe unavailable storage without making it ready: read,
+move, borrowing, transfer and cleanup consume their own current-state readiness.
+Incoming argument carriers and already-produced values remain represented while
+later arguments execute. No pending post-state readiness may be supplied as an
+entry premise. The producer-consumer chain for selected branches keeps the
+original checking derivation, actual first-match decision and branch correlation.
+
+Source names resolve to lexical binding identities; dynamic activations map
+those identities to actual storage identities. Recursion reuses the lexical
+identity but creates a distinct activation and storage. Reference-handle storage,
+referents and loans remain distinct. These distinctions enter together with
+resolution, lookup, allocation and realization consumers, not as unused tables.
+
+Checking must describe incoming facts and possible outgoing facts. Normal
+return, nonlocal transfer, cancellation and absence of normal continuation must
+not be collapsed into one unconditional context. The first stateful cutover
+must implement actual availability changes and restoration; an extra context
+parameter that is always equated to its input would not close that boundary.
+Calls use declared interfaces; checked bodies establish those interfaces
+separately. A call-site derivation must not recursively contain the callee body.
+
+The operational cutover uses explicit evaluation frames and one step relation.
+Frames represent ordered arguments, retained values, scopes and return targets.
+The existing terminating evaluation interface must be recovered from finite
+machine execution, with equivalence proved before removing its old rules.
+Divergence is not a safety fault; neither invalid access nor an unproved case may
+be reclassified as exhaustion or an allowed abort.
+
+Operation contracts are shared across reads, writes, moves, loans, invocation,
+scope exit and later control disposition. Each operation states its required
+facts, actual transition and proved preservation/postconditions. Physical
+allocation, foreign interaction and compiler representations remain separate
+refinement boundaries. No physical or whole-language theorem is claimed by the
+current logical storage model.
+
+The implementation order is dependency-driven: separate existing authoritative
+owners; migrate identity and flow-sensitive storage together; replace the
+termination-bound call/checking boundary and evaluator with proved machine
+contracts; preserve source normalization and all public consumers; then extend
+those contracts through ownership, control and representation boundaries.
+A module split alone does not complete these semantic migrations.
+
 ## Recovered, verified baseline
 
 At commit `2958fffc`, `Grounded.lean` was restored byte-for-byte from commit

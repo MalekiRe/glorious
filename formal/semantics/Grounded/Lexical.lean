@@ -1,8 +1,45 @@
-import Grounded.Core
+import Grounded.Values
 
 /-! Logical lexical storage: actual replacement, immutable-cell preservation,
 and compositional scope framing. No physical allocation or loan model. -/
 namespace Grounded
+
+/-- Nearest lexical binding wins, including in shadowing initializers. -/
+def lookup {α : Type} (name : String) : List (String × α) → Option α
+  | [] => none
+  | (key, value) :: rest => if name = key then some value else lookup name rest
+
+inductive EnvironmentTyped (program : Program) : List (String × Value) → List (String × BindingType) → Prop where
+  | nil : EnvironmentTyped program [] []
+  | cons {name : String} {value : Value} {type : BindingType}
+      {environment : List (String × Value)} {context : List (String × BindingType)}
+      (resident : ValueHasType program value type.type) (rest : EnvironmentTyped program environment context) :
+      EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
+
+variable {program : Program}
+
+theorem EnvironmentTyped.append {left right : List (String × Value)} {first rest : List (String × BindingType)}
+    (front : EnvironmentTyped program left first) (back : EnvironmentTyped program right rest) :
+    EnvironmentTyped program (left ++ right) (first ++ rest) := by
+  induction front with
+  | nil => exact back
+  | cons resident tail ih => exact .cons resident ih
+
+theorem EnvironmentTyped.drop {environment : List (String × Value)} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) (count : Nat) :
+    EnvironmentTyped program (environment.drop count) (context.drop count) := by
+  induction count generalizing environment context with
+  | zero => exact typed
+  | succ count ih => cases typed with
+    | nil => exact .nil
+    | cons resident rest => exact ih rest
+
+theorem EnvironmentTyped.length {environment : List (String × Value)} {context : List (String × BindingType)}
+    (typed : EnvironmentTyped program environment context) : environment.length = context.length := by
+  induction typed with
+  | nil => rfl
+  | cons _ _ ih => exact congrArg Nat.succ ih
+
 
 /-- Replace the nearest lexical binding; an absent destination is rejected. -/
 def replaceBinding {α : Type} (name : String) (value : α) : List (String × α) → Option (List (String × α))

@@ -1,4 +1,4 @@
-import Grounded.Execution
+import Grounded.Soundness
 
 /-!
 Structural constant patterns (§4.3). Closed constant checking produces each
