@@ -92,6 +92,28 @@ theorem replaceBinding.lookup_after {α : Type} {name : BindingId} {value : α}
         simp [lookup, Ne.symm different, ih tailWrite]
 
 
+/-- Replacement changes no other root, including mutable roots. -/
+theorem replaceBinding.lookup_other {α : Type} {name other : BindingId} {value : α}
+    {before after : List (BindingId × α)} (written : replaceBinding name value before = some after)
+    (different : other ≠ name) : lookup other after = lookup other before := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    rcases entry with ⟨key, old⟩
+    simp only [replaceBinding] at written
+    split at written
+    next same =>
+      cases written
+      simp [lookup, same, different]
+    next missed =>
+      cases tailWrite : replaceBinding name value rest with
+      | none => simp [tailWrite] at written
+      | some tail =>
+        simp [tailWrite] at written
+        subst after
+        simp [lookup, ih tailWrite]
+
+
 /-- Preserve lexical slots and every immutable resident, including shadowed slots. -/
 inductive EnvironmentFrame : List (BindingId × BindingType) →
     List (BindingId × Value) → List (BindingId × Value) → Prop where

@@ -99,6 +99,25 @@ theorem SourceScope.enter_preserves_selected {scope : SourceScope} {spelling : S
   exact scope.selected resolved
 
 
+/-- A write through the newly resolved binding cannot overwrite an outer root.
+The compared environments are immediately before/after the destination write;
+RHS effects have already happened and are not claimed to be undone. -/
+theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spelling : String}
+    {binding : SourceBinding} (resolved : scope.resolve spelling = some binding)
+    {program : Program} {fields outerFields : List FieldKey} {value : Value}
+    {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
+    (step : Step program ⟨before, .result value, .assign ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
+    readPlace program ⟨binding.identity, outerFields⟩ after.environment =
+      readPlace program ⟨binding.identity, outerFields⟩ before := by
+  apply Step.assignment_frame step
+  intro equal
+  change binding.identity = (⟨scope.next⟩ : BindingId) at equal
+  have member : binding.identity ∈ scope.bindings.map SourceBinding.identity :=
+    List.mem_map.mpr ⟨binding, List.mem_of_find?_eq_some resolved, rfl⟩
+  rw [equal] at member
+  exact scope.fresh member
+
+
 /-- Resolution produces the exact core place; projection authority remains the
 shared PathType judgment, rather than a second source-field analysis. -/
 def SourceScope.resolvePlace (scope : SourceScope) (spelling : String) (fields : List FieldKey) : Option Place :=

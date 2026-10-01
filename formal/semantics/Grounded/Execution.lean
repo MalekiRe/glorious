@@ -160,6 +160,17 @@ inductive Run (program : Program) : Configuration → Configuration → Prop whe
 
 variable {program : Program}
 
+/-- The destination-write step preserves every differently rooted place in the
+post-RHS environment. It makes no claim about earlier RHS effects. -/
+theorem Step.assignment_frame {before : Environment} {after : Configuration} {stack : List Frame}
+    {place other : Place} {rest : Expr} {value : Value}
+    (step : Step program ⟨before, .result value, .assign place rest :: stack⟩ after)
+    (different : other.root ≠ place.root) :
+    readPlace program other after.environment = readPlace program other before := by
+  cases step with
+  | assignResult written => exact writePlace.read_other written different
+
+
 theorem Terminal.no_step {state next : Configuration} (done : Terminal state) : ¬ Step program state next := by
   intro step
   cases done <;> cases step

@@ -191,6 +191,27 @@ import check confirmed that `SourceScope`, `HasType` and `correctness` are
 absent. No examples, unit tests, new axioms or temporary files were added.
 
 
+## Verified post-RHS assignment frame
+
+`replaceBinding.lookup_other` preserves every different lexical root, including
+mutable roots. `writePlace.lookup_other` and `writePlace.read_other` carry the
+same guarantee through arbitrary destination projections and arbitrary observed
+paths under another root. The actual machine consumer is
+`Step.assignment_frame`, not an assumed write-success field in checking.
+
+`SourceScope.shadow_assignment_preserves_outer` consumes that machine theorem
+and the source scope's fresh-ID producer. Writing the newly resolved binding
+cannot modify an already-resolved outer binding, even when their source spellings
+are identical. The comparison is explicitly against the store after RHS
+evaluation and immediately before the destination write; mutations performed by
+the RHS are not incorrectly claimed to be absent or undone. Same-root disjoint
+nested-path framing and move/restoration semantics remain separate obligations.
+
+Strict `lake build` passed (18 jobs). The defining-module audit covered 2,016
+declarations with only standard Lean axioms. Both the machine assignment-frame
+and source-shadow assignment theorems depend on `propext` and `Quot.sound`.
+
+
 ## Verified explicit-frame migration
 
 `Execution` now owns `Control`, `Frame`, `Configuration`, `Step`, `Run` and

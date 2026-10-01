@@ -76,6 +76,27 @@ def writePlace (program : Program) (place : Place) (replacement : Value)
   let updated ← writeFields program root place.fields replacement
   replaceBinding place.root updated environment
 
+/-- These are write-operation frames: before is the actual post-RHS store. -/
+theorem writePlace.lookup_other {program : Program} {place : Place} {value : Value}
+    {before after : List (BindingId × Value)} {other : BindingId}
+    (written : writePlace program place value before = some after) (different : other ≠ place.root) :
+    lookup other after = lookup other before := by
+  cases found : lookup place.root before with
+  | none => simp [writePlace, found] at written
+  | some root =>
+    cases updated : writeFields program root place.fields value with
+    | none => simp [writePlace, found, updated] at written
+    | some replacement =>
+      exact replaceBinding.lookup_other (by simpa [writePlace, found, updated] using written) different
+
+theorem writePlace.read_other {program : Program} {place other : Place} {value : Value}
+    {before after : List (BindingId × Value)}
+    (written : writePlace program place value before = some after) (different : other.root ≠ place.root) :
+    readPlace program other after = readPlace program other before := by
+  unfold readPlace
+  rw [writePlace.lookup_other written different]
+
+
 variable {program : Program} {home : Module}
 
 theorem ValuesHaveTypes.set {values : List Value} {types : List Ty}
