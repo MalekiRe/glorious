@@ -433,13 +433,13 @@ and the actual storage update, with typed reconstruction and exact readback.
 static transformation. Single-field replacement preserves every sibling's
 partial resident, including its holes.
 
-`StorageOperations` owns the path-based `takeStorage` and `restoreStorage`
+`StorageOperations` owns the address-based `StorageAddress.take` and `StorageAddress.restore`
 operations. Their former root-only definitions and consumers were removed;
 empty paths are the whole-owner case of the same operations. General progress
 and preservation consume checked paths, current cell typing and, for moves,
 current source-state readiness. They prove same-cell updates, preserved
 activation/type, global resident typing and outside-cell framing.
-`takeStorage.restore` composes an actual move and restoration at any field
+`StorageAddress.take.restore` composes an actual move and restoration at any field
 depth: the static state changes to absent then present, a second intermediate
 take fails, and no new identity is allocated. Retired storage rejects both
 operations.
@@ -2357,7 +2357,7 @@ whole-language obligations.
 
 ## Disjoint readiness through constructive move/restoration
 
-The existing `takeStorage.restore` progress contract now derives unchanged
+The existing `StorageAddress.take.restore` progress contract now derives unchanged
 initialization-mask selections and runtime reads for every pre-state-disjoint
 path, both in its intermediate moved-out heap and in its restored heap.
 `PathDisjoint.initialization_frame` uses the same resolved projection geometry
@@ -2887,4 +2887,36 @@ This establishes logical storage-identity lifetime safety for the current owned
 fragment. Reference carriers, loan permissions, reborrowing, outlives and return
 provenance, and custom Drop remain unimplemented. Storage liveness alone grants
 no reference access permission; none of the broad completion tasks is closed.
+
+
+## Canonical storage addresses and the source projection bridge
+
+Actual reads, moves and restoration now operate on `StorageAddress`, whose
+storage root is independent of lexical binding identity. `BindingMap.resolve`
+produces that address; all three lexical access operations consume it. The old
+`takeStorage`/`restoreStorage` APIs were removed rather than retained as aliases.
+This is a logical root/path address, not a byte offset or a physical ABI claim.
+
+`StorageAddress.Typed` records the exact projected type of the current heap
+cell using the existing `PathType` judgment. Its type is unique. It supplies
+neither initialized contents nor loan permission. `BindingMap.Typed.resolve`
+constructs the actual resolution result and address typing from source binding
+realization and the checked source projection. The read/move/restoration
+progress proofs consume that same result; they no longer independently rebuild
+the source-to-cell projection bridge. Initialization evidence remains a separate
+pre-state requirement for reads and moves, while restoration can fill a hole.
+
+The migrated operations and proofs feed existing machine preservation/progress
+and public source soundness. `Run.address_type` uses actual allocation-provenance
+preservation to retain exact address typing when its root survives;
+`Run.retired_untyped` rejects address typing after retirement. Observed root
+liveness in the former theorem is not assumed as a future source-admission fact.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+covered the source bridge, address-type uniqueness, all three operation-progress
+producers, lifetime transport/rejection, general preservation/progress and public
+source-function/lifetime soundness; only standard Lean axioms occurred. No
+examples or unit tests were added. Reference carriers, loan authority, reborrowing
+and region/return contracts remain the next integrated representation boundary;
+this address cutover alone does not admit borrowing or establish full soundness.
 

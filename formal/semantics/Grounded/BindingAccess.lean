@@ -4,24 +4,39 @@ import Grounded.BindingStorage
 as allocation and scope retirement. Language permission is checked above here. -/
 namespace Grounded
 
+def BindingMap.resolve (bindings : BindingMap) (place : Place) : Option StorageAddress :=
+  (lookup place.root bindings).map fun identity => ⟨identity, place.fields⟩
+
 def BindingMap.read (bindings : BindingMap) (program : Program) (heap : RuntimeHeap StorageCell)
-    (place : Place) : Option Value := do
-  let identity ← lookup place.root bindings
-  let cell ← heap.read identity
-  let resident ← cell.resident.selectFields program cell.type place.fields
-  resident.read
+    (place : Place) : Option Value :=
+  (bindings.resolve place).bind (StorageAddress.read program heap)
 
 def BindingMap.take (bindings : BindingMap) (program : Program) (heap : RuntimeHeap StorageCell)
     (place : Place) : Option (Value × RuntimeHeap StorageCell) :=
-  (lookup place.root bindings).bind fun identity => takeStorage program heap identity place.fields
+  (bindings.resolve place).bind (StorageAddress.take program heap)
 
 def BindingMap.restore (bindings : BindingMap) (program : Program) (heap : RuntimeHeap StorageCell)
     (place : Place) (value : Value) : Option (RuntimeHeap StorageCell) :=
-  (lookup place.root bindings).bind fun identity => restoreStorage program heap identity place.fields value
+  (bindings.resolve place).bind fun address => address.restore program heap value
 
 variable {program : Program} {home : Module} {heap : RuntimeHeap StorageCell} {activation : ActivationId}
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
     {place : Place} {state : BindingState} {type : Ty}
+
+/-- Source projection resolves to the actual allocated cell and exact projected
+type. No source binding identity is cast to a storage address. -/
+theorem BindingMap.Typed.resolve (typed : BindingMap.Typed program heap activation bindings context)
+    (resolved : Grounded.lookup place.root context = some state)
+    (checked : PathType program home state.slot.type place.fields type) :
+    ∃ identity cell, Grounded.lookup place.root bindings = some identity ∧
+      bindings.resolve place = some ⟨identity, place.fields⟩ ∧
+      heap.read identity = some cell ∧ cell.activation = activation ∧ cell.type = state.slot.type ∧
+      cell.Typed program state.initialization ∧
+      StorageAddress.Typed program heap ⟨identity, place.fields⟩ type := by
+  obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
+  refine ⟨identity, cell, mapped, by simp [BindingMap.resolve, mapped], found, owner, declared, resident, ?_⟩
+  exact .intro found (by simpa only [declared] using checked)
+
 
 /-- The selected old resident has legal residual disposition immediately before
 a write. Selection uses the same heap path as restoration itself. -/
@@ -94,7 +109,8 @@ reads. This is independent of the selected path or its source typing. -/
 theorem BindingMap.read.frame {after : RuntimeHeap StorageCell}
     (unchanged : ∀ identity ∈ bindings.map Prod.snd, after.read identity = heap.read identity) :
     bindings.read program after place = bindings.read program heap place := by
-  unfold BindingMap.read
+  unfold BindingMap.read BindingMap.resolve StorageAddress.read
+  simp only [Option.bind_map]
   cases mapped : lookup place.root bindings with
   | none => rfl
   | some identity =>
@@ -110,13 +126,11 @@ theorem BindingMap.read.progress (typed : BindingMap.Typed program heap activati
     (selected : state.initialization.selectFields program state.slot.type place.fields = some selectedState)
     (ready : selectedState.Ready) :
     ∃ value, bindings.read program heap place = some value ∧ ValueHasType program value type := by
-  obtain ⟨identity, cell, mapped, found, _, declared, resident, _⟩ := typed.lookup resolved
-  have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
-  obtain ⟨selectedResident, actualState, stateFound, partialFound, partialTyped⟩ := path.select_partial resident.2
-  rw [declared, selected] at stateFound
-  cases stateFound
-  obtain ⟨value, read, valueTyped⟩ := partialTyped.read ready
-  exact ⟨value, by simp [BindingMap.read, mapped, found, partialFound, read], valueTyped⟩
+  obtain ⟨identity, cell, mapped, address, found, _, declared, resident, physical⟩ := typed.resolve resolved checked
+  have selection : state.initialization.selectFields program cell.type place.fields = some selectedState := by
+    simpa only [declared] using selected
+  obtain ⟨value, read, valueTyped⟩ := StorageAddress.read.progress found resident physical selection ready
+  exact ⟨value, by simp [BindingMap.read, address, read], valueTyped⟩
 
 /-- The actual read result carries structural Copy permission. -/
 def BindingMap.CopySafe (program : Program) (heap : RuntimeHeap StorageCell)
@@ -162,17 +176,16 @@ theorem BindingMap.take.progress (typed : BindingMap.Typed program heap activati
       (∀ (caller : AddressedScope) states, BindingMap.Typed program heap caller.activation caller.bindings states →
         caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states ∧
           (∀ identity ∈ caller.bindings.map Prod.snd, after.read identity = heap.read identity)) := by
-  obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
-  have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
+  obtain ⟨identity, cell, mapped, address, found, owner, declared, resident, physical⟩ := typed.resolve resolved checked
   have selection : state.initialization.selectFields program cell.type place.fields = some selectedState := by
     simpa only [declared] using selected
   obtain ⟨value, after, updated, nextState, stateWritten, taken, valueTyped, written, updatedTyped,
-    _, noRetake, next, framed⟩ := takeStorage.progress found resident path selection ready
+    _, noRetake, next, framed⟩ := StorageAddress.take.progress found resident physical selection ready
   obtain ⟨nextContext, replaced, afterTyped⟩ := typed.write resolved mapped written owner declared updatedTyped
   exact ⟨identity, value, after, nextState, nextContext, mapped,
     by simpa only [declared] using stateWritten, replaced,
-    by simp [BindingMap.take, mapped, taken], valueTyped, afterTyped,
-    by simp [BindingMap.take, mapped, noRetake], next, framed,
+    by simp [BindingMap.take, address, taken], valueTyped, afterTyped,
+    by simp [BindingMap.take, BindingMap.resolve, mapped, noRetake], next, framed,
     fun _ _ callerTyped different => callerTyped.frame_other_activation found
       (by simpa only [owner] using different) framed⟩
 
@@ -194,15 +207,14 @@ theorem BindingMap.restore.progress (typed : BindingMap.Typed program heap activ
       (∀ (caller : AddressedScope) states, BindingMap.Typed program heap caller.activation caller.bindings states →
         caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states ∧
           (∀ identity ∈ caller.bindings.map Prod.snd, after.read identity = heap.read identity)) := by
-  obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
-  have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
+  obtain ⟨identity, cell, mapped, address, found, owner, declared, resident, physical⟩ := typed.resolve resolved checked
   obtain ⟨after, updated, nextState, stateWritten, restored, written, updatedTyped,
-    updatedFound, readback, next, framed⟩ := restoreStorage.progress found resident path valueTyped
+    updatedFound, readback, next, framed⟩ := StorageAddress.restore.progress found resident physical valueTyped
   obtain ⟨nextContext, replaced, afterTyped⟩ := typed.write resolved mapped written owner declared updatedTyped
   exact ⟨identity, after, nextState, nextContext, mapped,
     by simpa only [declared] using stateWritten, replaced,
-    by simp [BindingMap.restore, mapped, restored], afterTyped,
-    by simp [BindingMap.read, mapped, updatedFound, readback, PartialValue.read], next, framed,
+    by simp [BindingMap.restore, address, restored], afterTyped,
+    by simp [BindingMap.read, BindingMap.resolve, StorageAddress.read, mapped, updatedFound, readback, PartialValue.read], next, framed,
     (fun ready => Initialization.write_ready ready .present stateWritten),
     fun _ _ callerTyped different => callerTyped.frame_other_activation found
       (by simpa only [owner] using different) framed⟩
@@ -325,7 +337,7 @@ theorem BindingMap.restore.cell_other {after : RuntimeHeap StorageCell} {name : 
     (written : bindings.restore program heap place value = some after)
     (otherMapped : lookup name bindings = some other) (different : name ≠ place.root) :
     after.read other = heap.read other := by
-  simp only [BindingMap.restore, restoreStorage, Option.bind_eq_some_iff] at written
+  simp only [BindingMap.restore, BindingMap.resolve, Option.bind_map, Function.comp_def, StorageAddress.restore, Option.bind_eq_some_iff] at written
   obtain ⟨identity, mapped, cell, _, updated, _, stored⟩ := written
   apply RuntimeHeap.write_other stored
   intro same
@@ -338,9 +350,9 @@ theorem BindingMap.restore.read_other {after : RuntimeHeap StorageCell} {other :
     (different : other.root ≠ place.root) :
     bindings.read program after other = bindings.read program heap other := by
   cases otherMapped : lookup other.root bindings with
-  | none => simp [BindingMap.read, otherMapped]
+  | none => simp [BindingMap.read, BindingMap.resolve, otherMapped]
   | some identity =>
-    simp [BindingMap.read, otherMapped, BindingMap.restore.cell_other distinct written otherMapped different]
+    simp [BindingMap.read, BindingMap.resolve, StorageAddress.read, otherMapped, BindingMap.restore.cell_other distinct written otherMapped different]
 
 /-- Frame exact immutable cells. Every source read is a consequence, not a
 separately maintained value snapshot. -/
@@ -372,7 +384,8 @@ theorem AddressedEnvironment.Frames.read {context : List (BindingId × BindingTy
   simp only [AddressedEnvironment.scope] at maps
   simp only [AddressedEnvironment.read]
   rw [maps]
-  unfold BindingMap.read
+  unfold BindingMap.read BindingMap.resolve StorageAddress.read
+  simp only [Option.bind_map]
   cases mapped : lookup place.root before.bindings with
   | none => rfl
   | some identity =>
@@ -728,9 +741,9 @@ theorem AddressedEnvironment.take.consumption_frame {current after : AddressedEn
     (fun result => (result.1, { current with heap := result.2 })) = some (value, after) at taken
   obtain ⟨result, rawTaken, same⟩ := Option.map_eq_some_iff.mp taken
   cases same
-  simp only [BindingMap.take, Option.bind_eq_some_iff] at rawTaken
+  simp only [BindingMap.take, BindingMap.resolve, Option.bind_map, Function.comp_def, Option.bind_eq_some_iff] at rawTaken
   obtain ⟨identity, _, storageTaken⟩ := rawTaken
-  simp only [takeStorage, Option.bind_eq_some_iff, Option.map_eq_some_iff] at storageTaken
+  simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at storageTaken
   obtain ⟨cell, found, resident, _, value, _, updated, written, heap, stored, same⟩ := storageTaken
   cases same
   refine ⟨rfl, ?_⟩
@@ -794,9 +807,9 @@ theorem BindingMap.restore.read_disjoint
     (apart : PathDisjoint program home cell.type place.fields other.fields)
     (changed : bindings.restore program heap place value = some after) :
     bindings.read program after other = bindings.read program heap other := by
-  simp only [BindingMap.restore, mapped, Option.bind_some] at changed
-  simpa [BindingMap.read, otherMapped, found] using
-    restoreStorage.read_disjoint found apart changed
+  simp only [BindingMap.restore, BindingMap.resolve, Option.bind_map, mapped, Option.bind_some] at changed
+  simpa [BindingMap.read, BindingMap.resolve, Option.bind_map, StorageAddress.read, otherMapped, found] using
+    StorageAddress.restore.read_disjoint found apart changed
 
 theorem BindingMap.take.read_disjoint
     {after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell} {other : Place} {value : Value}
@@ -806,9 +819,9 @@ theorem BindingMap.take.read_disjoint
     (apart : PathDisjoint program home cell.type place.fields other.fields)
     (changed : bindings.take program heap place = some (value, after)) :
     bindings.read program after other = bindings.read program heap other := by
-  simp only [BindingMap.take, mapped, Option.bind_some] at changed
-  simpa [BindingMap.read, otherMapped, found] using
-    takeStorage.read_disjoint found apart changed
+  simp only [BindingMap.take, BindingMap.resolve, Option.bind_map, mapped, Option.bind_some] at changed
+  simpa [BindingMap.read, BindingMap.resolve, Option.bind_map, StorageAddress.read, otherMapped, found] using
+    StorageAddress.take.read_disjoint found apart changed
 
 
 end Grounded

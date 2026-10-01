@@ -8,6 +8,13 @@ structure StorageId where
   index : Nat
   deriving DecidableEq
 
+/-- A logical storage address is independent of lexical bindings and activation
+names. Fields use the shared declaration-indexed path semantics, not byte offsets. -/
+structure StorageAddress where
+  root : StorageId
+  fields : List FieldKey := []
+
+
 structure ActivationId where
   index : Nat
   deriving DecidableEq

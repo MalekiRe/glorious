@@ -405,12 +405,12 @@ theorem Step.heap_history {before after : Configuration} (step : Step program be
     obtain ⟨⟨value, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
     cases same
     obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
-    exact takeStorage.history raw
+    exact StorageAddress.take.history raw
   | assignResult written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
-    exact restoreStorage.history raw
+    exact StorageAddress.restore.history raw
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
     cases same
@@ -447,11 +447,11 @@ theorem Run.retired_inaccessible {before after : Configuration} {identity : Stor
     ∀ value, after.environment.write program place value = none := by
   have absent := (run.retired retired).2
   constructor
-  · simp [AddressedEnvironment.read, BindingMap.read, mapped, absent]
+  · simp [AddressedEnvironment.read, BindingMap.read, BindingMap.resolve, StorageAddress.read, mapped, absent]
   constructor
-  · simp [AddressedEnvironment.take, BindingMap.take, mapped, takeStorage, absent]
+  · simp [AddressedEnvironment.take, BindingMap.take, BindingMap.resolve, mapped, StorageAddress.take, absent]
   · intro value
-    simp [AddressedEnvironment.write, BindingMap.restore, mapped, restoreStorage, absent]
+    simp [AddressedEnvironment.write, BindingMap.restore, BindingMap.resolve, mapped, StorageAddress.restore, absent]
 
 /-- Actual lexical-scope retirement permanently kills every released identity;
 the following run need not return or preserve the original lexical environment. -/
@@ -494,12 +494,12 @@ theorem Step.storage_origin {before after : Configuration} (step : Step program 
     obtain ⟨⟨value, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
-    exact takeStorage.identity raw found
+    exact StorageAddress.take.identity raw found
   | assignResult written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
-    exact restoreStorage.identity raw found
+    exact StorageAddress.restore.identity raw found
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
     cases same
@@ -527,6 +527,33 @@ theorem Run.storage_origin {before after : Configuration} (run : Run program bef
     obtain ⟨middle, present, owner, type⟩ := ih (Nat.lt_of_lt_of_le allocated head.heap_history.next_le) found
     obtain ⟨old, original, oldOwner, oldType⟩ := head.storage_origin allocated present
     exact ⟨old, original, owner.trans oldOwner, type.trans oldType⟩
+
+
+/-- A surviving address keeps its exact referent type across actual execution.
+Liveness is checked at the observed state; this does not grant future access. -/
+theorem Run.address_type {before after : Configuration} (run : Run program before after)
+    {address : StorageAddress} {type : Ty}
+    (checked : address.Typed program before.environment.heap type)
+    (live : ∃ cell, after.environment.heap.read address.root = some cell) :
+    address.Typed program after.environment.heap type := by
+  cases checked with
+  | intro found path =>
+    obtain ⟨cell, current⟩ := live
+    obtain ⟨old, original, _, declared⟩ :=
+      run.storage_origin (before.environment.heap.bounded _ _ found) current
+    cases Option.some.inj (found.symm.trans original)
+    exact .intro current (by rw [declared]; exact path)
+
+/-- A retired address has no physical referent typing at any later state. -/
+theorem Run.retired_untyped {before after : Configuration} (run : Run program before after)
+    {address : StorageAddress} (retired : before.environment.heap.Retired address.root) :
+    ∀ type, ¬ address.Typed program after.environment.heap type := by
+  intro type checked
+  cases checked with
+  | intro found path =>
+    have absent := (run.retired retired).2
+    rw [absent] at found
+    cases found
 
 
 end Grounded
