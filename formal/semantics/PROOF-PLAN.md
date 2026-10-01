@@ -50,8 +50,9 @@ and owners from supplied roots and explicit module inclusion, constructs fresh
 function entry and proves general body-prefix safety. File permutation preserves
 actual admission. Callable lookup and imports now require explicit package
 dependencies, with checked normalized names and collision rejection, and
-visibility-checked traversal through actual module bindings. Textual paths/groups,
-other namespaces, prelude profiles and the remaining source frontend are open.
+visibility-checked traversal through actual module bindings. Calls interpret decoded
+`self`/`crate`/`super`/dependency anchors through the same resolver. Import-path
+elaboration, module aliases/groups, other namespaces, preludes and parsing remain open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1546,4 +1547,48 @@ Strict `lake build Grounded` passed. The imported audit covered 3,417
 the strengthened call theorem and general function soundness received explicit
 axiom inspection. No examples or tests were added. Textual path elaboration and
 the other previously recorded whole-language obligations remain open.
+
+
+## Verified anchored source-call paths through general soundness
+
+Qualified function names now carry decoded `ModulePath` syntax, not an arbitrary
+pre-resolved `Module`. The shared interpreter handles `self`, `crate`, a
+positive number of `super` steps, and a checked dependency spelling. Its result
+is only a module identity: the existing package-access, declared-module
+reachability and function-visibility checks still grant authority.
+
+`resolvePackageDependency` first selects the caller's own manifest and uses
+`PackageSource.resolveDependency`, preserving the existing normalized-name
+producer. Source expressions and declaration bodies now use the same composed
+`SourceClosure.functionNames` producer. `FunctionName.owner` and the
+pre-resolved qualified-name constructor are removed; all expression, pattern-arm,
+declaration, closure, identity, visibility and public safety/correctness consumers
+use the migrated contract. The lower binding resolver remains the existing
+seeded import closure, not a second name analysis.
+
+General proofs establish exact parent-suffix removal and failure beyond the
+package root. `call_super_depth` carries the bound through actual source call
+elaboration; `call_namespace_missing` excludes fallback after failed namespace
+interpretation. `call_dependency_spelling` derives the precise manifest spelling
+and declared module reachability from an elaborated call, including dependencies
+that target the caller's own package. Another alias of a package cannot stand in
+for an absent spelling. `dependency_call_soundness` constructs lookup and call
+elaboration from the actual manifest binding and static visible candidate, then
+proves the existing general preservation/progress/framing contract. It does not
+accept a completed resolver result or execution success as an admission premise.
+File-order admission invariance, ancestor visibility, declaration identity,
+function-body soundness and finite-call correctness remain proved.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). An exhaustive imported
+audit checked 3,486 `Grounded` declarations, including private/generated ones;
+only `propext`, `Quot.sound` and `Classical.choice` occur. The path laws and
+public source consumers received explicit axiom inspection. No unit tests,
+examples, new axioms or proof placeholders were added.
+
+This closes interpretation of the modeled decoded call anchors, not byte-level
+path parsing, module-alias/unanchored-name disambiguation, inherent namespaces,
+or complete source resolution. Import targets still carry decoded module
+identities and require their own cutover to the same path producer. Import
+groups, other namespaces, preludes, UTF-8/spans and the previously tracked
+ownership, effects, physical-memory and whole-language obligations remain open.
 

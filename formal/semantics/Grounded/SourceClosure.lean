@@ -158,6 +158,56 @@ def PackageAccess (packages : List PackageSource) (caller target : Nat) : Prop :
     (target = caller ∨ ∃ name, package.resolveDependency name = some target)
 
 
+/-- Select the caller's manifest before interpreting a dependency spelling. -/
+def resolvePackageDependency : List PackageSource → Nat → Identifier → Option Nat
+  | [], _, _ => none
+  | package :: rest, caller, name =>
+      if package.identity = caller then package.resolveDependency name
+      else resolvePackageDependency rest caller name
+
+def sourceNamespace (packages : List PackageSource) (caller : Module) (name : FunctionName) : Option Module :=
+  name.namespace (resolvePackageDependency packages caller.package) caller
+
+theorem resolvePackageDependency.selected {packages : List PackageSource} {caller : Nat}
+    {name : Identifier} {target : Nat} (selected : resolvePackageDependency packages caller name = some target) :
+    ∃ package ∈ packages, package.identity = caller ∧ package.resolveDependency name = some target := by
+  induction packages with
+  | nil => cases selected
+  | cons package rest ih =>
+    simp only [resolvePackageDependency] at selected
+    split at selected
+    · rename_i owner
+      exact ⟨package, by simp, owner, selected⟩
+    · obtain ⟨original, member, owner, found⟩ := ih selected
+      exact ⟨original, by simp [member], owner, found⟩
+
+
+theorem resolvePackageDependency.existing {packages : List PackageSource}
+    (distinct : (packages.map PackageSource.identity).Nodup) {package : PackageSource}
+    (member : package ∈ packages) (name : Identifier) :
+    resolvePackageDependency packages package.identity name = package.resolveDependency name := by
+  induction packages with
+  | nil => cases member
+  | cons head rest ih =>
+    rcases List.mem_cons.mp member with rfl | member
+    · simp [resolvePackageDependency]
+    · have different : head.identity ≠ package.identity := by
+        intro same
+        exact (List.nodup_cons.mp distinct).1 (List.mem_map.mpr ⟨package, member, same.symm⟩)
+      simp only [resolvePackageDependency, if_neg different]
+      exact ih (List.nodup_cons.mp distinct).2 member
+
+theorem resolvePackageDependency.reorder (packages : List PackageSource) (reorder : PackageSource → SourceFiles) :
+    resolvePackageDependency (packages.map fun package => { package with files := reorder package }) =
+      resolvePackageDependency packages := by
+  induction packages with
+  | nil => rfl
+  | cons package rest ih =>
+    funext caller name
+    by_cases same : package.identity = caller <;>
+      simp [resolvePackageDependency, same, ih, PackageSource.resolveDependency]
+
+
 theorem PackageAccess.reorder (packages : List PackageSource) (reorder : PackageSource → SourceFiles)
     (caller target : Nat) :
     PackageAccess (packages.map fun package => { package with files := reorder package }) caller target ↔
@@ -203,7 +253,7 @@ def SourceClosure.imports {packages : List PackageSource} (closure : SourceClosu
 
 /-- Package authorization guards the existing unique-identity resolver.
 Import traversal and function-body elaboration retain their shared producers. -/
-noncomputable def SourceClosure.functionNames {packages : List PackageSource}
+noncomputable def SourceClosure.bindingNames {packages : List PackageSource}
     (closure : SourceClosure packages) (caller home : Module) (name : Identifier) : Option Nat := by
   classical
   exact if PackageAccess packages caller.package home.package
@@ -211,17 +261,32 @@ noncomputable def SourceClosure.functionNames {packages : List PackageSource}
       then Grounded.functionNames closure.functions closure.imports caller home name else none
     else none
 
-theorem SourceClosure.functionNames_selected {packages : List PackageSource} (closure : SourceClosure packages)
+theorem SourceClosure.bindingNames_selected {packages : List PackageSource} (closure : SourceClosure packages)
     {caller home : Module} {name : Identifier} {identity : Nat} :
-    closure.functionNames caller home name = some identity ↔
+    closure.bindingNames caller home name = some identity ↔
       PackageAccess packages caller.package home.package ∧
       ModuleReachable closure.modules caller home ∧
         FunctionResolution closure.functions closure.imports caller home name identity := by
   classical
-  simp only [SourceClosure.functionNames]
+  simp only [SourceClosure.bindingNames]
   split
   · split <;> simp_all [Grounded.functionNames.selected_iff]
   · simp_all
+
+
+noncomputable def SourceClosure.functionNames {packages : List PackageSource}
+    (closure : SourceClosure packages) : Module → FunctionName → Option Nat :=
+  resolveFunctionNames (sourceNamespace packages) closure.bindingNames
+
+theorem SourceClosure.functionNames_selected {packages : List PackageSource} (closure : SourceClosure packages)
+    {caller : Module} {name : FunctionName} {identity : Nat} :
+    closure.functionNames caller name = some identity ↔
+      ∃ home, sourceNamespace packages caller name = some home ∧
+        PackageAccess packages caller.package home.package ∧
+        ModuleReachable closure.modules caller home ∧
+        FunctionResolution closure.functions closure.imports caller home name.spelling identity := by
+  simp [SourceClosure.functionNames, resolveFunctionNames, Option.bind_eq_some_iff,
+    SourceClosure.bindingNames_selected]
 
 
 /-- Static module inclusion feeds the same elaboration and machine contract.
@@ -382,15 +447,21 @@ theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (clos
     (reorder : PackageSource → SourceFiles)
     (same : ∀ package ∈ packages, package.files.Perm (reorder package)) (program : Program) :
     (closure.reorder reorder same).Admitted program ↔ closure.Admitted program := by
-  have names : (closure.reorder reorder same).functionNames = closure.functionNames := by
+  have bindings : (closure.reorder reorder same).bindingNames = closure.bindingNames := by
     funext caller home name
     have access := PackageAccess.reorder packages reorder caller.package home.package
     by_cases allowed : PackageAccess packages caller.package home.package
-    · simp only [SourceClosure.functionNames, if_pos allowed, if_pos (access.mpr allowed)]
+    · simp only [SourceClosure.bindingNames, if_pos allowed, if_pos (access.mpr allowed)]
       rfl
     · have denied : ¬PackageAccess (packages.map fun package => { package with files := reorder package })
           caller.package home.package := fun found => allowed (access.mp found)
-      simp only [SourceClosure.functionNames, if_neg allowed, if_neg denied]
+      simp only [SourceClosure.bindingNames, if_neg allowed, if_neg denied]
+  have namespaces : sourceNamespace (packages.map fun package => { package with files := reorder package }) =
+      sourceNamespace packages := by
+    funext caller name
+    simp only [sourceNamespace, resolvePackageDependency.reorder]
+  have names : (closure.reorder reorder same).functionNames = closure.functionNames := by
+    simp only [SourceClosure.functionNames, namespaces, bindings]
   simp only [SourceClosure.Admitted, names]
   simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions, SourceClosure.imports,
     PackageSource.DependenciesValid, PackageAccess.reorder, List.map_map, Function.comp_def]
@@ -493,14 +564,17 @@ theorem SourceClosure.call_dependency {packages : List PackageSource} {closure :
     {name : FunctionName} {arguments : List NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
       (.call name arguments) core type after)
-    (foreign : (name.owner home).package ≠ home.package) :
+    {targetHome : Module} (namespaceResolved : sourceNamespace packages home name = some targetHome)
+    (foreign : targetHome.package ≠ home.package) :
     ∃ package ∈ packages, package.identity = home.package ∧
-      ∃ dependency ∈ package.dependencies, dependency.target = (name.owner home).package ∧
+      ∃ dependency ∈ package.dependencies, dependency.target = targetHome.package ∧
         ∃ normalized, dependency.name = some normalized := by
   cases elaborated with
   | call _ selected _ _ _ =>
-    obtain ⟨package, included, owner, same | ⟨normalized, found⟩⟩ :=
-      (closure.functionNames_selected.mp selected).1
+    obtain ⟨actual, path, access, _⟩ := closure.functionNames_selected.mp selected
+    have same := Option.some.inj (path.symm.trans namespaceResolved)
+    cases same
+    obtain ⟨package, included, owner, same | ⟨normalized, found⟩⟩ := access
     · exact False.elim (foreign same)
     · obtain ⟨dependency, member, decoded, target⟩ := PackageSource.resolveDependency_selected found
       exact ⟨package, included, owner, dependency, member, target, normalized, decoded⟩
@@ -512,14 +586,14 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {package : PackageSource} (packageIncluded : package ∈ packages) {home : Module}
     (owner : package.identity = home.package) {dependency : PackageDependency}
-    (dependencyIncluded : dependency ∈ package.dependencies) {name : FunctionName}
-    (target : dependency.target = (name.owner home).package)
+    (dependencyIncluded : dependency ∈ package.dependencies) {normalized spelling : Identifier}
+    (decoded : dependency.name = some normalized) {children : List Identifier}
     {scope : SourceScope} {before after : FlowContext} {identity : Nat} {declaration : FunctionDecl}
     {arguments : List NamedExpr} {inputs : List Expr}
-    (included : name.owner home ∈ closure.homes)
-    (reachable : ModuleReachable closure.modules home (name.owner home))
-    (candidate : VisibleFunctionCandidate closure.functions closure.imports home (name.owner home) name.spelling identity)
-    (unshadowed : name.Unshadowed scope) (declared : program.functions identity = some declaration)
+    (included : (⟨dependency.target, children⟩ : Module) ∈ closure.homes)
+    (reachable : ModuleReachable closure.modules home ⟨dependency.target, children⟩)
+    (candidate : VisibleFunctionCandidate closure.functions closure.imports home ⟨dependency.target, children⟩ spelling identity)
+    (declared : program.functions identity = some declaration)
     (visible : declaration.visibility.Allows declaration.home home)
     (argumentsTyped : NamedExprsElaborate program closure.functionNames home scope before
       arguments inputs (declaration.parameters.map fun parameter => parameter.2.type) after)
@@ -532,26 +606,32 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
       AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
       (state.environment.bindings.map Prod.fst).Nodup := by
   have dependencies := admitted.2.1 package packageIncluded
-  obtain ⟨normalized, decoded⟩ := (dependencies.2 dependency dependencyIncluded).1
   have selectedDependency := dependencies.resolve_existing dependencyIncluded decoded
-  have allowed : PackageAccess packages home.package (name.owner home).package :=
-    ⟨package, packageIncluded, owner, .inr ⟨normalized, selectedDependency.trans (congrArg some target)⟩⟩
+  have allowed : PackageAccess packages home.package dependency.target :=
+    ⟨package, packageIncluded, owner, .inr ⟨normalized, selectedDependency⟩⟩
+  have path : sourceNamespace packages home (.qualified (.dependency normalized children) spelling) =
+      some ⟨dependency.target, children⟩ := by
+    simp only [sourceNamespace, FunctionName.namespace, ModulePath.resolve, ← owner,
+      resolvePackageDependency.existing admitted.1 packageIncluded normalized, selectedDependency, Option.map_some]
   have base := admitted.2.2.2.1.resolve_existing included candidate
-  have resolved := closure.functionNames_selected.mpr ⟨allowed, reachable, Grounded.functionNames.selected_iff.mp base⟩
+  have resolved := closure.functionNames_selected.mpr
+    ⟨⟨dependency.target, children⟩, path, allowed, reachable, Grounded.functionNames.selected_iff.mp base⟩
   have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
-      (.call name arguments) (.call identity inputs) declaration.result after :=
-    .call unshadowed resolved declared visible argumentsTyped
+      (.call (.qualified (.dependency normalized children) spelling) arguments)
+      (.call identity inputs) declaration.result after :=
+    .call trivial resolved declared visible argumentsTyped
   exact admitted.soundness elaborated slots store issued run
 
 
 theorem SourceClosure.Admitted.resolves {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program)
-    {caller home : Module} {name : Identifier} {identity : Nat}
-    (resolved : closure.functionNames caller home name = some identity) :
+    {caller : Module} {name : FunctionName} {identity : Nat}
+    (resolved : closure.functionNames caller name = some identity) :
     ∃ source core, closure.functions[identity]? = some source ∧ program.functions identity = some core ∧
       NamedFunction.Elaborates program closure.functionNames source core := by
   obtain ⟨_, cores, elaborated, functions⟩ := admitted.2.2.2.2
-  have base := Grounded.functionNames.selected_iff.mpr (closure.functionNames_selected.mp resolved).2.2
+  obtain ⟨_, _, _, _, resolution⟩ := closure.functionNames_selected.mp resolved
+  have base := Grounded.functionNames.selected_iff.mpr resolution
   obtain ⟨source, selected⟩ := Grounded.functionNames.selected base
   obtain ⟨core, emitted, checked⟩ := elaborated.selected selected
   exact ⟨source, core, selected, by rw [functions]; exact emitted, checked⟩
@@ -567,9 +647,10 @@ theorem SourceClosure.Admitted.call_resolution {packages : List PackageSource} {
     ∃ identity declaration inputs source, closure.functions[identity]? = some source ∧
       core = .call identity inputs ∧ program.functions identity = some declaration ∧
       declaration.home = source.home ∧ declaration.visibility.Allows declaration.home home ∧
-      PackageAccess packages home.package (name.owner home).package ∧
-      ModuleReachable closure.modules home (name.owner home) ∧
-      FunctionResolution closure.functions closure.imports home (name.owner home) name.spelling identity := by
+      ∃ targetHome, sourceNamespace packages home name = some targetHome ∧
+        PackageAccess packages home.package targetHome.package ∧
+        ModuleReachable closure.modules home targetHome ∧
+        FunctionResolution closure.functions closure.imports home targetHome name.spelling identity := by
   cases elaborated with
   | call _ resolved declared visible _ =>
     obtain ⟨source, emitted, selected, found, body⟩ := admitted.resolves resolved
@@ -726,14 +807,69 @@ theorem SourceClosure.Admitted.call_ancestor_visibility {packages : List Package
     (declared : (child, visibility, body) ∈ parent.source.children)
     {home : Module} {scope : SourceScope} {before after : FlowContext}
     {name : FunctionName} {arguments : List NamedExpr} {core : Expr} {type : Ty}
-    (packageSame : parent.home.package = (name.owner home).package)
-    (enclosing : (parent.home.child child).path.IsPrefix (name.owner home).path)
+    {targetHome : Module} (namespaceResolved : sourceNamespace packages home name = some targetHome)
+    (packageSame : parent.home.package = targetHome.package)
+    (enclosing : (parent.home.child child).path.IsPrefix targetHome.path)
     (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
       (.call name arguments) core type after) : visibility.Allows parent.home home := by
   cases elaborated with
   | call _ selected _ _ _ =>
-    have reachable := (closure.functionNames_selected.mp selected).2.1
+    obtain ⟨actual, path, _, reachable, _⟩ := closure.functionNames_selected.mp selected
+    have same := Option.some.inj (path.symm.trans namespaceResolved)
+    cases same
     exact admitted.child_visibility included declared (reachable.ancestor packageSame enclosing)
+
+
+/-- A failed namespace interpretation cannot fall back to a different module
+or a function with the same spelling. This applies inside every source body. -/
+theorem SourceClosure.call_namespace_missing {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} {home : Module} {scope : SourceScope} {before after : FlowContext}
+    {name : FunctionName} {arguments : List NamedExpr} {core : Expr} {type : Ty}
+    (missing : sourceNamespace packages home name = none) :
+    ¬ NamedExpr.Elaborates program closure.functionNames home scope before (.call name arguments) core type after := by
+  intro elaborated
+  cases elaborated with
+  | call _ selected _ _ _ =>
+    obtain ⟨_, path, _⟩ := closure.functionNames_selected.mp selected
+    rw [missing] at path
+    contradiction
+
+theorem SourceClosure.call_super_depth {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} {home : Module} {scope : SourceScope} {before after : FlowContext}
+    {additional : Nat} {children : List Identifier} {spelling : Identifier}
+    {arguments : List NamedExpr} {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.call (.qualified (.super additional children) spelling) arguments) core type after) :
+    additional + 1 ≤ home.path.length := by
+  apply Classical.byContradiction
+  intro beyond
+  have missing := (ModulePath.resolve_super_none (resolvePackageDependency packages home.package)
+    home additional children).mpr (Nat.lt_of_not_ge beyond)
+  exact SourceClosure.call_namespace_missing
+    (name := .qualified (.super additional children) spelling) missing elaborated
+
+/-- The spelling actually written in a dependency-qualified call is selected
+from the caller's manifest. Another alias of the same package cannot replace it. -/
+theorem SourceClosure.call_dependency_spelling {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} {home : Module} {scope : SourceScope} {before after : FlowContext}
+    {dependencyName spelling : Identifier} {children : List Identifier}
+    {arguments : List NamedExpr} {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.call (.qualified (.dependency dependencyName children) spelling) arguments) core type after) :
+    ∃ package ∈ packages, package.identity = home.package ∧
+      ∃ dependency ∈ package.dependencies, dependency.name = some dependencyName ∧
+        ModuleReachable closure.modules home ⟨dependency.target, children⟩ := by
+  cases elaborated with
+  | call _ selected _ _ _ =>
+    obtain ⟨targetHome, path, _, reachable, _⟩ := closure.functionNames_selected.mp selected
+    change (resolvePackageDependency packages home.package dependencyName).map
+      (fun package => (⟨package, children⟩ : Module)) = some targetHome at path
+    obtain ⟨target, selectedDependency, rfl⟩ := Option.map_eq_some_iff.mp path
+    obtain ⟨package, included, owner, found⟩ := resolvePackageDependency.selected selectedDependency
+    obtain ⟨dependency, member, decoded, same⟩ := PackageSource.resolveDependency_selected found
+    refine ⟨package, included, owner, dependency, member, decoded, ?_⟩
+    rw [same]
+    exact reachable
 
 
 end Grounded
