@@ -320,4 +320,45 @@ theorem allocateBindings.extend {inputs : List BindingInput} (inputsTyped : Bind
     omega
 
 
+theorem BindingMap.Typed.take (typed : BindingMap.Typed program heap activation bindings context) (count : Nat) :
+    BindingMap.Typed program heap activation (bindings.take count) (context.take count) := by
+  induction count generalizing bindings context with
+  | zero => exact .nil
+  | succ count ih =>
+    cases typed with
+    | nil => exact .nil
+    | cons found owner declared resident tail freshName freshStorage =>
+      refine .cons found owner declared resident (ih tail) ?_ ?_
+      · intro member
+        obtain ⟨entry, included, equal⟩ := List.mem_map.mp member
+        exact freshName (List.mem_map.mpr ⟨entry, List.mem_of_mem_take included, equal⟩)
+      · intro member
+        obtain ⟨entry, included, equal⟩ := List.mem_map.mp member
+        exact freshStorage (List.mem_map.mpr ⟨entry, List.mem_of_mem_take included, equal⟩)
+
+theorem BindingMap.Typed.drop (typed : BindingMap.Typed program heap activation bindings context) (count : Nat) :
+    BindingMap.Typed program heap activation (bindings.drop count) (context.drop count) := by
+  induction count generalizing bindings context with
+  | zero => exact typed
+  | succ count ih =>
+    cases typed with
+    | nil => exact .nil
+    | cons found owner declared resident tail freshName freshStorage => exact ih tail
+
+/-- Scope exit releases exactly the leading local bindings. Separation from
+the surviving outer bindings follows from current ownership, not a release-success premise. -/
+theorem BindingMap.Typed.exit_scope (typed : BindingMap.Typed program heap activation bindings context)
+    (count : Nat) :
+    ∃ after, releaseBindings heap (bindings.take count) = some after ∧
+      BindingMap.Typed program after activation (bindings.drop count) (context.drop count) ∧
+      after.next = heap.next ∧
+      (∀ identity ∈ (bindings.take count).map Prod.snd, after.Retired identity) := by
+  apply (typed.take count).release_retained (typed.drop count)
+  intro identity retained released
+  have distinct := typed.addresses_distinct
+  rw [← List.take_append_drop count bindings, List.map_append] at distinct
+  have apart := (List.nodup_append.mp distinct).2.2
+  exact apart identity released identity retained rfl
+
+
 end Grounded

@@ -455,6 +455,12 @@ entry advances the activation supply even for zero arguments. Scope retirement
 constructs the actual release, proves permanent retirement, and preserves a
 disjoint retained caller map. The shared lookup/replacement functions moved
 from `Lexical` to `Model`; their old definitions were removed.
+`BindingMap.Typed.exit_scope` also constructs prefix retirement and preserves
+the surviving outer scope. It derives their address separation from current
+realization, rather than requiring successful cleanup or supplying a retained
+post-state. Its strict dependency check passed (11 jobs), and its axiom closure
+contains only `propext` and `Quot.sound`.
+
 
 `BindingAccess` consumes this realization and the existing `StorageOperations`
 contracts. Checked paths and current availability construct resolved reads and
