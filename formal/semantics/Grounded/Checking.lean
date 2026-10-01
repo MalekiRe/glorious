@@ -243,6 +243,7 @@ structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Pro
 
 structure Program.Checked (program : Program) : Prop where
   data : program.data.Valid program.target
+  aliases : program.aliases.Valid program.target program.data
   functions : ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
 
 theorem HasTypes.slots {program : Program} {home : Module} {before after : FlowContext}

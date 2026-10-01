@@ -35,8 +35,8 @@ ConfigurationTyped program final (.one type) state ∧
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
-checks nominal layout and manual-principal validity, function-interface layouts,
-and each function body against its interface. It contains no termination,
+checks nominal layout and manual-principal validity, alias expansion and layout,
+function-interface layouts, and each body against its interface. It contains no termination,
 future-state readiness or execution-success premise. Recursive calls are therefore
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
@@ -2620,4 +2620,34 @@ indirection-aware recursive representation and capability fixed points remain
 open. This does not establish byte sizes, alignment, physical allocation,
 source data-declaration elaboration or whole-language soundness. The 15 broad
 completion tasks remain open.
+
+
+## Declaration-wide alias validation and expansion correctness
+
+The pre-repair admission contract still accepted arbitrary alias tables when
+functions were absent and nominal declarations valid. Alias checks ran only
+when a type use requested expansion. A general Lean proof reproduced this
+unused-declaration bypass before the repair.
+
+`Aliases.Valid` now requires every declared body to resolve through the existing
+`ResolvesType` relation to a finite-layout type. `NamedProgramAdmitted` and
+`Program.Checked.aliases` consume this contract; no alternate expander or
+runtime-success assumption was introduced.
+
+`ResolvesType.alias_dependencies` derives declaration existence and
+well-founded alias dependencies from actual expansion derivations, including
+references nested in tuples and arrays. `ResolvesType.no_alias_cycle` excludes
+arbitrary nonempty dependency cycles. Public source admission now derives
+`alias_resolution` (existence, finite layout and uniqueness), `no_alias_cycle`
+and `no_unresolved_alias` for every declared alias, used or unused.
+
+Verification: `lake build Grounded` passed all 30 jobs. Exhaustive axiom
+inspection covered 4,029 declarations; only standard Lean axioms occurred.
+The two expansion/dependency theorems themselves require no axioms. Source
+alias consumers and general preservation/progress and source-function soundness
+were inspected explicitly. No unit tests or concrete examples were added.
+
+This covers the current decoded nongeneric alias model. Generic substitution,
+alias-qualified trait coherence, namespace/visibility resolution for source type
+names, and the remaining whole-language obligations remain open.
 

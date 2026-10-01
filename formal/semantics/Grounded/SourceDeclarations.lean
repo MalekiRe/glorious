@@ -83,13 +83,14 @@ def NamedProgramAdmitted (names : Module → FunctionName → Option Nat)
     (source : List NamedFunction) (program : Program) : Prop :=
   (source.map fun declaration => (declaration.home, declaration.name)).Nodup ∧ ∃ core,
     NamedFunctionsElaborate program names source core ∧
-    program.functions = (fun identity => core[identity]?) ∧ program.data.Valid program.target
+    program.functions = (fun identity => core[identity]?) ∧ program.data.Valid program.target ∧
+      program.aliases.Valid program.target program.data
 
 theorem NamedProgramAdmitted.checked {names : Module → FunctionName → Option Nat}
     {source : List NamedFunction} {program : Program}
     (admitted : NamedProgramAdmitted names source program) : program.Checked := by
-  obtain ⟨_, core, elaborated, functions, data⟩ := admitted
-  refine ⟨data, ?_⟩
+  obtain ⟨_, core, elaborated, functions, data, aliases⟩ := admitted
+  refine ⟨data, aliases, ?_⟩
   intro identity declaration selected
   rw [functions] at selected
   exact elaborated.checked declaration (List.mem_of_getElem? selected)

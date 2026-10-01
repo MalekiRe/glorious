@@ -221,6 +221,67 @@ structure DataDeclarations.Valid (data : DataDeclarations) (target : Target) : P
   layouts : ∀ identity declaration, data identity = some declaration →
     FiniteLayout target data (.nominal identity)
 
+/-- Syntactic alias references whose expansion is required by a decoded type. -/
+inductive TypeExpr.MentionsAlias (name : String) : TypeExpr → Prop where
+  | alias : TypeExpr.MentionsAlias name (.alias name)
+  | tupleHead {head : TypeExpr} {tail : List TypeExpr} (mentioned : TypeExpr.MentionsAlias name head) :
+      TypeExpr.MentionsAlias name (.tuple head tail)
+  | tupleTail {head : TypeExpr} {tail : List TypeExpr} {source : TypeExpr}
+      (member : source ∈ tail) (mentioned : TypeExpr.MentionsAlias name source) :
+      TypeExpr.MentionsAlias name (.tuple head tail)
+  | array {element : TypeExpr} {length : Nat} (mentioned : TypeExpr.MentionsAlias name element) :
+      TypeExpr.MentionsAlias name (.array element length)
+
+inductive AliasDependency (aliases : Aliases) : String → String → Prop where
+  | intro {parent child : String} {body : TypeExpr} (declared : aliases parent = some body)
+      (mentioned : body.MentionsAlias child) : AliasDependency aliases child parent
+
+/-- The actual expansion derivation supplies declaration existence and
+well-foundedness for every alias reference; no second expander is involved. -/
+theorem ResolvesType.alias_dependencies {aliases : Aliases} {source : TypeExpr} {type : Ty}
+    (resolved : ResolvesType aliases source type) :
+    ∀ name, source.MentionsAlias name → (∃ body, aliases name = some body) ∧ Acc (AliasDependency aliases) name := by
+  induction resolved using ResolvesType.rec
+    (motive_2 := fun sources _ _ => ∀ source ∈ sources, ∀ name, source.MentionsAlias name →
+      (∃ body, aliases name = some body) ∧ Acc (AliasDependency aliases) name) with
+  | concrete => intro name mentioned; cases mentioned
+  | alias declared expanded ih =>
+    intro name mentioned
+    cases mentioned
+    refine ⟨⟨_, declared⟩, .intro _ ?_⟩
+    intro child edge
+    cases edge with
+    | intro found reference =>
+      cases Option.some.inj (found.symm.trans declared)
+      exact (ih child reference).2
+  | tuple first rest firstIH restIH =>
+    intro name mentioned
+    cases mentioned with
+    | tupleHead reference => exact firstIH name reference
+    | tupleTail member reference => exact restIH _ member name reference
+  | array length element ih =>
+    intro name mentioned
+    cases mentioned with
+    | array reference => exact ih name reference
+  | nil => rename_i source member name mentioned; cases member
+  | cons head tail headIH tailIH =>
+    rename_i source member name mentioned
+    cases member with
+    | head => exact headIH name mentioned
+    | tail _ member => exact tailIH source member name mentioned
+
+theorem ResolvesType.no_alias_cycle {aliases : Aliases} {name : String} {type : Ty}
+    (resolved : ResolvesType aliases (.alias name) type) :
+    ¬ Relation.TransGen (AliasDependency aliases) name name :=
+  accessible_not_cycle (resolved.alias_dependencies name .alias).2
+
+/-- Validate every alias body, including unused declarations, with the same
+finite expansion and layout judgments consumed by source type elaboration. -/
+def Aliases.Valid (aliases : Aliases) (target : Target) (data : DataDeclarations) : Prop :=
+  ∀ name body, aliases name = some body →
+    ∃ type, ResolvesType aliases body type ∧ FiniteLayout target data type
+
+
 
 
 

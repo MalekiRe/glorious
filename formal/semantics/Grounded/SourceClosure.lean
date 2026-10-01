@@ -603,6 +603,35 @@ theorem SourceClosure.Admitted.no_interface_inline_cycle {packages : List Packag
   exact ⟨fun parameter member => (layouts.1 parameter member).no_inline_cycle, layouts.2.no_inline_cycle⟩
 
 
+/-- Every admitted alias, including an unused one, resolves to one finite type. -/
+theorem SourceClosure.Admitted.alias_resolution {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {name : String} {body : TypeExpr} (declared : program.aliases name = some body) :
+    ∃ type, ResolvesType program.aliases (.alias name) type ∧ FiniteLayout program.target program.data type ∧
+      ∀ other, ResolvesType program.aliases (.alias name) other → other = type := by
+  obtain ⟨type, expanded, finite⟩ := admitted.checked.aliases name body declared
+  have resolved := ResolvesType.alias declared expanded
+  exact ⟨type, resolved, finite, resolved.unique⟩
+
+theorem SourceClosure.Admitted.no_alias_cycle {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {name : String} {body : TypeExpr} (declared : program.aliases name = some body) :
+    ¬ Relation.TransGen (AliasDependency program.aliases) name name := by
+  obtain ⟨type, resolved, _⟩ := admitted.alias_resolution declared
+  exact resolved.no_alias_cycle
+
+/-- Missing references in a declared alias body are rejected even when no
+function uses the alias. References nested inside tuples and arrays are covered. -/
+theorem SourceClosure.Admitted.no_unresolved_alias {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {name reference : String} {body : TypeExpr} (declared : program.aliases name = some body)
+    (mentioned : body.MentionsAlias reference) (missing : program.aliases reference = none) : False := by
+  obtain ⟨type, expanded, _⟩ := admitted.checked.aliases name body declared
+  obtain ⟨definition, found⟩ := (expanded.alias_dependencies reference mentioned).1
+  rw [missing] at found
+  cases found
+
+
 /-- Import-path authorization comes from actual source admission over the
 complete elaborated import product, not an independently supplied namespace. -/
 theorem SourceClosure.Admitted.source_import_access {packages : List PackageSource}
