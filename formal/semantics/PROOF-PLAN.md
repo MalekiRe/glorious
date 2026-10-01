@@ -1529,3 +1529,21 @@ other namespaces, prelude profiles, frontend spans/UTF-8 and whole-language
 completion remain open. Source parsing still has to supply omitted-visibility
 defaults and reject invalid restricted-visibility syntax.
 
+
+
+## Verified enclosing-module visibility for arbitrary descendant calls
+
+`ModuleReachable.ancestor` proves accessibility of every enclosing module
+from accessibility of a descendant. The public call theorem is strengthened
+from an immediate-child equality to an arbitrary same-package path prefix:
+`SourceClosure.Admitted.call_ancestor_visibility` derives each enclosing
+binding's declared permission from actual source call elaboration. Deeper public
+children cannot bypass a private or restricted ancestor. The superseded
+`call_child_visibility` theorem is removed, not retained as an alias.
+
+Strict `lake build Grounded` passed. The imported audit covered 3,417
+`Grounded` declarations with only standard Lean axioms; ancestor accessibility,
+the strengthened call theorem and general function soundness received explicit
+axiom inspection. No examples or tests were added. Textual path elaboration and
+the other previously recorded whole-language obligations remain open.
+

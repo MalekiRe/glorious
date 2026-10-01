@@ -672,21 +672,68 @@ theorem SourceClosure.Admitted.child_visibility {packages : List PackageSource}
     cases declarationSame
     exact allowed
 
-theorem SourceClosure.Admitted.call_child_visibility {packages : List PackageSource}
+private theorem prefix_snoc {α : Type} {first second : List α} {last : α}
+    (initial : first.IsPrefix (second ++ [last])) : first.IsPrefix second ∨ first = second ++ [last] := by
+  induction second generalizing first with
+  | nil =>
+    cases first with
+    | nil => exact .inl ⟨[], rfl⟩
+    | cons head rest =>
+      obtain ⟨suffix, same⟩ := initial
+      have parts : head = last ∧ rest = [] ∧ suffix = [] := by simpa using same
+      obtain ⟨rfl, rfl, _⟩ := parts
+      exact .inr rfl
+  | cons head rest ih =>
+    cases first with
+    | nil => exact .inl ⟨head :: rest, rfl⟩
+    | cons first tail =>
+      obtain ⟨suffix, same⟩ := initial
+      change first :: (tail ++ suffix) = head :: (rest ++ [last]) at same
+      obtain ⟨rfl, remaining⟩ := List.cons.inj same
+      rcases ih ⟨suffix, remaining⟩ with shorter | equal
+      · obtain ⟨suffix, same⟩ := shorter
+        exact .inl ⟨suffix, congrArg (List.cons first) same⟩
+      · exact .inr (congrArg (List.cons first) equal)
+
+/-- Accessibility of a descendant retains accessibility of every enclosing
+module. A longer qualifier cannot skip a hidden binding. -/
+theorem ModuleReachable.ancestor {modules : List LoadedModule} {caller target : Module}
+    (reachable : ModuleReachable modules caller target) {ancestor : Module}
+    (packageSame : ancestor.package = target.package) (enclosing : ancestor.path.IsPrefix target.path) :
+    ModuleReachable modules caller ancestor := by
+  induction reachable with
+  | root included =>
+    obtain ⟨suffix, same⟩ := enclosing
+    have parts : ancestor.path = [] ∧ suffix = [] := by simpa using same
+    change ModuleReachable modules caller ⟨ancestor.package, ancestor.path⟩
+    rw [parts.1, packageSame]
+    exact .root included
+  | @child parent name visibility body included reachable declared allowed ih =>
+    rcases prefix_snoc enclosing with shorter | equal
+    · exact ih packageSame shorter
+    · have same : ancestor = parent.home.child name := by
+        change Module.mk ancestor.package ancestor.path = Module.mk (parent.home.child name).package (parent.home.child name).path
+        rw [packageSame, equal]
+        rfl
+      rw [same]
+      exact .child included reachable declared allowed
+
+
+theorem SourceClosure.Admitted.call_ancestor_visibility {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {parent : LoadedModule} (included : parent ∈ closure.modules)
     {child : Identifier} {visibility : Visibility} {body : Option ModuleSource}
     (declared : (child, visibility, body) ∈ parent.source.children)
     {home : Module} {scope : SourceScope} {before after : FlowContext}
     {name : FunctionName} {arguments : List NamedExpr} {core : Expr} {type : Ty}
-    (target : name.owner home = parent.home.child child)
+    (packageSame : parent.home.package = (name.owner home).package)
+    (enclosing : (parent.home.child child).path.IsPrefix (name.owner home).path)
     (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
       (.call name arguments) core type after) : visibility.Allows parent.home home := by
   cases elaborated with
   | call _ selected _ _ _ =>
     have reachable := (closure.functionNames_selected.mp selected).2.1
-    rw [target] at reachable
-    exact admitted.child_visibility included declared reachable
+    exact admitted.child_visibility included declared (reachable.ancestor packageSame enclosing)
 
 
 end Grounded
