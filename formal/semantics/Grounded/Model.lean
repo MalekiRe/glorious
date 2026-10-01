@@ -200,4 +200,16 @@ structure Program where
   data : DataDeclarations
   functions : Nat → Option FunctionDecl
 
+/-- Resolve an already-selected lexical identity; independent of its payload. -/
+def lookup {α : Type} (name : BindingId) : List (BindingId × α) → Option α
+  | [] => none
+  | (key, value) :: rest => if name = key then some value else lookup name rest
+
+/-- Replace the selected lexical payload without changing binding identities. -/
+def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId × α) → Option (List (BindingId × α))
+  | [] => none
+  | (key, old) :: rest =>
+      if key = name then some ((key, value) :: rest)
+      else ((key, old) :: ·) <$> replaceBinding name value rest
+
 end Grounded

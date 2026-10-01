@@ -4,11 +4,6 @@ import Grounded.Values
 and compositional scope framing. No physical allocation or loan model. -/
 namespace Grounded
 
-/-- Resolve an already-selected binding identity in the current lexical environment. -/
-def lookup {α : Type} (name : BindingId) : List (BindingId × α) → Option α
-  | [] => none
-  | (key, value) :: rest => if name = key then some value else lookup name rest
-
 inductive EnvironmentTyped (program : Program) : List (BindingId × Value) → List (BindingId × BindingType) → Prop where
   | nil : EnvironmentTyped program [] []
   | cons {name : BindingId} {value : Value} {type : BindingType}
@@ -63,13 +58,6 @@ theorem EnvironmentTyped.length {environment : List (BindingId × Value)} {conte
   | nil => rfl
   | cons _ _ _ ih => exact congrArg Nat.succ ih
 
-
-/-- Replace the nearest lexical binding; an absent destination is rejected. -/
-def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId × α) → Option (List (BindingId × α))
-  | [] => none
-  | (key, old) :: rest =>
-      if key = name then some ((key, value) :: rest)
-      else ((key, old) :: ·) <$> replaceBinding name value rest
 
 theorem replaceBinding.lookup_after {α : Type} {name : BindingId} {value : α}
     {before after : List (BindingId × α)} (written : replaceBinding name value before = some after) :

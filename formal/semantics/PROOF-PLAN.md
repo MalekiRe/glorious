@@ -66,12 +66,14 @@ loans, resolved storage identities and physical memory remain outside it.
 
 | Module | Authoritative responsibility |
 | --- | --- |
-| `Model` | Decoded vocabulary and declarations; no checking/execution certificates |
+| `Model` | Decoded vocabulary, declarations and identity-indexed lookup/replacement; no checking/execution certificates |
 | `Types` | Alias resolution, finite layout and duplicability |
 | `Values` | Structural value equality, resident typing and indexed access |
-| `Lexical` | Binding lookup, lexical realization, replacement and immutable framing |
+| `Lexical` | Existing value-environment realization, replacement proofs and immutable framing; pending addressed-store migration |
 | `Projections` | Shared field/path authority and value selection/replacement, independent of lexical storage |
 | `Places` | Rooted lexical place contracts and actual reads/writes |
+| `BindingStorage` | Addressed binding realization, actual allocation/activation entry, scope extension and retirement |
+| `BindingAccess` | Resolved address reads, moves and restoration through shared path/heap operations |
 | `Matching` | Runtime matching, subject interpretation and first-arm selection |
 | `Patterns` | Pattern typing, coverage/usefulness and constructive binding/selection proofs |
 | `Checking` | Expression, argument and arm admission |
@@ -443,6 +445,38 @@ that producer. Removing the former `PartialFields → Places → Lexical`
 dependency allows addressed lexical storage to consume `StorageOperations`
 without an import cycle. No projection rules or guarantees changed; the
 source-declaration and storage-operation closures check together (24 jobs).
+
+`BindingStorage` now connects lexical IDs to allocated storage IDs. Its
+realization records each cell’s activation, declared type and initialization
+state; it stores no duplicate resident. Ordered input allocation constructs
+that realization and preserves existing live bindings. Scope extension derives
+address separation from allocation bounds and pre-state liveness. Invocation
+entry advances the activation supply even for zero arguments. Scope retirement
+constructs the actual release, proves permanent retirement, and preserves a
+disjoint retained caller map. The shared lookup/replacement functions moved
+from `Lexical` to `Model`; their old definitions were removed.
+
+`BindingAccess` consumes this realization and the existing `StorageOperations`
+contracts. Checked paths and current availability construct resolved reads and
+moves. Moves update both the resident and the static initialization state,
+preserve the binding map, and reject an immediate second move. Restoration
+updates the same cell and its checking state, with exact readback and framing
+of all other addresses. These operations are storage mechanisms, not permission
+to bypass language ownership or destruction.
+
+The composed binding-access/source-declaration gate passed (26 jobs); subsequent
+scope-extension checking passed its 11-job dependency closure. An axiom audit
+of both closures inspected 2,826 declarations and found only standard Lean
+axioms. The new allocation, scope-extension and access results use only
+`propext` and `Quot.sound`. No examples or unit tests were added or run.
+
+Required consumer cutover remains: `Execution` must replace its value-bearing
+environments with address maps over one shared heap; restoration frames must
+retain caller maps and activation IDs, not heap snapshots. Its continuation
+realization must preserve retained-cell liveness and separation through every
+actual transition. Checking and source admission must then consume the same
+outgoing availability states. The binding modules alone do not complete this
+boundary or establish source-level move soundness.
 
 These storage results are not language-level permission to discard residents,
 bypass ownership/loans, or execute unchecked projections. The expression
