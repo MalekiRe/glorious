@@ -1037,4 +1037,56 @@ theorem SourceClosure.call_dependency_spelling {packages : List PackageSource} {
     exact reachable
 
 
+/-- A source import constructs its unique callable declaration before argument
+checking. Every typed execution prefix of that call then satisfies general
+preservation, progress and storage framing. No successful lookup is an input. -/
+theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : FunctionImportSyntax} (sourceIncluded : source ∈ loaded.source.imports)
+    {target : Module} (path : source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target)
+    {edge : FunctionImport} (emitted : ImportSelection.Emits loaded.home source.visibility target source.selection (.binding edge))
+    {sourceName localName : Identifier} (kind : edge.kind = .explicit sourceName localName)
+    {caller : Module} {name : FunctionName}
+    (namespaceResolved : sourceNamespace packages caller name = some edge.home)
+    (spelling : name.spelling = localName)
+    (access : PackageAccess packages caller.package edge.home.package)
+    (reachable : ModuleReachable closure.modules caller edge.home)
+    (bindingVisible : edge.visibility.Allows edge.home caller) :
+    ∃ identity declaration, closure.functionNames caller name = some identity ∧
+      program.functions identity = some declaration ∧
+      ∀ {scope : SourceScope} {before after : FlowContext} {arguments : List NamedExpr} {inputs : List Expr},
+        name.Unshadowed scope → declaration.visibility.Allows declaration.home caller →
+        NamedExprsElaborate program closure.functionNames caller scope before arguments inputs
+          (declaration.parameters.map fun parameter => parameter.2.type) after →
+        before.slots = scope.context →
+        ∀ {environment : Environment},
+          BindingMap.Typed program environment.heap environment.activation environment.bindings before →
+          environment.supply.Issued environment.activation →
+          ∀ {state : Configuration}, Run program ⟨environment, .expression (.call identity inputs), []⟩ state →
+            ConfigurationTyped program after (.one declaration.result) state ∧
+              (Terminal state ∨ ∃ next, Step program state next) ∧
+              AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
+              (state.environment.bindings.map Prod.fst).Nodup := by
+  have entryMember := closure.import_emitted included sourceIncluded path emitted
+  have member : edge ∈ closure.imports :=
+    List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
+  have valid := admitted.2.2.2.1
+  obtain ⟨identity, candidate⟩ := valid.explicit_binding member kind
+  have selectedBinding := valid.resolve_existing (valid.2.2.1 edge member).1
+    ⟨edge.visibility, candidate, bindingVisible⟩
+  have selected : closure.functionNames caller name = some identity := by
+    apply closure.functionNames_selected.mpr
+    refine ⟨edge.home, namespaceResolved, access, reachable, ?_⟩
+    rw [spelling]
+    exact Grounded.functionNames.selected_iff.mp selectedBinding
+  obtain ⟨_, declaration, _, declared, _⟩ := admitted.resolves selected
+  refine ⟨identity, declaration, selected, declared, ?_⟩
+  intro scope before after arguments inputs unshadowed visible argumentsTyped slots environment store issued state run
+  have elaborated : NamedExpr.Elaborates program closure.functionNames caller scope before
+      (.call name arguments) (.call identity inputs) declaration.result after :=
+    .call unshadowed selected declared visible argumentsTyped
+  exact admitted.soundness elaborated slots store issued run
+
+
 end Grounded

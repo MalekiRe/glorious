@@ -439,7 +439,7 @@ def FunctionImportsValid (modules : List Module) (sources : List NamedFunction)
   (∀ declaration ∈ sources, declaration.home ∈ modules) ∧
   (∀ edge ∈ imports, edge.home ∈ modules ∧ edge.target ∈ modules ∧
     ∀ sourceName localName, edge.kind = .explicit sourceName localName →
-      ∃ identity, functionNames sources imports edge.home edge.target sourceName = some identity) ∧
+      ∃ identity, VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity) ∧
   (∀ caller home, home ∈ modules → ∀ name first second,
     VisibleFunctionCandidate sources imports caller home name first →
     VisibleFunctionCandidate sources imports caller home name second → first = second)
@@ -455,10 +455,21 @@ theorem FunctionImportsValid.resolve_existing {modules : List Module} {sources :
   exact ⟨candidate, fun other found => valid.2.2.2 caller home included name other identity found candidate⟩
 
 
+/-- Explicit bindings are constructed from finite, declaration-seeded provenance.
+The input contract does not contain a completed resolver result. -/
+theorem FunctionImportsValid.explicit_binding {modules : List Module} {sources : List NamedFunction}
+    {imports : List FunctionImport} (valid : FunctionImportsValid modules sources imports)
+    {edge : FunctionImport} (member : edge ∈ imports) {sourceName localName : Identifier}
+    (kind : edge.kind = .explicit sourceName localName) :
+    ∃ identity, FunctionCandidate sources imports edge.home localName identity edge.visibility := by
+  obtain ⟨identity, visibility, candidate, accessible⟩ := (valid.2.2.1 edge member).2.2 sourceName localName kind
+  exact ⟨identity, .imported member (.explicit kind) candidate accessible⟩
+
+
 theorem FunctionImportsValid.imports_congr {modules : List Module} {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second) :
     FunctionImportsValid modules sources first ↔ FunctionImportsValid modules sources second := by
-  simp only [FunctionImportsValid, same, functionNames.imports_congr same,
+  simp only [FunctionImportsValid, same,
     VisibleFunctionCandidate, FunctionCandidate.imports_congr same]
 
 

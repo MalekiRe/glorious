@@ -1679,3 +1679,41 @@ family imports, inherent namespaces, unanchored qualifier disambiguation, prelud
 or parsing. Those source boundaries and the previously tracked ownership,
 effects, raw-memory, foreign/ABI and whole-language obligations remain open.
 
+
+## Verified imported-call construction from finite source provenance
+
+Explicit-import admission in `FunctionImportsValid` now requires finite,
+declaration-seeded visible-candidate derivations, not a supplied successful
+`functionNames` result. Namespace membership and global unique-identity
+requirements are unchanged. The actual resolver derives its result from these
+facts; unresolved cycles have no declaration seed, and conflicting candidates
+still violate uniqueness. No second resolver or alternate import table exists.
+
+`SourceClosure.Admitted.imported_call_soundness` consumes an actual import
+statement in an included module and one of its source-rule-emitted explicit
+bindings, including arbitrarily nested groups. It constructs a unique callable
+identity and the actual admitted core declaration **before** quantifying over
+arguments. It then constructs call elaboration and derives general configuration
+typing, terminal-or-step progress, storage consumption framing and environment
+binding uniqueness for every typed execution prefix. The caller supplies static
+namespace access, binding/declaration visibility and argument typing, plus the
+current typed store and activation issuance; no successful callable lookup,
+completed execution or future-state readiness is a premise.
+
+The constructed declaration comes from the existing exact source-declaration
+product. Visibility and dependency checks remain distinct: exposing a binding
+does not erase the original declaration's visibility. Source-level lexical
+shadowing remains checked before call elaboration. General source/function
+soundness, finite-call correctness and file-order admission invariance consume
+the migrated admission contract.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,635 `Grounded` declarations; only `propext`,
+`Quot.sound` and `Classical.choice` occur. Explicit binding construction,
+imported-call soundness, file-order invariance, function soundness and correctness
+received explicit axiom inspection. No unit tests, concrete examples, proof
+placeholders or additional axioms were added.
+
+This closes the constructive explicit-import call boundary, not the outstanding
+module aliases, other namespaces, preludes, parsing or whole-language obligations.
+
