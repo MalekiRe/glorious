@@ -2292,3 +2292,32 @@ branch cleanup, borrowing, nonlocal control, physical allocation or the other
 remaining whole-language boundaries. None of the broad completion tasks is
 claimed complete.
 
+
+## Unified actual Copy and disposal safety through public source soundness
+
+`Configuration.OwnershipSafe` now covers actual storage reads as well as all
+modeled disposal sites. `BindingMap.Typed.copy_safe` constructs the real read
+result and its Copy permission from the existing addressed-read producer and
+checked field path. No second resource analysis or future execution assumption
+is introduced.
+
+`HasType.no_noncopyable_read` proves that an actual read transition after a
+checked prefix cannot duplicate an owner whose principal forbids Copy. It covers
+affine and exact restrictions, inherited aggregate restrictions, and alternative
+valid typings of the observed value through the previously proved principal
+invariance theorem.
+
+All expression, pattern, declaration, supplied-package, imported-call and prelude
+soundness consumers now export the unified ownership predicate. The old
+cleanup-only predicate and proof names were migrated rather than retained as
+aliases. Existing actual retirement, descendant protection, replacement and
+direct-discard proofs consume the same strengthened public contract.
+
+`lake build Grounded` passed all 30 jobs. Exhaustive imported axiom inspection
+covered 3,813 declarations and found only standard Lean axioms. The Copy producer,
+general ownership invariant, actual-read exclusion, preservation, progress and
+public source-function soundness received explicit axiom inspection. No unit
+tests or concrete example files were added. Full-language completion remains
+open, including custom destruction, correlated branches, borrowing and the other
+tracked boundaries.
+
