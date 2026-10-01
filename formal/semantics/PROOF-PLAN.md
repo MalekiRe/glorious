@@ -110,9 +110,9 @@ The new public theorem is `SourceArmsChecked.correctness`:
 
 | Fact | Producer | Consumer |
 | --- | --- | --- |
-| Constant value | Existing `closed_correctness`, from ordinary constant typing | `SourcePattern.Checked.normalize` and `normalizes` |
+| Constant value | Existing `closed_correctness`, from ordinary constant typing | Certified `SourcePattern.Checked.normalize` result |
 | Unique constant type and value | `ResolvesType.unique` and existing evaluation uniqueness | `NormalizesPattern.unique`, then `NormalizesArms.unique` |
-| Ordered normalized patterns and unchanged bodies | `SourceArmsChecked.normalize` and `normalizes` | Ordinary `Covers` / `ArmsType`, then `SourceArmsChecked.correctness` |
+| Ordered normalized patterns and unchanged bodies | Certified `SourceArmsChecked.normalize` result | Ordinary `Covers` / `ArmsType`, then `SourceArmsChecked.correctness` |
 | Actual selected-body execution | `Covers.selectArm`, `PatternType.bindings`, general correctness | The source application theorem |
 
 Normalization uses standard `Classical.choice` to extract a value whose
@@ -352,4 +352,29 @@ proved constant normal form and its source consumer. No tests, examples,
 custom axioms, assumed execution bridges or unfinished proof declarations were
 introduced. This remains a fully initialized logical-storage fragment, not a
 proof of move/hole, borrowing, cleanup, machine or whole-language correctness.
+
+
+## Certified normalization reduction
+
+Pattern, pattern-list and arm-list normalization now return a subtype containing
+both the normalized value and its existing normalization proof. Consumers use
+`.val` and `.property`; the three separate recursive `normalizes` traversals
+were removed without compatibility wrappers. The normalization relations and
+their uniqueness proofs are unchanged. Choice still extracts only already-proved
+constant values; no new admission premise or axiom was introduced.
+
+`SourceArmsChecked.correctness` consumes the certified arm list directly and
+retains actual execution, result/store typing, immutable framing and uniqueness
+of both result and successor store. Strict `lake build` passed. A general
+stdin proof checked equality with every result satisfying the original
+normalization relation and transported the complete public execution guarantee
+to that result. The exhaustive module audit checked 1,579 declarations; only
+`propext`, `Quot.sound` and `Classical.choice` occur. The removed traversal
+names are absent from the loaded environment. No test or proof scaffold remains.
+
+`SourcePatterns.lean` decreased from 199 to 188 lines; the six Lean files total
+1,751 lines, down from 1,762 (including comments and blank lines). The optional
+preservation-record wrapper was not added: it would introduce constructors and
+transport methods without removing the existing case-proof structure. Semantic
+coverage and the next move/initialization-state obligation are unchanged.
 

@@ -96,36 +96,28 @@ theorem NormalizesPattern.unique {source : SourcePattern} {pattern : Pattern}
 
 noncomputable section
 mutual
-/-- Choice extracts a proved normal form; this defines semantics, not an algorithm. -/
+/-- Construct the normal form and its certificate together; only constants use choice. -/
 def SourcePattern.Checked.normalize {source : SourcePattern}
-    (checked : SourcePattern.Checked program home source) : Pattern :=
-  match checked with
-  | .wildcard => .wildcard
-  | .binder name => .binder name
-  | .node (head := head) fields => .node head fields.normalize
-  | .constant type typed => .literal (some type) (Classical.choose (closed_correctness typed))
-def SourcePatternsChecked.normalize {sources : List SourcePattern}
-    (checked : SourcePatternsChecked program home sources) : List Pattern :=
-  match checked with
-  | .nil => []
-  | .cons first rest => first.normalize :: rest.normalize
-end
-
-mutual
-theorem SourcePattern.Checked.normalizes {source : SourcePattern}
     (checked : SourcePattern.Checked program home source) :
-    NormalizesPattern program home source checked.normalize := by
-  cases checked with
-  | wildcard => exact .wildcard
-  | binder name => exact .binder name
-  | node fields => exact .node fields.normalizes
-  | constant type typed => exact .constant typed (Classical.choose_spec (closed_correctness typed)).1
-theorem SourcePatternsChecked.normalizes {sources : List SourcePattern}
+    {pattern // NormalizesPattern program home source pattern} :=
+  match checked with
+  | .wildcard => ⟨.wildcard, .wildcard⟩
+  | .binder name => ⟨.binder name, .binder name⟩
+  | .node (head := head) fields =>
+    let result := fields.normalize
+    ⟨.node head result.val, .node result.property⟩
+  | .constant type typed =>
+    ⟨.literal (some type) (Classical.choose (closed_correctness typed)),
+      .constant typed (Classical.choose_spec (closed_correctness typed)).1⟩
+def SourcePatternsChecked.normalize {sources : List SourcePattern}
     (checked : SourcePatternsChecked program home sources) :
-    NormalizesPatterns program home sources checked.normalize := by
-  cases checked with
-  | nil => exact .nil
-  | cons first rest => exact .cons first.normalizes rest.normalizes
+    {patterns // NormalizesPatterns program home sources patterns} :=
+  match checked with
+  | .nil => ⟨[], .nil⟩
+  | .cons first rest =>
+    let head := first.normalize
+    let tail := rest.normalize
+    ⟨head.val :: tail.val, .cons head.property tail.property⟩
 end
 
 inductive SourceArmsChecked (program : Program) (home : Module) :
@@ -135,12 +127,6 @@ inductive SourceArmsChecked (program : Program) (home : Module) :
       (checked : SourcePattern.Checked program home pattern)
       (tail : SourceArmsChecked program home rest) :
       SourceArmsChecked program home ((pattern, body) :: rest)
-
-def SourceArmsChecked.normalize {source : List (SourcePattern × Expr)}
-    (checked : SourceArmsChecked program home source) : List (Pattern × Expr) :=
-  match checked with
-  | .nil => []
-  | .cons (body := body) first rest => (first.normalize, body) :: rest.normalize
 
 /-- Arm order and bodies are unchanged by compile-time pattern normalization. -/
 inductive NormalizesArms (program : Program) (home : Module) :
@@ -163,12 +149,15 @@ theorem NormalizesArms.unique {source : List (SourcePattern × Expr)} {arms : Li
     | cons otherFirst otherRest => rw [first.unique _ otherFirst, ih _ otherRest]
 
 
-theorem SourceArmsChecked.normalizes {source : List (SourcePattern × Expr)}
+def SourceArmsChecked.normalize {source : List (SourcePattern × Expr)}
     (checked : SourceArmsChecked program home source) :
-    NormalizesArms program home source checked.normalize := by
-  induction checked with
-  | nil => exact .nil
-  | cons first rest ih => exact .cons first.normalizes ih
+    {arms // NormalizesArms program home source arms} :=
+  match checked with
+  | .nil => ⟨[], .nil⟩
+  | .cons (body := body) first rest =>
+    let head := first.normalize
+    let tail := rest.normalize
+    ⟨(head.val, body) :: tail.val, .cons head.property tail.property⟩
 
 /-- Source checking → derived normalization → ordinary ordered dispatch →
 unique typed value and successor store. No execution or normalization witness is supplied. -/
@@ -178,21 +167,21 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs)
     (nonempty : source ≠ [])
-    (covered : Covers program [argumentType inputs] (checked.normalize.map (fun arm => [arm.1])))
-    (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize)
+    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val)
     (environmentTyped : EnvironmentTyped program environment context) :
-    NormalizesArms program home source checked.normalize ∧
-      (∀ other, NormalizesArms program home source other → other = checked.normalize) ∧
-      ∃ value after, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) value after ∧
+    NormalizesArms program home source checked.normalize.val ∧
+      (∀ other, NormalizesArms program home source other → other = checked.normalize.val) ∧
+      ∃ value after, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) value after ∧
         ValueHasType program value result ∧ EnvironmentTyped program after context ∧
         EnvironmentFrame context environment after ∧
-        ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize) other otherAfter →
+        ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) other otherAfter →
           other = value ∧ otherAfter = after := by
-  have normalizedNonempty : checked.normalize ≠ [] := by
+  have normalizedNonempty : checked.normalize.val ≠ [] := by
     cases checked with
     | nil => exact False.elim (nonempty rfl)
     | cons first rest => simp [SourceArmsChecked.normalize]
-  exact ⟨checked.normalizes, checked.normalizes.unique,
+  exact ⟨checked.normalize.property, checked.normalize.property.unique,
     Grounded.correctness (.applyPatterns argumentsTyped normalizedNonempty covered bodies) environmentTyped⟩
 
 end
