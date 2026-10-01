@@ -627,6 +627,20 @@ derives its initialization masks from those slots, while the current lexical
 consumer directly projects the typed inputs. The 26-job source gate and
 imported-declaration axiom audit passed after migrating both consumers.
 
+Retained-caller contracts now preserve exact heap cells, not merely their
+typing. Actual allocation, moves, writes, lexical exit and caller restoration
+derive equality of every retained address lookup from allocation bounds,
+ownership separation and the actual write/retirement operation. The same
+equality establishes retained typing; it is not supplied as a future-state
+premise. Scope exit also preserves all surviving local cells. Ordinary and
+pattern source-entry consumers carry this stronger result.
+`BindingMap.read.frame` transports every projected read through exact cell
+framing, including failed reads. Source-facing restoration consumes it to
+prove that every restored caller read equals its pre-restoration observation.
+The 26-job source gate and imported-declaration axiom audit passed. This
+closes retained-value framing for these addressed operations, but not the
+expression-machine and continuation consumer cutover below.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

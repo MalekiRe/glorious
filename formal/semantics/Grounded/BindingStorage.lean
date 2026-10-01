@@ -126,13 +126,15 @@ theorem BindingMap.Typed.frame_other_activation
     {identity : StorageId} {cell : StorageCell} (found : heap.read identity = some cell)
     (different : activation ≠ cell.activation)
     (unchanged : ∀ other, other ≠ identity → after.read other = heap.read other) :
-    BindingMap.Typed program after activation bindings context := by
-  apply typed.frame
-  intro other member
-  apply unchanged other
-  intro same
-  subst other
-  exact different (typed.owns member found).symm
+    BindingMap.Typed program after activation bindings context ∧
+      (∀ other ∈ bindings.map Prod.snd, after.read other = heap.read other) := by
+  have preserved : ∀ other ∈ bindings.map Prod.snd, after.read other = heap.read other := by
+    intro other member
+    apply unchanged other
+    intro same
+    subst other
+    exact different (typed.owns member found).symm
+  exact ⟨typed.frame preserved, preserved⟩
 
 theorem allocateBindings.old (heap : RuntimeHeap StorageCell) (activation : ActivationId)
     (inputs : List BindingInput) {identity : StorageId} (old : identity.index < heap.next) :
@@ -183,13 +185,18 @@ theorem allocateBindings.typed {inputs : List BindingInput} (typed : BindingInpu
 
 /-- Previously live bindings survive allocation, including shared retained
 caller maps. No disjointness assumption about newly allocated addresses is needed. -/
-theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activation bindings context)
+theorem BindingMap.Typed.allocate_preserves (typed : BindingMap.Typed program heap activation bindings context)
     (owner : ActivationId) (inputs : List BindingInput) :
-    BindingMap.Typed program (allocateBindings heap owner inputs).2 activation bindings context := by
-  apply typed.frame
+    ∀ identity ∈ bindings.map Prod.snd,
+      (allocateBindings heap owner inputs).2.read identity = heap.read identity := by
   intro identity member
   obtain ⟨cell, found⟩ := typed.live identity member
   exact allocateBindings.old heap owner inputs (heap.bounded identity cell found)
+
+theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activation bindings context)
+    (owner : ActivationId) (inputs : List BindingInput) :
+    BindingMap.Typed program (allocateBindings heap owner inputs).2 activation bindings context :=
+  typed.frame (typed.allocate_preserves owner inputs)
 
 /-- Scope release retires identities, not lexical names or activation counters. -/
 def releaseBindings (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Option (RuntimeHeap StorageCell) :=
@@ -303,10 +310,11 @@ theorem BindingMap.Typed.release_retained
     ∃ after, releaseBindings heap bindings = some after ∧
       BindingMap.Typed program after caller retained callerContext ∧
       after.next = heap.next ∧
-      (∀ identity ∈ bindings.map Prod.snd, after.Retired identity) := by
+      (∀ identity ∈ bindings.map Prod.snd, after.Retired identity) ∧
+      (∀ identity ∈ retained.map Prod.snd, after.read identity = heap.read identity) := by
   obtain ⟨after, released, next, retired, outside⟩ := typed.release
-  exact ⟨after, released, callerTyped.frame (fun identity member => outside identity (apart identity member)),
-    next, retired⟩
+  have preserved := fun identity member => outside identity (apart identity member)
+  exact ⟨after, released, callerTyped.frame preserved, next, retired, preserved⟩
 
 /-- Retained lexical scope metadata contains no heap or allocation supply. -/
 structure AddressedScope where
@@ -338,11 +346,12 @@ theorem AddressedEnvironment.restore.progress {current : AddressedEnvironment} {
       BindingMap.Typed program after.heap caller.activation caller.bindings callerContext ∧
       after.activation = caller.activation ∧ after.bindings = caller.bindings ∧
       after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
-      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) := by
-  obtain ⟨heap, released, retained, next, retired⟩ :=
+      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
+      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
+  obtain ⟨heap, released, retained, next, retired, preserved⟩ :=
     localTyped.release_retained callerTyped (callerTyped.apart_activations localTyped different)
   exact ⟨{ current with activation := caller.activation, bindings := caller.bindings, heap := heap },
-    by simp [AddressedEnvironment.restore, released], retained, rfl, rfl, rfl, next, retired⟩
+    by simp [AddressedEnvironment.restore, released], retained, rfl, rfl, rfl, next, retired, preserved⟩
 
 /-- Dynamic invocation entry consumes the activation supply, even for an empty
 argument list. Lexical declaration IDs do not determine either dynamic identity. -/
@@ -441,7 +450,8 @@ theorem BindingMap.Typed.exit_scope (typed : BindingMap.Typed program heap activ
     ∃ after, releaseBindings heap (bindings.take count) = some after ∧
       BindingMap.Typed program after activation (bindings.drop count) (context.drop count) ∧
       after.next = heap.next ∧
-      (∀ identity ∈ (bindings.take count).map Prod.snd, after.Retired identity) := by
+      (∀ identity ∈ (bindings.take count).map Prod.snd, after.Retired identity) ∧
+      (∀ identity ∈ (bindings.drop count).map Prod.snd, after.read identity = heap.read identity) := by
   apply (typed.take count).release_retained (typed.drop count)
   intro identity retained released
   have distinct := typed.addresses_distinct
@@ -524,7 +534,8 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
       (∀ previous, supply.Issued previous → entry.supply.Issued previous ∧ previous ≠ entry.activation) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.heap owner caller callerContext ∧
-        ∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) := by
+        (∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) ∧
+        (∀ identity ∈ caller.map Prod.snd, entry.heap.read identity = heap.read identity)) := by
   obtain ⟨inputs, prepared, inputsTyped, slots⟩ := prepareBindings.progress arguments distinct
   refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl,
     supply.allocate_fresh, supply.allocate_issued, ?_, ?_⟩
@@ -536,7 +547,8 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
     exact ⟨ActivationSupply.allocate_preserves issued, ActivationSupply.allocate_distinct issued⟩
   · intro caller callerContext owner callerTyped
     exact ⟨callerTyped.allocate supply.allocate.1 inputs,
-      fun identity member oldMember => callerTyped.allocate_apart supply.allocate.1 inputs identity member identity oldMember rfl⟩
+      (fun identity member oldMember => callerTyped.allocate_apart supply.allocate.1 inputs identity member identity oldMember rfl),
+      callerTyped.allocate_preserves supply.allocate.1 inputs⟩
 
 
 /-- Lexical extension allocates in the existing activation; invocation entry
@@ -556,9 +568,10 @@ theorem AddressedEnvironment.extend.typed {current : AddressedEnvironment}
     (current.extend inputs).activation = current.activation ∧
     (current.extend inputs).supply = current.supply ∧
     (∀ owner bindings states, BindingMap.Typed program current.heap owner bindings states →
-      BindingMap.Typed program (current.extend inputs).heap owner bindings states) := by
+      BindingMap.Typed program (current.extend inputs).heap owner bindings states ∧
+      (∀ identity ∈ bindings.map Prod.snd, (current.extend inputs).heap.read identity = current.heap.read identity)) := by
   exact ⟨allocateBindings.extend inputsTyped typed fresh, rfl, rfl,
-    fun _ _ _ retained => retained.allocate current.activation inputs⟩
+    fun _ _ _ retained => ⟨retained.allocate current.activation inputs, retained.allocate_preserves current.activation inputs⟩⟩
 
 def AddressedEnvironment.exitScope (current : AddressedEnvironment) (count : Nat) :
     Option AddressedEnvironment :=
@@ -576,14 +589,17 @@ theorem AddressedEnvironment.exitScope.progress {current : AddressedEnvironment}
       (∀ identity ∈ (current.bindings.take count).map Prod.snd, after.heap.Retired identity) ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
         caller.activation ≠ current.activation →
-        BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
-  obtain ⟨heap, released, remaining, next, retired⟩ := typed.exit_scope count
+        BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+        (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) ∧
+      (∀ identity ∈ after.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
+  obtain ⟨heap, released, remaining, next, retired, preserved⟩ := typed.exit_scope count
   refine ⟨{ current with bindings := current.bindings.drop count, heap := heap },
-    by simp [AddressedEnvironment.exitScope, released], remaining, rfl, rfl, next, retired, ?_⟩
+    by simp [AddressedEnvironment.exitScope, released], remaining, rfl, rfl, next, retired, ?_, preserved⟩
   intro caller states callerTyped different
-  apply callerTyped.frame
-  intro identity member
-  exact RuntimeHeap.retireMany_outside released
-    (callerTyped.apart_activations (typed.take count) different identity member)
+  have framed : ∀ identity ∈ caller.bindings.map Prod.snd, heap.read identity = current.heap.read identity := by
+    intro identity member
+    exact RuntimeHeap.retireMany_outside released
+      (callerTyped.apart_activations (typed.take count) different identity member)
+  exact ⟨callerTyped.frame framed, framed⟩
 
 end Grounded

@@ -187,7 +187,8 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
       (∀ previous, supply.Issued previous → entry.supply.Issued previous ∧ previous ≠ entry.activation) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
         BindingMap.Typed program entry.heap owner caller callerContext ∧
-        ∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) := by
+        (∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) ∧
+        (∀ identity ∈ caller.map Prod.snd, entry.heap.read identity = heap.read identity)) := by
   have checked := admitted.checked identity declaration declared
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, older, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply

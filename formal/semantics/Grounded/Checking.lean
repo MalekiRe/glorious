@@ -162,7 +162,8 @@ theorem ArmsType.enter {program : Program} {home : Module} {context : List (Bind
       (current.extend inputs).activation = current.activation ∧
       (current.extend inputs).supply = current.supply ∧
       (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
-        caller.Realizes program (current.extend inputs).heap callerContext) := by
+        caller.Realizes program (current.extend inputs).heap callerContext ∧
+        (∀ identity ∈ caller.bindings.map Prod.snd, (current.extend inputs).heap.read identity = current.heap.read identity)) := by
   obtain ⟨inputs, body, selected⟩ := covered.selectArm resident
   obtain ⟨locals, _, _, inputsTyped, slots, disposable, bodyTyped, distinct⟩ := checked.selected resident selected
   have names := congrArg (List.map Prod.fst) slots

@@ -23,6 +23,20 @@ variable {program : Program} {home : Module} {heap : RuntimeHeap StorageCell} {a
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
     {place : Place} {state : BindingState} {type : Ty}
 
+/-- Exact retained cells preserve every projected read, including unsuccessful
+reads. This is independent of the selected path or its source typing. -/
+theorem BindingMap.read.frame {after : RuntimeHeap StorageCell}
+    (unchanged : ∀ identity ∈ bindings.map Prod.snd, after.read identity = heap.read identity) :
+    bindings.read program after place = bindings.read program heap place := by
+  unfold BindingMap.read
+  cases mapped : lookup place.root bindings with
+  | none => rfl
+  | some identity =>
+    have member : identity ∈ bindings.map Prod.snd :=
+      List.mem_map.mpr ⟨(place.root, identity), lookup.mem mapped, rfl⟩
+    change (after.read identity).bind _ = (heap.read identity).bind _
+    rw [unchanged identity member]
+
 theorem BindingMap.read.progress (typed : BindingMap.Typed program heap activation bindings context)
     (resolved : lookup place.root context = some state)
     (checked : PathType program home state.slot.type place.fields type)
@@ -56,7 +70,8 @@ theorem BindingMap.take.progress (typed : BindingMap.Typed program heap activati
       bindings.take program after place = none ∧ after.next = heap.next ∧
       (∀ other, other ≠ identity → after.read other = heap.read other) ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program heap caller.activation caller.bindings states →
-        caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states) := by
+        caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd, after.read identity = heap.read identity)) := by
   obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
   have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
   have selection : state.initialization.selectFields program cell.type place.fields = some selectedState := by
@@ -87,7 +102,8 @@ theorem BindingMap.restore.progress (typed : BindingMap.Typed program heap activ
       (∀ other, other ≠ identity → after.read other = heap.read other) ∧
       (state.initialization.Ready → nextState.Ready) ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program heap caller.activation caller.bindings states →
-        caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states) := by
+        caller.activation ≠ activation → BindingMap.Typed program after caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd, after.read identity = heap.read identity)) := by
   obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
   have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
   obtain ⟨after, updated, nextState, stateWritten, restored, written, updatedTyped,
@@ -138,7 +154,8 @@ theorem AddressedEnvironment.take.progress {current : AddressedEnvironment}
       after.take program place = none ∧ after.scope = current.scope ∧ after.supply = current.supply ∧
       after.heap.next = current.heap.next ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
-        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) := by
   obtain ⟨identity, value, heap, nextState, nextContext, _, stateWritten, replaced,
     taken, resident, afterTyped, noRetake, next, _, retained⟩ :=
     BindingMap.take.progress typed resolved checked selected ready
@@ -159,7 +176,8 @@ theorem AddressedEnvironment.write.progress {current : AddressedEnvironment}
       after.read program place = some value ∧ after.scope = current.scope ∧ after.supply = current.supply ∧
       after.heap.next = current.heap.next ∧ (state.initialization.Ready → nextState.Ready) ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
-        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) := by
   obtain ⟨identity, heap, nextState, nextContext, _, stateWritten, replaced,
     written, afterTyped, readback, next, _, initialized, retained⟩ :=
     BindingMap.restore.progress typed resolved checked resident
@@ -265,7 +283,8 @@ theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
       after.supply = current.supply ∧
       after.heap.next = current.heap.next ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
-        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+        caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+          (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) := by
   have beforeRealized := realized
   have sourceResolved := resolved
   obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
@@ -292,7 +311,8 @@ theorem AddressedEnvironment.Realizes.extend {current : AddressedEnvironment}
     (fresh : (inputs.map BindingInput.name ++ context.map Prod.fst).Nodup) :
     (current.extend inputs).Realizes program ((inputs.map fun input => (input.name, input.slot)) ++ context) ∧
     (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
-      caller.Realizes program (current.extend inputs).heap callerContext) := by
+      caller.Realizes program (current.extend inputs).heap callerContext ∧
+      (∀ identity ∈ caller.bindings.map Prod.snd, (current.extend inputs).heap.read identity = current.heap.read identity)) := by
   obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
   have keys := congrArg (List.map Prod.fst) slots
   simp only [List.map_map, Function.comp_def] at keys
@@ -309,7 +329,8 @@ theorem AddressedEnvironment.Realizes.extend {current : AddressedEnvironment}
     · exact ready entry old
   · intro caller callerContext callerRealized
     obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
-    exact ⟨callerStates, retained _ _ _ callerTyped, callerSlots, callerReady⟩
+    obtain ⟨afterTyped, preserved⟩ := retained _ _ _ callerTyped
+    exact ⟨⟨callerStates, afterTyped, callerSlots, callerReady⟩, preserved⟩
 
 theorem AddressedEnvironment.Realizes.exitScope {current : AddressedEnvironment}
     {context : List (BindingId × BindingType)} (realized : current.Realizes program context) (count : Nat) :
@@ -318,12 +339,14 @@ theorem AddressedEnvironment.Realizes.exitScope {current : AddressedEnvironment}
       after.heap.next = current.heap.next ∧
       (∀ identity ∈ (List.take count current.bindings).map Prod.snd, after.heap.Retired identity) ∧
       (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
-        caller.activation ≠ current.activation → caller.Realizes program after.heap callerContext) := by
+        caller.activation ≠ current.activation → caller.Realizes program after.heap callerContext ∧
+        (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity)) ∧
+      (∀ identity ∈ after.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
   obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
-  obtain ⟨after, exited, afterTyped, activation, supply, next, retired, retained⟩ :=
+  obtain ⟨after, exited, afterTyped, activation, supply, next, retired, retained, preserved⟩ :=
     AddressedEnvironment.exitScope.progress typed count
   refine ⟨after, exited, ⟨⟨states.drop count, afterTyped, ?_, ?_⟩, ?_⟩,
-    activation, supply, next, retired, ?_⟩
+    activation, supply, next, retired, ?_, preserved⟩
   · rw [List.map_drop, slots]
   · intro entry member
     exact ready entry (List.mem_of_mem_drop member)
@@ -331,7 +354,8 @@ theorem AddressedEnvironment.Realizes.exitScope {current : AddressedEnvironment}
     exact issued
   · intro caller callerContext callerRealized different
     obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
-    exact ⟨callerStates, retained _ _ callerTyped different, callerSlots, callerReady⟩
+    obtain ⟨callerAfter, callerPreserved⟩ := retained _ _ callerTyped different
+    exact ⟨⟨callerStates, callerAfter, callerSlots, callerReady⟩, callerPreserved⟩
 
 theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
     {locals context : List (BindingId × BindingType)} {caller : AddressedScope}
@@ -341,10 +365,12 @@ theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
     (different : caller.activation ≠ current.activation) :
     ∃ after, current.restore caller = some after ∧ after.Realizes program context ∧
       after.scope = caller ∧ after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
-      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) := by
+      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
+      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
+      (∀ place, after.read program place = caller.bindings.read program current.heap place) := by
   obtain ⟨⟨states, typed, _, _⟩, _⟩ := realized
   obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
-  obtain ⟨after, restored, afterTyped, activation, bindings, supply, next, retired⟩ :=
+  obtain ⟨after, restored, afterTyped, activation, bindings, supply, next, retired, preserved⟩ :=
     AddressedEnvironment.restore.progress typed callerTyped different
   have realizedAfter : after.Realizes program context := by
     refine ⟨⟨callerStates, ?_, callerSlots, callerReady⟩, ?_⟩
@@ -353,9 +379,13 @@ theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
       exact afterTyped
     · rw [supply, activation]
       exact callerIssued
-  refine ⟨after, restored, realizedAfter, ?_, supply, next, retired⟩
-  change (⟨after.activation, after.bindings⟩ : AddressedScope) = caller
-  rw [activation, bindings]
+  refine ⟨after, restored, realizedAfter, ?_, supply, next, retired, preserved, ?_⟩
+  · change (⟨after.activation, after.bindings⟩ : AddressedScope) = caller
+    rw [activation, bindings]
+  · intro place
+    change after.bindings.read program after.heap place = _
+    rw [bindings]
+    exact BindingMap.read.frame preserved
 
 
 end Grounded
