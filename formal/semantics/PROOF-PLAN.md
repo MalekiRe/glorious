@@ -533,6 +533,22 @@ initialized-fragment preservation obligation needed by the machine cutover
 without assuming a ready successor. The combined binding-access/source gate
 passed (26 jobs), and the combined axiom audit found only standard Lean axioms.
 
+Addressed entry now returns an `AddressedEnvironment` with named activation,
+supply, binding-map and shared-heap fields instead of a nested tuple.
+`enterBindings`, `enterFunction` and the source-admitted entry theorem have
+all migrated to this product. `AddressedScope` retains only the activation
+and binding map, never a heap snapshot or saved supply.
+
+`AddressedEnvironment.restore` retires the current bindings in the current
+heap and installs the retained scope, preserving the current activation
+supply and heap frontier. Its general progress proof constructs actual
+retirement and caller realization from current cell typing. Separation is
+derived from different activation identities and the cells’ unique recorded
+owners, not assumed as an unrelated disjointness certificate. The combined
+26-job source/access proof gate and full imported-declaration axiom audit
+passed. This is the addressed return mechanism; `Execution.Frame.restore`
+still uses the older lexical representation and must be migrated below.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

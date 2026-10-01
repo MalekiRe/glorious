@@ -181,13 +181,13 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
     (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
     HasType program declaration.home declaration.parameters declaration.body declaration.result ∧
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
-      BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
-      entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
-      (¬supply.Issued entry.1) ∧ entry.2.1.Issued entry.1 ∧
-      (∀ previous, supply.Issued previous → entry.2.1.Issued previous ∧ previous ≠ entry.1) ∧
+      BindingMap.Typed program entry.heap entry.activation entry.bindings (initializedContext declaration.parameters) ∧
+      entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧
+      (¬supply.Issued entry.activation) ∧ entry.supply.Issued entry.activation ∧
+      (∀ previous, supply.Issued previous → entry.supply.Issued previous ∧ previous ≠ entry.activation) ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
-        BindingMap.Typed program entry.2.2.2 owner caller callerContext ∧
-        ∀ identity ∈ entry.2.2.1.map Prod.snd, identity ∉ caller.map Prod.snd) := by
+        BindingMap.Typed program entry.heap owner caller callerContext ∧
+        ∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) := by
   have checked := admitted.checked identity declaration declared
   exact ⟨checked.body, enterFunction.progress arguments checked.distinct heap supply⟩
 
