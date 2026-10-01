@@ -106,4 +106,24 @@ theorem ValuesHaveTypes.select {types : List Ty} {values : List Value}
         exact ⟨_, rfl, headTyped⟩
       | succ index => exact ih tailTyped index selection
 
+/-- A resident's typing derives finite declared layout, including inactive
+nominal variants; storage retains this fact when the resident moves out. -/
+theorem ValueHasType.finite {value : Value} {type : Ty}
+    (typed : ValueHasType program value type) : FiniteLayout program.target program.data type := by
+  induction typed using ValueHasType.rec
+    (motive_2 := fun _ types _ => ∀ type ∈ types, FiniteLayout program.target program.data type) with
+  | unit => exact .unit
+  | integer => exact .integer _
+  | character => exact .character
+  | tuple head tail headIH tailIH => exact .tuple headIH tailIH
+  | array residents element size ih => exact .array element size
+  | nominal declared chosen finite residents ih => exact finite
+  | nil => rename_i type member; cases member
+  | cons head tail headIH tailIH =>
+    rename_i type member
+    cases member with
+    | head => exact headIH
+    | tail _ member => exact tailIH type member
+
+
 end Grounded

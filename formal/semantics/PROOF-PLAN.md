@@ -388,6 +388,29 @@ retirement-history and batch-retirement existence use only `propext`. No
 examples or unit tests were used. The public source theorem is unchanged.
 
 
+The resident layer in `Grounded/PartialStorage.lean` now distinguishes live
+holes from retired storage and separates declared layout from availability.
+`ValueHasType.finite` derives layout from resident typing; a storage cell
+retains it after its resident moves out. Tuple and nominal partial residents
+have a structural initialization description. General read construction and
+read preservation connect that description to actual resident reconstruction.
+
+`takeStorage` and `restoreStorage` consume the heap operations above.
+Their constructive progress and preservation theorems prove whole-resident
+transfer, rejection of a second take, same-cell restoration with any correctly
+typed replacement, and preservation of all unrelated cells. Activation and
+declared type survive the updates. Neither operation accepts retired storage.
+These are storage operations, not language-level permission to discard an old
+resident or bypass ownership and loan checks. Projected partial moves and
+restoration, source admission and machine integration are still unproved.
+
+Verification: strict `lake build Grounded.PartialStorage` passed. An audit
+of all 488 declarations defined by `Values`, `RuntimeHeap` and
+`PartialStorage` found only standard Lean axioms. The move/restoration
+results use `propext` and `Quot.sound`. No source-soundness theorem
+was changed, and no examples or unit tests were added or run.
+
+
 ## Migration contracts and premise producers
 
 The restructuring migrates this development; it does not introduce a second
