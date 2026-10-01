@@ -155,6 +155,19 @@ def DataDecl.constructor (declaration : DataDecl) (tag : Option Nat) : Option Fi
   | .enumeration variants, some index => variants[index]?
   | _, _ => none
 
+theorem DataDecl.constructor_exists {declaration : DataDecl} {schema : Fields}
+    (member : schema ∈ declaration.schemas) : ∃ tag, declaration.constructor tag = some schema := by
+  cases shape : declaration.shape with
+  | «structure» fields =>
+    simp [DataDecl.schemas, shape] at member
+    subst schema
+    exact ⟨none, by simp [DataDecl.constructor, shape]⟩
+  | enumeration variants =>
+    have included : schema ∈ variants := by simpa [DataDecl.schemas, shape] using member
+    obtain ⟨index, selected⟩ := List.getElem?_of_mem included
+    exact ⟨some index, by simp [DataDecl.constructor, shape, selected]⟩
+
+
 abbrev DataDeclarations := Nat → Option DataDecl
 /-- Constructor identity for structural matching; tuples remain distinct from nominal data. -/
 inductive Head where

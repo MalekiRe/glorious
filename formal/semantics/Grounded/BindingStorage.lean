@@ -73,7 +73,8 @@ variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation 
 the same heap cells selected by the runtime binding map. -/
 def BindingMap.Disposable (program : Program) (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Prop :=
   ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell ∧
-    cell.resident.Disposable program
+    cell.resident.Disposable program ∧
+    ∀ value, cell.resident.read = some value → UsePermitted program.data .discard cell.type
 
 theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activation bindings context)
     (disposition : ∀ binding ∈ context, binding.2.Disposable program.data) :
@@ -87,7 +88,8 @@ theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activ
     · refine ⟨cell, found, ?_⟩
       have permission : state.initialization.Disposable program.data cell.type := by
         rw [declared]; exact disposition (name, state) (by simp)
-      exact permission.realizes resident.2
+      exact ⟨permission.realizes resident.2, fun _ read =>
+        permission.ready (resident.2.read_sound read).2⟩
     · exact ih (fun binding included => disposition binding (List.mem_cons_of_mem _ included)) address member
 
 theorem BindingMap.Typed.keys (typed : BindingMap.Typed program heap activation bindings context) :
@@ -233,6 +235,23 @@ theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activat
 def releaseBindings (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Option (RuntimeHeap StorageCell) :=
   heap.retireMany (bindings.map Prod.snd)
 
+/-- Whole owners whose structural principal forbids discard survive retirement,
+including principals inherited from fields or inactive nominal variants. -/
+theorem BindingMap.Disposable.release_preserves_nondiscardable
+    (disposition : BindingMap.Disposable program heap bindings)
+    {after : RuntimeHeap StorageCell} (released : releaseBindings heap bindings = some after)
+    {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
+    {value : Value} (resident : cell.resident.read = some value)
+    (required : ¬ UsePermitted program.data .discard cell.type) :
+    after.read address = some cell := by
+  have outside : address ∉ bindings.map Prod.snd := by
+    intro member
+    obtain ⟨actual, selected, _, permission⟩ := disposition address member
+    cases Option.some.inj (selected.symm.trans found)
+    exact required (permission value resident)
+  exact (RuntimeHeap.retireMany_outside released outside).trans found
+
+
 /-- Retirement leaves every live exact nominal owner untouched, including owners
 outside the current lexical scope. No ownership permission is assumed for it. -/
 theorem BindingMap.Disposable.release_preserves_exact
@@ -247,7 +266,7 @@ theorem BindingMap.Disposable.release_preserves_exact
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact PartialValue.Disposable.not_exact_read declared restricted resident permission
+    exact PartialValue.Disposable.not_exact_read declared restricted resident permission.1
   exact (RuntimeHeap.retireMany_outside released outside).trans found
 
 

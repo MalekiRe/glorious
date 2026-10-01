@@ -2149,3 +2149,33 @@ ownership boundary; it does not supply custom destructors, ordered/diverging
 cleanup, borrowing, correlated control state, nonlocal cleanup, physical memory
 or the other outstanding language/compiler semantics.
 
+
+## General structural-principal preservation through retirement
+
+`Initialization.Disposable.ready` now proves that a readable residual mask
+can be disposable only when the original whole type permits discard. This is
+not limited to explicit nominal restrictions: tuples, arrays and nominal
+principals inherited from fields are covered. For nominal types the proof
+recovers every declared constructor, so inactive variants cannot be ignored.
+Readiness and consumed-mask emptiness are proved incompatible generally.
+
+The existing `BindingMap.Typed.disposable` producer derives the whole-owner
+permission from actual resident reads and the authoritative final masks. Its
+runtime cleanup contract is strengthened in place; all public prefix/source
+soundness consumers inherit the stronger guarantee. No second analysis or
+future-state admission premise is introduced.
+
+`BindingMap.Disposable.release_preserves_nondiscardable` and the public
+`HasType.scope_preserves_nondiscardable` / `restore_preserves_nondiscardable`
+prove that an actual retirement step preserves any readable heap cell whose
+structural type forbids discard. They require neither an explicit exact nominal
+annotation nor a syntactic resident wrapper. The earlier exact-value guarantees
+remain valid, including for cells outside the current lexical scope.
+
+`lake build Grounded` passed all 30 jobs. Explicit axiom inspection of residual
+permission recovery, both general retirement theorems and source-function
+soundness found only standard Lean axioms. No unit tests or concrete examples
+were added. General preservation and progress consume the strengthened cleanup
+contract; whole-language completion and the outstanding custom-hook, borrowing,
+control-flow and physical-memory obligations remain open.
+

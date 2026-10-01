@@ -117,6 +117,24 @@ def Initialization.Empty : Initialization → Prop
   | .present => False
   | .fields states => states ≠ [] ∧ ∀ state ∈ states, state.Empty
 
+theorem Initialization.Ready.not_empty {state : Initialization} (ready : state.Ready) : ¬ state.Empty := by
+  induction ready using Initialization.Ready.rec
+    (motive_2 := fun states _ => ∀ state ∈ states, ¬ state.Empty) with
+  | present => simp [Initialization.Empty]
+  | @fields states residents ih =>
+    intro empty
+    simp only [Initialization.Empty] at empty
+    cases states with
+    | nil => exact empty.1 rfl
+    | cons head tail => exact ih head (by simp) (empty.2 head (by simp))
+  | nil => rename_i state member; cases member
+  | cons head tail headIH tailIH =>
+    rename_i state member
+    cases member with
+    | head => exact headIH
+    | tail _ member => exact tailIH state member
+
+
 def PartialValue.Empty : PartialValue → Prop
   | .hole => True
   | .resident _ => False
@@ -228,6 +246,37 @@ theorem Initialization.Disposable.realizes {program : Program} {type : Ty} {stat
       cases member with
       | head => exact headIH first
       | tail _ member => exact tailIH _ rest value member
+
+/-- Residual disposition cannot weaken the principal of a reconstructed whole
+owner. Every nominal constructor contributes, including inactive variants. -/
+theorem Initialization.Disposable.ready {data : DataDeclarations} {type : Ty} {state : Initialization}
+    (permission : state.Disposable data type) (ready : state.Ready) : UsePermitted data .discard type := by
+  induction permission using Initialization.Disposable.rec
+    (motive_2 := fun types states _ => InitializationsReady states →
+      ∀ type ∈ types, UsePermitted data .discard type) with
+  | empty absent => exact False.elim (ready.not_empty absent)
+  | permitted permission => exact permission
+  | tuple head tail headIH tailIH =>
+    cases ready with
+    | fields residents =>
+      cases residents with
+      | cons first rest => exact .tuple (headIH first) (tailIH rest)
+  | nominal declared restriction fields ih =>
+    cases ready with
+    | fields ready =>
+      refine .nominal declared restriction ?_
+      intro schema member field included
+      obtain ⟨tag, selected⟩ := DataDecl.constructor_exists member
+      exact ih tag schema selected ready field.type (List.mem_map.mpr ⟨field, included, rfl⟩)
+  | nil => rename_i ready type member; cases member
+  | cons head tail headIH tailIH =>
+    rename_i ready type member
+    cases ready with
+    | cons first rest =>
+      cases member with
+      | head => exact headIH first
+      | tail _ member => exact tailIH rest type member
+
 
 /-- A still-whole resident receives exactly its ordinary MayDiscard permission. -/
 theorem Initialization.Disposable.present_iff {data : DataDeclarations} {type : Ty} :

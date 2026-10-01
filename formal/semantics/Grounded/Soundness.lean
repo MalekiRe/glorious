@@ -39,6 +39,55 @@ theorem HasType.no_exact_discard (checkedProgram : program.Checked)
   exact PartialValue.Disposable.not_exact_resident declared restricted
     (checked.soundness checkedProgram store issued run).2.2.2.2
 
+/-- A checked prefix and actual scope step preserve every readable owner whose
+structural type forbids discard, not only explicitly restricted nominal types. -/
+theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment} {after : Configuration}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {count : Nat} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .scope count :: stack⟩)
+    (step : Step program ⟨current, .result value, .scope count :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {owner : Value} (resident : cell.resident.read = some owner)
+    (required : ¬ UsePermitted program.data .discard cell.type) :
+    after.environment.heap.read address = some cell := by
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  cases step with
+  | scope retired =>
+    simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at retired
+    obtain ⟨heap, released, same⟩ := retired
+    subst_vars
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found resident required
+
+/-- A checked prefix and actual restore step preserve every readable owner whose
+structural type forbids discard, not only explicitly restricted nominal types. -/
+theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment} {after : Configuration}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .restore caller :: stack⟩)
+    (step : Step program ⟨current, .result value, .restore caller :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {owner : Value} (resident : cell.resident.read = some owner)
+    (required : ¬ UsePermitted program.data .discard cell.type) :
+    after.environment.heap.read address = some cell := by
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  cases step with
+  | restore retired =>
+    simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at retired
+    obtain ⟨heap, released, same⟩ := retired
+    subst_vars
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found resident required
+
+
 /-- An actual lexical retirement after a checked prefix cannot retire or alter a
 live exact nominal owner in the heap. -/
 theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
