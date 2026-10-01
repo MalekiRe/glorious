@@ -427,6 +427,15 @@ cutover; it does not yet allocate a runtime cell. Strict checking of
 (23 jobs). The source closure audit inspected 2,265 `Grounded` declarations
 and found only standard Lean axioms.
 
+Pattern binders likewise retain their resolved type. Named pattern elaboration
+produces it, and `PatternType.binder` requires that exact subject type. The
+decoded constant-pattern normalization interface preserves both identity and
+type; normalization uniqueness, coverage, matching realization and source
+soundness continue to check. Runtime matching still returns lexical values;
+it has not yet been migrated to cell allocation. Strict source-declaration
+checking passed (19 jobs), and the source closure audit found only standard
+Lean axioms.
+
 These storage results are not language-level permission to discard residents,
 bypass ownership/loans, or execute unchecked projections. The expression
 machine, flow-sensitive admission and public source theorem are not yet

@@ -30,7 +30,7 @@ mutual
 inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (BindingId × BindingType) → Prop where
   | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
   | binder (name : BindingId) {type : Ty} (discard : Duplicable program.data type) :
-      PatternType program home (.binder name) type [(name, ⟨type, false⟩)]
+      PatternType program home (.binder name type) type [(name, ⟨type, false⟩)]
   | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
       (discard : Duplicable program.data type) : PatternType program home (.literal (some type) value) type []
   | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (BindingId × BindingType)}
@@ -47,7 +47,7 @@ end
 
 /-- Static matrix specialization, not an assumption that an execution will match. -/
 def Pattern.specialize (head : Head) (arity : Nat) : Pattern → Option (List Pattern)
-  | .wildcard | .binder _ => some (List.replicate arity .wildcard)
+  | .wildcard | .binder _ _ => some (List.replicate arity .wildcard)
   | .node selected fields => if selected = head ∧ fields.length = arity then some fields else none
   | .literal _ value => if value.head = head ∧ value.children.length = arity
       then some (value.children.map (Pattern.literal none)) else none
@@ -257,7 +257,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
             have normalized : front.length = fields.length := by
               cases pattern with
               | wildcard => simp [Pattern.specialize] at frontSelected; subst front; simp
-              | binder name => simp [Pattern.specialize] at frontSelected; subst front; simp
+              | binder name type => simp [Pattern.specialize] at frontSelected; subst front; simp
               | node head children =>
                 simp only [Pattern.specialize] at frontSelected
                 split at frontSelected <;> simp_all
@@ -276,7 +276,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
           have originalMatches : ∃ result, pattern.matchValue value = some result := by
             cases pattern with
             | wildcard => exact ⟨[], by simp [Pattern.matchValue]⟩
-            | binder name => exact ⟨[(name, value)], by simp [Pattern.matchValue]⟩
+            | binder name type => exact ⟨[(name, value)], by simp [Pattern.matchValue]⟩
             | node head children =>
               simp only [Pattern.specialize] at frontSelected
               split at frontSelected

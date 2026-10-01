@@ -148,7 +148,7 @@ inductive Value where
 
 inductive Pattern where
   | wildcard
-  | binder (name : BindingId)
+  | binder (name : BindingId) (type : Ty)
   | node (head : Head) (fields : List Pattern)
   /-- Some records the constant type; None is the untyped coverage form. -/
   | literal (type : Option Ty) (value : Value)

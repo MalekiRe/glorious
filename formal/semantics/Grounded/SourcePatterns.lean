@@ -5,13 +5,13 @@ Structural constant patterns (§4.3). Closed constant checking produces each
 normal form through core correctness. Coverage, usefulness and body checking
 consume that concrete result; neither evaluation nor normalization success is
 an admission premise. Bodies and arguments are the existing decoded core; binder
-identities are already resolved inputs, not source spellings.
+identities and binder types are already resolved inputs, not source spellings.
 -/
 namespace Grounded
 
 inductive SourcePattern where
   | wildcard
-  | binder (name : BindingId)
+  | binder (name : BindingId) (type : Ty)
   | node (head : Head) (fields : List SourcePattern)
   | constant (name : String)
 
@@ -19,7 +19,7 @@ mutual
 /-- Compile-time inputs: source syntax and ordinary closed constant typing. -/
 inductive SourcePattern.Checked (program : Program) (home : Module) : SourcePattern → Type where
   | wildcard : SourcePattern.Checked program home .wildcard
-  | binder (name : BindingId) : SourcePattern.Checked program home (.binder name)
+  | binder (name : BindingId) (type : Ty) : SourcePattern.Checked program home (.binder name type)
   | node {head : Head} {fields : List SourcePattern}
       (checked : SourcePatternsChecked program home fields) :
       SourcePattern.Checked program home (.node head fields)
@@ -38,7 +38,7 @@ mutual
 /-- The normalization specification uses the same constant evaluation relation. -/
 inductive NormalizesPattern (program : Program) (home : Module) : SourcePattern → Pattern → Prop where
   | wildcard : NormalizesPattern program home .wildcard .wildcard
-  | binder (name : BindingId) : NormalizesPattern program home (.binder name) (.binder name)
+  | binder (name : BindingId) (type : Ty) : NormalizesPattern program home (.binder name type) (.binder name type)
   | node {head : Head} {fields : List SourcePattern} {patterns : List Pattern}
       (fieldsNormalize : NormalizesPatterns program home fields patterns) :
       NormalizesPattern program home (.node head fields) (.node head patterns)
@@ -75,7 +75,7 @@ theorem NormalizesPattern.unique {source : SourcePattern} {pattern : Pattern}
     (motive_2 := fun sources patterns _ =>
       ∀ others, NormalizesPatterns program home sources others → others = patterns) with
   | wildcard => intro other found; cases found; rfl
-  | binder name => intro other found; cases found; rfl
+  | binder name type => intro other found; cases found; rfl
   | node fields ih =>
     intro other found
     cases found with
@@ -103,7 +103,7 @@ def SourcePattern.Checked.normalize {source : SourcePattern}
     {pattern // NormalizesPattern program home source pattern} :=
   match checked with
   | .wildcard => ⟨.wildcard, .wildcard⟩
-  | .binder name => ⟨.binder name, .binder name⟩
+  | .binder name type => ⟨.binder name type, .binder name type⟩
   | .node (head := head) fields =>
     let result := fields.normalize
     ⟨.node head result.val, .node result.property⟩

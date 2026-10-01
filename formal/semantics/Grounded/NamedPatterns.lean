@@ -31,7 +31,7 @@ inductive NamedPattern.Elaborates (program : Program) (home : Module) :
   | wildcard {scope type} (discard : Duplicable program.data type) :
       NamedPattern.Elaborates program home scope .wildcard type .wildcard [] scope
   | binder {scope type} (name : String) (discard : Duplicable program.data type) :
-      NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩)
+      NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩ type)
         [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter name ⟨type, false⟩)
   | constant {scope name type} (typed : HasType program home [] (.constant name) type)
       (discard : Duplicable program.data type) :

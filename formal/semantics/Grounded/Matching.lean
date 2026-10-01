@@ -8,7 +8,7 @@ mutual
 def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (BindingId × Value)) :=
   match pattern with
   | .wildcard => some []
-  | .binder name => some [(name, value)]
+  | .binder name _ => some [(name, value)]
   | .literal _ expected => if value = expected then some [] else none
   | .node head fields =>
       if head = value.head then matchPatterns fields value.children else none
