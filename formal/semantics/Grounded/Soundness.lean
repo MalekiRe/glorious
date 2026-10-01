@@ -159,6 +159,27 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found declared restricted selected
 
 
+/-- No checked prefix can overwrite a readable owner of any structurally
+nondiscardable type. The observation is made after RHS evaluation. -/
+theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .assign place rest :: stack⟩)
+    {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
+    (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
+    (path : PathType program selectedHome cell.type place.fields selectedType)
+    {owner : Value}
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard selectedType) : False := by
+  exact BindingMap.ReplacementSafe.not_nondiscardable
+    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path selected required
+
+
 /-- Completed execution realizes exactly the declared output masks. No completed
 run or future readiness is a premise of checking or progress. -/
 theorem HasType.evaluation_soundness (checkedProgram : program.Checked)

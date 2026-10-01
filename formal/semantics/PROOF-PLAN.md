@@ -2179,3 +2179,26 @@ were added. General preservation and progress consume the strengthened cleanup
 contract; whole-language completion and the outstanding custom-hook, borrowing,
 control-flow and physical-memory obligations remain open.
 
+
+## General structural-principal protection at replacement
+
+The runtime replacement contract now retains the existing checked path and
+proves that a readable selected old resident permits discard at that path's
+type. This permission is derived from the same final mask after RHS execution,
+not a second resource analysis. Field/path result uniqueness is proved across
+module visibility contexts, so the existentially selected type cannot conceal
+another structural principal.
+
+`HasType.no_nondiscardable_overwrite` consumes the general public prefix
+soundness contract. It excludes overwrites of all readable structurally
+nondiscardable selected owners, including tuples, arrays and inherited nominal
+restrictions. It does not assume that execution terminates. Moved-out holes
+remain restorable; no additional restriction was imposed on source admission.
+
+`lake build Grounded` passed all 30 jobs. Explicit axiom inspection covered
+path uniqueness, the strengthened replacement producer, general overwrite
+exclusion, preservation, progress and source-function soundness. Only standard
+Lean axioms occurred. No unit tests, examples or assumed completion conditions
+were introduced. Custom destruction, correlated branch states, loans, nonlocal
+cleanup and the other whole-language obligations remain open.
+

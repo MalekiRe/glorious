@@ -22,6 +22,35 @@ inductive PathType (program : Program) (home : Module) : Ty → List FieldKey �
       (tail : PathType program home child rest result) :
       PathType program home parent (key :: rest) result
 
+theorem ProjectionType.result_unique {program : Program} {home otherHome : Module}
+    {parent left right : Ty} {key : FieldKey} {index otherIndex : Nat}
+    (first : ProjectionType program home parent key index left)
+    (second : ProjectionType program otherHome parent key otherIndex right) : left = right := by
+  cases first with
+  | tuple selected =>
+    cases second with
+    | tuple other => exact Option.some.inj (selected.symm.trans other)
+  | nominal declared structureOnly indexed selected visible =>
+    cases second with
+    | nominal otherDeclared otherStructure otherIndex otherSelected otherVisible =>
+      cases Option.some.inj (declared.symm.trans otherDeclared)
+      cases DataShape.structure.inj (structureOnly.symm.trans otherStructure)
+      cases Option.some.inj (indexed.symm.trans otherIndex)
+      exact congrArg Field.type (Option.some.inj (selected.symm.trans otherSelected))
+
+theorem PathType.result_unique {program : Program} {home otherHome : Module}
+    {parent left right : Ty} {keys : List FieldKey}
+    (first : PathType program home parent keys left)
+    (second : PathType program otherHome parent keys right) : left = right := by
+  induction first generalizing right with
+  | here => cases second; rfl
+  | step field tail ih =>
+    cases second with
+    | step otherField otherTail =>
+      cases field.result_unique otherField
+      exact ih otherTail
+
+
 /-- Resolve one tuple/struct field; enum payloads are not unchecked places. -/
 def Value.projectField (program : Program) (value : Value) (key : FieldKey) : Option (Nat × Value) :=
   match value, key with

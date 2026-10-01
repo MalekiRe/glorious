@@ -31,7 +31,28 @@ def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCe
     lookup place.root bindings = some identity ∧ heap.read identity = some cell ∧
     cell.resident.selectFields program cell.type place.fields = some resident ∧
     resident.Typed program type mask ∧
-    resident.Disposable program
+    (∃ home, PathType program home cell.type place.fields type) ∧
+    resident.Disposable program ∧
+    ∀ value, resident.read = some value → UsePermitted program.data .discard type
+
+/-- An actual readable selected owner must permit discard at its uniquely
+resolved type. Reconstructing fields cannot erase inherited principal constraints. -/
+theorem BindingMap.ReplacementSafe.not_nondiscardable
+    (safe : BindingMap.ReplacementSafe program heap bindings place)
+    {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
+    (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
+    (path : PathType program selectedHome cell.type place.fields selectedType)
+    {owner : Value}
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) = some owner)
+    (required : ¬ UsePermitted program.data .discard selectedType) : False := by
+  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound,
+    actualSelected, _, ⟨home, actualPath⟩, _, permission⟩ := safe
+  cases Option.some.inj (actualMapped.symm.trans mapped)
+  cases Option.some.inj (actualFound.symm.trans found)
+  cases actualPath.result_unique path
+  rw [actualSelected] at selected
+  exact required (permission owner selected)
+
 
 theorem BindingMap.ReplacementSafe.not_exact
     (safe : BindingMap.ReplacementSafe program heap bindings place)
@@ -41,7 +62,7 @@ theorem BindingMap.ReplacementSafe.not_exact
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
       some (.nominal identity tag fields)) : False := by
-  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound, actualSelected, _, permission⟩ := safe
+  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound, actualSelected, _, _, permission, _⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   rw [actualSelected] at selected
@@ -64,7 +85,8 @@ theorem BindingMap.Typed.replacement_safe
   rw [declared] at maskSelected
   cases Option.some.inj (maskSelected.symm.trans selection)
   exact ⟨identity, cell, resident, type, available, mapped, found, residentSelected,
-    residentTyped, discard.realizes residentTyped⟩
+    residentTyped, ⟨home, actualPath⟩, discard.realizes residentTyped,
+    fun _ read => discard.ready (residentTyped.read_sound read).2⟩
 
 
 /-- Exact retained cells preserve every projected read, including unsuccessful
