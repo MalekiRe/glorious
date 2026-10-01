@@ -18,10 +18,10 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup := by
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program := by
   have entry := ConfigurationTyped.entry checked store issued
   have current := entry.run checkedProgram run
-  exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct⟩
+  exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.scope_cleanup_safe⟩
 
 /-- Completed execution realizes exactly the declared output masks. No completed
 run or future readiness is a premise of checking or progress. -/

@@ -110,6 +110,37 @@ theorem PartialValue.Typed.hole_unready {program : Program} {type : Ty} {state :
   intro ready
   cases ready
 
+/-- No active resident remains, including nested aggregate shells. -/
+def Initialization.Empty : Initialization → Prop
+  | .absent => True
+  | .present => False
+  | .fields states => ∀ state ∈ states, state.Empty
+
+def PartialValue.Empty : PartialValue → Prop
+  | .hole => True
+  | .resident _ => False
+  | .tuple head tail => head.Empty ∧ ∀ value ∈ tail, value.Empty
+  | .nominal _ _ fields => ∀ value ∈ fields, value.Empty
+
+/-- The shared initialization mask certifies actual absence, not just a readable
+value's absence. No resident can hide inside an empty partial aggregate. -/
+theorem PartialValue.Typed.empty {program : Program} {value : PartialValue} {type : Ty}
+    {state : Initialization} (typed : value.Typed program type state) (empty : state.Empty) : value.Empty := by
+  induction typed using PartialValue.Typed.rec
+    (motive_2 := fun values _ states _ =>
+      (∀ state ∈ states, state.Empty) → ∀ value ∈ values, value.Empty)
+  all_goals simp_all [Initialization.Empty, PartialValue.Empty]
+  case cons =>
+    rename_i value headEmpty tailEmpty states member
+    rcases member with rfl | member
+    · exact headEmpty
+    · exact tailEmpty value member
+
+/-- A scope may retire an empty shell without assigning discard permission to
+its type. Otherwise this fragment requires ordinary structural MayDiscard. -/
+def Initialization.Disposable (data : DataDeclarations) (type : Ty) (state : Initialization) : Prop :=
+  state.Empty ∨ UsePermitted data .discard type
+
 structure StorageCell where
   activation : ActivationId
   type : Ty

@@ -113,7 +113,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
   | bind {scope before middle after mutable name annotation initial body first rest localType type finalMask}
       (initialized : NamedExpr.Elaborates program names home scope before initial first localType middle)
-      (discard : UsePermitted program.data .discard localType)
+      (discard : finalMask.Disposable program.data localType)
       (annotated : Annotation program.aliases annotation localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter name ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
@@ -182,6 +182,7 @@ inductive NamedArmsElaborate (program : Program) (names : Module → FunctionNam
       (bodyTyped : NamedExpr.Elaborates program names home localScope (initializedContext bindings ++ before)
         body coreBody result (localsAfter ++ after))
       (localSlots : localsAfter.slots = bindings)
+      (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 end
@@ -250,10 +251,10 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     have first := head slots
     exact .cons first (tail (first.slots.trans slots))
   | empty => exact .empty
-  | clause allocated _ useful _ localSlots _ body tail =>
+  | clause allocated _ useful _ localSlots disposable _ body tail =>
     rename_i slots
     apply ArmsType.clause allocated.checked.1 (by rw [slots]; exact allocated.fresh) useful
-      (body ?_) localSlots (tail slots)
+      (body ?_) localSlots disposable (tail slots)
     rw [allocated.checked.2]
     simp [FlowContext.slots, initializedContext, List.map_append, List.map_map, Function.comp_def, ← slots]
 
@@ -283,7 +284,7 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program :=
   (elaborated.checked slots).soundness checkedProgram store issued run
 
 /-- Completed executions preserve the declared result and caller environment;

@@ -31,7 +31,7 @@ Run program ⟨environment, .expression expression, []⟩ state →
 ConfigurationTyped program final (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
   AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-  (state.environment.bindings.map Prod.fst).Nodup
+  (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
@@ -73,8 +73,9 @@ The admitted logical fragment supports initialized and partially consumed storag
 named moves, restoration, mutable lexical storage, projected access and recursive
 declared functions over one shared heap with generative activation identities.
 Owned nominal construction does not require Copy. Copy and MayDiscard use one
-structural permission producer; residual exact-owner disposition, custom
-destruction, loans and physical memory remain open.
+structural permission producer. Final masks permit retirement of fully consumed
+exact owners. Mixed residual disposition, custom destruction, loans and physical
+memory remain open.
 
 
 
@@ -1902,9 +1903,49 @@ Exhaustive imported axiom inspection covered 3,710 declarations; only standard
 Lean axioms occur. General preservation, progress, source/function correctness,
 finite execution and Copy-to-discard transport received explicit inspection.
 
-Residual-mask-dependent exact-owner disposition remains open: a fully consumed
-exact local or parameter is still rejected by the type-wide scope restriction.
-It must be admitted from its final residual ownership, not by pretending its
-type permits discard. Custom destruction, ordered hook execution, branch joins,
-loans and the other whole-language obligations also remain open.
+At this checkpoint fully consumed exact locals and parameters were still rejected
+by the type-wide scope restriction. The next checkpoint moves scope disposition
+to final residual masks without granting discard permission to exact types.
+
+
+## Verified residual scope disposition through public source soundness
+
+Scope disposal now consumes the same final initialization masks produced by
+flow checking. `Initialization.Disposable` admits a fully empty shell or an
+ordinary MayDiscard type. `Initialization.Empty` covers nested empty masks;
+`PartialValue.Typed.empty` proves that such a mask contains no actual resident.
+This does not manufacture Copy or MayDiscard for an exact type.
+
+Migrated lexical binders, function bodies/parameters, pattern-bound locals,
+invocation continuations and scope continuations. Function signatures and
+pattern binders no longer require type-wide disposal before their bodies run.
+Instead, their bodies must statically establish disposition of every final
+local state. Removed the obsolete parameter/binder disposal derivations.
+Wildcard and literal-pattern disposal still require MayDiscard; reads still
+require Copy. Moves retain their original definite-initialization requirements.
+
+`BindingMap.Typed.disposable` connects static disposition to the actual cells
+selected for retirement. `ConfigurationTyped.scope_cleanup_safe` proves that
+before each lexical-scope or caller-restoration cleanup, every selected live
+cell is empty or its type permits discard. This is now a conclusion of the
+general prefix soundness theorem, propagated through named expressions, source
+patterns, declarations, package/source closures and imported/prelude calls.
+It is not an assumed successful cleanup or a supplied future runtime state.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Universal Lean stdin
+proofs established local whole-owner transfer followed by actual execution and
+cleanup safety for every prefix, checked whole-owner parameter transfer for
+arbitrary types, and rejected disposal of a still-present exact nominal owner.
+The prior verified source freeze proved the old rule rejected every exact local
+binding regardless of its body. No concrete examples or unit tests were added.
+Exhaustive imported axiom inspection covered 3,739 declarations, with only
+standard Lean axioms. The mask-to-resident bridge, selected-cell disposition,
+cleanup safety and strengthened public source/function soundness received
+explicit axiom inspection.
+
+Remaining disposition obligations are narrower but substantial: mixed residual
+aggregates whose whole type is nondiscardable still need field-sensitive
+residual permission; assignment restoration still requires type-wide discard
+permission. Custom hooks and their order/divergence, conditional ownership,
+loans, nonlocal exits and the other whole-language boundaries remain open.
 

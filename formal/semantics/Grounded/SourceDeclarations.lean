@@ -15,20 +15,9 @@ inductive NamedParametersElaborate (program : Program) : List NamedParameter →
   | nil : NamedParametersElaborate program [] .empty
   | cons {parameter rest scope type}
       (tail : NamedParametersElaborate program rest scope)
-      (resolved : ResolvesType program.aliases parameter.type type)
-      (disposable : UsePermitted program.data .discard type) :
+      (resolved : ResolvesType program.aliases parameter.type type) :
       NamedParametersElaborate program (parameter :: rest) (scope.enter parameter.name ⟨type, parameter.mutable⟩)
 
-theorem NamedParametersElaborate.disposable {program : Program} {parameters : List NamedParameter}
-    {scope : SourceScope} (elaborated : NamedParametersElaborate program parameters scope) :
-    ∀ parameter ∈ scope.context, UsePermitted program.data .discard parameter.2.type := by
-  induction elaborated with
-  | nil => simp [SourceScope.empty, SourceScope.context]
-  | cons tail resolved disposable ih =>
-    intro parameter member
-    cases member with
-    | head => exact disposable
-    | tail _ member => exact ih parameter member
 
 /-- Source parameter names, omitted-unit result semantics and the actual named
 body determine the same declaration consumed by runtime invocation. -/
@@ -38,7 +27,8 @@ inductive NamedFunction.Elaborates (program : Program) (names : Module → Funct
       (parameters : NamedParametersElaborate program source.parameters scope)
       (distinct : (source.parameters.map NamedParameter.name).Nodup)
       (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
-      (elaborated : NamedExpr.Elaborates program names source.home scope (initializedContext scope.context) source.body body result after) :
+      (elaborated : NamedExpr.Elaborates program names source.home scope (initializedContext scope.context) source.body body result after)
+      (disposable : ∀ binding ∈ after, binding.2.Disposable program.data) :
       NamedFunction.Elaborates program names source
         ⟨source.home, source.visibility, scope.context, result, body⟩
 
@@ -46,9 +36,9 @@ theorem NamedFunction.Elaborates.checked {program : Program} {names : Module →
     {source : NamedFunction} {core : FunctionDecl}
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
-  | intro parameters distinct resultType body =>
-    exact ⟨SourceScope.context_distinct _, parameters.disposable, _, body.checked (by
-      simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])⟩
+  | intro parameters distinct resultType body disposable =>
+    exact ⟨SourceScope.context_distinct _, _, body.checked (by
+      simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]), disposable⟩
 
 
 inductive NamedFunctionsElaborate (program : Program) (names : Module → FunctionName → Option Nat) :
@@ -115,7 +105,7 @@ theorem NamedProgramAdmitted.soundness {source : List NamedFunction} {program : 
     ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
 
@@ -198,7 +188,7 @@ theorem NamedProgramAdmitted.enter {sources : List NamedFunction} {program : Pro
   have checked := admitted.checked identity declaration declared
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, older, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply
-  exact ⟨checked.body, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩
+  exact ⟨⟨_, checked.body.choose_spec.1⟩, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩
 
 
 end Grounded

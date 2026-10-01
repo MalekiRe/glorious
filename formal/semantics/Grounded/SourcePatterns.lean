@@ -189,7 +189,7 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     ConfigurationTyped program final (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
+      (state.environment.bindings.map Prod.fst).Nodup ∧ state.ScopeCleanupSafe program :=
   (checked.admits argumentsTyped nonempty covered bodies).soundness checkedProgram store issued run
 
 

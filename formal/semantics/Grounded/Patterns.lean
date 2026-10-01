@@ -29,7 +29,7 @@ def Head.Accessible (program : Program) (home : Module) : Head → Prop
 mutual
 inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (BindingId × BindingType) → Prop where
   | wildcard {type : Ty} (discard : UsePermitted program.data .discard type) : PatternType program home .wildcard type []
-  | binder (name : BindingId) {type : Ty} (discard : UsePermitted program.data .discard type) :
+  | binder (name : BindingId) {type : Ty} :
       PatternType program home (.binder name type) type [(name, ⟨type, false⟩)]
   | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
       (discard : UsePermitted program.data .discard type) : PatternType program home (.literal (some type) value) type []
@@ -108,7 +108,7 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (Bi
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
     exact ⟨.nil, rfl⟩
-  | binder name discard =>
+  | binder name =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
     subst bindings
     exact ⟨.cons valueTyped .nil (by simp), rfl⟩
@@ -330,22 +330,6 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
   | none => exact False.elim (armMatches (noneMeansMissing arms selected arm armIncluded))
   | some result => exact ⟨result.1, result.2, rfl⟩
 
-/-- Pattern-bound locals inherit the disposal permission checked at each binder. -/
-theorem PatternType.disposable {program : Program} {home : Module} {pattern : Pattern} {type : Ty}
-    {bindings : List (BindingId × BindingType)} (typed : PatternType program home pattern type bindings) :
-    ∀ binding ∈ bindings, UsePermitted program.data .discard binding.2.type := by
-  induction typed using PatternType.rec
-    (motive_2 := fun _ _ bindings _ => ∀ binding ∈ bindings, UsePermitted program.data .discard binding.2.type) with
-  | wildcard discard => simp
-  | binder name discard => simpa using discard
-  | literal typed discard => simp
-  | node shape access fields ih => exact ih
-  | nil => rename_i binding member; cases member
-  | cons first rest firstIH restIH =>
-    rename_i binding member
-    rcases List.mem_append.mp member with left | right
-    · exact firstIH _ left
-    · exact restIH _ right
 
 
 end Grounded

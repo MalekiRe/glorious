@@ -25,13 +25,13 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (discard : UsePermitted program.data .discard discarded) (checked : HasType program home before rest result after) :
       FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one result)
   | bind {home before after name mutable localType result body finalMask}
-      (discard : UsePermitted program.data .discard localType)
+      (discard : finalMask.Disposable program.data localType)
       (checked : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: before) body result
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
       FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
   | scope {context : FlowContext} (locals : FlowContext) {result}
-      (discard : ∀ binding ∈ locals, UsePermitted program.data .discard binding.2.slot.type) :
+      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
       FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) context (.one result)
   | assign {home before restored after place type result rest state updated}
       (selected : lookup place.root before = some state)
@@ -66,7 +66,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (checked : ArmsType program home before (argumentType inputs) result [] arms after) :
       FrameTyped program heap supply activation before (.many inputs) (.patterns arms) after (.one result)
   | restore {context : FlowContext} (locals : FlowContext) {result} {caller : AddressedScope}
-      (discard : ∀ binding ∈ locals, UsePermitted program.data .discard binding.2.slot.type)
+      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
       (retained : BindingMap.Typed program heap caller.activation caller.bindings context)
       (issued : supply.Issued caller.activation) (older : caller.activation.index < activation.index) :
       FrameTyped program heap supply activation locals (.one result) (.restore caller) context (.one result)
@@ -211,7 +211,7 @@ theorem ConfigurationTyped.invoke {environment : Environment} {callerContext fin
       callerContext (.one type) stack final result)
     (inputsTyped : BindingInputsTyped program inputs)
     (checked : HasType program home (inputs.map BindingInput.state) body type locals)
-    (discard : ∀ binding ∈ locals, UsePermitted program.data .discard binding.2.slot.type) :
+    (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
     ConfigurationTyped program final result
       ⟨enterBindings environment.heap environment.supply inputs, .expression body, .restore environment.scope :: stack⟩ := by
   refine .intro (enterBindings.typed inputsTyped _ _) environment.supply.allocate_issued (.expression checked)
@@ -278,7 +278,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
               (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons resident .nil (by simp))
               (by simpa using List.nodup_cons.mpr ⟨fresh, contextDistinct⟩)
-            refine .intro entered issued (.expression checked) (.cons (.scope [_] (by simpa using discard)) ?_)
+            refine .intro entered issued (.expression checked) (.cons (.scope [_] (by simpa [BindingState.Disposable] using discard)) ?_)
             exact tail.transport (fun _ previous => previous)
               (fun scope states typed _ => (retained scope.activation scope.bindings states typed).1)
     | scope exited =>
@@ -389,16 +389,12 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             have declaration := checkedProgram _ _ declared
             obtain ⟨inputs, preparedInputs, inputsTyped, slots⟩ := prepareBindings.progress residents declaration.distinct
             cases Option.some.inj (prepared.symm.trans preparedInputs)
-            obtain ⟨locals, body⟩ := declaration.body
+            obtain ⟨locals, body, discard⟩ := declaration.body
             apply ConfigurationTyped.invoke store issued tail inputsTyped
             · rw [← slots] at body
               simp only [initializedContext, List.map_map, Function.comp_def] at body
               exact body
-            · intro binding member
-              have slotMember : (binding.1, binding.2.slot) ∈ locals.slots := List.mem_map.mpr ⟨binding, member, rfl⟩
-              rw [body.slots] at slotMember
-              simp only [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] at slotMember
-              exact declaration.disposable _ (by simpa using slotMember)
+            · exact discard
     | applyPatterns =>
       cases code with | expression checked =>
         cases checked with | applyPatterns arguments nonempty covered bodies =>
@@ -423,11 +419,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             have localLength := congrArg List.length localSlots
             simp only [FlowContext.slots, List.length_map] at length localLength
             rw [length, ← localLength]
-            apply FrameTyped.scope
-            intro binding member
-            apply discard (binding.1, binding.2.slot)
-            rw [← localSlots]
-            exact List.mem_map.mpr ⟨binding, member, rfl⟩
+            exact FrameTyped.scope _ discard
     | nil =>
       cases code with | arguments checked => cases checked; exact .intro store issued (.results .nil) continuation
     | cons =>
@@ -668,6 +660,31 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | refl state => exact .refl _ _
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
+
+/-- Before lexical or invocation retirement, every selected cell is either an
+empty shell or has structural MayDiscard. This is a current-state assertion. -/
+def Configuration.ScopeCleanupSafe (program : Program) (state : Configuration) : Prop :=
+  match state.control, state.continuation with
+  | .result _, .scope count :: _ =>
+      BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings)
+  | .result _, .restore _ :: _ =>
+      BindingMap.Disposable program state.environment.heap state.environment.bindings
+  | _, _ => True
+
+theorem ConfigurationTyped.scope_cleanup_safe {context : FlowContext} {result : ResultType}
+    {state : Configuration} (typed : ConfigurationTyped program context result state) :
+    state.ScopeCleanupSafe program := by
+  cases typed with
+  | intro store issued code continuation =>
+    cases code <;> try trivial
+    case result resident =>
+      cases continuation
+      · trivial
+      case cons frame tail =>
+        cases frame <;> try trivial
+        case scope locals discard =>
+          exact (store.take locals.length).disposable (by simpa using discard)
+        case restore => exact store.disposable (by assumption)
 
 end Grounded
 

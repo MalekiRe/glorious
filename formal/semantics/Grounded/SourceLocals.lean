@@ -189,7 +189,7 @@ theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
     {initial body : Expr} {localType result : Ty} {before middle after : FlowContext} {finalMask : Initialization}
     (slots : before.slots = scope.context)
     (initialized : HasType program home before initial localType middle)
-    (discard : UsePermitted program.data .discard localType)
+    (discard : finalMask.Disposable program.data localType)
     (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
     HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by

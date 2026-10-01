@@ -30,7 +30,7 @@ inductive NamedPattern.Elaborates (program : Program) (home : Module) :
     SourceScope → NamedPattern → Ty → Pattern → List (BindingId × BindingType) → SourceScope → Prop where
   | wildcard {scope type} (discard : UsePermitted program.data .discard type) :
       NamedPattern.Elaborates program home scope .wildcard type .wildcard [] scope
-  | binder {scope type} (name : Identifier) (discard : UsePermitted program.data .discard type) :
+  | binder {scope type} (name : Identifier) :
       NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩ type)
         [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter name ⟨type, false⟩)
   | constant {scope name type} (typed : HasType program home [] (.constant name) type [])
@@ -62,7 +62,7 @@ theorem NamedPattern.Elaborates.checked {program : Program} {home : Module}
     (motive_2 := fun scope _ types patterns bindings after _ =>
       PatternsType program home patterns types bindings ∧ after.context = bindings ++ scope.context) with
   | wildcard discard => exact ⟨.wildcard discard, rfl⟩
-  | binder name discard => exact ⟨.binder _ discard, rfl⟩
+  | binder name => exact ⟨.binder _, rfl⟩
   | constant typed discard =>
     exact ⟨.literal (Classical.choose_spec (Classical.choose_spec (constant_correctness typed))).2.1 discard, rfl⟩
   | node shape access _ ih => exact ⟨.node shape access ih.1, ih.2⟩

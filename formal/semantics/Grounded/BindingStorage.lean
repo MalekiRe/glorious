@@ -15,6 +15,9 @@ structure BindingState where
   slot : BindingType
   initialization : Initialization
 
+def BindingState.Disposable (data : DataDeclarations) (state : BindingState) : Prop :=
+  state.initialization.Disposable data state.slot.type
+
 inductive BindingInputsTyped (program : Program) : List BindingInput → Prop where
   | nil : BindingInputsTyped program []
   | cons {input : BindingInput} {rest : List BindingInput}
@@ -65,6 +68,27 @@ inductive BindingMap.Typed (program : Program) (heap : RuntimeHeap StorageCell)
 
 variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation : ActivationId}
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
+
+/-- Physical residents eligible for scope retirement. This predicate inspects
+the same heap cells selected by the runtime binding map. -/
+def BindingMap.Disposable (program : Program) (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Prop :=
+  ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell ∧
+    (cell.resident.Empty ∨ UsePermitted program.data .discard cell.type)
+
+theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activation bindings context)
+    (disposition : ∀ binding ∈ context, binding.2.Disposable program.data) :
+    BindingMap.Disposable program heap bindings := by
+  induction typed with
+  | nil => intro identity member; simp at member
+  | @cons name identity cell state bindings context found owner declared resident tail freshName freshStorage ih =>
+    intro address member
+    simp only [List.map_cons, List.mem_cons] at member
+    rcases member with rfl | member
+    · refine ⟨cell, found, ?_⟩
+      rcases disposition (name, state) (by simp) with empty | permission
+      · exact .inl (resident.2.empty empty)
+      · exact .inr (by rw [declared]; exact permission)
+    · exact ih (fun binding included => disposition binding (List.mem_cons_of_mem _ included)) address member
 
 theorem BindingMap.Typed.keys (typed : BindingMap.Typed program heap activation bindings context) :
     bindings.map Prod.fst = context.map Prod.fst := by

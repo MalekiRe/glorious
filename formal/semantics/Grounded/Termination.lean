@@ -96,7 +96,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     obtain ⟨after, tailRun, tailScope, tailHeap⟩ := tails middle
     exact ⟨after, .cons headRun tailRun, tailScope.trans headScope, tailHeap.trans headHeap⟩
   | empty => trivial
-  | clause patternTyped distinct useful bodyTyped localSlots tailTyped bodyIH tailIH => trivial
+  | clause patternTyped distinct useful bodyTyped localSlots disposable tailTyped bodyIH tailIH => trivial
 
 theorem constant_correctness {name : String} {type : Ty}
     (checked : HasType program home [] (.constant name) type []) :
@@ -229,7 +229,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
         many inputs (fun _ member => .callInput member) store issued
       have declarationChecked := checkedProgram _ _ declared
       obtain ⟨bindings, prepared, inputsTyped, slots⟩ := prepareBindings.progress residents declarationChecked.distinct
-      obtain ⟨locals, checkedBody⟩ := declarationChecked.body
+      obtain ⟨locals, checkedBody, discard⟩ := declarationChecked.body
       have bodyTyped : HasType program declaration.home (bindings.map BindingInput.state)
           declaration.body declaration.result locals := by
         rw [← slots] at checkedBody
@@ -237,12 +237,6 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
         exact checkedBody
       have entered := enterBindings.typed inputsTyped middle.heap middle.supply
       obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered middle.supply.allocate_issued
-      have discard : ∀ binding ∈ locals, UsePermitted program.data .discard binding.2.slot.type := by
-        intro binding member
-        have slotMember : (binding.1, binding.2.slot) ∈ locals.slots := List.mem_map.mpr ⟨binding, member, rfl⟩
-        rw [checkedBody.slots] at slotMember
-        simp only [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] at slotMember
-        exact declarationChecked.disposable _ (by simpa using slotMember)
       have invocation := ConfigurationTyped.invoke middleTyped middleIssued .nil inputsTyped bodyTyped discard
       have returned := invocation.run checkedProgram (Run.extend bodyRun [.restore middle.scope])
       obtain done | ⟨next, stepped⟩ := returned.progress

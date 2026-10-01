@@ -57,7 +57,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       HasType program home before (.sequence first rest) type after
   | bind {home before middle after mutable name initial body localType type finalMask}
       (initialized : HasType program home before initial localType middle)
-      (drop : UsePermitted program.data .discard localType)
+      (drop : finalMask.Disposable program.data localType)
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ middle.map Prod.fst) :
@@ -123,6 +123,7 @@ inductive ArmsType (program : Program) :
       (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ after))
       (localSlots : FlowContext.slots localsAfter = bindings)
+      (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
       (tailTyped : ArmsType program home before subject result (previous ++ [pattern]) rest after) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
@@ -149,7 +150,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
   | nil => rfl
   | cons head tail headIH tailIH => exact tailIH.trans headIH
   | empty => rename_i nonempty; exact False.elim (nonempty rfl)
-  | clause pattern distinct useful body localSlots tail bodyIH tailIH =>
+  | clause pattern distinct useful body localSlots disposable tail bodyIH tailIH =>
     simp only [FlowContext.slots, List.map_append] at bodyIH
     change FlowContext.slots _ ++ FlowContext.slots _ = FlowContext.slots _ ++ FlowContext.slots _ at bodyIH
     rw [localSlots] at bodyIH
@@ -170,14 +171,14 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals localsAfter pattern, (pattern, body) ∈ arms ∧
       BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = locals ∧
-      (∀ binding ∈ locals, UsePermitted program.data .discard binding.2.type) ∧
+      (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ after) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup := by
   induction arms generalizing previous with
   | nil => simp [selectArm] at selected
   | cons arm arms ih =>
     cases checked with
-    | clause patternTyped distinct useful bodyTyped localSlots tailTyped =>
+    | clause patternTyped distinct useful bodyTyped localSlots disposable tailTyped =>
       simp only [selectArm] at selected
       split at selected
       next matched found =>
@@ -185,20 +186,19 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
         obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
           (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
         exact ⟨_, _, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          inputsTyped, slots, patternTyped.disposable, bodyTyped, localSlots, distinct⟩
+          inputsTyped, slots, disposable, bodyTyped, localSlots, distinct⟩
       next missed =>
         obtain ⟨locals, localsAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped, localSlots, distinct⟩ :=
           ih tailTyped selected
         exact ⟨locals, localsAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
           disposable, bodyTyped, localSlots, distinct⟩
 
-/-- Bodies may finish with holes; scope disposal requires discardable
-parameter types in this fragment. No completed execution is assumed. -/
+/-- Bodies certify disposition from their final masks, never from a completed run. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
   distinct : (declaration.parameters.map Prod.fst).Nodup
-  disposable : ∀ parameter ∈ declaration.parameters, UsePermitted program.data .discard parameter.2.type
   body : ∃ after, HasType program declaration.home (initializedContext declaration.parameters)
-    declaration.body declaration.result after
+    declaration.body declaration.result after ∧
+    ∀ binding ∈ after, binding.2.Disposable program.data
 
 def Program.Checked (program : Program) : Prop :=
   ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
@@ -218,7 +218,7 @@ theorem ArmsType.slots {program : Program} {home : Module} {before after : FlowC
     after.slots = before.slots := by
   cases checked with
   | empty => exact False.elim (nonempty rfl)
-  | clause pattern distinct useful body localSlots tail =>
+  | clause pattern distinct useful body localSlots disposable tail =>
     have same := body.slots
     simp only [FlowContext.slots, List.map_append] at same
     change FlowContext.slots _ ++ FlowContext.slots _ = FlowContext.slots _ ++ FlowContext.slots _ at same
