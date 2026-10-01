@@ -73,6 +73,7 @@ loans, resolved storage identities and physical memory remain outside it.
 | `Termination` | Structural constant termination and optional well-founded call expansion |
 | `Soundness` | Prefix safety and the preserved terminating-fragment theorem |
 | `SourcePatterns` | Certified constant normalization and its public source consumer |
+| `SourceLocals` | Named-local resolution, fresh lexical scope entry and source checking/safety consumers |
 
 The former `Core.lean` is removed, not retained as a compatibility import.
 Checking consumes storage and pattern contracts; execution consumes storage
@@ -153,6 +154,41 @@ Strict `lake build` passed (17 jobs). The defining-module axiom audit covered
 1,943 declarations, including private/generated declarations, with only the
 standard `propext`, `Quot.sound` and `Classical.choice` dependencies. No
 examples, unit tests, new axioms or assumed post-state distinctness were added.
+
+
+## Verified named-local resolution boundary
+
+`SourceLocals` owns source-local spelling resolution. `SourceScope` contains
+source bindings and a fresh lexical-ID bound; its core checking context is
+computed from those bindings rather than maintained as a second fact table.
+`resolve_first` characterizes exact nearest-spelling selection, and
+`resolve_missing` characterizes rejection of absent names. `enter` constructs
+a fresh ID and the body's scope. The initializer is checked in the incoming
+scope. `enter_preserves_selected` proves that introducing a shadowing spelling
+cannot capture an already-resolved outer reference.
+
+`resolvePlace` produces a core place with that exact ID. `place` proves its
+static selection using the same core lookup; field authority remains the existing
+`PathType` contract. The read, assignment and binding checking producers consume
+these facts, including binding freshness derived from `enter`. Their public
+soundness theorems derive realization, progress, immutable entry-store framing
+and runtime binding uniqueness for every actual execution prefix. RHS order and
+scope exit remain the existing machine transitions, not another source evaluator.
+
+This closes compositional named-local resolution for these three operations.
+It does not implement a parser, recursive whole-source elaborator, type inference,
+or pattern-binder allocation. Subexpressions still supply their core checking
+derivations; `SourcePatterns` still receives resolved binder IDs. The allocation
+bound establishes freshness relative to the source scope, not a globally fresh
+runtime activation or storage address. Those boundaries and flow-sensitive
+moves/restoration remain open.
+
+Verification: strict `lake build` passed (18 jobs). The defining-module audit
+covered 2,011 declarations including private/generated declarations, permitting
+only `propext`, `Quot.sound` and `Classical.choice`. All three named-local
+soundness theorems depend only on `propext` and `Quot.sound`. A runtime-only
+import check confirmed that `SourceScope`, `HasType` and `correctness` are
+absent. No examples, unit tests, new axioms or temporary files were added.
 
 
 ## Verified explicit-frame migration
