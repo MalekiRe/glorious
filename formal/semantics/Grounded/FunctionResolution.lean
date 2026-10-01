@@ -10,23 +10,27 @@ structure NamedParameter where
   type : TypeExpr
   mutable : Bool := false
 
-structure NamedFunction where
+structure FunctionSyntax where
   name : Identifier
-  home : Module
   visibility : Visibility := .private
   parameters : List NamedParameter
   result : Option TypeExpr := none
   body : NamedExpr
 
+structure NamedFunction extends FunctionSyntax where
+  home : Module
+
 inductive FunctionImportKind where
   | explicit (sourceName localName : Identifier)
   | glob
 
-structure FunctionImport where
-  home : Module
+structure FunctionImportSyntax where
   target : Module
   kind : FunctionImportKind
   visibility : Visibility := .private
+
+structure FunctionImport extends FunctionImportSyntax where
+  home : Module
 
 /-- Explicit source bindings suppress weak imports even when the explicit
 binding is unresolved. An invalid explicit import cannot expose a fallback. -/

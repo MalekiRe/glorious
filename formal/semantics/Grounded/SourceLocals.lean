@@ -1,4 +1,3 @@
-import Grounded.Identifiers
 import Grounded.Soundness
 
 /-! Named local resolution feeds the existing decoded-core checking rules.

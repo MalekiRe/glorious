@@ -40,14 +40,16 @@ future-state readiness or execution-success premise. Recursive calls are therefo
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
 
-`NamedFunctionsAdmitted.soundness` now derives this core contract from named
+`NamedFunctionsAdmitted.soundness` derives this core contract from named
 direct-function declarations and recursively elaborated named expressions,
 including named pattern clauses. `Program.Checked` is a proved intermediate
-product, not a premise supplied by that source-facing theorem.
-Callable imports now use a seeded least candidate relation with visibility,
-explicit-over-glob priority and unique-identity selection. Static module/import
-admission is explicit; `import_call_soundness` derives selection and the same
-machine contract from a visible candidate. Package source closure remains open.
+product, not a supplied execution guarantee. Callable imports use seeded least
+candidate closure, visibility, explicit-over-glob priority and unique selection.
+`SourceClosure.Admitted.function_soundness` now derives the declaring modules
+and owners from supplied roots and explicit module inclusion, constructs fresh
+function entry and proves general body-prefix safety. File permutation preserves
+actual admission. Dependency authorization, textual paths/groups, package-name
+normalization, prelude profiles and the remaining source frontend are still open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -94,6 +96,7 @@ ownership, destruction, loans and physical memory remain open.
 | `SourceExpressions` | Recursive named-expression and clause elaboration into core admission |
 | `FunctionResolution` | Named function syntax, seeded callable import closure, priority, visibility and unique selection |
 | `SourceDeclarations` | Named direct-function interfaces/bodies, import admission and derived program safety |
+| `SourceClosure` | Declaration-driven supplied-file inclusion, assigned module ownership and source-owned function safety |
 
 The former `Core.lean` is removed, not retained as a compatibility import.
 Checking consumes storage and pattern contracts; execution consumes storage
@@ -1385,4 +1388,55 @@ spans, other literal forms and source package/module closure remain open.
 Constants, type aliases and field keys retain decoded textual interfaces;
 they have not been represented as fully validated source tokens. The broader
 lexical and whole-language completion tasks remain incomplete.
+
+
+
+## Verified declaration-driven module inclusion
+
+`SourceClosure` derives included modules from driver-selected package roots
+and explicit inline/external module declarations over finite supplied decoded
+file collections. External children select exactly
+`D/child/child.glorious`; both external and inline children advance the
+logical directory to `D/child`. An inline child retains its containing file
+identity. Roots use their selected file without the child filename rule.
+There is no filesystem I/O, directory enumeration, or implicit sibling rule.
+
+Module paths now contain checked identifier components, rather than arbitrary
+numeric path segments. `FunctionSyntax` and `FunctionImportSyntax` do not
+contain a declaring home. Inclusion assigns their home from the module tree;
+the resulting `NamedFunction` and `FunctionImport` products feed the existing
+resolver and declaration elaborator. There is no alternate callable analysis.
+The public `Grounded` import now includes this source-closure boundary.
+
+General proofs establish:
+
+- Uniqueness of loading and of the entire `SourceClosure` product for fixed
+  supplied packages. Duplicate file keys are rejected; root and child file
+  selection cannot choose competing bodies.
+- Preservation of package identity and provenance in an actually supplied file.
+- Invariance of the exact loaded modules and actual program admission under
+  arbitrary within-package file permutations. File position does not establish
+  private authority or change declaration identity.
+- Every selected runtime function elaborates from a function in an included
+  module, with the declaring owner assigned by inclusion.
+- `SourceClosure.Admitted.function_soundness` consumes that inclusion-derived
+  owner and supplied-file provenance, constructs fresh addressed function entry,
+  preserves existing caller cells at entry, and proves preservation, progress,
+  consumption framing and binding distinctness for every actual body execution
+  prefix. It assumes neither completed execution nor future-state readiness.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). The imported audit
+covered 3,353 `Grounded` declarations with only standard Lean axioms. Closure
+uniqueness, file-order admission equivalence, file provenance and both public
+closure soundness theorems received explicit axiom inspection. No unit tests,
+concrete examples, custom axioms or proof placeholders were added.
+
+This closes declaration-driven inclusion of decoded module/function syntax,
+not the full source frontend. Package identities and qualified import targets
+are still decoded inputs. Explicit dependency authorization, normalized package
+names/collisions, textual path/group resolution, prelude profiles, other
+namespaces, parsing/UTF-8 and preservation of original byte spans remain open.
+Nominal declarations, aliases and constants retain their earlier decoded
+interfaces. The overall source-closure task and whole-language soundness are
+not complete.
 

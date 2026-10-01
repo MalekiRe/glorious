@@ -156,6 +156,19 @@ theorem NamedFunctionsElaborate.selected {program : Program} {names : Module →
     | zero => cases selected; exact ⟨_, rfl, head⟩
     | succ identity => exact ih selected
 
+theorem NamedFunctionsElaborate.selected_core {program : Program} {names : Module → Module → Identifier → Option Nat}
+    {sources : List NamedFunction} {cores : List FunctionDecl}
+    (elaborated : NamedFunctionsElaborate program names sources cores)
+    {identity : Nat} {core : FunctionDecl} (selected : cores[identity]? = some core) :
+    ∃ source, sources[identity]? = some source ∧ NamedFunction.Elaborates program names source core := by
+  induction elaborated generalizing identity with
+  | nil => simp at selected
+  | cons head tail ih =>
+    cases identity with
+    | zero => cases selected; exact ⟨_, rfl, head⟩
+    | succ identity => exact ih selected
+
+
 theorem NamedFunctionsAdmitted.resolves {sources : List NamedFunction} {program : Program}
     (admitted : NamedFunctionsAdmitted modules sources imports program)
     {caller home : Module} {name : Identifier} {identity : Nat}

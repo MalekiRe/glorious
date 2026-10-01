@@ -1,4 +1,4 @@
-
+import Grounded.Identifiers
 /-! Decoded language vocabulary and declarations. Program records contain no checking
 or execution certificates. Lexical uses carry resolved binding identities. -/
 namespace Grounded
@@ -53,7 +53,7 @@ abbrev Aliases := String → Option TypeExpr
 /-- Resolved module identity, including the package boundary (§2.2). -/
 structure Module where
   package : Nat
-  path : List Nat
+  path : List Identifier
   deriving DecidableEq
 
 inductive Visibility where
