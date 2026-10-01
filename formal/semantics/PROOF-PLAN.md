@@ -44,6 +44,10 @@ checking from the selected declaration at invocation entry.
 direct-function declarations and recursively elaborated named expressions,
 including named pattern clauses. `Program.Checked` is a proved intermediate
 product, not a premise supplied by that source-facing theorem.
+Callable imports now use a seeded least candidate relation with visibility,
+explicit-over-glob priority and unique-identity selection. Static module/import
+admission is explicit; `import_call_soundness` derives selection and the same
+machine contract from a visible candidate. Package source closure remains open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -87,7 +91,8 @@ ownership, destruction, loans and physical memory remain open.
 | `SourceLocals` | Named-local resolution, fresh lexical scope entry and source checking/safety consumers |
 | `NamedPatterns` | Named pattern-binder allocation and exact matcher/body scope agreement |
 | `SourceExpressions` | Recursive named-expression and clause elaboration into core admission |
-| `SourceDeclarations` | Named direct-function interfaces/bodies, name resolution and derived program admission |
+| `FunctionResolution` | Named function syntax, seeded callable import closure, priority, visibility and unique selection |
+| `SourceDeclarations` | Named direct-function interfaces/bodies, import admission and derived program safety |
 
 The former `Core.lean` is removed, not retained as a compatibility import.
 Checking consumes storage and pattern contracts; execution consumes storage
@@ -1297,4 +1302,53 @@ source closure, textual path decoding, import/prelude fixed points and other
 namespaces remain unproved. Constants and type aliases retain their separate
 decoded textual interfaces. This checkpoint does not establish source-text
 resolution or whole-language soundness.
+
+
+
+## Verified decoded callable import closure
+
+`FunctionResolution` is the authoritative producer for decoded callable
+imports. Its inductive `FunctionCandidate` relation is seeded by actual source
+declarations and closed under accessible explicit/alias and glob import edges.
+`FunctionCandidate.least` proves leastness against every relation closed under
+those same rules. Cycles cannot invent a declaration identity; unseeded cycles
+cannot resolve. Multiple paths to one identity are not an ambiguity.
+
+Explicit source bindings suppress glob candidates, including when an explicit
+import is unresolved. Lookup selects only a unique visible declaration identity;
+distinct surviving candidates are rejected rather than ordered by traversal,
+argument types or expected result. `functionNames` is a noncomputable semantic
+selector over the proved candidate relation, not an executable resolver algorithm.
+No arbitrary import-result table is supplied to source program admission.
+
+`FunctionImportsValid` checks the supplied module set, declaration/import
+membership, resolution of every explicit target, and absence of visible identity
+conflicts. These are static name-admission conditions, not runtime-progress or
+future-state assumptions. The module set is still driver/decoded source input;
+its derivation from package source closure remains open. General import-set
+congruence proves that reordering or repeating edges preserves lookup, import
+validity and the actual `NamedFunctionsAdmitted` program.
+
+All named expression/declaration consumers now use caller-sensitive import
+resolution. `call_resolution` follows aliases to the original emitted declaration
+and retains its original module and visibility. The earlier equality between the
+lookup module and declaration module is correctly superseded: an alias need not
+be declared in the original module. `import_call_soundness` constructs name
+selection from a visible candidate and static admission, constructs the source
+call, then proves the general preservation/progress and consumption-framing
+contract for every actual execution prefix. Qualified calls cannot bypass an
+import binding's visibility or the original declaration's invocation visibility.
+
+Fresh source-only `lake build Grounded.SourceDeclarations` passed (26 jobs).
+The full imported audit covered 3,113 `Grounded` declarations with only standard
+Lean axioms. Leastness, cycle/ambiguity rejection, import-order admission,
+source/runtime identity and imported-call soundness received explicit axiom
+inspection. No unit tests, concrete examples, new axioms or proof placeholders
+were added. Existing general named-source and finite-call consumers also check.
+
+This is decoded callable import semantics, not completed source closure or all
+namespace resolution. Textual paths/groups, package acquisition/normalization,
+prelude profiles and their priority, non-callable namespaces, lexical decoding,
+and the rest of the whole-language obligations remain open. No full-language
+completion claim follows from this checkpoint.
 
