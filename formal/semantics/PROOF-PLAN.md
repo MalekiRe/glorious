@@ -2920,3 +2920,38 @@ examples or unit tests were added. Reference carriers, loan authority, reborrowi
 and region/return contracts remain the next integrated representation boundary;
 this address cutover alone does not admit borrowing or establish full soundness.
 
+
+## Address separation through constructive owned-input entry
+
+`StorageAddress.Disjoint` lifts the existing checked field geometry into the
+actual pre-state heap; distinct-root separation uses storage identities, not
+lexical names. `BindingMap.Typed.separated` derives it from the source relation
+and actual address resolution, using binding-map injectivity. No second alias
+analysis or independently reconstructed field layout is introduced.
+
+Actual take/restoration framing consumes this relation, including disjoint
+fields in one cell. The existing lexical and machine framing consumers use the
+same address-level producer. `HasTypes.disjoint_moves_execute` then constructs
+an arbitrary ordered batch of admitted separated owned moves. It proves that
+each returned value equals that input's original pre-state observation, derives
+the intermediate heaps and checking contexts, and preserves scope and activation
+supply. Pending observations survive each real move by address framing; their
+future readiness or future contents are not assumed.
+
+`HasType.disjoint_call_entry` consumes that batch, performs actual parameter
+preparation and callee allocation, constructs the machine run to the selected
+body with its caller-restoration frame, and obtains reached-state typing and a
+next transition from general preservation/progress. The body may recurse or
+diverge: neither completion nor body termination is assumed.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+of address separation, both mutation-frame producers, constructive batch/entry,
+general preservation/progress and public source-function soundness found only
+`propext`, `Classical.choice` and `Quot.sound`. No unit tests or concrete
+examples were added.
+
+This constructs separated owned-move entry in the current logical allocator.
+Existing mixed Copy/move call-prefix safety remains unchanged. It does not yet
+construct borrowed inputs, prove shared/unique loan compatibility, interpret
+physical allocation exhaustion, or discharge the whole-language obligations.
+

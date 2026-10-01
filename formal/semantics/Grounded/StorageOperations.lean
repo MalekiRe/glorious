@@ -24,6 +24,17 @@ def StorageAddress.restore (program : Program) (heap : RuntimeHeap StorageCell)
     (cell.resident.writeFields program cell.type address.fields (.resident value)).bind fun updated =>
       heap.write address.root { cell with resident := updated }
 
+/-- A move returns precisely the resident selected before clearing the path. -/
+theorem StorageAddress.take.read_before {program : Program} {before after : RuntimeHeap StorageCell}
+    {address : StorageAddress} {value : Value}
+    (taken : address.take program before = some (value, after)) :
+    address.read program before = some value := by
+  simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+  obtain ⟨cell, found, selected, selectedAt, owner, read, updated, _, heap, _, same⟩ := taken
+  cases same
+  simp [StorageAddress.read, found, selectedAt, read]
+
+
 /-- Exact address typing comes from the current cell and the shared projection
 judgment. It grants neither initialization nor permission to access a loan. -/
 inductive StorageAddress.Typed (program : Program) (heap : RuntimeHeap StorageCell) :
@@ -49,6 +60,18 @@ theorem StorageAddress.Typed.unique {program : Program} {heap : RuntimeHeap Stor
   | intro found path =>
     obtain ⟨home, other⟩ := second.path found
     exact path.result_unique other
+
+/-- Address separation uses the existing checked path geometry in the actual
+pre-state cell. Distinct lexical names alone are not evidence of separation. -/
+inductive StorageAddress.Disjoint (program : Program) (heap : RuntimeHeap StorageCell) :
+    StorageAddress → StorageAddress → Prop where
+  | roots {left right : StorageAddress} (different : left.root ≠ right.root) :
+      Disjoint program heap left right
+  | fields {identity : StorageId} {left right : List FieldKey} {home : Module} {cell : StorageCell}
+      (found : heap.read identity = some cell)
+      (apart : PathDisjoint program home cell.type left right) :
+      Disjoint program heap ⟨identity, left⟩ ⟨identity, right⟩
+
 
 theorem StorageAddress.read.progress {program : Program} {heap : RuntimeHeap StorageCell}
     {address : StorageAddress} {cell : StorageCell} {state selectedState : Initialization} {type : Ty}
@@ -193,6 +216,38 @@ theorem StorageAddress.take.read_disjoint {program : Program} {home : Module}
   cases same
   rw [RuntimeHeap.write_read stored]
   exact congrArg (fun selected => selected.bind PartialValue.read) (apart.write_frame written)
+
+/-- Restoration preserves every pre-state-separated address observation. -/
+theorem StorageAddress.restore.read_frame {program : Program}
+    {before after : RuntimeHeap StorageCell} {address observed : StorageAddress} {value : Value}
+    (apart : address.Disjoint program before observed)
+    (restored : address.restore program before value = some after) :
+    observed.read program after = observed.read program before := by
+  cases apart with
+  | roots different =>
+    simp only [StorageAddress.restore, Option.bind_eq_some_iff] at restored
+    obtain ⟨cell, _, updated, _, written⟩ := restored
+    simp only [StorageAddress.read, RuntimeHeap.write_other written (Ne.symm different)]
+  | fields found separated =>
+    simpa [StorageAddress.read, found] using
+      StorageAddress.restore.read_disjoint found separated restored
+
+/-- Moving a field preserves every pre-state-separated address observation. -/
+theorem StorageAddress.take.read_frame {program : Program}
+    {before after : RuntimeHeap StorageCell} {address observed : StorageAddress} {value : Value}
+    (apart : address.Disjoint program before observed)
+    (taken : address.take program before = some (value, after)) :
+    observed.read program after = observed.read program before := by
+  cases apart with
+  | roots different =>
+    simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+    obtain ⟨cell, _, selected, _, owner, _, updated, _, heap, written, same⟩ := taken
+    cases same
+    simp only [StorageAddress.read, RuntimeHeap.write_other written (Ne.symm different)]
+  | fields found separated =>
+    simpa [StorageAddress.read, found] using
+      StorageAddress.take.read_disjoint found separated taken
+
 
 /-- The same cell supports a complete checked move/restoration sequence at any
 field depth. The checking state records absent then present; no new storage

@@ -1,4 +1,5 @@
 import Grounded.BindingStorage
+import Grounded.Places
 
 /-! Resolved lexical accesses use the same addressed cells and path operations
 as allocation and scope retirement. Language permission is checked above here. -/
@@ -36,6 +37,37 @@ theorem BindingMap.Typed.resolve (typed : BindingMap.Typed program heap activati
   obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
   refine ⟨identity, cell, mapped, by simp [BindingMap.resolve, mapped], found, owner, declared, resident, ?_⟩
   exact .intro found (by simpa only [declared] using checked)
+
+/-- Checked source separation is realized by actual storage identities and
+field paths, using the binding map's injectivity rather than source spelling. -/
+theorem BindingMap.Typed.separated (typed : BindingMap.Typed program heap activation bindings context)
+    {left right : Place} {leftAddress rightAddress : StorageAddress}
+    (apart : PlaceDisjoint program home (context.map fun entry => (entry.1, entry.2.slot)) left right)
+    (leftResolved : bindings.resolve left = some leftAddress)
+    (rightResolved : bindings.resolve right = some rightAddress) :
+    leftAddress.Disjoint program heap rightAddress := by
+  obtain ⟨leftRoot, leftMapped, leftSame⟩ := Option.map_eq_some_iff.mp leftResolved
+  obtain ⟨rightRoot, rightMapped, rightSame⟩ := Option.map_eq_some_iff.mp rightResolved
+  cases leftSame
+  cases rightSame
+  cases apart with
+  | roots different =>
+    apply StorageAddress.Disjoint.roots
+    intro same
+    change leftRoot = rightRoot at same
+    exact different (Grounded.lookup.unique_key typed.addresses_distinct leftMapped (by simpa only [same] using rightMapped))
+  | fields same selected separated =>
+    rw [Grounded.lookup.map] at selected
+    obtain ⟨state, selected, slotSame⟩ := Option.map_eq_some_iff.mp selected
+    obtain ⟨identity, cell, mapped, found, _, declared, _⟩ := typed.lookup selected
+    cases Option.some.inj (mapped.symm.trans leftMapped)
+    have rightFound : Grounded.lookup right.root bindings = some leftRoot := by
+      simpa only [same] using leftMapped
+    have roots : leftRoot = rightRoot := Option.some.inj (rightFound.symm.trans rightMapped)
+    cases roots
+    apply StorageAddress.Disjoint.fields found
+    simpa only [declared, slotSame] using separated
+
 
 
 /-- The selected old resident has legal residual disposition immediately before
@@ -808,8 +840,8 @@ theorem BindingMap.restore.read_disjoint
     (changed : bindings.restore program heap place value = some after) :
     bindings.read program after other = bindings.read program heap other := by
   simp only [BindingMap.restore, BindingMap.resolve, Option.bind_map, mapped, Option.bind_some] at changed
-  simpa [BindingMap.read, BindingMap.resolve, Option.bind_map, StorageAddress.read, otherMapped, found] using
-    StorageAddress.restore.read_disjoint found apart changed
+  simpa [BindingMap.read, BindingMap.resolve, otherMapped] using
+    StorageAddress.restore.read_frame (.fields found apart) changed
 
 theorem BindingMap.take.read_disjoint
     {after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell} {other : Place} {value : Value}
@@ -820,8 +852,42 @@ theorem BindingMap.take.read_disjoint
     (changed : bindings.take program heap place = some (value, after)) :
     bindings.read program after other = bindings.read program heap other := by
   simp only [BindingMap.take, BindingMap.resolve, Option.bind_map, mapped, Option.bind_some] at changed
-  simpa [BindingMap.read, BindingMap.resolve, Option.bind_map, StorageAddress.read, otherMapped, found] using
-    StorageAddress.take.read_disjoint found apart changed
+  simpa [BindingMap.read, BindingMap.resolve, otherMapped] using
+    StorageAddress.take.read_frame (.fields found apart) changed
+
+
+/-- Actual movement preserves every source-separated pending observation. -/
+theorem BindingMap.take.read_frame (typed : BindingMap.Typed program heap activation bindings context)
+    {after : RuntimeHeap StorageCell} {other : Place} {value : Value}
+    (apart : PlaceDisjoint program home (context.map fun entry => (entry.1, entry.2.slot)) place other)
+    (changed : bindings.take program heap place = some (value, after)) :
+    bindings.read program after other = bindings.read program heap other := by
+  obtain ⟨address, resolved, taken⟩ := Option.bind_eq_some_iff.mp changed
+  cases observed : bindings.resolve other with
+  | none => simp [BindingMap.read, observed]
+  | some target =>
+    simpa only [BindingMap.read, observed, Option.bind_some] using
+      StorageAddress.take.read_frame (typed.separated apart resolved observed) taken
+
+/-- Actual restoration preserves every source-separated pending observation. -/
+theorem BindingMap.restore.read_frame (typed : BindingMap.Typed program heap activation bindings context)
+    {after : RuntimeHeap StorageCell} {other : Place} {value : Value}
+    (apart : PlaceDisjoint program home (context.map fun entry => (entry.1, entry.2.slot)) place other)
+    (changed : bindings.restore program heap place value = some after) :
+    bindings.read program after other = bindings.read program heap other := by
+  obtain ⟨address, resolved, restored⟩ := Option.bind_eq_some_iff.mp changed
+  cases observed : bindings.resolve other with
+  | none => simp [BindingMap.read, observed]
+  | some target =>
+    simpa only [BindingMap.read, observed, Option.bind_some] using
+      StorageAddress.restore.read_frame (typed.separated apart resolved observed) restored
+
+
+theorem BindingMap.take.read_before {after : RuntimeHeap StorageCell} {value : Value}
+    (taken : bindings.take program heap place = some (value, after)) :
+    bindings.read program heap place = some value := by
+  obtain ⟨address, resolved, moved⟩ := Option.bind_eq_some_iff.mp taken
+  simpa only [BindingMap.read, resolved, Option.bind_some] using StorageAddress.take.read_before moved
 
 
 end Grounded

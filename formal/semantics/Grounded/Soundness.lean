@@ -128,6 +128,101 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
               fun _ apart => apart.initialization_frame maskWritten⟩
 
 
+/-- Checked separated owned inputs actually finish in order. Each returned
+value is the observation of that input in the original pre-state, not merely
+some value of the right type in an assumed intermediate heap. -/
+theorem HasTypes.disjoint_moves_execute {before final : FlowContext} {inputs : List (Place × Ty)}
+    (separated : inputs.Pairwise (fun left right => PlaceDisjoint program home before.slots left.1 right.1))
+    (checked : HasTypes program home before (inputs.map fun input => Expr.move input.1)
+      (inputs.map Prod.snd) final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before) :
+    ∃ after values,
+      EvaluatesMany program environment (inputs.map fun input => Expr.move input.1) values after ∧
+      ValuesHaveTypes program values (inputs.map Prod.snd) ∧
+      values.map some = inputs.map (fun input => environment.read program input.1) ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.scope = environment.scope ∧ after.supply = environment.supply := by
+  induction inputs generalizing before final environment with
+  | nil =>
+    cases checked
+    exact ⟨environment, [], .nil, .nil, rfl, store, rfl, rfl⟩
+  | cons input rest ih =>
+    have parts := List.pairwise_cons.mp separated
+    cases checked with
+    | cons head tail =>
+      have slots := head.slots
+      have tailSeparated := parts.2
+      rw [← slots] at tailSeparated
+      cases head with
+      | move selected path selection ready mask changed =>
+        obtain ⟨identity, value, heap, nextState, nextContext, _, maskWritten, contextWritten,
+          taken, valueTyped, movedTyped, _⟩ := BindingMap.take.progress store selected path selection ready
+        cases Option.some.inj (mask.symm.trans maskWritten)
+        cases Option.some.inj (changed.symm.trans contextWritten)
+        obtain ⟨after, values, evaluated, valuesTyped, observed, afterTyped, scope, supply⟩ :=
+          ih tailSeparated tail (environment := { environment with heap := heap }) movedTyped
+        refine ⟨after, value :: values,
+          .cons (.move (by simp [AddressedEnvironment.take, taken])) evaluated,
+          .cons valueTyped valuesTyped, ?_, afterTyped, scope, supply⟩
+        change some value :: values.map some =
+          environment.read program input.1 :: rest.map (fun input => environment.read program input.1)
+        have first : some value = environment.read program input.1 := (BindingMap.take.read_before taken).symm
+        rw [← first]
+        apply congrArg (List.cons (some value))
+        apply observed.trans
+        apply List.map_congr_left
+        intro pending member
+        exact BindingMap.take.read_frame store (parts.1 pending member) taken
+
+
+/-- Pre-state source admission constructs actual owned-input evaluation and
+callee entry, then general preservation types that reached body configuration.
+The callee body may recurse or diverge; no completed call is assumed. -/
+theorem HasType.disjoint_call_entry (checkedProgram : program.Checked)
+    {before : FlowContext} {inputs : List (Place × Ty)} {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (separated : inputs.Pairwise (fun left right => PlaceDisjoint program home before.slots left.1 right.1))
+    (ready : ∀ input ∈ inputs, ∃ state available,
+      lookup input.1.root before = some state ∧
+      PathType program home state.slot.type input.1.fields input.2 ∧
+      state.initialization.selectFields program state.slot.type input.1.fields = some available ∧ available.Ready)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ final middle values bindings,
+      HasType program home before (.call identity (inputs.map fun input => Expr.move input.1))
+        declaration.result final ∧
+      EvaluatesMany program environment (inputs.map fun input => Expr.move input.1) values middle ∧
+      values.map some = inputs.map (fun input => environment.read program input.1) ∧
+      prepareBindings declaration.parameters values = some bindings ∧
+      Run program ⟨environment, .expression (.call identity (inputs.map fun input => Expr.move input.1)), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ConfigurationTyped program final (.one declaration.result)
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ∃ next, Step program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next := by
+  obtain ⟨final, inputsChecked⟩ := HasTypes.disjoint_moves separated ready
+  have checked : HasType program home before (.call identity (inputs.map fun input => Expr.move input.1))
+      declaration.result final := .call declared visible (by simpa only [arguments] using inputsChecked)
+  obtain ⟨middle, values, evaluated, valuesTyped, observed, _⟩ :=
+    inputsChecked.disjoint_moves_execute separated store
+  obtain ⟨bindings, prepared, _, _⟩ := prepareBindings.progress
+    (by simpa only [arguments] using valuesTyped) (checkedProgram.functions identity declaration declared).distinct
+  have entered : Run program
+      ⟨environment, .expression (.call identity (inputs.map fun input => Expr.move input.1)), []⟩
+      ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ :=
+    .step (.call declared) ((Run.extend evaluated [.call declaration]).trans
+      (.step (.callInputs prepared) (.refl _)))
+  have safe := checked.soundness checkedProgram store issued entered
+  refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, safe.1, ?_⟩
+  rcases safe.2.1 with terminal | next
+  · cases terminal
+  · exact next
+
+
 /-- Pre-state-compatible owned arguments yield general call-prefix safety,
 including actual argument movement, callee entry, recursive execution and return.
 No intermediate input readiness or completed execution is assumed. -/
