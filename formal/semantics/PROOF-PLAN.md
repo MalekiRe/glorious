@@ -2823,3 +2823,27 @@ remain unimplemented; they must not use this correlation-forgetting
 join. Custom Drop, cleanup order with observable hooks, loans, cancellation and
 nonlocal exits, and physical storage semantics remain whole-language obligations.
 
+
+## Actual pattern invocation and normalized-source execution
+
+`Evaluates.applyPatterns_iff` now characterizes completed pattern invocations
+through the existing machine: ordered argument execution, actual first-arm
+selection, execution in extended binding storage, and scope retirement. The
+reverse implication constructs the same run; there is no alternate evaluator.
+
+`SourceArmsChecked.evaluation_soundness` consumes this characterization through
+existing normalized-source admission and arm selection. It derives typed
+argument values and binding packs, realized argument-output and final contexts,
+issued final activation, consumption framing, result typing and actual sequential
+execution at every argument-list cut. No `FiniteCalls` premise or assumed future
+completion is introduced into admission. Completion is an observation for this
+partial-correctness theorem; existing prefix soundness still provides progress
+for recursive and nonterminating computations.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+of the operational characterization, new source consumer, existing source-prefix
+soundness and public source-function soundness found only standard Lean axioms.
+No examples or unit tests were added. First-class pattern callable values,
+captured environments, borrowing and nonlocal control remain separate open
+representation and proof obligations.
+

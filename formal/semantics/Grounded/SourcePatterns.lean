@@ -219,5 +219,45 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
   exact ⟨checked.normalize.property, checked.normalize.property.unique,
     Grounded.correctness checkedProgram (checked.admits argumentsTyped nonempty covered bodies) finite environmentTyped issued⟩
 
+/-- Completed normalized source invocations expose the actual ordered argument
+run, selected branch and scope exit. Recursive bodies need no static termination
+certificate; their completed execution is observed rather than assumed by admission. -/
+theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × Expr)}
+    {context evaluated final : FlowContext} {environment after : Environment}
+    {arguments : List Expr} {inputs : List Ty} {result : Ty} {value : Value}
+    (checkedProgram : program.Checked) (checked : SourceArmsChecked program home source)
+    (argumentsTyped : HasTypes program home context arguments inputs evaluated) (nonempty : source ≠ [])
+    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    (run : Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) value after) :
+    ∃ values middle bindings body localAfter,
+      EvaluatesMany program environment arguments values middle ∧ ValuesHaveTypes program values inputs ∧
+      BindingMap.Typed program middle.heap middle.activation middle.bindings evaluated ∧
+      selectArm (argumentValue values) checked.normalize.val = some (bindings, body) ∧
+      BindingInputsTyped program bindings ∧
+      Evaluates program (middle.extend bindings) body value localAfter ∧
+      localAfter.exitScope bindings.length = some after ∧
+      ValueHasType program value result ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      ∀ front back, arguments = front ++ back →
+        ∃ first rest next, values = first ++ rest ∧
+          EvaluatesMany program environment front first next ∧
+          EvaluatesMany program next back rest middle := by
+  obtain ⟨values, middle, bindings, body, localAfter, argumentsRun, selected, bodyRun, retired⟩ :=
+    Evaluates.applyPatterns_iff.mp run
+  obtain ⟨residents, middleTyped, _, _⟩ := argumentsTyped.evaluation_soundness checkedProgram store issued argumentsRun
+  obtain ⟨_, _, _, _, _, inputsTyped, _⟩ := bodies.selected residents.argument selected
+  obtain ⟨resident, afterTyped, afterIssued, framed⟩ :=
+    (checked.admits argumentsTyped nonempty covered bodies).evaluation_soundness checkedProgram store issued run
+  refine ⟨values, middle, bindings, body, localAfter, argumentsRun, residents, middleTyped,
+    selected, inputsTyped, bodyRun, retired, resident, afterTyped, afterIssued, framed, ?_⟩
+  intro front back same
+  exact EvaluatesMany.append_iff.mp (same ▸ argumentsRun)
+
+
 end
 end Grounded

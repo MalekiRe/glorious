@@ -285,4 +285,49 @@ theorem Evaluates.call_body_noncompletion {environment middle : Environment}
   cases Option.some.inj (prepared.symm.trans preparation)
   exact noncompletion _ _ body
 
+/-- A completed pattern invocation executes its ordered arguments, the actual
+first selected arm, and that arm's scope retirement, in precisely that order. -/
+theorem Evaluates.applyPatterns_iff {environment after : Environment} {inputs : List Ty}
+    {arguments : List Expr} {arms : List (Pattern × Expr)} {value : Value} :
+    Evaluates program environment (.applyPatterns inputs arguments arms) value after ↔
+      ∃ values middle bindings body localAfter,
+        EvaluatesMany program environment arguments values middle ∧
+        selectArm (argumentValue values) arms = some (bindings, body) ∧
+        Evaluates program (middle.extend bindings) body value localAfter ∧
+        localAfter.exitScope bindings.length = some after := by
+  constructor
+  · intro evaluated
+    cases evaluated with
+    | step head rest =>
+      cases head with
+      | applyPatterns =>
+        obtain ⟨done, terminal, argumentsRun, continued⟩ := rest.unextend
+          ⟨environment, .arguments arguments, []⟩ [_] rfl (by simp)
+        cases terminal with
+        | result middle argument =>
+          cases continued with
+          | step head rest => cases head
+        | results middle values =>
+          cases continued with
+          | step head rest =>
+            cases head with
+            | selectedPattern selected =>
+              obtain ⟨done, terminal, bodyRun, exited⟩ := rest.unextend
+                ⟨_, .expression _, []⟩ [_] rfl (by simp)
+              cases terminal with
+              | results localAfter results =>
+                cases exited with
+                | step head rest => cases head
+              | result localAfter result =>
+                cases exited with
+                | step head rest =>
+                  cases head with
+                  | scope retired =>
+                    cases rest with
+                    | refl => exact ⟨_, _, _, _, _, argumentsRun, selected, bodyRun, retired⟩
+                    | step head rest => cases head
+  · rintro ⟨values, middle, bindings, body, localAfter, argumentsRun, selected, bodyRun, retired⟩
+    exact .applyPatterns argumentsRun selected bodyRun retired
+
+
 end Grounded
