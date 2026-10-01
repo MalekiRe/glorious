@@ -381,4 +381,55 @@ theorem Initialization.write_select {program : Program} {parent : Ty}
     exact ih tail
 
 
+theorem InitializationsReady.replicate_present (count : Nat) :
+    InitializationsReady (List.replicate count .present) := by
+  induction count with
+  | zero => exact .nil
+  | succ count ih => exact .cons .present ih
+
+theorem Initialization.Ready.openFields {state : Initialization} (ready : state.Ready) (count : Nat) :
+    InitializationsReady (state.openFields count) := by
+  cases ready with
+  | present => exact InitializationsReady.replicate_present count
+  | fields residents => exact residents
+
+theorem InitializationsReady.select {states : List Initialization} (ready : InitializationsReady states)
+    {index : Nat} {state : Initialization} (selected : states[index]? = some state) : state.Ready := by
+  induction states generalizing index with
+  | nil => simp at selected
+  | cons first rest ih =>
+    cases ready with
+    | cons head tail =>
+      cases index with
+      | zero => cases selected; exact head
+      | succ index => exact ih tail selected
+
+theorem InitializationsReady.set {states : List Initialization} (ready : InitializationsReady states)
+    (index : Nat) {state : Initialization} (replacement : state.Ready) :
+    InitializationsReady (states.set index state) := by
+  induction states generalizing index with
+  | nil => exact .nil
+  | cons first rest ih =>
+    cases ready with
+    | cons head tail =>
+      cases index with
+      | zero => exact .cons replacement tail
+      | succ index => exact .cons head (ih tail index)
+
+/-- Replacing a ready path with a ready resident cannot invalidate any other
+path of an already initialized owner. -/
+theorem Initialization.write_ready {program : Program} {parent : Ty}
+    {before after replacement : Initialization} {path : List FieldKey}
+    (ready : before.Ready) (replacementReady : replacement.Ready)
+    (written : before.writeFields program parent path replacement = some after) : after.Ready := by
+  induction path generalizing parent before after with
+  | nil => cases written; exact replacementReady
+  | cons key rest ih =>
+    simp only [Initialization.writeFields, Option.bind_eq_some_iff, Option.map_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, current, found, updated, tail, same⟩ := written
+    subst after
+    have fields := ready.openFields types.length
+    exact .fields (fields.set index (ih (fields.select found) tail))
+
+
 end Grounded

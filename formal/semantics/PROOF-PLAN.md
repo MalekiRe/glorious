@@ -482,12 +482,22 @@ and exact initialized-context correspondence from argument typing and declared
 parameter distinctness. `enterFunction` consumes those inputs through the same
 activation/storage allocator. `NamedFunctionsAdmitted.enter` now derives
 checked body admission and actual addressed entry from source admission,
-including preservation of every previously realized caller map. This is a
-source-to-storage entry result, not body execution or machine preservation.
+including preservation of every previously realized caller map and derived
+caller/callee address separation. Scope extension reuses this same separation
+proof. This is a source-to-storage entry result, not body execution or machine
+preservation.
 Strict source-declaration checking passed (25 jobs); the full source closure
 audit found only standard Lean axioms. No future execution or successful
 allocation is a premise. Logical allocation still makes no physical-resource
 exhaustion claim.
+
+`Initialization.write_ready` proves that replacing a selected subtree with
+initialized contents preserves whole-owner readiness when the owner was
+already initialized. `BindingMap.restore.progress` consumes that result,
+alongside its general partial-restoration contract. This supplies the
+initialized-fragment preservation obligation needed by the machine cutover
+without assuming a ready successor. The combined binding-access/source gate
+passed (26 jobs), and the combined axiom audit found only standard Lean axioms.
 
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must

@@ -80,7 +80,8 @@ theorem BindingMap.restore.progress (typed : BindingMap.Typed program heap activ
       bindings.restore program heap place value = some after ∧
       BindingMap.Typed program after activation bindings nextContext ∧
       bindings.read program after place = some value ∧ after.next = heap.next ∧
-      (∀ other, other ≠ identity → after.read other = heap.read other) := by
+      (∀ other, other ≠ identity → after.read other = heap.read other) ∧
+      (state.initialization.Ready → nextState.Ready) := by
   obtain ⟨identity, cell, mapped, found, owner, declared, resident, _⟩ := typed.lookup resolved
   have path : PathType program home cell.type place.fields type := by simpa only [declared] using checked
   obtain ⟨after, updated, nextState, stateWritten, restored, written, updatedTyped,
@@ -89,6 +90,7 @@ theorem BindingMap.restore.progress (typed : BindingMap.Typed program heap activ
   exact ⟨identity, after, nextState, nextContext, mapped,
     by simpa only [declared] using stateWritten, replaced,
     by simp [BindingMap.restore, mapped, restored], afterTyped,
-    by simp [BindingMap.read, mapped, updatedFound, readback, PartialValue.read], next, framed⟩
+    by simp [BindingMap.read, mapped, updatedFound, readback, PartialValue.read], next, framed,
+    fun ready => Initialization.write_ready ready .present stateWritten⟩
 
 end Grounded

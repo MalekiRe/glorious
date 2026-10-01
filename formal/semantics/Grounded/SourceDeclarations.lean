@@ -184,7 +184,8 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
       BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
       entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
-        BindingMap.Typed program entry.2.2.2 owner caller callerContext) := by
+        BindingMap.Typed program entry.2.2.2 owner caller callerContext ∧
+        ∀ identity ∈ entry.2.2.1.map Prod.snd, identity ∉ caller.map Prod.snd) := by
   have checked := admitted.checked identity declaration declared
   exact ⟨checked.body, enterFunction.progress arguments checked.distinct heap supply⟩
 

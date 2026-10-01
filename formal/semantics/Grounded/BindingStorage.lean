@@ -297,6 +297,18 @@ theorem BindingMap.Typed.append {front back : BindingMap}
     have addressParts := List.nodup_cons.mp addresses
     exact .cons found owner declared resident (ih nameParts.2 addressParts.2) nameParts.1 addressParts.1
 
+theorem BindingMap.Typed.allocate_apart (current : BindingMap.Typed program heap activation bindings context)
+    (owner : ActivationId) (inputs : List BindingInput) :
+    ∀ newAddress ∈ (allocateBindings heap owner inputs).1.map Prod.snd,
+      ∀ oldAddress ∈ bindings.map Prod.snd, newAddress ≠ oldAddress := by
+  intro newAddress newMember oldAddress oldMember same
+  obtain ⟨cell, found⟩ := current.live oldAddress oldMember
+  have lower := allocateBindings.bounds heap owner inputs newAddress newMember
+  have upper := heap.bounded oldAddress cell found
+  rw [same] at lower
+  omega
+
+
 /-- Scope extension consumes pre-state lexical freshness. Storage separation is
 derived from allocation bounds and existing liveness, never assumed. -/
 theorem allocateBindings.extend {inputs : List BindingInput} (inputsTyped : BindingInputsTyped program inputs)
@@ -312,12 +324,7 @@ theorem allocateBindings.extend {inputs : List BindingInput} (inputsTyped : Bind
   · rw [List.map_append]
     apply List.nodup_append.mpr
     refine ⟨allocated.addresses_distinct, current.addresses_distinct, ?_⟩
-    intro newAddress newMember oldAddress oldMember same
-    obtain ⟨cell, found⟩ := current.live oldAddress oldMember
-    have lower := allocateBindings.bounds heap activation inputs newAddress newMember
-    have upper := heap.bounded oldAddress cell found
-    rw [same] at lower
-    omega
+    exact current.allocate_apart activation inputs
 
 
 theorem BindingMap.Typed.take (typed : BindingMap.Typed program heap activation bindings context) (count : Nat) :
@@ -406,12 +413,14 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
       BindingMap.Typed program entry.2.2.2 entry.1 entry.2.2.1 (initializedContext declaration.parameters) ∧
       entry.1.index = supply.next ∧ entry.2.1.next = supply.next + 1 ∧
       (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
-        BindingMap.Typed program entry.2.2.2 owner caller callerContext) := by
+        BindingMap.Typed program entry.2.2.2 owner caller callerContext ∧
+        ∀ identity ∈ entry.2.2.1.map Prod.snd, identity ∉ caller.map Prod.snd) := by
   obtain ⟨inputs, prepared, inputsTyped, _, states⟩ := prepareBindings.progress arguments distinct
   refine ⟨enterBindings heap supply inputs, by simp [enterFunction, prepared], ?_, rfl, rfl, ?_⟩
   · rw [← states]; exact enterBindings.typed inputsTyped heap supply
   · intro caller callerContext owner callerTyped
-    exact callerTyped.allocate supply.allocate.1 inputs
+    exact ⟨callerTyped.allocate supply.allocate.1 inputs,
+      fun identity member oldMember => callerTyped.allocate_apart supply.allocate.1 inputs identity member identity oldMember rfl⟩
 
 
 end Grounded
