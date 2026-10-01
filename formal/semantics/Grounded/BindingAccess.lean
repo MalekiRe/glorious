@@ -23,15 +23,15 @@ variable {program : Program} {home : Module} {heap : RuntimeHeap StorageCell} {a
     {bindings : BindingMap} {context : List (BindingId × BindingState)}
     {place : Place} {state : BindingState} {type : Ty}
 
-/-- The selected old resident, immediately before a write, is empty or has
-MayDiscard. Selection uses the same heap path as restoration itself. -/
+/-- The selected old resident has legal residual disposition immediately before
+a write. Selection uses the same heap path as restoration itself. -/
 def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCell)
     (bindings : BindingMap) (place : Place) : Prop :=
   ∃ identity cell resident type mask,
     lookup place.root bindings = some identity ∧ heap.read identity = some cell ∧
     cell.resident.selectFields program cell.type place.fields = some resident ∧
     resident.Typed program type mask ∧
-    (resident.Empty ∨ UsePermitted program.data .discard type)
+    resident.Disposable program
 
 theorem BindingMap.Typed.replacement_safe
     (store : BindingMap.Typed program heap activation bindings context)
@@ -48,10 +48,8 @@ theorem BindingMap.Typed.replacement_safe
     actualPath.select_partial typed.2
   rw [declared] at maskSelected
   cases Option.some.inj (maskSelected.symm.trans selection)
-  refine ⟨identity, cell, resident, type, available, mapped, found, residentSelected, residentTyped, ?_⟩
-  rcases discard with empty | permission
-  · exact .inl (residentTyped.empty empty)
-  · exact .inr permission
+  exact ⟨identity, cell, resident, type, available, mapped, found, residentSelected,
+    residentTyped, discard.realizes residentTyped⟩
 
 
 /-- Exact retained cells preserve every projected read, including unsuccessful

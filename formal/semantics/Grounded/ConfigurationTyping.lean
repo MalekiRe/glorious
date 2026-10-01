@@ -663,8 +663,8 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
 
-/-- Before storage retirement or replacement, the selected old residents are
-empty or have MayDiscard. This is a current-state assertion, not readiness. -/
+/-- Before storage retirement or replacement, every selected old resident has
+legal residual disposition. This is a current-state assertion, not readiness. -/
 def Configuration.StorageCleanupSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
   | .result _, .scope count :: _ =>

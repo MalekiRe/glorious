@@ -73,9 +73,9 @@ The admitted logical fragment supports initialized and partially consumed storag
 named moves, restoration, mutable lexical storage, projected access and recursive
 declared functions over one shared heap with generative activation identities.
 Owned nominal construction does not require Copy. Copy and MayDiscard use one
-structural permission producer. Final masks permit retirement of fully consumed
-exact owners. Mixed residual disposition, custom destruction, loans and physical
-memory remain open.
+structural permission producer. Final masks admit fully consumed exact owners
+and field-sensitive residual cleanup. Custom destruction, correlated branch
+states, loans and physical memory remain open.
 
 
 
@@ -1979,8 +1979,47 @@ permission for every still-present exact nominal owner. Exhaustive imported
 axiom inspection covered 3,741 declarations; only standard Lean axioms occurred.
 No unit tests, concrete examples, new axioms or proof placeholders were added.
 
-Whole-language completeness remains open. Mixed residual aggregates still need
-field-sensitive disposition rather than the current empty-or-whole-type rule.
-Custom destruction and ordering/divergence, correlated branch states, loans,
-nonlocal cleanup and the other tracked semantic boundaries remain unproved.
+At this checkpoint mixed residual aggregates still required an empty-or-whole-type
+rule. The following checkpoint adds field-sensitive residual disposition. Custom
+destruction and ordering/divergence, correlated branch states, loans, nonlocal
+cleanup and the other tracked semantic boundaries remain unproved.
+
+
+## Verified field-sensitive residual disposition through general soundness
+
+`Initialization.Disposable` is now the authoritative structural residual
+judgment. It preserves empty-shell retirement and whole-type MayDiscard, and
+additionally admits tuple and nominal residual fields individually. Moved-out
+exact children need no discard permission; remaining residents still do.
+Nominal rules retain the declaration's explicit principal restriction and check
+constructor schemas rather than inferring permission from absent fields.
+
+`Initialization.Disposable.realizes` derives `PartialValue.Disposable` for the
+actual typed residual value. This latter relation interprets permission for
+runtime residents; it does not reconstruct source flow or supply checking facts.
+The existing binding-map retirement and selected-replacement consumers now use
+this proof. Consequently the general preservation/progress and public
+`StorageCleanupSafe` results cover mixed residual aggregates in the modeled
+hook-free fragment, including source/function/package/import consumers.
+
+`present_iff` proves that whole initialized values still require exactly their
+ordinary MayDiscard evidence. Static and runtime `exact_nominal_empty` theorems
+prove that an explicit exact nominal restriction admits only fully empty shells,
+not partially consumed shells with remaining residents.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). General Lean proofs
+constructed a checked mixed-owner local, moved its arbitrary first field out,
+and derived actual terminating execution and cleanup safety for every prefix
+when the initializer has finite call expansion. Only the remaining field
+requires MayDiscard. A universally quantified struct-schema proof checked the
+nominal residual rule. Exhaustive imported axiom inspection covered 3,788
+declarations; only standard Lean axioms occurred. No concrete examples, unit
+tests, additional axioms or proof placeholders were added.
+
+This closes mixed residual disposition for the currently modeled tuple/struct
+storage paths, not full ownership or language soundness. Rvalue projection still
+requires whole-parent discard permission rather than permission for just its
+unselected remainder. Custom hooks, destruction order/divergence, correlated
+branch masks, loans, nonlocal exits and the remaining tracked boundaries stay
+open. Unresolved constructor-dependent masks are not assumed compatible.
 

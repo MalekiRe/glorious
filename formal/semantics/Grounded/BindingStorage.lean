@@ -73,7 +73,7 @@ variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation 
 the same heap cells selected by the runtime binding map. -/
 def BindingMap.Disposable (program : Program) (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Prop :=
   ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell ∧
-    (cell.resident.Empty ∨ UsePermitted program.data .discard cell.type)
+    cell.resident.Disposable program
 
 theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activation bindings context)
     (disposition : ∀ binding ∈ context, binding.2.Disposable program.data) :
@@ -85,9 +85,9 @@ theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activ
     simp only [List.map_cons, List.mem_cons] at member
     rcases member with rfl | member
     · refine ⟨cell, found, ?_⟩
-      rcases disposition (name, state) (by simp) with empty | permission
-      · exact .inl (resident.2.empty empty)
-      · exact .inr (by rw [declared]; exact permission)
+      have permission : state.initialization.Disposable program.data cell.type := by
+        rw [declared]; exact disposition (name, state) (by simp)
+      exact permission.realizes resident.2
     · exact ih (fun binding included => disposition binding (List.mem_cons_of_mem _ included)) address member
 
 theorem BindingMap.Typed.keys (typed : BindingMap.Typed program heap activation bindings context) :
