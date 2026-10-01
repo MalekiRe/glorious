@@ -631,5 +631,20 @@ theorem PathDisjoint.initialization_frame {program : Program} {home : Module} {p
     rw [List.getElem?_set_self bound, found]
     exact ih changed
 
+/-- A selected static path admits replacement without a supplied future mask. -/
+theorem Initialization.write_exists {program : Program} {parent : Ty}
+    {before selected : Initialization} {path : List FieldKey}
+    (selection : before.selectFields program parent path = some selected) (replacement : Initialization) :
+    ∃ after, before.writeFields program parent path replacement = some after := by
+  induction path generalizing before parent with
+  | nil => exact ⟨replacement, rfl⟩
+  | cons key rest ih =>
+    simp only [Initialization.selectFields, Option.bind_eq_some_iff] at selection
+    obtain ⟨⟨index, child, types⟩, info, current, found, tail⟩ := selection
+    obtain ⟨updated, written⟩ := ih tail
+    exact ⟨.fields ((before.openFields types.length).set index updated), by
+      simp [Initialization.writeFields, info, found, written]⟩
+
+
 
 end Grounded

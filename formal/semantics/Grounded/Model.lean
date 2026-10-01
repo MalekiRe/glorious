@@ -305,6 +305,20 @@ def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId
       if key = name then some ((key, value) :: rest)
       else ((key, old) :: ·) <$> replaceBinding name value rest
 
+theorem replaceBinding.exists {α : Type} {name : BindingId} {old : α}
+    {before : List (BindingId × α)} (selected : lookup name before = some old) (value : α) :
+    ∃ after, replaceBinding name value before = some after := by
+  induction before with
+  | nil => simp [lookup] at selected
+  | cons entry rest ih =>
+    rcases entry with ⟨key, resident⟩
+    by_cases same : key = name
+    · exact ⟨(key, value) :: rest, by simp [replaceBinding, same]⟩
+    · have tail : lookup name rest = some old := by simpa [lookup, Ne.symm same] using selected
+      obtain ⟨after, written⟩ := ih tail
+      exact ⟨(key, resident) :: after, by simp [replaceBinding, same, written]⟩
+
+
 theorem replaceBinding.map_same {α β : Type} {name : BindingId} {old value : α}
     {before after : List (BindingId × α)} (transform : α → β)
     (selected : lookup name before = some old)
@@ -412,6 +426,28 @@ theorem replaceBinding.overwrite {α : Type} {name : BindingId} {first second : 
       obtain ⟨final, replacedAgain, same⟩ := Option.map_eq_some_iff.mp rewritten
       subst after
       simp [replaceBinding, different, ih replaced replacedAgain]
+
+
+theorem replaceBinding.lookup_other {α : Type} {name other : BindingId} {value : α}
+    {before after : List (BindingId × α)} (written : replaceBinding name value before = some after)
+    (different : name ≠ other) : lookup other after = lookup other before := by
+  induction before generalizing after with
+  | nil => simp [replaceBinding] at written
+  | cons entry rest ih =>
+    rcases entry with ⟨key, resident⟩
+    simp only [replaceBinding] at written
+    split at written
+    next same =>
+      subst key
+      cases written
+      simp [lookup, Ne.symm different]
+    next missed =>
+      obtain ⟨tail, changed, same⟩ := Option.map_eq_some_iff.mp written
+      cases same
+      simp only [lookup]
+      split
+      · rfl
+      · exact ih changed
 
 
 end Grounded

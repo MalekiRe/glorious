@@ -2372,3 +2372,36 @@ preservation/progress and source soundness. Exhaustive imported axiom inspection
 covered 3,844 declarations with only standard Lean axioms. Both the static
 framing theorem and its composed progress consumer received explicit inspection.
 
+
+## Pre-state admission of arbitrary ordered owned-move arguments
+
+`PlaceDisjoint` combines distinct resolved roots with disjoint checked fields
+inside one root. It uses the existing slot and projection authorities; it does
+not assert future readiness or blanket-ban shared storage.
+
+`HasTypes.disjoint_moves` derives the ordinary sequential argument judgment
+for any list of explicit owned moves from pairwise pre-state separation and
+pre-state path typing/readiness. Static path and context updates are constructed.
+Each update transports pending readiness using `initialization_frame`; slot
+preservation transports compatibility for the remaining batch. No intermediate
+context or successful runtime operation is supplied by admission.
+
+`HasType.call_disjoint_moves` connects the result to existing function signature,
+visibility and argument-shape checks. `HasType.disjoint_call_soundness` consumes
+general preservation/progress and exports the complete prefix contract through
+argument evaluation, entry and recursive callee execution: current typing,
+terminal-or-step progress, caller consumption framing, distinct binding names
+and ownership safety. It does not require termination or a completed execution.
+
+Independent source-only verification in
+`/tmp/grandiose-ordered-moves-verified.5ECk28` passed all 30 Lean build jobs.
+Exhaustive axiom inspection covered 3,857 declarations; only standard Lean axioms
+occurred. Ordered admission and both call consumers were inspected explicitly.
+No unit tests or concrete examples were added.
+
+This proves the explicit owned-move input boundary of the current logical
+fragment. Mixed Copy/move input compatibility, borrowing/reborrowing, guards,
+custody, physical allocation/exhaustion and the remaining whole-language
+obligations are not established by this theorem. All broad completion tasks
+remain open.
+

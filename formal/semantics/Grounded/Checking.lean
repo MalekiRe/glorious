@@ -229,6 +229,72 @@ theorem ArmsType.slots {program : Program} {home : Module} {before after : FlowC
     rw [localSlots] at same
     simpa [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] using same
 
+/-- Arbitrary ordered owned inputs are admitted from pre-state readiness and
+separation. Each real source-context update preserves all pending inputs. -/
+theorem HasTypes.disjoint_moves {program : Program} {home : Module} {before : FlowContext}
+    {inputs : List (Place × Ty)}
+    (separated : inputs.Pairwise (fun left right => PlaceDisjoint program home before.slots left.1 right.1))
+    (ready : ∀ input ∈ inputs, ∃ state available,
+      lookup input.1.root before = some state ∧
+      PathType program home state.slot.type input.1.fields input.2 ∧
+      state.initialization.selectFields program state.slot.type input.1.fields = some available ∧ available.Ready) :
+    ∃ after, HasTypes program home before (inputs.map fun input => Expr.move input.1) (inputs.map Prod.snd) after := by
+  induction inputs generalizing before with
+  | nil => exact ⟨before, .nil⟩
+  | cons first rest ih =>
+    obtain ⟨state, available, selected, path, selection, initialized⟩ := ready first (by simp)
+    obtain ⟨updated, mask⟩ := Initialization.write_exists selection .absent
+    obtain ⟨middle, changed⟩ := replaceBinding.exists selected { state with initialization := updated }
+    have head : HasType program home before (.move first.1) first.2 middle :=
+      .move selected path selection initialized mask changed
+    have parts := List.pairwise_cons.mp separated
+    have tailSeparated : rest.Pairwise (fun left right => PlaceDisjoint program home (FlowContext.slots middle) left.1 right.1) := by
+      rw [head.slots]
+      exact parts.2
+    have tailReady : ∀ input ∈ rest, ∃ nextState nextAvailable,
+        lookup input.1.root middle = some nextState ∧
+        PathType program home nextState.slot.type input.1.fields input.2 ∧
+        nextState.initialization.selectFields program nextState.slot.type input.1.fields = some nextAvailable ∧
+        nextAvailable.Ready := by
+      intro input member
+      obtain ⟨otherState, otherAvailable, otherSelected, otherPath, otherSelection, otherReady⟩ :=
+        ready input (List.mem_cons_of_mem first member)
+      cases parts.1 input member with
+      | roots different =>
+        exact ⟨otherState, otherAvailable, (replaceBinding.lookup_other changed different).trans otherSelected,
+          otherPath, otherSelection, otherReady⟩
+      | fields same slotSelected apart =>
+        have stateSame : state = otherState := Option.some.inj
+          (selected.symm.trans (by simpa only [same] using otherSelected))
+        subst otherState
+        have rootSlot : lookup first.1.root before.slots = some state.slot := by
+          simp [FlowContext.slots, lookup.map, selected]
+        have slotSame := Option.some.inj (rootSlot.symm.trans slotSelected)
+        rw [← slotSame] at apart
+        exact ⟨{ state with initialization := updated }, otherAvailable,
+          by simpa only [same] using replaceBinding.lookup_after changed,
+          otherPath, (apart.initialization_frame mask).trans otherSelection, otherReady⟩
+    obtain ⟨after, tail⟩ := ih tailSeparated tailReady
+    exact ⟨after, .cons head tail⟩
+
+/-- Function input admission uses the ordinary ordered argument relation. -/
+theorem HasType.call_disjoint_moves {program : Program} {home : Module} {before : FlowContext}
+    {inputs : List (Place × Ty)} {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (separated : inputs.Pairwise (fun left right => PlaceDisjoint program home before.slots left.1 right.1))
+    (ready : ∀ input ∈ inputs, ∃ state available,
+      lookup input.1.root before = some state ∧
+      PathType program home state.slot.type input.1.fields input.2 ∧
+      state.initialization.selectFields program state.slot.type input.1.fields = some available ∧ available.Ready) :
+    ∃ after, HasType program home before (.call identity (inputs.map fun input => Expr.move input.1))
+      declaration.result after := by
+  obtain ⟨after, checked⟩ := HasTypes.disjoint_moves separated ready
+  exact ⟨after, .call declared visible (by simpa only [arguments] using checked)⟩
+
+
+
 
 end Grounded
 
