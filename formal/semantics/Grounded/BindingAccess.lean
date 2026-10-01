@@ -212,17 +212,62 @@ theorem AddressedEnvironment.Realizes.read {current : AddressedEnvironment}
     (Initialization.select_ready rootReady stateFound)
 
 
+theorem BindingMap.restore.read_other {after : RuntimeHeap StorageCell} {other : Place} {value : Value}
+    (distinct : (bindings.map Prod.snd).Nodup)
+    (written : bindings.restore program heap place value = some after)
+    (different : other.root ≠ place.root) :
+    bindings.read program after other = bindings.read program heap other := by
+  simp only [BindingMap.restore, restoreStorage, Option.bind_eq_some_iff] at written
+  obtain ⟨identity, mapped, cell, _, updated, _, stored⟩ := written
+  cases otherMapped : lookup other.root bindings with
+  | none => simp [BindingMap.read, otherMapped]
+  | some otherIdentity =>
+    have apart : otherIdentity ≠ identity := by
+      intro same
+      subst otherIdentity
+      exact different (lookup.unique_key distinct otherMapped mapped)
+    simp [BindingMap.read, otherMapped, RuntimeHeap.write_other stored apart]
+
+/-- Observational framing preserves storage identities and all reads rooted in
+immutable source bindings. It contains no runtime snapshot or duplicated values. -/
+def AddressedEnvironment.Frames (program : Program) (context : List (BindingId × BindingType))
+    (before after : AddressedEnvironment) : Prop :=
+  after.scope = before.scope ∧
+    ∀ (place : Place) (slot : BindingType), lookup place.root context = some slot → slot.mutable = false →
+      after.read program place = before.read program place
+
+theorem AddressedEnvironment.write.frame {current after : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} {slot : BindingType} {value : Value}
+    (realized : current.Realizes program context) (resolved : lookup place.root context = some slot)
+    (writable : slot.mutable = true) (written : current.write program place value = some after) :
+    AddressedEnvironment.Frames program context current after := by
+  obtain ⟨⟨states, typed, _, _⟩, _⟩ := realized
+  obtain ⟨heap, restored, same⟩ := Option.map_eq_some_iff.mp written
+  subst after
+  refine ⟨rfl, ?_⟩
+  intro other otherSlot selected immutable
+  apply BindingMap.restore.read_other typed.addresses_distinct restored
+  intro sameRoot
+  rw [sameRoot, resolved] at selected
+  cases Option.some.inj selected
+  simp_all
+
+
 theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
     {context : List (BindingId × BindingType)} {slot : BindingType}
     (realized : current.Realizes program context)
     (resolved : lookup place.root context = some slot)
     (checked : PathType program home slot.type place.fields type)
+    (writable : slot.mutable = true)
     {value : Value} (resident : ValueHasType program value type) :
     ∃ after, current.write program place value = some after ∧ after.Realizes program context ∧
-      after.read program place = some value ∧ after.scope = current.scope ∧ after.supply = current.supply ∧
+      after.read program place = some value ∧ AddressedEnvironment.Frames program context current after ∧
+      after.supply = current.supply ∧
       after.heap.next = current.heap.next ∧
       (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
         caller.activation ≠ current.activation → BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+  have beforeRealized := realized
+  have sourceResolved := resolved
   obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
   rw [← slots, lookup.map] at resolved
   obtain ⟨state, selected, sameSlot⟩ := Option.map_eq_some_iff.mp resolved
@@ -236,7 +281,7 @@ theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
     (initialized (ready (place.root, state) (lookup.mem selected)))
   have activation : after.activation = current.activation := congrArg AddressedScope.activation scope
   refine ⟨after, written, ⟨⟨nextContext, afterTyped, projected.trans slots, nextReady⟩, ?_⟩,
-    readback, scope, supply, next, retained⟩
+    readback, AddressedEnvironment.write.frame beforeRealized sourceResolved writable written, supply, next, retained⟩
   rw [supply, activation]
   exact issued
 

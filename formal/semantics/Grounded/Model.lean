@@ -228,6 +228,35 @@ theorem lookup.mem {α : Type} {name : BindingId} {value : α} {entries : List (
       next same => subst key; cases found; exact List.mem_cons_self
       next different => exact List.mem_cons_of_mem _ (ih found)
 
+theorem lookup.unique_key {α : Type} {firstName secondName : BindingId} {value : α}
+    {entries : List (BindingId × α)} (distinct : (entries.map Prod.snd).Nodup)
+    (first : lookup firstName entries = some value) (second : lookup secondName entries = some value) :
+    firstName = secondName := by
+  induction entries with
+  | nil => simp [lookup] at first
+  | cons entry rest ih =>
+    cases entry with
+    | mk key resident =>
+      have parts := List.nodup_cons.mp distinct
+      simp only [lookup] at first second
+      split at first
+      next same =>
+        subst firstName
+        have equal := Option.some.inj first
+        subst resident
+        split at second
+        next same => exact same.symm
+        next different =>
+          exact False.elim (parts.1 (List.mem_map.mpr ⟨(secondName, value), lookup.mem second, rfl⟩))
+      next different =>
+        split at second
+        next same =>
+          have equal := Option.some.inj second
+          subst resident
+          exact False.elim (parts.1 (List.mem_map.mpr ⟨(firstName, value), lookup.mem first, rfl⟩))
+        next missed => exact ih parts.2 first second
+
+
 /-- Replace the selected lexical payload without changing binding identities. -/
 def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId × α) → Option (List (BindingId × α))
   | [] => none

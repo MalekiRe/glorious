@@ -596,6 +596,17 @@ without restoring a saved supply. The 26-job source gate and full imported
 axiom audit passed. These scope results close the initialized realization
 operations, not their outstanding expression-machine integration.
 
+Addressed assignment now also has immutable-observation framing. Actual
+distinct storage identities establish that differently rooted reads survive
+a write; differing lexical names alone are not treated as physical
+separation. `AddressedEnvironment.Frames` relates scope identities and every
+read rooted in an immutable source binding, without storing snapshots.
+The constructive initialized write theorem consumes the source slot’s
+mutability permission and returns this framing result alongside readback
+and preserved realization. The 26-job source gate and imported-declaration
+axiom audit passed. Replacement of the lexical machine’s framing relation
+and continuation consumers remains part of the same cutover below.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation
