@@ -83,6 +83,16 @@ theorem Visibility.ValidAt.not_parent_at_root {visibility : Visibility} {owner :
   exact valid.1 root
 
 
+theorem Visibility.Allows.descendant {visibility : Visibility} {owner caller child : Module}
+    (allowed : visibility.Allows owner caller) (same : child.package = caller.package)
+    (enclosing : caller.path.IsPrefix child.path) : visibility.Allows owner child := by
+  cases visibility with
+  | «private» => exact ⟨same.trans allowed.1, allowed.2.trans enclosing⟩
+  | package => exact same.trans allowed
+  | parent => exact ⟨allowed.1, same.trans allowed.2.1, allowed.2.2.trans enclosing⟩
+  | «public» => trivial
+
+
 inductive FieldKey where
   | named (name : String)
   | positional (index : Nat)

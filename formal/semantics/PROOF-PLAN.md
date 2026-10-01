@@ -1802,3 +1802,33 @@ not the entire library profile contract. Hosted-library acquisition/selection,
 intrinsic/runtime service admission, literal manifests, other namespace preludes,
 attribute parsing, module aliases and the other whole-language tasks remain open.
 
+
+## Verified inclusion-derived local namespace authority
+
+Local namespace reachability is now derived from declaration-driven inclusion
+and validated visibility scopes, not supplied to prelude-call soundness.
+`Visibility.Allows.descendant` proves access is preserved for descendants in
+the same package. `ModuleReachable.descendant_caller` carries that fact through
+the actual module-binding traversal, without granting cross-package access.
+
+A mutual proof over `ModuleSource.Loads` / `ModuleChildrenLoad` constructs
+self-reachability through both inline and external module declarations. Each
+child step uses the included parent's actual child binding and its validated
+visibility. Package roots come from the supplied inclusion product; no independent
+module table, guessed path or assumed successful resolver result is used.
+
+`SourceClosure.Admitted.local_resolution` combines this constructive access
+proof with inclusion-derived package provenance and the shared candidate resolver.
+`prelude_call_soundness` consumes it directly: the former `homeReachable`
+premise is removed, while all argument, original-declaration visibility,
+shadowing and execution-prefix guarantees remain unchanged.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,684 declarations; only standard Lean axioms occur.
+Mutual inclusion access, local resolution, prelude-call soundness and public
+function soundness/correctness received explicit axiom inspection. No tests,
+examples, proof placeholders or additional axioms were added.
+
+The previously listed module-alias, namespace, parsing, library/runtime and
+whole-language obligations remain open.
+

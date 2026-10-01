@@ -53,6 +53,15 @@ inductive ModuleReachable (modules : List LoadedModule) (caller : Module) : Modu
       ModuleReachable modules caller (parent.home.child name)
 
 
+theorem ModuleReachable.descendant_caller {modules : List LoadedModule} {caller target child : Module}
+    (reachable : ModuleReachable modules caller target) (same : child.package = caller.package)
+    (enclosing : caller.path.IsPrefix child.path) : ModuleReachable modules child target := by
+  induction reachable with
+  | root included => exact .root included
+  | child included _ declared allowed ih =>
+    exact .child included ih declared (allowed.descendant same enclosing)
+
+
 def childDirectory (directory : SourcePath) (name : Identifier) : SourcePath :=
   directory ++ [name.text]
 
@@ -1206,6 +1215,81 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
   exact admitted.soundness elaborated slots store issued run
 
 
+/-- Inclusion, not a future resolver result, supplies local namespace access. -/
+theorem ModuleSource.Loads.self_reachable {whole : List LoadedModule}
+    (valid : ∀ node ∈ whole, node.VisibilityValid)
+    {files : SourceFiles} {home : Module} {origin directory : SourcePath}
+    {source : ModuleSource} {modules : List LoadedModule} (loaded : source.Loads files home origin directory modules) :
+    (∀ node ∈ modules, node ∈ whole) → ModuleReachable whole home home →
+    ∀ node ∈ modules, ModuleReachable whole node.home node.home := by
+  induction loaded using ModuleSource.Loads.rec
+    (motive_2 := fun home _ _ children modules _ =>
+      (∀ node ∈ modules, node ∈ whole) →
+      (∀ child ∈ children, ModuleReachable whole (home.child child.1) (home.child child.1)) →
+      ∀ node ∈ modules, ModuleReachable whole node.home node.home) with
+  | @body home origin directory functions imports children descendants _ _ ih =>
+    intro subset reachable node member
+    rcases List.mem_cons.mp member with same | member
+    · subst node; exact reachable
+    · apply ih (fun other found => subset other (.tail _ found)) ?_ node member
+      intro child declared
+      have parentIncluded : (⟨home, origin, directory, .body functions imports children⟩ : LoadedModule) ∈ whole :=
+        subset _ (.head _)
+      have scope := (valid _ parentIncluded).2.2 child declared
+      exact .child parentIncluded (reachable.descendant_caller rfl ⟨[child.1], rfl⟩) declared
+        ((show child.2.1.Allows home home from scope).descendant rfl ⟨[child.1], rfl⟩)
+  | nil => rename_i _ _ node member; cases member
+  | inline _ _ head tail | external _ _ _ head tail =>
+    rename_i subset edges node member
+    rcases List.mem_append.mp member with first | rest
+    · exact head (fun other found => subset other (List.mem_append.mpr (.inl found)))
+        (edges _ (.head _)) node first
+    · exact tail (fun other found => subset other (List.mem_append.mpr (.inr found)))
+        (fun child found => edges child (.tail _ found)) node rest
+
+theorem ModuleSource.Loads.root_member {files : SourceFiles} {home : Module}
+    {origin directory : SourcePath} {source : ModuleSource} {modules : List LoadedModule}
+    (loaded : source.Loads files home origin directory modules) :
+    (⟨home, origin, directory, source⟩ : LoadedModule) ∈ modules := by
+  cases loaded
+  exact .head _
+
+theorem PackagesLoad.self_reachable {whole : List LoadedModule}
+    (valid : ∀ node ∈ whole, node.VisibilityValid)
+    {packages : List PackageSource} {modules : List LoadedModule} (loaded : PackagesLoad packages modules) :
+    (∀ node ∈ modules, node ∈ whole) → ∀ node ∈ modules, ModuleReachable whole node.home node.home := by
+  induction loaded with
+  | nil => intro _ node member; cases member
+  | @cons package packages first rest head tail ih =>
+    intro subset node member
+    rcases List.mem_append.mp member with first | rest
+    · obtain ⟨_, source, _, tree⟩ := head
+      have contained := fun other found => subset other (List.mem_append.mpr (.inl found))
+      have root : (⟨package.identity, []⟩ : Module) ∈ whole.map LoadedModule.home :=
+        List.mem_map.mpr ⟨_, contained _ tree.root_member, rfl⟩
+      exact tree.self_reachable valid contained (.root root) node first
+    · exact ih (fun other found => subset other (List.mem_append.mpr (.inr found))) node rest
+
+theorem SourceClosure.Admitted.self_reachable {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules) :
+    ModuleReachable closure.modules loaded.home loaded.home :=
+  closure.included.self_reachable admitted.2.2.2.2.2 (fun _ member => member) loaded included
+
+/-- Bare callable lookup derives namespace access from the actual source closure. -/
+theorem SourceClosure.Admitted.local_resolution {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules) {name : Identifier} {identity : Nat}
+    (candidate : VisibleFunctionCandidate closure.functions closure.imports loaded.home loaded.home name identity) :
+    closure.functionNames loaded.home (.unqualified name) = some identity := by
+  have selected := admitted.2.2.2.1.resolve_existing (List.mem_map.mpr ⟨loaded, included, rfl⟩) candidate
+  obtain ⟨package, packageIncluded, owner, _⟩ := closure.included.provenance included
+  exact closure.functionNames_selected.mpr ⟨loaded.home, rfl,
+    ⟨package, packageIncluded, owner.symm, .inl rfl⟩, admitted.self_reachable included,
+    Grounded.functionNames.selected_iff.mp selected⟩
+
+
+
 theorem LoadedModule.importRequests_suppressed {packages : List PackageSource}
     (distinct : (packages.map PackageSource.identity).Nodup) {package : PackageSource}
     (member : package ∈ packages) (loaded : LoadedModule) (owner : package.identity = loaded.home.package)
@@ -1225,7 +1309,6 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
     {path : ModulePath} (profile : package.standardPrelude = some path)
     (enabled : package.noStd = false) (implicitEnabled : package.noImplicitPrelude = false)
     {target : Module} (pathResolved : path.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target)
-    (homeReachable : ModuleReachable closure.modules loaded.home loaded.home)
     {name : Identifier} {identity : Nat}
     (unshadowed : ¬ ExplicitFunctionBinding closure.functions closure.imports loaded.home name)
     (candidate : VisibleFunctionCandidate closure.functions closure.imports loaded.home target name identity) :
@@ -1257,12 +1340,8 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
   obtain ⟨visibility, original, accessible⟩ := candidate
   have imported : FunctionCandidate closure.functions closure.imports loaded.home name identity .private :=
     .imported member (.glob rfl unshadowed) original accessible
-  have selectedBinding := admitted.2.2.2.1.resolve_existing (List.mem_map.mpr ⟨loaded, included, rfl⟩)
-    (caller := loaded.home) ⟨.private, imported, by simp [Visibility.Allows]⟩
-  have selected : closure.functionNames loaded.home (.unqualified name) = some identity :=
-    closure.functionNames_selected.mpr ⟨loaded.home, rfl,
-      ⟨package, packageIncluded, owner, .inl rfl⟩, homeReachable,
-      Grounded.functionNames.selected_iff.mp selectedBinding⟩
+  have selected := admitted.local_resolution included
+    ⟨.private, imported, by simp [Visibility.Allows]⟩
   obtain ⟨_, declaration, _, declared, _⟩ := admitted.resolves selected
   refine ⟨declaration, selected, declared, ?_⟩
   intro scope before after arguments inputs lexical visible argumentsTyped slots environment store issued state run
