@@ -128,7 +128,7 @@ inductive ArmsType (program : Program) :
       (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ branchAfter))
       (localSlots : FlowContext.slots localsAfter = bindings)
       (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
-      (joined : BindingContextApprox branchAfter after)
+      (joined : BindingContextApprox program.data branchAfter after)
       (tailTyped : ArmsType program home before subject result (previous ++ [pattern]) rest after) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
@@ -227,7 +227,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
       (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧
-      BindingContextApprox branchAfter after := by
+      BindingContextApprox program.data branchAfter after := by
   induction arms generalizing previous with
   | nil => simp [selectArm] at selected
   | cons arm arms ih =>

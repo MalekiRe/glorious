@@ -77,8 +77,9 @@ declared functions over one shared heap with generative activation identities.
 Owned nominal construction does not require Copy. Copy and MayDiscard use one
 structural permission producer. Final masks admit fully consumed exact owners
 and field-sensitive residual cleanup, including conservative maybe-initialized
-branch joins. Custom destruction, relationally correlated branch states, loans
-and physical memory remain open.
+branch joins restricted to discardable uncertainty; manually exact shells
+preserve consumed/live status without freezing affine descendant masks. Custom
+destruction, relationally correlated branch states, loans and physical memory remain open.
 
 
 
@@ -2773,3 +2774,52 @@ callable evidence and nonlocal control therefore still require an authoritative
 model extension and corresponding checking/preservation/source consumers.
 Pattern application retains its existing machine and safety semantics; this
 new direct-call decomposition does not claim a pattern-application inverse.
+
+## Ownership-safe uncorrelated branch joins
+
+The former type-free `Initialization.Approximates.unknown` admitted every
+initialization mask as `maybe`, including exact-linear occupancy. Residual
+cleanup already refused to discard such an owner, but branch admission could
+still forget the correlation required by language §7.4. Rejecting a later
+cleanup is not the contract for crossing that uncorrelated boundary.
+
+Approximation now uses the authoritative declared resident type and data table.
+A fresh unknown requires ordinary `MayDiscard`; tuple and nominal fields are
+checked recursively. Manual exact nominal restrictions additionally preserve
+whether the shell is consumed: `Empty (.fields before) ↔ Empty (.fields after)`.
+This does not freeze its whole mask. A retained present sibling permits another
+discardable field to become uncertain, including inside a manually exact struct.
+The uncertain field may then be restored before a whole move. Conversely, a
+consumed shell and a live shell cannot share a join. Reflexive joins remain
+available for all ownership classes.
+
+`BindingContextApprox`, core arm checking, named arm elaboration and actual
+scope-frame preservation consume this same relation. No alternate join model or
+post-state certificate was added. `PathType.approximate_initialization` derives
+the type-indexed join relation at arbitrary checked descendant paths from the
+actual resident. `HasType.scope_join_preserves_ownership` carries this to every
+actual scope-retirement step reached by a checked program: retained heap cells
+are unchanged, both branch and joined contexts type that actual store, no
+nondiscardable descendant gains a fresh unknown mask, and every manually exact
+nominal descendant retains its consumed-versus-live status. Its inputs are
+ordinary program/body checking, actual entry-store typing, issued activation
+and an observed run/step; no future successful cleanup, progress or completion
+is assumed.
+
+Integrated verification: `lake build Grounded` passed all 30 jobs, including
+the recently integrated import-privacy and ordered-call proof consumers. A
+general Lean proof additionally established that any two exact-shell states
+admitting a common join agree on their consumed status.
+Lean axiom inspection of the new public theorem, ordinary soundness, descendant
+approximation and runtime typing approximation reports only `propext`,
+`Classical.choice` and `Quot.sound`. Independent general Lean probes against
+the corrected production declarations establish anchored affine-field join
+admission, unchanged actual residents under those joins, and exclusion of a
+common join for consumed/live exact-shell alternatives. No examples or unit
+tests were added.
+
+Relational control islands that retain differing exact-shell consumption states
+remain unimplemented; they must not use this correlation-forgetting
+join. Custom Drop, cleanup order with observable hooks, loans, cancellation and
+nonlocal exits, and physical storage semantics remain whole-language obligations.
+

@@ -23,6 +23,66 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.ownership_safe⟩
 
+/-- Actual scope retirement retains its outer cells and joins each descendant
+under the descendant's own use class. No positive-lower occupancy becomes a
+fresh unknown, and manually exact nominal shells retain their consumed status. -/
+theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current after : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {count : Nat} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .scope count :: stack⟩)
+    (step : Step program ⟨current, .result value, .scope count :: stack⟩
+      ⟨after, .result value, stack⟩) :
+    ∃ branch joined : FlowContext,
+      BindingMap.Typed program after.heap after.activation after.bindings branch ∧
+      BindingMap.Typed program after.heap after.activation after.bindings joined ∧
+      BindingContextApprox program.data branch joined ∧
+      (∀ address ∈ after.bindings.map Prod.snd, after.heap.read address = current.heap.read address) ∧
+      ∀ name state, lookup name branch = some state →
+        ∀ selectedHome selectedType fields selectedState,
+          PathType program selectedHome state.slot.type fields selectedType →
+          state.initialization.selectFields program state.slot.type fields = some selectedState →
+          ∃ next nextSelected,
+            lookup name joined = some ⟨state.slot, next⟩ ∧
+            next.selectFields program state.slot.type fields = some nextSelected ∧
+            (¬ UsePermitted program.data .discard selectedType → nextSelected = .maybe → selectedState = .maybe) ∧
+            (∀ identity declaration, selectedType = .nominal identity →
+              program.data identity = some declaration → declaration.restriction = some .exact →
+              (selectedState.Empty ↔ nextSelected.Empty)) := by
+  have typed := (checked.soundness checkedProgram store issued run).1
+  cases typed with
+  | intro currentStore currentIssued code continuation =>
+    cases code with
+    | result resident =>
+      cases continuation with
+      | cons frame tail =>
+        cases frame with
+        | scope locals discard joined =>
+          cases step with
+          | scope exited =>
+            obtain ⟨actual, produced, afterTyped, _, _, _, _, _, preserved⟩ :=
+              AddressedEnvironment.exitScope.progress currentStore locals.length
+            cases Option.some.inj (exited.symm.trans produced)
+            have branchTyped : BindingMap.Typed program after.heap after.activation after.bindings _ :=
+              (by simpa using afterTyped)
+            refine ⟨_, _, branchTyped, branchTyped.approximate joined, joined, preserved, ?_⟩
+            intro name state selected selectedHome selectedType fields selectedState path selection
+            obtain ⟨next, found, approximation⟩ := joined.lookup selected
+            obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected
+            have residentTyped : cell.resident.Typed program state.slot.type state.initialization := by
+              simpa only [typeEq] using cellTyped.2
+            obtain ⟨nextSelected, selectedAfter, selectedJoined⟩ :=
+              path.approximate_initialization residentTyped approximation selection
+            refine ⟨next, nextSelected, found, selectedAfter,
+              fun required unknown => selectedJoined.no_new_nondiscardable_maybe required unknown, ?_⟩
+            intro identity declaration same declared restricted
+            subst selectedType
+            exact selectedJoined.exact_nominal_consumption declared restricted
+
 /-- An actual checked assignment restores its selected place, including an
 uncertain one. Disjoint masks retain exactly their prior availability. No
 pre-write readiness or post-write realization is supplied. -/

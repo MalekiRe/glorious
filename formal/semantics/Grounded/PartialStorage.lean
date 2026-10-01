@@ -97,41 +97,90 @@ inductive PartialValuesTyped (program : Program) : List PartialValue → List Ty
       (tailTyped : PartialValuesTyped program tail rest tailStates) :
       PartialValuesTyped program (head :: tail) (first :: rest) (headState :: tailStates)
 end
-/- Approximation forgets availability, never storage type or ownership. -/
+
+/-- An empty shell contains consumed storage. A zero-field aggregate is still
+a whole value, not evidence that an owner has been consumed. -/
+def Initialization.Empty : Initialization → Prop
+  | .absent => True
+  | .present => False
+  | .maybe => False
+  | .fields states => states ≠ [] ∧ ∀ state ∈ states, state.Empty
+
+/- Uncorrelated joins may forget only discardable occupancy. Exact nominal
+restrictions also protect the shell, independently of resident field classes. -/
 mutual
-inductive Initialization.Approximates : Initialization → Initialization → Prop where
-  | refl {state} : Initialization.Approximates state state
-  | unknown {state} : Initialization.Approximates state .maybe
-  | fields {before after} (children : InitializationsApproximate before after) :
-      Initialization.Approximates (.fields before) (.fields after)
-inductive InitializationsApproximate : List Initialization → List Initialization → Prop where
-  | nil : InitializationsApproximate [] []
-  | cons {first next rest tail} (head : Initialization.Approximates first next)
-      (remaining : InitializationsApproximate rest tail) :
-      InitializationsApproximate (first :: rest) (next :: tail)
+inductive Initialization.Approximates (data : DataDeclarations) : Ty → Initialization → Initialization → Prop where
+  | refl {type state} : Initialization.Approximates data type state state
+  | unknown {type state} (disposable : UsePermitted data .discard type) :
+      Initialization.Approximates data type state .maybe
+  | tuple {first rest before after} (children : InitializationsApproximate data (first :: rest) before after) :
+      Initialization.Approximates data (.tuple first rest) (.fields before) (.fields after)
+  | nominal {identity declaration before after}
+      (declared : data identity = some declaration)
+      (consumption : declaration.restriction = some .exact →
+        (Initialization.Empty (.fields before) ↔ Initialization.Empty (.fields after)))
+      (children : ∀ tag schema, declaration.constructor tag = some schema →
+        InitializationsApproximate data (schema.residents.map Field.type) before after) :
+      Initialization.Approximates data (.nominal identity) (.fields before) (.fields after)
+inductive InitializationsApproximate (data : DataDeclarations) : List Ty → List Initialization → List Initialization → Prop where
+  | nil : InitializationsApproximate data [] [] []
+  | cons {type types first next rest tail} (head : Initialization.Approximates data type first next)
+      (remaining : InitializationsApproximate data types rest tail) :
+      InitializationsApproximate data (type :: types) (first :: rest) (next :: tail)
 end
 
 theorem PartialValue.Typed.approximate {program : Program} {value : PartialValue} {type : Ty}
     {before after : Initialization} (typed : value.Typed program type before)
-    (approximation : before.Approximates after) : value.Typed program type after := by
+    (approximation : before.Approximates program.data type after) : value.Typed program type after := by
   induction approximation using Initialization.Approximates.rec
-    (motive_2 := fun before after _ => ∀ values types, PartialValuesTyped program values types before →
-      PartialValuesTyped program values types after) generalizing value type with
+    (motive_2 := fun types before after _ => ∀ values, PartialValuesTyped program values types before →
+      PartialValuesTyped program values types after) generalizing value with
   | refl => exact typed
   | unknown => exact .uncertain typed
-  | fields children ih =>
+  | tuple children ih =>
     cases typed with
     | tuple head tail =>
-      have residents := ih _ _ (.cons head tail)
+      have residents := ih _ (.cons head tail)
       cases residents with
       | cons head tail => exact .tuple head tail
-    | nominal declared chosen finite residents => exact .nominal declared chosen finite (ih _ _ residents)
-  | nil => rename_i values types residents; exact residents
+  | nominal declared consumption children ih =>
+    cases typed with
+    | nominal found chosen finite residents =>
+      cases Option.some.inj (found.symm.trans declared)
+      exact .nominal declared chosen finite (ih _ _ chosen _ residents)
+  | nil => rename_i values residents; exact residents
   | cons first remaining firstIH remainingIH =>
-    rename_i values types residents
+    rename_i values residents
     cases residents with
-    | cons head tail => exact .cons (firstIH head) (remainingIH _ _ tail)
+    | cons head tail => exact .cons (firstIH head) (remainingIH _ tail)
 
+
+/-- A fresh unknown state is justified by ordinary whole-owner MayDiscard. -/
+theorem Initialization.Approximates.no_new_nondiscardable_maybe {data : DataDeclarations}
+    {type : Ty} {before after : Initialization} (joined : before.Approximates data type after)
+    (required : ¬ UsePermitted data .discard type) (unknown : after = .maybe) : before = .maybe := by
+  cases joined with
+  | refl => exact unknown
+  | unknown disposable => exact False.elim (required disposable)
+  | tuple | nominal => cases unknown
+
+/-- Manual exact ownership preserves whether the shell has been consumed,
+without forbidding uncertainty in independently discardable resident fields. -/
+theorem Initialization.Approximates.exact_nominal_consumption {data : DataDeclarations}
+    {identity : Nat} {declaration : DataDecl} {before after : Initialization}
+    (joined : before.Approximates data (.nominal identity) after)
+    (declared : data identity = some declaration) (restricted : declaration.restriction = some .exact) :
+    before.Empty ↔ after.Empty := by
+  cases joined with
+  | refl => exact Iff.rfl
+  | unknown disposable =>
+    cases disposable with
+    | nominal found restriction fields =>
+      cases Option.some.inj (found.symm.trans declared)
+      simp [UsePermission.Allows, restricted] at restriction
+  | nominal found consumption children =>
+    cases Option.some.inj (found.symm.trans declared)
+    exact consumption restricted
 
 
 /-- Checking availability constructs the actual read; successful reads are not
@@ -173,13 +222,6 @@ theorem PartialValue.Typed.hole_unready {program : Program} {type : Ty} {state :
     (typed : PartialValue.Typed program .hole type state) : ¬state.Ready := by
   cases typed <;> intro ready <;> cases ready
 
-/-- An empty shell contains consumed storage. A zero-field aggregate is still
-a whole value, not evidence that an owner has been consumed. -/
-def Initialization.Empty : Initialization → Prop
-  | .absent => True
-  | .present => False
-  | .maybe => False
-  | .fields states => states ≠ [] ∧ ∀ state ∈ states, state.Empty
 
 theorem Initialization.Ready.not_empty {state : Initialization} (ready : state.Ready) : ¬ state.Empty := by
   induction ready using Initialization.Ready.rec

@@ -624,6 +624,65 @@ theorem ProjectionType.fieldInfo_exists {program : Program} {home : Module} {par
       simp [Ty.fieldInfo, Ty.fieldTypes, Ty.fieldIndex, declared, DataDecl.constructor, shape,
         indexed, List.getElem?_map, selected]⟩
 
+private theorem InitializationsApproximate.select {data : DataDeclarations}
+    {types : List Ty} {before after : List Initialization}
+    (joined : InitializationsApproximate data types before after)
+    {index : Nat} {type : Ty} {state : Initialization}
+    (selected : types[index]? = some type) (found : before[index]? = some state) :
+    ∃ next, after[index]? = some next ∧ state.Approximates data type next := by
+  induction types generalizing before after index with
+  | nil => simp at selected
+  | cons first rest ih =>
+    cases joined with
+    | cons head tail =>
+      cases index with
+      | zero => cases selected; cases found; exact ⟨_, rfl, head⟩
+      | succ index => exact ih tail selected found
+
+private theorem ProjectionType.approximate_field {program : Program} {home : Module}
+    {parent child : Ty} {key : FieldKey} {index : Nat}
+    (projection : ProjectionType program home parent key index child)
+    {types : List Ty} (layout : parent.fieldTypes program = some types)
+    (selected : types[index]? = some child)
+    {before after state : Initialization} (joined : before.Approximates program.data parent after)
+    (found : (before.openFields types.length)[index]? = some state) :
+    ∃ next, (after.openFields types.length)[index]? = some next ∧
+      state.Approximates program.data child next := by
+  cases joined with
+  | refl => exact ⟨state, found, .refl⟩
+  | unknown disposable =>
+    refine ⟨.maybe, ?_, .unknown (projection.use_permission disposable)⟩
+    simp [Initialization.openFields, (List.getElem?_eq_some_iff.mp selected).1]
+  | tuple children =>
+    simp only [Ty.fieldTypes, Option.some.injEq] at layout
+    subst types
+    exact children.select selected found
+  | nominal declared consumption children =>
+    simp only [Ty.fieldTypes, declared, Option.bind_some, Option.map_eq_some_iff] at layout
+    obtain ⟨schema, chosen, rfl⟩ := layout
+    exact (children none schema chosen).select selected found
+
+/-- Every descendant crosses a join under its own ownership permission. The
+same actual resident realizes both masks; joining performs no storage mutation. -/
+theorem PathType.approximate_initialization {program : Program} {home : Module}
+    {parent child : Ty} {path : List FieldKey} (pathTyped : PathType program home parent path child)
+    {value : PartialValue} {before after selectedState : Initialization}
+    (typed : value.Typed program parent before)
+    (joined : before.Approximates program.data parent after)
+    (selected : before.selectFields program parent path = some selectedState) :
+    ∃ next, after.selectFields program parent path = some next ∧
+      selectedState.Approximates program.data child next := by
+  induction pathTyped generalizing value before after with
+  | here type => cases selected; exact ⟨after, rfl, joined⟩
+  | step projection path ih =>
+    obtain ⟨types, layout, fields, selectedType, opened, fieldsTyped⟩ := projection.open_partial typed
+    obtain ⟨resident, state, found, stateFound, residentTyped⟩ := fieldsTyped.select selectedType
+    have info := projection.fieldInfo layout selectedType
+    simp only [Initialization.selectFields, info, Option.bind_some, stateFound] at selected
+    obtain ⟨nextState, nextFound, fieldJoined⟩ := projection.approximate_field layout selectedType joined stateFound
+    obtain ⟨next, nextSelected, nextJoined⟩ := ih residentTyped fieldJoined selected
+    exact ⟨next, by simp [Initialization.selectFields, info, nextFound, nextSelected], nextJoined⟩
+
 /-- Physical replacement frames every disjoint path, including failed reads and
 partially consumed ancestors. No post-state typing premise is required. -/
 theorem PathDisjoint.write_frame {program : Program} {home : Module} {parent : Ty}

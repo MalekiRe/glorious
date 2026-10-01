@@ -32,7 +32,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
   | scope {context after : FlowContext} (locals : FlowContext) {result}
       (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
-      (joined : BindingContextApprox context after) :
+      (joined : BindingContextApprox program.data context after) :
       FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) after (.one result)
   | assign {home before restored after place type result rest state updated available}
       (selected : lookup place.root before = some state)

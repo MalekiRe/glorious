@@ -67,41 +67,57 @@ inductive BindingMap.Typed (program : Program) (heap : RuntimeHeap StorageCell)
       BindingMap.Typed program heap activation ((name, identity) :: bindings) ((name, state) :: context)
 
 /-- Joined contexts preserve binding identity, declared type and mutability.
-Only initialization evidence may be forgotten. -/
-inductive BindingContextApprox : List (BindingId × BindingState) → List (BindingId × BindingState) → Prop where
-  | nil : BindingContextApprox [] []
+Only discardable occupancy may lose branch correlation. -/
+inductive BindingContextApprox (data : DataDeclarations) : List (BindingId × BindingState) → List (BindingId × BindingState) → Prop where
+  | nil : BindingContextApprox data [] []
   | cons {name slot before after rest tail}
-      (head : Initialization.Approximates before after) (remaining : BindingContextApprox rest tail) :
-      BindingContextApprox ((name, ⟨slot, before⟩) :: rest) ((name, ⟨slot, after⟩) :: tail)
+      (head : Initialization.Approximates data slot.type before after) (remaining : BindingContextApprox data rest tail) :
+      BindingContextApprox data ((name, ⟨slot, before⟩) :: rest) ((name, ⟨slot, after⟩) :: tail)
 
-theorem BindingContextApprox.refl (context : List (BindingId × BindingState)) : BindingContextApprox context context := by
+theorem BindingContextApprox.refl {data : DataDeclarations} (context : List (BindingId × BindingState)) : BindingContextApprox data context context := by
   induction context with
   | nil => exact .nil
   | cons entry rest ih => exact .cons .refl ih
 
-theorem BindingContextApprox.slots {before after : List (BindingId × BindingState)}
-    (approximation : BindingContextApprox before after) :
+theorem BindingContextApprox.slots {data : DataDeclarations} {before after : List (BindingId × BindingState)}
+    (approximation : BindingContextApprox data before after) :
     after.map (fun entry => (entry.1, entry.2.slot)) = before.map (fun entry => (entry.1, entry.2.slot)) := by
   induction approximation with
   | nil => rfl
   | cons head remaining ih => simp only [List.map_cons, ih]
 
-theorem BindingContextApprox.keys {before after : List (BindingId × BindingState)}
-    (approximation : BindingContextApprox before after) : after.map Prod.fst = before.map Prod.fst := by
+theorem BindingContextApprox.keys {data : DataDeclarations} {before after : List (BindingId × BindingState)}
+    (approximation : BindingContextApprox data before after) : after.map Prod.fst = before.map Prod.fst := by
   simpa only [List.map_map, Function.comp_def] using congrArg (List.map Prod.fst) approximation.slots
 
 theorem BindingMap.Typed.approximate {program : Program} {heap : RuntimeHeap StorageCell}
     {activation : ActivationId} {bindings : BindingMap} {before after : List (BindingId × BindingState)}
-    (typed : BindingMap.Typed program heap activation bindings before) (approximation : BindingContextApprox before after) :
+    (typed : BindingMap.Typed program heap activation bindings before) (approximation : BindingContextApprox program.data before after) :
     BindingMap.Typed program heap activation bindings after := by
   induction approximation generalizing bindings with
   | nil => cases typed; exact .nil
   | cons head remaining ih =>
     cases typed with
     | cons found owner declared resident tail freshName freshStorage =>
-      exact .cons found owner declared ⟨resident.1, resident.2.approximate head⟩ (ih tail)
+      exact .cons found owner declared ⟨resident.1, resident.2.approximate (by simpa only [declared] using head)⟩ (ih tail)
         (by simpa only [remaining.keys] using freshName) freshStorage
 
+
+theorem BindingContextApprox.lookup {data : DataDeclarations}
+    {before after : List (BindingId × BindingState)} (joined : BindingContextApprox data before after)
+    {name : BindingId} {state : BindingState} (selected : Grounded.lookup name before = some state) :
+    ∃ next, Grounded.lookup name after = some ⟨state.slot, next⟩ ∧
+      state.initialization.Approximates data state.slot.type next := by
+  induction joined with
+  | nil => simp [Grounded.lookup] at selected
+  | cons head tail ih =>
+    simp only [Grounded.lookup] at selected ⊢
+    split at selected
+    next same =>
+      cases selected
+      exact ⟨_, by simp [same], head⟩
+    next different =>
+      simpa only [if_neg different] using ih selected
 
 
 variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation : ActivationId}

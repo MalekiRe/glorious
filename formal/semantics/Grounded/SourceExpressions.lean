@@ -187,7 +187,7 @@ inductive NamedArmsElaborate (program : Program) (names : Module → FunctionNam
         body coreBody result (localsAfter ++ branchAfter))
       (localSlots : localsAfter.slots = bindings)
       (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
-      (joined : BindingContextApprox branchAfter after)
+      (joined : BindingContextApprox program.data branchAfter after)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 end
