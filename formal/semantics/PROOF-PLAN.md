@@ -2921,7 +2921,7 @@ and region/return contracts remain the next integrated representation boundary;
 this address cutover alone does not admit borrowing or establish full soundness.
 
 
-## Address separation through constructive owned-input entry
+## Address separation through constructive mixed-input entry
 
 `StorageAddress.Disjoint` lifts the existing checked field geometry into the
 actual pre-state heap; distinct-root separation uses storage identities, not
@@ -2931,14 +2931,14 @@ analysis or independently reconstructed field layout is introduced.
 
 Actual take/restoration framing consumes this relation, including disjoint
 fields in one cell. The existing lexical and machine framing consumers use the
-same address-level producer. `HasTypes.disjoint_moves_execute` then constructs
-an arbitrary ordered batch of admitted separated owned moves. It proves that
+same address-level producer. `HasTypes.compatible_inputs_execute` constructs
+arbitrary ordered batches of admitted direct Copy/move inputs. It proves that
 each returned value equals that input's original pre-state observation, derives
 the intermediate heaps and checking contexts, and preserves scope and activation
 supply. Pending observations survive each real move by address framing; their
 future readiness or future contents are not assumed.
 
-`HasType.disjoint_call_entry` consumes that batch, performs actual parameter
+`HasType.compatible_call_entry` consumes that batch, performs actual parameter
 preparation and callee allocation, constructs the machine run to the selected
 body with its caller-restoration frame, and obtains reached-state typing and a
 next transition from general preservation/progress. The body may recurse or
@@ -2950,8 +2950,21 @@ general preservation/progress and public source-function soundness found only
 `propext`, `Classical.choice` and `Quot.sound`. No unit tests or concrete
 examples were added.
 
-This constructs separated owned-move entry in the current logical allocator.
-Existing mixed Copy/move call-prefix safety remains unchanged. It does not yet
-construct borrowed inputs, prove shared/unique loan compatibility, interpret
-physical allocation exhaustion, or discharge the whole-language obligations.
+The initial owned-move-only construction was generalized through the existing
+ordered `InputCompatible` relation; its two narrower theorem APIs were removed.
+Copy may overlap later Copy or move inputs. A preceding move must preserve the
+later read/move through pre-state address separation. The syntax premise only
+identifies direct place inputs; it assumes no successful read or completed run.
+`Expr.inputObservation` records the same addressed read for either input mode,
+not a second storage semantics. Arbitrary effectful/computing argument expressions
+retain general prefix safety, not an unconditional termination claim.
+
+The mixed construction passed all 30 jobs; explicit inspection of its two
+endpoints, pending-admission producer, call-prefix safety, general machine
+preservation/progress and public source soundness found only standard Lean axioms.
+No unit tests or concrete examples were added.
+
+This is entry in the current logical allocator. It does not construct borrowed
+inputs, prove shared/unique loan compatibility, interpret physical allocation
+exhaustion, or discharge the whole-language obligations.
 
