@@ -49,6 +49,30 @@ theorem HasType.disjoint_call_soundness (checkedProgram : program.Checked)
   obtain ⟨final, checked⟩ := HasType.call_disjoint_moves declared visible arguments separated ready
   exact ⟨final, checked, fun _ _ store issued run => checked.soundness checkedProgram store issued run⟩
 
+/-- Pre-state-compatible mixed Copy/move inputs yield general call-prefix safety,
+including actual argument movement, callee entry, recursive execution and return.
+No intermediate input readiness or completed execution is assumed. -/
+theorem HasType.compatible_call_soundness (checkedProgram : program.Checked)
+    {before : FlowContext} {inputs : List (Expr × Ty)} {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home before.slots left.1 right.1))
+    (admitted : ∀ input ∈ inputs, ∃ after, HasType program home before input.1 input.2 after) :
+    ∃ final, HasType program home before (.call identity (inputs.map Prod.fst))
+        declaration.result final ∧
+      ∀ (environment : Environment) (state : Configuration),
+        BindingMap.Typed program environment.heap environment.activation environment.bindings before →
+        environment.supply.Issued environment.activation →
+        Run program ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩ state →
+        ConfigurationTyped program final (.one declaration.result) state ∧
+        (Terminal state ∨ ∃ next, Step program state next) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
+        (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
+  obtain ⟨final, checked⟩ := HasType.call_compatible_inputs declared visible arguments compatible admitted
+  exact ⟨final, checked, fun _ _ store issued run => checked.soundness checkedProgram store issued run⟩
+
+
 
 /-- No checked execution can duplicate a value whose principal forbids Copy.
 The claim is about the actual read transition, not merely a source annotation. -/

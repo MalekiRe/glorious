@@ -2405,3 +2405,36 @@ custody, physical allocation/exhaustion and the remaining whole-language
 obligations are not established by this theorem. All broad completion tasks
 remain open.
 
+
+## Mode-aware mixed Copy/move input composition
+
+`InputCompatible` now records ordered pre-state access compatibility over the
+existing expression forms. Copy may precede another access to the same place;
+a move requires disjointness from a later read or move. A Copy constructor is
+not permission: each input must still have its ordinary pre-state checking
+proof, including Copy permission and readiness where required.
+
+`PlaceDisjoint.write_frame` transports the selected slot and exact mask through
+an actual static context update. `InputCompatible.admit_next` uses that result
+to derive pending admission. `HasTypes.compatible_inputs` composes an arbitrary
+list with no supplied intermediate admission or runtime-success premise. The
+former independent move-only induction was removed; `disjoint_moves` now
+constructs individual admissions and consumes this same composition theorem.
+
+`HasType.call_compatible_inputs` and `compatible_call_soundness` connect the
+mixed relation to existing call checking and the complete general prefix-safety
+contract. `InputCompatible.move_self_excluded` proves that move-then-read and
+move-then-move of the identical place cannot satisfy compatibility, while
+Copy-before-move and overlapping Copy reads remain admitted by the relation.
+This is an ordered relation, not a symmetric blanket separation policy.
+
+`lake build Grounded` passed all 30 jobs. Exhaustive axiom inspection covered
+3,871 declarations with only standard Lean axioms; transport, overlap exclusion,
+ordered composition and general call soundness were inspected explicitly.
+
+This extends the preceding owned-move result to mixed accesses in the current
+logical fragment. It is not shared-loan compatibility: borrowing, guards,
+custody, physical exhaustion, custom destruction and whole-language soundness
+remain open. Arbitrary inputs not handled by the compatibility constructors
+are not silently declared compatible.
+

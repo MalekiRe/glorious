@@ -23,6 +23,17 @@ inductive PlaceDisjoint (program : Program) (home : Module) (context : List (Bin
       (apart : PathDisjoint program home slot.type left.fields right.fields) :
       PlaceDisjoint program home context left right
 
+/-- Compatibility is ordered: Copy observes without clearing storage, while an
+owned move must preserve the later access. It does not model borrowed loans. -/
+inductive InputCompatible (program : Program) (home : Module) (context : List (BindingId × BindingType)) :
+    Expr → Expr → Prop where
+  | copy {place : Place} {later : Expr} : InputCompatible program home context (.read place) later
+  | moveRead {left right : Place} (apart : PlaceDisjoint program home context left right) :
+      InputCompatible program home context (.move left) (.read right)
+  | moveMove {left right : Place} (apart : PlaceDisjoint program home context left right) :
+      InputCompatible program home context (.move left) (.move right)
+
+
 
 
 end Grounded

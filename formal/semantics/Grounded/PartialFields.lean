@@ -645,6 +645,22 @@ theorem Initialization.write_exists {program : Program} {parent : Ty}
     exact ⟨.fields ((before.openFields types.length).set index updated), by
       simp [Initialization.writeFields, info, found, written]⟩
 
+/-- Resolved disjoint paths cannot designate the same syntactic path. -/
+theorem PathDisjoint.ne {program : Program} {home : Module} {parent : Ty}
+    {left right : List FieldKey} (apart : PathDisjoint program home parent left right) : left ≠ right := by
+  induction apart with
+  | fork leftField rightField different =>
+    intro same
+    have keys := (List.cons.inj same).1
+    have leftIndex := leftField.fieldIndex
+    have rightIndex := rightField.fieldIndex
+    rw [keys] at leftIndex
+    exact different (Option.some.inj (leftIndex.symm.trans rightIndex))
+  | descend field apart ih =>
+    intro same
+    exact ih (List.cons.inj same).2
+
+
 
 
 end Grounded

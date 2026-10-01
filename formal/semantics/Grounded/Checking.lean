@@ -229,6 +229,108 @@ theorem ArmsType.slots {program : Program} {home : Module} {before after : FlowC
     rw [localSlots] at same
     simpa [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] using same
 
+theorem PlaceDisjoint.write_frame {program : Program} {home : Module}
+    {before middle : FlowContext} {moved pending : Place} {source target : BindingState}
+    {updated replacement : Initialization}
+    (apart : PlaceDisjoint program home before.slots moved pending)
+    (selected : lookup moved.root before = some source)
+    (mask : source.initialization.writeFields program source.slot.type moved.fields replacement = some updated)
+    (changed : replaceBinding moved.root { source with initialization := updated } before = some middle)
+    (found : lookup pending.root before = some target) :
+    ∃ next, lookup pending.root middle = some next ∧ next.slot = target.slot ∧
+      next.initialization.selectFields program next.slot.type pending.fields =
+        target.initialization.selectFields program target.slot.type pending.fields := by
+  cases apart with
+  | roots different =>
+    exact ⟨target, (replaceBinding.lookup_other changed different).trans found, rfl, rfl⟩
+  | fields same slotSelected separated =>
+    have stateSame : source = target := Option.some.inj
+      (selected.symm.trans (by simpa only [same] using found))
+    subst target
+    have rootSlot : lookup moved.root before.slots = some source.slot := by
+      simp [FlowContext.slots, lookup.map, selected]
+    have slotSame := Option.some.inj (rootSlot.symm.trans slotSelected)
+    rw [← slotSame] at separated
+    exact ⟨{ source with initialization := updated },
+      by simpa only [same] using replaceBinding.lookup_after changed,
+      rfl, separated.initialization_frame mask⟩
+
+/-- Compatible pre-state admissions compose through the actual static update.
+The pending admission is derived, never supplied for the intermediate context. -/
+theorem InputCompatible.admit_next {program : Program} {home : Module}
+    {before middle after : FlowContext} {first second : Expr} {firstType secondType : Ty}
+    (compatible : InputCompatible program home before.slots first second)
+    (head : HasType program home before first firstType middle)
+    (pending : HasType program home before second secondType after) :
+    ∃ final, HasType program home middle second secondType final := by
+  cases compatible with
+  | copy =>
+    cases head
+    exact ⟨after, pending⟩
+  | moveRead apart =>
+    cases head with
+    | move selected path selection ready mask changed =>
+      cases pending with
+      | read otherSelected otherPath otherSelection otherReady permission =>
+        obtain ⟨next, mapped, slots, framed⟩ := apart.write_frame selected mask changed otherSelected
+        exact ⟨middle, .read mapped (by simpa only [slots] using otherPath)
+          (framed.trans otherSelection) otherReady permission⟩
+  | moveMove apart =>
+    cases head with
+    | move selected path selection ready mask changed =>
+      cases pending with
+      | move otherSelected otherPath otherSelection otherReady oldMask oldContext =>
+        obtain ⟨next, mapped, slots, framed⟩ := apart.write_frame selected mask changed otherSelected
+        obtain ⟨updated, written⟩ := Initialization.write_exists (framed.trans otherSelection) .absent
+        obtain ⟨final, replaced⟩ := replaceBinding.exists mapped { next with initialization := updated }
+        exact ⟨final, .move mapped (by simpa only [slots] using otherPath)
+          (framed.trans otherSelection) otherReady written replaced⟩
+
+/-- One ordered composition theorem admits mixed Copy and move inputs.
+Overlapping Copy inputs are allowed; moves frame every later selected input. -/
+theorem HasTypes.compatible_inputs {program : Program} {home : Module} {before : FlowContext}
+    {inputs : List (Expr × Ty)}
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home before.slots left.1 right.1))
+    (checked : ∀ input ∈ inputs, ∃ after, HasType program home before input.1 input.2 after) :
+    ∃ after, HasTypes program home before (inputs.map Prod.fst) (inputs.map Prod.snd) after := by
+  induction inputs generalizing before with
+  | nil => exact ⟨before, .nil⟩
+  | cons first rest ih =>
+    obtain ⟨middle, head⟩ := checked first (by simp)
+    have parts := List.pairwise_cons.mp compatible
+    have tailCompatible : rest.Pairwise
+        (fun left right => InputCompatible program home middle.slots left.1 right.1) := by
+      rw [head.slots]
+      exact parts.2
+    obtain ⟨final, tail⟩ := ih tailCompatible (by
+      intro input member
+      obtain ⟨after, pending⟩ := checked input (List.mem_cons_of_mem first member)
+      exact (parts.1 input member).admit_next head pending)
+    exact ⟨final, .cons head tail⟩
+
+/-- A destructive input cannot be certified compatible with a later access to
+that same place. Copy-before-move remains permitted by the ordered relation. -/
+theorem InputCompatible.move_self_excluded {program : Program} {home : Module}
+    {before : FlowContext} {place : Place} {later : Expr}
+    (compatible : InputCompatible program home before.slots (.move place) later) :
+    later ≠ .read place ∧ later ≠ .move place := by
+  have noSelf : ¬ PlaceDisjoint program home before.slots place place := by
+    intro apart
+    cases apart with
+    | roots different => exact different rfl
+    | fields same selected apart => exact apart.ne rfl
+  cases compatible with
+  | moveRead apart =>
+    constructor
+    · intro same; cases same; exact noSelf apart
+    · intro same; cases same
+  | moveMove apart =>
+    constructor
+    · intro same; cases same
+    · intro same; cases same; exact noSelf apart
+
+
+
 /-- Arbitrary ordered owned inputs are admitted from pre-state readiness and
 separation. Each real source-context update preserves all pending inputs. -/
 theorem HasTypes.disjoint_moves {program : Program} {home : Module} {before : FlowContext}
@@ -239,43 +341,20 @@ theorem HasTypes.disjoint_moves {program : Program} {home : Module} {before : Fl
       PathType program home state.slot.type input.1.fields input.2 ∧
       state.initialization.selectFields program state.slot.type input.1.fields = some available ∧ available.Ready) :
     ∃ after, HasTypes program home before (inputs.map fun input => Expr.move input.1) (inputs.map Prod.snd) after := by
-  induction inputs generalizing before with
-  | nil => exact ⟨before, .nil⟩
-  | cons first rest ih =>
-    obtain ⟨state, available, selected, path, selection, initialized⟩ := ready first (by simp)
+  have initial : ∀ input ∈ inputs.map (fun input => (Expr.move input.1, input.2)),
+      ∃ after, HasType program home before input.1 input.2 after := by
+    intro input member
+    obtain ⟨original, originalMember, rfl⟩ := List.mem_map.mp member
+    obtain ⟨state, available, selected, path, selection, initialized⟩ := ready original originalMember
     obtain ⟨updated, mask⟩ := Initialization.write_exists selection .absent
-    obtain ⟨middle, changed⟩ := replaceBinding.exists selected { state with initialization := updated }
-    have head : HasType program home before (.move first.1) first.2 middle :=
-      .move selected path selection initialized mask changed
-    have parts := List.pairwise_cons.mp separated
-    have tailSeparated : rest.Pairwise (fun left right => PlaceDisjoint program home (FlowContext.slots middle) left.1 right.1) := by
-      rw [head.slots]
-      exact parts.2
-    have tailReady : ∀ input ∈ rest, ∃ nextState nextAvailable,
-        lookup input.1.root middle = some nextState ∧
-        PathType program home nextState.slot.type input.1.fields input.2 ∧
-        nextState.initialization.selectFields program nextState.slot.type input.1.fields = some nextAvailable ∧
-        nextAvailable.Ready := by
-      intro input member
-      obtain ⟨otherState, otherAvailable, otherSelected, otherPath, otherSelection, otherReady⟩ :=
-        ready input (List.mem_cons_of_mem first member)
-      cases parts.1 input member with
-      | roots different =>
-        exact ⟨otherState, otherAvailable, (replaceBinding.lookup_other changed different).trans otherSelected,
-          otherPath, otherSelection, otherReady⟩
-      | fields same slotSelected apart =>
-        have stateSame : state = otherState := Option.some.inj
-          (selected.symm.trans (by simpa only [same] using otherSelected))
-        subst otherState
-        have rootSlot : lookup first.1.root before.slots = some state.slot := by
-          simp [FlowContext.slots, lookup.map, selected]
-        have slotSame := Option.some.inj (rootSlot.symm.trans slotSelected)
-        rw [← slotSame] at apart
-        exact ⟨{ state with initialization := updated }, otherAvailable,
-          by simpa only [same] using replaceBinding.lookup_after changed,
-          otherPath, (apart.initialization_frame mask).trans otherSelection, otherReady⟩
-    obtain ⟨after, tail⟩ := ih tailSeparated tailReady
-    exact ⟨after, .cons head tail⟩
+    obtain ⟨after, changed⟩ := replaceBinding.exists selected { state with initialization := updated }
+    exact ⟨after, .move selected path selection initialized mask changed⟩
+  have compatible : (inputs.map fun input => (Expr.move input.1, input.2)).Pairwise
+      (fun left right => InputCompatible program home before.slots left.1 right.1) := by
+    rw [List.pairwise_map]
+    exact separated.imp fun apart => .moveMove apart
+  obtain ⟨after, checked⟩ := HasTypes.compatible_inputs compatible initial
+  exact ⟨after, by simpa only [List.map_map, Function.comp_def] using checked⟩
 
 /-- Function input admission uses the ordinary ordered argument relation. -/
 theorem HasType.call_disjoint_moves {program : Program} {home : Module} {before : FlowContext}
@@ -292,6 +371,20 @@ theorem HasType.call_disjoint_moves {program : Program} {home : Module} {before 
       declaration.result after := by
   obtain ⟨after, checked⟩ := HasTypes.disjoint_moves separated ready
   exact ⟨after, .call declared visible (by simpa only [arguments] using checked)⟩
+
+/-- Mixed inputs are checked once in the pre-state, then composed by their
+ordered access compatibility rather than assumed intermediate admissions. -/
+theorem HasType.call_compatible_inputs {program : Program} {home : Module} {before : FlowContext}
+    {inputs : List (Expr × Ty)} {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home before.slots left.1 right.1))
+    (checked : ∀ input ∈ inputs, ∃ after, HasType program home before input.1 input.2 after) :
+    ∃ after, HasType program home before (.call identity (inputs.map Prod.fst)) declaration.result after := by
+  obtain ⟨after, inputsTyped⟩ := HasTypes.compatible_inputs compatible checked
+  exact ⟨after, .call declared visible (by simpa only [arguments] using inputsTyped)⟩
+
 
 
 
