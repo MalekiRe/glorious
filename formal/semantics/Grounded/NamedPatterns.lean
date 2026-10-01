@@ -28,13 +28,13 @@ runtime matcher's head-before-tail binding order. This is static allocation,
 not evaluation of pattern fields. Sibling clauses start with the same scope. -/
 inductive NamedPattern.Elaborates (program : Program) (home : Module) :
     SourceScope → NamedPattern → Ty → Pattern → List (BindingId × BindingType) → SourceScope → Prop where
-  | wildcard {scope type} (discard : Duplicable program.data type) :
+  | wildcard {scope type} (discard : UsePermitted program.data .discard type) :
       NamedPattern.Elaborates program home scope .wildcard type .wildcard [] scope
-  | binder {scope type} (name : Identifier) (discard : Duplicable program.data type) :
+  | binder {scope type} (name : Identifier) (discard : UsePermitted program.data .discard type) :
       NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩ type)
         [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter name ⟨type, false⟩)
   | constant {scope name type} (typed : HasType program home [] (.constant name) type [])
-      (discard : Duplicable program.data type) :
+      (discard : UsePermitted program.data .discard type) :
       NamedPattern.Elaborates program home scope (.constant name) type
         (SourcePattern.Checked.constant type typed).normalize.val [] scope
   | node {scope after head fields types type patterns bindings}

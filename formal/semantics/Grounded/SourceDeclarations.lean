@@ -16,12 +16,12 @@ inductive NamedParametersElaborate (program : Program) : List NamedParameter →
   | cons {parameter rest scope type}
       (tail : NamedParametersElaborate program rest scope)
       (resolved : ResolvesType program.aliases parameter.type type)
-      (disposable : Duplicable program.data type) :
+      (disposable : UsePermitted program.data .discard type) :
       NamedParametersElaborate program (parameter :: rest) (scope.enter parameter.name ⟨type, parameter.mutable⟩)
 
 theorem NamedParametersElaborate.disposable {program : Program} {parameters : List NamedParameter}
     {scope : SourceScope} (elaborated : NamedParametersElaborate program parameters scope) :
-    ∀ parameter ∈ scope.context, Duplicable program.data parameter.2.type := by
+    ∀ parameter ∈ scope.context, UsePermitted program.data .discard parameter.2.type := by
   induction elaborated with
   | nil => simp [SourceScope.empty, SourceScope.context]
   | cons tail resolved disposable ih =>

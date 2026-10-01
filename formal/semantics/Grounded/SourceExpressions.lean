@@ -95,7 +95,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (selected : lookup binding.identity context = some state)
       (path : PathType program home binding.slot.type fields type)
       (selection : state.initialization.selectFields program binding.slot.type fields = some available)
-      (ready : available.Ready) (copyable : Duplicable program.data type) :
+      (ready : available.Ready) (copyable : UsePermitted program.data .copy type) :
       NamedExpr.Elaborates program names home scope context (.read name fields) (.read ⟨binding.identity, fields⟩) type context
   | move {scope before after name fields binding type state available updated}
       (resolved : scope.resolve name = some binding)
@@ -108,12 +108,12 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.move name fields) (.move ⟨binding.identity, fields⟩) type after
   | sequence {scope before middle after first rest head tail discarded type}
       (initial : NamedExpr.Elaborates program names home scope before first head discarded middle)
-      (discard : Duplicable program.data discarded)
+      (discard : UsePermitted program.data .discard discarded)
       (continued : NamedExpr.Elaborates program names home scope middle rest tail type after) :
       NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
   | bind {scope before middle after mutable name annotation initial body first rest localType type finalMask}
       (initialized : NamedExpr.Elaborates program names home scope before initial first localType middle)
-      (discard : Duplicable program.data localType)
+      (discard : UsePermitted program.data .discard localType)
       (annotated : Annotation program.aliases annotation localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter name ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
@@ -126,7 +126,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.tuple head tail) (.tuple first rest) (.tuple type types) after
   | project {scope before after source core key parent type index}
       (body : NamedExpr.Elaborates program names home scope before source core parent after)
-      (discard : Duplicable program.data parent) (selected : ProjectionType program home parent key index type) :
+      (discard : UsePermitted program.data .discard parent) (selected : ProjectionType program home parent key index type) :
       NamedExpr.Elaborates program names home scope before (.project source key) (.project core key) type after
   | array {scope before after source core element length}
       (residents : NamedExprsElaborate program names home scope before source core (List.replicate length element) after)
@@ -154,7 +154,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (resident : NamedExpr.Elaborates program names home scope before value coreValue type evaluated)
       (selected : lookup binding.identity evaluated = some state)
       (path : PathType program home binding.slot.type fields type)
-      (writable : binding.slot.mutable = true) (discard : Duplicable program.data type)
+      (writable : binding.slot.mutable = true) (discard : UsePermitted program.data .discard type)
       (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
       (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
       (continued : NamedExpr.Elaborates program names home scope restored rest coreRest result after) :

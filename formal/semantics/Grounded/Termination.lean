@@ -237,7 +237,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
         exact checkedBody
       have entered := enterBindings.typed inputsTyped middle.heap middle.supply
       obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered middle.supply.allocate_issued
-      have discard : ∀ binding ∈ locals, Duplicable program.data binding.2.slot.type := by
+      have discard : ∀ binding ∈ locals, UsePermitted program.data .discard binding.2.slot.type := by
         intro binding member
         have slotMember : (binding.1, binding.2.slot) ∈ locals.slots := List.mem_map.mpr ⟨binding, member, rfl⟩
         rw [checkedBody.slots] at slotMember

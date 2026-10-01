@@ -148,7 +148,7 @@ theorem SourceScope.read_checked {scope : SourceScope} {spelling : Identifier} {
     (selected : lookup binding.identity context = some state)
     (path : PathType program home binding.slot.type fields type)
     (selection : state.initialization.selectFields program binding.slot.type fields = some available)
-    (ready : available.Ready) (copyable : Duplicable program.data type) :
+    (ready : available.Ready) (copyable : UsePermitted program.data .copy type) :
     HasType program home context (.read ⟨binding.identity, fields⟩) type context := by
   have same := scope.selected_slot resolved slots selected
   exact .read selected (by rw [same]; exact path) (by rw [same]; exact selection) ready copyable
@@ -176,7 +176,7 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (resident : HasType program home before value type evaluated)
     (selected : lookup binding.identity evaluated = some state)
     (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
-    (discard : Duplicable program.data type)
+    (discard : UsePermitted program.data .discard type)
     (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
     (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
     (continued : HasType program home restored rest result after) :
@@ -189,7 +189,7 @@ theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
     {initial body : Expr} {localType result : Ty} {before middle after : FlowContext} {finalMask : Initialization}
     (slots : before.slots = scope.context)
     (initialized : HasType program home before initial localType middle)
-    (discard : Duplicable program.data localType)
+    (discard : UsePermitted program.data .discard localType)
     (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
       ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
     HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by

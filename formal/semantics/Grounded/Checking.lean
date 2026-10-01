@@ -41,7 +41,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (selected : lookup place.root context = some state)
       (path : PathType program home state.slot.type place.fields type)
       (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
-      (ready : available.Ready) (copyable : Duplicable program.data type) :
+      (ready : available.Ready) (copyable : UsePermitted program.data .copy type) :
       HasType program home context (.read place) type context
   | move {home before after place type state available updated}
       (selected : lookup place.root before = some state)
@@ -52,12 +52,12 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (context : replaceBinding place.root { state with initialization := updated } before = some after) :
       HasType program home before (.move place) type after
   | sequence {home before middle after first rest discarded type}
-      (head : HasType program home before first discarded middle) (drop : Duplicable program.data discarded)
+      (head : HasType program home before first discarded middle) (drop : UsePermitted program.data .discard discarded)
       (tail : HasType program home middle rest type after) :
       HasType program home before (.sequence first rest) type after
   | bind {home before middle after mutable name initial body localType type finalMask}
       (initialized : HasType program home before initial localType middle)
-      (drop : Duplicable program.data localType)
+      (drop : UsePermitted program.data .discard localType)
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ middle.map Prod.fst) :
@@ -68,7 +68,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       HasType program home before (.tuple head tail) (.tuple first rest) after
   | project {home before after body key parent type index}
       (source : HasType program home before body parent after)
-      (discard : Duplicable program.data parent) (selected : ProjectionType program home parent key index type) :
+      (discard : UsePermitted program.data .discard parent) (selected : ProjectionType program home parent key index type) :
       HasType program home before (.project body key) type after
   | array {home before after elements element length}
       (residents : HasTypes program home before elements (List.replicate length element) after)
@@ -97,7 +97,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (resident : HasType program home before value type evaluated)
       (selected : lookup place.root evaluated = some state)
       (path : PathType program home state.slot.type place.fields type)
-      (writable : state.slot.mutable = true) (discard : Duplicable program.data type)
+      (writable : state.slot.mutable = true) (discard : UsePermitted program.data .discard type)
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } evaluated = some restored)
       (continued : HasType program home restored rest result after) :
@@ -170,7 +170,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals localsAfter pattern, (pattern, body) ∈ arms ∧
       BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = locals ∧
-      (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
+      (∀ binding ∈ locals, UsePermitted program.data .discard binding.2.type) ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ after) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup := by
   induction arms generalizing previous with
@@ -192,11 +192,11 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
         exact ⟨locals, localsAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
           disposable, bodyTyped, localSlots, distinct⟩
 
-/-- Bodies may finish with holes; scope disposal still requires duplicable
+/-- Bodies may finish with holes; scope disposal requires discardable
 parameter types in this fragment. No completed execution is assumed. -/
 structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
   distinct : (declaration.parameters.map Prod.fst).Nodup
-  disposable : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2.type
+  disposable : ∀ parameter ∈ declaration.parameters, UsePermitted program.data .discard parameter.2.type
   body : ∃ after, HasType program declaration.home (initializedContext declaration.parameters)
     declaration.body declaration.result after
 

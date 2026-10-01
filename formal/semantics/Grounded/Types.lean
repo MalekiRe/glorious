@@ -1,6 +1,6 @@
 import Grounded.Model
 
-/-! Static type resolution, finite inline layout and duplicability. These contracts
+/-! Static type resolution, finite inline layout and owned-use permissions. These contracts
 do not depend on expression checking or execution. -/
 namespace Grounded
 
@@ -76,21 +76,52 @@ inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop
       (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
         FiniteLayout target data field.type) : FiniteLayout target data (.nominal identity)
 
-/-- §7.2: scalar owned use may copy; scalar values may also be discarded.
-Keep this explicit at consumers rather than making all future types copyable. -/
-inductive Duplicable (data : DataDeclarations) : Ty → Prop where
-  | unit : Duplicable data .unit
-  | integer (type : IntegerType) : Duplicable data (.integer type)
-  | character : Duplicable data .character
-  | tuple {head : Ty} {tail : List Ty} (first : Duplicable data head)
-      (rest : ∀ type ∈ tail, Duplicable data type) : Duplicable data (.tuple head tail)
-  | array {element : Ty} (length : Nat) (resident : Duplicable data element) :
-      Duplicable data (.array element length)
-  | emptyArray (element : Ty) : Duplicable data (.array element 0)
+/-- The two independent owned-use permissions in §7. Copy does not mean move;
+    discard permits zero use. Exact ownership grants neither permission. -/
+inductive UsePermission where
+  | copy | discard
+
+def UsePermission.Allows (permission : UsePermission) : Option Principal → Prop
+  | none | some .duplicable => True
+  | some .affine => permission = .discard
+  | some .exact => False
+
+/-- One structural producer for Copy and MayDiscard. This logical fragment has
+no custom Drop hooks or indirections; every resident contributes its permission. -/
+inductive UsePermitted (data : DataDeclarations) (permission : UsePermission) : Ty → Prop where
+  | unit : UsePermitted data permission .unit
+  | integer (type : IntegerType) : UsePermitted data permission (.integer type)
+  | character : UsePermitted data permission .character
+  | tuple {head : Ty} {tail : List Ty} (first : UsePermitted data permission head)
+      (rest : ∀ type ∈ tail, UsePermitted data permission type) :
+      UsePermitted data permission (.tuple head tail)
+  | array {element : Ty} (length : Nat) (resident : UsePermitted data permission element) :
+      UsePermitted data permission (.array element length)
+  | emptyArray (element : Ty) : UsePermitted data permission (.array element 0)
   | nominal {identity : Nat} {declaration : DataDecl}
       (declared : data identity = some declaration)
-      (restriction : declaration.restriction = none ∨ declaration.restriction = some .duplicable)
-      (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents, Duplicable data field.type) :
-      Duplicable data (.nominal identity)
+      (restriction : permission.Allows declaration.restriction)
+      (fields : ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
+        UsePermitted data permission field.type) :
+      UsePermitted data permission (.nominal identity)
+
+theorem UsePermission.copy_allows_discard {restriction : Option Principal}
+    (allowed : UsePermission.copy.Allows restriction) : UsePermission.discard.Allows restriction := by
+  cases restriction with
+  | none => trivial
+  | some principal => cases principal <;> simp_all [UsePermission.Allows]
+
+/-- Structural Copy evidence entails zero-use permission, not conversely. -/
+theorem UsePermitted.copy_discard {data : DataDeclarations} {type : Ty}
+    (copy : UsePermitted data .copy type) : UsePermitted data .discard type := by
+  induction copy with
+  | unit => exact .unit
+  | integer type => exact .integer type
+  | character => exact .character
+  | tuple first rest firstIH restIH => exact .tuple firstIH restIH
+  | array length resident ih => exact .array length ih
+  | emptyArray element => exact .emptyArray element
+  | nominal declared restriction fields ih => exact .nominal declared (UsePermission.copy_allows_discard restriction) ih
+
 
 end Grounded

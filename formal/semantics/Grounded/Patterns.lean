@@ -28,11 +28,11 @@ def Head.Accessible (program : Program) (home : Module) : Head → Prop
 
 mutual
 inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (BindingId × BindingType) → Prop where
-  | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
-  | binder (name : BindingId) {type : Ty} (discard : Duplicable program.data type) :
+  | wildcard {type : Ty} (discard : UsePermitted program.data .discard type) : PatternType program home .wildcard type []
+  | binder (name : BindingId) {type : Ty} (discard : UsePermitted program.data .discard type) :
       PatternType program home (.binder name type) type [(name, ⟨type, false⟩)]
   | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
-      (discard : Duplicable program.data type) : PatternType program home (.literal (some type) value) type []
+      (discard : UsePermitted program.data .discard type) : PatternType program home (.literal (some type) value) type []
   | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (BindingId × BindingType)}
       (shape : HeadType program head type fields) (access : head.Accessible program home)
       (fieldsTyped : PatternsType program home patterns fields bindings) :
@@ -333,9 +333,9 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
 /-- Pattern-bound locals inherit the disposal permission checked at each binder. -/
 theorem PatternType.disposable {program : Program} {home : Module} {pattern : Pattern} {type : Ty}
     {bindings : List (BindingId × BindingType)} (typed : PatternType program home pattern type bindings) :
-    ∀ binding ∈ bindings, Duplicable program.data binding.2.type := by
+    ∀ binding ∈ bindings, UsePermitted program.data .discard binding.2.type := by
   induction typed using PatternType.rec
-    (motive_2 := fun _ _ bindings _ => ∀ binding ∈ bindings, Duplicable program.data binding.2.type) with
+    (motive_2 := fun _ _ bindings _ => ∀ binding ∈ bindings, UsePermitted program.data .discard binding.2.type) with
   | wildcard discard => simp
   | binder name discard => simpa using discard
   | literal typed discard => simp

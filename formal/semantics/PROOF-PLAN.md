@@ -72,15 +72,16 @@ consumer separately requires finite call expansion.
 The admitted logical fragment supports initialized and partially consumed storage,
 named moves, restoration, mutable lexical storage, projected access and recursive
 declared functions over one shared heap with generative activation identities.
-Owned nominal construction no longer requires Copy. Disposal still carries duplicability restrictions; principal
-ownership, destruction, loans and physical memory remain open.
+Owned nominal construction does not require Copy. Copy and MayDiscard use one
+structural permission producer; residual exact-owner disposition, custom
+destruction, loans and physical memory remain open.
 
 
 
 | Module | Authoritative responsibility |
 | --- | --- |
 | `Model` | Decoded vocabulary, declarations and identity-indexed lookup/replacement; no checking/execution certificates |
-| `Types` | Alias resolution, finite layout and duplicability |
+| `Types` | Alias resolution, finite layout and shared Copy/MayDiscard derivation |
 | `Values` | Structural value equality, resident typing and indexed access |
 | `Projections` | Shared field/path authority and value selection/replacement, independent of lexical storage |
 | `Places` | Rooted lexical place contracts using the shared checked field path |
@@ -1864,7 +1865,46 @@ General preservation, progress, execution and public source/function correctness
 received explicit axiom inspection.
 
 This corrects owned construction, not the remaining ownership/disposal boundary.
-Local binding, parameter and pattern-binding cleanup still impose duplicability
-restrictions. They require a shared residual-ownership disposition contract and
-actual cleanup correctness; whole-language ownership soundness remains open.
+At this checkpoint local binding, parameter and pattern-binding cleanup still
+imposed duplicability restrictions. The next checkpoint replaces that conflation;
+residual exact-owner disposition and whole-language ownership soundness remain open.
+
+
+## Verified shared Copy and MayDiscard authority
+
+Replaced `Duplicable` with one indexed structural relation, `UsePermitted`,
+producing either `.copy` or `.discard` evidence. There is no independent
+second ownership walker or compatibility alias. Nominal restrictions and all
+resident fields contribute to the same derivation: affine restrictions admit
+discard but not Copy; exact restrictions admit neither. Empty arrays retain
+their no-resident rule. The general `copy_discard` theorem proves the permission
+implication structurally, including nominal fields.
+
+Migrated every source/Core consumer: reads require Copy; sequencing, local
+binding, projected-value residue, overwritten values, wildcard/literal patterns,
+pattern-bound locals, function parameters, scope frames and caller restoration
+require MayDiscard. The existing general preservation/progress and finite-call
+execution proofs consume those contracts directly. No operational success,
+post-state readiness or termination assumption was added to ordinary admission.
+The fragment has no custom Drop hooks, references or raw owning representations;
+this change does not claim their destruction semantics.
+
+A general inversion proof verified the former sequence-discard Copy restriction
+before changing it. Fresh source-only `lake build Grounded` passed (30 jobs).
+A universally quantified Lean proof then derived named affine local binding,
+actual execution through scope cleanup, the unit result, final storage typing,
+issued activation and immutable consumption framing from the public source
+correctness theorem. General negative proofs established that affine nominal
+owners cannot acquire Copy and exact nominal owners cannot acquire MayDiscard.
+These stdin proof checks used no concrete examples or unit tests.
+
+Exhaustive imported axiom inspection covered 3,710 declarations; only standard
+Lean axioms occur. General preservation, progress, source/function correctness,
+finite execution and Copy-to-discard transport received explicit inspection.
+
+Residual-mask-dependent exact-owner disposition remains open: a fully consumed
+exact local or parameter is still rejected by the type-wide scope restriction.
+It must be admitted from its final residual ownership, not by pretending its
+type permits discard. Custom destruction, ordered hook execution, branch joins,
+loans and the other whole-language obligations also remain open.
 
