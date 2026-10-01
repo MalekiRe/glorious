@@ -10,13 +10,16 @@ abbrev SourcePath := List String
 
 inductive ModuleSource where
   | body (functions : List FunctionSyntax) (imports : List FunctionImportSyntax)
-      (children : List (Identifier × Option ModuleSource))
+      (children : List (Identifier × Visibility × Option ModuleSource))
 
 def ModuleSource.functions : ModuleSource → List FunctionSyntax
   | .body functions _ _ => functions
 
 def ModuleSource.imports : ModuleSource → List FunctionImportSyntax
   | .body _ imports _ => imports
+
+def ModuleSource.children : ModuleSource → List (Identifier × Visibility × Option ModuleSource)
+  | .body _ _ children => children
 
 abbrev SourceFiles := List (SourcePath × ModuleSource)
 
@@ -28,6 +31,19 @@ structure LoadedModule where
 
 def Module.child (home : Module) (name : Identifier) : Module :=
   ⟨home.package, home.path ++ [name]⟩
+
+/-- Module bindings carry their declaring parent's visibility. A public
+function inside a hidden module does not itself expose that module path. -/
+inductive ModuleReachable (modules : List LoadedModule) (caller : Module) : Module → Prop where
+  | root {package} (included : (⟨package, []⟩ : Module) ∈ modules.map LoadedModule.home) :
+      ModuleReachable modules caller ⟨package, []⟩
+  | child {parent name visibility body}
+      (included : parent ∈ modules)
+      (ancestor : ModuleReachable modules caller parent.home)
+      (declared : (name, visibility, body) ∈ parent.source.children)
+      (allowed : visibility.Allows parent.home caller) :
+      ModuleReachable modules caller (parent.home.child name)
+
 
 def childDirectory (directory : SourcePath) (name : Identifier) : SourcePath :=
   directory ++ [name.text]
@@ -45,19 +61,19 @@ inductive ModuleSource.Loads (files : SourceFiles) :
         (⟨home, origin, directory, .body functions imports children⟩ :: descendants)
 
 inductive ModuleChildrenLoad (files : SourceFiles) : Module → SourcePath → SourcePath →
-    List (Identifier × Option ModuleSource) → List LoadedModule → Prop where
+    List (Identifier × Visibility × Option ModuleSource) → List LoadedModule → Prop where
   | nil {home origin directory} : ModuleChildrenLoad files home origin directory [] []
-  | inline {home origin directory name body rest first tail}
+  | inline {home origin directory name visibility body rest first tail}
       (included : ModuleSource.Loads files (home.child name) origin
         (childDirectory directory name) body first)
       (remaining : ModuleChildrenLoad files home origin directory rest tail) :
-      ModuleChildrenLoad files home origin directory ((name, some body) :: rest) (first ++ tail)
-  | external {home origin directory name body rest first tail}
+      ModuleChildrenLoad files home origin directory ((name, visibility, some body) :: rest) (first ++ tail)
+  | external {home origin directory name visibility body rest first tail}
       (supplied : (childFile directory name, body) ∈ files)
       (included : ModuleSource.Loads files (home.child name) (childFile directory name)
         (childDirectory directory name) body first)
       (remaining : ModuleChildrenLoad files home origin directory rest tail) :
-      ModuleChildrenLoad files home origin directory ((name, none) :: rest) (first ++ tail)
+      ModuleChildrenLoad files home origin directory ((name, visibility, none) :: rest) (first ++ tail)
 end
 
 structure PackageDependency where
@@ -191,17 +207,20 @@ noncomputable def SourceClosure.functionNames {packages : List PackageSource}
     (closure : SourceClosure packages) (caller home : Module) (name : Identifier) : Option Nat := by
   classical
   exact if PackageAccess packages caller.package home.package
-    then Grounded.functionNames closure.functions closure.imports caller home name else none
+    then if ModuleReachable closure.modules caller home
+      then Grounded.functionNames closure.functions closure.imports caller home name else none
+    else none
 
 theorem SourceClosure.functionNames_selected {packages : List PackageSource} (closure : SourceClosure packages)
     {caller home : Module} {name : Identifier} {identity : Nat} :
     closure.functionNames caller home name = some identity ↔
       PackageAccess packages caller.package home.package ∧
+      ModuleReachable closure.modules caller home ∧
         FunctionResolution closure.functions closure.imports caller home name identity := by
   classical
   simp only [SourceClosure.functionNames]
   split
-  · simp_all only [true_and, functionNames.selected_iff]
+  · split <;> simp_all [Grounded.functionNames.selected_iff]
   · simp_all
 
 
@@ -211,7 +230,8 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
     (program : Program) : Prop :=
   (packages.map PackageSource.identity).Nodup ∧
   (∀ package ∈ packages, package.DependenciesValid packages) ∧
-  (∀ edge ∈ closure.imports, PackageAccess packages edge.home.package edge.target.package) ∧
+  (∀ edge ∈ closure.imports, PackageAccess packages edge.home.package edge.target.package ∧
+    ModuleReachable closure.modules edge.home edge.target) ∧
   FunctionImportsValid closure.homes closure.functions closure.imports ∧
   NamedProgramAdmitted closure.functionNames closure.functions program
 
@@ -497,6 +517,7 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
     {scope : SourceScope} {before after : FlowContext} {identity : Nat} {declaration : FunctionDecl}
     {arguments : List NamedExpr} {inputs : List Expr}
     (included : name.owner home ∈ closure.homes)
+    (reachable : ModuleReachable closure.modules home (name.owner home))
     (candidate : VisibleFunctionCandidate closure.functions closure.imports home (name.owner home) name.spelling identity)
     (unshadowed : name.Unshadowed scope) (declared : program.functions identity = some declaration)
     (visible : declaration.visibility.Allows declaration.home home)
@@ -516,7 +537,7 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
   have allowed : PackageAccess packages home.package (name.owner home).package :=
     ⟨package, packageIncluded, owner, .inr ⟨normalized, selectedDependency.trans (congrArg some target)⟩⟩
   have base := admitted.2.2.2.1.resolve_existing included candidate
-  have resolved := closure.functionNames_selected.mpr ⟨allowed, Grounded.functionNames.selected_iff.mp base⟩
+  have resolved := closure.functionNames_selected.mpr ⟨allowed, reachable, Grounded.functionNames.selected_iff.mp base⟩
   have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
       (.call name arguments) (.call identity inputs) declaration.result after :=
     .call unshadowed resolved declared visible argumentsTyped
@@ -530,7 +551,7 @@ theorem SourceClosure.Admitted.resolves {packages : List PackageSource} {closure
     ∃ source core, closure.functions[identity]? = some source ∧ program.functions identity = some core ∧
       NamedFunction.Elaborates program closure.functionNames source core := by
   obtain ⟨_, cores, elaborated, functions⟩ := admitted.2.2.2.2
-  have base := Grounded.functionNames.selected_iff.mpr (closure.functionNames_selected.mp resolved).2
+  have base := Grounded.functionNames.selected_iff.mpr (closure.functionNames_selected.mp resolved).2.2
   obtain ⟨source, selected⟩ := Grounded.functionNames.selected base
   obtain ⟨core, emitted, checked⟩ := elaborated.selected selected
   exact ⟨source, core, selected, by rw [functions]; exact emitted, checked⟩
@@ -547,6 +568,7 @@ theorem SourceClosure.Admitted.call_resolution {packages : List PackageSource} {
       core = .call identity inputs ∧ program.functions identity = some declaration ∧
       declaration.home = source.home ∧ declaration.visibility.Allows declaration.home home ∧
       PackageAccess packages home.package (name.owner home).package ∧
+      ModuleReachable closure.modules home (name.owner home) ∧
       FunctionResolution closure.functions closure.imports home (name.owner home) name.spelling identity := by
   cases elaborated with
   | call _ resolved declared visible _ =>
@@ -582,6 +604,89 @@ theorem SourceClosure.Admitted.correctness {packages : List PackageSource} {clos
       after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter → other = value ∧ otherAfter = after :=
   admitted.2.2.2.2.correctness elaborated slots finite store issued
+
+
+theorem Module.child_injective {first second : Module} {left right : Identifier}
+    (same : first.child left = second.child right) : first = second ∧ left = right := by
+  have recovered := congrArg (fun home : Module => (home.package, home.path.dropLast)) same
+  cases first
+  cases second
+  simp [Module.child] at recovered
+  obtain ⟨rfl, rfl⟩ := recovered
+  refine ⟨rfl, ?_⟩
+  have paths := congrArg Module.path same
+  simpa [Module.child] using paths
+
+theorem ModuleSource.Loads.children_distinct {files : SourceFiles} {home : Module}
+    {origin directory : SourcePath} {source : ModuleSource} {modules : List LoadedModule}
+    (loaded : source.Loads files home origin directory modules) :
+    ∀ node ∈ modules, (node.source.children.map Prod.fst).Nodup := by
+  induction loaded using ModuleSource.Loads.rec
+    (motive_2 := fun _ _ _ _ modules _ =>
+      ∀ node ∈ modules, (node.source.children.map Prod.fst).Nodup) with
+  | body distinct _ ih =>
+    intro node member
+    rcases List.mem_cons.mp member with same | member
+    · subst node; exact distinct
+    · exact ih node member
+  | nil => rename_i node member; cases member
+  | inline _ _ head tail | external _ _ _ head tail =>
+    rename_i node member
+    rcases List.mem_append.mp member with member | member
+    · exact head node member
+    · exact tail node member
+
+theorem PackagesLoad.children_distinct {packages : List PackageSource} {modules : List LoadedModule}
+    (loaded : PackagesLoad packages modules) {node : LoadedModule} (member : node ∈ modules) :
+    (node.source.children.map Prod.fst).Nodup := by
+  induction loaded with
+  | nil => simp at member
+  | cons head tail ih =>
+    rcases List.mem_append.mp member with first | rest
+    · obtain ⟨_, _, _, included⟩ := head
+      exact included.children_distinct node first
+    · exact ih rest
+
+/-- Module traversal cannot select a different visibility for the same child.
+Both module-owner uniqueness and child-name uniqueness come from actual source
+admission/inclusion, not from a second independently supplied namespace table. -/
+theorem SourceClosure.Admitted.child_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {parent : LoadedModule} (included : parent ∈ closure.modules)
+    {name : Identifier} {visibility : Visibility} {body : Option ModuleSource}
+    (declared : (name, visibility, body) ∈ parent.source.children) {caller : Module}
+    (reachable : ModuleReachable closure.modules caller (parent.home.child name)) :
+    visibility.Allows parent.home caller := by
+  generalize targetEq : parent.home.child name = target at reachable
+  cases reachable with
+  | root _ =>
+    have paths := congrArg Module.path targetEq
+    simp [Module.child] at paths
+  | child otherIncluded _ otherDeclared allowed =>
+    obtain ⟨ownerEq, nameEq⟩ := Module.child_injective targetEq
+    have ownerSame := unique_key_member admitted.2.2.2.1.1 included otherIncluded ownerEq
+    cases ownerSame
+    cases nameEq
+    have declarationSame := unique_key_member (closure.included.children_distinct included)
+      declared otherDeclared rfl
+    cases declarationSame
+    exact allowed
+
+theorem SourceClosure.Admitted.call_child_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {parent : LoadedModule} (included : parent ∈ closure.modules)
+    {child : Identifier} {visibility : Visibility} {body : Option ModuleSource}
+    (declared : (child, visibility, body) ∈ parent.source.children)
+    {home : Module} {scope : SourceScope} {before after : FlowContext}
+    {name : FunctionName} {arguments : List NamedExpr} {core : Expr} {type : Ty}
+    (target : name.owner home = parent.home.child child)
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.call name arguments) core type after) : visibility.Allows parent.home home := by
+  cases elaborated with
+  | call _ selected _ _ _ =>
+    have reachable := (closure.functionNames_selected.mp selected).2.1
+    rw [target] at reachable
+    exact admitted.child_visibility included declared reachable
 
 
 end Grounded

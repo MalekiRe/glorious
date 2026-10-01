@@ -49,9 +49,9 @@ candidate closure, visibility, explicit-over-glob priority and unique selection.
 and owners from supplied roots and explicit module inclusion, constructs fresh
 function entry and proves general body-prefix safety. File permutation preserves
 actual admission. Callable lookup and imports now require explicit package
-dependencies, with checked normalized names and collision rejection. Textual
-paths/groups, other namespaces, prelude profiles and the remaining source
-frontend are still open.
+dependencies, with checked normalized names and collision rejection, and
+visibility-checked traversal through actual module bindings. Textual paths/groups,
+other namespaces, prelude profiles and the remaining source frontend are open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1491,4 +1491,41 @@ namespaces still require their source-resolution cutovers. Textual paths/groups,
 module-binding visibility along paths, prelude profiles, parsing/UTF-8, byte
 spans and the other whole-language obligations remain open. No full-language
 completion claim follows.
+
+
+
+## Verified module-binding visibility for callable lookup
+
+Decoded inline/external child declarations now retain their module-binding
+visibility alongside the name and body. `ModuleReachable` traverses actual
+included declarations from package roots, checking each child binding with the
+existing `Visibility.Allows` relation at its declaring parent. A public
+function does not itself expose a hidden containing module.
+
+The authoritative closure resolver now requires both explicit package access
+and a visibility-checked module traversal. Source import admission uses the
+same traversal requirement. Dependency-derived call soundness, original
+identity/owner preservation, general body safety and finite-call correctness
+all consume the strengthened resolver. Re-export lookup still checks the
+exporting namespace rather than inventing visibility for the original path.
+
+`PackagesLoad.children_distinct` derives child-name uniqueness from actual
+inclusion. `child_visibility` combines that fact with admitted module-owner
+uniqueness to show that traversal cannot substitute another visibility for a
+selected binding. `call_child_visibility` carries the result through actual
+source call elaboration: caller access to the selected child must satisfy that
+binding's declared visibility. No independent module-permission table is used.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). The imported audit
+covered 3,416 `Grounded` declarations; only standard Lean axioms occur. Module
+visibility, call-site visibility, dependency-derived call safety, function-body
+soundness, finite-call correctness and file-order admission invariance received
+explicit axiom inspection. No unit tests, examples or proof placeholders were
+added.
+
+This covers visibility traversal for the modeled callable namespace with
+decoded module identities. Textual anchors/path parsing, module aliases/groups,
+other namespaces, prelude profiles, frontend spans/UTF-8 and whole-language
+completion remain open. Source parsing still has to supply omitted-visibility
+defaults and reject invalid restricted-visibility syntax.
 
