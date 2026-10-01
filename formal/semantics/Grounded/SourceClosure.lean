@@ -3,7 +3,7 @@ import Grounded.SourceDeclarations
 /-! Declaration-driven inclusion over a finite supplied collection of decoded
 files. No ambient file lookup is available. Function and import ownership is
 assigned by the module tree, never by a file's position in that collection.
-Package identities and qualified import targets are already decoded here. -/
+Package identities are driver keys; call and import paths share interpretation. -/
 namespace Grounded
 
 abbrev SourcePath := List String
@@ -232,9 +232,110 @@ inductive PackagesLoad : List PackageSource → List LoadedModule → Prop where
       (head : package.Loads first) (tail : PackagesLoad packages rest) :
       PackagesLoad (package :: packages) (first ++ rest)
 
+/-- Owners come from inclusion, while targets are still source paths. -/
+def LoadedModule.importSources (loaded : LoadedModule) : List (Module × FunctionImportSyntax) :=
+  loaded.source.imports.map fun source => (loaded.home, source)
+
+def elaborateModuleImports (packages : List PackageSource) (modules : List LoadedModule) : Option (List FunctionImport) :=
+  resolveFunctionImports (fun home => resolvePackageDependency packages home.package)
+    (modules.flatMap LoadedModule.importSources)
+
+
 structure SourceClosure (packages : List PackageSource) where
   modules : List LoadedModule
   included : PackagesLoad packages modules
+  imports : List FunctionImport
+  importsResolved : elaborateModuleImports packages modules = some imports
+
+/-- Construct the complete import product, or reject an unresolved path.
+This is source elaboration, not execution or a promise of future progress. -/
+def SourceClosure.fromModules {packages : List PackageSource} (modules : List LoadedModule)
+    (included : PackagesLoad packages modules) : Option (SourceClosure packages) :=
+  match resolved : elaborateModuleImports packages modules with
+  | none => none
+  | some imports => some ⟨modules, included, imports, resolved⟩
+
+
+theorem SourceClosure.fromModules_complete {packages : List PackageSource} (closure : SourceClosure packages) :
+    SourceClosure.fromModules closure.modules closure.included = some closure := by
+  cases closure with
+  | mk modules included imports resolved =>
+    unfold SourceClosure.fromModules
+    split
+    · rename_i missing
+      rw [resolved] at missing
+      contradiction
+    · rename_i other found
+      have same := Option.some.inj (found.symm.trans resolved)
+      cases same
+      rfl
+
+/-- Source closure does not silently omit an import whose path cannot resolve. -/
+theorem SourceClosure.import_source {packages : List PackageSource} (closure : SourceClosure packages)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : FunctionImportSyntax} (declared : source ∈ loaded.source.imports) :
+    ∃ edge ∈ closure.imports, edge.home = loaded.home ∧ edge.kind = source.kind ∧
+      edge.visibility = source.visibility ∧
+      source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some edge.target := by
+  have member : (loaded.home, source) ∈ closure.modules.flatMap LoadedModule.importSources :=
+    List.mem_flatMap.mpr ⟨loaded, included, List.mem_map.mpr ⟨source, declared, rfl⟩⟩
+  obtain ⟨index, bound, same⟩ := List.mem_iff_getElem.mp member
+  have selected : (closure.modules.flatMap LoadedModule.importSources)[index]? = some (loaded.home, source) := by
+    exact List.getElem?_eq_some_iff.mpr ⟨bound, same⟩
+  obtain ⟨edge, found, resolved⟩ := resolveFunctionImports.source closure.importsResolved selected
+  exact ⟨edge, List.mem_of_getElem? found, FunctionImportSyntax.resolve_selected resolved⟩
+
+/-- Every import edge consumed by name resolution has an included source owner,
+its original visibility and kind, and a successfully interpreted source path. -/
+theorem SourceClosure.import_origin {packages : List PackageSource} (closure : SourceClosure packages)
+    {edge : FunctionImport} (member : edge ∈ closure.imports) :
+    ∃ loaded ∈ closure.modules, ∃ source ∈ loaded.source.imports,
+      edge.home = loaded.home ∧ edge.kind = source.kind ∧ edge.visibility = source.visibility ∧
+        source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some edge.target := by
+  obtain ⟨index, bound, same⟩ := List.mem_iff_getElem.mp member
+  have selected : closure.imports[index]? = some edge := by simp [bound, same]
+  obtain ⟨owned, found, resolved⟩ := resolveFunctionImports.origin closure.importsResolved selected
+  obtain ⟨loaded, included, sourceMember⟩ := List.mem_flatMap.mp (List.mem_of_getElem? found)
+  obtain ⟨source, declared, rfl⟩ := List.mem_map.mp sourceMember
+  exact ⟨loaded, included, source, declared, FunctionImportSyntax.resolve_selected resolved⟩
+
+
+theorem SourceClosure.fromModules_selected {packages : List PackageSource} {modules : List LoadedModule}
+    {included : PackagesLoad packages modules} {closure : SourceClosure packages}
+    (built : SourceClosure.fromModules modules included = some closure) : closure.modules = modules := by
+  unfold SourceClosure.fromModules at built
+  split at built
+  · contradiction
+  · have same := Option.some.inj built
+    cases same
+    rfl
+
+/-- Exact construction criterion for import elaboration: every supplied import
+path must resolve, including unused explicit imports and empty globs. It requires
+only interpretation of finite source paths, not a successful name lookup or run. -/
+theorem SourceClosure.fromModules_exists_iff {packages : List PackageSource} (modules : List LoadedModule)
+    (included : PackagesLoad packages modules) :
+    (∃ closure, SourceClosure.fromModules modules included = some closure) ↔
+      ∀ loaded ∈ modules, ∀ source ∈ loaded.source.imports,
+        ∃ target, source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target := by
+  constructor
+  · rintro ⟨closure, built⟩ loaded member source declared
+    have modulesEq := SourceClosure.fromModules_selected built
+    obtain ⟨edge, _, _, _, _, path⟩ := closure.import_source (modulesEq.symm ▸ member) declared
+    exact ⟨edge.target, path⟩
+  · intro paths
+    have possible : ∀ owned ∈ modules.flatMap LoadedModule.importSources,
+        ∃ edge, owned.2.resolve (resolvePackageDependency packages owned.1.package) owned.1 = some edge := by
+      intro owned member
+      obtain ⟨loaded, loadedIn, sourceMember⟩ := List.mem_flatMap.mp member
+      obtain ⟨source, declared, rfl⟩ := List.mem_map.mp sourceMember
+      obtain ⟨target, path⟩ := paths loaded loadedIn source declared
+      exact ⟨⟨loaded.home, target, source.kind, source.visibility⟩, by simp [FunctionImportSyntax.resolve, path]⟩
+    obtain ⟨imports, resolved⟩ := resolveFunctionImports.exists
+      (dependencies := fun home => resolvePackageDependency packages home.package) possible
+    let closure : SourceClosure packages := ⟨modules, included, imports, resolved⟩
+    exact ⟨closure, closure.fromModules_complete⟩
+
 
 def SourceClosure.homes {packages : List PackageSource} (closure : SourceClosure packages) : List Module :=
   closure.modules.map LoadedModule.home
@@ -242,14 +343,8 @@ def SourceClosure.homes {packages : List PackageSource} (closure : SourceClosure
 def LoadedModule.functions (loaded : LoadedModule) : List NamedFunction :=
   loaded.source.functions.map fun source => ⟨source, loaded.home⟩
 
-def LoadedModule.imports (loaded : LoadedModule) : List FunctionImport :=
-  loaded.source.imports.map fun source => ⟨source, loaded.home⟩
-
 def SourceClosure.functions {packages : List PackageSource} (closure : SourceClosure packages) : List NamedFunction :=
   closure.modules.flatMap LoadedModule.functions
-
-def SourceClosure.imports {packages : List PackageSource} (closure : SourceClosure packages) : List FunctionImport :=
-  closure.modules.flatMap LoadedModule.imports
 
 /-- Package authorization guards the existing unique-identity resolver.
 Import traversal and function-body elaboration retain their shared producers. -/
@@ -303,6 +398,20 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
 theorem SourceClosure.Admitted.checked {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) : program.Checked :=
   admitted.2.2.2.2.checked
+
+/-- Import-path authorization comes from actual source admission over the
+complete elaborated import product, not an independently supplied namespace. -/
+theorem SourceClosure.Admitted.source_import_access {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : FunctionImportSyntax} (declared : source ∈ loaded.source.imports) :
+    ∃ target, source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target ∧
+      PackageAccess packages loaded.home.package target.package ∧ ModuleReachable closure.modules loaded.home target := by
+  obtain ⟨edge, member, owner, _, _, path⟩ := closure.import_source included declared
+  obtain ⟨access, reachable⟩ := admitted.2.2.1 edge member
+  rw [owner] at access reachable
+  exact ⟨edge.target, path, access, reachable⟩
+
 
 theorem SourceClosure.function_owner {packages : List PackageSource} (closure : SourceClosure packages)
     {declaration : NamedFunction} (member : declaration ∈ closure.functions) :
@@ -413,10 +522,12 @@ theorem PackagesLoad.deterministic {packages : List PackageSource} {first second
 theorem SourceClosure.unique {packages : List PackageSource} (first second : SourceClosure packages) :
     first = second := by
   cases first with
-  | mk first included =>
+  | mk first included firstImports firstResolved =>
     cases second with
-    | mk second other =>
+    | mk second other secondImports secondResolved =>
       cases included.deterministic other
+      have same := Option.some.inj (firstResolved.symm.trans secondResolved)
+      cases same
       rfl
 
 
@@ -440,8 +551,9 @@ theorem PackagesLoad.reorder {packages : List PackageSource} {modules : List Loa
 def SourceClosure.reorder {packages : List PackageSource} (closure : SourceClosure packages)
     (reorder : PackageSource → SourceFiles)
     (same : ∀ package ∈ packages, package.files.Perm (reorder package)) :
-    SourceClosure (packages.map fun package => { package with files := reorder package }) :=
-  ⟨closure.modules, closure.included.reorder reorder same⟩
+    SourceClosure (packages.map fun package => { package with files := reorder package }) := by
+  refine ⟨closure.modules, closure.included.reorder reorder same, closure.imports, ?_⟩
+  simpa only [elaborateModuleImports, resolvePackageDependency.reorder] using closure.importsResolved
 
 theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (closure : SourceClosure packages)
     (reorder : PackageSource → SourceFiles)
@@ -463,7 +575,7 @@ theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (clos
   have names : (closure.reorder reorder same).functionNames = closure.functionNames := by
     simp only [SourceClosure.functionNames, namespaces, bindings]
   simp only [SourceClosure.Admitted, names]
-  simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions, SourceClosure.imports,
+  simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions,
     PackageSource.DependenciesValid, PackageAccess.reorder, List.map_map, Function.comp_def]
 
 

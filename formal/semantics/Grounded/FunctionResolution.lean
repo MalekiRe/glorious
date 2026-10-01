@@ -25,12 +25,97 @@ inductive FunctionImportKind where
   | glob
 
 structure FunctionImportSyntax where
+  target : ModulePath
+  kind : FunctionImportKind
+  visibility : Visibility := .private
+
+structure FunctionImport where
+  home : Module
   target : Module
   kind : FunctionImportKind
   visibility : Visibility := .private
 
-structure FunctionImport extends FunctionImportSyntax where
-  home : Module
+/-- Source import targets use the same path interpreter as source calls.
+Failure is retained; an unresolved explicit import must not expose a fallback. -/
+def FunctionImportSyntax.resolve (dependencies : Identifier → Option Nat) (home : Module)
+    (source : FunctionImportSyntax) : Option FunctionImport :=
+  (source.target.resolve dependencies home).map fun target =>
+    ⟨home, target, source.kind, source.visibility⟩
+
+def resolveFunctionImports (dependencies : Module → Identifier → Option Nat) :
+    List (Module × FunctionImportSyntax) → Option (List FunctionImport)
+  | [] => some []
+  | (home, source) :: rest => do
+      let first ← source.resolve (dependencies home) home
+      let tail ← resolveFunctionImports dependencies rest
+      pure (first :: tail)
+
+
+theorem FunctionImportSyntax.resolve_selected {dependencies : Identifier → Option Nat} {home : Module}
+    {source : FunctionImportSyntax} {edge : FunctionImport} (resolved : source.resolve dependencies home = some edge) :
+    edge.home = home ∧ edge.kind = source.kind ∧ edge.visibility = source.visibility ∧
+      source.target.resolve dependencies home = some edge.target := by
+  obtain ⟨target, path, rfl⟩ := Option.map_eq_some_iff.mp resolved
+  exact ⟨rfl, rfl, rfl, path⟩
+
+private theorem resolveFunctionImports.cons {dependencies : Module → Identifier → Option Nat}
+    {owned : Module × FunctionImportSyntax} {sources : List (Module × FunctionImportSyntax)}
+    {outputs : List FunctionImport} (resolved : resolveFunctionImports dependencies (owned :: sources) = some outputs) :
+    ∃ edge tail, owned.2.resolve (dependencies owned.1) owned.1 = some edge ∧
+      resolveFunctionImports dependencies sources = some tail ∧ outputs = edge :: tail := by
+  obtain ⟨edge, head, remaining⟩ := Option.bind_eq_some_iff.mp resolved
+  obtain ⟨tail, rest, same⟩ := Option.bind_eq_some_iff.mp remaining
+  exact ⟨edge, tail, head, rest, (Option.some.inj same).symm⟩
+
+/-- Every source import survives at its original position; none is skipped. -/
+theorem resolveFunctionImports.source {dependencies : Module → Identifier → Option Nat}
+    {sources : List (Module × FunctionImportSyntax)} {outputs : List FunctionImport}
+    (resolved : resolveFunctionImports dependencies sources = some outputs)
+    {index : Nat} {owned : Module × FunctionImportSyntax} (selected : sources[index]? = some owned) :
+    ∃ edge, outputs[index]? = some edge ∧ owned.2.resolve (dependencies owned.1) owned.1 = some edge := by
+  induction sources generalizing outputs index with
+  | nil => simp at selected
+  | cons first rest ih =>
+    obtain ⟨edge, tail, head, continued, rfl⟩ := resolveFunctionImports.cons resolved
+    cases index with
+    | zero =>
+      have same := Option.some.inj selected
+      subst owned
+      exact ⟨edge, rfl, head⟩
+    | succ index => exact ih continued selected
+
+/-- Every resolved edge originates at the same position in the source list. -/
+theorem resolveFunctionImports.origin {dependencies : Module → Identifier → Option Nat}
+    {sources : List (Module × FunctionImportSyntax)} {outputs : List FunctionImport}
+    (resolved : resolveFunctionImports dependencies sources = some outputs)
+    {index : Nat} {edge : FunctionImport} (selected : outputs[index]? = some edge) :
+    ∃ owned, sources[index]? = some owned ∧ owned.2.resolve (dependencies owned.1) owned.1 = some edge := by
+  induction sources generalizing outputs index with
+  | nil =>
+    have same := Option.some.inj resolved
+    subst outputs
+    simp at selected
+  | cons first rest ih =>
+    obtain ⟨headEdge, tail, head, continued, rfl⟩ := resolveFunctionImports.cons resolved
+    cases index with
+    | zero =>
+      have same := Option.some.inj selected
+      subst edge
+      exact ⟨first, rfl, head⟩
+    | succ index => exact ih continued selected
+
+
+theorem resolveFunctionImports.exists {dependencies : Module → Identifier → Option Nat}
+    {sources : List (Module × FunctionImportSyntax)}
+    (possible : ∀ owned ∈ sources, ∃ edge, owned.2.resolve (dependencies owned.1) owned.1 = some edge) :
+    ∃ outputs, resolveFunctionImports dependencies sources = some outputs := by
+  induction sources with
+  | nil => exact ⟨[], rfl⟩
+  | cons owned rest ih =>
+    obtain ⟨edge, head⟩ := possible owned (by simp)
+    obtain ⟨tail, continued⟩ := ih (fun original member => possible original (by simp [member]))
+    exact ⟨edge :: tail, by simp [resolveFunctionImports, head, continued]⟩
+
 
 /-- Explicit source bindings suppress weak imports even when the explicit
 binding is unresolved. An invalid explicit import cannot expose a fallback. -/

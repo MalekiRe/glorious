@@ -50,9 +50,9 @@ and owners from supplied roots and explicit module inclusion, constructs fresh
 function entry and proves general body-prefix safety. File permutation preserves
 actual admission. Callable lookup and imports now require explicit package
 dependencies, with checked normalized names and collision rejection, and
-visibility-checked traversal through actual module bindings. Calls interpret decoded
-`self`/`crate`/`super`/dependency anchors through the same resolver. Import-path
-elaboration, module aliases/groups, other namespaces, preludes and parsing remain open.
+visibility-checked traversal through actual module bindings. Calls and callable
+imports interpret decoded `self`/`crate`/`super`/dependency anchors through the same
+producer. Module aliases/groups, other namespaces, preludes and parsing remain open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1591,4 +1591,45 @@ or complete source resolution. Import targets still carry decoded module
 identities and require their own cutover to the same path producer. Import
 groups, other namespaces, preludes, UTF-8/spans and the previously tracked
 ownership, effects, physical-memory and whole-language obligations remain open.
+
+
+## Verified source-import paths through closure construction and soundness
+
+`FunctionImportSyntax.target` now contains `ModulePath`, not a pre-resolved
+module identity. `FunctionImportSyntax.resolve` invokes the same path interpreter
+as calls and produces the resolved edge with its source owner, import kind and
+visibility. `resolveFunctionImports` preserves failure and input position;
+it never filters out an unresolved import. The superseded direct
+`LoadedModule.imports` mapping is removed.
+
+`SourceClosure` now owns the complete elaborated import product, certified by
+equality with `elaborateModuleImports`. The executable `fromModules` constructor
+produces that product or rejects it. `fromModules_complete` proves every such
+closure is reconstructed by the constructor, and `fromModules_exists_iff`
+proves its exact success criterion: every declared source import path has an
+interpretation. This is finite source interpretation, not an assumed name-lookup
+success, execution, progress or post-state invariant. Namespace existence,
+module visibility, dependency validity, import ambiguity and body checking
+remain separate requirements of `SourceClosure.Admitted`.
+
+The bidirectional position proofs yield `import_source` (no omitted source
+imports) and `import_origin` (no invented edges or changed owners/kinds/visibility).
+`Admitted.source_import_access` derives dependency authorization and declared
+module reachability for each source import from the actual admitted product.
+The seeded least import resolver, recursive declaration admission, call identity,
+general source/function safety and finite-call correctness consume these same
+resolved edges. No second source walker or permission table was introduced.
+Closure uniqueness and file-order admission invariance were migrated and proved.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). The exhaustive import
+audit checked 3,513 `Grounded` declarations with only the standard Lean axioms
+`propext`, `Quot.sound` and `Classical.choice`. Construction, source/edge
+provenance, admitted import access, uniqueness, file-order invariance and the
+public safety/correctness consumers received explicit axiom inspection. No
+unit tests, examples, proof placeholders or additional axioms were added.
+
+Calls and callable imports now share decoded anchor interpretation. Module
+aliases and unanchored qualifier disambiguation, import groups, inherent/other
+namespaces, preludes, byte parsing/UTF-8/spans, and the previously recorded
+whole-language obligations remain open. This is not whole-language completion.
 
