@@ -119,6 +119,21 @@ theorem BindingMap.Typed.frame (typed : BindingMap.Typed program heap activation
     exact .cons ((unchanged _ (by simp)).trans found) owner declared resident
       (ih (fun identity member => unchanged identity (List.mem_cons_of_mem _ member))) freshName freshStorage
 
+/-- A write confined to one owned cell preserves every differently owned map.
+The address separation follows from the cell’s owner, not lexical spelling. -/
+theorem BindingMap.Typed.frame_other_activation
+    (typed : BindingMap.Typed program heap activation bindings context)
+    {identity : StorageId} {cell : StorageCell} (found : heap.read identity = some cell)
+    (different : activation ≠ cell.activation)
+    (unchanged : ∀ other, other ≠ identity → after.read other = heap.read other) :
+    BindingMap.Typed program after activation bindings context := by
+  apply typed.frame
+  intro other member
+  apply unchanged other
+  intro same
+  subst other
+  exact different (typed.owns member found).symm
+
 theorem allocateBindings.old (heap : RuntimeHeap StorageCell) (activation : ActivationId)
     (inputs : List BindingInput) {identity : StorageId} (old : identity.index < heap.next) :
     (allocateBindings heap activation inputs).2.read identity = heap.read identity := by

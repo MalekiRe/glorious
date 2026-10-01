@@ -560,6 +560,16 @@ The combined 26-job proof gate and imported-declaration axiom audit passed.
 The addressed lexical operations still await the expression-machine cutover;
 their proofs do not substitute for its general preservation theorem.
 
+`AddressedEnvironment.read`, `take` and `write` now consume the same binding
+map/path operations. Their general progress proofs carry exact static
+availability updates, preserve scope metadata and allocation supplies, and
+derive retained-caller realization from the modified cell’s actual owner.
+Moves reject an immediate second take; writes establish exact readback and
+preserve whole-owner readiness when it held before. No independent alias
+analysis or post-state readiness premise is used. The combined 26-job gate
+and imported-declaration axiom audit passed. These access mechanisms remain
+to be connected to expression stepping and its continuation realization.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation
