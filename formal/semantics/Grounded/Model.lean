@@ -1,6 +1,6 @@
 
 /-! Decoded language vocabulary and declarations. Program records contain no checking
-or execution certificates. Lexical names are not yet resolved binding identities. -/
+or execution certificates. Lexical uses carry resolved binding identities. -/
 namespace Grounded
 
 /-- The selected target supplies its positive pointer width (§4.4). Other ABI
@@ -70,8 +70,15 @@ inductive FieldKey where
   | named (name : String)
   | positional (index : Nat)
 
+/-- A resolved lexical declaration identity, not a source spelling or a runtime
+storage address. Recursive invocations reuse it in distinct environments. -/
+structure BindingId where
+  index : Nat
+  deriving DecidableEq
+
+
 structure Place where
-  root : String
+  root : BindingId
   fields : List FieldKey := []
 
 structure Field where
@@ -141,7 +148,7 @@ inductive Value where
 
 inductive Pattern where
   | wildcard
-  | binder (name : String)
+  | binder (name : BindingId)
   | node (head : Head) (fields : List Pattern)
   /-- Some records the constant type; None is the untyped coverage form. -/
   | literal (type : Option Ty) (value : Value)
@@ -158,7 +165,7 @@ inductive Expr where
   | group (body : Expr)
   | read (place : Place)
   | sequence (first rest : Expr)
-  | bind (mutable : Bool) (name : String) (annotation : Option TypeExpr) (initial body : Expr)
+  | bind (mutable : Bool) (name : BindingId) (annotation : Option TypeExpr) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
   | project (body : Expr) (key : FieldKey)
   | array (elements : List Expr)
@@ -180,7 +187,7 @@ abbrev Constants := String → Option ConstantDecl
 structure FunctionDecl where
   home : Module
   visibility : Visibility := .private
-  parameters : List (String × BindingType)
+  parameters : List (BindingId × BindingType)
   result : Ty := .unit
   body : Expr
 

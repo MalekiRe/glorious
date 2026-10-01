@@ -5,7 +5,7 @@ the pattern subject; it does not change the callable argument-list shape. -/
 namespace Grounded
 
 mutual
-def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (String × Value)) :=
+def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (BindingId × Value)) :=
   match pattern with
   | .wildcard => some []
   | .binder name => some [(name, value)]
@@ -14,7 +14,7 @@ def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List (Strin
       if head = value.head then matchPatterns fields value.children else none
 termination_by sizeOf pattern
 
-def matchPatterns (patterns : List Pattern) (values : List Value) : Option (List (String × Value)) :=
+def matchPatterns (patterns : List Pattern) (values : List Value) : Option (List (BindingId × Value)) :=
   match patterns, values with
   | [], [] => some []
   | pattern :: patterns, value :: values => do
@@ -38,7 +38,7 @@ def argumentValue : List Value → Value
   | [value] => value
   | head :: next :: tail => .tuple head (next :: tail)
 
-def selectArm (value : Value) : List (Pattern × Expr) → Option (List (String × Value) × Expr)
+def selectArm (value : Value) : List (Pattern × Expr) → Option (List (BindingId × Value) × Expr)
   | [] => none
   | (pattern, body) :: rest =>
       match pattern.matchValue value with

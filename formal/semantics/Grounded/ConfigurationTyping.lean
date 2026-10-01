@@ -5,7 +5,7 @@ import Grounded.Execution
 checking products and actual typed values, never certificates of future runs. -/
 namespace Grounded
 
-abbrev StaticContext := List (String × BindingType)
+abbrev StaticContext := List (BindingId × BindingType)
 
 inductive ResultType where
   | one (type : Ty)
@@ -27,7 +27,7 @@ inductive FrameTyped (program : Program) : StaticContext → ResultType → Fram
   | sequence {home : Module} {context : StaticContext} {discarded result : Ty} {rest : Expr}
       (discard : Duplicable program.data discarded) (checked : HasType program home context rest result) :
       FrameTyped program context (.one discarded) (.sequence rest) context (.one result)
-  | bind {home : Module} {context : StaticContext} {name : String} {mutable : Bool} {localType result : Ty} {body : Expr}
+  | bind {home : Module} {context : StaticContext} {name : BindingId} {mutable : Bool} {localType result : Ty} {body : Expr}
       (discard : Duplicable program.data localType)
       (checked : HasType program home ((name, ⟨localType, mutable⟩) :: context) body result) :
       FrameTyped program context (.one localType) (.bind name body) context (.one result)

@@ -23,47 +23,47 @@ inductive Structural : Expr → Prop where
       Structural (.construct identity tag fields)
 
 mutual
-inductive HasType (program : Program) : Module → List (String × BindingType) → Expr → Ty → Prop where
-  | unit {home : Module} {context : List (String × BindingType)} : HasType program home context .unit .unit
-  | integer {home : Module} {context : List (String × BindingType)} {type : IntegerType} {magnitude : Nat}
+inductive HasType (program : Program) : Module → List (BindingId × BindingType) → Expr → Ty → Prop where
+  | unit {home : Module} {context : List (BindingId × BindingType)} : HasType program home context .unit .unit
+  | integer {home : Module} {context : List (BindingId × BindingType)} {type : IntegerType} {magnitude : Nat}
       (fits : type.Contains program.target magnitude) :
       HasType program home context (.integer type magnitude) (.integer type)
-  | character {home : Module} {context : List (String × BindingType)} {number : Nat}
+  | character {home : Module} {context : List (BindingId × BindingType)} {number : Nat}
       (valid : UnicodeScalar number) :
       HasType program home context (.character number) .character
-  | group {home : Module} {context : List (String × BindingType)} {body : Expr} {type : Ty}
+  | group {home : Module} {context : List (BindingId × BindingType)} {body : Expr} {type : Ty}
       (typed : HasType program home context body type) : HasType program home context (.group body) type
-  | read {home : Module} {context : List (String × BindingType)} {place : Place} {type : Ty} {mutable : Bool}
+  | read {home : Module} {context : List (BindingId × BindingType)} {place : Place} {type : Ty} {mutable : Bool}
       (selected : PlaceType program home context place type mutable) (copyable : Duplicable program.data type) :
       HasType program home context (.read place) type
-  | sequence {home : Module} {context : List (String × BindingType)} {first rest : Expr} {discarded type : Ty}
+  | sequence {home : Module} {context : List (BindingId × BindingType)} {first rest : Expr} {discarded type : Ty}
       (head : HasType program home context first discarded) (drop : Duplicable program.data discarded)
       (tail : HasType program home context rest type) : HasType program home context (.sequence first rest) type
-  | bind {home : Module} {context : List (String × BindingType)} {mutable : Bool} {name : String} {annotation : Option TypeExpr} {initial body : Expr}
+  | bind {home : Module} {context : List (BindingId × BindingType)} {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr}
       {localType type : Ty} (initialized : HasType program home context initial localType)
       (drop : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
       (continued : HasType program home ((name, ⟨localType, mutable⟩) :: context) body type) :
       HasType program home context (.bind mutable name annotation initial body) type
-  | tuple {home : Module} {context : List (String × BindingType)} {head : Expr} {tail : List Expr}
+  | tuple {home : Module} {context : List (BindingId × BindingType)} {head : Expr} {tail : List Expr}
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
       (tailTyped : HasTypes program home context tail rest) :
       HasType program home context (.tuple head tail) (.tuple first rest)
-  | project {home : Module} {context : List (String × BindingType)} {body : Expr} {key : FieldKey}
+  | project {home : Module} {context : List (BindingId × BindingType)} {body : Expr} {key : FieldKey}
       {parent type : Ty} {index : Nat} (source : HasType program home context body parent)
       (discard : Duplicable program.data parent) (selected : ProjectionType program home parent key index type) :
       HasType program home context (.project body key) type
-  | array {home : Module} {context : List (String × BindingType)} {elements : List Expr} {element : Ty} {length : Nat}
+  | array {home : Module} {context : List (BindingId × BindingType)} {elements : List Expr} {element : Ty} {length : Nat}
       (residents : HasTypes program home context elements (List.replicate length element))
       (elementValid : FiniteLayout program.target program.data element)
       (size : length < 2 ^ program.target.pointerBits) :
       HasType program home context (.array elements) (.array element length)
-  | constant {home : Module} {context : List (String × BindingType)} {name : String}
+  | constant {home : Module} {context : List (BindingId × BindingType)} {name : String}
       {declaration : ConstantDecl} {type : Ty} (declared : program.constants name = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
       (resolved : ResolvesType program.aliases declaration.type type) (structural : Structural declaration.body)
       (initialized : HasType program declaration.home [] declaration.body type) :
       HasType program home context (.constant name) type
-  | construct {home : Module} {context : List (String × BindingType)} {identity : Nat} {tag : Option Nat}
+  | construct {home : Module} {context : List (BindingId × BindingType)} {identity : Nat} {tag : Option Nat}
       {declaration : DataDecl} {schema : Fields} {fields : List Expr}
       (declared : program.data identity = some declaration)
       (chosen : declaration.constructor tag = some schema)
@@ -73,20 +73,20 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home)
       (residents : HasTypes program home context fields (schema.residents.map Field.type)) :
       HasType program home context (.construct identity tag fields) (.nominal identity)
-  | call {home : Module} {context : List (String × BindingType)} {identity : Nat}
+  | call {home : Module} {context : List (BindingId × BindingType)} {identity : Nat}
       {arguments : List Expr} {declaration : FunctionDecl}
       (declared : program.functions identity = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
       (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type))) :
       HasType program home context (.call identity arguments) declaration.result
-  | assign {home : Module} {context : List (String × BindingType)} {place : Place}
+  | assign {home : Module} {context : List (BindingId × BindingType)} {place : Place}
       {value rest : Expr} {type result : Ty}
       (selected : PlaceType program home context place type true)
       (discard : Duplicable program.data type)
       (resident : HasType program home context value type)
       (continued : HasType program home context rest result) :
       HasType program home context (.assign place value rest) result
-  | applyPatterns {home : Module} {context : List (String × BindingType)} {inputs : List Ty}
+  | applyPatterns {home : Module} {context : List (BindingId × BindingType)} {inputs : List Ty}
       {arguments : List Expr} {arms : List (Pattern × Expr)} {result : Ty}
       (argumentsTyped : HasTypes program home context arguments inputs)
       (nonempty : arms ≠ [])
@@ -94,19 +94,19 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       (bodies : ArmsType program home context (argumentType inputs) result [] arms) :
       HasType program home context (.applyPatterns inputs arguments arms) result
 
-inductive HasTypes (program : Program) : Module → List (String × BindingType) → List Expr → List Ty → Prop where
-  | nil {home : Module} {context : List (String × BindingType)} : HasTypes program home context [] []
-  | cons {home : Module} {context : List (String × BindingType)} {head : Expr} {tail : List Expr}
+inductive HasTypes (program : Program) : Module → List (BindingId × BindingType) → List Expr → List Ty → Prop where
+  | nil {home : Module} {context : List (BindingId × BindingType)} : HasTypes program home context [] []
+  | cons {home : Module} {context : List (BindingId × BindingType)} {head : Expr} {tail : List Expr}
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
       (tailTyped : HasTypes program home context tail rest) :
       HasTypes program home context (head :: tail) (first :: rest)
 inductive ArmsType (program : Program) :
-    Module → List (String × BindingType) → Ty → Ty → List Pattern → List (Pattern × Expr) → Prop where
-  | empty {home : Module} {context : List (String × BindingType)} {subject result : Ty} {previous : List Pattern} :
+    Module → List (BindingId × BindingType) → Ty → Ty → List Pattern → List (Pattern × Expr) → Prop where
+  | empty {home : Module} {context : List (BindingId × BindingType)} {subject result : Ty} {previous : List Pattern} :
       ArmsType program home context subject result previous []
-  | clause {home : Module} {context : List (String × BindingType)} {subject result : Ty}
+  | clause {home : Module} {context : List (BindingId × BindingType)} {subject result : Ty}
       {previous : List Pattern} {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)}
-      {bindings : List (String × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
+      {bindings : List (BindingId × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
       (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (bindings ++ context) body result)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest) :
@@ -115,11 +115,11 @@ end
 
 /-- Recover the original selected body's admission and actual local realization;
 no alternative's runtime bindings or successful body execution is supplied. -/
-theorem ArmsType.selected {program : Program} {home : Module} {context : List (String × BindingType)}
+theorem ArmsType.selected {program : Program} {home : Module} {context : List (BindingId × BindingType)}
     {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
     (checked : ArmsType program home context subject result previous arms)
     {value : Value} (resident : ValueHasType program value subject)
-    {bindings : List (String × Value)} {body : Expr}
+    {bindings : List (BindingId × Value)} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals pattern, (pattern, body) ∈ arms ∧ EnvironmentTyped program bindings locals ∧
       (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧

@@ -4,28 +4,28 @@ import Grounded.Values
 and compositional scope framing. No physical allocation or loan model. -/
 namespace Grounded
 
-/-- Nearest lexical binding wins, including in shadowing initializers. -/
-def lookup {α : Type} (name : String) : List (String × α) → Option α
+/-- Resolve an already-selected binding identity in the current lexical environment. -/
+def lookup {α : Type} (name : BindingId) : List (BindingId × α) → Option α
   | [] => none
   | (key, value) :: rest => if name = key then some value else lookup name rest
 
-inductive EnvironmentTyped (program : Program) : List (String × Value) → List (String × BindingType) → Prop where
+inductive EnvironmentTyped (program : Program) : List (BindingId × Value) → List (BindingId × BindingType) → Prop where
   | nil : EnvironmentTyped program [] []
-  | cons {name : String} {value : Value} {type : BindingType}
-      {environment : List (String × Value)} {context : List (String × BindingType)}
+  | cons {name : BindingId} {value : Value} {type : BindingType}
+      {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
       (resident : ValueHasType program value type.type) (rest : EnvironmentTyped program environment context) :
       EnvironmentTyped program ((name, value) :: environment) ((name, type) :: context)
 
 variable {program : Program}
 
-theorem EnvironmentTyped.append {left right : List (String × Value)} {first rest : List (String × BindingType)}
+theorem EnvironmentTyped.append {left right : List (BindingId × Value)} {first rest : List (BindingId × BindingType)}
     (front : EnvironmentTyped program left first) (back : EnvironmentTyped program right rest) :
     EnvironmentTyped program (left ++ right) (first ++ rest) := by
   induction front with
   | nil => exact back
   | cons resident tail ih => exact .cons resident ih
 
-theorem EnvironmentTyped.drop {environment : List (String × Value)} {context : List (String × BindingType)}
+theorem EnvironmentTyped.drop {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
     (typed : EnvironmentTyped program environment context) (count : Nat) :
     EnvironmentTyped program (environment.drop count) (context.drop count) := by
   induction count generalizing environment context with
@@ -34,7 +34,7 @@ theorem EnvironmentTyped.drop {environment : List (String × Value)} {context : 
     | nil => exact .nil
     | cons resident rest => exact ih rest
 
-theorem EnvironmentTyped.length {environment : List (String × Value)} {context : List (String × BindingType)}
+theorem EnvironmentTyped.length {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
     (typed : EnvironmentTyped program environment context) : environment.length = context.length := by
   induction typed with
   | nil => rfl
@@ -42,14 +42,14 @@ theorem EnvironmentTyped.length {environment : List (String × Value)} {context 
 
 
 /-- Replace the nearest lexical binding; an absent destination is rejected. -/
-def replaceBinding {α : Type} (name : String) (value : α) : List (String × α) → Option (List (String × α))
+def replaceBinding {α : Type} (name : BindingId) (value : α) : List (BindingId × α) → Option (List (BindingId × α))
   | [] => none
   | (key, old) :: rest =>
       if key = name then some ((key, value) :: rest)
       else ((key, old) :: ·) <$> replaceBinding name value rest
 
-theorem replaceBinding.lookup_after {α : Type} {name : String} {value : α}
-    {before after : List (String × α)} (written : replaceBinding name value before = some after) :
+theorem replaceBinding.lookup_after {α : Type} {name : BindingId} {value : α}
+    {before after : List (BindingId × α)} (written : replaceBinding name value before = some after) :
     lookup name after = some value := by
   induction before generalizing after with
   | nil => simp [replaceBinding] at written
@@ -70,17 +70,17 @@ theorem replaceBinding.lookup_after {α : Type} {name : String} {value : α}
 
 
 /-- Preserve lexical slots and every immutable resident, including shadowed slots. -/
-inductive EnvironmentFrame : List (String × BindingType) →
-    List (String × Value) → List (String × Value) → Prop where
+inductive EnvironmentFrame : List (BindingId × BindingType) →
+    List (BindingId × Value) → List (BindingId × Value) → Prop where
   | nil : EnvironmentFrame [] [] []
-  | cons {name : String} {slot : BindingType} {old value : Value}
-      {context : List (String × BindingType)} {before after : List (String × Value)}
+  | cons {name : BindingId} {slot : BindingType} {old value : Value}
+      {context : List (BindingId × BindingType)} {before after : List (BindingId × Value)}
       (immutable : slot.mutable = false → value = old)
       (rest : EnvironmentFrame context before after) :
       EnvironmentFrame ((name, slot) :: context) ((name, old) :: before) ((name, value) :: after)
 
-variable {program : Program} {context : List (String × BindingType)}
-    {before middle after : List (String × Value)}
+variable {program : Program} {context : List (BindingId × BindingType)}
+    {before middle after : List (BindingId × Value)}
 
 theorem EnvironmentTyped.frame_refl (typed : EnvironmentTyped program before context) :
     EnvironmentFrame context before before := by
@@ -107,7 +107,7 @@ theorem EnvironmentFrame.drop (framed : EnvironmentFrame context before after) (
 /-- Current typing and writable destination evidence construct the actual update,
 its typing, and its immutable frame; none is an admission premise. -/
 theorem EnvironmentTyped.replace (typed : EnvironmentTyped program before context)
-    {name : String} {slot : BindingType} (selected : lookup name context = some slot)
+    {name : BindingId} {slot : BindingType} (selected : lookup name context = some slot)
     (writable : slot.mutable = true) {value : Value} (resident : ValueHasType program value slot.type) :
     ∃ after, replaceBinding name value before = some after ∧
       EnvironmentTyped program after context ∧ EnvironmentFrame context before after := by
@@ -127,7 +127,7 @@ theorem EnvironmentTyped.replace (typed : EnvironmentTyped program before contex
         .cons oldTyped afterTyped, .cons (fun _ => rfl) framed⟩
 
 /-- Invocation constructs its environment from the actual typed argument list. -/
-theorem EnvironmentTyped.parameters (parameters : List (String × BindingType)) (values : List Value)
+theorem EnvironmentTyped.parameters (parameters : List (BindingId × BindingType)) (values : List Value)
     (typed : ValuesHaveTypes program values (parameters.map (fun parameter => parameter.2.type))) :
     EnvironmentTyped program (List.zip (parameters.map Prod.fst) values) parameters := by
   induction parameters generalizing values with

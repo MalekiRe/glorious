@@ -6,7 +6,7 @@ caller environments and scope boundaries. No checking or execution certificate
 occurs in a runtime configuration. Storage is still the logical lexical store. -/
 namespace Grounded
 
-abbrev Environment := List (String × Value)
+abbrev Environment := List (BindingId × Value)
 
 inductive Control where
   | expression (expression : Expr)
@@ -16,7 +16,7 @@ inductive Control where
 
 inductive Frame where
   | sequence (rest : Expr)
-  | bind (name : String) (body : Expr)
+  | bind (name : BindingId) (body : Expr)
   | scope (count : Nat)
   | assign (place : Place) (rest : Expr)
   | tupleHead (tail : List Expr)
@@ -79,11 +79,11 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
         ⟨env, .expression first, .sequence rest :: stack⟩
   | sequenceResult {env : Environment} {stack : List Frame} {value : Value} {rest : Expr} :
       Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .expression rest, stack⟩
-  | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : String}
+  | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : BindingId}
       {annotation : Option TypeExpr} {initial body : Expr} :
       Step program ⟨env, .expression (.bind mutable name annotation initial body), stack⟩
         ⟨env, .expression initial, .bind name body :: stack⟩
-  | bindResult {env : Environment} {stack : List Frame} {name : String} {body : Expr} {value : Value} :
+  | bindResult {env : Environment} {stack : List Frame} {name : BindingId} {body : Expr} {value : Value} :
       Step program ⟨env, .result value, .bind name body :: stack⟩
         ⟨(name, value) :: env, .expression body, .scope 1 :: stack⟩
   | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value} :

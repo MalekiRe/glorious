@@ -27,20 +27,20 @@ def Head.Accessible (program : Program) (home : Module) : Head → Prop
   | _ => True
 
 mutual
-inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (String × BindingType) → Prop where
+inductive PatternType (program : Program) (home : Module) : Pattern → Ty → List (BindingId × BindingType) → Prop where
   | wildcard {type : Ty} (discard : Duplicable program.data type) : PatternType program home .wildcard type []
-  | binder (name : String) {type : Ty} (discard : Duplicable program.data type) :
+  | binder (name : BindingId) {type : Ty} (discard : Duplicable program.data type) :
       PatternType program home (.binder name) type [(name, ⟨type, false⟩)]
   | literal {type : Ty} {value : Value} (typed : ValueHasType program value type)
       (discard : Duplicable program.data type) : PatternType program home (.literal (some type) value) type []
-  | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (String × BindingType)}
+  | node {head : Head} {patterns : List Pattern} {type : Ty} {fields : List Ty} {bindings : List (BindingId × BindingType)}
       (shape : HeadType program head type fields) (access : head.Accessible program home)
       (fieldsTyped : PatternsType program home patterns fields bindings) :
       PatternType program home (.node head patterns) type bindings
-inductive PatternsType (program : Program) (home : Module) : List Pattern → List Ty → List (String × BindingType) → Prop where
+inductive PatternsType (program : Program) (home : Module) : List Pattern → List Ty → List (BindingId × BindingType) → Prop where
   | nil : PatternsType program home [] [] []
   | cons {pattern : Pattern} {patterns : List Pattern} {type : Ty} {types : List Ty}
-      {first rest : List (String × BindingType)} (headTyped : PatternType program home pattern type first)
+      {first rest : List (BindingId × BindingType)} (headTyped : PatternType program home pattern type first)
       (tailTyped : PatternsType program home patterns types rest) :
       PatternsType program home (pattern :: patterns) (type :: types) (first ++ rest)
 end
@@ -94,9 +94,9 @@ theorem ValuesHaveTypes.argument {values : List Value} {types : List Ty}
     | nil => exact head
     | cons next rest => exact .tuple head (.cons next rest)
 
-theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (String × BindingType)}
+theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (BindingId × BindingType)}
     (typed : PatternType program home pattern type context) {value : Value}
-    (valueTyped : ValueHasType program value type) {bindings : List (String × Value)}
+    (valueTyped : ValueHasType program value type) {bindings : List (BindingId × Value)}
     (matched : pattern.matchValue value = some bindings) : EnvironmentTyped program bindings context := by
   induction typed using PatternType.rec
     (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
@@ -199,7 +199,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
           cases front : matchPatterns patterns values <;>
           cases back : matchPatterns tail rest <;>
           simp [List.append_assoc]
-  have literalFields : ∀ (expected actual : List Value) (bindings : List (String × Value)),
+  have literalFields : ∀ (expected actual : List Value) (bindings : List (BindingId × Value)),
       matchPatterns (expected.map (Pattern.literal none)) actual = some bindings → expected = actual := by
     intro expected
     induction expected with
@@ -321,7 +321,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
 
 /-- Pattern-bound locals inherit the disposal permission checked at each binder. -/
 theorem PatternType.disposable {program : Program} {home : Module} {pattern : Pattern} {type : Ty}
-    {bindings : List (String × BindingType)} (typed : PatternType program home pattern type bindings) :
+    {bindings : List (BindingId × BindingType)} (typed : PatternType program home pattern type bindings) :
     ∀ binding ∈ bindings, Duplicable program.data binding.2.type := by
   induction typed using PatternType.rec
     (motive_2 := fun _ _ bindings _ => ∀ binding ∈ bindings, Duplicable program.data binding.2.type) with

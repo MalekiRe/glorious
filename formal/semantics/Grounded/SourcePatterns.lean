@@ -4,13 +4,14 @@ import Grounded.Soundness
 Structural constant patterns (§4.3). Closed constant checking produces each
 normal form through core correctness. Coverage, usefulness and body checking
 consume that concrete result; neither evaluation nor normalization success is
-an admission premise. Bodies and arguments are the existing decoded core.
+an admission premise. Bodies and arguments are the existing decoded core; binder
+identities are already resolved inputs, not source spellings.
 -/
 namespace Grounded
 
 inductive SourcePattern where
   | wildcard
-  | binder (name : String)
+  | binder (name : BindingId)
   | node (head : Head) (fields : List SourcePattern)
   | constant (name : String)
 
@@ -18,7 +19,7 @@ mutual
 /-- Compile-time inputs: source syntax and ordinary closed constant typing. -/
 inductive SourcePattern.Checked (program : Program) (home : Module) : SourcePattern → Type where
   | wildcard : SourcePattern.Checked program home .wildcard
-  | binder (name : String) : SourcePattern.Checked program home (.binder name)
+  | binder (name : BindingId) : SourcePattern.Checked program home (.binder name)
   | node {head : Head} {fields : List SourcePattern}
       (checked : SourcePatternsChecked program home fields) :
       SourcePattern.Checked program home (.node head fields)
@@ -37,7 +38,7 @@ mutual
 /-- The normalization specification uses the same constant evaluation relation. -/
 inductive NormalizesPattern (program : Program) (home : Module) : SourcePattern → Pattern → Prop where
   | wildcard : NormalizesPattern program home .wildcard .wildcard
-  | binder (name : String) : NormalizesPattern program home (.binder name) (.binder name)
+  | binder (name : BindingId) : NormalizesPattern program home (.binder name) (.binder name)
   | node {head : Head} {fields : List SourcePattern} {patterns : List Pattern}
       (fieldsNormalize : NormalizesPatterns program home fields patterns) :
       NormalizesPattern program home (.node head fields) (.node head patterns)
@@ -193,7 +194,7 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
 /-- The optional finite-call contract additionally constructs a unique typed
 value and successor store. Ordinary source safety does not require FiniteCalls. -/
 theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
-    {context : List (String × BindingType)} {environment : List (String × Value)}
+    {context : List (BindingId × BindingType)} {environment : List (BindingId × Value)}
     {arguments : List Expr} {inputs : List Ty} {result : Ty}
     (checkedProgram : program.Checked)
     (checked : SourceArmsChecked program home source)

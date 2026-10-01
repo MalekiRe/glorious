@@ -23,9 +23,9 @@ inductive PathType (program : Program) (home : Module) : Ty → List FieldKey �
       (tail : PathType program home child rest result) :
       PathType program home parent (key :: rest) result
 
-inductive PlaceType (program : Program) (home : Module) (context : List (String × BindingType)) :
+inductive PlaceType (program : Program) (home : Module) (context : List (BindingId × BindingType)) :
     Place → Ty → Bool → Prop where
-  | root {name : String} {fields : List FieldKey} {parent result : Ty} {mutable : Bool}
+  | root {name : BindingId} {fields : List FieldKey} {parent result : Ty} {mutable : Bool}
       (selected : lookup name context = some ⟨parent, mutable⟩)
       (path : PathType program home parent fields result) :
       PlaceType program home context ⟨name, fields⟩ result mutable
@@ -66,12 +66,12 @@ def writeFields (program : Program) (value : Value) (fields : List FieldKey)
       let updated ← writeFields program child rest replacement
       value.replaceField index updated
 
-def readPlace (program : Program) (place : Place) (environment : List (String × Value)) : Option Value := do
+def readPlace (program : Program) (place : Place) (environment : List (BindingId × Value)) : Option Value := do
   let root ← lookup place.root environment
   readFields program root place.fields
 
 def writePlace (program : Program) (place : Place) (replacement : Value)
-    (environment : List (String × Value)) : Option (List (String × Value)) := do
+    (environment : List (BindingId × Value)) : Option (List (BindingId × Value)) := do
   let root ← lookup place.root environment
   let updated ← writeFields program root place.fields replacement
   replaceBinding place.root updated environment
@@ -196,8 +196,8 @@ theorem PathType.write {parent type : Ty} {fields : List FieldKey} {value replac
     exact ⟨after, by simp [writeFields, selected, written, replaced], afterTyped,
       by simp [readFields, selectedAfter, readBack]⟩
 
-theorem EnvironmentTyped.lookup {environment : List (String × Value)} {context : List (String × BindingType)}
-    (typed : EnvironmentTyped program environment context) {name : String} {slot : BindingType}
+theorem EnvironmentTyped.lookup {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
+    (typed : EnvironmentTyped program environment context) {name : BindingId} {slot : BindingType}
     (selected : lookup name context = some slot) :
     ∃ value, lookup name environment = some value ∧ ValueHasType program value slot.type := by
   induction typed with
@@ -209,7 +209,7 @@ theorem EnvironmentTyped.lookup {environment : List (String × Value)} {context 
     · obtain ⟨value, found, valueTyped⟩ := ih selected
       exact ⟨value, by simp_all, valueTyped⟩
 
-theorem EnvironmentTyped.readPlace {environment : List (String × Value)} {context : List (String × BindingType)}
+theorem EnvironmentTyped.readPlace {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {type : Ty} {mutable : Bool}
     (selected : PlaceType program home context place type mutable) :
     ∃ value, readPlace program place environment = some value ∧ ValueHasType program value type := by
@@ -234,7 +234,7 @@ theorem writeFields_siblings {program : Program} {before after replacement child
     simp [childWrite] at written
     exact Value.replaceField_siblings written different
 
-theorem EnvironmentTyped.writePlace {environment : List (String × Value)} {context : List (String × BindingType)}
+theorem EnvironmentTyped.writePlace {environment : List (BindingId × Value)} {context : List (BindingId × BindingType)}
     (typed : EnvironmentTyped program environment context) {place : Place} {type : Ty} {value : Value}
     (selected : PlaceType program home context place type true) (resident : ValueHasType program value type) :
     ∃ after, writePlace program place value environment = some after ∧ EnvironmentTyped program after context ∧

@@ -42,7 +42,7 @@ theorem HasType.evaluation_soundness (checkedProgram : program.Checked)
 
 /-- Optional finite-call correctness retains actual result/store construction,
 immutable framing and uniqueness. FiniteCalls is not required for general safety. -/
-theorem correctness (checkedProgram : program.Checked) {context : List (String × BindingType)}
+theorem correctness (checkedProgram : program.Checked) {context : List (BindingId × BindingType)}
     {expression : Expr} {type : Ty} (admitted : HasType program home context expression type)
     (finite : FiniteCalls program expression) {environment : Environment}
     (environmentTyped : EnvironmentTyped program environment context) :
@@ -61,7 +61,7 @@ theorem closed_correctness (checkedProgram : program.Checked) {expression : Expr
   exact ⟨value, evaluated, typed, unique⟩
 
 /-- Exact admission boundary, in every lexical context and at every width. -/
-theorem integer_admission (context : List (String × BindingType)) (type : IntegerType) (magnitude : Nat) :
+theorem integer_admission (context : List (BindingId × BindingType)) (type : IntegerType) (magnitude : Nat) :
     (∃ result, HasType program home context (.integer type magnitude) result) ↔ type.Contains program.target magnitude := by
   constructor
   · rintro ⟨_, admitted⟩
@@ -70,7 +70,7 @@ theorem integer_admission (context : List (String × BindingType)) (type : Integ
   · intro fits
     exact ⟨_, .integer fits⟩
 
-theorem character_admission (context : List (String × BindingType)) (number : Nat) :
+theorem character_admission (context : List (BindingId × BindingType)) (number : Nat) :
     (∃ result, HasType program home context (.character number) result) ↔ UnicodeScalar number := by
   constructor
   · rintro ⟨_, admitted⟩

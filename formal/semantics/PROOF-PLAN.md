@@ -106,6 +106,30 @@ soundness: resolved binding/activation/storage identities and flow-sensitive
 move/restoration/scope-disposition checking remain open.
 
 
+## Resolved lexical-key cutover
+
+`BindingId` is now the key of local declarations, rooted places, function
+parameters, pattern bindings, checking contexts and runtime environments.
+Matching produces bindings with those same IDs; lookup and replacement compare
+IDs rather than source spellings. The complete preservation/progress, optional
+termination and source-normalization consumers use this representation. There
+is no legacy string-keyed local access path or compatibility coercion.
+
+This is a decoded-core input contract, not a proved source resolver. Alias,
+constant and named-field lookup retain their existing textual interfaces.
+The source-pattern interface now takes already-resolved binder IDs. Proving
+source resolution, declaration-ID freshness and dynamic activation/storage
+identity remains necessary; a lexical ID is explicitly not a storage address.
+The logical environment still directly holds resident values, so this cutover
+alone does not close the full identity/availability migration.
+
+Verification: strict `lake build` passed (17 jobs). Transient general Lean proofs
+established that any injective encoding of the former local keys preserves
+actual lookup and replacement for every environment. These comparison functions
+existed only in stdin. The defining-module audit covered 1,939 declarations and
+found only `propext`, `Quot.sound` and `Classical.choice`.
+
+
 ## Verified explicit-frame migration
 
 `Execution` now owns `Control`, `Frame`, `Configuration`, `Step`, `Run` and

@@ -8,7 +8,7 @@ namespace Grounded
 
 variable {program : Program} {home : Module}
 
-theorem HasType.structural_value {context : List (String × BindingType)} {expression : Expr} {type : Ty}
+theorem HasType.structural_value {context : List (BindingId × BindingType)} {expression : Expr} {type : Ty}
     (typed : HasType program home context expression type) :
     Structural expression → ∃ value, Evaluates program [] expression value [] ∧ ValueHasType program value type := by
   induction typed using HasType.rec
@@ -79,9 +79,9 @@ inductive EvaluationDependency (program : Program) : Expr → Expr → Prop wher
   | group {body : Expr} : EvaluationDependency program body (.group body)
   | sequenceFirst {first rest : Expr} : EvaluationDependency program first (.sequence first rest)
   | sequenceRest {first rest : Expr} : EvaluationDependency program rest (.sequence first rest)
-  | bindInitial {mutable : Bool} {name : String} {annotation : Option TypeExpr} {initial body : Expr} :
+  | bindInitial {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr} :
       EvaluationDependency program initial (.bind mutable name annotation initial body)
-  | bindBody {mutable : Bool} {name : String} {annotation : Option TypeExpr} {initial body : Expr} :
+  | bindBody {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr} :
       EvaluationDependency program body (.bind mutable name annotation initial body)
   | tupleHead {head : Expr} {tail : List Expr} : EvaluationDependency program head (.tuple head tail)
   | tupleTail {head expression : Expr} {tail : List Expr} (member : expression ∈ tail) :
@@ -109,7 +109,7 @@ def FiniteCalls (program : Program) (expression : Expr) : Prop := Acc (Evaluatio
 
 /-- Well-founded static call expansion recovers the terminating-fragment
 contract. General recursive safety does not require this optional hypothesis. -/
-theorem HasType.executes (checkedProgram : program.Checked) {context : List (String × BindingType)}
+theorem HasType.executes (checkedProgram : program.Checked) {context : List (BindingId × BindingType)}
     {expression : Expr} {type : Ty} (checked : HasType program home context expression type)
     (finite : FiniteCalls program expression) {environment : Environment}
     (store : EnvironmentTyped program environment context) :
@@ -117,7 +117,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Str
       EnvironmentTyped program after context ∧ EnvironmentFrame context environment after := by
   induction finite generalizing home context type environment with
   | intro expression children ih =>
-    have many {home : Module} {context : List (String × BindingType)} {expressions : List Expr} {types : List Ty}
+    have many {home : Module} {context : List (BindingId × BindingType)} {expressions : List Expr} {types : List Ty}
         (checked : HasTypes program home context expressions types)
         (dependencies : ∀ child ∈ expressions, EvaluationDependency program child expression)
         {environment : Environment} (store : EnvironmentTyped program environment context) :
