@@ -44,11 +44,11 @@ theorem NamedParametersElaborate.disposable {program : Program} {parameters : Li
 body determine the same declaration consumed by runtime invocation. -/
 inductive NamedFunction.Elaborates (program : Program) (names : String → Option Nat) :
     NamedFunction → FunctionDecl → Prop where
-  | intro {source scope result body}
+  | intro {source scope result body after}
       (parameters : NamedParametersElaborate program source.parameters scope)
       (distinct : (source.parameters.map NamedParameter.name).Nodup)
       (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
-      (elaborated : NamedExpr.Elaborates program names source.home scope source.body body result) :
+      (elaborated : NamedExpr.Elaborates program names source.home scope (initializedContext scope.context) source.body body result after) :
       NamedFunction.Elaborates program names source
         ⟨source.home, source.visibility, scope.context, result, body⟩
 
@@ -57,7 +57,8 @@ theorem NamedFunction.Elaborates.checked {program : Program} {names : String →
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
   | intro parameters distinct resultType body =>
-    exact ⟨SourceScope.context_distinct _, parameters.disposable, body.checked⟩
+    exact ⟨SourceScope.context_distinct _, parameters.disposable, _, body.checked (by
+      simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])⟩
 
 /-- Declaration identities are the source-list positions. Duplicate qualified
 names are rejected by program admission rather than resolved by first-wins. -/
@@ -102,15 +103,17 @@ theorem NamedFunctionsAdmitted.checked {source : List NamedFunction} {program : 
 admission, rather than accepting Program.Checked from the caller. -/
 theorem NamedFunctionsAdmitted.soundness {source : List NamedFunction} {program : Program}
     (admitted : NamedFunctionsAdmitted source program) {home : Module} {scope : SourceScope}
-    {expression : NamedExpr} {core : Expr} {type : Ty}
-    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
-    {environment : Environment} (store : environment.Realizes program scope.context)
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment : Environment} (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
     {state : Configuration} (run : Run program ⟨environment, .expression core, []⟩ state) :
-    ConfigurationTyped program scope.context (.one type) state ∧
+    ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
       (state.environment.bindings.map Prod.fst).Nodup :=
-  elaborated.soundness admitted.checked store run
+  elaborated.soundness slots admitted.checked store issued run
 
 /-- A resolved source name selects the same list position used for the emitted
 runtime declaration, including forward references and mutually recursive calls. -/
@@ -150,26 +153,32 @@ theorem NamedFunctionsAdmitted.resolves {sources : List NamedFunction} {program 
 
 theorem NamedFunctionsAdmitted.evaluation_soundness {source : List NamedFunction} {program : Program}
     (admitted : NamedFunctionsAdmitted source program) {home : Module} {scope : SourceScope}
-    {expression : NamedExpr} {core : Expr} {type : Ty}
-    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope before expression core type final)
+    (slots : before.slots = scope.context)
     {environment after : Environment} {value : Value}
-    (store : environment.Realizes program scope.context)
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
     (evaluated : Evaluates program environment core value after) :
-    ValueHasType program value type ∧ after.Realizes program scope.context ∧
-      AddressedEnvironment.Frames scope.context environment after :=
-  elaborated.evaluation_soundness admitted.checked store evaluated
+    ValueHasType program value type ∧ BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
+  elaborated.evaluation_soundness slots admitted.checked store issued evaluated
 
 theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {program : Program}
     (admitted : NamedFunctionsAdmitted source program) {home : Module} {scope : SourceScope}
-    {expression : NamedExpr} {core : Expr} {type : Ty}
-    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope expression core type)
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program (functionNames source) home scope before expression core type final)
+    (slots : before.slots = scope.context)
     (finite : FiniteCalls program core) {environment : Environment}
-    (store : environment.Realizes program scope.context) :
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
     ∃ value after, Evaluates program environment core value after ∧ ValueHasType program value type ∧
-      after.Realizes program scope.context ∧ AddressedEnvironment.Frames scope.context environment after ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter →
         other = value ∧ otherAfter = after :=
-  elaborated.correctness admitted.checked finite store
+  elaborated.correctness slots admitted.checked finite store issued
 
 
 /-- Source admission derives both body checking and actual addressed invocation
@@ -179,7 +188,7 @@ theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : P
     (declared : program.functions identity = some declaration) {values : List Value}
     (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
     (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
-    HasType program declaration.home declaration.parameters declaration.body declaration.result ∧
+    (∃ final, HasType program declaration.home (initializedContext declaration.parameters) declaration.body declaration.result final) ∧
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
       entry.Realizes program declaration.parameters ∧
       entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧

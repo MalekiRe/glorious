@@ -9,18 +9,18 @@ namespace Grounded
 
 variable {program : Program} {home : Module}
 
-theorem HasType.structural_value {context : List (BindingId × BindingType)} {expression : Expr} {type : Ty}
-    (typed : HasType program home context expression type) :
+theorem HasType.structural_value {context final : FlowContext} {expression : Expr} {type : Ty}
+    (typed : HasType program home context expression type final) :
     Structural expression → ∃ value, ValueHasType program value type ∧
       ∀ environment : Environment, ∃ after, Evaluates program environment expression value after ∧
         after.scope = environment.scope ∧ after.heap = environment.heap := by
   induction typed using HasType.rec
-    (motive_2 := fun home context expressions types _ =>
+    (motive_2 := fun home context expressions types final _ =>
       (∀ expression ∈ expressions, Structural expression) →
         ∃ values, ValuesHaveTypes program values types ∧
           ∀ environment : Environment, ∃ after, EvaluatesMany program environment expressions values after ∧
             after.scope = environment.scope ∧ after.heap = environment.heap)
-    (motive_3 := fun _ _ _ _ _ _ _ => True) with
+    (motive_3 := fun _ _ _ _ _ _ _ _ => True) with
   | unit => intro _; exact ⟨_, .unit, fun environment => ⟨environment, .unit, rfl, rfl⟩⟩
   | integer fits => intro _; exact ⟨_, .integer fits, fun environment => ⟨environment, .integer fits, rfl, rfl⟩⟩
   | character valid => intro _; exact ⟨_, .character valid, fun environment => ⟨environment, .character valid, rfl, rfl⟩⟩
@@ -32,7 +32,8 @@ theorem HasType.structural_value {context : List (BindingId × BindingType)} {ex
       intro environment
       obtain ⟨after, run, scope, heap⟩ := runs environment
       exact ⟨after, .group run, scope, heap⟩
-  | read selected copyable => intro closed; cases closed
+  | read selected path selection ready copyable => intro closed; cases closed
+  | move selected path selection ready mask context => intro closed; cases closed
   | sequence head discard tail headIH tailIH => intro closed; cases closed
   | bind initial discard body fresh initialIH bodyIH => intro closed; cases closed
   | tuple head tail headIH tailIH =>
@@ -82,10 +83,10 @@ theorem HasType.structural_value {context : List (BindingId × BindingType)} {ex
       obtain ⟨after, run, scope, heap⟩ := runs environment
       exact ⟨after, .construct run, scope, heap⟩
   | call declared visible inputs ih => intro closed; cases closed
-  | assign selected discard resident rest residentIH restIH => intro closed; cases closed
+  | assign resident selected path writable discard mask context rest residentIH restIH => intro closed; cases closed
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH => intro closed; cases closed
   | nil => exact ⟨[], .nil, fun environment => ⟨environment, .nil, rfl, rfl⟩⟩
-  | @cons home context head tail first rest headTyped tailTyped headIH tailIH =>
+  | @cons home before middle after head tail first rest headTyped tailTyped headIH tailIH =>
     rename_i closed
     obtain ⟨value, resident, heads⟩ := headIH (closed head (by simp))
     obtain ⟨values, residents, tails⟩ := tailIH (fun expression member => closed expression (by simp [member]))
@@ -95,10 +96,10 @@ theorem HasType.structural_value {context : List (BindingId × BindingType)} {ex
     obtain ⟨after, tailRun, tailScope, tailHeap⟩ := tails middle
     exact ⟨after, .cons headRun tailRun, tailScope.trans headScope, tailHeap.trans headHeap⟩
   | empty => trivial
-  | clause patternTyped distinct useful bodyTyped tailTyped bodyIH tailIH => trivial
+  | clause patternTyped distinct useful bodyTyped localSlots tailTyped bodyIH tailIH => trivial
 
 theorem constant_correctness {name : String} {type : Ty}
-    (checked : HasType program home [] (.constant name) type) :
+    (checked : HasType program home [] (.constant name) type []) :
     ∃ value after, Evaluates program AddressedEnvironment.empty (.constant name) value after ∧ ValueHasType program value type ∧
       ∀ other otherAfter, Evaluates program AddressedEnvironment.empty (.constant name) other otherAfter →
         other = value ∧ otherAfter = after := by
@@ -142,112 +143,138 @@ inductive EvaluationDependency (program : Program) : Expr → Expr → Prop wher
 progress. Recursive programs may be checked without possessing this certificate. -/
 def FiniteCalls (program : Program) (expression : Expr) : Prop := Acc (EvaluationDependency program) expression
 
-/-- Finite static call expansion constructs actual allocation, body execution
-and retirement. Postconditions come from the general machine theorem. -/
-theorem HasType.executes (checkedProgram : program.Checked) {context : StaticContext}
-    {expression : Expr} {type : Ty} (checked : HasType program home context expression type)
+/-- Finite static call expansion constructs actual allocation, moves,
+restoration and retirement. Post-state typing is general machine preservation. -/
+theorem HasType.executes (checkedProgram : program.Checked) {context final : FlowContext}
+    {expression : Expr} {type : Ty} (checked : HasType program home context expression type final)
     (finite : FiniteCalls program expression) {environment : Environment}
-    (store : environment.Realizes program context) :
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
     ∃ value after, Evaluates program environment expression value after ∧ ValueHasType program value type ∧
-      after.Realizes program context ∧ AddressedEnvironment.Frames context environment after := by
-  induction finite generalizing home context type environment with
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧ after.scope = environment.scope := by
+  induction finite generalizing home context final type environment with
   | intro expression children ih =>
-    have many {home : Module} {context : StaticContext} {expressions : List Expr} {types : List Ty}
-        (checked : HasTypes program home context expressions types)
+    have many {home : Module} {context final : FlowContext} {expressions : List Expr} {types : List Ty}
+        (checked : HasTypes program home context expressions types final)
         (dependencies : ∀ child ∈ expressions, EvaluationDependency program child expression)
-        {environment : Environment} (store : environment.Realizes program context) :
+        {environment : Environment}
+        (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+        (issued : environment.supply.Issued environment.activation) :
         ∃ values after, EvaluatesMany program environment expressions values after ∧ ValuesHaveTypes program values types ∧
-          after.Realizes program context ∧ AddressedEnvironment.Frames context environment after := by
-      induction expressions generalizing types environment with
-      | nil => cases checked; exact ⟨[], environment, .nil, .nil, store, .refl _ _⟩
+          BindingMap.Typed program after.heap after.activation after.bindings final ∧
+          after.supply.Issued after.activation := by
+      induction expressions generalizing context final types environment with
+      | nil => cases checked; exact ⟨[], environment, .nil, .nil, store, issued⟩
       | cons head tail tailIH =>
         cases checked with | cons headTyped tailTyped =>
-          obtain ⟨value, middle, headRun, resident, middleTyped, middleFrame⟩ :=
-            ih head (dependencies head (by simp)) headTyped store
-          obtain ⟨values, after, tailRun, residents, afterTyped, afterFrame⟩ :=
-            tailIH tailTyped (fun child member => dependencies child (by simp [member])) middleTyped
-          exact ⟨_, after, .cons headRun tailRun, .cons resident residents, afterTyped, middleFrame.trans afterFrame⟩
+          obtain ⟨value, middle, headRun, resident, middleTyped, middleIssued, _⟩ :=
+            ih head (dependencies head (by simp)) headTyped store issued
+          obtain ⟨values, after, tailRun, residents, afterTyped, afterIssued⟩ :=
+            tailIH tailTyped (fun child member => dependencies child (by simp [member])) middleTyped middleIssued
+          exact ⟨_, after, .cons headRun tailRun, .cons resident residents, afterTyped, afterIssued⟩
     suffices ∃ value after, Evaluates program environment expression value after by
       obtain ⟨value, after, run⟩ := this
-      have entry := ConfigurationTyped.entry checked store
-      have current := entry.run checkedProgram run
-      have framed := entry.frame_run checkedProgram run
-      cases current with | intro realized code continuation =>
+      have current := (ConfigurationTyped.entry checked store issued).run checkedProgram run
+      have scope := run.outer_scope
+      cases current with | intro realized afterIssued code continuation =>
         cases continuation
-        cases code with | result resident => exact ⟨value, after, run, resident, realized, framed⟩
+        cases code with | result resident => exact ⟨value, after, run, resident, realized, afterIssued, scope⟩
     have whole := checked
     cases checked with
     | unit => exact ⟨_, environment, .unit⟩
     | integer fits => exact ⟨_, environment, .integer fits⟩
     | character valid => exact ⟨_, environment, .character valid⟩
     | group body =>
-      obtain ⟨value, after, run, _⟩ := ih _ .group body store
+      obtain ⟨value, after, run, _⟩ := ih _ .group body store issued
       exact ⟨value, after, .group run⟩
-    | read selected copyable =>
-      cases selected with | root resolved path =>
-        obtain ⟨value, found, _⟩ := store.read (place := ⟨_, _⟩) (slot := ⟨_, _⟩) resolved path
-        exact ⟨value, environment, .read found⟩
+    | read selected path selection ready copyable =>
+      obtain ⟨value, found, _⟩ := AddressedEnvironment.read.progress store selected path selection ready
+      exact ⟨value, environment, .read found⟩
+    | move selected path selection ready mask context =>
+      obtain ⟨value, after, _, _, taken, _⟩ := AddressedEnvironment.take.progress store selected path selection ready
+      exact ⟨value, after, .move taken⟩
     | sequence head discard tail =>
-      obtain ⟨value, middle, headRun, _, middleTyped, _⟩ := ih _ .sequenceFirst head store
-      obtain ⟨result, after, tailRun, _⟩ := ih _ .sequenceRest tail middleTyped
+      obtain ⟨value, middle, headRun, _, middleTyped, middleIssued, _⟩ := ih _ .sequenceFirst head store issued
+      obtain ⟨result, after, tailRun, _⟩ := ih _ .sequenceRest tail middleTyped middleIssued
       exact ⟨result, after, .sequence headRun tailRun⟩
-    | @bind home context mutable name initial body localType type initialTyped discard bodyTyped fresh =>
-      obtain ⟨value, middle, initialRun, resident, middleTyped, _⟩ := ih _ .bindInitial initialTyped store
-      obtain ⟨entered, _⟩ := middleTyped.extend (inputs := [⟨name, ⟨localType, mutable⟩, value⟩])
-        (.cons resident .nil (by simp)) (by simpa using List.nodup_cons.mpr ⟨fresh, middleTyped.distinct⟩)
-      obtain ⟨result, localAfter, bodyRun, _, localTyped, _⟩ := ih _ .bindBody bodyTyped entered
-      obtain ⟨after, exited, _⟩ := localTyped.exitScope 1
+    | @bind home before middleContext afterContext mutable name initial body localType type finalMask initialTyped discard bodyTyped fresh =>
+      obtain ⟨value, middle, initialRun, resident, middleTyped, middleIssued, _⟩ := ih _ .bindInitial initialTyped store issued
+      obtain ⟨entered, _, _, _⟩ := AddressedEnvironment.extend.typed middleTyped
+        (inputs := [⟨name, ⟨localType, mutable⟩, value⟩]) (.cons resident .nil (by simp))
+        (by simpa using List.nodup_cons.mpr ⟨fresh, middleTyped.context_distinct⟩)
+      obtain ⟨result, localAfter, bodyRun, _, localTyped, _, _⟩ := ih _ .bindBody bodyTyped entered middleIssued
+      obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped 1
       exact ⟨result, after, .bind initialRun bodyRun exited⟩
     | tuple head tail =>
-      obtain ⟨value, middle, headRun, _, middleTyped, _⟩ := ih _ .tupleHead head store
-      obtain ⟨values, after, tailRun, _⟩ := many tail (fun _ member => .tupleTail member) middleTyped
+      obtain ⟨value, middle, headRun, _, middleTyped, middleIssued, _⟩ := ih _ .tupleHead head store issued
+      obtain ⟨values, after, tailRun, _⟩ := many tail (fun _ member => .tupleTail member) middleTyped middleIssued
       exact ⟨_, after, .tuple headRun tailRun⟩
     | project source discard selected =>
-      obtain ⟨aggregate, after, run, resident, _⟩ := ih _ .project source store
+      obtain ⟨aggregate, after, run, resident, _⟩ := ih _ .project source store issued
       obtain ⟨value, found, _⟩ := selected.access resident
       exact ⟨value, after, .project run found⟩
     | array residents finite size =>
-      obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .array member) store
+      obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .array member) store issued
       exact ⟨_, after, .array run⟩
     | constant declared visible resolved structural initialized =>
       obtain ⟨value, _, runs⟩ := whole.structural_value (.constant _)
       obtain ⟨after, run, _⟩ := runs environment
       exact ⟨value, after, run⟩
     | construct declared chosen finite copyable visible access residents =>
-      obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .construct member) store
+      obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .construct member) store issued
       exact ⟨_, after, .construct run⟩
-    | @call home context identity arguments declaration declared visible inputs =>
-      obtain ⟨values, middle, inputRun, residents, middleTyped, _⟩ := many inputs (fun _ member => .callInput member) store
+    | @call home before afterContext identity arguments declaration declared visible inputs =>
+      obtain ⟨values, middle, inputRun, residents, middleTyped, middleIssued⟩ :=
+        many inputs (fun _ member => .callInput member) store issued
       have declarationChecked := checkedProgram _ _ declared
       obtain ⟨bindings, prepared, inputsTyped, slots⟩ := prepareBindings.progress residents declarationChecked.distinct
-      have bodyTyped : HasType program declaration.home (bindings.map fun input => (input.name, input.slot))
-          declaration.body declaration.result := by rw [slots]; exact declarationChecked.body
-      obtain ⟨entered, _⟩ := inputsTyped.enter middle.heap middle.supply
-      obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered
-      have invocation := ConfigurationTyped.invoke middleTyped .nil inputsTyped bodyTyped
-        (by rw [slots]; exact declarationChecked.disposable)
+      obtain ⟨locals, checkedBody⟩ := declarationChecked.body
+      have bodyTyped : HasType program declaration.home (bindings.map BindingInput.state)
+          declaration.body declaration.result locals := by
+        rw [← slots] at checkedBody
+        simp only [initializedContext, List.map_map, Function.comp_def] at checkedBody
+        exact checkedBody
+      have entered := enterBindings.typed inputsTyped middle.heap middle.supply
+      obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered middle.supply.allocate_issued
+      have discard : ∀ binding ∈ locals, Duplicable program.data binding.2.slot.type := by
+        intro binding member
+        have slotMember : (binding.1, binding.2.slot) ∈ locals.slots := List.mem_map.mpr ⟨binding, member, rfl⟩
+        rw [checkedBody.slots] at slotMember
+        simp only [FlowContext.slots, initializedContext, List.map_map, Function.comp_def] at slotMember
+        exact declarationChecked.disposable _ (by simpa using slotMember)
+      have invocation := ConfigurationTyped.invoke middleTyped middleIssued .nil inputsTyped bodyTyped discard
       have returned := invocation.run checkedProgram (Run.extend bodyRun [.restore middle.scope])
       obtain done | ⟨next, stepped⟩ := returned.progress
       · cases done
       · cases stepped with | restore restored => exact ⟨value, _, .call declared prepared inputRun bodyRun restored⟩
-    | assign selected discard resident rest =>
-      obtain ⟨value, middle, valueRun, valueTyped, middleTyped, _⟩ := ih _ .assignValue resident store
-      cases selected with | root resolved path =>
-        obtain ⟨updated, written, updatedTyped, _⟩ := middleTyped.write (place := ⟨_, _⟩)
-          (slot := ⟨_, true⟩) resolved path rfl valueTyped
-        obtain ⟨result, after, restRun, _⟩ := ih _ .assignRest rest updatedTyped
-        exact ⟨result, after, .assign valueRun written restRun⟩
+    | assign resident selected path writable discard mask context rest =>
+      obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleIssued, _⟩ := ih _ .assignValue resident store issued
+      obtain ⟨updated, updatedMask, updatedContext, written, maskWritten, contextWritten, updatedTyped,
+        _, scope, supply, _, _, _⟩ := AddressedEnvironment.write.progress middleTyped selected path valueTyped
+      cases Option.some.inj (mask.symm.trans maskWritten)
+      cases Option.some.inj (context.symm.trans contextWritten)
+      have activation := congrArg AddressedScope.activation scope
+      simp only [AddressedEnvironment.scope] at activation
+      have updatedIssued : updated.supply.Issued updated.activation := by rw [supply, activation]; exact middleIssued
+      obtain ⟨result, after, restRun, _⟩ := ih _ .assignRest rest updatedTyped updatedIssued
+      exact ⟨result, after, .assign valueRun written restRun⟩
     | applyPatterns arguments nonempty covered bodies =>
-      obtain ⟨values, middle, argumentsRun, residents, middleTyped, _⟩ := many arguments (fun _ member => .patternInput member) store
+      obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleIssued⟩ :=
+        many arguments (fun _ member => .patternInput member) store issued
       obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
-      obtain ⟨locals, pattern, member, inputsTyped, slots, discard, bodyTyped, distinct⟩ := bodies.selected residents.argument selected
-      obtain ⟨entered, _⟩ := middleTyped.extend inputsTyped (by
+      obtain ⟨locals, localsAfter, pattern, member, inputsTyped, slots, discard, bodyTyped, localSlots, distinct⟩ :=
+        bodies.selected residents.argument selected
+      obtain ⟨entered, _, _, _⟩ := AddressedEnvironment.extend.typed middleTyped inputsTyped (by
         rw [← slots] at distinct
-        simpa only [List.map_append, List.map_map, Function.comp_def] using distinct)
-      rw [slots] at entered
-      obtain ⟨value, localAfter, bodyRun, _, localTyped, _⟩ := ih _ (.patternBody member) bodyTyped entered
-      obtain ⟨after, exited, _⟩ := localTyped.exitScope bindings.length
+        simpa only [FlowContext.slots, List.map_append, List.map_map, Function.comp_def] using distinct)
+      have states := congrArg initializedContext slots
+      simp only [initializedContext, List.map_map, Function.comp_def] at states
+      change List.map BindingInput.state _ = initializedContext locals at states
+      rw [states] at entered
+      obtain ⟨value, localAfter, bodyRun, _, localTyped, _, _⟩ := ih _ (.patternBody member) bodyTyped entered middleIssued
+      obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped bindings.length
       exact ⟨value, after, .applyPatterns argumentsRun selected bodyRun exited⟩
 
-
 end Grounded
+

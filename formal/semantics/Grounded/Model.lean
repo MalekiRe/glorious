@@ -164,6 +164,7 @@ inductive Expr where
   | character (number : Nat)
   | group (body : Expr)
   | read (place : Place)
+  | move (place : Place)
   | sequence (first rest : Expr)
   | bind (mutable : Bool) (name : BindingId) (localType : Ty) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)

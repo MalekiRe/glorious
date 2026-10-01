@@ -1,92 +1,103 @@
 import Grounded.ConfigurationTyping
 import Grounded.Termination
 
-/-! General recursive safety follows from checked declarations, expression
-checking and current entry values. Termination is a separate optional contract. -/
+/-! General recursive safety consumes exact flow-state checking and current
+partial storage. Termination remains a separate optional contract. -/
 namespace Grounded
 
 variable {program : Program} {home : Module}
 
-/-- Preservation and progress hold at every actual execution prefix; they are
-not assumptions attached to source admission. Recursive calls are permitted. -/
-theorem HasType.soundness (checkedProgram : program.Checked) {context : StaticContext} {expression : Expr} {type : Ty}
-    (checked : HasType program home context expression type) {environment : Environment}
-    (store : environment.Realizes program context) {state : Configuration}
+/-- Every actual prefix is safe. Immutable storage may be consumed, but cannot
+be replaced; retained callers and lexical storage identities remain protected. -/
+theorem HasType.soundness (checkedProgram : program.Checked) {context final : FlowContext}
+    {expression : Expr} {type : Ty} (checked : HasType program home context expression type final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) {state : Configuration}
     (run : Run program ⟨environment, .expression expression, []⟩ state) :
-    ConfigurationTyped program context (.one type) state ∧
+    ConfigurationTyped program final (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.Frames context environment state.outerEnvironment ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
       (state.environment.bindings.map Prod.fst).Nodup := by
-  have entry := ConfigurationTyped.entry checked store
+  have entry := ConfigurationTyped.entry checked store issued
   have current := entry.run checkedProgram run
-  exact ⟨current, current.progress, entry.frame_run checkedProgram run, current.bindings_distinct⟩
+  exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct⟩
 
-/-- Any completed recursive execution has the declared result and a framed
-successor store. Unlike existence of such an execution, this requires no
-well-founded call expansion. -/
+/-- Completed execution realizes exactly the declared output masks. No completed
+run or future readiness is a premise of checking or progress. -/
 theorem HasType.evaluation_soundness (checkedProgram : program.Checked)
-    {context : StaticContext} {expression : Expr} {type : Ty}
-    (checked : HasType program home context expression type) {environment after : Environment} {value : Value}
-    (store : environment.Realizes program context)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment after : Environment} {value : Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
     (evaluated : Evaluates program environment expression value after) :
-    ValueHasType program value type ∧ after.Realizes program context ∧
-      AddressedEnvironment.Frames context environment after := by
-  have entry := ConfigurationTyped.entry checked store
+    ValueHasType program value type ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after := by
+  have entry := ConfigurationTyped.entry checked store issued
   have current := entry.run checkedProgram evaluated
-  have framed := entry.frame_run checkedProgram evaluated
+  have framed := entry.consumption_run checkedProgram evaluated
   cases current with
-  | intro residents code continuation =>
+  | intro residents afterIssued code continuation =>
     cases continuation
     cases code with
-    | result resident => exact ⟨resident, residents, framed⟩
+    | result resident => exact ⟨resident, residents, afterIssued, framed⟩
 
-
-/-- Optional finite-call correctness retains actual result/store construction,
-immutable framing and uniqueness. FiniteCalls is not required for general safety. -/
-theorem correctness (checkedProgram : program.Checked) {context : List (BindingId × BindingType)}
-    {expression : Expr} {type : Ty} (admitted : HasType program home context expression type)
+/-- Finite-call correctness constructs execution and proves its unique result,
+exact post-state and consumption-only immutable frame. -/
+theorem correctness (checkedProgram : program.Checked) {context final : FlowContext}
+    {expression : Expr} {type : Ty} (admitted : HasType program home context expression type final)
     (finite : FiniteCalls program expression) {environment : Environment}
-    (environmentTyped : environment.Realizes program context) :
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
     ∃ value after, Evaluates program environment expression value after ∧ ValueHasType program value type ∧
-      after.Realizes program context ∧ AddressedEnvironment.Frames context environment after ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       ∀ other otherAfter, Evaluates program environment expression other otherAfter → other = value ∧ otherAfter = after := by
-  obtain ⟨value, after, run, valueTyped, afterTyped, framed⟩ := admitted.executes checkedProgram finite environmentTyped
-  exact ⟨value, after, run, valueTyped, afterTyped, framed, fun _ _ other => run.unique other⟩
+  obtain ⟨value, after, run, valueTyped, afterTyped, afterIssued, _⟩ := admitted.executes checkedProgram finite store issued
+  exact ⟨value, after, run, valueTyped, afterTyped, afterIssued,
+    (admitted.soundness checkedProgram store issued run).2.2.1, fun _ _ other => run.unique other⟩
 
-theorem AddressedEnvironment.empty_realizes : AddressedEnvironment.empty.Realizes program [] :=
-  (BindingInputsTyped.enter (program := program) (inputs := []) .nil RuntimeHeap.empty ⟨0⟩).1
+theorem AddressedEnvironment.empty_typed :
+    BindingMap.Typed program AddressedEnvironment.empty.heap AddressedEnvironment.empty.activation
+      AddressedEnvironment.empty.bindings [] := .nil
+
+theorem AddressedEnvironment.empty_issued :
+    AddressedEnvironment.empty.supply.Issued AddressedEnvironment.empty.activation := Nat.zero_lt_succ 0
 
 theorem closed_correctness (checkedProgram : program.Checked) {expression : Expr} {type : Ty}
-    (admitted : HasType program home [] expression type) (finite : FiniteCalls program expression) :
+    (admitted : HasType program home [] expression type []) (finite : FiniteCalls program expression) :
     ∃ value after, Evaluates program AddressedEnvironment.empty expression value after ∧ ValueHasType program value type ∧
-      after.Realizes program [] ∧ AddressedEnvironment.Frames [] AddressedEnvironment.empty after ∧
+      BindingMap.Typed program after.heap after.activation after.bindings [] ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program [] AddressedEnvironment.empty after ∧
       ∀ other otherAfter, Evaluates program AddressedEnvironment.empty expression other otherAfter →
         other = value ∧ otherAfter = after :=
-  correctness checkedProgram admitted finite AddressedEnvironment.empty_realizes
+  correctness checkedProgram admitted finite AddressedEnvironment.empty_typed AddressedEnvironment.empty_issued
 
-
-/-- Exact admission boundary, in every lexical context and at every width. -/
-theorem integer_admission (context : List (BindingId × BindingType)) (type : IntegerType) (magnitude : Nat) :
-    (∃ result, HasType program home context (.integer type magnitude) result) ↔ type.Contains program.target magnitude := by
+/-- Exact scalar admission, independent of incoming availability. -/
+theorem integer_admission (context : FlowContext) (type : IntegerType) (magnitude : Nat) :
+    (∃ result after, HasType program home context (.integer type magnitude) result after) ↔
+      type.Contains program.target magnitude := by
   constructor
-  · rintro ⟨_, admitted⟩
-    cases admitted with
-    | integer fits => exact fits
+  · rintro ⟨_, _, admitted⟩
+    cases admitted with | integer fits => exact fits
   · intro fits
-    exact ⟨_, .integer fits⟩
+    exact ⟨_, _, .integer fits⟩
 
-theorem character_admission (context : List (BindingId × BindingType)) (number : Nat) :
-    (∃ result, HasType program home context (.character number) result) ↔ UnicodeScalar number := by
+theorem character_admission (context : FlowContext) (number : Nat) :
+    (∃ result after, HasType program home context (.character number) result after) ↔ UnicodeScalar number := by
   constructor
-  · rintro ⟨_, admitted⟩
-    cases admitted with
-    | character valid => exact valid
+  · rintro ⟨_, _, admitted⟩
+    cases admitted with | character valid => exact valid
   · intro valid
-    exact ⟨_, .character valid⟩
+    exact ⟨_, _, .character valid⟩
 
-
-/-- The original unit subset retains precisely its admission and evaluation meaning. -/
-theorem unit_agreement : HasType program home [] .unit .unit ∧
+/-- The original unit subset retains its admission and evaluation meaning. -/
+theorem unit_agreement : HasType program home [] .unit .unit [] ∧
     ∀ value, Evaluates program AddressedEnvironment.empty .unit value AddressedEnvironment.empty ↔ value = .unit := by
   refine ⟨.unit, fun value => ⟨?_, ?_⟩⟩
   · intro evaluation
@@ -96,3 +107,4 @@ theorem unit_agreement : HasType program home [] .unit .unit ∧
     exact .unit
 
 end Grounded
+

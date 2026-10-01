@@ -72,6 +72,13 @@ theorem BindingMap.Typed.keys (typed : BindingMap.Typed program heap activation 
   | nil => rfl
   | cons found owner declared resident tail freshName freshStorage ih => exact congrArg (List.cons _) ih
 
+theorem BindingMap.Typed.context_distinct (typed : BindingMap.Typed program heap activation bindings context) :
+    (context.map Prod.fst).Nodup := by
+  induction typed with
+  | nil => exact .nil
+  | cons found owner declared resident tail freshName freshStorage ih =>
+    exact List.nodup_cons.mpr ⟨freshName, ih⟩
+
 theorem BindingMap.Typed.addresses_distinct (typed : BindingMap.Typed program heap activation bindings context) :
     (bindings.map Prod.snd).Nodup := by
   induction typed with

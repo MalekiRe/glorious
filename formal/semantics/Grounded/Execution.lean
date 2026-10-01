@@ -82,6 +82,9 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | read {env : Environment} {stack : List Frame} {place : Place} {value : Value}
       (selected : env.read program place = some value) :
       Step program ⟨env, .expression (.read place), stack⟩ ⟨env, .result value, stack⟩
+  | move {env after : Environment} {stack : List Frame} {place : Place} {value : Value}
+      (taken : env.take program place = some (value, after)) :
+      Step program ⟨env, .expression (.move place), stack⟩ ⟨after, .result value, stack⟩
   | sequence {env : Environment} {stack : List Frame} {first rest : Expr} :
       Step program ⟨env, .expression (.sequence first rest), stack⟩
         ⟨env, .expression first, .sequence rest :: stack⟩
@@ -247,6 +250,74 @@ theorem Frame.scope_extension (current : Environment) (inputs : List BindingInpu
   simp only [Frame.environment, Frame.activation, AddressedEnvironment.extend]
   rw [← length]
   simp
+
+
+theorem Frame.scope_congr {before after : Environment}
+    (same : after.scope = before.scope) (frame : Frame) :
+    (frame.environment after).scope = (frame.environment before).scope := by
+  have activation := congrArg AddressedScope.activation same
+  have bindings := congrArg AddressedScope.bindings same
+  simp only [AddressedEnvironment.scope] at activation bindings
+  cases frame <;> simp [Frame.environment, Frame.activation, AddressedEnvironment.scope, activation, bindings]
+
+theorem continuationEnvironment.scope_congr {before after : Environment}
+    (same : after.scope = before.scope) (stack : List Frame) :
+    (continuationEnvironment after stack).scope = (continuationEnvironment before stack).scope := by
+  induction stack generalizing before after with
+  | nil => exact same
+  | cons frame rest ih => exact ih (frame.scope_congr same)
+
+/-- Even raw operational transitions preserve the externally visible scope.
+This says nothing about resident availability or equality of heap cells. -/
+theorem Step.outer_scope {before after : Configuration} (step : Step program before after) :
+    after.outerEnvironment.scope = before.outerEnvironment.scope := by
+  cases step <;> try rfl
+  case move after stack place value taken =>
+    obtain ⟨result, _, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    apply continuationEnvironment.scope_congr
+    rfl
+  case bindResult env stack name slot body value =>
+    change (continuationEnvironment ((Frame.scope 1).environment (env.extend [⟨name, slot, value⟩])) stack).scope = _
+    have extended := Frame.scope_extension env [⟨name, slot, value⟩]
+    simp only [List.length_cons, List.length_nil] at extended
+    rw [extended]
+    apply continuationEnvironment.scope_congr
+    rfl
+  case scope env after stack count value exited =>
+    obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    apply continuationEnvironment.scope_congr
+    rfl
+  case assignResult env after stack place rest value written =>
+    obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    apply continuationEnvironment.scope_congr
+    rfl
+  case restore env after caller stack value restored =>
+    obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    apply continuationEnvironment.scope_congr
+    rfl
+  case selectedPattern env bindings stack values arms body selected =>
+    change (continuationEnvironment ((Frame.scope bindings.length).environment (env.extend bindings)) stack).scope = _
+    rw [Frame.scope_extension]
+    apply continuationEnvironment.scope_congr
+    rfl
+  case constant =>
+    simp only [Configuration.outerEnvironment, continuationEnvironment]
+    apply continuationEnvironment.scope_congr
+    rfl
+  case callInputs =>
+    simp only [Configuration.outerEnvironment, continuationEnvironment]
+    apply continuationEnvironment.scope_congr
+    rfl
+
+theorem Run.outer_scope {before after : Configuration} (run : Run program before after) :
+    after.outerEnvironment.scope = before.outerEnvironment.scope := by
+  induction run with
+  | refl => rfl
+  | step head tail ih => exact ih.trans head.outer_scope
 
 
 end Grounded

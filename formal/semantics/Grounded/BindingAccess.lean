@@ -585,4 +585,115 @@ theorem AddressedEnvironment.Realizes.take_restore {current : AddressedEnvironme
       (afterPreserved identity member).trans (middlePreserved identity member)⟩
 
 
+/-- Immutable storage may be consumed, but never replaced with a new resident.
+Each non-reflexive generator is exactly the authoritative hole-writing operation. -/
+inductive StorageCell.Consumption (program : Program) : Option StorageCell → Option StorageCell → Prop where
+  | refl (cell) : Consumption program cell cell
+  | erase {cell : StorageCell} {path : List FieldKey} {resident : PartialValue}
+      (written : cell.resident.writeFields program cell.type path .hole = some resident) :
+      Consumption program (some cell) (some { cell with resident := resident })
+  | trans {first middle last} (head : Consumption program first middle) (tail : Consumption program middle last) :
+      Consumption program first last
+
+/-- Partial storage typing projected to declarations; no readiness is added. -/
+def AddressedEnvironment.Declares (current : AddressedEnvironment) (program : Program)
+    (slots : List (BindingId × BindingType)) : Prop :=
+  ∃ states, BindingMap.Typed program current.heap current.activation current.bindings states ∧
+    states.map (fun entry => (entry.1, entry.2.slot)) = slots
+
+def AddressedEnvironment.ConsumptionFrame (program : Program) (slots : List (BindingId × BindingType))
+    (before after : AddressedEnvironment) : Prop :=
+  after.scope = before.scope ∧
+    ∀ name slot identity, lookup name slots = some slot → slot.mutable = false →
+      lookup name before.bindings = some identity →
+      StorageCell.Consumption program (before.heap.read identity) (after.heap.read identity)
+
+theorem AddressedEnvironment.ConsumptionFrame.refl (slots : List (BindingId × BindingType))
+    (current : AddressedEnvironment) : ConsumptionFrame program slots current current :=
+  ⟨rfl, fun _ _ _ _ _ _ => .refl _⟩
+
+theorem AddressedEnvironment.ConsumptionFrame.of_cells {slots : List (BindingId × BindingType)}
+    {before after : AddressedEnvironment} (scope : after.scope = before.scope)
+    (preserved : ∀ identity ∈ before.bindings.map Prod.snd, after.heap.read identity = before.heap.read identity) :
+    ConsumptionFrame program slots before after := by
+  refine ⟨scope, ?_⟩
+  intro name slot identity _ _ mapped
+  rw [preserved identity (List.mem_map.mpr ⟨(name, identity), lookup.mem mapped, rfl⟩)]
+  exact .refl _
+
+theorem AddressedEnvironment.ConsumptionFrame.trans {slots : List (BindingId × BindingType)}
+    {before middle after : AddressedEnvironment} (first : ConsumptionFrame program slots before middle)
+    (second : ConsumptionFrame program slots middle after) : ConsumptionFrame program slots before after := by
+  refine ⟨second.1.trans first.1, ?_⟩
+  intro name slot identity selected immutable mapped
+  have maps := congrArg AddressedScope.bindings first.1
+  exact (first.2 name slot identity selected immutable mapped).trans
+    (second.2 name slot identity selected immutable (by change middle.bindings = before.bindings at maps; rw [maps]; exact mapped))
+
+theorem AddressedEnvironment.take.consumption_frame {current after : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} {value : Value}
+    (taken : current.take program place = some (value, after)) :
+    AddressedEnvironment.ConsumptionFrame program slots current after := by
+  change (current.bindings.take program current.heap place).map
+    (fun result => (result.1, { current with heap := result.2 })) = some (value, after) at taken
+  obtain ⟨result, rawTaken, same⟩ := Option.map_eq_some_iff.mp taken
+  cases same
+  simp only [BindingMap.take, Option.bind_eq_some_iff] at rawTaken
+  obtain ⟨identity, _, storageTaken⟩ := rawTaken
+  simp only [takeStorage, Option.bind_eq_some_iff, Option.map_eq_some_iff] at storageTaken
+  obtain ⟨cell, found, resident, _, value, _, updated, written, heap, stored, same⟩ := storageTaken
+  cases same
+  refine ⟨rfl, ?_⟩
+  intro name slot other _ _ _
+  by_cases equal : other = identity
+  · subst other
+    rw [found, RuntimeHeap.write_read stored]
+    exact .erase written
+  · rw [RuntimeHeap.write_other stored equal]
+    exact .refl _
+
+theorem AddressedEnvironment.write.consumption_frame {current after : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} {slot : BindingType} {value : Value}
+    (declared : current.Declares program slots) (resolved : lookup place.root slots = some slot)
+    (writable : slot.mutable = true) (written : current.write program place value = some after) :
+    AddressedEnvironment.ConsumptionFrame program slots current after := by
+  obtain ⟨states, typed, _⟩ := declared
+  obtain ⟨heap, restored, same⟩ := Option.map_eq_some_iff.mp written
+  subst after
+  refine ⟨rfl, ?_⟩
+  intro other otherSlot identity selected immutable mapped
+  have same := BindingMap.restore.cell_other typed.addresses_distinct restored mapped (by
+    intro sameRoot
+    rw [sameRoot, resolved] at selected
+    cases Option.some.inj selected
+    simp_all)
+  rw [same]
+  exact .refl _
+
+
+theorem AddressedEnvironment.Declares.drop {current : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} (declared : current.Declares program slots) (count : Nat) :
+    ({ current with bindings := current.bindings.drop count } : AddressedEnvironment).Declares program (slots.drop count) := by
+  obtain ⟨states, typed, same⟩ := declared
+  exact ⟨states.drop count, typed.drop count, by rw [List.map_drop, same]⟩
+
+theorem AddressedEnvironment.ConsumptionFrame.drop {before after : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} (declared : before.Declares program slots)
+    (framed : ConsumptionFrame program slots before after) (count : Nat) :
+    ConsumptionFrame program (slots.drop count) { before with bindings := before.bindings.drop count }
+      { after with bindings := after.bindings.drop count } := by
+  obtain ⟨states, typed, same⟩ := declared
+  have keys : slots.map Prod.fst = states.map Prod.fst := by
+    rw [← same]; simp only [List.map_map, Function.comp_def]
+  have distinct : (slots.map Prod.fst).Nodup := by rw [keys]; exact typed.context_distinct
+  refine ⟨congrArg (fun scope : AddressedScope =>
+    (⟨scope.activation, scope.bindings.drop count⟩ : AddressedScope)) framed.1, ?_⟩
+  intro name slot identity selected immutable mapped
+  apply framed.2 name slot identity
+    (lookup.of_mem distinct (List.mem_of_mem_drop (lookup.mem selected))) immutable
+  apply lookup.of_mem _ (List.mem_of_mem_drop (lookup.mem mapped))
+  rw [typed.keys]
+  exact typed.context_distinct
+
+
 end Grounded

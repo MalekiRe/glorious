@@ -106,12 +106,11 @@ theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spe
     {binding : SourceBinding} (resolved : scope.resolve spelling = some binding)
     {program : Program} {fields outerFields : List FieldKey} {value : Value}
     {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
-    {context : StaticContext} (store : before.Realizes program context)
+    {context : FlowContext} (store : BindingMap.Typed program before.heap before.activation before.bindings context)
     (step : Step program ⟨before, .result value, .assign ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
     after.environment.read program ⟨binding.identity, outerFields⟩ =
       before.read program ⟨binding.identity, outerFields⟩ := by
-  obtain ⟨⟨states, typed, _, _⟩, _⟩ := store
-  apply Step.assignment_frame typed.addresses_distinct step
+  apply Step.assignment_frame store.addresses_distinct step
   intro equal
   change binding.identity = (⟨scope.next⟩ : BindingId) at equal
   have member : binding.identity ∈ scope.bindings.map SourceBinding.identity :=
@@ -135,73 +134,71 @@ theorem SourceScope.place {scope : SourceScope} {spelling : String} {fields : Li
   refine ⟨by simp [resolvePlace, resolved], ?_⟩
   exact .root (scope.selected resolved) path
 
-theorem SourceScope.read_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
-    {binding : SourceBinding} {type : Ty} (resolved : scope.resolve spelling = some binding)
-    (path : PathType program home binding.slot.type fields type) (copyable : Duplicable program.data type) :
-    HasType program home scope.context (.read ⟨binding.identity, fields⟩) type :=
-  .read (scope.place resolved path).2 copyable
+theorem SourceScope.selected_slot {scope : SourceScope} {spelling : String} {binding : SourceBinding}
+    {context : FlowContext} {state : BindingState} (resolved : scope.resolve spelling = some binding)
+    (slots : context.slots = scope.context) (selected : lookup binding.identity context = some state) :
+    state.slot = binding.slot := by
+  have found := scope.selected resolved
+  rw [← slots, FlowContext.slots, lookup.map, selected] at found
+  exact Option.some.inj found
 
+theorem SourceScope.read_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+    {binding : SourceBinding} {type : Ty} {context : FlowContext} {state : BindingState} {available : Initialization}
+    (resolved : scope.resolve spelling = some binding) (slots : context.slots = scope.context)
+    (selected : lookup binding.identity context = some state)
+    (path : PathType program home binding.slot.type fields type)
+    (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+    (ready : available.Ready) (copyable : Duplicable program.data type) :
+    HasType program home context (.read ⟨binding.identity, fields⟩) type context := by
+  have same := scope.selected_slot resolved slots selected
+  exact .read selected (by rw [same]; exact path) (by rw [same]; exact selection) ready copyable
+
+theorem SourceScope.move_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+    {binding : SourceBinding} {type : Ty} {before after : FlowContext} {state : BindingState}
+    {available updated : Initialization}
+    (resolved : scope.resolve spelling = some binding) (slots : before.slots = scope.context)
+    (selected : lookup binding.identity before = some state)
+    (path : PathType program home binding.slot.type fields type)
+    (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+    (ready : available.Ready)
+    (mask : state.initialization.writeFields program binding.slot.type fields .absent = some updated)
+    (context : replaceBinding binding.identity { state with initialization := updated } before = some after) :
+    HasType program home before (.move ⟨binding.identity, fields⟩) type after := by
+  have same := scope.selected_slot resolved slots selected
+  exact .move selected (by rw [same]; exact path) (by rw [same]; exact selection) ready
+    (by rw [same]; exact mask) context
+
+/-- Destination selection uses the RHS output state, not the incoming state. -/
 theorem SourceScope.assign_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
     {binding : SourceBinding} {type result : Ty} {value rest : Expr}
-    (resolved : scope.resolve spelling = some binding)
+    {before evaluated restored after : FlowContext} {state : BindingState} {updated : Initialization}
+    (resolved : scope.resolve spelling = some binding) (slots : before.slots = scope.context)
+    (resident : HasType program home before value type evaluated)
+    (selected : lookup binding.identity evaluated = some state)
     (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
-    (discard : Duplicable program.data type) (resident : HasType program home scope.context value type)
-    (continued : HasType program home scope.context rest result) :
-    HasType program home scope.context (.assign ⟨binding.identity, fields⟩ value rest) result := by
-  have place := (scope.place resolved path).2
-  rw [writable] at place
-  exact .assign place discard resident continued
+    (discard : Duplicable program.data type)
+    (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
+    (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
+    (continued : HasType program home restored rest result after) :
+    HasType program home before (.assign ⟨binding.identity, fields⟩ value rest) result after := by
+  have same := scope.selected_slot resolved (resident.slots.trans slots) selected
+  exact .assign resident selected (by rw [same]; exact path) (by rw [same]; exact writable) discard
+    (by rw [same]; exact mask) context continued
 
-theorem SourceScope.bind_checked (scope : SourceScope) (spelling : String) (mutable : Bool)
-    {initial body : Expr} {localType result : Ty}
-    (initialized : HasType program home scope.context initial localType)
+theorem SourceScope.bind_checked (scope : SourceScope) (mutable : Bool)
+    {initial body : Expr} {localType result : Ty} {before middle after : FlowContext} {finalMask : Initialization}
+    (slots : before.slots = scope.context)
+    (initialized : HasType program home before initial localType middle)
     (discard : Duplicable program.data localType)
-    (continued : HasType program home (scope.enter spelling ⟨localType, mutable⟩).context body result) :
-    HasType program home scope.context (.bind mutable ⟨scope.next⟩ localType initial body) result := by
+    (continued : HasType program home ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body result
+      ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩) :: after)) :
+    HasType program home before (.bind mutable ⟨scope.next⟩ localType initial body) result after := by
   refine .bind initialized discard continued ?_
-  simpa [context, List.map_map, Function.comp_def] using scope.fresh
+  have keys := congrArg (List.map Prod.fst) (initialized.slots.trans slots)
+  simp only [FlowContext.slots, SourceScope.context, List.map_map, Function.comp_def] at keys
+  rw [keys]
+  exact scope.fresh
 
-/-- Actual named-local elaboration constructs core admission and then consumes
-ordinary machine soundness. No completed execution or successor readiness is supplied. -/
-theorem SourceScope.bind_soundness (checkedProgram : program.Checked)
-    (scope : SourceScope) (spelling : String) (mutable : Bool)
-    {initial body : Expr} {localType result : Ty}
-    (initialized : HasType program home scope.context initial localType)
-    (discard : Duplicable program.data localType)
-    (continued : HasType program home (scope.enter spelling ⟨localType, mutable⟩).context body result)
-    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.bind mutable ⟨scope.next⟩ localType initial body), []⟩ state) :
-    ConfigurationTyped program scope.context (.one result) state ∧
-      (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
-  (scope.bind_checked spelling mutable initialized discard continued).soundness checkedProgram store run
-
-theorem SourceScope.read_soundness (checkedProgram : program.Checked)
-    {scope : SourceScope} {spelling : String} {fields : List FieldKey} {binding : SourceBinding} {type : Ty}
-    (resolved : scope.resolve spelling = some binding)
-    (path : PathType program home binding.slot.type fields type) (copyable : Duplicable program.data type)
-    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.read ⟨binding.identity, fields⟩), []⟩ state) :
-    ConfigurationTyped program scope.context (.one type) state ∧
-      (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
-  (scope.read_checked resolved path copyable).soundness checkedProgram store run
-
-theorem SourceScope.assign_soundness (checkedProgram : program.Checked)
-    {scope : SourceScope} {spelling : String} {fields : List FieldKey} {binding : SourceBinding}
-    {type result : Ty} {value rest : Expr} (resolved : scope.resolve spelling = some binding)
-    (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
-    (discard : Duplicable program.data type) (resident : HasType program home scope.context value type)
-    (continued : HasType program home scope.context rest result)
-    {environment : Environment} (store : environment.Realizes program scope.context) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.assign ⟨binding.identity, fields⟩ value rest), []⟩ state) :
-    ConfigurationTyped program scope.context (.one result) state ∧
-      (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.Frames scope.context environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup :=
-  (scope.assign_checked resolved path writable discard resident continued).soundness checkedProgram store run
 
 
 end Grounded

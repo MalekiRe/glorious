@@ -24,12 +24,13 @@ General source safety is defined in `Grounded/Soundness.lean`:
 
 ```lean
 program.Checked →
-HasType program home context expression type →
-environment.Realizes program context →
+HasType program home before expression type final →
+BindingMap.Typed program environment.heap environment.activation environment.bindings before →
+environment.supply.Issued environment.activation →
 Run program ⟨environment, .expression expression, []⟩ state →
-ConfigurationTyped program context (.one type) state ∧
+ConfigurationTyped program final (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
-  AddressedEnvironment.Frames context environment state.outerEnvironment ∧
+  AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
   (state.environment.bindings.map Prod.fst).Nodup
 ```
 
@@ -44,9 +45,9 @@ direct-function declarations and recursively elaborated named expressions,
 including named pattern clauses. `Program.Checked` is a proved intermediate
 product, not a premise supplied by that source-facing theorem.
 
-`HasType.evaluation_soundness` proves declared result typing, successor-store
-realization and immutable framing for every completed execution, including
-recursive executions. `correctness` additionally constructs a unique completed
+`HasType.evaluation_soundness` proves declared result typing, exact output-mask
+realization, issued activation and consumption-only immutable framing for every
+completed execution, including recursive executions. `correctness` constructs a unique completed
 execution when supplied `FiniteCalls program expression`: accessibility of the
 static subexpression/call-body dependency relation. This is an optional
 termination criterion, not part of ordinary admission or prefix safety.
@@ -57,11 +58,11 @@ Certified source-pattern normalization consumes this theorem. Its public safety
 consumer exports the complete prefix contract above; its terminating correctness
 consumer separately requires finite call expansion.
 
-The admitted logical fragment still requires fully initialized storage and
-copyable/disposable expression operations. Mutable lexical storage, checked
-projected writes and recursive declared functions now use resolved storage and
-generative activation identities over one shared logical heap. Source-level
-moves, holes, loans and physical memory remain outside the admitted fragment.
+The admitted logical fragment supports initialized and partially consumed storage,
+named moves, restoration, mutable lexical storage, projected access and recursive
+declared functions over one shared heap with generative activation identities.
+Disposal and construction still carry duplicability restrictions; principal
+ownership, destruction, loans and physical memory remain open.
 
 
 
@@ -701,18 +702,55 @@ consumed by this composition, including nested aggregate paths. Strict
 `lake build Grounded.SourceDeclarations` passed (25 jobs). The imported-declaration
 audit checked 2,942 `Grounded` declarations and found only standard Lean axioms;
 the new composition uses only `propext` and `Quot.sound`. No examples or unit tests
-were added or run. This is a storage-to-realization result, not source admission
-of move syntax: the checking and continuation cutover described below remains
-open.
+were added or run. That checkpoint established storage-to-realization composition;
+the source checking and continuation cutover is established below.
 
 
-Remaining boundary: flow-sensitive moves and restoration must extend the same
-checking, control/continuation realization and source-admission chain. The
-current source fragment still requires initialized residents and duplicable
-operations; storage-level move proofs do not yet establish source-level move
-soundness. Logical allocation is unbounded: this result does not establish
-physical exhaustion, loans, destruction hooks, nonlocal cleanup, foreign
-runtime correctness or whole-language soundness.
+The flow-sensitive cutover is now integrated through named-source soundness.
+`HasType`, `HasTypes` and `ArmsType` carry exact incoming/outgoing
+`BindingState` contexts. Arguments, tuple fields, sequences, initializers and
+pattern subjects thread those states in execution order. Assignment selects its
+destination after RHS evaluation. Moves require readiness at the selected path
+and replace that path's mask with absence; restoration writes presence through
+the same path and binding-context operations.
+
+`ConfigurationTyped` realizes the current partial storage, not the future
+contexts predicted by pending continuations. Retained callers remain typed in
+the current shared heap. General preservation and progress cover actual moves,
+restoration, recursive calls, lexical exit and caller retirement. Terminal
+results realize the exact output masks, including remaining holes.
+
+Immutable bindings may be consumed, so unconditional cell equality is not a
+valid general move-aware invariant. `ConsumptionFrame` preserves scope identity
+and relates immutable cells only by reflexivity, actual path writes of holes,
+and composition. It does not permit replacement residents or retirement of an
+external immutable cell. Actual allocation, retirement and retained-caller
+transitions preserve those cells exactly. `ConfigurationTyped.consumption_run`
+derives this relation across every run. The older exact `Frames` relation remains
+in storage-level results that genuinely preserve entire cells; it is not used
+as an invalid general guarantee for moves.
+
+Named expression elaboration now threads the same flow states, including named
+moves and restoration. Name scopes agree with flow contexts on declarations;
+no future readiness is assumed. Pattern-local masks are removed at scope exit,
+and function bodies may finish with holes. `NamedFunctionsAdmitted.soundness`
+and its completed-execution and finite-call consumers derive the migrated core
+contract from actual named declarations. Structural constants still normalize
+through the same machine independently of function-body checking.
+
+Fresh source-only verification passed `lake build Grounded.SourceDeclarations`
+(25 jobs). The imported-declaration audit checked 2,999 `Grounded` declarations
+and found only standard Lean axioms. General preservation, progress,
+consumption framing and finite-call execution use only `propext` and
+`Quot.sound`; source constant normalization additionally uses
+`Classical.choice`. No unit tests or concrete examples were added or run.
+
+Remaining boundary: principal ownership and destruction must replace the
+fragment's duplicability-based disposal restrictions through the same checking,
+execution and source-admission chain. Logical allocation remains unbounded.
+Loans, destruction hooks, nonlocal cleanup, physical exhaustion, foreign runtime
+correctness and whole-language soundness remain open.
+
 
 
 Verification: strict `lake build Grounded.StorageOperations` passed. The

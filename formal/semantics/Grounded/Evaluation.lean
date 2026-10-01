@@ -36,6 +36,11 @@ theorem Evaluates.read {environment : Environment} {place : Place} {value : Valu
       Evaluates program environment (.read place) value environment :=
   .step (.read selected) (.refl _)
 
+theorem Evaluates.move {environment after : Environment} {place : Place} {value : Value}
+    (taken : environment.take program place = some (value, after)) :
+    Evaluates program environment (.move place) value after :=
+  .step (.move taken) (.refl _)
+
 theorem Evaluates.sequence {environment middle after : Environment} {first rest : Expr}
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
       (tail : Evaluates program middle rest value after) :
