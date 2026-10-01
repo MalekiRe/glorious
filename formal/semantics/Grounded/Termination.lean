@@ -270,5 +270,36 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped bindings.length
       exact ⟨value, after, .applyPatterns argumentsRun selected bodyRun exited⟩
 
+/-- Finite argument evaluation constructs the actual ordered machine run without
+requiring finite expansion of the callable that will consume the results. -/
+theorem HasTypes.executes (checkedProgram : program.Checked) {context final : FlowContext}
+    {expressions : List Expr} {types : List Ty}
+    (checked : HasTypes program home context expressions types final)
+    (finite : ∀ expression ∈ expressions, FiniteCalls program expression) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ values after, EvaluatesMany program environment expressions values after ∧
+      ValuesHaveTypes program values types ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation := by
+  induction expressions generalizing context final types environment with
+  | nil => cases checked; exact ⟨[], environment, .nil, .nil, store, issued⟩
+  | cons first rest ih =>
+    cases checked with
+    | cons head tail =>
+      obtain ⟨value, middle, firstRun, resident, middleTyped, middleIssued, _⟩ :=
+        head.executes checkedProgram (finite _ (by simp)) store issued
+      obtain ⟨values, after, tailRun, residents, afterTyped, afterIssued⟩ :=
+        ih tail (fun expression member => finite expression (List.mem_cons_of_mem _ member)) middleTyped middleIssued
+      exact ⟨value :: values, after, .cons firstRun tailRun, .cons resident residents, afterTyped, afterIssued⟩
+
+/-- Direct place accesses have no recursive evaluation dependencies. -/
+theorem FiniteCalls.read (place : Place) : FiniteCalls program (.read place) :=
+  .intro _ (fun _ dependency => by cases dependency)
+
+theorem FiniteCalls.move (place : Place) : FiniteCalls program (.move place) :=
+  .intro _ (fun _ dependency => by cases dependency)
+
+
 end Grounded
 

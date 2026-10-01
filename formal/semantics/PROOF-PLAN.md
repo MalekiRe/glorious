@@ -2438,3 +2438,35 @@ custody, physical exhaustion, custom destruction and whole-language soundness
 remain open. Arbitrary inputs not handled by the compatibility constructors
 are not silently declared compatible.
 
+
+## Constructive pre-entry progress for mixed place inputs
+
+`HasTypes.executes` constructs an actual ordered argument-machine run from
+checked arguments and finite static expansion of those arguments alone.
+`HasType.call_entry` consumes it, prepares the complete parameter binding list,
+and constructs the actual `Step.call` / `Step.callInputs` run into fresh
+`enterBindings` storage. General soundness proves entered-state typing, a next
+step, retained caller consumption framing, distinct binding names and ownership
+safety. Neither a supplied prepared binding list nor successful entry is assumed.
+The callee body need not have finite call expansion and may recurse or diverge.
+
+`HasType.compatible_access_entry` closes the pre-state admission-to-entry chain
+for arbitrary mixed direct Copy/move arguments. It derives the ordered checking
+judgment from `InputCompatible`, proves argument termination directly from
+read/move syntax, and obtains actual argument evaluation, binding preparation,
+entry and the complete entered-state safety contract. No future readiness,
+completed execution or argument-termination certificate is supplied for this
+place-access consumer.
+
+A fresh source-only build in `/tmp/grandiose-input-entry-verified.hdR3QH` passed
+all 30 jobs. Exhaustive axiom inspection covered 3,876 declarations with only
+standard Lean axioms. The argument execution, general entry and mixed-place
+entry theorems were explicitly inspected together with preservation, progress
+and public source-function soundness. No unit tests or concrete examples were
+added.
+
+Scope remains the current logical heap and direct place-access fragment.
+Physical allocation exhaustion, loan/reborrow permissions, guarded or captured
+inputs, custody, custom cleanup and the remaining whole-language obligations
+are not proved by this result. None of the 15 broad completion tasks is closed.
+

@@ -72,6 +72,95 @@ theorem HasType.compatible_call_soundness (checkedProgram : program.Checked)
   obtain ⟨final, checked⟩ := HasType.call_compatible_inputs declared visible arguments compatible admitted
   exact ⟨final, checked, fun _ _ store issued run => checked.soundness checkedProgram store issued run⟩
 
+/-- Argument termination reaches actual fresh callee entry even when the callee
+itself is recursive. Allocation, preparation and the entered state are results. -/
+theorem HasType.call_entry (checkedProgram : program.Checked)
+    {before final : FlowContext} {identity : Nat} {arguments : List Expr} {type : Ty}
+    (checked : HasType program home before (.call identity arguments) type final)
+    (finite : ∀ argument ∈ arguments, FiniteCalls program argument) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ declaration values middle bindings,
+      program.functions identity = some declaration ∧
+      EvaluatesMany program environment arguments values middle ∧
+      prepareBindings declaration.parameters values = some bindings ∧ BindingInputsTyped program bindings ∧
+      Run program ⟨environment, .expression (.call identity arguments), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ConfigurationTyped program final (.one type)
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      (∃ next, Step program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next) ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment
+        (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+          [.restore middle.scope]⟩ : Configuration).outerEnvironment ∧
+      ((enterBindings middle.heap middle.supply bindings).bindings.map Prod.fst).Nodup ∧
+      (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+        [.restore middle.scope]⟩ : Configuration).OwnershipSafe program := by
+  cases checked with
+  | @call home before final identity arguments declaration declared visible inputs =>
+    obtain ⟨values, middle, inputRun, residents, middleTyped, middleIssued⟩ :=
+      inputs.executes checkedProgram finite store issued
+    obtain ⟨bindings, prepared, inputsTyped, slots⟩ :=
+      prepareBindings.progress residents (checkedProgram _ _ declared).distinct
+    have run : Run program ⟨environment, .expression (.call identity arguments), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ :=
+      .step (.call declared) ((Run.extend inputRun [.call declaration]).trans
+        (.step (.callInputs prepared) (.refl _)))
+    have source : HasType program home before (.call identity arguments) declaration.result final :=
+      .call declared visible inputs
+    have safety := source.soundness checkedProgram store issued run
+    have progress : ∃ next, Step program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next := by
+      rcases safety.2.1 with terminal | next
+      · cases terminal
+      · exact next
+    exact ⟨declaration, values, middle, bindings, declared, inputRun, prepared, inputsTyped,
+      run, safety.1, progress, safety.2.2⟩
+
+/-- Mixed direct place inputs construct a safe callee entry from pre-state
+admission alone. Read/move syntax proves argument termination; the body may diverge. -/
+theorem HasType.compatible_access_entry (checkedProgram : program.Checked)
+    {before : FlowContext} {inputs : List (Expr × Ty)} {identity : Nat} {declaration : FunctionDecl}
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home before.slots left.1 right.1))
+    (admitted : ∀ input ∈ inputs, ∃ after, HasType program home before input.1 input.2 after)
+    (accesses : ∀ input ∈ inputs, ∃ place, input.1 = .read place ∨ input.1 = .move place)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ final values middle bindings,
+      HasType program home before (.call identity (inputs.map Prod.fst)) declaration.result final ∧
+      EvaluatesMany program environment (inputs.map Prod.fst) values middle ∧
+      prepareBindings declaration.parameters values = some bindings ∧ BindingInputsTyped program bindings ∧
+      Run program ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ConfigurationTyped program final (.one declaration.result)
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      (∃ next, Step program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next) ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment
+        (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+          [.restore middle.scope]⟩ : Configuration).outerEnvironment ∧
+      ((enterBindings middle.heap middle.supply bindings).bindings.map Prod.fst).Nodup ∧
+      (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+        [.restore middle.scope]⟩ : Configuration).OwnershipSafe program := by
+  obtain ⟨final, checked⟩ := HasType.call_compatible_inputs declared visible arguments compatible admitted
+  have finite : ∀ argument ∈ inputs.map Prod.fst, FiniteCalls program argument := by
+    intro argument member
+    obtain ⟨input, inputMember, rfl⟩ := List.mem_map.mp member
+    obtain ⟨place, copy | move⟩ := accesses input inputMember
+    · rw [copy]; exact FiniteCalls.read place
+    · rw [move]; exact FiniteCalls.move place
+  obtain ⟨actual, values, middle, bindings, found, inputRun, prepared, inputsTyped, run, safe⟩ :=
+    checked.call_entry checkedProgram finite store issued
+  have same := Option.some.inj (found.symm.trans declared)
+  subst actual
+  exact ⟨final, values, middle, bindings, checked, inputRun, prepared, inputsTyped, run, safe⟩
+
+
+
 
 
 /-- No checked execution can duplicate a value whose principal forbids Copy.
