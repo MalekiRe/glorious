@@ -236,7 +236,9 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, _, _, bindingsTyped, discard, bodyTyped, distinct⟩ := checked.selected residents.argument selected
+            obtain ⟨locals, _, _, inputsTyped, slots, discard, bodyTyped, distinct⟩ := checked.selected residents.argument selected
+            have bindingsTyped := inputsTyped.environment
+            rw [slots] at bindingsTyped
             refine .intro (bindingsTyped.append store distinct) (.expression bodyTyped) (.cons ?_ tail)
             rw [← List.length_map (f := fun input : BindingInput => (input.name, input.value)), bindingsTyped.length]
             exact .scope locals discard

@@ -607,6 +607,18 @@ and preserved realization. The 26-job source gate and imported-declaration
 axiom audit passed. Replacement of the lexical machine’s framing relation
 and continuation consumers remains part of the same cutover below.
 
+Selected pattern-body admission now returns authoritative `BindingInputsTyped`
+and exact slot correspondence instead of discarding those facts into the
+legacy value-environment projection. Existing machine preservation and
+termination consumers project only at their current lexical boundary.
+`ArmsType.enter` composes coverage, actual first selection, body admission
+and addressed local allocation. It constructs initialized body realization
+and preserves all retained scopes, without assuming selection or allocation
+success and without advancing the activation supply for lexical locals.
+The 26-job source gate and full imported-declaration axiom audit passed.
+This closes the addressed pattern-entry contract, not body execution in
+the still-unmigrated expression machine.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

@@ -1,5 +1,6 @@
 import Grounded.Patterns
 import Grounded.Places
+import Grounded.BindingAccess
 
 /-! Expression checking uses declared callable interfaces. Declaration bodies
 are checked separately; constant dependencies remain structurally well founded. -/
@@ -123,7 +124,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
     {bindings : List BindingInput} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals pattern, (pattern, body) ∈ arms ∧
-      EnvironmentTyped program (bindings.map fun input => (input.name, input.value)) locals ∧
+      BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = locals ∧
       (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
       HasType program home (locals ++ context) body result ∧ ((locals ++ context).map Prod.fst).Nodup := by
   induction arms generalizing previous with
@@ -138,10 +139,40 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
         obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
           (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
         exact ⟨_, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          slots ▸ inputsTyped.environment, patternTyped.disposable, bodyTyped, distinct⟩
+          inputsTyped, slots, patternTyped.disposable, bodyTyped, distinct⟩
       next missed =>
-        obtain ⟨locals, pattern, member, localTyped, disposable, bodyTyped, distinct⟩ := ih tailTyped selected
-        exact ⟨locals, pattern, List.mem_cons_of_mem _ member, localTyped, disposable, bodyTyped, distinct⟩
+        obtain ⟨locals, pattern, member, inputsTyped, slots, disposable, bodyTyped, distinct⟩ := ih tailTyped selected
+        exact ⟨locals, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots, disposable, bodyTyped, distinct⟩
+
+
+/-- Coverage constructs first selection; selected-body admission supplies the
+same typed inputs consumed by addressed lexical allocation. No successful match
+or allocation appears as a premise. -/
+theorem ArmsType.enter {program : Program} {home : Module} {context : List (BindingId × BindingType)}
+    {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
+    (checked : ArmsType program home context subject result previous arms)
+    (covered : Covers program [subject] (arms.map fun arm => [arm.1]))
+    {current : AddressedEnvironment} (realized : current.Realizes program context)
+    {value : Value} (resident : ValueHasType program value subject) :
+    ∃ inputs body locals, selectArm value arms = some (inputs, body) ∧
+      HasType program home (locals ++ context) body result ∧
+      (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
+      (current.extend inputs).Realizes program (locals ++ context) ∧
+      (inputs.map fun input => (input.name, input.slot)) = locals ∧
+      (current.extend inputs).activation = current.activation ∧
+      (current.extend inputs).supply = current.supply ∧
+      (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
+        caller.Realizes program (current.extend inputs).heap callerContext) := by
+  obtain ⟨inputs, body, selected⟩ := covered.selectArm resident
+  obtain ⟨locals, _, _, inputsTyped, slots, disposable, bodyTyped, distinct⟩ := checked.selected resident selected
+  have names := congrArg (List.map Prod.fst) slots
+  simp only [List.map_map, Function.comp_def] at names
+  have fresh : (inputs.map BindingInput.name ++ context.map Prod.fst).Nodup := by
+    rw [names]
+    simpa only [List.map_append] using distinct
+  obtain ⟨afterRealized, retained⟩ := realized.extend inputsTyped fresh
+  rw [slots] at afterRealized
+  exact ⟨inputs, body, locals, selected, bodyTyped, disposable, afterRealized, slots, rfl, rfl, retained⟩
 
 
 /-- A declaration body is checked once against its declared interface. This

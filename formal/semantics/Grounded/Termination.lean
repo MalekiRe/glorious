@@ -185,7 +185,9 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
     | applyPatterns arguments nonempty covered bodies =>
       obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleFrame⟩ := many arguments (fun _ member => .patternInput member) store
       obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
-      obtain ⟨locals, pattern, member, bindingsTyped, discard, bodyTyped, distinct⟩ := bodies.selected residents.argument selected
+      obtain ⟨locals, pattern, member, inputsTyped, slots, discard, bodyTyped, distinct⟩ := bodies.selected residents.argument selected
+      have bindingsTyped := inputsTyped.environment
+      rw [slots] at bindingsTyped
       obtain ⟨value, after, bodyRun, resident, afterTyped, afterFrame⟩ :=
         ih _ (.patternBody member) bodyTyped (bindingsTyped.append middleTyped distinct)
       refine ⟨value, after.drop bindings.length, .applyPatterns argumentsRun selected bodyRun, resident, ?_, middleFrame.trans ?_⟩
