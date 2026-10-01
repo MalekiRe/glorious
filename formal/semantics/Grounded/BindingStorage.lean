@@ -233,6 +233,25 @@ theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activat
 def releaseBindings (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Option (RuntimeHeap StorageCell) :=
   heap.retireMany (bindings.map Prod.snd)
 
+/-- Retirement leaves every live exact nominal owner untouched, including owners
+outside the current lexical scope. No ownership permission is assumed for it. -/
+theorem BindingMap.Disposable.release_preserves_exact
+    (disposition : BindingMap.Disposable program heap bindings)
+    {after : RuntimeHeap StorageCell} (released : releaseBindings heap bindings = some after)
+    {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    after.read address = some cell := by
+  have outside : address ∉ bindings.map Prod.snd := by
+    intro member
+    obtain ⟨actual, selected, permission⟩ := disposition address member
+    cases Option.some.inj (selected.symm.trans found)
+    rw [resident] at permission
+    exact PartialValue.Disposable.not_exact_resident declared restricted permission
+  exact (RuntimeHeap.retireMany_outside released outside).trans found
+
+
 theorem BindingMap.Typed.release (typed : BindingMap.Typed program heap activation bindings context) :
     ∃ after, releaseBindings heap bindings = some after ∧
       after.next = heap.next ∧

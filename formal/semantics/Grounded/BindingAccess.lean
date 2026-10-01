@@ -33,6 +33,21 @@ def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCe
     resident.Typed program type mask ∧
     resident.Disposable program
 
+theorem BindingMap.ReplacementSafe.not_exact
+    (safe : BindingMap.ReplacementSafe program heap bindings place)
+    {address : StorageId} {cell : StorageCell}
+    (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (selected : cell.resident.selectFields program cell.type place.fields =
+      some (.resident (.nominal identity tag fields))) : False := by
+  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound, actualSelected, _, permission⟩ := safe
+  cases Option.some.inj (actualMapped.symm.trans mapped)
+  cases Option.some.inj (actualFound.symm.trans found)
+  cases Option.some.inj (actualSelected.symm.trans selected)
+  exact PartialValue.Disposable.not_exact_resident declared restricted permission
+
+
 theorem BindingMap.Typed.replacement_safe
     (store : BindingMap.Typed program heap activation bindings context)
     {available : Initialization}

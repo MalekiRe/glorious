@@ -39,6 +39,76 @@ theorem HasType.no_exact_discard (checkedProgram : program.Checked)
   exact PartialValue.Disposable.not_exact_resident declared restricted
     (checked.soundness checkedProgram store issued run).2.2.2.2
 
+/-- An actual lexical retirement after a checked prefix cannot retire or alter a
+live exact nominal owner in the heap. -/
+theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment} {after : Configuration}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {count : Nat} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .scope count :: stack⟩)
+    (step : Step program ⟨current, .result value, .scope count :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    after.environment.heap.read address = some cell := by
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  cases step with
+  | scope exited =>
+    simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at exited
+    obtain ⟨heap, released, same⟩ := exited
+    subst_vars
+    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
+
+/-- An actual caller restoration after a checked prefix cannot retire or alter a
+live exact nominal owner in the heap. -/
+theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment} {after : Configuration}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .restore caller :: stack⟩)
+    (step : Step program ⟨current, .result value, .restore caller :: stack⟩ after)
+    {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (resident : cell.resident = .resident (.nominal identity tag fields)) :
+    after.environment.heap.read address = some cell := by
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  cases step with
+  | restore restored =>
+    simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at restored
+    obtain ⟨heap, released, same⟩ := restored
+    subst_vars
+    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
+
+/-- Selection is observed after RHS evaluation. A moved-out slot may be restored,
+but a still-live exact selected owner cannot be overwritten. -/
+theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .assign place rest :: stack⟩)
+    {address : StorageId} {cell : StorageCell}
+    (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
+    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (selected : cell.resident.selectFields program cell.type place.fields =
+      some (.resident (.nominal identity tag fields))) : False := by
+  exact BindingMap.ReplacementSafe.not_exact
+    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found declared restricted selected
+
 
 /-- Completed execution realizes exactly the declared output masks. No completed
 run or future readiness is a premise of checking or progress. -/

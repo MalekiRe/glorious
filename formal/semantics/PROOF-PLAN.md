@@ -2082,3 +2082,32 @@ placeholders were added. This is direct-discard safety in the modeled fragment,
 not complete destruction semantics or whole-language soundness. The previously
 recorded custom-hook, borrowing, nonlocal-control and other obligations remain.
 
+
+## Verified exact-owner protection through actual retirement and overwrite events
+
+`BindingMap.Disposable.release_preserves_exact` proves that actual
+`releaseBindings` leaves every observed live exact nominal cell unchanged. It
+derives that the cell cannot belong to the retired address list from the shared
+runtime disposition proof, then consumes `RuntimeHeap.retireMany_outside`.
+The owner need not be in the current lexical environment.
+
+`HasType.scope_preserves_exact` and `HasType.restore_preserves_exact` carry this
+result through an arbitrary checked execution prefix and the actual following
+lexical-retirement or caller-restoration step. Their conclusions preserve the
+same logical heap cell, not merely its type or a supplied liveness predicate.
+They assume neither termination nor a future readiness certificate.
+
+`HasType.no_exact_overwrite` observes the selected resident through the runtime
+binding map, heap lookup and field selection immediately after RHS evaluation.
+The general soundness invariant rules out overwriting a still-live exact nominal
+owner. This does not forbid restoration after the RHS has moved that owner out.
+The underlying exclusion lemma is consumed by this public execution theorem.
+
+`lake build Grounded` passed (30 jobs). Exhaustive imported axiom inspection
+covered 3,799 declarations with only standard Lean axioms. The actual release,
+scope/caller retirement, overwrite and direct-discard theorems received explicit
+axiom inspection. No concrete examples, unit tests, additional axioms or proof
+placeholders were added. These results concern the modeled logical heap and
+explicit exact nominal restrictions; they do not establish physical allocation,
+custom hooks, borrowing, nonlocal cleanup or complete language soundness.
+
