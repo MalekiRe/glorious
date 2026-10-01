@@ -6,12 +6,12 @@ one. Priority depends on source bindings, not on traversal order. -/
 namespace Grounded
 
 structure NamedParameter where
-  name : String
+  name : Identifier
   type : TypeExpr
   mutable : Bool := false
 
 structure NamedFunction where
-  name : String
+  name : Identifier
   home : Module
   visibility : Visibility := .private
   parameters : List NamedParameter
@@ -19,7 +19,7 @@ structure NamedFunction where
   body : NamedExpr
 
 inductive FunctionImportKind where
-  | explicit (sourceName localName : String)
+  | explicit (sourceName localName : Identifier)
   | glob
 
 structure FunctionImport where
@@ -31,12 +31,12 @@ structure FunctionImport where
 /-- Explicit source bindings suppress weak imports even when the explicit
 binding is unresolved. An invalid explicit import cannot expose a fallback. -/
 def ExplicitFunctionBinding (sources : List NamedFunction) (imports : List FunctionImport)
-    (home : Module) (name : String) : Prop :=
+    (home : Module) (name : Identifier) : Prop :=
   (∃ declaration ∈ sources, declaration.home = home ∧ declaration.name = name) ∨
   ∃ edge ∈ imports, edge.home = home ∧ ∃ sourceName, edge.kind = .explicit sourceName name
 
 inductive FunctionImport.Selects (sources : List NamedFunction) (imports : List FunctionImport)
-    (edge : FunctionImport) : String → String → Prop where
+    (edge : FunctionImport) : Identifier → Identifier → Prop where
   | explicit {sourceName localName} (kind : edge.kind = .explicit sourceName localName) :
       edge.Selects sources imports localName sourceName
   | glob {name} (kind : edge.kind = .glob)
@@ -46,7 +46,7 @@ inductive FunctionImport.Selects (sources : List NamedFunction) (imports : List 
 /-- Visibility belongs to each binding edge. The origin declaration retains
 its own visibility and contract at the eventual invocation boundary. -/
 inductive FunctionCandidate (sources : List NamedFunction) (imports : List FunctionImport) :
-    Module → String → Nat → Visibility → Prop where
+    Module → Identifier → Nat → Visibility → Prop where
   | declaration {identity declaration} (found : sources[identity]? = some declaration) :
       FunctionCandidate sources imports declaration.home declaration.name identity declaration.visibility
   | imported {edge name sourceName identity visibility}
@@ -56,7 +56,7 @@ inductive FunctionCandidate (sources : List NamedFunction) (imports : List Funct
       FunctionCandidate sources imports edge.home name identity edge.visibility
 
 theorem FunctionCandidate.origin {sources : List NamedFunction} {imports : List FunctionImport}
-    {home : Module} {name : String} {identity : Nat} {visibility : Visibility}
+    {home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
     (candidate : FunctionCandidate sources imports home name identity visibility) :
     ∃ declaration, sources[identity]? = some declaration := by
   induction candidate with
@@ -67,13 +67,13 @@ theorem FunctionCandidate.origin {sources : List NamedFunction} {imports : List 
 cycles. The comparison relation is arbitrary and must satisfy exactly the
 same declaration and import closure rules. -/
 theorem FunctionCandidate.least {sources : List NamedFunction} {imports : List FunctionImport}
-    (relation : Module → String → Nat → Visibility → Prop)
+    (relation : Module → Identifier → Nat → Visibility → Prop)
     (declarations : ∀ identity declaration, sources[identity]? = some declaration →
       relation declaration.home declaration.name identity declaration.visibility)
     (steps : ∀ edge name sourceName identity visibility, edge ∈ imports →
       edge.Selects sources imports name sourceName → relation edge.target sourceName identity visibility →
       visibility.Allows edge.target edge.home → relation edge.home name identity edge.visibility)
-    {home : Module} {name : String} {identity : Nat} {visibility : Visibility}
+    {home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
     (candidate : FunctionCandidate sources imports home name identity visibility) :
     relation home name identity visibility := by
   induction candidate with
@@ -84,17 +84,17 @@ theorem FunctionCandidate.least {sources : List NamedFunction} {imports : List F
 /-- Only accessible candidates participate in lookup. Repeated routes to the
 same identity are not an overload set or an ambiguity. -/
 def VisibleFunctionCandidate (sources : List NamedFunction) (imports : List FunctionImport)
-    (caller home : Module) (name : String) (identity : Nat) : Prop :=
+    (caller home : Module) (name : Identifier) (identity : Nat) : Prop :=
   ∃ visibility, FunctionCandidate sources imports home name identity visibility ∧
     visibility.Allows home caller
 
 def FunctionResolution (sources : List NamedFunction) (imports : List FunctionImport)
-    (caller home : Module) (name : String) (identity : Nat) : Prop :=
+    (caller home : Module) (name : Identifier) (identity : Nat) : Prop :=
   VisibleFunctionCandidate sources imports caller home name identity ∧
     ∀ other, VisibleFunctionCandidate sources imports caller home name other → other = identity
 
 theorem FunctionResolution.unique {sources : List NamedFunction} {imports : List FunctionImport}
-    {caller home : Module} {name : String} {first second : Nat}
+    {caller home : Module} {name : Identifier} {first second : Nat}
     (left : FunctionResolution sources imports caller home name first)
     (right : FunctionResolution sources imports caller home name second) : first = second :=
   right.2 first left.1
@@ -102,13 +102,13 @@ theorem FunctionResolution.unique {sources : List NamedFunction} {imports : List
 /-- Semantic selection, not an assumed import table. Both missing and ambiguous
 names have no selected identity; admission distinguishes their obligations. -/
 noncomputable def functionNames (sources : List NamedFunction) (imports : List FunctionImport)
-    (caller home : Module) (name : String) : Option Nat := by
+    (caller home : Module) (name : Identifier) : Option Nat := by
   classical
   exact if resolved : ∃ identity, FunctionResolution sources imports caller home name identity
     then some (Classical.choose resolved) else none
 
 theorem functionNames.selected_iff {sources : List NamedFunction} {imports : List FunctionImport}
-    {caller home : Module} {name : String} {identity : Nat} :
+    {caller home : Module} {name : Identifier} {identity : Nat} :
     functionNames sources imports caller home name = some identity ↔
       FunctionResolution sources imports caller home name identity := by
   classical
@@ -127,14 +127,14 @@ theorem functionNames.selected_iff {sources : List NamedFunction} {imports : Lis
     · intro resolved; exact False.elim (missing ⟨identity, resolved⟩)
 
 theorem functionNames.selected {sources : List NamedFunction} {imports : List FunctionImport}
-    {caller home : Module} {name : String} {identity : Nat}
+    {caller home : Module} {name : Identifier} {identity : Nat}
     (resolved : functionNames sources imports caller home name = some identity) :
     ∃ declaration, sources[identity]? = some declaration := by
   obtain ⟨visibility, candidate, _⟩ := (functionNames.selected_iff.mp resolved).1
   exact candidate.origin
 
 /-- An unseeded cycle cannot resolve, whatever its length or visibility. -/
-theorem functionNames.empty (imports : List FunctionImport) (caller home : Module) (name : String) :
+theorem functionNames.empty (imports : List FunctionImport) (caller home : Module) (name : Identifier) :
     functionNames [] imports caller home name = none := by
   cases found : functionNames [] imports caller home name with
   | none => rfl
@@ -145,7 +145,7 @@ theorem functionNames.empty (imports : List FunctionImport) (caller home : Modul
 /-- Actual conflicting declaration identities are rejected, rather than chosen
 by source order, argument types, or expected result type. -/
 theorem functionNames.ambiguous {sources : List NamedFunction} {imports : List FunctionImport}
-    {caller home : Module} {name : String} {first second : Nat}
+    {caller home : Module} {name : Identifier} {first second : Nat}
     (left : VisibleFunctionCandidate sources imports caller home name first)
     (right : VisibleFunctionCandidate sources imports caller home name second)
     (different : first ≠ second) : functionNames sources imports caller home name = none := by
@@ -157,13 +157,13 @@ theorem functionNames.ambiguous {sources : List NamedFunction} {imports : List F
 
 theorem ExplicitFunctionBinding.imports_congr {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    (home : Module) (name : String) :
+    (home : Module) (name : Identifier) :
     ExplicitFunctionBinding sources first home name ↔ ExplicitFunctionBinding sources second home name := by
   simp only [ExplicitFunctionBinding, same]
 
 theorem FunctionCandidate.transport_imports {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    {home : Module} {name : String} {identity : Nat} {visibility : Visibility}
+    {home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
     (candidate : FunctionCandidate sources first home name identity visibility) :
     FunctionCandidate sources second home name identity visibility := by
   induction candidate with
@@ -177,14 +177,14 @@ theorem FunctionCandidate.transport_imports {sources : List NamedFunction}
 
 theorem FunctionCandidate.imports_congr {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    (home : Module) (name : String) (identity : Nat) (visibility : Visibility) :
+    (home : Module) (name : Identifier) (identity : Nat) (visibility : Visibility) :
     FunctionCandidate sources first home name identity visibility ↔
       FunctionCandidate sources second home name identity visibility :=
   ⟨FunctionCandidate.transport_imports same, FunctionCandidate.transport_imports (fun edge => (same edge).symm)⟩
 
 theorem FunctionResolution.imports_congr {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    (caller home : Module) (name : String) (identity : Nat) :
+    (caller home : Module) (name : Identifier) (identity : Nat) :
     FunctionResolution sources first caller home name identity ↔
       FunctionResolution sources second caller home name identity := by
   simp only [FunctionResolution, VisibleFunctionCandidate, FunctionCandidate.imports_congr same]
@@ -193,7 +193,7 @@ theorem FunctionResolution.imports_congr {sources : List NamedFunction}
 multiplicity. This includes both successful and ambiguous cyclic closures. -/
 theorem functionNames.imports_congr {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    (caller home : Module) (name : String) :
+    (caller home : Module) (name : Identifier) :
     functionNames sources first caller home name = functionNames sources second caller home name := by
   cases left : functionNames sources first caller home name with
   | some identity =>
@@ -226,7 +226,7 @@ def FunctionImportsValid (modules : List Module) (sources : List NamedFunction)
 No completed resolver result is an extra premise at this boundary. -/
 theorem FunctionImportsValid.resolve_existing {modules : List Module} {sources : List NamedFunction}
     {imports : List FunctionImport} (valid : FunctionImportsValid modules sources imports)
-    {caller home : Module} (included : home ∈ modules) {name : String} {identity : Nat}
+    {caller home : Module} (included : home ∈ modules) {name : Identifier} {identity : Nat}
     (candidate : VisibleFunctionCandidate sources imports caller home name identity) :
     functionNames sources imports caller home name = some identity := by
   apply functionNames.selected_iff.mpr

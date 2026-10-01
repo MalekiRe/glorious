@@ -1,3 +1,4 @@
+import Grounded.Identifiers
 import Grounded.Soundness
 
 /-! Named local resolution feeds the existing decoded-core checking rules.
@@ -6,7 +7,7 @@ consults spellings. This is local elaboration, not a parser or type inference. -
 namespace Grounded
 
 structure SourceBinding where
-  spelling : String
+  spelling : Identifier
   identity : BindingId
   slot : BindingType
 
@@ -22,7 +23,7 @@ def SourceScope.context (scope : SourceScope) : List (BindingId × BindingType) 
   scope.bindings.map fun binding => (binding.identity, binding.slot)
 
 /-- Nearest source spelling wins. An absent name is not an invented binding. -/
-def SourceScope.resolve (scope : SourceScope) (spelling : String) : Option SourceBinding :=
+def SourceScope.resolve (scope : SourceScope) (spelling : Identifier) : Option SourceBinding :=
   scope.bindings.find? (fun binding => binding.spelling == spelling)
 
 theorem SourceScope.fresh (scope : SourceScope) :
@@ -34,7 +35,7 @@ theorem SourceScope.fresh (scope : SourceScope) :
   exact Nat.lt_irrefl _ bound
 
 /-- The binder is installed only for its body, not its initializer. -/
-def SourceScope.enter (scope : SourceScope) (spelling : String) (slot : BindingType) : SourceScope where
+def SourceScope.enter (scope : SourceScope) (spelling : Identifier) (slot : BindingType) : SourceScope where
   bindings := ⟨spelling, ⟨scope.next⟩, slot⟩ :: scope.bindings
   next := scope.next + 1
   distinct := List.nodup_cons.mpr ⟨scope.fresh, scope.distinct⟩
@@ -44,11 +45,11 @@ def SourceScope.enter (scope : SourceScope) (spelling : String) (slot : BindingT
     | head => exact Nat.lt_succ_self _
     | tail _ member => exact Nat.lt_succ_of_lt (scope.below binding member)
 
-theorem SourceScope.enter_resolve (scope : SourceScope) (spelling : String) (slot : BindingType) :
+theorem SourceScope.enter_resolve (scope : SourceScope) (spelling : Identifier) (slot : BindingType) :
     (scope.enter spelling slot).resolve spelling = some ⟨spelling, ⟨scope.next⟩, slot⟩ := by
   simp [resolve, enter]
 
-theorem SourceScope.enter_resolve_other (scope : SourceScope) (spelling other : String) (slot : BindingType)
+theorem SourceScope.enter_resolve_other (scope : SourceScope) (spelling other : Identifier) (slot : BindingType)
     (different : spelling ≠ other) :
     (scope.enter spelling slot).resolve other = scope.resolve other := by
   simp [resolve, enter, different]
@@ -68,26 +69,26 @@ private theorem selected_binding {bindings : List SourceBinding} {binding : Sour
         exact parts.1 (same ▸ List.mem_map.mpr ⟨binding, member, rfl⟩)
       simp [lookup, different, ih parts.2 member]
 
-theorem SourceScope.selected {scope : SourceScope} {spelling : String} {binding : SourceBinding}
+theorem SourceScope.selected {scope : SourceScope} {spelling : Identifier} {binding : SourceBinding}
     (resolved : scope.resolve spelling = some binding) :
     lookup binding.identity scope.context = some binding.slot :=
   selected_binding scope.distinct (List.mem_of_find?_eq_some resolved)
 
 /-- Successful resolution selects precisely the first matching spelling. -/
-theorem SourceScope.resolve_first (scope : SourceScope) (spelling : String) (binding : SourceBinding) :
+theorem SourceScope.resolve_first (scope : SourceScope) (spelling : Identifier) (binding : SourceBinding) :
     scope.resolve spelling = some binding ↔ binding.spelling = spelling ∧
       ∃ before after, scope.bindings = before ++ binding :: after ∧
         ∀ earlier ∈ before, earlier.spelling ≠ spelling := by
   simp [resolve, List.find?_eq_some_iff_append]
 
-theorem SourceScope.resolve_missing (scope : SourceScope) (spelling : String) :
+theorem SourceScope.resolve_missing (scope : SourceScope) (spelling : Identifier) :
     scope.resolve spelling = none ↔ ∀ binding ∈ scope.bindings, binding.spelling ≠ spelling := by
   simp [resolve, List.find?_eq_none]
 
 /-- Shadowing changes future name resolution, never an already-resolved outer
 reference. This includes the case where both declarations have the same spelling. -/
-theorem SourceScope.enter_preserves_selected {scope : SourceScope} {spelling : String} {binding : SourceBinding}
-    (resolved : scope.resolve spelling = some binding) (newName : String) (slot : BindingType) :
+theorem SourceScope.enter_preserves_selected {scope : SourceScope} {spelling : Identifier} {binding : SourceBinding}
+    (resolved : scope.resolve spelling = some binding) (newName : Identifier) (slot : BindingType) :
     lookup binding.identity (scope.enter newName slot).context = some binding.slot := by
   have different : binding.identity ≠ (⟨scope.next⟩ : BindingId) := by
     intro equal
@@ -102,7 +103,7 @@ theorem SourceScope.enter_preserves_selected {scope : SourceScope} {spelling : S
 /-- A write through the newly resolved binding cannot overwrite an outer root.
 The compared environments are immediately before/after the destination write;
 RHS effects have already happened and are not claimed to be undone. -/
-theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spelling : String}
+theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spelling : Identifier}
     {binding : SourceBinding} (resolved : scope.resolve spelling = some binding)
     {program : Program} {fields outerFields : List FieldKey} {value : Value}
     {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
@@ -121,12 +122,12 @@ theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spe
 
 /-- Resolution produces the exact core place; projection authority remains the
 shared PathType judgment, rather than a second source-field analysis. -/
-def SourceScope.resolvePlace (scope : SourceScope) (spelling : String) (fields : List FieldKey) : Option Place :=
+def SourceScope.resolvePlace (scope : SourceScope) (spelling : Identifier) (fields : List FieldKey) : Option Place :=
   (scope.resolve spelling).map (fun binding => ⟨binding.identity, fields⟩)
 
 variable {program : Program} {home : Module}
 
-theorem SourceScope.place {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+theorem SourceScope.place {scope : SourceScope} {spelling : Identifier} {fields : List FieldKey}
     {binding : SourceBinding} {type : Ty} (resolved : scope.resolve spelling = some binding)
     (path : PathType program home binding.slot.type fields type) :
     scope.resolvePlace spelling fields = some ⟨binding.identity, fields⟩ ∧
@@ -134,7 +135,7 @@ theorem SourceScope.place {scope : SourceScope} {spelling : String} {fields : Li
   refine ⟨by simp [resolvePlace, resolved], ?_⟩
   exact .root (scope.selected resolved) path
 
-theorem SourceScope.selected_slot {scope : SourceScope} {spelling : String} {binding : SourceBinding}
+theorem SourceScope.selected_slot {scope : SourceScope} {spelling : Identifier} {binding : SourceBinding}
     {context : FlowContext} {state : BindingState} (resolved : scope.resolve spelling = some binding)
     (slots : context.slots = scope.context) (selected : lookup binding.identity context = some state) :
     state.slot = binding.slot := by
@@ -142,7 +143,7 @@ theorem SourceScope.selected_slot {scope : SourceScope} {spelling : String} {bin
   rw [← slots, FlowContext.slots, lookup.map, selected] at found
   exact Option.some.inj found
 
-theorem SourceScope.read_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+theorem SourceScope.read_checked {scope : SourceScope} {spelling : Identifier} {fields : List FieldKey}
     {binding : SourceBinding} {type : Ty} {context : FlowContext} {state : BindingState} {available : Initialization}
     (resolved : scope.resolve spelling = some binding) (slots : context.slots = scope.context)
     (selected : lookup binding.identity context = some state)
@@ -153,7 +154,7 @@ theorem SourceScope.read_checked {scope : SourceScope} {spelling : String} {fiel
   have same := scope.selected_slot resolved slots selected
   exact .read selected (by rw [same]; exact path) (by rw [same]; exact selection) ready copyable
 
-theorem SourceScope.move_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+theorem SourceScope.move_checked {scope : SourceScope} {spelling : Identifier} {fields : List FieldKey}
     {binding : SourceBinding} {type : Ty} {before after : FlowContext} {state : BindingState}
     {available updated : Initialization}
     (resolved : scope.resolve spelling = some binding) (slots : before.slots = scope.context)
@@ -169,7 +170,7 @@ theorem SourceScope.move_checked {scope : SourceScope} {spelling : String} {fiel
     (by rw [same]; exact mask) context
 
 /-- Destination selection uses the RHS output state, not the incoming state. -/
-theorem SourceScope.assign_checked {scope : SourceScope} {spelling : String} {fields : List FieldKey}
+theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier} {fields : List FieldKey}
     {binding : SourceBinding} {type result : Ty} {value rest : Expr}
     {before evaluated restored after : FlowContext} {state : BindingState} {updated : Initialization}
     (resolved : scope.resolve spelling = some binding) (slots : before.slots = scope.context)

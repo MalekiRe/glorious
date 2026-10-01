@@ -88,6 +88,7 @@ ownership, destruction, loans and physical memory remain open.
 | `Termination` | Structural constant termination and optional well-founded call expansion |
 | `Soundness` | Prefix safety and the preserved terminating-fragment theorem |
 | `SourcePatterns` | Certified constant normalization and its public source consumer |
+| `Identifiers` | Total checked identifier decoding and exact ASCII lexeme grammar |
 | `SourceLocals` | Named-local resolution, fresh lexical scope entry and source checking/safety consumers |
 | `NamedPatterns` | Named pattern-binder allocation and exact matcher/body scope agreement |
 | `SourceExpressions` | Recursive named-expression and clause elaboration into core admission |
@@ -1351,4 +1352,37 @@ namespace resolution. Textual paths/groups, package acquisition/normalization,
 prelude profiles and their priority, non-callable namespaces, lexical decoding,
 and the rest of the whole-language obligations remain open. No full-language
 completion claim follows from this checkpoint.
+
+
+
+## Verified checked identifier boundary
+
+`Identifiers` owns the executable ASCII character classifier and total
+`Identifier.decode` producer for the identifier lexemes of normative §3.1.
+`identifierLexeme_grammar` proves exact equivalence with the nonempty
+`[A-Za-z_][A-Za-z0-9_]*` grammar and exclusion of the standalone wildcard
+`_`. Decoder proofs characterize both successful exact-spelling selection
+and rejection. Character classification is not delegated to Unicode alphabetic
+predicates, locale, or another source consumer.
+
+The checked `Identifier` product replaces arbitrary strings in source-local
+bindings and uses, named pattern binders, parameters, direct-function names,
+qualified/unqualified callable spellings and explicit import aliases. Scope
+entry, shadowing, duplicate-name checks, seeded import resolution and named
+source admission all consume the same representation. No unchecked string
+coercion or compatibility lookup remains on these migrated paths. Core binding
+and declaration identities and the runtime machine are unchanged.
+
+Fresh source-only `lake build Grounded.SourceDeclarations` passed (27 jobs).
+The full imported audit covered 3,150 `Grounded` declarations with only
+standard Lean axioms. Decoder acceptance/rejection, exact grammar equivalence,
+imported-call soundness and named finite-call correctness received explicit
+axiom inspection. No unit tests or concrete examples were added or run.
+
+This closes identifier-lexeme admission on the listed source paths, not byte
+lexing or parsing. UTF-8 validation, token boundaries/comments, keyword roles,
+spans, other literal forms and source package/module closure remain open.
+Constants, type aliases and field keys retain decoded textual interfaces;
+they have not been represented as fully validated source tokens. The broader
+lexical and whole-language completion tasks remain incomplete.
 

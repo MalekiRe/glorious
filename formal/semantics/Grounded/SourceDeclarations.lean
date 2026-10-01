@@ -32,7 +32,7 @@ theorem NamedParametersElaborate.disposable {program : Program} {parameters : Li
 
 /-- Source parameter names, omitted-unit result semantics and the actual named
 body determine the same declaration consumed by runtime invocation. -/
-inductive NamedFunction.Elaborates (program : Program) (names : Module → Module → String → Option Nat) :
+inductive NamedFunction.Elaborates (program : Program) (names : Module → Module → Identifier → Option Nat) :
     NamedFunction → FunctionDecl → Prop where
   | intro {source scope result body after}
       (parameters : NamedParametersElaborate program source.parameters scope)
@@ -42,7 +42,7 @@ inductive NamedFunction.Elaborates (program : Program) (names : Module → Modul
       NamedFunction.Elaborates program names source
         ⟨source.home, source.visibility, scope.context, result, body⟩
 
-theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → Module → String → Option Nat}
+theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → Module → Identifier → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
@@ -51,7 +51,7 @@ theorem NamedFunction.Elaborates.checked {program : Program} {names : Module →
       simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])⟩
 
 
-inductive NamedFunctionsElaborate (program : Program) (names : Module → Module → String → Option Nat) :
+inductive NamedFunctionsElaborate (program : Program) (names : Module → Module → Identifier → Option Nat) :
     List NamedFunction → List FunctionDecl → Prop where
   | nil : NamedFunctionsElaborate program names [] []
   | cons {source sources core cores}
@@ -59,7 +59,7 @@ inductive NamedFunctionsElaborate (program : Program) (names : Module → Module
       (tail : NamedFunctionsElaborate program names sources cores) :
       NamedFunctionsElaborate program names (source :: sources) (core :: cores)
 
-theorem NamedFunctionsElaborate.checked {program : Program} {names : Module → Module → String → Option Nat}
+theorem NamedFunctionsElaborate.checked {program : Program} {names : Module → Module → Identifier → Option Nat}
     {source : List NamedFunction} {core : List FunctionDecl}
     (elaborated : NamedFunctionsElaborate program names source core) :
     ∀ declaration ∈ core, FunctionChecked program declaration := by
@@ -144,7 +144,7 @@ theorem NamedFunctionsAdmitted.import_call_soundness {sources : List NamedFuncti
   exact admitted.soundness elaborated slots store issued run
 
 
-theorem NamedFunctionsElaborate.selected {program : Program} {names : Module → Module → String → Option Nat}
+theorem NamedFunctionsElaborate.selected {program : Program} {names : Module → Module → Identifier → Option Nat}
     {sources : List NamedFunction} {cores : List FunctionDecl}
     (elaborated : NamedFunctionsElaborate program names sources cores)
     {identity : Nat} {source : NamedFunction} (selected : sources[identity]? = some source) :
@@ -158,7 +158,7 @@ theorem NamedFunctionsElaborate.selected {program : Program} {names : Module →
 
 theorem NamedFunctionsAdmitted.resolves {sources : List NamedFunction} {program : Program}
     (admitted : NamedFunctionsAdmitted modules sources imports program)
-    {caller home : Module} {name : String} {identity : Nat}
+    {caller home : Module} {name : Identifier} {identity : Nat}
     (resolved : functionNames sources imports caller home name = some identity) :
     ∃ source core, sources[identity]? = some source ∧ program.functions identity = some core ∧
       NamedFunction.Elaborates program (functionNames sources imports) source core := by

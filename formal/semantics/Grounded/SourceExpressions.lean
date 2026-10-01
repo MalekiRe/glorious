@@ -8,14 +8,14 @@ namespace Grounded
 /-- Explicit qualification carries a module identity, not authority encoded in
 a flattened string. Textual path/import expansion remains a source boundary. -/
 inductive FunctionName where
-  | unqualified (spelling : String)
-  | qualified (owner : Module) (spelling : String)
+  | unqualified (spelling : Identifier)
+  | qualified (owner : Module) (spelling : Identifier)
 
 def FunctionName.owner (caller : Module) : FunctionName → Module
   | .unqualified _ => caller
   | .qualified owner _ => owner
 
-def FunctionName.spelling : FunctionName → String
+def FunctionName.spelling : FunctionName → Identifier
   | .unqualified spelling | .qualified _ spelling => spelling
 
 def FunctionName.Unshadowed (scope : SourceScope) : FunctionName → Prop
@@ -27,23 +27,23 @@ inductive NamedExpr where
   | integer (type : IntegerType) (magnitude : Nat)
   | character (number : Nat)
   | group (body : NamedExpr)
-  | read (name : String) (fields : List FieldKey)
-  | move (name : String) (fields : List FieldKey)
+  | read (name : Identifier) (fields : List FieldKey)
+  | move (name : Identifier) (fields : List FieldKey)
   | sequence (first rest : NamedExpr)
-  | bind (mutable : Bool) (name : String) (annotation : Option TypeExpr) (initial body : NamedExpr)
+  | bind (mutable : Bool) (name : Identifier) (annotation : Option TypeExpr) (initial body : NamedExpr)
   | tuple (head : NamedExpr) (tail : List NamedExpr)
   | project (body : NamedExpr) (key : FieldKey)
   | array (elements : List NamedExpr)
   | constant (name : String)
   | construct (identity : Nat) (tag : Option Nat) (fields : List NamedExpr)
   | call (name : FunctionName) (arguments : List NamedExpr)
-  | assign (name : String) (fields : List FieldKey) (value rest : NamedExpr)
+  | assign (name : Identifier) (fields : List FieldKey) (value rest : NamedExpr)
   | applyPatterns (arguments : List NamedExpr) (arms : List (NamedPattern × NamedExpr))
 
 mutual
 /-- Name resolution and static availability are composed in evaluation order.
 No operational success or successor heap is an admission premise. -/
-inductive NamedExpr.Elaborates (program : Program) (names : Module → Module → String → Option Nat) (home : Module) :
+inductive NamedExpr.Elaborates (program : Program) (names : Module → Module → Identifier → Option Nat) (home : Module) :
     SourceScope → FlowContext → NamedExpr → Expr → Ty → FlowContext → Prop where
   | unit {scope context} : NamedExpr.Elaborates program names home scope context .unit .unit .unit context
   | integer {scope context type magnitude} (fits : type.Contains program.target magnitude) :
@@ -130,14 +130,14 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → Module �
       (bodies : NamedArmsElaborate program names home scope evaluated (argumentType inputs) result [] arms coreArms after) :
       NamedExpr.Elaborates program names home scope before (.applyPatterns arguments arms)
         (.applyPatterns inputs coreArguments coreArms) result after
-inductive NamedExprsElaborate (program : Program) (names : Module → Module → String → Option Nat) (home : Module) :
+inductive NamedExprsElaborate (program : Program) (names : Module → Module → Identifier → Option Nat) (home : Module) :
     SourceScope → FlowContext → List NamedExpr → List Expr → List Ty → FlowContext → Prop where
   | nil {scope context} : NamedExprsElaborate program names home scope context [] [] [] context
   | cons {scope before middle after head tail first rest type types}
       (initial : NamedExpr.Elaborates program names home scope before head first type middle)
       (continued : NamedExprsElaborate program names home scope middle tail rest types after) :
       NamedExprsElaborate program names home scope before (head :: tail) (first :: rest) (type :: types) after
-inductive NamedArmsElaborate (program : Program) (names : Module → Module → String → Option Nat) (home : Module) :
+inductive NamedArmsElaborate (program : Program) (names : Module → Module → Identifier → Option Nat) (home : Module) :
     SourceScope → FlowContext → Ty → Ty → List Pattern → List (NamedPattern × NamedExpr) → List (Pattern × Expr) → FlowContext → Prop where
   | empty {scope before after subject result previous} : NamedArmsElaborate program names home scope before subject result previous [] [] after
   | clause {scope localScope before after subject result previous source pattern bindings localsAfter body coreBody tail coreTail}
@@ -154,8 +154,8 @@ end
 result or argument types. Local callable invocation is a separate language
 operation; failure to support it must not expose the hidden declaration. -/
 theorem NamedExpr.Elaborates.call_not_shadowed {program : Program}
-    {names : Module → Module → String → Option Nat} {home : Module} {scope : SourceScope}
-    {before after : FlowContext} {name : String} {arguments : List NamedExpr}
+    {names : Module → Module → Identifier → Option Nat} {home : Module} {scope : SourceScope}
+    {before after : FlowContext} {name : Identifier} {arguments : List NamedExpr}
     {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope before
       (.call (.unqualified name) arguments) core type after) : scope.resolve name = none := by
@@ -164,7 +164,7 @@ theorem NamedExpr.Elaborates.call_not_shadowed {program : Program}
 
 /-- Elaboration preserves the authoritative flow checking judgment. The static
 name scope and flow context agree on declarations, not on future readiness. -/
-theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names : Module → Module → String → Option Nat}
+theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names : Module → Module → Identifier → Option Nat}
     {scope : SourceScope} {before after : FlowContext} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope before source core type after)
     (slots : before.slots = scope.context) : HasType program home before core type after := by
@@ -221,7 +221,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     rw [allocated.checked.2]
     simp [FlowContext.slots, initializedContext, List.map_append, List.map_map, Function.comp_def, ← slots]
 
-theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names : Module → Module → String → Option Nat}
+theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names : Module → Module → Identifier → Option Nat}
     {scope : SourceScope} {before after : FlowContext} {source : List NamedExpr} {core : List Expr} {types : List Ty}
     (elaborated : NamedExprsElaborate program names home scope before source core types after)
     (slots : before.slots = scope.context) : HasTypes program home before core types after := by
@@ -236,7 +236,7 @@ theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names :
 /-- Every prefix of the selected elaboration is safe, including recursive calls.
 The only dynamic input evidence describes the actual incoming environment. -/
 theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
-    {names : Module → Module → String → Option Nat}
+    {names : Module → Module → Identifier → Option Nat}
     {scope : SourceScope} {before final : FlowContext} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope before source core type final)
     (slots : before.slots = scope.context)
@@ -253,7 +253,7 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
 /-- Completed executions preserve the declared result and caller environment;
 termination is not assumed by source admission. -/
 theorem NamedExpr.Elaborates.evaluation_soundness {program : Program} {home : Module}
-    {names : Module → Module → String → Option Nat}
+    {names : Module → Module → Identifier → Option Nat}
     {scope : SourceScope} {before final : FlowContext} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope before source core type final)
     (slots : before.slots = scope.context)
@@ -269,7 +269,7 @@ theorem NamedExpr.Elaborates.evaluation_soundness {program : Program} {home : Mo
 /-- Finite-call termination remains an optional theorem about the same selected
 core, not a restriction on recursive source safety. -/
 theorem NamedExpr.Elaborates.correctness {program : Program} {home : Module}
-    {names : Module → Module → String → Option Nat}
+    {names : Module → Module → Identifier → Option Nat}
     {scope : SourceScope} {before final : FlowContext} {source : NamedExpr} {core : Expr} {type : Ty}
     (elaborated : NamedExpr.Elaborates program names home scope before source core type final)
     (slots : before.slots = scope.context)

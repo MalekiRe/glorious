@@ -7,16 +7,16 @@ namespace Grounded
 
 inductive NamedPattern where
   | wildcard
-  | binder (name : String)
+  | binder (name : Identifier)
   | node (head : Head) (fields : List NamedPattern)
   | constant (name : String)
 
 mutual
-def NamedPattern.binders : NamedPattern → List String
+def NamedPattern.binders : NamedPattern → List Identifier
   | .wildcard | .constant _ => []
   | .binder name => [name]
   | .node _ fields => namedPatternBinders fields
-def namedPatternBinders : List NamedPattern → List String
+def namedPatternBinders : List NamedPattern → List Identifier
   | [] => []
   | first :: rest => first.binders ++ namedPatternBinders rest
 end
@@ -30,7 +30,7 @@ inductive NamedPattern.Elaborates (program : Program) (home : Module) :
     SourceScope → NamedPattern → Ty → Pattern → List (BindingId × BindingType) → SourceScope → Prop where
   | wildcard {scope type} (discard : Duplicable program.data type) :
       NamedPattern.Elaborates program home scope .wildcard type .wildcard [] scope
-  | binder {scope type} (name : String) (discard : Duplicable program.data type) :
+  | binder {scope type} (name : Identifier) (discard : Duplicable program.data type) :
       NamedPattern.Elaborates program home scope (.binder name) type (.binder ⟨scope.next⟩ type)
         [(⟨scope.next⟩, ⟨type, false⟩)] (scope.enter name ⟨type, false⟩)
   | constant {scope name type} (typed : HasType program home [] (.constant name) type [])
