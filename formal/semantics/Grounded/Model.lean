@@ -67,6 +67,22 @@ def Visibility.Allows (visibility : Visibility) (owner caller : Module) : Prop :
       owner.path.dropLast.IsPrefix caller.path
   | .public => True
 
+/-- A declared visibility must designate a scope containing its owner.
+In particular, a package root has no parent scope. -/
+def Visibility.ValidAt (visibility : Visibility) (owner : Module) : Prop :=
+  visibility.Allows owner owner
+
+theorem Visibility.validAt_iff (visibility : Visibility) (owner : Module) :
+    visibility.ValidAt owner ↔ (visibility = .parent → owner.path ≠ []) := by
+  cases visibility <;> simp [Visibility.ValidAt, Visibility.Allows, List.dropLast_prefix]
+
+theorem Visibility.ValidAt.not_parent_at_root {visibility : Visibility} {owner : Module}
+    (valid : visibility.ValidAt owner) (root : owner.path = []) : visibility ≠ .parent := by
+  intro same
+  subst visibility
+  exact valid.1 root
+
+
 inductive FieldKey where
   | named (name : String)
   | positional (index : Nat)

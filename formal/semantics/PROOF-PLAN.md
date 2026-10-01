@@ -1717,3 +1717,39 @@ placeholders or additional axioms were added.
 This closes the constructive explicit-import call boundary, not the outstanding
 module aliases, other namespaces, preludes, parsing or whole-language obligations.
 
+
+## Verified declaration-time visibility scope validation
+
+`Visibility.ValidAt` reuses the authoritative access relation: a declared scope
+must contain its declaring module. The general `validAt_iff` theorem establishes
+exact acceptance: private, package and public scopes are valid at every owner;
+a parent scope is valid exactly when the owner is not the parentless package
+root. There is no separate visibility classifier with potentially different rules.
+
+`SourceClosure.Admitted` now validates the scopes of every function declaration,
+import statement and child-module binding in every included module, whether used
+or not. Validation uses inclusion-derived module owners, not physical file names.
+It is separate from namespace reachability and call-site access checking.
+`root_visibility` proves rejection of parent-restricted declarations for all
+three modeled source item kinds at roots. Empty import groups cannot evade this
+check. No access attempt or successful execution is needed to detect an invalid
+scope.
+
+`declaration_visibility` transports validation through the exact emitted
+source-function relation to actual runtime declarations. The general
+`function_soundness` theorem now returns valid declaration scope alongside
+source provenance, fresh function entry, preservation, progress and storage
+framing. Imported-call soundness, finite-call correctness and file-order admission
+invariance consume the migrated admission contract.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,647 declarations; only standard Lean axioms occur.
+Exact visibility acceptance, root rejection, emitted declaration validity,
+function soundness, imported-call soundness, correctness and file-order invariance
+received explicit axiom inspection. No unit tests, examples, placeholders or
+additional axioms were added.
+
+This covers the function/import/module source forms currently modeled. Nominal
+source declarations and field visibility elaboration, module aliases, other
+namespaces, preludes, parsing and the remaining whole-language tasks remain open.
+

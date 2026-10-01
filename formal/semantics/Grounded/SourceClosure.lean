@@ -29,6 +29,14 @@ structure LoadedModule where
   directory : SourcePath
   source : ModuleSource
 
+/-- Validate every declared scope, including unused imports and module bindings.
+The owner is the inclusion-derived module, never the supplied file path. -/
+def LoadedModule.VisibilityValid (loaded : LoadedModule) : Prop :=
+  (∀ declaration ∈ loaded.source.functions, declaration.visibility.ValidAt loaded.home) ∧
+  (∀ source ∈ loaded.source.imports, source.visibility.ValidAt loaded.home) ∧
+  (∀ child ∈ loaded.source.children, child.2.1.ValidAt loaded.home)
+
+
 def Module.child (home : Module) (name : Identifier) : Module :=
   ⟨home.package, home.path ++ [name]⟩
 
@@ -432,11 +440,24 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
   (∀ entry ∈ closure.importEntries, PackageAccess packages entry.home.package entry.target.package ∧
     ModuleReachable closure.modules entry.home entry.target) ∧
   FunctionImportsValid closure.homes closure.functions closure.imports ∧
-  NamedProgramAdmitted closure.functionNames closure.functions program
+  NamedProgramAdmitted closure.functionNames closure.functions program ∧
+  ∀ loaded ∈ closure.modules, loaded.VisibilityValid
+
+theorem SourceClosure.Admitted.root_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules) (root : loaded.home.path = []) :
+    (∀ declaration ∈ loaded.source.functions, declaration.visibility ≠ .parent) ∧
+    (∀ source ∈ loaded.source.imports, source.visibility ≠ .parent) ∧
+    (∀ child ∈ loaded.source.children, child.2.1 ≠ .parent) := by
+  have valid := admitted.2.2.2.2.2 loaded included
+  exact ⟨fun declaration member => (valid.1 declaration member).not_parent_at_root root,
+    fun source member => (valid.2.1 source member).not_parent_at_root root,
+    fun child member => (valid.2.2 child member).not_parent_at_root root⟩
+
 
 theorem SourceClosure.Admitted.checked {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) : program.Checked :=
-  admitted.2.2.2.2.checked
+  admitted.2.2.2.2.1.checked
 
 /-- Import-path authorization comes from actual source admission over the
 complete elaborated import product, not an independently supplied namespace. -/
@@ -498,7 +519,7 @@ theorem SourceClosure.Admitted.declaration {packages : List PackageSource} {clos
       declaration.home = loaded.home ∧
       NamedFunction.Elaborates program closure.functionNames
         ⟨source, loaded.home⟩ declaration := by
-  obtain ⟨_, core, elaborated, functions⟩ := admitted.2.2.2.2
+  obtain ⟨_, core, elaborated, functions⟩ := admitted.2.2.2.2.1
   rw [functions] at selected
   obtain ⟨source, found, body⟩ := elaborated.selected_core selected
   obtain ⟨loaded, included, item, member, same⟩ := closure.function_owner (List.mem_of_getElem? found)
@@ -506,6 +527,16 @@ theorem SourceClosure.Admitted.declaration {packages : List PackageSource} {clos
   refine ⟨loaded, included, item, member, ?_, body⟩
   cases body
   rfl
+
+theorem SourceClosure.Admitted.declaration_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : FunctionDecl} (selected : program.functions identity = some declaration) :
+    declaration.visibility.ValidAt declaration.home := by
+  obtain ⟨loaded, included, source, member, _, elaborated⟩ := admitted.declaration selected
+  have valid := (admitted.2.2.2.2.2 loaded included).1 source member
+  cases elaborated
+  exact valid
+
 
 /-- General preservation, progress and consumption framing for elaboration
 against the declaration-driven closure. No execution-success premise occurs. -/
@@ -699,6 +730,7 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
         ⟨source, loaded.home⟩ declaration ∧
       (∃ package ∈ packages, loaded.home.package = package.identity ∧
         ∃ fileSource, (loaded.origin, fileSource) ∈ package.files) ∧
+      declaration.visibility.ValidAt declaration.home ∧
       ∃ entry final, enterFunction heap supply declaration values = some entry ∧
         entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧
         (¬supply.Issued entry.activation) ∧
@@ -717,7 +749,7 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, _, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply
   exact ⟨loaded, included, source, member, owner, elaborated,
-    closure.included.provenance included, entry, final,
+    closure.included.provenance included, admitted.declaration_visibility selected, entry, final,
     entered, activation, supplyNext, fresh, callers,
     fun _ run => body.soundness admitted.checked typed issued run⟩
 
@@ -794,7 +826,7 @@ theorem SourceClosure.Admitted.resolves {packages : List PackageSource} {closure
     (resolved : closure.functionNames caller name = some identity) :
     ∃ source core, closure.functions[identity]? = some source ∧ program.functions identity = some core ∧
       NamedFunction.Elaborates program closure.functionNames source core := by
-  obtain ⟨_, cores, elaborated, functions⟩ := admitted.2.2.2.2
+  obtain ⟨_, cores, elaborated, functions⟩ := admitted.2.2.2.2.1
   obtain ⟨_, _, _, _, resolution⟩ := closure.functionNames_selected.mp resolved
   have base := Grounded.functionNames.selected_iff.mpr resolution
   obtain ⟨source, selected⟩ := Grounded.functionNames.selected base
@@ -836,7 +868,7 @@ theorem SourceClosure.Admitted.evaluation_soundness {packages : List PackageSour
     (evaluated : Evaluates program environment core value after) :
     ValueHasType program value type ∧ BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
-  admitted.2.2.2.2.evaluation_soundness elaborated slots store issued evaluated
+  admitted.2.2.2.2.1.evaluation_soundness elaborated slots store issued evaluated
 
 theorem SourceClosure.Admitted.correctness {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
@@ -849,7 +881,7 @@ theorem SourceClosure.Admitted.correctness {packages : List PackageSource} {clos
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter → other = value ∧ otherAfter = after :=
-  admitted.2.2.2.2.correctness elaborated slots finite store issued
+  admitted.2.2.2.2.1.correctness elaborated slots finite store issued
 
 
 theorem Module.child_injective {first second : Module} {left right : Identifier}
