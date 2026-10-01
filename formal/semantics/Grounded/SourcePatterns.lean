@@ -187,7 +187,8 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     (run : Run program ⟨environment, .expression (.applyPatterns inputs arguments checked.normalize.val), []⟩ state) :
     ConfigurationTyped program context (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame context environment state.outerEnvironment :=
+      EnvironmentFrame context environment state.outerEnvironment ∧
+      (state.environment.map Prod.fst).Nodup :=
   (checked.admits argumentsTyped nonempty covered bodies).soundness checkedProgram store run
 
 

@@ -15,10 +15,11 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context : StaticCo
     (run : Run program ⟨environment, .expression expression, []⟩ state) :
     ConfigurationTyped program context (.one type) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
-      EnvironmentFrame context environment state.outerEnvironment := by
+      EnvironmentFrame context environment state.outerEnvironment ∧
+      (state.environment.map Prod.fst).Nodup := by
   have entry := ConfigurationTyped.entry checked store
   have current := entry.run checkedProgram run
-  exact ⟨current, current.progress, entry.frame_run checkedProgram run⟩
+  exact ⟨current, current.progress, entry.frame_run checkedProgram run, current.bindings_distinct⟩
 
 /-- Any completed recursive execution has the declared result and a framed
 successor store. Unlike existence of such an execution, this requires no

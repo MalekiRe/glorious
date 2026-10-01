@@ -202,7 +202,7 @@ theorem EnvironmentTyped.lookup {environment : List (BindingId × Value)} {conte
     ∃ value, lookup name environment = some value ∧ ValueHasType program value slot.type := by
   induction typed with
   | nil => simp [Grounded.lookup] at selected
-  | cons resident rest ih =>
+  | cons resident rest fresh ih =>
     simp only [Grounded.lookup] at selected ⊢
     split at selected
     · cases selected; exact ⟨_, by simp_all, resident⟩

@@ -29,7 +29,8 @@ inductive FrameTyped (program : Program) : StaticContext → ResultType → Fram
       FrameTyped program context (.one discarded) (.sequence rest) context (.one result)
   | bind {home : Module} {context : StaticContext} {name : BindingId} {mutable : Bool} {localType result : Ty} {body : Expr}
       (discard : Duplicable program.data localType)
-      (checked : HasType program home ((name, ⟨localType, mutable⟩) :: context) body result) :
+      (checked : HasType program home ((name, ⟨localType, mutable⟩) :: context) body result)
+      (fresh : name ∉ context.map Prod.fst) :
       FrameTyped program context (.one localType) (.bind name body) context (.one result)
   | scope {context : StaticContext} (locals : StaticContext) {result : Ty}
       (discard : ∀ binding ∈ locals, Duplicable program.data binding.2.type) :
@@ -92,6 +93,12 @@ inductive ConfigurationTyped (program : Program) (context : StaticContext) (resu
 
 variable {program : Program}
 
+theorem ConfigurationTyped.bindings_distinct {context : StaticContext} {result : ResultType} {state : Configuration}
+    (typed : ConfigurationTyped program context result state) : (state.environment.map Prod.fst).Nodup := by
+  cases typed with
+  | intro store code continuation => exact store.runtimeDistinct
+
+
 theorem ConfigurationTyped.entry {home : Module} {context : StaticContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type) {environment : Environment}
     (store : EnvironmentTyped program environment context) :
@@ -132,13 +139,13 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
           cases frame with | sequence discard checked => exact .intro store (.expression checked) tail
     | bind =>
       cases code with | expression checked =>
-        cases checked with | bind initial discard annotation body =>
-          exact .intro store (.expression initial) (.cons (.bind discard body) continuation)
+        cases checked with | bind initial discard annotation body fresh =>
+          exact .intro store (.expression initial) (.cons (.bind discard body fresh) continuation)
     | bindResult =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | bind discard checked =>
-            exact .intro (.cons resident store) (.expression checked)
+          cases frame with | bind discard checked fresh =>
+            exact .intro (.cons resident store fresh) (.expression checked)
               (.cons (.scope [_] (by simpa using discard)) tail)
     | scope =>
       cases code with | result resident =>
@@ -217,7 +224,7 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
         cases continuation with | cons frame tail =>
           cases frame with | call declared =>
             have declaration := checkedProgram _ _ declared
-            exact .intro (EnvironmentTyped.parameters _ _ residents) (.expression declaration.body)
+            exact .intro (EnvironmentTyped.parameters _ _ residents declaration.distinct) (.expression declaration.body)
               (.cons (.restore _ declaration.disposable store) tail)
     | applyPatterns =>
       cases code with | expression checked =>
@@ -227,8 +234,8 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, _, _, bindingsTyped, discard, bodyTyped⟩ := checked.selected residents.argument selected
-            refine .intro (bindingsTyped.append store) (.expression bodyTyped) (.cons ?_ tail)
+            obtain ⟨locals, _, _, bindingsTyped, discard, bodyTyped, distinct⟩ := checked.selected residents.argument selected
+            refine .intro (bindingsTyped.append store distinct) (.expression bodyTyped) (.cons ?_ tail)
             rw [bindingsTyped.length]
             exact .scope locals discard
     | nil =>
@@ -266,7 +273,7 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
         obtain ⟨value, selected, _⟩ := store.readPlace place
         exact ⟨_, .read selected⟩
       | sequence head discard tail => exact ⟨_, .sequence⟩
-      | bind initial discard annotated body => exact ⟨_, .bind⟩
+      | bind initial discard annotated body fresh => exact ⟨_, .bind⟩
       | tuple head tail => exact ⟨_, .tuple⟩
       | project source discard selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩
@@ -287,7 +294,7 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
         right
         cases frame with
         | sequence discard checked => exact ⟨_, .sequenceResult⟩
-        | bind discard checked => exact ⟨_, .bindResult⟩
+        | bind discard checked fresh => exact ⟨_, .bindResult⟩
         | scope locals discard => exact ⟨_, .scope⟩
         | assign place discard checked =>
           obtain ⟨after, written, _, _, _⟩ := store.writePlace place resident

@@ -26,7 +26,7 @@ theorem HasType.structural_value {context : List (BindingId × BindingType)} {ex
       exact ⟨value, .group run, resident⟩
   | read selected copyable => intro closed; cases closed
   | sequence head discard tail headIH tailIH => intro closed; cases closed
-  | bind initial discard annotated body initialIH bodyIH => intro closed; cases closed
+  | bind initial discard annotated body fresh initialIH bodyIH => intro closed; cases closed
   | tuple head tail headIH tailIH =>
     intro closed
     cases closed with | tuple first rest =>
@@ -146,9 +146,9 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
       obtain ⟨value, middle, headRun, _, middleTyped, middleFrame⟩ := ih _ .sequenceFirst head store
       obtain ⟨result, after, tailRun, resident, afterTyped, afterFrame⟩ := ih _ .sequenceRest tail middleTyped
       exact ⟨result, after, .sequence headRun tailRun, resident, afterTyped, middleFrame.trans afterFrame⟩
-    | bind initial discard annotated body =>
+    | bind initial discard annotated body fresh =>
       obtain ⟨value, middle, initialRun, resident, middleTyped, middleFrame⟩ := ih _ .bindInitial initial store
-      obtain ⟨result, after, bodyRun, resultTyped, afterTyped, afterFrame⟩ := ih _ .bindBody body (.cons resident middleTyped)
+      obtain ⟨result, after, bodyRun, resultTyped, afterTyped, afterFrame⟩ := ih _ .bindBody body (.cons resident middleTyped fresh)
       exact ⟨result, after.drop 1, .bind initialRun bodyRun, resultTyped,
         afterTyped.drop 1, middleFrame.trans (afterFrame.drop 1)⟩
     | tuple head tail =>
@@ -171,7 +171,8 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
     | @call home context identity arguments declaration declared visible inputs =>
       obtain ⟨values, middle, inputRun, residents, middleTyped, middleFrame⟩ := many inputs (fun _ member => .callInput member) store
       obtain ⟨value, after, bodyRun, resident, _, _⟩ :=
-        ih _ (.callBody declared) (checkedProgram _ _ declared).body (EnvironmentTyped.parameters _ _ residents)
+        ih _ (.callBody declared) (checkedProgram _ _ declared).body
+          (EnvironmentTyped.parameters _ _ residents (checkedProgram _ _ declared).distinct)
       exact ⟨value, middle, .call declared inputRun bodyRun, resident, middleTyped, middleFrame⟩
     | assign selected discard resident rest =>
       obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleFrame⟩ := ih _ .assignValue resident store
@@ -182,9 +183,9 @@ theorem HasType.executes (checkedProgram : program.Checked) {context : List (Bin
     | applyPatterns arguments nonempty covered bodies =>
       obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleFrame⟩ := many arguments (fun _ member => .patternInput member) store
       obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
-      obtain ⟨locals, pattern, member, bindingsTyped, discard, bodyTyped⟩ := bodies.selected residents.argument selected
+      obtain ⟨locals, pattern, member, bindingsTyped, discard, bodyTyped, distinct⟩ := bodies.selected residents.argument selected
       obtain ⟨value, after, bodyRun, resident, afterTyped, afterFrame⟩ :=
-        ih _ (.patternBody member) bodyTyped (bindingsTyped.append middleTyped)
+        ih _ (.patternBody member) bodyTyped (bindingsTyped.append middleTyped distinct)
       refine ⟨value, after.drop bindings.length, .applyPatterns argumentsRun selected bodyRun, resident, ?_, middleFrame.trans ?_⟩
       · simpa [bindingsTyped.length] using afterTyped.drop bindings.length
       · simpa [bindingsTyped.length] using afterFrame.drop bindings.length

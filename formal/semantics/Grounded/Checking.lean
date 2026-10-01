@@ -42,7 +42,8 @@ inductive HasType (program : Program) : Module → List (BindingId × BindingTyp
   | bind {home : Module} {context : List (BindingId × BindingType)} {mutable : Bool} {name : BindingId} {annotation : Option TypeExpr} {initial body : Expr}
       {localType type : Ty} (initialized : HasType program home context initial localType)
       (drop : Duplicable program.data localType) (annotated : Annotation program.aliases annotation localType)
-      (continued : HasType program home ((name, ⟨localType, mutable⟩) :: context) body type) :
+      (continued : HasType program home ((name, ⟨localType, mutable⟩) :: context) body type)
+      (fresh : name ∉ context.map Prod.fst) :
       HasType program home context (.bind mutable name annotation initial body) type
   | tuple {home : Module} {context : List (BindingId × BindingType)} {head : Expr} {tail : List Expr}
       {first : Ty} {rest : List Ty} (headTyped : HasType program home context head first)
@@ -107,7 +108,7 @@ inductive ArmsType (program : Program) :
   | clause {home : Module} {context : List (BindingId × BindingType)} {subject result : Ty}
       {previous : List Pattern} {pattern : Pattern} {body : Expr} {rest : List (Pattern × Expr)}
       {bindings : List (BindingId × BindingType)} (patternTyped : PatternType program home pattern subject bindings)
-      (distinct : (bindings.map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
+      (distinct : ((bindings ++ context).map Prod.fst).Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (bindings ++ context) body result)
       (tailTyped : ArmsType program home context subject result (previous ++ [pattern]) rest) :
       ArmsType program home context subject result previous ((pattern, body) :: rest)
@@ -123,7 +124,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals pattern, (pattern, body) ∈ arms ∧ EnvironmentTyped program bindings locals ∧
       (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
-      HasType program home (locals ++ context) body result := by
+      HasType program home (locals ++ context) body result ∧ ((locals ++ context).map Prod.fst).Nodup := by
   induction arms generalizing previous with
   | nil => simp [selectArm] at selected
   | cons arm arms ih =>
@@ -134,10 +135,11 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (B
       next matched found =>
         cases Option.some.inj selected
         exact ⟨_, _, by simp only [List.mem_cons]; exact Or.inl rfl,
-          patternTyped.bindings resident found, patternTyped.disposable, bodyTyped⟩
+          patternTyped.bindings resident found (List.nodup_append.mp
+            (by simpa only [List.map_append] using distinct)).1, patternTyped.disposable, bodyTyped, distinct⟩
       next missed =>
-        obtain ⟨locals, pattern, member, localTyped, disposable, bodyTyped⟩ := ih tailTyped selected
-        exact ⟨locals, pattern, List.mem_cons_of_mem _ member, localTyped, disposable, bodyTyped⟩
+        obtain ⟨locals, pattern, member, localTyped, disposable, bodyTyped, distinct⟩ := ih tailTyped selected
+        exact ⟨locals, pattern, List.mem_cons_of_mem _ member, localTyped, disposable, bodyTyped, distinct⟩
 
 
 /-- A declaration body is checked once against its declared interface. This

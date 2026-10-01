@@ -27,7 +27,8 @@ EnvironmentTyped program environment context →
 Run program ⟨environment, .expression expression, []⟩ state →
 ConfigurationTyped program context (.one type) state ∧
   (Terminal state ∨ ∃ next, Step program state next) ∧
-  EnvironmentFrame context environment state.outerEnvironment
+  EnvironmentFrame context environment state.outerEnvironment ∧
+  (state.environment.map Prod.fst).Nodup
 ```
 
 Call sites check declaration signatures, not callee bodies. `Program.Checked`
@@ -117,9 +118,9 @@ is no legacy string-keyed local access path or compatibility coercion.
 
 This is a decoded-core input contract, not a proved source resolver. Alias,
 constant and named-field lookup retain their existing textual interfaces.
-The source-pattern interface now takes already-resolved binder IDs. Proving
-source resolution, declaration-ID freshness and dynamic activation/storage
-identity remains necessary; a lexical ID is explicitly not a storage address.
+The source-pattern interface takes already-resolved binder IDs. Lexical
+freshness is now enforced as described below. Proving source resolution and
+dynamic activation/storage identity remains necessary; an ID is not an address.
 The logical environment still directly holds resident values, so this cutover
 alone does not close the full identity/availability migration.
 
@@ -128,6 +129,30 @@ established that any injective encoding of the former local keys preserves
 actual lookup and replacement for every environment. These comparison functions
 existed only in stdin. The defining-module audit covered 1,939 declarations and
 found only `propext`, `Quot.sound` and `Classical.choice`.
+
+
+## Verified lexical-identity freshness
+
+`EnvironmentTyped.cons` now requires the new ID to be absent from the remaining
+checked environment. `HasType.bind` produces this freshness obligation before
+execution; the pending bind frame retains it until installation. Clause checking
+requires uniqueness of the combined clause-local and outer context, not merely
+uniqueness within the pattern. `ArmsType.selected` carries that exact evidence
+with the actual selected body's typing and matching result. Invocation entry
+consumes `FunctionChecked.distinct`, rather than reconstructing declarations.
+
+The shared append, replacement, scope-drop and parameter-installation producers
+preserve this stronger realization. `ConfigurationTyped.bindings_distinct`
+extracts runtime uniqueness, and both public source-safety theorems now export
+it for every reachable current environment. Source spelling shadowing requires
+distinct resolved IDs; recursive callees may reuse their lexical IDs in their
+separate invocation environments. This proves no globally fresh runtime address
+or activation identity.
+
+Strict `lake build` passed (17 jobs). The defining-module axiom audit covered
+1,943 declarations, including private/generated declarations, with only the
+standard `propext`, `Quot.sound` and `Classical.choice` dependencies. No
+examples, unit tests, new axioms or assumed post-state distinctness were added.
 
 
 ## Verified explicit-frame migration
