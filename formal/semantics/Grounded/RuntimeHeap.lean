@@ -456,5 +456,27 @@ theorem allocate_scope_retire (heap : RuntimeHeap α) (values : List α) :
   · exact (retireMany_outside released member).trans (heap.allocateMany_outside values member)
 
 
+theorem History.next_le {before after : RuntimeHeap α} (history : History before after) :
+    before.next ≤ after.next := by
+  induction history with
+  | refl => exact Nat.le_refl _
+  | step head tail ih =>
+    apply Nat.le_trans _ ih
+    cases head with
+    | allocate => exact Nat.le_succ _
+    | write written => exact Nat.le_of_eq (write_next written).symm
+    | retire released => exact Nat.le_of_eq (retire_next released).symm
+
+/-- Retirement only removes cells; every survivor is the same original cell. -/
+theorem retireMany_origin {before after : RuntimeHeap α} {identities : List StorageId}
+    (released : before.retireMany identities = some after) {identity : StorageId} {value : α}
+    (found : after.read identity = some value) : before.read identity = some value := by
+  induction identities generalizing before with
+  | nil => cases released; exact found
+  | cons first rest ih =>
+    obtain ⟨middle, head, tail⟩ := Option.bind_eq_some_iff.mp released
+    exact (Typed.retire (fun _ _ selected => selected) head) identity value (ih tail)
+
+
 end RuntimeHeap
 end Grounded

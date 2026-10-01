@@ -215,4 +215,38 @@ theorem restoreStorage.history {program : Program} {heap after : RuntimeHeap Sto
   exact .step (.write written) (.refl _)
 
 
+/-- A resident update preserves the cell's allocation owner and declared type. -/
+theorem RuntimeHeap.write_resident_identity {before after : RuntimeHeap StorageCell}
+    {identity observed : StorageId} {cell result : StorageCell} {resident : PartialValue}
+    (original : before.read identity = some cell)
+    (written : before.write identity { cell with resident := resident } = some after)
+    (found : after.read observed = some result) :
+    ∃ old, before.read observed = some old ∧ result.activation = old.activation ∧ result.type = old.type := by
+  by_cases same : observed = identity
+  · subst observed
+    cases Option.some.inj ((RuntimeHeap.write_read written).symm.trans found)
+    exact ⟨cell, original, rfl, rfl⟩
+  · rw [RuntimeHeap.write_other written same] at found
+    exact ⟨result, found, rfl, rfl⟩
+
+theorem takeStorage.identity {program : Program} {heap after : RuntimeHeap StorageCell}
+    {identity observed : StorageId} {path : List FieldKey} {value : Value} {result : StorageCell}
+    (taken : takeStorage program heap identity path = some (value, after))
+    (found : after.read observed = some result) :
+    ∃ old, heap.read observed = some old ∧ result.activation = old.activation ∧ result.type = old.type := by
+  simp only [takeStorage, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+  obtain ⟨cell, original, selected, _, resident, _, updated, _, next, written, same⟩ := taken
+  cases same
+  exact RuntimeHeap.write_resident_identity original written found
+
+theorem restoreStorage.identity {program : Program} {heap after : RuntimeHeap StorageCell}
+    {identity observed : StorageId} {path : List FieldKey} {value : Value} {result : StorageCell}
+    (restored : restoreStorage program heap identity path value = some after)
+    (found : after.read observed = some result) :
+    ∃ old, heap.read observed = some old ∧ result.activation = old.activation ∧ result.type = old.type := by
+  simp only [restoreStorage, Option.bind_eq_some_iff] at restored
+  obtain ⟨cell, original, updated, _, written⟩ := restored
+  exact RuntimeHeap.write_resident_identity original written found
+
+
 end Grounded

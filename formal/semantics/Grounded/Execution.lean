@@ -482,4 +482,51 @@ theorem Run.return_retired {before : Environment} {middle after : Configuration}
     exact run.retired (RuntimeHeap.retireMany_retired released identity member)
 
 
+/-- An already-issued storage identity can survive a step only with its
+original allocation owner and declared type; only its resident may change. -/
+theorem Step.storage_origin {before after : Configuration} (step : Step program before after)
+    {identity : StorageId} (allocated : identity.index < before.environment.heap.next)
+    {result : StorageCell} (found : after.environment.heap.read identity = some result) :
+    ∃ old, before.environment.heap.read identity = some old ∧
+      result.activation = old.activation ∧ result.type = old.type := by
+  cases step with
+  | move taken =>
+    obtain ⟨⟨value, heap⟩, operation, same⟩ := Option.map_eq_some_iff.mp taken
+    cases same
+    obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    exact takeStorage.identity raw found
+  | assignResult written =>
+    obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
+    cases same
+    obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
+    exact restoreStorage.identity raw found
+  | scope exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    exact ⟨result, RuntimeHeap.retireMany_origin released found, rfl, rfl⟩
+  | restore restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    exact ⟨result, RuntimeHeap.retireMany_origin released found, rfl, rfl⟩
+  | bindResult => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
+  | selectedPattern _ => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
+  | constant _ => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
+  | callInputs _ => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
+  | _ => exact ⟨result, found, rfl, rfl⟩
+
+/-- Storage provenance is stable across arbitrary actual runs, including
+recursive invocation and temporary initialization holes. No typing is assumed. -/
+theorem Run.storage_origin {before after : Configuration} (run : Run program before after)
+    {identity : StorageId} (allocated : identity.index < before.environment.heap.next)
+    {result : StorageCell} (found : after.environment.heap.read identity = some result) :
+    ∃ old, before.environment.heap.read identity = some old ∧
+      result.activation = old.activation ∧ result.type = old.type := by
+  induction run with
+  | refl => exact ⟨result, found, rfl, rfl⟩
+  | step head tail ih =>
+    obtain ⟨middle, present, owner, type⟩ := ih (Nat.lt_of_lt_of_le allocated head.heap_history.next_le) found
+    obtain ⟨old, original, oldOwner, oldType⟩ := head.storage_origin allocated present
+    exact ⟨old, original, owner.trans oldOwner, type.trans oldType⟩
+
+
 end Grounded

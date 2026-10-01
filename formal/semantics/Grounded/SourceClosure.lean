@@ -958,7 +958,7 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
 
 /-- Source admission keeps every active and retained scope live through actual
 execution. Identities retired before entry remain dead and cannot reappear in
-those scopes, even after recursive calls and fresh lexical allocations. -/
+those scopes. Surviving old cells retain their original owner and declared type. -/
 theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {identity : Nat} {declaration : FunctionDecl}
@@ -970,22 +970,31 @@ theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageS
         (∀ front back, state.continuation = front ++ back →
           ∀ address ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
             ∃ cell, state.environment.heap.read address = some cell) ∧
+        (∀ address, address.index < heap.next → ∀ cell, state.environment.heap.read address = some cell →
+          ∃ old, heap.read address = some old ∧ cell.activation = old.activation ∧ cell.type = old.type) ∧
         ∀ address, heap.Retired address → state.environment.heap.Retired address ∧
           ∀ front back, state.continuation = front ++ back →
             address ∉ (continuationEnvironment state.environment front).bindings.map Prod.snd := by
   obtain ⟨_, _, _, _, _, _, _, _, entry, final, entered, _, _, _, _, safe⟩ :=
     admitted.function_soundness selected arguments heap supply
+  obtain ⟨inputs, _, representation⟩ := Option.map_eq_some_iff.mp entered
   have entryHistory : RuntimeHeap.History heap entry.heap := by
-    obtain ⟨inputs, _, same⟩ := Option.map_eq_some_iff.mp entered
-    rw [← same]
+    rw [← representation]
     exact allocateBindings.history _ _ _
+  have entryOld : ∀ address, address.index < heap.next → entry.heap.read address = heap.read address := by
+    rw [← representation]
+    exact fun _ allocated => allocateBindings.old _ _ _ allocated
   refine ⟨entry, entered, ?_⟩
   intro state run
   have typed := (safe state run).1
-  refine ⟨typed.live_scopes, ?_⟩
-  intro address retired
-  have dead := retired.history (entryHistory.trans run.heap_history)
-  exact ⟨dead, fun _ _ split => typed.retired_not_retained dead split⟩
+  refine ⟨typed.live_scopes, ?_, ?_⟩
+  · intro address allocated cell found
+    obtain ⟨old, original, owner, type⟩ :=
+      run.storage_origin (Nat.lt_of_lt_of_le allocated entryHistory.next_le) found
+    exact ⟨old, (entryOld address allocated).symm.trans original, owner, type⟩
+  · intro address retired
+    have dead := retired.history (entryHistory.trans run.heap_history)
+    exact ⟨dead, fun _ _ split => typed.retired_not_retained dead split⟩
 
 
 /-- Every admitted cross-package call namespace has an actual normalized

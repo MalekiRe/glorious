@@ -2869,6 +2869,15 @@ retired identities cannot occur in any of those realized binding maps.
 source-derived prefix soundness, heap-history production and retained-scope
 liveness. It requires neither termination nor future-state liveness assumptions.
 
+The same public source contract now also preserves allocation provenance:
+every surviving previously issued cell retains its original activation owner
+and declared type. `Step.storage_origin` proves this from actual resident updates,
+allocation and retirement; `Run.storage_origin` composes it across arbitrary
+execution. The allocation frontier is derived monotone from the existing heap
+history. No post-state identity or typing premise is supplied. Explicit axiom
+inspection of both operational producers and the strengthened public source
+consumer found only standard Lean axioms; the 30-job build passed.
+
 Verification: `lake build Grounded` passed all 30 jobs. Explicit dependency
 inspection of the new operational and source endpoints and existing general
 preservation/progress found only standard Lean axioms. No examples or unit tests
