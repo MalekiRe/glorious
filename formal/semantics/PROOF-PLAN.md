@@ -37,6 +37,11 @@ future-state readiness or execution-success premise. Recursive calls are therefo
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
 
+`NamedFunctionsAdmitted.soundness` now derives this core contract from named
+direct-function declarations and recursively elaborated named expressions,
+including named pattern clauses. `Program.Checked` is a proved intermediate
+product, not a premise supplied by that source-facing theorem.
+
 `HasType.evaluation_soundness` proves declared result typing, successor-store
 realization and immutable framing for every completed execution, including
 recursive executions. `correctness` additionally constructs a unique completed
@@ -74,6 +79,9 @@ loans, resolved storage identities and physical memory remain outside it.
 | `Soundness` | Prefix safety and the preserved terminating-fragment theorem |
 | `SourcePatterns` | Certified constant normalization and its public source consumer |
 | `SourceLocals` | Named-local resolution, fresh lexical scope entry and source checking/safety consumers |
+| `NamedPatterns` | Named pattern-binder allocation and exact matcher/body scope agreement |
+| `SourceExpressions` | Recursive named-expression and clause elaboration into core admission |
+| `SourceDeclarations` | Named direct-function interfaces/bodies, name resolution and derived program admission |
 
 The former `Core.lean` is removed, not retained as a compatibility import.
 Checking consumes storage and pattern contracts; execution consumes storage
@@ -216,16 +224,66 @@ only under the separately supplied finite-call termination criterion.
 
 This is a declarative elaboration relation, not a parser or executable inference
 algorithm. It does not establish elaboration existence or uniqueness for arbitrary
-source text. Named pattern-binder allocation, pattern-callable expression
-elaboration, source declaration/name resolution, dynamic activation/storage
-identity, and flow-sensitive moves/restoration remain open. Lexical IDs are fresh
-relative to the active scope, not globally unique across disjoint scopes.
+source text. The named-pattern and direct-function checkpoint below closes those
+source boundaries for this fragment. Dynamic activation/storage identity and
+flow-sensitive moves/restoration remain open. Lexical IDs are fresh relative
+to the active scope, not globally unique across disjoint scopes.
 
 Verification: strict `lake build` passed (19 jobs). An axiom-closure audit of
 2,060 declarations in the `Grounded` namespace permitted only `propext`,
 `Quot.sound` and `Classical.choice`. The four new expression checking/safety/
 correctness theorems depend only on `propext` and `Quot.sound`. No concrete
 examples or unit tests were added or run.
+
+
+## Verified named patterns and direct-function declarations
+
+`NamedPatterns` allocates lexical IDs for explicit named binders, recursively
+through structural patterns. Constant patterns reuse
+`SourcePattern.Checked.normalize`; no second evaluator is introduced. Its
+`checked` theorem proves both core pattern typing and the exact equality
+between the emitted match-binding context plus incoming context and the body's
+source scope. `fresh` derives ID distinctness from scope allocation.
+
+`NamedExpr.applyPatterns` and `NamedArmsElaborate` now elaborate named arguments,
+patterns and clause bodies together. Duplicate binder spellings are rejected.
+Every clause starts from the same incoming scope, so bindings cannot leak to
+siblings. Core coverage and usefulness consume the emitted patterns; the real
+first-match execution and selected-body preservation remain the existing proof
+chain. Tail-first static ID allocation preserves the matcher's head-before-tail
+binding order; it does not reorder runtime argument evaluation.
+
+`SourceDeclarations` elaborates named direct-function parameters, result
+annotations and bodies. Omitted results mean unit, not an inferred arbitrary
+result. Duplicate parameter and qualified function names are rejected. Parameter
+IDs are allocated through `SourceScope.enter`, and parameter order is retained
+in the runtime invocation signature. Named calls resolve through
+`functionNames`, computed from the source declaration list; no parallel runtime
+name table is installed. `NamedFunctionsAdmitted.resolves` proves that this name
+lookup selects the exact emitted source declaration, including forward and
+mutually recursive references.
+
+`NamedFunctionsAdmitted` requires every runtime function to be an elaborated
+source declaration. It derives `Program.Checked` rather than storing it as an
+assumption. Its public `soundness`, `evaluation_soundness` and `correctness`
+theorems consume named expression elaboration and actual entry typing, deriving
+prefix safety, completed-result safety and optional finite-call termination.
+No successful run, successor readiness or assumed progress is source admission.
+
+This closes explicit named pattern-binder allocation, immediate pattern-callable
+expression elaboration and named direct-function admission for the existing
+fragment. Parsing/import expansion, bare-identifier constant/constructor/binder
+classification, source data/constant declaration elaboration, first-class
+callables, dynamic activation/storage IDs, moves, holes and restoration remain
+outside this checkpoint. Function names are qualified declaration keys; nominal
+constructor/module identities and the alias/data/constant tables remain decoded
+inputs. No whole-language soundness or completed storage migration is claimed.
+
+Verification: strict `lake build` passed (21 jobs). The defining-module axiom
+closure audit covered 2,376 declarations, including private/generated declarations,
+and permitted only `propext`, `Quot.sound` and `Classical.choice`. The named
+source proofs use those standard axioms; choice comes from the existing certified
+constant normalizer. No examples or unit tests were added or run.
 
 
 ## Verified post-RHS assignment frame
