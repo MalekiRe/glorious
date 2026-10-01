@@ -586,6 +586,16 @@ source gate and imported-declaration axiom audit passed. These results
 prepare the initialized-fragment machine migration; they do not establish
 flow-sensitive move admission or replace the outstanding machine proof.
 
+Initialized source realization now also survives actual addressed scope
+extension, scope exit and caller restoration. Extension uses the existing
+typed input product and preserves every pre-existing realized scope. Exit
+derives the dropped source context, actual local retirement and retained
+caller realization. Restoration requires an already-issued distinct caller
+activation and reconstructs its source realization in the current heap,
+without restoring a saved supply. The 26-job source gate and full imported
+axiom audit passed. These scope results close the initialized realization
+operations, not their outstanding expression-machine integration.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

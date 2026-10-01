@@ -241,4 +241,76 @@ theorem AddressedEnvironment.Realizes.write {current : AddressedEnvironment}
   exact issued
 
 
+theorem AddressedEnvironment.Realizes.extend {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} {inputs : List BindingInput}
+    (realized : current.Realizes program context) (inputsTyped : BindingInputsTyped program inputs)
+    (fresh : (inputs.map BindingInput.name ++ context.map Prod.fst).Nodup) :
+    (current.extend inputs).Realizes program ((inputs.map fun input => (input.name, input.slot)) ++ context) ∧
+    (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
+      caller.Realizes program (current.extend inputs).heap callerContext) := by
+  obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
+  have keys := congrArg (List.map Prod.fst) slots
+  simp only [List.map_map, Function.comp_def] at keys
+  have freshStates : (inputs.map BindingInput.name ++ states.map Prod.fst).Nodup := by
+    rw [keys]; exact fresh
+  obtain ⟨afterTyped, _, _, retained⟩ := AddressedEnvironment.extend.typed typed inputsTyped freshStates
+  refine ⟨⟨⟨inputs.map BindingInput.state ++ states, afterTyped, ?_, ?_⟩, issued⟩, ?_⟩
+  · simp only [List.map_append, slots, List.map_map, BindingInput.state, Function.comp_def]
+  · intro entry member
+    rcases List.mem_append.mp member with fresh | old
+    · obtain ⟨input, _, same⟩ := List.mem_map.mp fresh
+      subst entry
+      exact .present
+    · exact ready entry old
+  · intro caller callerContext callerRealized
+    obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
+    exact ⟨callerStates, retained _ _ _ callerTyped, callerSlots, callerReady⟩
+
+theorem AddressedEnvironment.Realizes.exitScope {current : AddressedEnvironment}
+    {context : List (BindingId × BindingType)} (realized : current.Realizes program context) (count : Nat) :
+    ∃ after, current.exitScope count = some after ∧ after.Realizes program (context.drop count) ∧
+      after.activation = current.activation ∧ after.supply = current.supply ∧
+      after.heap.next = current.heap.next ∧
+      (∀ identity ∈ (List.take count current.bindings).map Prod.snd, after.heap.Retired identity) ∧
+      (∀ caller callerContext, AddressedScope.Realizes caller program current.heap callerContext →
+        caller.activation ≠ current.activation → caller.Realizes program after.heap callerContext) := by
+  obtain ⟨⟨states, typed, slots, ready⟩, issued⟩ := realized
+  obtain ⟨after, exited, afterTyped, activation, supply, next, retired, retained⟩ :=
+    AddressedEnvironment.exitScope.progress typed count
+  refine ⟨after, exited, ⟨⟨states.drop count, afterTyped, ?_, ?_⟩, ?_⟩,
+    activation, supply, next, retired, ?_⟩
+  · rw [List.map_drop, slots]
+  · intro entry member
+    exact ready entry (List.mem_of_mem_drop member)
+  · rw [supply, activation]
+    exact issued
+  · intro caller callerContext callerRealized different
+    obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
+    exact ⟨callerStates, retained _ _ callerTyped different, callerSlots, callerReady⟩
+
+theorem AddressedEnvironment.Realizes.restore {current : AddressedEnvironment}
+    {locals context : List (BindingId × BindingType)} {caller : AddressedScope}
+    (realized : current.Realizes program locals)
+    (callerRealized : caller.Realizes program current.heap context)
+    (callerIssued : current.supply.Issued caller.activation)
+    (different : caller.activation ≠ current.activation) :
+    ∃ after, current.restore caller = some after ∧ after.Realizes program context ∧
+      after.scope = caller ∧ after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
+      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) := by
+  obtain ⟨⟨states, typed, _, _⟩, _⟩ := realized
+  obtain ⟨callerStates, callerTyped, callerSlots, callerReady⟩ := callerRealized
+  obtain ⟨after, restored, afterTyped, activation, bindings, supply, next, retired⟩ :=
+    AddressedEnvironment.restore.progress typed callerTyped different
+  have realizedAfter : after.Realizes program context := by
+    refine ⟨⟨callerStates, ?_, callerSlots, callerReady⟩, ?_⟩
+    · change BindingMap.Typed program after.heap after.activation after.bindings callerStates
+      rw [activation, bindings]
+      exact afterTyped
+    · rw [supply, activation]
+      exact callerIssued
+  refine ⟨after, restored, realizedAfter, ?_, supply, next, retired⟩
+  change (⟨after.activation, after.bindings⟩ : AddressedScope) = caller
+  rw [activation, bindings]
+
+
 end Grounded
