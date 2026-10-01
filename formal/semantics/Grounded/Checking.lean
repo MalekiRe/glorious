@@ -1,8 +1,8 @@
 import Grounded.Patterns
 import Grounded.Places
 
-/-! Decoded expression, argument and clause checking. This finite-derivation
-fragment still checks function bodies at call sites; it is not recursive-language admission. -/
+/-! Expression checking uses declared callable interfaces. Declaration bodies
+are checked separately; constant dependencies remain structurally well founded. -/
 namespace Grounded
 
 /-- This restricts constant syntax, not a second evaluator. Constant dependencies
@@ -77,10 +77,7 @@ inductive HasType (program : Program) : Module → List (String × BindingType) 
       {arguments : List Expr} {declaration : FunctionDecl}
       (declared : program.functions identity = some declaration)
       (visible : declaration.visibility.Allows declaration.home home)
-      (distinct : (declaration.parameters.map Prod.fst).Nodup)
-      (discard : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2.type)
-      (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type)))
-      (body : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
+      (inputs : HasTypes program home context arguments (declaration.parameters.map (fun parameter => parameter.2.type))) :
       HasType program home context (.call identity arguments) declaration.result
   | assign {home : Module} {context : List (String × BindingType)} {place : Place}
       {value rest : Expr} {type result : Ty}
@@ -124,7 +121,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (S
     {value : Value} (resident : ValueHasType program value subject)
     {bindings : List (String × Value)} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
-    ∃ locals, EnvironmentTyped program bindings locals ∧
+    ∃ locals pattern, (pattern, body) ∈ arms ∧ EnvironmentTyped program bindings locals ∧
       (∀ binding ∈ locals, Duplicable program.data binding.2.type) ∧
       HasType program home (locals ++ context) body result := by
   induction arms generalizing previous with
@@ -136,8 +133,24 @@ theorem ArmsType.selected {program : Program} {home : Module} {context : List (S
       split at selected
       next matched found =>
         cases Option.some.inj selected
-        exact ⟨_, patternTyped.bindings resident found, patternTyped.disposable, bodyTyped⟩
-      next missed => exact ih tailTyped selected
+        exact ⟨_, _, by simp only [List.mem_cons]; exact Or.inl rfl,
+          patternTyped.bindings resident found, patternTyped.disposable, bodyTyped⟩
+      next missed =>
+        obtain ⟨locals, pattern, member, localTyped, disposable, bodyTyped⟩ := ih tailTyped selected
+        exact ⟨locals, pattern, List.mem_cons_of_mem _ member, localTyped, disposable, bodyTyped⟩
+
+
+/-- A declaration body is checked once against its declared interface. This
+fragment still requires duplicable parameters at normal invocation exit. -/
+structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Prop where
+  distinct : (declaration.parameters.map Prod.fst).Nodup
+  disposable : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2.type
+  body : HasType program declaration.home declaration.parameters declaration.body declaration.result
+
+/-- Static declaration checking permits recursive calls through signatures;
+it contains neither termination nor execution-success obligations. -/
+def Program.Checked (program : Program) : Prop :=
+  ∀ identity declaration, program.functions identity = some declaration → FunctionChecked program declaration
 
 
 end Grounded

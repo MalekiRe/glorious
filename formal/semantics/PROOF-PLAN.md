@@ -18,31 +18,42 @@ project is introduced by this reset. Subagent use remains paused.
 
 ## Current proved contract and ownership
 
-The terminating-fragment theorem is defined in `Grounded/Soundness.lean`:
+General source safety is defined in `Grounded/Soundness.lean`:
 
 ```lean
+program.Checked →
 HasType program home context expression type →
 EnvironmentTyped program environment context →
-∃ value after,
-  Evaluates program environment expression value after ∧
-  ValueHasType program value type ∧
-  EnvironmentTyped program after context ∧
-  EnvironmentFrame context environment after ∧
-  ∀ other otherAfter,
-    Evaluates program environment expression other otherAfter →
-      other = value ∧ otherAfter = after
+Run program ⟨environment, .expression expression, []⟩ state →
+ConfigurationTyped program context (.one type) state ∧
+  (Terminal state ∨ ∃ next, Step program state next) ∧
+  EnvironmentFrame context environment state.outerEnvironment
 ```
 
-This is the fully initialized, duplicable, finite-call logical fragment. It
-covers mutable lexical storage and checked projected writes, but not holes,
-loans, general recursion or physical memory. The unchanged source-pattern
-consumer exports the same result for the certified normalized arm list.
+Call sites check declaration signatures, not callee bodies. `Program.Checked`
+checks each declaration body against its interface. It contains no termination,
+future-state readiness or execution-success premise. Recursive calls are therefore
+admitted without finite expansion of their bodies. Preservation obtains body
+checking from the selected declaration at invocation entry.
 
-The finite-call theorem below is preserved. In addition,
-`HasType.soundness` and `SourceArmsChecked.soundness` prove that every actual
-execution prefix reaches a realized configuration which is terminal or can
-step. Entry realization, preservation and progress are derived, not supplied
-by source admission.
+`HasType.evaluation_soundness` proves declared result typing, successor-store
+realization and immutable framing for every completed execution, including
+recursive executions. `correctness` additionally constructs a unique completed
+execution when supplied `FiniteCalls program expression`: accessibility of the
+static subexpression/call-body dependency relation. This is an optional
+termination criterion, not part of ordinary admission or prefix safety.
+
+Structural constants terminate directly from their checking derivation through
+`constant_correctness`, independently of `Program.Checked` and `FiniteCalls`.
+Certified source-pattern normalization consumes this theorem. Its public safety
+consumer exports the complete prefix contract above; its terminating correctness
+consumer separately requires finite call expansion.
+
+The admitted logical fragment still requires fully initialized storage and
+copyable/disposable expression operations. Mutable lexical storage, checked
+projected writes and recursive declared functions are covered. Moves, holes,
+loans, resolved storage identities and physical memory remain outside it.
+
 
 
 | Module | Authoritative responsibility |
@@ -58,6 +69,7 @@ by source admission.
 | `Execution` | Explicit frames, single-step execution, finite runs and operational determinism |
 | `Evaluation` | Terminating execution and composition derived from machine runs |
 | `ConfigurationTyping` | Current-state/continuation realization, entry, preservation and progress |
+| `Termination` | Structural constant termination and optional well-founded call expansion |
 | `Soundness` | Prefix safety and the preserved terminating-fragment theorem |
 | `SourcePatterns` | Certified constant normalization and its public source consumer |
 
@@ -66,6 +78,33 @@ Checking consumes storage and pattern contracts; execution consumes storage
 operations and matching. Soundness joins the two. Constant normalization
 consumes soundness, so its compile-time evaluation dependency is acyclic.
 The original terminating contract is preserved; `Evaluates` now denotes finite machine execution.
+
+## Verified recursive declaration boundary
+
+`FunctionChecked` owns parameter distinctness, the current duplicable-parameter
+exit requirement, and body checking against the declared parameter/result types.
+`HasType.call` and `FrameTyped.call` no longer embed callee-body derivations.
+`ConfigurationTyped.preservation` and `run` consume `Program.Checked`;
+`progress` constructs an actual next step from current realization.
+
+`Frame.environment` is the shared scope-exit/caller-return operation used by
+`Step` and the entry-visible environment projection. `frame_step` and
+`frame_run` prove immutable framing through actual ordered transitions,
+including RHS mutation, local scopes, selected clauses and recursive calls.
+The projection does not execute pending code or assume future completion.
+`HasType.soundness` and `SourceArmsChecked.soundness` export this invariant.
+
+The independent `Termination` module proves structural constant evaluation and
+optional finite-call evaluation using the same machine. No second evaluator,
+compatibility call rule or future-execution field remains.
+
+Verification: strict `lake build` passed (17 jobs). The defining-module audit
+covers private and generated declarations as well as public theorems and permits
+only `propext`, `Quot.sound` and `Classical.choice`. No concrete examples or
+unit tests were added. This is a recursive safety boundary, not whole-language
+soundness: resolved binding/activation/storage identities and flow-sensitive
+move/restoration/scope-disposition checking remain open.
+
 
 ## Verified explicit-frame migration
 
@@ -105,11 +144,10 @@ from the thirteen semantic modules, including private/generated declarations;
 only `propext`, `Quot.sound` and `Classical.choice` occur. The runtime-only
 import still contains neither `HasType` nor `correctness`.
 
-This closes the operational migration for the existing fragment, not whole-
-language soundness. Lexical names still identify list bindings, store realization
-still requires full initialization, and call-site typing still embeds body
-typing. Resolving identities, admitting holes/restoration, separating declaration
-checking and admitting recursion remain semantic cutovers, not module cleanup.
+At this earlier checkpoint, the operational migration covered the original
+fragment only. Call-site typing still embedded body typing; that restriction is
+removed by the recursive declaration boundary above. Resolved identities and
+flow-sensitive holes/restoration remain open semantic cutovers.
 No allocation, loans, control transfer, cancellation or foreign-runtime outcome
 has been added or assumed.
 

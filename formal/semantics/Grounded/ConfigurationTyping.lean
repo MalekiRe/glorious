@@ -58,10 +58,7 @@ inductive FrameTyped (program : Program) : StaticContext → ResultType → Fram
       (access : ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home) :
       FrameTyped program context (.many (schema.residents.map Field.type)) (.construct identity tag) context (.one (.nominal identity))
   | call {context : StaticContext} {identity : Nat} {declaration : FunctionDecl}
-      (declared : program.functions identity = some declaration)
-      (distinct : (declaration.parameters.map Prod.fst).Nodup)
-      (discard : ∀ parameter ∈ declaration.parameters, Duplicable program.data parameter.2.type)
-      (checked : HasType program declaration.home declaration.parameters declaration.body declaration.result) :
+      (declared : program.functions identity = some declaration) :
       FrameTyped program context (.many (declaration.parameters.map (fun parameter => parameter.2.type)))
         (.call declaration) context (.one declaration.result)
   | patterns {home : Module} {context : StaticContext} {inputs : List Ty} {arms : List (Pattern × Expr)} {result : Ty}
@@ -104,7 +101,8 @@ theorem ConfigurationTyped.entry {home : Module} {context : StaticContext} {expr
 /-- Every actual transition preserves the current store, code and continuation
 correspondence. No successor readiness or completed run occurs in the premises. -/
 theorem ConfigurationTyped.preservation {context : StaticContext} {result : ResultType}
-    {before after : Configuration} (typed : ConfigurationTyped program context result before)
+    {before after : Configuration} (checkedProgram : program.Checked)
+    (typed : ConfigurationTyped program context result before)
     (step : Step program before after) : ConfigurationTyped program context result after := by
   cases typed with
   | intro store code continuation =>
@@ -146,7 +144,7 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | scope locals discard =>
-            exact .intro (by simpa using store.drop locals.length) (.result resident) tail
+            exact .intro (by simpa [Frame.environment] using store.drop locals.length) (.result resident) tail
     | assign =>
       cases code with | expression checked =>
         cases checked with | assign place discard resident rest =>
@@ -211,15 +209,16 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
             exact .intro store (.result (.nominal declared chosen finite residents)) tail
     | call declared =>
       cases code with | expression checked =>
-        cases checked with | call otherDeclared visible distinct discard inputs body =>
+        cases checked with | call otherDeclared visible inputs =>
           cases Option.some.inj (declared.symm.trans otherDeclared)
-          exact .intro store (.arguments inputs) (.cons (.call otherDeclared distinct discard body) continuation)
+          exact .intro store (.arguments inputs) (.cons (.call otherDeclared) continuation)
     | callInputs =>
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
-          cases frame with | call declared distinct discard checked =>
-            exact .intro (EnvironmentTyped.parameters _ _ residents) (.expression checked)
-              (.cons (.restore _ discard store) tail)
+          cases frame with | call declared =>
+            have declaration := checkedProgram _ _ declared
+            exact .intro (EnvironmentTyped.parameters _ _ residents) (.expression declaration.body)
+              (.cons (.restore _ declaration.disposable store) tail)
     | applyPatterns =>
       cases code with | expression checked =>
         cases checked with | applyPatterns arguments nonempty covered bodies =>
@@ -228,7 +227,7 @@ theorem ConfigurationTyped.preservation {context : StaticContext} {result : Resu
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, bindingsTyped, discard, bodyTyped⟩ := checked.selected residents.argument selected
+            obtain ⟨locals, _, _, bindingsTyped, discard, bodyTyped⟩ := checked.selected residents.argument selected
             refine .intro (bindingsTyped.append store) (.expression bodyTyped) (.cons ?_ tail)
             rw [bindingsTyped.length]
             exact .scope locals discard
@@ -273,7 +272,7 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
       | array residents finite size => exact ⟨_, .array⟩
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
       | construct declared chosen finite copyable visible access residents => exact ⟨_, .construct⟩
-      | call declared visible distinct discard inputs body => exact ⟨_, .call declared⟩
+      | call declared visible inputs => exact ⟨_, .call declared⟩
       | assign place discard resident rest => exact ⟨_, .assign⟩
       | applyPatterns arguments nonempty covered bodies => exact ⟨_, .applyPatterns⟩
     | arguments checked =>
@@ -308,18 +307,19 @@ theorem ConfigurationTyped.progress {context : StaticContext} {result : ResultTy
         | tupleTail head => exact ⟨_, .tupleTail⟩
         | array finite size => exact ⟨_, .arrayResult⟩
         | construct declared chosen finite copyable visible access => exact ⟨_, .constructResult⟩
-        | call declared distinct discard checked => exact ⟨_, .callInputs⟩
+        | call declared => exact ⟨_, .callInputs⟩
         | patterns nonempty covered checked =>
           obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
           exact ⟨_, .selectedPattern selected⟩
         | argumentTail head => exact ⟨_, .argumentTail⟩
 
 theorem ConfigurationTyped.run {context : StaticContext} {result : ResultType} {before after : Configuration}
+    (checkedProgram : program.Checked)
     (typed : ConfigurationTyped program context result before) (run : Run program before after) :
     ConfigurationTyped program context result after := by
   induction run with
   | refl state => exact typed
-  | step head tail ih => exact ih (typed.preservation head)
+  | step head tail ih => exact ih (typed.preservation checkedProgram head)
 
 theorem ConfigurationTyped.normal_form {context : StaticContext} {type : Ty} {state : Configuration}
     (typed : ConfigurationTyped program context (.one type) state) (done : Terminal state) :
@@ -334,6 +334,51 @@ theorem ConfigurationTyped.normal_form {context : StaticContext} {type : Ty} {st
     cases typed with | intro store code continuation =>
       cases continuation
       cases code
+
+
+/-- The actual frame exit preserves immutable outer bindings. -/
+theorem FrameTyped.frame {current next : StaticContext} {input result : ResultType} {frame : Frame}
+    (typed : FrameTyped program current input frame next result) {before after : Environment}
+    (framed : EnvironmentFrame current before after) :
+    EnvironmentFrame next (frame.environment before) (frame.environment after) := by
+  cases typed <;> try exact framed
+  case scope locals result discard => simpa [Frame.environment] using framed.drop locals.length
+  case restore result caller discard retained => exact retained.frame_refl
+
+theorem ContinuationTyped.frame {current final : StaticContext} {input result : ResultType} {stack : List Frame}
+    (typed : ContinuationTyped program current input stack final result) {before after : Environment}
+    (framed : EnvironmentFrame current before after) :
+    EnvironmentFrame final (continuationEnvironment before stack) (continuationEnvironment after stack) := by
+  induction typed generalizing before after with
+  | nil => exact framed
+  | cons head tail ih => exact ih (head.frame framed)
+
+/-- Every actual step frames the entry-visible environment, even while running
+inside nested scopes or recursive callees. -/
+theorem ConfigurationTyped.frame_step {context : StaticContext} {result : ResultType} {before after : Configuration}
+    (typed : ConfigurationTyped program context result before) (step : Step program before after) :
+    EnvironmentFrame context before.outerEnvironment after.outerEnvironment := by
+  cases typed with
+  | intro store code continuation =>
+    cases step <;> try exact continuation.frame store.frame_refl
+    case selectedPattern selected =>
+      simpa [Configuration.outerEnvironment, continuationEnvironment, Frame.environment] using
+        continuation.frame store.frame_refl
+    case assignResult written =>
+      cases code with | result resident =>
+        cases continuation with | cons frame tail =>
+          cases frame with | assign selected discard checked =>
+            obtain ⟨updated, produced, _, framed, _⟩ := store.writePlace selected resident
+            cases Option.some.inj (written.symm.trans produced)
+            exact tail.frame framed
+
+theorem ConfigurationTyped.frame_run {context : StaticContext} {result : ResultType} {before after : Configuration}
+    (checkedProgram : program.Checked) (typed : ConfigurationTyped program context result before)
+    (run : Run program before after) : EnvironmentFrame context before.outerEnvironment after.outerEnvironment := by
+  induction run with
+  | refl state => cases typed with | intro store code continuation => exact continuation.frame store.frame_refl
+  | step head tail ih =>
+    exact (typed.frame_step head).trans (ih (typed.preservation checkedProgram head))
 
 
 end Grounded

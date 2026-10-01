@@ -83,7 +83,7 @@ theorem NormalizesPattern.unique {source : SourcePattern} {pattern : Pattern}
     intro other found
     cases found with
     | constant otherTyped otherEvaluated =>
-      obtain ⟨value, evaluation, valueTyped, unique⟩ := closed_correctness typed
+      obtain ⟨value, evaluation, valueTyped, unique⟩ := constant_correctness typed
       have sameType := constant_type_unique typed otherTyped
       have sameValue := (unique _ [] otherEvaluated).1.trans (unique _ [] evaluated).1.symm
       rw [sameType, sameValue]
@@ -107,8 +107,8 @@ def SourcePattern.Checked.normalize {source : SourcePattern}
     let result := fields.normalize
     ⟨.node head result.val, .node result.property⟩
   | .constant type typed =>
-    ⟨.literal (some type) (Classical.choose (closed_correctness typed)),
-      .constant typed (Classical.choose_spec (closed_correctness typed)).1⟩
+    ⟨.literal (some type) (Classical.choose (constant_correctness typed)),
+      .constant typed (Classical.choose_spec (constant_correctness typed)).1⟩
 def SourcePatternsChecked.normalize {sources : List SourcePattern}
     (checked : SourcePatternsChecked program home sources) :
     {patterns // NormalizesPatterns program home sources patterns} :=
@@ -177,6 +177,7 @@ theorem SourceArmsChecked.admits {source : List (SourcePattern × Expr)}
 at every reachable machine state, including during arguments and selected bodies. -/
 theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     {context : StaticContext} {environment : Environment} {arguments : List Expr} {inputs : List Ty} {result : Ty}
+    (checkedProgram : program.Checked)
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs) (nonempty : source ≠ [])
     (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
@@ -184,20 +185,23 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     (store : EnvironmentTyped program environment context) {state : Configuration}
     (run : Run program ⟨environment, .expression (.applyPatterns inputs arguments checked.normalize.val), []⟩ state) :
     ConfigurationTyped program context (.one result) state ∧
-      (Terminal state ∨ ∃ next, Step program state next) :=
-  (checked.admits argumentsTyped nonempty covered bodies).soundness store run
+      (Terminal state ∨ ∃ next, Step program state next) ∧
+      EnvironmentFrame context environment state.outerEnvironment :=
+  (checked.admits argumentsTyped nonempty covered bodies).soundness checkedProgram store run
 
 
-/-- Source checking → derived normalization → ordinary ordered dispatch →
-unique typed value and successor store. No execution or normalization witness is supplied. -/
+/-- The optional finite-call contract additionally constructs a unique typed
+value and successor store. Ordinary source safety does not require FiniteCalls. -/
 theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     {context : List (String × BindingType)} {environment : List (String × Value)}
     {arguments : List Expr} {inputs : List Ty} {result : Ty}
+    (checkedProgram : program.Checked)
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs)
     (nonempty : source ≠ [])
     (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home context (argumentType inputs) result [] checked.normalize.val)
+    (finite : FiniteCalls program (.applyPatterns inputs arguments checked.normalize.val))
     (environmentTyped : EnvironmentTyped program environment context) :
     NormalizesArms program home source checked.normalize.val ∧
       (∀ other, NormalizesArms program home source other → other = checked.normalize.val) ∧
@@ -207,7 +211,7 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
         ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) other otherAfter →
           other = value ∧ otherAfter = after := by
   exact ⟨checked.normalize.property, checked.normalize.property.unique,
-    Grounded.correctness (checked.admits argumentsTyped nonempty covered bodies) environmentTyped⟩
+    Grounded.correctness checkedProgram (checked.admits argumentsTyped nonempty covered bodies) finite environmentTyped⟩
 
 end
 end Grounded

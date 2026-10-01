@@ -30,10 +30,27 @@ inductive Frame where
   | argumentHead (tail : List Expr)
   | argumentTail (head : Value)
 
+/-- The environment exposed outside a frame. This is the same scope/return
+operation used by execution; it does not execute any pending expression. -/
+def Frame.environment (frame : Frame) (current : Environment) : Environment :=
+  match frame with
+  | .scope count => current.drop count
+  | .restore caller => caller
+  | _ => current
+
+def continuationEnvironment (current : Environment) : List Frame → Environment
+  | [] => current
+  | frame :: rest => continuationEnvironment (frame.environment current) rest
+
+
 structure Configuration where
   environment : Environment
   control : Control
   continuation : List Frame
+
+def Configuration.outerEnvironment (state : Configuration) : Environment :=
+  continuationEnvironment state.environment state.continuation
+
 
 inductive Terminal : Configuration → Prop where
   | result (environment : Environment) (value : Value) : Terminal ⟨environment, .result value, []⟩
@@ -70,7 +87,8 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       Step program ⟨env, .result value, .bind name body :: stack⟩
         ⟨(name, value) :: env, .expression body, .scope 1 :: stack⟩
   | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value} :
-      Step program ⟨env, .result value, .scope count :: stack⟩ ⟨env.drop count, .result value, stack⟩
+      Step program ⟨env, .result value, .scope count :: stack⟩
+        ⟨(Frame.scope count).environment env, .result value, stack⟩
   | assign {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
       Step program ⟨env, .expression (.assign place value rest), stack⟩
         ⟨env, .expression value, .assign place rest :: stack⟩
@@ -100,7 +118,8 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       Step program ⟨env, .expression (.constant name), stack⟩
         ⟨[], .expression declaration.body, .restore env :: stack⟩
   | restore {env caller : Environment} {stack : List Frame} {value : Value} :
-      Step program ⟨env, .result value, .restore caller :: stack⟩ ⟨caller, .result value, stack⟩
+      Step program ⟨env, .result value, .restore caller :: stack⟩
+        ⟨(Frame.restore caller).environment env, .result value, stack⟩
   | construct {env : Environment} {stack : List Frame} {identity : Nat} {tag : Option Nat} {fields : List Expr} :
       Step program ⟨env, .expression (.construct identity tag fields), stack⟩
         ⟨env, .arguments fields, .construct identity tag :: stack⟩
