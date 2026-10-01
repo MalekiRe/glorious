@@ -71,40 +71,42 @@ theorem NamedFunctionsElaborate.checked {program : Program} {names : Module → 
     | head => exact head.checked
     | tail _ member => exact ih declaration member
 
-/-- Every executable function is an emitted source declaration: no hidden
-unchecked functions, assumed successful runs or progress certificates. -/
-def NamedFunctionsAdmitted (modules : List Module) (source : List NamedFunction)
-    (imports : List FunctionImport) (program : Program) : Prop :=
-  FunctionImportsValid modules source imports ∧
+/-- Declaration elaboration is independent of how the source namespace is
+produced. Both decoded imports and package-authorized closure use this same
+body-checking and exact-emission contract. -/
+def NamedProgramAdmitted (names : Module → Module → Identifier → Option Nat)
+    (source : List NamedFunction) (program : Program) : Prop :=
   (source.map fun declaration => (declaration.home, declaration.name)).Nodup ∧ ∃ core,
-    NamedFunctionsElaborate program (functionNames source imports) source core ∧
+    NamedFunctionsElaborate program names source core ∧
     program.functions = fun identity => core[identity]?
 
-/-- Reordering or repeating import edges preserves the actual admitted program,
-not merely a detached lookup table. All public machine theorems consume this
-same admission relation. -/
-theorem NamedFunctionsAdmitted.imports_congr {source : List NamedFunction} {program : Program}
-    {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second) :
-    NamedFunctionsAdmitted modules source first program ↔ NamedFunctionsAdmitted modules source second program := by
-  have names : functionNames source first = functionNames source second := by
-    funext caller home name
-    exact functionNames.imports_congr same caller home name
-  simp only [NamedFunctionsAdmitted, FunctionImportsValid.imports_congr same, names]
-
-
-theorem NamedFunctionsAdmitted.checked {source : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules source imports program) : program.Checked := by
-  obtain ⟨_, _, core, elaborated, functions⟩ := admitted
+theorem NamedProgramAdmitted.checked {names : Module → Module → Identifier → Option Nat}
+    {source : List NamedFunction} {program : Program}
+    (admitted : NamedProgramAdmitted names source program) : program.Checked := by
+  obtain ⟨_, core, elaborated, functions⟩ := admitted
   intro identity declaration selected
   rw [functions] at selected
   exact elaborated.checked declaration (List.mem_of_getElem? selected)
 
+
+/-- Import order preserves the shared declaration-elaboration contract. The
+closure layer separately enforces package authorization and module inclusion. -/
+theorem NamedProgramAdmitted.imports_congr {source : List NamedFunction} {program : Program}
+    {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second) :
+    NamedProgramAdmitted (functionNames source first) source program ↔
+      NamedProgramAdmitted (functionNames source second) source program := by
+  have names : functionNames source first = functionNames source second := by
+    funext caller home name
+    exact functionNames.imports_congr same caller home name
+  rw [names]
+
 /-- Public source safety obtains declaration-body correctness from named source
 admission, rather than accepting Program.Checked from the caller. -/
-theorem NamedFunctionsAdmitted.soundness {source : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules source imports program) {home : Module} {scope : SourceScope}
+theorem NamedProgramAdmitted.soundness {source : List NamedFunction} {program : Program}
+    {names : Module → Module → Identifier → Option Nat}
+    (admitted : NamedProgramAdmitted names source program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
-    (elaborated : NamedExpr.Elaborates program (functionNames source imports) home scope before expression core type final)
+    (elaborated : NamedExpr.Elaborates program names home scope before expression core type final)
     (slots : before.slots = scope.context)
     {environment : Environment} (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation)
@@ -115,33 +117,6 @@ theorem NamedFunctionsAdmitted.soundness {source : List NamedFunction} {program 
       (state.environment.bindings.map Prod.fst).Nodup :=
   elaborated.soundness slots admitted.checked store issued run
 
-
-/-- A visible import derivation and static source admission construct name
-selection and call elaboration, then feed the general machine theorem. No
-resolved import table or execution-success premise is supplied. -/
-theorem NamedFunctionsAdmitted.import_call_soundness {sources : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules sources imports program) {home : Module} {scope : SourceScope}
-    {before after : FlowContext} {name : FunctionName} {identity : Nat} {declaration : FunctionDecl}
-    {arguments : List NamedExpr} {inputs : List Expr}
-    (included : name.owner home ∈ modules)
-    (candidate : VisibleFunctionCandidate sources imports home (name.owner home) name.spelling identity)
-    (unshadowed : name.Unshadowed scope) (declared : program.functions identity = some declaration)
-    (visible : declaration.visibility.Allows declaration.home home)
-    (argumentsTyped : NamedExprsElaborate program (functionNames sources imports) home scope before
-      arguments inputs (declaration.parameters.map fun parameter => parameter.2.type) after)
-    (slots : before.slots = scope.context) {environment : Environment}
-    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
-    (issued : environment.supply.Issued environment.activation) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.call identity inputs), []⟩ state) :
-    ConfigurationTyped program after (.one declaration.result) state ∧
-      (Terminal state ∨ ∃ next, Step program state next) ∧
-      AddressedEnvironment.ConsumptionFrame program after.slots environment state.outerEnvironment ∧
-      (state.environment.bindings.map Prod.fst).Nodup := by
-  have resolved := admitted.1.resolve_existing included candidate
-  have elaborated : NamedExpr.Elaborates program (functionNames sources imports) home scope before
-      (.call name arguments) (.call identity inputs) declaration.result after :=
-    .call unshadowed resolved declared visible argumentsTyped
-  exact admitted.soundness elaborated slots store issued run
 
 
 theorem NamedFunctionsElaborate.selected {program : Program} {names : Module → Module → Identifier → Option Nat}
@@ -169,45 +144,11 @@ theorem NamedFunctionsElaborate.selected_core {program : Program} {names : Modul
     | succ identity => exact ih selected
 
 
-theorem NamedFunctionsAdmitted.resolves {sources : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules sources imports program)
-    {caller home : Module} {name : Identifier} {identity : Nat}
-    (resolved : functionNames sources imports caller home name = some identity) :
-    ∃ source core, sources[identity]? = some source ∧ program.functions identity = some core ∧
-      NamedFunction.Elaborates program (functionNames sources imports) source core := by
-  obtain ⟨_, _, cores, elaborated, functions⟩ := admitted
-  obtain ⟨source, selected⟩ := functionNames.selected resolved
-  obtain ⟨core, emitted, checked⟩ := elaborated.selected selected
-  exact ⟨source, core, selected, by rw [functions]; exact emitted, checked⟩
-
-/-- Aliases retain the original runtime identity and declaring module. Every
-selected name has a seeded import derivation and keeps declaration visibility. -/
-theorem NamedFunctionsAdmitted.call_resolution {sources : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules sources imports program) {home : Module} {scope : SourceScope}
-    {before after : FlowContext} {name : FunctionName} {arguments : List NamedExpr}
-    {core : Expr} {type : Ty}
-    (elaborated : NamedExpr.Elaborates program (functionNames sources imports) home scope before
-      (.call name arguments) core type after) :
-    ∃ identity declaration inputs source, sources[identity]? = some source ∧
-      core = .call identity inputs ∧ program.functions identity = some declaration ∧
-      declaration.home = source.home ∧ declaration.visibility.Allows declaration.home home ∧
-      FunctionResolution sources imports home (name.owner home) name.spelling identity := by
-  cases elaborated with
-  | call _ resolved declared visible _ =>
-    obtain ⟨source, emitted, selected, found, body⟩ := admitted.resolves resolved
-    have same := Option.some.inj (declared.symm.trans found)
-    subst emitted
-    refine ⟨_, _, _, source, selected, rfl, declared, ?_, visible,
-      functionNames.selected_iff.mp resolved⟩
-    cases body
-    rfl
-
-
-
-theorem NamedFunctionsAdmitted.evaluation_soundness {source : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules source imports program) {home : Module} {scope : SourceScope}
+theorem NamedProgramAdmitted.evaluation_soundness {source : List NamedFunction} {program : Program}
+    {names : Module → Module → Identifier → Option Nat}
+    (admitted : NamedProgramAdmitted names source program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
-    (elaborated : NamedExpr.Elaborates program (functionNames source imports) home scope before expression core type final)
+    (elaborated : NamedExpr.Elaborates program names home scope before expression core type final)
     (slots : before.slots = scope.context)
     {environment after : Environment} {value : Value}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
@@ -218,10 +159,11 @@ theorem NamedFunctionsAdmitted.evaluation_soundness {source : List NamedFunction
       AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
   elaborated.evaluation_soundness slots admitted.checked store issued evaluated
 
-theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules source imports program) {home : Module} {scope : SourceScope}
+theorem NamedProgramAdmitted.correctness {source : List NamedFunction} {program : Program}
+    {names : Module → Module → Identifier → Option Nat}
+    (admitted : NamedProgramAdmitted names source program) {home : Module} {scope : SourceScope}
     {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
-    (elaborated : NamedExpr.Elaborates program (functionNames source imports) home scope before expression core type final)
+    (elaborated : NamedExpr.Elaborates program names home scope before expression core type final)
     (slots : before.slots = scope.context)
     (finite : FiniteCalls program core) {environment : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
@@ -236,8 +178,9 @@ theorem NamedFunctionsAdmitted.correctness {source : List NamedFunction} {progra
 
 /-- Source admission derives both body checking and actual addressed invocation
 entry. This is the storage-entry boundary, not execution of the body. -/
-theorem NamedFunctionsAdmitted.enter {sources : List NamedFunction} {program : Program}
-    (admitted : NamedFunctionsAdmitted modules sources imports program) {identity : Nat} {declaration : FunctionDecl}
+theorem NamedProgramAdmitted.enter {sources : List NamedFunction} {program : Program}
+    {names : Module → Module → Identifier → Option Nat}
+    (admitted : NamedProgramAdmitted names sources program) {identity : Nat} {declaration : FunctionDecl}
     (declared : program.functions identity = some declaration) {values : List Value}
     (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
     (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :

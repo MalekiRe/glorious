@@ -40,7 +40,7 @@ future-state readiness or execution-success premise. Recursive calls are therefo
 admitted without finite expansion of their bodies. Preservation obtains body
 checking from the selected declaration at invocation entry.
 
-`NamedFunctionsAdmitted.soundness` derives this core contract from named
+`NamedProgramAdmitted.soundness` derives this core contract from named
 direct-function declarations and recursively elaborated named expressions,
 including named pattern clauses. `Program.Checked` is a proved intermediate
 product, not a supplied execution guarantee. Callable imports use seeded least
@@ -48,8 +48,10 @@ candidate closure, visibility, explicit-over-glob priority and unique selection.
 `SourceClosure.Admitted.function_soundness` now derives the declaring modules
 and owners from supplied roots and explicit module inclusion, constructs fresh
 function entry and proves general body-prefix safety. File permutation preserves
-actual admission. Dependency authorization, textual paths/groups, package-name
-normalization, prelude profiles and the remaining source frontend are still open.
+actual admission. Callable lookup and imports now require explicit package
+dependencies, with checked normalized names and collision rejection. Textual
+paths/groups, other namespaces, prelude profiles and the remaining source
+frontend are still open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1439,4 +1441,54 @@ namespaces, parsing/UTF-8 and preservation of original byte spans remain open.
 Nominal declarations, aliases and constants retain their earlier decoded
 interfaces. The overall source-closure task and whole-language soundness are
 not complete.
+
+
+
+## Verified explicit callable dependency authority
+
+Each supplied package now declares its dependencies by manifest name and target
+package identity. `PackageDependency.name` normalizes hyphens to underscores
+and invokes the shared checked identifier decoder. Admission rejects failed
+decoding, duplicate normalized names and targets absent from the supplied
+package collection. General proofs establish normalized-name uniqueness and
+construct exact dependency lookup from each valid manifest binding.
+
+`SourceClosure.functionNames` guards the existing seeded callable resolver
+with the caller's own explicit package bindings. Every imported edge is checked
+against the same authorization relation. All function bodies are elaborated
+with that guarded resolver. Supplying a package or depending on one of its
+dependents is no longer sufficient authority for direct lookup into it.
+`SourceClosure.call_dependency` proves that every elaborated cross-package
+call namespace has a normalized binding in the caller's actual manifest.
+
+`dependency_call_soundness` constructs dependency lookup, unique callable
+selection and source call elaboration from a valid manifest binding and visible
+candidate, then proves preservation, progress and consumption framing through
+the actual emitted call. Authorization applies to the lookup namespace, not
+the ultimate declaration owner: valid re-exports retain their original runtime
+identity and visibility without requiring an extra direct dependency on that
+ultimate owner. `call_resolution` proves the resulting identity/owner contract.
+
+The obsolete `NamedFunctionsAdmitted` wrapper is removed. Its shared body and
+exact-emission contract is now `NamedProgramAdmitted`; the closure is the
+source-admission boundary that produces its resolver. Existing general safety,
+completed-evaluation, finite-call correctness and entry guarantees are retained
+through that shared contract. Public closure correctness and identity theorems
+consume the authorized resolver. File-order-independent admission still holds.
+No compatibility alias or parallel body analysis remains.
+
+Fresh source-only `lake build Grounded` passed (30 jobs) after the full cutover.
+The imported audit covered 3,390 `Grounded` declarations with only standard
+Lean axioms. Direct-dependency necessity, dependency-derived call soundness,
+function-body soundness, identity preservation, finite-call correctness and
+file-permutation admission equivalence received explicit axiom inspection.
+No unit tests, concrete examples, custom axioms or proof placeholders were added.
+
+This establishes explicit dependency authorization for the modeled callable
+namespace, including normalized dependency-name validation. Module qualifiers
+and import targets are still decoded identities, not textual paths. Other
+namespaces still require their source-resolution cutovers. Textual paths/groups,
+module-binding visibility along paths, prelude profiles, parsing/UTF-8, byte
+spans and the other whole-language obligations remain open. No full-language
+completion claim follows.
 
