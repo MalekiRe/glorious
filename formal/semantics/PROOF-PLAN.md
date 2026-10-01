@@ -549,6 +549,17 @@ owners, not assumed as an unrelated disjointness certificate. The combined
 passed. This is the addressed return mechanism; `Execution.Frame.restore`
 still uses the older lexical representation and must be migrated below.
 
+The addressed environment also has lexical `extend` and `exitScope` operations
+using the existing allocator and retirement operations. Extension preserves
+every existing realized map without advancing the activation supply. Exit
+constructs retirement, preserves surviving local bindings and every retained
+scope owned by a different activation, and leaves both supplies unchanged.
+The actual pending `Frame.bind` now retains the complete `BindingType`,
+including mutability; frame typing and evaluation composition consume it.
+The combined 26-job proof gate and imported-declaration axiom audit passed.
+The addressed lexical operations still await the expression-machine cutover;
+their proofs do not substitute for its general preservation theorem.
+
 Required consumer cutover remains: `Execution` must replace its value-bearing
 environments with address maps over one shared heap; restoration frames must
 retain caller maps and activation IDs, not heap snapshots. Its continuation

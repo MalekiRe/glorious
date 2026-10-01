@@ -47,7 +47,7 @@ theorem Evaluates.bind {environment middle after : List (BindingId × Value)} {m
       (initialized : Evaluates program environment initial resident middle)
       (continued : Evaluates program ((name, resident) :: middle) body value after) :
       Evaluates program environment (.bind mutable name localType initial body) value (after.drop 1) :=
-  .step .bind ((Run.extend initialized [.bind name localType body]).trans
+  .step .bind ((Run.extend initialized [.bind name ⟨localType, mutable⟩ body]).trans
     (.step .bindResult ((Run.extend continued [.scope 1]).trans (.step .scope (.refl _)))))
 
 theorem Evaluates.assign {environment middle updated after : List (BindingId × Value)} {place : Place}

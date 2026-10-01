@@ -521,4 +521,51 @@ theorem enterFunction.progress {declaration : FunctionDecl} {values : List Value
       fun identity member oldMember => callerTyped.allocate_apart supply.allocate.1 inputs identity member identity oldMember rfl⟩
 
 
+/-- Lexical extension allocates in the existing activation; invocation entry
+alone advances the activation supply. -/
+def AddressedEnvironment.extend (current : AddressedEnvironment) (inputs : List BindingInput) :
+    AddressedEnvironment :=
+  let allocated := allocateBindings current.heap current.activation inputs
+  { current with bindings := allocated.1 ++ current.bindings, heap := allocated.2 }
+
+theorem AddressedEnvironment.extend.typed {current : AddressedEnvironment}
+    {inputs : List BindingInput} {context : List (BindingId × BindingState)}
+    (typed : BindingMap.Typed program current.heap current.activation current.bindings context)
+    (inputsTyped : BindingInputsTyped program inputs)
+    (fresh : (inputs.map BindingInput.name ++ context.map Prod.fst).Nodup) :
+    BindingMap.Typed program (current.extend inputs).heap current.activation (current.extend inputs).bindings
+      (inputs.map BindingInput.state ++ context) ∧
+    (current.extend inputs).activation = current.activation ∧
+    (current.extend inputs).supply = current.supply ∧
+    (∀ owner bindings states, BindingMap.Typed program current.heap owner bindings states →
+      BindingMap.Typed program (current.extend inputs).heap owner bindings states) := by
+  exact ⟨allocateBindings.extend inputsTyped typed fresh, rfl, rfl,
+    fun _ _ _ retained => retained.allocate current.activation inputs⟩
+
+def AddressedEnvironment.exitScope (current : AddressedEnvironment) (count : Nat) :
+    Option AddressedEnvironment :=
+  (releaseBindings current.heap (current.bindings.take count)).map fun heap =>
+    { current with bindings := current.bindings.drop count, heap := heap }
+
+theorem AddressedEnvironment.exitScope.progress {current : AddressedEnvironment}
+    {context : List (BindingId × BindingState)}
+    (typed : BindingMap.Typed program current.heap current.activation current.bindings context)
+    (count : Nat) :
+    ∃ after, current.exitScope count = some after ∧
+      BindingMap.Typed program after.heap after.activation after.bindings (context.drop count) ∧
+      after.activation = current.activation ∧ after.supply = current.supply ∧
+      after.heap.next = current.heap.next ∧
+      (∀ identity ∈ (current.bindings.take count).map Prod.snd, after.heap.Retired identity) ∧
+      (∀ (caller : AddressedScope) states, BindingMap.Typed program current.heap caller.activation caller.bindings states →
+        caller.activation ≠ current.activation →
+        BindingMap.Typed program after.heap caller.activation caller.bindings states) := by
+  obtain ⟨heap, released, remaining, next, retired⟩ := typed.exit_scope count
+  refine ⟨{ current with bindings := current.bindings.drop count, heap := heap },
+    by simp [AddressedEnvironment.exitScope, released], remaining, rfl, rfl, next, retired, ?_⟩
+  intro caller states callerTyped different
+  apply callerTyped.frame
+  intro identity member
+  exact RuntimeHeap.retireMany_outside released
+    (callerTyped.apart_activations (typed.take count) different identity member)
+
 end Grounded

@@ -31,7 +31,7 @@ inductive FrameTyped (program : Program) : StaticContext → ResultType → Fram
       (discard : Duplicable program.data localType)
       (checked : HasType program home ((name, ⟨localType, mutable⟩) :: context) body result)
       (fresh : name ∉ context.map Prod.fst) :
-      FrameTyped program context (.one localType) (.bind name localType body) context (.one result)
+      FrameTyped program context (.one localType) (.bind name ⟨localType, mutable⟩ body) context (.one result)
   | scope {context : StaticContext} (locals : StaticContext) {result : Ty}
       (discard : ∀ binding ∈ locals, Duplicable program.data binding.2.type) :
       FrameTyped program (locals ++ context) (.one result) (.scope locals.length) context (.one result)

@@ -16,7 +16,7 @@ inductive Control where
 
 inductive Frame where
   | sequence (rest : Expr)
-  | bind (name : BindingId) (localType : Ty) (body : Expr)
+  | bind (name : BindingId) (slot : BindingType) (body : Expr)
   | scope (count : Nat)
   | assign (place : Place) (rest : Expr)
   | tupleHead (tail : List Expr)
@@ -82,9 +82,9 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : BindingId}
       {localType : Ty} {initial body : Expr} :
       Step program ⟨env, .expression (.bind mutable name localType initial body), stack⟩
-        ⟨env, .expression initial, .bind name localType body :: stack⟩
-  | bindResult {env : Environment} {stack : List Frame} {name : BindingId} {localType : Ty} {body : Expr} {value : Value} :
-      Step program ⟨env, .result value, .bind name localType body :: stack⟩
+        ⟨env, .expression initial, .bind name ⟨localType, mutable⟩ body :: stack⟩
+  | bindResult {env : Environment} {stack : List Frame} {name : BindingId} {slot : BindingType} {body : Expr} {value : Value} :
+      Step program ⟨env, .result value, .bind name slot body :: stack⟩
         ⟨(name, value) :: env, .expression body, .scope 1 :: stack⟩
   | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value} :
       Step program ⟨env, .result value, .scope count :: stack⟩
