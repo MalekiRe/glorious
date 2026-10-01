@@ -346,6 +346,17 @@ theorem PartialValue.Disposable.read_permission {program : Program} {value : Par
   obtain ⟨state, typed, disposition⟩ := permission
   exact disposition.ready (typed.read_sound read).2
 
+/-- Another valid typing of the observed value cannot weaken its owned-use
+principal; this includes the element-type ambiguity of empty arrays. -/
+theorem PartialValue.Disposable.read_permission_as {program : Program} {value : PartialValue}
+    {type other : Ty} (permission : value.Disposable program type) {owner : Value}
+    (read : value.read = some owner) (typed : ValueHasType program owner other) :
+    UsePermitted program.data .discard other := by
+  obtain ⟨state, actual, disposition⟩ := permission
+  obtain ⟨resident, ready⟩ := actual.read_sound read
+  exact resident.use_permission typed (disposition.ready ready)
+
+
 /-- Reconstructing an aggregate cannot hide a live exact owner from cleanup. -/
 theorem PartialValue.Disposable.not_exact_read {program : Program} {identity : Nat}
     {declaration : DataDecl} {tag : Option Nat} {fields : List Value} {value : PartialValue} {type : Ty}

@@ -74,6 +74,54 @@ inductive ValuesHaveTypes (program : Program) : List Value → List Ty → Prop 
       ValuesHaveTypes program (head :: tail) (first :: rest)
 end
 
+/-- Owned-use permission is invariant under the possible typings of one value.
+In particular, an empty array's unconstrained element type cannot hide an owner. -/
+theorem ValueHasType.use_permission {program : Program} {value : Value} {type : Ty}
+    {permission : UsePermission} (typed : ValueHasType program value type) :
+    ∀ {other}, ValueHasType program value other →
+      UsePermitted program.data permission type → UsePermitted program.data permission other := by
+  induction typed using ValueHasType.rec
+    (motive_2 := fun values types _ => ∀ others, ValuesHaveTypes program values others →
+      (∀ type ∈ types, UsePermitted program.data permission type) →
+      ∀ type ∈ others, UsePermitted program.data permission type) with
+  | unit => intro other typed allowed; cases typed; exact allowed
+  | integer => intro other typed allowed; cases typed; exact allowed
+  | character => intro other typed allowed; cases typed; exact allowed
+  | tuple first rest firstIH restIH =>
+    intro other typed allowed
+    cases typed with
+    | tuple otherFirst otherRest =>
+      cases allowed with
+      | tuple firstAllowed restAllowed =>
+        exact .tuple (firstIH otherFirst firstAllowed) (restIH _ otherRest restAllowed)
+  | array residents finite size ih =>
+    intro other typed allowed
+    cases typed with
+    | @array values element length otherResidents otherFinite otherSize =>
+      by_cases zero : length = 0
+      · subst length; exact .emptyArray element
+      · have permissions := ih _ otherResidents (by
+          intro type member
+          cases allowed with
+          | array count permission =>
+            obtain ⟨_, rfl⟩ := List.mem_replicate.mp member
+            exact permission
+          | emptyArray => simp at member)
+        exact .array length (permissions element (by simp [zero]))
+  | nominal declared chosen finite residents ih =>
+    intro other typed allowed
+    cases typed
+    exact allowed
+  | nil => rename_i others typed allowed type member; cases typed; cases member
+  | cons head tail headIH tailIH =>
+    rename_i others typed allowed type member
+    cases typed with
+    | cons otherHead otherTail =>
+      cases member with
+      | head => exact headIH otherHead (allowed _ (by simp))
+      | tail _ member => exact tailIH _ otherTail (fun type included => allowed type (by simp [included])) type member
+
+
 def Value.head : Value → Head
   | .unit => .unit
   | .integer type number => .integer type number

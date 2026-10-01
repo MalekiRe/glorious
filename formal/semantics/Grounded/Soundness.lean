@@ -23,6 +23,23 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.storage_cleanup_safe⟩
 
+/-- Direct disposal cannot erase any nondiscardable principal, including one
+inherited through aggregates or inactive nominal variants. -/
+theorem HasType.no_nondiscardable_discard (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {owner : Value} {ownerType : Ty} {rest : Expr} {stack : List Frame}
+    (resident : ValueHasType program owner ownerType)
+    (required : ¬ UsePermitted program.data .discard ownerType)
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result owner, .sequence rest :: stack⟩) : False := by
+  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2
+  exact required (permission.read_permission_as (by simp [PartialValue.read]) resident)
+
+
 /-- No checked execution prefix reaches a direct discard of a live exact
 nominal owner. This includes empty nominal payloads, not just inhabited fields. -/
 theorem HasType.no_exact_discard (checkedProgram : program.Checked)

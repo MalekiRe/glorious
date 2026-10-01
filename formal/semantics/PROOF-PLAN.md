@@ -2239,3 +2239,25 @@ This closes the duplicate disposal-authority defect, not the full language.
 Custom hooks and their order/divergence, correlated ownership branches, loans,
 nonlocal cleanup and the remaining tracked boundaries are still unproved.
 
+
+## General direct-discard exclusion and principal invariance
+
+`ValueHasType.use_permission` proves that Copy and MayDiscard cannot change
+between two valid typings of the same logical value. The proof covers nested
+aggregates and the legitimate element-type ambiguity of empty arrays; it does
+not assume type uniqueness where that assumption would be false.
+
+The canonical runtime disposal relation uses this result in
+`read_permission_as`. Its existential typing witnesses cannot hide a weaker
+principal. `HasType.no_nondiscardable_discard` carries the result through general
+prefix soundness to direct sequence-result disposal, covering every structurally
+nondiscardable type rather than only explicitly exact nominal annotations.
+The proof requires an actual typing of the observed value, not a future-state
+readiness or execution-completion assumption.
+
+`lake build Grounded` passed all 30 jobs. Explicit axiom inspection of permission
+invariance, runtime interpretation, general direct-discard exclusion and public
+source-function soundness found only standard Lean axioms. No unit tests or
+concrete example files were introduced. The full-language obligations remain
+open; these results concern the current hook-free logical ownership semantics.
+
