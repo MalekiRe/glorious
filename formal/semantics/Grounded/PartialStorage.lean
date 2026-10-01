@@ -207,45 +207,16 @@ inductive InitializationsDisposable (data : DataDeclarations) : List Ty → List
       InitializationsDisposable data (type :: types) (state :: states)
 end
 
-/-- Runtime interpretation of residual permission. The witnesses concern the
-actual retained residents, never a reconstructed source flow or future state. -/
-inductive PartialValue.Disposable (program : Program) : PartialValue → Prop where
-  | empty {value} (absent : value.Empty) : Disposable program value
-  | permitted {value type state} (typed : PartialValue.Typed program value type state)
-      (permission : UsePermitted program.data .discard type) : Disposable program value
-  | tuple {head tail} (first : Disposable program head)
-      (rest : ∀ value ∈ tail, Disposable program value) : Disposable program (.tuple head tail)
-  | nominal {identity tag declaration schema fields}
-      (declared : program.data identity = some declaration)
-      (chosen : declaration.constructor tag = some schema)
-      (restriction : UsePermission.discard.Allows declaration.restriction)
-      (residents : ∀ value ∈ fields, Disposable program value) :
-      Disposable program (.nominal identity tag fields)
+/-- One runtime interpretation of the authoritative residual permission. Its
+mask describes this actual resident at its storage type, not a future source state. -/
+def PartialValue.Disposable (program : Program) (value : PartialValue) (type : Ty) : Prop :=
+  ∃ state, value.Typed program type state ∧ state.Disposable program.data type
 
 theorem Initialization.Disposable.realizes {program : Program} {type : Ty} {state : Initialization}
     (permission : state.Disposable program.data type) {value : PartialValue}
-    (typed : value.Typed program type state) : value.Disposable program := by
-  induction permission using Initialization.Disposable.rec
-    (motive_2 := fun types states _ => ∀ values, PartialValuesTyped program values types states →
-      ∀ value ∈ values, value.Disposable program) generalizing value with
-  | empty absent => exact .empty (typed.empty absent)
-  | permitted permission => exact .permitted typed permission
-  | tuple head tail headIH tailIH =>
-    cases typed with
-    | tuple first rest => exact .tuple (headIH first) (tailIH _ rest)
-  | nominal declared restriction fields ih =>
-    cases typed with
-    | nominal found chosen finite residents =>
-      cases Option.some.inj (declared.symm.trans found)
-      exact .nominal found chosen restriction (ih _ _ chosen _ residents)
-  | nil => rename_i values typed value member; cases typed; cases member
-  | cons head tail headIH tailIH =>
-    rename_i values typed value member
-    cases typed with
-    | cons first rest =>
-      cases member with
-      | head => exact headIH first
-      | tail _ member => exact tailIH _ rest value member
+    (typed : value.Typed program type state) : value.Disposable program type :=
+  ⟨state, typed, permission⟩
+
 
 /-- Residual disposition cannot weaken the principal of a reconstructed whole
 owner. Every nominal constructor contributes, including inactive variants. -/
@@ -304,64 +275,18 @@ theorem Initialization.Disposable.exact_nominal_empty {data : DataDeclarations} 
     cases Option.some.inj (found.symm.trans declared)
     simp [UsePermission.Allows, restricted] at restriction
 
-/-- The same exclusion holds for the actual retained nominal shell. -/
+/-- Exact nominal shells can be retired only when genuinely consumed. -/
 theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identity : Nat}
-    {declaration : DataDecl} {tag : Option Nat} {fields : List PartialValue}
+    {declaration : DataDecl} {tag : Option Nat} {fields : List PartialValue} {type : Ty}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (permission : (PartialValue.nominal identity tag fields).Disposable program) :
+    (permission : (PartialValue.nominal identity tag fields).Disposable program type) :
     (PartialValue.nominal identity tag fields).Empty := by
-  cases permission with
-  | empty absent => exact absent
-  | permitted typed allowed =>
-    cases typed with
-    | nominal found chosen finite residents =>
-      cases allowed with
-      | nominal other restriction fields =>
-        cases Option.some.inj (other.symm.trans declared)
-        simp [UsePermission.Allows, restricted] at restriction
-  | nominal found chosen restriction residents =>
-    cases Option.some.inj (found.symm.trans declared)
-    simp [UsePermission.Allows, restricted] at restriction
+  obtain ⟨state, typed, disposition⟩ := permission
+  cases typed with
+  | nominal found chosen finite residents =>
+    exact (PartialValue.Typed.nominal found chosen finite residents).empty
+      (disposition.exact_nominal_empty declared restricted)
 
-/-- A live exact nominal value is never an empty shell, even with zero fields. -/
-theorem PartialValue.Disposable.not_exact_resident {program : Program} {identity : Nat}
-    {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
-    (declared : program.data identity = some declaration)
-    (restricted : declaration.restriction = some .exact) :
-    ¬ (PartialValue.resident (.nominal identity tag fields)).Disposable program := by
-  intro permission
-  cases permission with
-  | empty absent => simp [PartialValue.Empty] at absent
-  | permitted typed allowed =>
-    cases typed with
-    | resident typed =>
-      cases typed with
-      | nominal found chosen finite residents =>
-        cases allowed with
-        | nominal other restriction fields =>
-          cases Option.some.inj (other.symm.trans declared)
-          simp [UsePermission.Allows, restricted] at restriction
-
-/-- Reconstructing an aggregate does not hide a live exact owner from cleanup. -/
-theorem PartialValue.Disposable.not_exact_read {program : Program} {identity : Nat}
-    {declaration : DataDecl} {tag : Option Nat} {fields : List Value} {value : PartialValue}
-    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (observed : value.read = some (.nominal identity tag fields)) : ¬ value.Disposable program := by
-  intro permission
-  cases value with
-  | hole => simp [PartialValue.read] at observed
-  | resident value =>
-    simp only [PartialValue.read, Option.some.injEq] at observed
-    subst value
-    exact PartialValue.Disposable.not_exact_resident declared restricted permission
-  | tuple head tail =>
-    simp [PartialValue.read, Option.bind_eq_some_iff, Option.map_eq_some_iff] at observed
-  | nominal other tag residents =>
-    simp only [PartialValue.read, Option.map_eq_some_iff] at observed
-    obtain ⟨values, read, same⟩ := observed
-    cases same
-    have absent := (permission.exact_nominal_empty declared restricted).read_none
-    simp [PartialValue.read, read] at absent
 
 
 structure StorageCell where
@@ -413,6 +338,25 @@ theorem PartialValue.Typed.read_sound {program : Program} {valueState : PartialV
     obtain ⟨firstTyped, firstReady⟩ := headIH readFirst
     obtain ⟨restTyped, restReady⟩ := tailIH rest readRest
     exact ⟨.cons firstTyped restTyped, .cons firstReady restReady⟩
+
+/-- A readable old resident cannot bypass the principal of its actual storage type. -/
+theorem PartialValue.Disposable.read_permission {program : Program} {value : PartialValue} {type : Ty}
+    (permission : value.Disposable program type) {owner : Value} (read : value.read = some owner) :
+    UsePermitted program.data .discard type := by
+  obtain ⟨state, typed, disposition⟩ := permission
+  exact disposition.ready (typed.read_sound read).2
+
+/-- Reconstructing an aggregate cannot hide a live exact owner from cleanup. -/
+theorem PartialValue.Disposable.not_exact_read {program : Program} {identity : Nat}
+    {declaration : DataDecl} {tag : Option Nat} {fields : List Value} {value : PartialValue} {type : Ty}
+    (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
+    (observed : value.read = some (.nominal identity tag fields)) : ¬ value.Disposable program type := by
+  rintro ⟨state, typed, disposition⟩
+  obtain ⟨resident, ready⟩ := typed.read_sound observed
+  cases resident with
+  | nominal found chosen finite residents =>
+    exact ready.not_empty (disposition.exact_nominal_empty declared restricted)
+
 
 def StorageCell.WellTyped (program : Program) (cell : StorageCell) : Prop :=
   ∃ state, cell.Typed program state

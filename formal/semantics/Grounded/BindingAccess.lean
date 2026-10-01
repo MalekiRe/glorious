@@ -27,13 +27,11 @@ variable {program : Program} {home : Module} {heap : RuntimeHeap StorageCell} {a
 a write. Selection uses the same heap path as restoration itself. -/
 def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCell)
     (bindings : BindingMap) (place : Place) : Prop :=
-  ∃ identity cell resident type mask,
+  ∃ identity cell resident type,
     lookup place.root bindings = some identity ∧ heap.read identity = some cell ∧
     cell.resident.selectFields program cell.type place.fields = some resident ∧
-    resident.Typed program type mask ∧
     (∃ home, PathType program home cell.type place.fields type) ∧
-    resident.Disposable program ∧
-    ∀ value, resident.read = some value → UsePermitted program.data .discard type
+    resident.Disposable program type
 
 /-- An actual readable selected owner must permit discard at its uniquely
 resolved type. Reconstructing fields cannot erase inherited principal constraints. -/
@@ -45,13 +43,13 @@ theorem BindingMap.ReplacementSafe.not_nondiscardable
     {owner : Value}
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) = some owner)
     (required : ¬ UsePermitted program.data .discard selectedType) : False := by
-  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound,
-    actualSelected, _, ⟨home, actualPath⟩, _, permission⟩ := safe
+  obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
+    actualSelected, ⟨home, actualPath⟩, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   cases actualPath.result_unique path
   rw [actualSelected] at selected
-  exact required (permission owner selected)
+  exact required (permission.read_permission selected)
 
 
 theorem BindingMap.ReplacementSafe.not_exact
@@ -62,7 +60,7 @@ theorem BindingMap.ReplacementSafe.not_exact
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
     (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
       some (.nominal identity tag fields)) : False := by
-  obtain ⟨actualAddress, actualCell, value, type, mask, actualMapped, actualFound, actualSelected, _, _, permission, _⟩ := safe
+  obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound, actualSelected, _, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   rw [actualSelected] at selected
@@ -84,9 +82,8 @@ theorem BindingMap.Typed.replacement_safe
     actualPath.select_partial typed.2
   rw [declared] at maskSelected
   cases Option.some.inj (maskSelected.symm.trans selection)
-  exact ⟨identity, cell, resident, type, available, mapped, found, residentSelected,
-    residentTyped, ⟨home, actualPath⟩, discard.realizes residentTyped,
-    fun _ read => discard.ready (residentTyped.read_sound read).2⟩
+  exact ⟨identity, cell, resident, type, mapped, found, residentSelected,
+    ⟨home, actualPath⟩, discard.realizes residentTyped⟩
 
 
 /-- Exact retained cells preserve every projected read, including unsuccessful

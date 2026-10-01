@@ -676,7 +676,7 @@ def Configuration.StorageCleanupSafe (program : Program) (state : Configuration)
   | .result _, .assign place _ :: _ =>
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
   | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
-  | .result value, .sequence _ :: _ => (PartialValue.resident value).Disposable program
+  | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
   | _, _ => True
 
 theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result : ResultType}
@@ -697,7 +697,8 @@ theorem ConfigurationTyped.storage_cleanup_safe {context : FlowContext} {result 
           exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
         case project =>
           exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
-        case sequence => exact .permitted (.resident resident) (by assumption)
+        case sequence =>
+          exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
 
 end Grounded
 

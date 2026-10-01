@@ -73,8 +73,7 @@ variable {program : Program} {heap after : RuntimeHeap StorageCell} {activation 
 the same heap cells selected by the runtime binding map. -/
 def BindingMap.Disposable (program : Program) (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Prop :=
   ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell ∧
-    cell.resident.Disposable program ∧
-    ∀ value, cell.resident.read = some value → UsePermitted program.data .discard cell.type
+    cell.resident.Disposable program cell.type
 
 theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activation bindings context)
     (disposition : ∀ binding ∈ context, binding.2.Disposable program.data) :
@@ -88,8 +87,7 @@ theorem BindingMap.Typed.disposable (typed : BindingMap.Typed program heap activ
     · refine ⟨cell, found, ?_⟩
       have permission : state.initialization.Disposable program.data cell.type := by
         rw [declared]; exact disposition (name, state) (by simp)
-      exact ⟨permission.realizes resident.2, fun _ read =>
-        permission.ready (resident.2.read_sound read).2⟩
+      exact permission.realizes resident.2
     · exact ih (fun binding included => disposition binding (List.mem_cons_of_mem _ included)) address member
 
 theorem BindingMap.Typed.keys (typed : BindingMap.Typed program heap activation bindings context) :
@@ -246,9 +244,9 @@ theorem BindingMap.Disposable.release_preserves_nondiscardable
     after.read address = some cell := by
   have outside : address ∉ bindings.map Prod.snd := by
     intro member
-    obtain ⟨actual, selected, _, permission⟩ := disposition address member
+    obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact required (permission value resident)
+    exact required (permission.read_permission resident)
   exact (RuntimeHeap.retireMany_outside released outside).trans found
 
 
@@ -266,7 +264,7 @@ theorem BindingMap.Disposable.release_preserves_exact
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact PartialValue.Disposable.not_exact_read declared restricted resident permission.1
+    exact PartialValue.Disposable.not_exact_read declared restricted resident permission
   exact (RuntimeHeap.retireMany_outside released outside).trans found
 
 

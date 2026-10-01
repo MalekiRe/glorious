@@ -2202,3 +2202,40 @@ Lean axioms occurred. No unit tests, examples or assumed completion conditions
 were introduced. Custom destruction, correlated branch states, loans, nonlocal
 cleanup and the other whole-language obligations remain open.
 
+
+## Repaired the runtime disposal authority itself
+
+A general pre-fix proof reproduced a remaining modeling defect: the independent
+runtime nominal-disposal rule authorized a readable fieldless variant even when
+the nominal type's inactive variants made its principal nondiscardable. The
+source-mask checks and recently strengthened cleanup contracts blocked this in
+checked execution, but the runtime relation itself was too permissive.
+
+`PartialValue.Disposable` is now indexed by the actual storage/selected type.
+It interprets the single `Initialization.Disposable` authority through the
+existing physical-resident/mask typing relation. The duplicate runtime inductive
+rules were deleted. No future source state, completed execution or additional
+analysis is assumed. `read_permission` derives the whole-type permission from
+an actual read; it covers inactive variants and reconstructed representations.
+
+Retirement, replacement, temporary projection remainders and sequence-result
+cleanup all consume this same interpretation. The separate whole-read permission
+fields introduced in the preceding checkpoints were removed, as was duplicate
+resident typing in replacement safety. The specialized resident-only exclusion
+was removed; its real consumer now uses representation-independent read exclusion.
+General preservation, progress and public source soundness retain the stronger
+cleanup guarantees through the canonical relation.
+
+Fresh source-only `lake build Grounded` passed all 30 jobs. General negative
+proofs reject readable nondiscardable residents and reject a fieldless variant
+of a nondiscardable nominal under every proposed runtime type witness. The
+pre-fix reproduction and post-fix proofs were checked via stdin, with no test or
+example files added. Exhaustive axiom inspection covered 3,799 imported Grounded
+declarations and found only standard Lean axioms. The public preservation,
+progress, retirement, overwrite and source-function results received explicit
+axiom inspection.
+
+This closes the duplicate disposal-authority defect, not the full language.
+Custom hooks and their order/divergence, correlated ownership branches, loans,
+nonlocal cleanup and the remaining tracked boundaries are still unproved.
+

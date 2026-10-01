@@ -473,7 +473,7 @@ def Value.ProjectionCleanupSafe (program : Program) (aggregate : Value) (key : F
     aggregate.projectField program key = some (index, selected) ∧
     ValueHasType program selected type ∧
     (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
-    remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program
+    remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent
 
 theorem ProjectionType.cleanup_safe {program : Program} {home : Module} {parent type : Ty}
     {key : FieldKey} {index : Nat} {aggregate : Value} {residual : Initialization}

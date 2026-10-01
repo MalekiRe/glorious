@@ -36,8 +36,9 @@ theorem HasType.no_exact_discard (checkedProgram : program.Checked)
     (restricted : declaration.restriction = some .exact) {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result (.nominal identity tag fields), .sequence rest :: stack⟩) : False := by
-  exact PartialValue.Disposable.not_exact_resident declared restricted
-    (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2
+  exact PartialValue.Disposable.not_exact_read (tag := tag) (fields := fields)
+    declared restricted (by simp [PartialValue.read]) permission
 
 /-- A checked prefix and actual scope step preserve every readable owner whose
 structural type forbids discard, not only explicitly restricted nominal types. -/
