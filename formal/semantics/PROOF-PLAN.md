@@ -52,7 +52,8 @@ actual admission. Callable lookup and imports now require explicit package
 dependencies, with checked normalized names and collision rejection, and
 visibility-checked traversal through actual module bindings. Calls and callable
 imports interpret decoded `self`/`crate`/`super`/dependency anchors through the same
-producer. Module aliases/groups, other namespaces, preludes and parsing remain open.
+producer, including nested callable import groups with complete namespace validation.
+Module aliases, other namespaces, preludes and parsing remain open.
 
 `HasType.evaluation_soundness` proves declared result typing, exact output-mask
 realization, issued activation and consumption-only immutable framing for every
@@ -1632,4 +1633,49 @@ Calls and callable imports now share decoded anchor interpretation. Module
 aliases and unanchored qualifier disambiguation, import groups, inherent/other
 namespaces, preludes, byte parsing/UTF-8/spans, and the previously recorded
 whole-language obligations remain open. This is not whole-language completion.
+
+
+## Verified grouped callable imports through source soundness
+
+`ImportSelection` models callable leaves, relative namespace descent and
+arbitrarily nested groups. A single emission pass produces typed `ImportEntry`
+values: either a namespace obligation or a resolved binding. Descent and group
+nodes retain their namespace obligations even when a group is empty. Binding
+leaves preserve the source import's owner, visibility and explicit/glob kind.
+
+`ImportSelection.Emits` gives the source rules. `emit_sound` and
+`Emits.complete` prove both directions between these rules and the actual
+emitter, including nested group membership and relative path composition.
+`SourceClosure` owns the complete per-statement entry batches. Its entry and
+binding lists are projections of this product, not independently reconstructed
+source facts. The old atomic source `kind` field is replaced by the selection
+syntax; there is no parallel atomic-only import route.
+
+Admission checks package authorization and declared-module reachability for
+**every entry**, including namespace-only entries. The seeded callable resolver
+consumes only binding entries. `import_source`, `import_origin` and
+`import_emitted` connect the actual source rules to this same product;
+`Admitted.source_import_entry_access` proves all emitted namespace obligations
+hold, whether or not any subsequent call selects a leaf. An empty group cannot
+hide an inaccessible or absent namespace. Unknown dependency anchors still fail
+construction; other missing/inaccessible namespaces fail admission. Construction
+success alone is not complete source admission.
+
+The public call-identity theorem, general source/function soundness and finite-call
+correctness consume the migrated product. Closure uniqueness, exact construction
+criteria and file-order admission invariance remain proved. No future lookup,
+execution, progress, cleanup or post-state invariant was added as a premise.
+
+Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
+axiom inspection covered 3,631 `Grounded` declarations, including private and
+generated declarations; only `propext`, `Quot.sound` and `Classical.choice`
+occur. The source-rule equivalence, provenance, all-entry access, construction,
+uniqueness, file-order invariance and public soundness/correctness theorems
+received explicit axiom inspection. No unit tests, examples, additional axioms
+or proof placeholders were added.
+
+This covers decoded grouped **callable** imports, not module aliases, type/effect
+family imports, inherent namespaces, unanchored qualifier disambiguation, preludes
+or parsing. Those source boundaries and the previously tracked ownership,
+effects, raw-memory, foreign/ABI and whole-language obligations remain open.
 

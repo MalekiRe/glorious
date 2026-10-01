@@ -24,9 +24,15 @@ inductive FunctionImportKind where
   | explicit (sourceName localName : Identifier)
   | glob
 
+inductive ImportSelection where
+  | item (kind : FunctionImportKind)
+  | descend (path : List Identifier) (selection : ImportSelection)
+  | group (selections : List ImportSelection)
+
+
 structure FunctionImportSyntax where
   target : ModulePath
-  kind : FunctionImportKind
+  selection : ImportSelection
   visibility : Visibility := .private
 
 structure FunctionImport where
@@ -35,15 +41,142 @@ structure FunctionImport where
   kind : FunctionImportKind
   visibility : Visibility := .private
 
+/-- Namespace entries retain group obligations even when no binding is emitted. -/
+inductive ImportEntry where
+  | namespace (home target : Module)
+  | binding (edge : FunctionImport)
+
+def ImportEntry.home : ImportEntry → Module
+  | .namespace home _ => home
+  | .binding edge => edge.home
+
+def ImportEntry.target : ImportEntry → Module
+  | .namespace _ target => target
+  | .binding edge => edge.target
+
+def ImportEntry.bindings : ImportEntry → List FunctionImport
+  | .namespace _ _ => []
+  | .binding edge => [edge]
+
+mutual
+def ImportSelection.emit (home target : Module) (visibility : Visibility) : ImportSelection → List ImportEntry
+  | .item kind => [.binding ⟨home, target, kind, visibility⟩]
+  | .descend path selection => .namespace home target ::
+      selection.emit home ⟨target.package, target.path ++ path⟩ visibility
+  | .group selections => .namespace home target :: emitImportSelections home target visibility selections
+def emitImportSelections (home target : Module) (visibility : Visibility) : List ImportSelection → List ImportEntry
+  | [] => []
+  | first :: rest => first.emit home target visibility ++ emitImportSelections home target visibility rest
+end
+
+theorem ImportSelection.emit_root (selection : ImportSelection) (home target : Module) (visibility : Visibility) :
+    ∃ entry ∈ selection.emit home target visibility, entry.home = home ∧ entry.target = target := by
+  cases selection with
+  | item kind => exact ⟨.binding ⟨home, target, kind, visibility⟩, by simp [ImportSelection.emit], rfl, rfl⟩
+  | descend path selection => exact ⟨.namespace home target, by simp [ImportSelection.emit], rfl, rfl⟩
+  | group selections => exact ⟨.namespace home target, by simp [ImportSelection.emit], rfl, rfl⟩
+
+
+/-- Source rules for grouped imports: descent changes only the target namespace;
+all leaves retain their declaring module and the enclosing import's visibility. -/
+inductive ImportSelection.Emits (home : Module) (visibility : Visibility) :
+    Module → ImportSelection → ImportEntry → Prop where
+  | item {target} (kind : FunctionImportKind) :
+      Emits home visibility target (.item kind) (.binding ⟨home, target, kind, visibility⟩)
+  | descendRoot {target} (path : List Identifier) (selection : ImportSelection) :
+      Emits home visibility target (.descend path selection) (.namespace home target)
+  | descend {target path selection entry}
+      (emitted : Emits home visibility ⟨target.package, target.path ++ path⟩ selection entry) :
+      Emits home visibility target (.descend path selection) entry
+  | groupRoot {target} (selections : List ImportSelection) :
+      Emits home visibility target (.group selections) (.namespace home target)
+  | group {target selections selection entry} (member : selection ∈ selections)
+      (emitted : Emits home visibility target selection entry) :
+      Emits home visibility target (.group selections) entry
+
+mutual
+theorem ImportSelection.emit_sound (selection : ImportSelection) (home target : Module) (visibility : Visibility)
+    (entry : ImportEntry) (member : entry ∈ selection.emit home target visibility) :
+    ImportSelection.Emits home visibility target selection entry := by
+  cases selection with
+  | item kind =>
+    have same := List.mem_singleton.mp member
+    cases same
+    exact .item kind
+  | descend path selection =>
+    rcases List.mem_cons.mp member with rfl | member
+    · exact .descendRoot path selection
+    · exact .descend (selection.emit_sound home _ visibility entry member)
+  | group selections =>
+    rcases List.mem_cons.mp member with rfl | member
+    · exact .groupRoot selections
+    · obtain ⟨selection, included, emitted⟩ := emitImportSelections.sound selections home target visibility entry member
+      exact .group included emitted
+theorem emitImportSelections.sound (selections : List ImportSelection) (home target : Module) (visibility : Visibility)
+    (entry : ImportEntry) (member : entry ∈ emitImportSelections home target visibility selections) :
+    ∃ selection ∈ selections, ImportSelection.Emits home visibility target selection entry := by
+  cases selections with
+  | nil => simp [emitImportSelections] at member
+  | cons first rest =>
+    rcases List.mem_append.mp member with head | tail
+    · exact ⟨first, by simp, first.emit_sound home target visibility entry head⟩
+    · obtain ⟨selection, included, emitted⟩ := emitImportSelections.sound rest home target visibility entry tail
+      exact ⟨selection, by simp [included], emitted⟩
+end
+
+theorem emitImportSelections.member {selections : List ImportSelection} {selection : ImportSelection}
+    {home target : Module} {visibility : Visibility} {entry : ImportEntry}
+    (included : selection ∈ selections) (member : entry ∈ selection.emit home target visibility) :
+    entry ∈ emitImportSelections home target visibility selections := by
+  induction selections with
+  | nil => cases included
+  | cons first rest ih =>
+    rcases List.mem_cons.mp included with rfl | included
+    · exact List.mem_append.mpr (.inl member)
+    · exact List.mem_append.mpr (.inr (ih included))
+
+theorem ImportSelection.Emits.complete {home target : Module} {visibility : Visibility}
+    {selection : ImportSelection} {entry : ImportEntry} (emitted : Emits home visibility target selection entry) :
+    entry ∈ selection.emit home target visibility := by
+  induction emitted with
+  | item => simp [ImportSelection.emit]
+  | descendRoot => simp [ImportSelection.emit]
+  | descend _ ih => exact List.mem_cons_of_mem _ ih
+  | groupRoot => simp [ImportSelection.emit]
+  | group member _ ih => exact List.mem_cons_of_mem _ (emitImportSelections.member member ih)
+
+theorem ImportSelection.Emits.home {home target : Module} {visibility : Visibility}
+    {selection : ImportSelection} {entry : ImportEntry} (emitted : Emits home visibility target selection entry) :
+    entry.home = home := by
+  induction emitted with
+  | item => rfl
+  | descendRoot => rfl
+  | descend _ ih => exact ih
+  | groupRoot => rfl
+  | group _ _ ih => exact ih
+
+theorem ImportSelection.Emits.visibility {home target : Module} {visibility : Visibility}
+    {selection : ImportSelection} {entry : ImportEntry} (emitted : Emits home visibility target selection entry) :
+    match (generalizing := false) entry with
+    | .namespace _ _ => True
+    | .binding edge => edge.visibility = visibility := by
+  induction emitted with
+  | item => rfl
+  | descendRoot => trivial
+  | descend _ ih => exact ih
+  | groupRoot => trivial
+  | group _ _ ih => exact ih
+
+
 /-- Source import targets use the same path interpreter as source calls.
 Failure is retained; an unresolved explicit import must not expose a fallback. -/
 def FunctionImportSyntax.resolve (dependencies : Identifier → Option Nat) (home : Module)
-    (source : FunctionImportSyntax) : Option FunctionImport :=
+    (source : FunctionImportSyntax) : Option (List ImportEntry) :=
   (source.target.resolve dependencies home).map fun target =>
-    ⟨home, target, source.kind, source.visibility⟩
+    source.selection.emit home target source.visibility
 
 def resolveFunctionImports (dependencies : Module → Identifier → Option Nat) :
-    List (Module × FunctionImportSyntax) → Option (List FunctionImport)
+    List (Module × FunctionImportSyntax) → Option (List (List ImportEntry))
   | [] => some []
   | (home, source) :: rest => do
       let first ← source.resolve (dependencies home) home
@@ -52,15 +185,15 @@ def resolveFunctionImports (dependencies : Module → Identifier → Option Nat)
 
 
 theorem FunctionImportSyntax.resolve_selected {dependencies : Identifier → Option Nat} {home : Module}
-    {source : FunctionImportSyntax} {edge : FunctionImport} (resolved : source.resolve dependencies home = some edge) :
-    edge.home = home ∧ edge.kind = source.kind ∧ edge.visibility = source.visibility ∧
-      source.target.resolve dependencies home = some edge.target := by
+    {source : FunctionImportSyntax} {entries : List ImportEntry} (resolved : source.resolve dependencies home = some entries) :
+    ∃ target, source.target.resolve dependencies home = some target ∧
+      entries = source.selection.emit home target source.visibility := by
   obtain ⟨target, path, rfl⟩ := Option.map_eq_some_iff.mp resolved
-  exact ⟨rfl, rfl, rfl, path⟩
+  exact ⟨target, path, rfl⟩
 
 private theorem resolveFunctionImports.cons {dependencies : Module → Identifier → Option Nat}
     {owned : Module × FunctionImportSyntax} {sources : List (Module × FunctionImportSyntax)}
-    {outputs : List FunctionImport} (resolved : resolveFunctionImports dependencies (owned :: sources) = some outputs) :
+    {outputs : List (List ImportEntry)} (resolved : resolveFunctionImports dependencies (owned :: sources) = some outputs) :
     ∃ edge tail, owned.2.resolve (dependencies owned.1) owned.1 = some edge ∧
       resolveFunctionImports dependencies sources = some tail ∧ outputs = edge :: tail := by
   obtain ⟨edge, head, remaining⟩ := Option.bind_eq_some_iff.mp resolved
@@ -69,7 +202,7 @@ private theorem resolveFunctionImports.cons {dependencies : Module → Identifie
 
 /-- Every source import survives at its original position; none is skipped. -/
 theorem resolveFunctionImports.source {dependencies : Module → Identifier → Option Nat}
-    {sources : List (Module × FunctionImportSyntax)} {outputs : List FunctionImport}
+    {sources : List (Module × FunctionImportSyntax)} {outputs : List (List ImportEntry)}
     (resolved : resolveFunctionImports dependencies sources = some outputs)
     {index : Nat} {owned : Module × FunctionImportSyntax} (selected : sources[index]? = some owned) :
     ∃ edge, outputs[index]? = some edge ∧ owned.2.resolve (dependencies owned.1) owned.1 = some edge := by
@@ -84,11 +217,11 @@ theorem resolveFunctionImports.source {dependencies : Module → Identifier → 
       exact ⟨edge, rfl, head⟩
     | succ index => exact ih continued selected
 
-/-- Every resolved edge originates at the same position in the source list. -/
+/-- Every resolved import batch originates at the same position in the source list. -/
 theorem resolveFunctionImports.origin {dependencies : Module → Identifier → Option Nat}
-    {sources : List (Module × FunctionImportSyntax)} {outputs : List FunctionImport}
+    {sources : List (Module × FunctionImportSyntax)} {outputs : List (List ImportEntry)}
     (resolved : resolveFunctionImports dependencies sources = some outputs)
-    {index : Nat} {edge : FunctionImport} (selected : outputs[index]? = some edge) :
+    {index : Nat} {edge : List ImportEntry} (selected : outputs[index]? = some edge) :
     ∃ owned, sources[index]? = some owned ∧ owned.2.resolve (dependencies owned.1) owned.1 = some edge := by
   induction sources generalizing outputs index with
   | nil =>
