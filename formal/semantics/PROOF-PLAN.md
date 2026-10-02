@@ -4827,3 +4827,38 @@ All 30 strict Lean jobs passed. The new inversion, assembly and source execution
 proofs, together with public source soundness and behavior, use only the standard
 Lean axioms. This strengthens execution fidelity of the admitted decoded record
 boundary; all fourteen whole-language completion obligations remain open.
+
+## Bottom values and source-admitted infinite behavior
+
+Ty.never now represents the language's uninhabited bottom type. FiniteLayout
+and UsePermitted treat it as a finite structural type; no ValueHasType rule
+constructs a resident of that type. ValueHasType.not_never establishes the
+impossibility generally, not by enumerating programs. Residual-disposal
+classification and the existing general preservation/progress consumers have
+been migrated.
+
+HasType.never_behavior eliminates the normal alternative of the existing
+maximal-behavior theorem using value impossibility. It derives an actual
+InfiniteRun, preserving configuration typing, the consumption frame, ownership
+safety, external storage and tracking of newly allocated live cells at every
+prefix. SourceClosure.Admitted.never_behavior consumes the real elaboration
+and declaration admission. Neither theorem assumes divergence or supplies a
+normal output environment. This infinite-only conclusion is specific to the
+current fault-free fragment; adding abort, fault or resource outcomes requires
+extending the outcome theorem, not treating those outcomes as divergence.
+
+All 30 strict Lean jobs passed. The inspected bottom and public source
+soundness/behavior proofs depend only on propext, Classical.choice and
+Quot.sound.
+
+The next boundary remains nonreturning expression/branch composition. HasType
+and ArmsType still index checking by a FlowContext for normal completion;
+ArmsType.clause requires local disposal and a normal environment join for every
+body. Bottom-valued calls are now expressible and cannot return, but this does
+not yet admit a bottom body in an arbitrary expected result position or exclude
+it from normal branch joins. Repair that authoritative checking/continuation
+contract with an explicit nonreturning outcome and migrate source elaboration,
+continuation typing, preservation and progress together. Do not coerce bottom
+by manufacturing a normal post-state, erase pending owners, or interpret abort
+as ordinary cleanup. L13 and all fourteen whole-language completion obligations
+remain open.
