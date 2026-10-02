@@ -1,47 +1,68 @@
 import OwnershipMir.Machine
 
-/-! A deliberately small ownership-command frontend, not the full source
-language. Commands execute atomically on slots; MIR executes through an explicit
-transfer register. The translation preserves actual values and storage holes,
-not merely a resource-count approximation. -/
+/-! Atomic ownership commands lower to two MIR operations. Field paths use the
+same focus/rebuild contract as whole slots; the explicit transfer register
+accounts for ownership between the two physical steps. -/
 namespace OwnershipMir
 
 inductive Command (n : Nat) where
-  | move (source target : Fin n)
-  | copy (source target : Fin n)
-  | dispose (source : Fin n)
+  | move (mode : Extract) (source target : Place n)
+  | copy (source target : Place n)
+  | dispose (source : Place n)
 
-/-- Source operation meanings are independent of MIR instruction execution. -/
-def Command.exec {n : Nat} : Command n → State n → Option (State n)
-  | .move source target, state => match state.temp, state.slots source, state.slots target with
-    | none, some value, none => some ⟨update (update state.slots source none) target (some value), none⟩
-    | _, _, _ => none
-  | .copy source target, state => match state.temp, state.slots source, state.slots target with
-    | none, some value, none => some ⟨update state.slots target (some value), none⟩
-    | _, _, _ => none
-  | .dispose source, state => match state.temp, state.slots source with
-    | none, some _ => some ⟨update state.slots source none, none⟩
-    | _, _ => none
+/-- Independent atomic meaning. The destination is resolved after the source
+is cleared, permitting valid same-aggregate transfers without assuming a frame. -/
+def Command.exec {n : Nat} (command : Command n) (state : State n) : Option (State n) :=
+  match state.temp with
+  | some _ => none
+  | none => match command with
+    | .move mode source target => do
+      let origin ← source.find state.slots
+      let value ← origin.selected
+      let result ← mode.apply value
+      let slots := source.write state.slots origin none
+      let into ← target.find slots
+      if vacant into.selected then
+        some ⟨target.write slots into (some result), none⟩
+      else none
+    | .copy source target => do
+      let origin ← source.find state.slots
+      let value ← origin.selected
+      let into ← target.find state.slots
+      if vacant into.selected then
+        some ⟨target.write state.slots into (some value), none⟩
+      else none
+    | .dispose source => do
+      let origin ← source.find state.slots
+      let _ ← origin.selected
+      some ⟨source.write state.slots origin none, none⟩
 
 inductive Command.Checked {n : Nat} : Context n → Command n → Context n → Prop where
-  | move {context source target kind} (empty : context.temp = none)
-      (found : context.slots source = some kind) (vacant : context.slots target = none) :
-      Checked context (.move source target)
-        ⟨update (update context.slots source none) target (some kind), none⟩
-  | copy {context source target} (empty : context.temp = none)
-      (found : context.slots source = some .data) (vacant : context.slots target = none) :
-      Checked context (.copy source target) ⟨update context.slots target (some .data), none⟩
-  | dispose {context source kind} (empty : context.temp = none)
-      (found : context.slots source = some kind) (allowed : kind ≠ .exact) :
-      Checked context (.dispose source) ⟨update context.slots source none, none⟩
+  | move {context mode source target input output origin into} (empty : context.temp = none)
+      (found : source.find context.slots = some origin) (selected : origin.selected = some input)
+      (layout : source.layout = input.layout id) (extract : mode.Checked input output)
+      (initialized : mode = .whole → input.ready)
+      (destination : target.find (source.write context.slots origin none) = some into)
+      (vacant : Fits output into.selected) :
+      Checked context (.move mode source target)
+        ⟨target.write (source.write context.slots origin none) into (some output), none⟩
+  | copy {context source target shape origin into} (empty : context.temp = none)
+      (found : source.find context.slots = some origin) (selected : origin.selected = some shape)
+      (allowed : shape.copyable) (destination : target.find context.slots = some into)
+      (vacant : Fits shape into.selected) :
+      Checked context (.copy source target) ⟨target.write context.slots into (some shape), none⟩
+  | dispose {context source shape origin} (empty : context.temp = none)
+      (found : source.find context.slots = some origin) (selected : origin.selected = some shape)
+      (layout : source.layout = shape.layout id) (allowed : shape.disposable) (exhausted : shape.shallow) :
+      Checked context (.dispose source) ⟨source.write context.slots origin none, none⟩
 
 def Command.first {n : Nat} : Command n → Op n
-  | .move source _ => .take source
+  | .move mode source _ => .take source mode
   | .copy source _ => .copy source
-  | .dispose source => .take source
+  | .dispose source => .take source .whole
 
 def Command.last {n : Nat} : Command n → Op n
-  | .move _ target | .copy _ target => .put target
+  | .move _ _ target | .copy _ target => .put target
   | .dispose _ => .drop
 
 def Command.emit {n : Nat} (command : Command n) (next : Code n (Op n)) : Code n (Op n) :=
@@ -66,10 +87,12 @@ theorem Command.Checked.lower {n : Nat} {before after final : Context n} {comman
     (tail : Code.Checked Op.Checked after next final) :
     Code.Checked Op.Checked before (command.emit next) final := by
   cases checked with
-  | move empty found vacant =>
-    exact .act (.take empty found) (.act (.put rfl (by simp [update, vacant])) tail)
-  | copy empty found vacant => exact .act (.copy empty found) (.act (.put rfl vacant) tail)
-  | dispose empty found allowed => exact .act (.take empty found) (.act (.drop rfl allowed) tail)
+  | move empty found selected layout extract initialized destination vacant =>
+    exact .act (.take empty found selected layout extract) (.act (.put rfl destination vacant) tail)
+  | copy empty found selected allowed destination vacant =>
+    exact .act (.copy empty found selected allowed) (.act (.put rfl destination vacant) tail)
+  | dispose empty found selected layout allowed exhausted =>
+    exact .act (.take empty found selected layout (.whole _)) (.act (.drop rfl allowed exhausted) tail)
 
 theorem lower_checked {n : Nat} {before after : Context n} {source : Code n (Command n)}
     (checked : Code.Checked Command.Checked before source after) :
@@ -80,33 +103,17 @@ theorem lower_checked {n : Nat} {before after : Context n} {source : Code n (Com
   | branch scalar left right leftIH rightIH => exact .branch scalar leftIH rightIH
   | loop scalar body tail bodyIH tailIH => exact .loop scalar bodyIH tailIH
 
-/-- Each atomic source command is implemented by exactly two actual operations.
-No instruction result or post-state permission is assumed. -/
+/-- Equality is proved between independently defined atomic and granular
+execution functions, rather than defining the source to run the compiler. -/
+theorem Command.exec_eq {n : Nat} (command : Command n) (state : State n) :
+    command.exec state = (command.first.exec state).bind command.last.exec := by
+  cases command <;> cases unused : state.temp <;>
+    simp [Command.exec, Command.first, Command.last, Op.exec, unused, Extract.apply, Option.bind_assoc]
+
 theorem Command.exec_lower {n : Nat} {command : Command n} {before after : State n}
     (executed : command.exec before = some after) :
     ∃ middle, command.first.exec before = some middle ∧ command.last.exec middle = some after := by
-  cases command with
-  | move source target =>
-    cases temp : before.temp <;> cases live : before.slots source <;> cases vacant : before.slots target <;>
-      simp [Command.exec, temp, live, vacant] at executed
-    rename_i value
-    cases executed
-    have different : target ≠ source := by intro same; subst target; simp_all
-    exact ⟨⟨update before.slots source none, some value⟩, by simp [Command.first, Op.exec, temp, live],
-      by simp [Command.last, Op.exec, update, different, vacant]⟩
-  | copy source target =>
-    cases temp : before.temp <;> cases live : before.slots source <;> cases vacant : before.slots target <;>
-      simp [Command.exec, temp, live, vacant] at executed
-    rename_i value
-    cases executed
-    exact ⟨⟨before.slots, some value⟩, by simp [Command.first, Op.exec, temp, live],
-      by simp [Command.last, Op.exec, vacant]⟩
-  | dispose source =>
-    cases temp : before.temp <;> cases live : before.slots source <;>
-      simp [Command.exec, temp, live] at executed
-    rename_i value
-    cases executed
-    exact ⟨⟨update before.slots source none, some value⟩, by simp [Command.first, Op.exec, temp, live], rfl⟩
+  simpa only [Command.exec_eq, Option.bind_eq_some_iff] using executed
 
 /-- Nonempty simulation: even a source loop step performs an actual MIR step.
 Primitive lowering has one additional step, never an unbounded silent phase. -/
@@ -166,5 +173,18 @@ theorem compiled_return {n : Nat} {signature : Signature} {before final : Contex
     (Safe.run (signature := signature) ⟨before, typed, lower_checked checked⟩ Op.Checked.sound lowered)
   cases remaining with
   | halt => exact ⟨lowered, realized, by simpa [empty] using realized.2, conserved⟩
+
+/-- Ordinary source movement reads an actually initialized subtree. Internal
+cleanup transfers may carry holes, but cannot masquerade as source moves. -/
+theorem Command.Checked.move_ready {n : Nat} {signature : Signature} {before after : Context n}
+    {source target : Place n} (checked : Command.Checked before (.move .whole source target) after)
+    {state : State n} (typed : state.Typed signature before) :
+    ∃ lens value, source.find state.slots = some lens ∧ lens.selected = some value ∧ value.ready := by
+  cases checked with
+  | move empty found selected layout extract initialized destination vacant =>
+    obtain ⟨actual, actualFound, actualTyped, _⟩ := source.realized typed _ found
+    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
+    have ready : (value.kind signature).ready := classified.symm ▸ initialized rfl
+    exact ⟨actual, value, actualFound, live, (Tree.ready_map _ _).mp ready⟩
 
 end OwnershipMir

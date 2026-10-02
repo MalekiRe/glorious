@@ -41,42 +41,65 @@ verified admitted-core baseline. Neither development inherits the other's
 soundness claims. The frozen whole-language feature roadmap remains deferred.
 Work remains serial, without delegated implementation lanes.
 
-The new slice has 731 Lean lines across six files, including its entrypoint.
-It uses one structured-control definition instantiated with independently
-defined atomic ownership commands and four MIR operations: take, put, copy,
-and drop. A command lowers to two MIR operations through an explicit transfer
-register. Branches and loops share the control-composition proof.
+The extended slice has 1,989 Lean lines across fourteen files, including its
+entrypoint. Atomic ownership commands still lower to two MIR operations through
+an explicit transfer register. Branches and loops retain the shared control
+proof; aggregates are not a second execution or ownership pipeline.
 
-- `Model.lean`: fixed slots, an immutable resource-principal signature, store
-  realization, and ownership counts computed from actual slots plus register.
-- `Instructions.lean`: raw execution and syntactic checking. Unchecked copy
-  and drop can violate ownership; checking, not runtime permission guards,
-  establishes conservation and instruction progress.
-- `Machine.lean`: shared preservation/progress and arbitrary-prefix ownership
-  safety from the local instruction contract.
-- `Lowering.lean`: checking preservation, nonempty one-or-two-step simulation,
-  and `compiled_ownership_safety`, including intermediate transfer states.
-- `Adequacy.lean`: reverse prefix matching, `compiled_return_iff` for exact
-  returned-state correspondence, and `compiled_diverges_iff` for actual
-  infinite executions. Maximal behavior is derived, never assumed in admission.
+- `Tree.lean`: scalar data, opaque affine/exact resource identities, ordered
+  products, nominal shells, and typed initialization holes. A live fieldless
+  exact shell is not a hole. Shell deconstruction authority is independent of
+  disposal permission; recursive capabilities include the shell and residents.
+- `Focus.lean`, `Places.lean`: one executable field focus/rebuild, constructive
+  classification correspondence, and an additive ownership-frame equation.
+  Whole slots use the empty path. Restoration requires vacancy and, for field
+  holes, agreement with the recorded layout. No post-state readiness is assumed.
+- `Model.lean`, `Instructions.lean`: exact runtime occupancy and one local
+  progress/preservation contract for take, put, copy, and drop. Take explicitly
+  distinguishes transfer from authorized shell deconstruction. Raw execution
+  does not consult ownership permissions. Checked drop releases only scalars
+  or exhausted containers; it cannot atomically discard remaining fields.
+- `Machine.lean`, `Lowering.lean`, `Adequacy.lean`: general prefix safety,
+  actual initialization of ordinary source moves, checking preservation,
+  two-step atomic-command correspondence, exact returned-state equivalence,
+  and bidirectional correspondence of actual infinite executions. These
+  existing consumers now operate on structured residents and field places.
+- `ShellSafety.lean`: nonincrease of all noncopyable-shell occurrences and
+  exact-shell accounting at every prefix. Any exact-shell decrease is counted
+  from actual deconstruction steps. These are interpretations of actual
+  residents and traces, not independently updated owner or discharge tables.
+- `TreeFrame.lean`, `Cleanup.lean`: reusable proof contexts for the same
+  executable focus; structural cleanup in reverse field order, followed by
+  enclosing storage. Nested holes emit no operations. An empty root binding
+  is retired. The general checker derivation feeds each actual residual
+  context into the next step, and finite cleanup execution is derived.
+- `Scope.lean`, `Framing.lean`: fixed-slot lexical ownership in acquisition
+  order; cleanup reverses that order. `Scope.exit_iff` proves that the generated
+  MIR returns exactly the independently defined atomic scope-exit state.
+  `Scope.cleanup_frame` preserves actual retained/result slots at every MIR
+  prefix, including transient transfer-register states. `Scope.program_safety`
+  composes user code and scope exit into preservation, progress, resource
+  uniqueness/conservation, and both shell bounds.
 
-Bounds: this is an ownership-command frontend, not the full named language.
-It models scalar data and opaque affine/exact owners in a fixed region, with
-exact branch-context agreement and invariant loop contexts. Writes require
-vacancy. Halting returns the entire remaining region; it does not implicitly
-dispose it. The source and MIR share the finite-slot carrier. There is no claim
-of physical-heap lowering, allocation, aggregate shells/partial field moves,
-function calls, lexical cleanup, borrowing, effects, or backend correctness.
-Those require further semantic boundaries, not unchecked extension of this
-slice's theorem statements. The existing compiler and old Lean proofs are
-unchanged.
+Bounds: this remains an ownership-command frontend, not the full named source
+language. Field paths are resolved visible paths; shells carry resolved nominal
+metadata, not a source declaration/visibility elaborator. Branch contexts agree
+exactly, and loops have invariant contexts. Ordinary whole moves and copies
+require initialization; internal cleanup/deconstruction may transfer residual
+structures. Protected results reside in slots outside the exiting scope;
+cleanup begins with an empty transfer register. Halting returns the remaining
+region and does not implicitly clean it. The source and MIR share fixed slots.
+Heap allocation, physical addresses, borrowing/lifetimes, recursive calls and
+caller frames, custom destructors, effects, foreign execution, CFG/SSA, and
+backend refinement remain outside this slice. Earlier compiler and Lean code
+are preserved, not silently replaced or granted these claims.
 
-Verification: a clean `lake build OwnershipMir` in `formal/mir` passed all
-8 jobs with warnings as errors and auto-implicit parameters disabled. Axiom
-inspection of instruction soundness, lowering, prefix safety, returned-state
-adequacy and divergence adequacy reported only standard Lean axioms; checking
-preservation and one-or-two-step simulation depend only on `propext`.
-No concrete examples or unit tests were used as proof evidence.
+Verification: a fresh `lake clean && lake build OwnershipMir` in `formal/mir`
+passed all 16 jobs with warnings as errors and auto-implicit parameters disabled.
+Axiom inspection of sixteen general focus, instruction, source-initialization,
+lowering, adequacy, cleanup, framing, shell, and composed-safety theorems reported
+only `propext`, `Classical.choice`, and `Quot.sound`. No `sorry`, new axioms,
+concrete examples, or unit tests were used to bypass the general obligations.
 
 
 ### Joint storage ownership

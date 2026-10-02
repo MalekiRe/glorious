@@ -1,92 +1,111 @@
-import OwnershipMir.Model
+import OwnershipMir.Places
 
 namespace OwnershipMir
 
 inductive Op (n : Nat) where
-  | take (slot : Fin n)
-  | put (slot : Fin n)
-  | copy (slot : Fin n)
+  | take (place : Place n) (mode : Extract)
+  | put (place : Place n)
+  | copy (place : Place n)
   | drop
 
-/-- Raw execution does not consult typing or permissions. In particular an
-unchecked copy or drop can violate ownership; admission must rule that out. -/
+/-- Raw execution has no ownership permission guard. Classification and
+capabilities are checked independently; unsafe raw copies and drops can run. -/
 def Op.exec {n : Nat} : Op n → State n → Option (State n)
-  | .take i, state => match state.temp, state.slots i with
-    | none, some value => some ⟨update state.slots i none, some value⟩
-    | _, _ => none
-  | .put i, state => match state.temp, state.slots i with
-    | some value, none => some ⟨update state.slots i (some value), none⟩
-    | _, _ => none
-  | .copy i, state => match state.temp, state.slots i with
-    | none, some value => some { state with temp := some value }
-    | _, _ => none
+  | .take p mode, state => do
+    let lens ← p.find state.slots
+    let value ← lens.selected
+    let result ← mode.apply value
+    match state.temp with
+    | none => some ⟨p.write state.slots lens none, some result⟩
+    | some _ => none
+  | .put p, state => do
+    let lens ← p.find state.slots
+    let value ← state.temp
+    if vacant lens.selected then
+      some ⟨p.write state.slots lens (some value), none⟩
+    else none
+  | .copy p, state => do
+    let lens ← p.find state.slots
+    let value ← lens.selected
+    match state.temp with
+    | none => some {state with temp := some value}
+    | some _ => none
   | .drop, state => match state.temp with
-    | some _ => some { state with temp := none }
+    | some _ => some {state with temp := none}
     | none => none
 
 inductive Op.Checked {n : Nat} : Context n → Op n → Context n → Prop where
-  | take {context i kind} (empty : context.temp = none) (found : context.slots i = some kind) :
-      Checked context (.take i) ⟨update context.slots i none, some kind⟩
-  | put {context i kind} (resident : context.temp = some kind) (vacant : context.slots i = none) :
-      Checked context (.put i) ⟨update context.slots i (some kind), none⟩
-  | copy {context i} (empty : context.temp = none) (found : context.slots i = some .data) :
-      Checked context (.copy i) { context with temp := some .data }
-  | drop {context kind} (resident : context.temp = some kind) (allowed : kind ≠ .exact) :
-      Checked context .drop { context with temp := none }
+  | take {context p mode input output lens} (empty : context.temp = none)
+      (found : p.find context.slots = some lens) (selected : lens.selected = some input)
+      (layout : p.layout = input.layout id) (extract : mode.Checked input output) :
+      Checked context (.take p mode) ⟨p.write context.slots lens none, some output⟩
+  | put {context p shape lens} (resident : context.temp = some shape)
+      (found : p.find context.slots = some lens) (vacant : Fits shape lens.selected) :
+      Checked context (.put p) ⟨p.write context.slots lens (some shape), none⟩
+  | copy {context p shape lens} (empty : context.temp = none)
+      (found : p.find context.slots = some lens) (selected : lens.selected = some shape)
+      (allowed : shape.copyable) :
+      Checked context (.copy p) {context with temp := some shape}
+  | drop {context shape} (resident : context.temp = some shape)
+      (allowed : shape.disposable) (exhausted : shape.shallow) :
+      Checked context .drop {context with temp := none}
 
-/-- One local producer supplies progress, realization, and the resource
-interpretation for the actual operation, including its transient register. -/
+/-- The authoritative local contract covers every depth, including whole slots.
+It supplies actual progress, exact occupancy, and framed ownership together. -/
 theorem Op.Checked.sound {n : Nat} {signature : Signature} {before after : Context n}
     {op : Op n} (checked : Op.Checked before op after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ next, op.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
   cases checked with
-  | @take i kind empty found =>
+  | @take p mode input output lens empty found selected layout extract =>
     have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp ((typed.1 i).trans found)
-    refine ⟨⟨update state.slots i none, some value⟩, by simp [Op.exec, unused, live],
-      typed_update typed i rfl (by simp [classified]), ?_⟩
-    have equal : ∀ identity, (State.mk (update state.slots i none) (some value)).count identity =
+    obtain ⟨actual, actualFound, actualTyped, rebuild⟩ := p.realized typed lens found
+    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
+    obtain ⟨result, extracted, resultTyped, mass⟩ := extract.realized classified
+    refine ⟨⟨p.write state.slots actual none, some result⟩,
+      by simp [Op.exec, actualFound, live, extracted, unused],
+      p.typed_write typed actual lens rebuild rfl (by simp [resultTyped]), ?_⟩
+    have equal : ∀ identity, (State.mk (p.write state.slots actual none) (some result)).count identity =
         state.count identity := by
       intro identity
-      have changed := weight_update state.slots i none identity
-      simpa [State.count, live, unused, weight] using changed
+      have equation := p.count_write state actual actualFound none (some result) identity
+      have same : weight identity (some result) = weight identity (some value) := mass identity
+      rw [live, unused, same] at equation
+      simp only [weight, cellMass] at equation
+      omega
     exact ⟨fun i => by rw [equal i]; exact Nat.le_refl _, fun i _ => equal i⟩
-  | @put i kind resident vacant =>
-    have empty : state.slots i = none := by simpa [vacant] using typed.1 i
+  | @put p shape lens resident found fits =>
+    obtain ⟨actual, actualFound, actualTyped, rebuild⟩ := p.realized typed lens found
+    obtain ⟨available, absent⟩ := fits.realized actualTyped
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
-    refine ⟨⟨update state.slots i (some value), none⟩, by simp [Op.exec, live, empty],
-      typed_update typed i (by simp [classified]) rfl, ?_⟩
-    have equal : ∀ identity, (State.mk (update state.slots i (some value)) none).count identity =
+    refine ⟨⟨p.write state.slots actual (some value), none⟩,
+      by simp [Op.exec, actualFound, live, available],
+      p.typed_write typed actual lens rebuild (by simp [classified]) rfl, ?_⟩
+    have equal : ∀ identity, (State.mk (p.write state.slots actual (some value)) none).count identity =
         state.count identity := by
       intro identity
-      have changed := weight_update state.slots i (some value) identity
-      simpa [State.count, live, empty, weight] using changed
+      have equation := p.count_write state actual actualFound (some value) none identity
+      rw [live, absent] at equation
+      simp only [weight, cellMass] at equation
+      omega
     exact ⟨fun i => by rw [equal i]; exact Nat.le_refl _, fun i _ => equal i⟩
-  | @copy i empty found =>
+  | @copy p shape lens empty found selected allowed =>
     have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp ((typed.1 i).trans found)
-    have scalar : ∃ payload, value = .data payload := by
-      cases value with
-      | data payload => exact ⟨payload, rfl⟩
-      | owner identity => cases h : signature identity <;> simp [Value.kind, h, LinearKind.kind] at classified
-    obtain ⟨payload, rfl⟩ := scalar
-    refine ⟨{state with temp := some (.data payload)}, by simp [Op.exec, unused, live],
-      ⟨typed.1, rfl⟩, ?_⟩
-    exact ⟨fun _ => by simp [State.count, unused, weight], fun _ _ => by simp [State.count, unused, weight]⟩
-  | @drop kind resident allowed =>
+    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
+    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
+    have zero : ∀ identity, weight identity (some value) = 0 :=
+      Value.copyable_zero (classified.symm ▸ allowed)
+    refine ⟨{state with temp := some value}, by simp [Op.exec, actualFound, live, unused],
+      ⟨typed.1, by simp [classified]⟩, ?_⟩
+    exact ⟨fun i => by simp only [State.count]; rw [zero i, unused]; simp [weight, cellMass],
+      fun i _ => by simp only [State.count]; rw [zero i, unused]; rfl⟩
+  | @drop shape resident allowed exhausted =>
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
     refine ⟨{state with temp := none}, by simp [Op.exec, live], ⟨typed.1, rfl⟩, ?_⟩
-    refine ⟨fun _ => by simp [State.count, weight], ?_⟩
+    refine ⟨fun _ => by simp [State.count, weight, cellMass], ?_⟩
     intro identity exactKind
-    have absent : weight identity (some value) = 0 := by
-      cases value with
-      | data payload => rfl
-      | owner other =>
-        by_cases same : identity = other
-        · subst other; simp [Value.kind, exactKind, LinearKind.kind] at classified
-          exact False.elim (allowed classified.symm)
-        · simp [weight, same]
+    have absent : weight identity (some value) = 0 :=
+      Value.disposable_exact_zero (classified.symm ▸ allowed) exactKind
     simp only [State.count, live]
     rw [absent]
     rfl

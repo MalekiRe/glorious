@@ -1,1 +1,1 @@
-import OwnershipMir.Adequacy
+import OwnershipMir.Framing

@@ -8,31 +8,16 @@ theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : 
     {command : Command n} (checked : Command.Checked before command after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ next, command.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
-  have ready : ∃ next, command.exec state = some next := by
-    cases checked with
-    | @move source target kind empty found vacant =>
-      have unused : state.temp = none := by simpa [empty] using typed.2
-      have available : state.slots target = none := by simpa [vacant] using typed.1 target
-      obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp ((typed.1 source).trans found)
-      simp [Command.exec, unused, live, available]
-    | @copy source target empty found vacant =>
-      have unused : state.temp = none := by simpa [empty] using typed.2
-      have available : state.slots target = none := by simpa [vacant] using typed.1 target
-      obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp ((typed.1 source).trans found)
-      simp [Command.exec, unused, live, available]
-    | @dispose source kind empty found allowed =>
-      have unused : state.temp = none := by simpa [empty] using typed.2
-      obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp ((typed.1 source).trans found)
-      simp [Command.exec, unused, live]
-  obtain ⟨next, executed⟩ := ready
-  obtain ⟨middle, first, last⟩ := Command.exec_lower executed
-  have entry : Safe signature Op.Checked after ⟨command.emit .halt, state⟩ :=
-    ⟨before, typed, checked.lower .halt⟩
-  have run : Run Op.exec ⟨command.emit .halt, state⟩ ⟨.halt, next⟩ :=
-    .step (.act first) (.step (.act last) (.refl _))
-  obtain ⟨⟨current, realized, remaining⟩, conserved⟩ := entry.run Op.Checked.sound run
-  cases remaining
-  exact ⟨next, executed, realized, conserved⟩
+  have program := checked.lower (Code.Checked.halt (rule := Op.Checked))
+  cases program with
+  | act head tail =>
+    cases tail with
+    | act last terminal =>
+      obtain ⟨middle, firstRun, middleTyped, firstConserved⟩ := head.sound typed
+      obtain ⟨next, lastRun, nextTyped, lastConserved⟩ := last.sound middleTyped
+      cases terminal
+      exact ⟨next, by rw [Command.exec_eq, firstRun]; exact lastRun,
+        nextTyped, firstConserved.trans lastConserved⟩
 
 theorem Step.deterministic {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     {before first second : Configuration n α} (left : Step exec before first)

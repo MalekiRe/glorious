@@ -22,10 +22,10 @@ inductive Code.Checked {n : Nat} {α : Type} (rule : Context n → α → Contex
   | halt {context} : Checked rule context .halt context
   | act {before middle after op next} (head : rule before op middle)
       (tail : Checked rule middle next after) : Checked rule before (.act op next) after
-  | branch {before after guard yes no} (scalar : before.slots guard = some .data)
+  | branch {before after guard yes no} (scalar : before.slots guard = some (.leaf .data))
       (left : Checked rule before yes after) (right : Checked rule before no after) :
       Checked rule before (.branch guard yes no) after
-  | loop {before after guard body next} (scalar : before.slots guard = some .data)
+  | loop {before after guard body next} (scalar : before.slots guard = some (.leaf .data))
       (iteration : Checked rule before body before) (tail : Checked rule before next after) :
       Checked rule before (.loop guard body next) after
 
@@ -45,7 +45,7 @@ structure Configuration (n : Nat) (α : Type) where
 
 def observe {n : Nat} (guard : Fin n) (state : State n) : Option Bool :=
   match state.slots guard with
-  | some (.data value) => some (value != 0)
+  | some (.leaf (.data value)) => some (value != 0)
   | _ => none
 
 inductive Step {n : Nat} {α : Type} (exec : α → State n → Option (State n)) :
@@ -82,12 +82,15 @@ def InstructionSound {n : Nat} {α : Type} (signature : Signature)
     ∃ next, exec op state = some next ∧ next.Typed signature after ∧ Conserves signature state next
 
 theorem observe_ready {n : Nat} {signature : Signature} {state : State n} {context : Context n}
-    (typed : state.Typed signature context) {guard : Fin n} (scalar : context.slots guard = some .data) :
+    (typed : state.Typed signature context) {guard : Fin n} (scalar : context.slots guard = some (.leaf .data)) :
     ∃ choice, observe guard state = some choice := by
   obtain ⟨value, found, kind⟩ := Option.map_eq_some_iff.mp ((typed.1 guard).trans scalar)
-  cases value with
+  cases value <;> simp only [Value.kind, Tree.map, Tree.leaf.injEq] at kind
+  all_goals try { contradiction }
+  rename_i atom
+  cases atom with
   | data payload => exact ⟨payload != 0, by simp [observe, found]⟩
-  | owner identity => cases h : signature identity <;> simp [Value.kind, h, LinearKind.kind] at kind
+  | owner identity => cases h : signature identity <;> simp [Atom.kind, h, LinearKind.kind] at kind
 
 theorem Safe.progress {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}

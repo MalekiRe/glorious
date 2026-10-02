@@ -1,4 +1,4 @@
-import Std
+import OwnershipMir.Focus
 
 /-! A fixed-slot ownership region. Resource identity is independent of location;
 its principal comes from one immutable signature, never a use-site annotation.
@@ -6,32 +6,8 @@ The ownership interpretation counts actual residents, including the transfer
 register. It is not a second state maintained by the machine. -/
 namespace OwnershipMir
 
-inductive LinearKind where
-  | affine | exact
-  deriving DecidableEq
-
-inductive Kind where
-  | data | affine | exact
-  deriving DecidableEq
-
-def LinearKind.kind : LinearKind → Kind
-  | .affine => .affine
-  | .exact => .exact
-
-abbrev Signature := Nat → LinearKind
-
-inductive Value where
-  | data (payload : Nat)
-  | owner (identity : Nat)
-  deriving DecidableEq
-
-def Value.kind (signature : Signature) : Value → Kind
-  | .data _ => .data
-  | .owner identity => (signature identity).kind
-
-def weight (identity : Nat) : Option Value → Nat
-  | some (.owner other) => if identity = other then 1 else 0
-  | _ => 0
+def weight (identity : Nat) (cell : Option Value) : Nat :=
+  cellMass (Atom.weight identity) (fun _ => 0) cell
 
 def total : {n : Nat} → (Fin n → Nat) → Nat
   | 0, _ => 0
@@ -64,12 +40,15 @@ structure State (n : Nat) where
   temp : Option Value
 
 structure Context (n : Nat) where
-  slots : Fin n → Option Kind
-  temp : Option Kind
+  slots : Fin n → Option Shape
+  temp : Option Shape
 
 def State.Typed {n : Nat} (signature : Signature) (state : State n) (context : Context n) : Prop :=
   (∀ i, (state.slots i).map (Value.kind signature) = context.slots i) ∧
   state.temp.map (Value.kind signature) = context.temp
+
+def State.mass {n : Nat} (leaf : Atom → Nat) (shell : Shell → Nat) (state : State n) : Nat :=
+  total (fun i => cellMass leaf shell (state.slots i)) + cellMass leaf shell state.temp
 
 def State.count {n : Nat} (state : State n) (identity : Nat) : Nat :=
   total (fun i => weight identity (state.slots i)) + weight identity state.temp
@@ -96,19 +75,9 @@ theorem Conserves.unique {n : Nat} {signature : Signature} {before after : State
     (conserved : Conserves signature before after) (unique : before.Unique) : after.Unique :=
   fun i => Nat.le_trans (conserved.bounded i) (unique i)
 
-theorem weight_update {n : Nat} (slots : Fin n → Option Value) (i : Fin n)
-    (value : Option Value) (identity : Nat) :
-    total (fun j => weight identity (update slots i value j)) + weight identity (slots i) =
-      total (fun j => weight identity (slots j)) + weight identity value := by
-  have pointwise : (fun j => weight identity (update slots i value j)) =
-      update (fun j => weight identity (slots j)) i (weight identity value) := by
-    funext j; simp only [update]; split <;> rfl
-  rw [pointwise]
-  exact total_update _ _ _
-
 theorem typed_update {n : Nat} {signature : Signature} {state : State n} {context : Context n}
-    (typed : state.Typed signature context) (i : Fin n) {value : Option Value} {kind : Option Kind}
-    (resident : value.map (Value.kind signature) = kind) {temp : Option Value} {tempKind : Option Kind}
+    (typed : state.Typed signature context) (i : Fin n) {value : Option Value} {kind : Option Shape}
+    (resident : value.map (Value.kind signature) = kind) {temp : Option Value} {tempKind : Option Shape}
     (register : temp.map (Value.kind signature) = tempKind) :
     (State.mk (update state.slots i value) temp).Typed signature
       ⟨update context.slots i kind, tempKind⟩ := by
