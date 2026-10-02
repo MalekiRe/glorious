@@ -1,4 +1,4 @@
-import OwnershipMir.Blocks
+import OwnershipMir.Trace
 
 /-! Atomic commands refine to nonempty finite MIR blocks. Field paths use the
 same focus/rebuild contract as whole slots; transient registers belong to the
@@ -176,5 +176,16 @@ theorem Command.Checked.move_ready {n : Nat} {signature : Signature} {before aft
     obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
     have ready : (value.kind signature).ready := classified.symm ▸ initialized rfl
     exact ⟨actual, value, actualFound, live, (Tree.ready_map _ _).mp ready⟩
+
+theorem commands_trace {n : Nat} (commands : List (Command n)) {before after : State n}
+    (executed : Block.exec Command.exec commands before = some after) (next : Code n (Op n)) :
+    OwnershipTrace ⟨(lower (sequence commands)).append next, before⟩ ⟨next, after⟩
+      (commands.flatMap fun command => command.block.map Op.event) := by
+  induction commands generalizing before with
+  | nil => cases Option.some.inj executed; exact .refl _
+  | cons command rest ih =>
+    obtain ⟨middle, head, tail⟩ := Option.bind_eq_some_iff.mp executed
+    have first := Block.exec_trace command.block (by rwa [Command.exec_eq] at head) ((lower (sequence rest)).append next)
+    simpa only [sequence, Block.emit, lower, Command.emit, Block.emit_append, List.flatMap_cons] using first.trans (ih tail)
 
 end OwnershipMir

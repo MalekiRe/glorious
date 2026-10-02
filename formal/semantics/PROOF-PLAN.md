@@ -93,9 +93,16 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   composes user code and scope exit into preservation, progress, resource
   uniqueness/conservation, and both shell bounds.
 
-- `CleanupTrace.lean`: ownership observations are derived from successful MIR
-  transitions, including separate detach and release actions. An independent
-  structural specification visits newest roots first, fields right-to-left,
+- `Trace.lean`: reusable ownership events, trace composition/comparison, and
+  block observations depend only on `Blocks` and its machine prerequisites,
+  not source lowering, scope cleanup, or framing. Generic step determinism,
+  inability to step from halt, and halt-run inversion live in `Machine.lean`.
+  `OwnershipTrace.terminal_unique` and `.prefix` derive from `.compare`, rather
+  than repeat deterministic-step alignment. Command observations live with
+  their translation in `Lowering.lean`; names and theorem statements are unchanged.
+- `CleanupTrace.lean`: scope-specific ordering and handoff consume those shared
+  observations of successful MIR transitions, including separate detach and
+  release actions. An independent structural specification visits newest roots first, fields right-to-left,
   and enclosing storage last; it reads the original occupancy, not successive
   generator contexts. Nested holes and absent roots have no events; occupied
   root holes still retire their binding. `Scope.cleanup_trace_iff` proves both
@@ -138,11 +145,19 @@ integration must derive layout and principal restriction from declarations and
 deconstruction authority from the checking context, keeping field visibility
 separate. These remain obligations for their respective feature slices, not
 claims of this pre-call refactor.
+For the first call slice, install the result in caller-owned or explicitly
+protected storage before callee cleanup begins. Do not leave it in the transfer
+register and weaken the empty-register cleanup requirement. The activation
+representation must establish the result storage is outside the retiring scope
+and carry its ownership through handoff. Allocation and slot embedding remain
+decisions for that representation, not an additional pre-call storage framework.
 
-Verification: a fresh `lake clean && lake build OwnershipMir` in `formal/mir`
-passed all 18 jobs with warnings as errors and auto-implicit parameters disabled.
-Axiom inspection of sixteen instruction-legality, ownership, adequacy,
-continuation-cleanup, and composed-safety theorems reported only `propext`,
+
+Verification: after `lake clean`, `lake build OwnershipMir.Trace` passed its
+standalone 9-job dependency graph without compiling lowering or cleanup. The
+subsequent `lake build OwnershipMir` passed all 19 jobs, with warnings as errors
+and auto-implicit parameters disabled. Axiom inspection of sixteen control,
+trace, lowering, adequacy, and continuation-cleanup theorems reported only `propext`,
 `Classical.choice`, and `Quot.sound`. No `sorry`, new axioms,
 concrete examples, or unit tests were used to bypass the general obligations.
 

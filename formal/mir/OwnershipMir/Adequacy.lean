@@ -13,21 +13,6 @@ theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : 
     Block.checked_exec Op.Checked.sound command.block checkedBlock typed
   exact ⟨result, by rwa [Command.exec_eq], realized, conserved⟩
 
-theorem Step.deterministic {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before first second : Configuration n α} (left : Step exec before first)
-    (right : Step exec before second) : first = second := by
-  cases left <;> cases right <;> simp_all
-
-theorem Step.not_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before after : Configuration n α} (step : Step exec before after) : before.code ≠ .halt := by
-  cases step <;> simp
-
-theorem Run.from_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before after : Configuration n α} (run : Run exec before after) (halted : before.code = .halt) : after = before := by
-  cases run with
-  | refl => rfl
-  | step head tail => exact False.elim (head.not_halt halted)
-
 @[simp] theorem lower_halt {n : Nat} (source : Code n (Command n)) :
     lower source = .halt ↔ source = .halt := by
   cases source <;> simp [lower, Command.emit, Command.block_nonempty]

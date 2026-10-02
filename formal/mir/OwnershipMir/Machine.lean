@@ -76,6 +76,21 @@ theorem Run.trans {n : Nat} {α : Type} {exec : α → State n → Option (State
   | refl => exact last
   | step head tail ih => exact .step head (ih last)
 
+theorem Step.deterministic {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
+    {before first second : Configuration n α} (left : Step exec before first)
+    (right : Step exec before second) : first = second := by
+  cases left <;> cases right <;> simp_all
+
+theorem Step.not_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
+    {before after : Configuration n α} (step : Step exec before after) : before.code ≠ .halt := by
+  cases step <;> simp
+
+theorem Run.from_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
+    {before after : Configuration n α} (run : Run exec before after) (halted : before.code = .halt) : after = before := by
+  cases run with
+  | refl => rfl
+  | step head tail => exact False.elim (head.not_halt halted)
+
 def Safe {n : Nat} {α : Type} (signature : Signature)
     (rule : Context n → α → Context n → Prop) (final : Context n) (config : Configuration n α) : Prop :=
   ∃ current, config.state.Typed signature current ∧ Code.Checked rule current config.code final
