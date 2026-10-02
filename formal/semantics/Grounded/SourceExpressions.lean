@@ -163,7 +163,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
       (continued : NamedExpr.Elaborates program names home scope restored rest coreRest result after) :
       NamedExpr.Elaborates program names home scope before (.assign name fields value rest)
-        (.assign ⟨binding.identity, fields⟩ coreValue coreRest) result after
+        (.assign home ⟨binding.identity, fields⟩ coreValue coreRest) result after
   | applyPatterns {scope before evaluated after arguments coreArguments inputs arms coreArms result}
       (inputsTyped : NamedExprsElaborate program names home scope before arguments coreArguments inputs evaluated)
       (nonempty : coreArms ≠ []) (covered : Covers program home [argumentType inputs] (coreArms.map fun arm => [arm.1]))

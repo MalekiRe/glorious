@@ -19,7 +19,7 @@ inductive Frame where
   | sequence (rest : Expr)
   | bind (name : BindingId) (slot : BindingType) (body : Expr)
   | scope (count : Nat)
-  | assign (place : Place) (rest : Expr)
+  | assign (home : Module) (place : Place) (rest : Expr)
   | tupleHead (tail : List Expr)
   | tupleTail (head : Value)
   | project (home : Module) (key : FieldKey)
@@ -101,12 +101,12 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       (exited : env.exitScope count = some after) :
       Step program ⟨env, .result value, .scope count :: stack⟩
         ⟨after, .result value, stack⟩
-  | assign {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
-      Step program ⟨env, .expression (.assign place value rest), stack⟩
-        ⟨env, .expression value, .assign place rest :: stack⟩
-  | assignResult {env after : Environment} {stack : List Frame} {place : Place} {rest : Expr} {value : Value}
+  | assign {home : Module} {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
+      Step program ⟨env, .expression (.assign home place value rest), stack⟩
+        ⟨env, .expression value, .assign home place rest :: stack⟩
+  | assignResult {home : Module} {env after : Environment} {stack : List Frame} {place : Place} {rest : Expr} {value : Value}
       (written : env.write program place value = some after) :
-      Step program ⟨env, .result value, .assign place rest :: stack⟩ ⟨after, .expression rest, stack⟩
+      Step program ⟨env, .result value, .assign home place rest :: stack⟩ ⟨after, .expression rest, stack⟩
   | tuple {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
       Step program ⟨env, .expression (.tuple head tail), stack⟩
         ⟨env, .expression head, .tupleHead tail :: stack⟩
@@ -177,9 +177,9 @@ variable {program : Program}
 /-- Distinct lexical roots frame reads only when their storage identities are
 distinct. This is a pre-state separation condition, not a post-state promise. -/
 theorem Step.assignment_frame {before : Environment} {after : Configuration} {stack : List Frame}
-    {place other : Place} {rest : Expr} {value : Value}
+    {assignmentHome : Module} {place other : Place} {rest : Expr} {value : Value}
     (distinct : (before.bindings.map Prod.snd).Nodup)
-    (step : Step program ⟨before, .result value, .assign place rest :: stack⟩ after)
+    (step : Step program ⟨before, .result value, .assign assignmentHome place rest :: stack⟩ after)
     (different : other.root ≠ place.root) :
     after.environment.read program other = before.read program other := by
   cases step with
@@ -422,7 +422,7 @@ theorem Step.outer_scope {before after : Configuration} (step : Step program bef
     cases same
     apply continuationEnvironment.scope_congr
     rfl
-  case assignResult env after stack place rest value written =>
+  case assignResult home env after stack place rest value written =>
     obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     apply continuationEnvironment.scope_congr
@@ -456,13 +456,13 @@ theorem Run.outer_scope {before after : Configuration} (run : Run program before
 /-- An actual assignment preserves disjoint field observations even when the
 lexical places resolve to the same storage identity. -/
 theorem Step.assignment_frame_disjoint {before : Environment} {after : Configuration}
-    {stack : List Frame} {place other : Place} {rest : Expr} {value : Value}
+    {assignmentHome : Module} {stack : List Frame} {place other : Place} {rest : Expr} {value : Value}
     {identity : StorageId} {cell : StorageCell} {home : Module}
     (mapped : lookup place.root before.bindings = some identity)
     (otherMapped : lookup other.root before.bindings = some identity)
     (found : before.heap.read identity = some cell)
     (apart : PathDisjoint program home cell.type place.fields other.fields)
-    (step : Step program ⟨before, .result value, .assign place rest :: stack⟩ after) :
+    (step : Step program ⟨before, .result value, .assign assignmentHome place rest :: stack⟩ after) :
     after.environment.read program other = before.read program other := by
   cases step with
   | assignResult written =>
@@ -705,7 +705,7 @@ theorem Step.untracked_origin {before after : Configuration} (step : Step progra
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     obtain ⟨old, original, _, _⟩ := StorageAddress.take.identity raw found
     exact ⟨⟨old, original⟩, untracked.1⟩
-  case assignResult env after stack place rest value written =>
+  case assignResult home env after stack place rest value written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
@@ -814,7 +814,7 @@ theorem Step.untracked_frame {before after : Configuration} (step : Step program
     obtain ⟨resident, _, selected, _, owner, _, updated, _, next, written, same⟩ := raw
     cases same
     exact ⟨(RuntimeHeap.write_other written apart).trans found, untracked.1⟩
-  case assignResult env after stack place rest value written =>
+  case assignResult home env after stack place rest value written =>
     obtain ⟨heap, operation, same⟩ := Option.map_eq_some_iff.mp written
     cases same
     obtain ⟨address, resolved, raw⟩ := Option.bind_eq_some_iff.mp operation

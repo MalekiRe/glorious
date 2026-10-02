@@ -43,7 +43,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } before = some restored)
       (checked : HasType program home restored rest result after) :
-      FrameTyped program heap supply activation before (.one type) (.assign place rest) after (.one result)
+      FrameTyped program heap supply activation before (.one type) (.assign home place rest) after (.one result)
   | tupleHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
       FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (.tuple first types))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
@@ -680,8 +680,8 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
   | .result _, .restore _ :: _ =>
       BindingMap.Disposable program state.environment.heap state.environment.bindings ∧
         state.environment.bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index)
-  | .result _, .assign place _ :: _ =>
-      BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
+  | .result _, .assign home place _ :: _ =>
+      BindingMap.ReplacementSafe program home state.environment.heap state.environment.bindings place
   | .result aggregate, .project home key :: _ => aggregate.ProjectionCleanupSafe program home key
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
   | .results values, .patterns home arms :: _ =>

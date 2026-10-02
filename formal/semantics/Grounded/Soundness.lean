@@ -110,24 +110,26 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             subst selectedType
             exact selectedJoined.exact_nominal_consumption declared restricted
 
-/-- An actual checked assignment restores its selected place, including an
-uncertain one. Disjoint masks retain exactly their prior availability. No
-pre-write readiness or post-write realization is supplied. -/
+/-- Every reached checked assignment can restore its selected place, including
+an uncertain one. Its actual module authorizes the write and old-value disposal;
+disjoint masks retain their availability. No completed write is assumed. -/
 theorem HasType.assignment_restores (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current after : Environment}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {place : Place} {value : Value} {rest : Expr} {stack : List Frame}
+    {assignmentHome : Module} {place : Place} {value : Value} {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .result value, .assign place rest :: stack⟩)
-    (step : Step program ⟨current, .result value, .assign place rest :: stack⟩
-      ⟨after, .expression rest, stack⟩) :
-    ∃ before next state updated assignmentHome assignedType,
+      ⟨current, .result value, .assign assignmentHome place rest :: stack⟩) :
+    ∃ after before next state updated assignedType,
+      Step program ⟨current, .result value, .assign assignmentHome place rest :: stack⟩
+        ⟨after, .expression rest, stack⟩ ∧
       BindingMap.Typed program current.heap current.activation current.bindings before ∧
-      lookup place.root before = some state ∧
+      lookup place.root before = some state ∧ state.slot.mutable = true ∧
       PathType program assignmentHome state.slot.type place.fields assignedType ∧
+      ValueHasType program value assignedType ∧
+      BindingMap.ReplacementSafe program assignmentHome current.heap current.bindings place ∧
       state.initialization.writeFields program state.slot.type place.fields .present = some updated ∧
       replaceBinding place.root { state with initialization := updated } before = some next ∧
       BindingMap.Typed program after.heap after.activation after.bindings next ∧
@@ -145,14 +147,12 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
       | cons frame tail =>
         cases frame with
         | assign selected path writable selection discard mask context restTyped =>
-          cases step with
-          | assignResult written =>
-            obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
-              readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident
-            cases Option.some.inj (written.symm.trans produced)
-            exact ⟨_, _, _, _, _, _, currentStore, selected, path, maskWritten, contextWritten,
-              nextTyped, readback, Initialization.write_select maskWritten,
-              fun _ apart => apart.initialization_frame maskWritten⟩
+          obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
+            readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident
+          exact ⟨actual, _, _, _, _, _, .assignResult produced, currentStore, selected, writable, path, resident,
+            currentStore.replacement_safe selected path selection discard, maskWritten, contextWritten,
+            nextTyped, readback, Initialization.write_select maskWritten,
+            fun _ apart => apart.initialization_frame maskWritten⟩
 
 
 /-- Pre-state observation of an ordinary place input. This uses the same
@@ -606,9 +606,9 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
+    {assignmentHome : Module} {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .result value, .assign place rest :: stack⟩)
+      ⟨current, .result value, .assign assignmentHome place rest :: stack⟩)
     {address : StorageId} {cell : StorageCell}
     (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
@@ -627,9 +627,9 @@ theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
+    {assignmentHome : Module} {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .result value, .assign place rest :: stack⟩)
+      ⟨current, .result value, .assign assignmentHome place rest :: stack⟩)
     {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
     (path : PathType program selectedHome cell.type place.fields selectedType)

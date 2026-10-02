@@ -2526,8 +2526,8 @@ exclude source accesses when either the root or selected place is uncertain.
 These are statements over arbitrary checking derivations, not concrete examples.
 
 `HasType.assignment_restores` follows an arbitrary checked execution prefix
-through an actual assignment transition. It derives the current binding
-realization, resolved destination type, actual context update, resulting heap
+and constructs its next assignment transition. It derives the current binding
+realization, destination type at the actual assignment module, context update, resulting heap
 realization, exact readback of the assigned value, and a present mask at the
 selected path. Every pre-state-disjoint path retains its previous mask, including
 uncertainty. It requires neither old readiness nor supplied post-state typing.
@@ -3534,4 +3534,26 @@ preservation and source maximal behavior found only standard Lean axioms.
 No examples or tests were added. This does not implement custom destructor
 execution, borrowed projection or physical cleanup; all fourteen broad
 completion obligations remain open.
+
+## Assignment authority survives RHS evaluation and restoration
+
+Assignment expressions and frames retain their source module. The authoritative
+`BindingMap.ReplacementSafe` contract now requires the destination path at that
+module instead of existentially choosing an alternative permission scope.
+Elaboration, evaluation, framing, termination, general preservation and source
+behavior use this same fact. Existing exact and nondiscardable overwrite
+rejection proofs consume the strengthened contract.
+
+`HasType.assignment_restores` no longer assumes a completed write. After any
+checked prefix reaching assignment, it constructs the actual transition and
+derives mutable-binding authority, path permission at the stored module,
+inserted-value typing, legal old-resident disposal, resulting heap realization,
+exact readback and restored initialization, with disjoint masks unchanged.
+No pre-write readiness, post-state typing or execution-success premise is added.
+
+All 30 Lean build jobs passed. Axiom inspection covered constructive restoration,
+nondiscardable overwrite rejection, general preservation and source maximal
+behavior; only standard Lean axioms occur. No tests or subagents were used.
+Custom Drop and reference-bearing assignment remain open, as do all fourteen
+broad completion obligations.
 

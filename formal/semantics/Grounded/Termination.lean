@@ -132,8 +132,8 @@ inductive EvaluationDependency (program : Program) : Expr → Expr → Prop wher
   | callBody {identity : Nat} {arguments : List Expr} {declaration : FunctionDecl}
       (declared : program.functions identity = some declaration) :
       EvaluationDependency program declaration.body (.call identity arguments)
-  | assignValue {place : Place} {value rest : Expr} : EvaluationDependency program value (.assign place value rest)
-  | assignRest {place : Place} {value rest : Expr} : EvaluationDependency program rest (.assign place value rest)
+  | assignValue {home : Module} {place : Place} {value rest : Expr} : EvaluationDependency program value (.assign home place value rest)
+  | assignRest {home : Module} {place : Place} {value rest : Expr} : EvaluationDependency program rest (.assign home place value rest)
   | patternInput {home : Module} {inputs : List Ty} {expression : Expr} {arguments : List Expr} {arms : List (Pattern × Expr)}
       (member : expression ∈ arguments) : EvaluationDependency program expression (.applyPatterns home inputs arguments arms)
   | patternBody {home : Module} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} {pattern : Pattern} {body : Expr}

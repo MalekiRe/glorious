@@ -56,13 +56,13 @@ theorem Evaluates.bind {environment middle localAfter after : Environment} {muta
   .step .bind ((Run.extend initialized [.bind name ⟨localType, mutable⟩ body]).trans
     (.step .bindResult ((Run.extend continued [.scope 1]).trans (.step (.scope exited) (.refl _)))))
 
-theorem Evaluates.assign {environment middle updated after : Environment} {place : Place}
+theorem Evaluates.assign {home : Module} {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value}
       (evaluated : Evaluates program environment expression resident middle)
       (written : middle.write program place resident = some updated)
       (continued : Evaluates program updated rest value after) :
-      Evaluates program environment (.assign place expression rest) value after :=
-  .step .assign ((Run.extend evaluated [.assign place rest]).trans
+      Evaluates program environment (.assign home place expression rest) value after :=
+  .step .assign ((Run.extend evaluated [.assign home place rest]).trans
     (.step (.assignResult written) continued))
 
 theorem Evaluates.tuple {environment middle after : Environment} {head : Expr} {tail : List Expr}

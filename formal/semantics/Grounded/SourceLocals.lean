@@ -105,9 +105,9 @@ RHS effects have already happened and are not claimed to be undone. -/
 theorem SourceScope.shadow_assignment_preserves_outer {scope : SourceScope} {spelling : Identifier}
     {binding : SourceBinding} (resolved : scope.resolve spelling = some binding)
     {program : Program} {fields outerFields : List FieldKey} {value : Value}
-    {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
+    {assignmentHome : Module} {before : Environment} {after : Configuration} {stack : List Frame} {rest : Expr}
     {context : FlowContext} (store : BindingMap.Typed program before.heap before.activation before.bindings context)
-    (step : Step program ⟨before, .result value, .assign ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
+    (step : Step program ⟨before, .result value, .assign assignmentHome ⟨⟨scope.next⟩, fields⟩ rest :: stack⟩ after) :
     after.environment.read program ⟨binding.identity, outerFields⟩ =
       before.read program ⟨binding.identity, outerFields⟩ := by
   apply Step.assignment_frame store.addresses_distinct step
@@ -181,7 +181,7 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (mask : state.initialization.writeFields program binding.slot.type fields .present = some updated)
     (context : replaceBinding binding.identity { state with initialization := updated } evaluated = some restored)
     (continued : HasType program home restored rest result after) :
-    HasType program home before (.assign ⟨binding.identity, fields⟩ value rest) result after := by
+    HasType program home before (.assign home ⟨binding.identity, fields⟩ value rest) result after := by
   have same := scope.selected_slot resolved (resident.slots.trans slots) selected
   exact .assign resident selected (by rw [same]; exact path) (by rw [same]; exact writable)
     (by rw [same]; exact selection) discard

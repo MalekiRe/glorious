@@ -72,18 +72,18 @@ theorem BindingMap.Typed.separated (typed : BindingMap.Typed program heap activa
 
 /-- The selected old resident has legal residual disposition immediately before
 a write. Selection uses the same heap path as restoration itself. -/
-def BindingMap.ReplacementSafe (program : Program) (heap : RuntimeHeap StorageCell)
+def BindingMap.ReplacementSafe (program : Program) (home : Module) (heap : RuntimeHeap StorageCell)
     (bindings : BindingMap) (place : Place) : Prop :=
   ∃ identity cell resident type,
     lookup place.root bindings = some identity ∧ heap.read identity = some cell ∧
     cell.resident.selectFields program cell.type place.fields = some resident ∧
-    (∃ home, PathType program home cell.type place.fields type) ∧
+    PathType program home cell.type place.fields type ∧
     resident.Disposable program type
 
 /-- Replacement cannot discard a live nondiscardable descendant of the old
 destination, even when the destination itself is only partially initialized. -/
 theorem BindingMap.ReplacementSafe.not_nondiscardable
-    (safe : BindingMap.ReplacementSafe program heap bindings place)
+    (safe : BindingMap.ReplacementSafe program home heap bindings place)
     {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
     (path : PathType program selectedHome cell.type place.fields selectedType)
@@ -94,7 +94,7 @@ theorem BindingMap.ReplacementSafe.not_nondiscardable
       (old.selectFields program selectedType fields).bind PartialValue.read) = some owner)
     (required : ¬ UsePermitted program.data .discard descendantType) : False := by
   obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
-    actualSelected, ⟨home, actualPath⟩, permission⟩ := safe
+    actualSelected, actualPath, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
   cases actualPath.result_unique path
@@ -103,7 +103,7 @@ theorem BindingMap.ReplacementSafe.not_nondiscardable
 
 
 theorem BindingMap.ReplacementSafe.not_exact
-    (safe : BindingMap.ReplacementSafe program heap bindings place)
+    (safe : BindingMap.ReplacementSafe program home heap bindings place)
     {address : StorageId} {cell : StorageCell}
     (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
@@ -124,7 +124,7 @@ theorem BindingMap.Typed.replacement_safe
     (path : PathType program home state.slot.type place.fields type)
     (selection : state.initialization.selectFields program state.slot.type place.fields = some available)
     (discard : available.Disposable program.data type) :
-    BindingMap.ReplacementSafe program heap bindings place := by
+    BindingMap.ReplacementSafe program home heap bindings place := by
   obtain ⟨identity, cell, mapped, found, _, declared, typed, _⟩ := store.lookup selected
   have actualPath : PathType program home cell.type place.fields type := by
     rw [declared]; exact path
@@ -133,7 +133,7 @@ theorem BindingMap.Typed.replacement_safe
   rw [declared] at maskSelected
   cases Option.some.inj (maskSelected.symm.trans selection)
   exact ⟨identity, cell, resident, type, mapped, found, residentSelected,
-    ⟨home, actualPath⟩, discard.realizes residentTyped⟩
+    actualPath, discard.realizes residentTyped⟩
 
 
 /-- Exact retained cells preserve every projected read, including unsuccessful
