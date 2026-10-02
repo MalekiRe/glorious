@@ -85,9 +85,11 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               program.data nominal = some declaration → declaration.restriction = some .exact →
               ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty) ∧
       (∃ trace : Nat → Environment, trace 0 = current ∧ trace count = after ∧
-        (∀ position < count, ∃ (index : Nat) (identity : StorageId),
+        (∀ position < count, ∃ (index : Nat) (identity : StorageId) (cell : StorageCell),
           BindingMap.nextRelease (List.take (count - position) (trace position).bindings) (trace position).bindings = some (index, identity) ∧
-          index < count - position ∧ (trace position).retireBinding index = some (trace (position + 1))) ∧
+          index < count - position ∧ (trace position).heap.read identity = some cell ∧
+          cell.resident.Disposable program cell.type ∧
+          (trace position).retireBinding index = some (trace (position + 1))) ∧
         (∀ position ≤ count,
           ConfigurationTyped program final (.one type) ⟨trace position, .result value, .scope (count - position) :: stack⟩ ∧
           (trace position).exitScope (count - position) = some after)) ∧
@@ -172,10 +174,15 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             branchTyped, branchTyped.approximate joined, joined, preserved,
             (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_, ?_, ?_⟩
           · obtain ⟨trace, start, finish, steps, states⟩ := original.scope_retirement_trace
-            refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), steps, ?_⟩
-            intro position bound
-            obtain ⟨pointTyped, pointSame⟩ := states position bound
-            exact ⟨pointTyped, pointSame.trans produced⟩
+            refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), ?_, ?_⟩
+            · intro position bound
+              obtain ⟨index, identity, chosen, inside, operation⟩ := steps position bound
+              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
+              obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
+              exact ⟨index, identity, cell, chosen, inside, found, allowed, operation⟩
+            · intro position bound
+              obtain ⟨pointTyped, pointSame⟩ := states position bound
+              exact ⟨pointTyped, pointSame.trans produced⟩
           · exact original.scope_next
           · intro index entry next selected inside produced
             exact ((checked.soundness checkedProgram store issued run).2.2.1).trans
@@ -674,8 +681,9 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
       (∃ trace : Nat → Environment,
         trace 0 = current ∧ (trace current.bindings.length).bindings = [] ∧
-        (∀ position < current.bindings.length, ∃ (index : Nat) (identity : StorageId),
+        (∀ position < current.bindings.length, ∃ (index : Nat) (identity : StorageId) (cell : StorageCell),
           BindingMap.nextRelease (trace position).bindings (trace position).bindings = some (index, identity) ∧
+          (trace position).heap.read identity = some cell ∧ cell.resident.Disposable program cell.type ∧
           (trace position).retireBinding index = some (trace (position + 1))) ∧
         (∀ position ≤ current.bindings.length,
           ConfigurationTyped program final (.one type) ⟨trace position, .result value, .restore caller :: stack⟩ ∧
@@ -732,10 +740,15 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             (fun _ _ _ split => original.ownership_safe.return_retirement step split)⟩
           · simp [AddressedEnvironment.scope, activation, bindings]
           · obtain ⟨trace, start, finish, steps, states⟩ := original.restore_retirement_trace
-            refine ⟨trace, start, finish, steps, ?_⟩
-            intro position bound
-            obtain ⟨pointTyped, pointSame⟩ := states position bound
-            exact ⟨pointTyped, pointSame.trans restored⟩
+            refine ⟨trace, start, finish, ?_, ?_⟩
+            · intro position bound
+              obtain ⟨index, identity, chosen, operation⟩ := steps position bound
+              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
+              obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
+              exact ⟨index, identity, cell, chosen, found, allowed, operation⟩
+            · intro position bound
+              obtain ⟨pointTyped, pointSame⟩ := states position bound
+              exact ⟨pointTyped, pointSame.trans restored⟩
           · intro front back middle split executed
             have owned : ∀ identity ∈ front, identity ∈ current.bindings.map Prod.snd := by
               intro identity member

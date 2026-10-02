@@ -591,12 +591,10 @@ theorem BindingMap.release_next (pending available : BindingMap)
     have actual : available[index]? = some entry := by rw [indices]; exact oldSelected
     refine ⟨index, entry, ?_, actual, member, by simp only [List.head?_cons, same]⟩
     simp [BindingMap.nextRelease, ordered, List.findIdx?_eq_some_of_exists witness, same, index]
-/-- Selecting a pending lexical prefix cannot select a retained outer binding,
-even after earlier retirements have shortened that prefix. -/
-theorem BindingMap.nextRelease.in_prefix {pending available : BindingMap} {index : Nat} {identity : StorageId}
-    (leading : pending <+: available)
+/-- Every successful selection names an owner in the actual pending map. -/
+theorem BindingMap.nextRelease.member {pending available : BindingMap} {index : Nat} {identity : StorageId}
     (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
-    index < pending.length := by
+    identity ∈ pending.map Prod.snd := by
   cases first : pending.releaseOrder.head? with
   | none => simp [BindingMap.nextRelease, first] at chosen
   | some root =>
@@ -606,10 +604,28 @@ theorem BindingMap.nextRelease.in_prefix {pending available : BindingMap} {index
       have same : position = index ∧ root = identity := by
         simpa [BindingMap.nextRelease, first, searched] using chosen
       obtain ⟨rfl, rfl⟩ := same
-      have member : root ∈ pending.map Prod.snd := by
-        apply BindingMap.mem_releaseOrder.mp
-        obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
-        simp only [ordered, List.mem_cons, true_or]
+      apply BindingMap.mem_releaseOrder.mp
+      obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+      simp only [ordered, List.mem_cons, true_or]
+
+
+/-- Selecting a pending lexical prefix cannot select a retained outer binding,
+even after earlier retirements have shortened that prefix. -/
+theorem BindingMap.nextRelease.in_prefix {pending available : BindingMap} {index : Nat} {identity : StorageId}
+    (leading : pending <+: available)
+    (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
+    index < pending.length := by
+  have pendingMember := BindingMap.nextRelease.member chosen
+  cases first : pending.releaseOrder.head? with
+  | none => simp [BindingMap.nextRelease, first] at chosen
+  | some root =>
+    cases searched : available.findIdx? (fun entry => decide (entry.2 = root)) with
+    | none => simp [BindingMap.nextRelease, first, searched] at chosen
+    | some position =>
+      have same : position = index ∧ root = identity := by
+        simpa [BindingMap.nextRelease, first, searched] using chosen
+      obtain ⟨rfl, rfl⟩ := same
+      have member := pendingMember
       obtain ⟨entry, member, same⟩ := List.mem_map.mp member
       have bound := List.findIdx_lt_length_of_exists
         (xs := pending) (p := fun entry => decide (entry.2 = root))

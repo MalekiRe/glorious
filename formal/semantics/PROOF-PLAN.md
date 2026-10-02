@@ -4041,3 +4041,13 @@ intermediate readiness is a premise. All 30 strict build jobs passed, and the
 inspected trace/source proofs use only standard Lean axioms. These finite
 traces describe actual storage operations, not a new machine `Run`; resident
 destruction must still be interleaved through the retirement-frame cutover.
+
+Every stage of both reached-source traces now exposes the actual selected
+resident and its disposal permission in that stage’s physical heap. The shared
+`BindingMap.nextRelease.member` theorem derives pending-owner membership from
+the executable selection; lexical confinement and both source trace consumers
+reuse it. Permission comes from the preserved configuration invariant, not a
+new readiness premise or the original resident before earlier transitions.
+All 30 strict build jobs and inspected producer/source axiom closures passed.
+This supplies current-resident authority for interleaved destruction; the
+machine retirement-frame integration remains open.
