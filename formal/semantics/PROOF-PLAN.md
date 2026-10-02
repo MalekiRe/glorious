@@ -4431,3 +4431,20 @@ partially moved enclosing destinations. It consumes the existing general
 replacement invariant; no target read, future cleanup or extra admission
 certificate is assumed. All 30 strict jobs and inspected replacement, retirement
 and public source-soundness/behavior axiom closures passed.
+
+
+## Branch approximation cannot manufacture residual disposal authority
+
+`Initialization.Approximates.disposable_before` proves that every disposal
+permission after a join was already valid for the incoming mask. This is a
+general static theorem, independent of future runtime realization. It covers
+structural tuples, every nominal constructor, inferred classes and explicit
+exact restrictions, including partially moved owners and empty residual shells.
+
+`HasType.scope_join_preserves_ownership` now consumes this theorem for every
+selected descendant in the actual reached branch and joined contexts. Existing
+unknown-state and explicit exact-shell guarantees remain unchanged. No source
+permission, future disposal or completed execution is assumed. All 30 strict
+Lean jobs passed; inspected join, general soundness and public source-behavior
+closures use only the standard Lean axioms. Custom destruction, reference
+restoration and whole-language completion remain open.

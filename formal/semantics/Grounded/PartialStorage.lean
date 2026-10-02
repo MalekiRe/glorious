@@ -341,6 +341,80 @@ theorem Initialization.Disposable.maybe_iff {data : DataDeclarations} {type : Ty
   · exact .permitted
 
 
+private theorem InitializationsApproximate.lengths {data : DataDeclarations}
+    {types : List Ty} {before after : List Initialization}
+    (joined : InitializationsApproximate data types before after) :
+    before.length = types.length ∧ after.length = types.length := by
+  induction types generalizing before after with
+  | nil => cases joined; exact ⟨rfl, rfl⟩
+  | cons type types ih =>
+    cases joined with
+    | cons head tail =>
+      obtain ⟨left, right⟩ := ih tail
+      exact ⟨by simpa using congrArg Nat.succ left, by simpa using congrArg Nat.succ right⟩
+
+private theorem InitializationsDisposable.of_empty {data : DataDeclarations}
+    {types : List Ty} {states : List Initialization}
+    (lengths : states.length = types.length) (empty : ∀ state ∈ states, state.Empty) :
+    InitializationsDisposable data types states := by
+  induction types generalizing states with
+  | nil =>
+    cases states with
+    | nil => exact .nil
+    | cons head tail => simp at lengths
+  | cons type types ih =>
+    cases states with
+    | nil => simp at lengths
+    | cons head tail =>
+      exact .cons (.empty (empty head (by simp)))
+        (ih (by simpa using lengths) (fun state member => empty state (by simp [member])))
+
+/-- Losing branch information cannot invent permission to destroy a residual
+owner. The proof applies to all masks, without assuming a runtime realization. -/
+theorem Initialization.Approximates.disposable_before {data : DataDeclarations}
+    {type : Ty} {before after : Initialization} (joined : before.Approximates data type after)
+    (permission : after.Disposable data type) : before.Disposable data type := by
+  induction joined using Initialization.Approximates.rec
+    (motive_2 := fun types before after _ =>
+      InitializationsDisposable data types after → InitializationsDisposable data types before) with
+  | refl => exact permission
+  | unknown allowed => exact .permitted allowed
+  | tuple children ih =>
+    cases permission with
+    | empty absent =>
+      simp only [Initialization.Empty] at absent
+      have original := ih (InitializationsDisposable.of_empty children.lengths.2 absent.2)
+      cases original with
+      | cons head tail => exact .tuple head tail
+    | permitted allowed => exact .permitted allowed
+    | tuple head tail =>
+      have original := ih (.cons head tail)
+      cases original with
+      | cons head tail => exact .tuple head tail
+  | @nominal identity declaration before after declared consumption children ih =>
+    cases permission with
+    | empty absent =>
+      by_cases restricted : declaration.restriction = some .exact
+      · exact .empty ((consumption restricted).mpr absent)
+      · apply Initialization.Disposable.nominal declared
+        · cases restriction : declaration.restriction with
+          | none => trivial
+          | some principal => cases principal <;> simp_all [UsePermission.Allows]
+        · intro tag schema chosen
+          simp only [Initialization.Empty] at absent
+          exact ih tag schema chosen
+            (InitializationsDisposable.of_empty (children tag schema chosen).lengths.2 absent.2)
+    | permitted allowed => exact .permitted allowed
+    | nominal found restriction fields =>
+      cases Option.some.inj (found.symm.trans declared)
+      exact .nominal declared restriction (fun tag schema chosen => ih tag schema chosen (fields tag schema chosen))
+  | nil => exact .nil
+  | cons head tail headIH tailIH =>
+    rename_i permission
+    cases permission with
+    | cons first rest => exact .cons (headIH first) (tailIH rest)
+
+
 
 theorem InitializationsDisposable.select {data : DataDeclarations} {types : List Ty}
     {states : List Initialization} (permission : InitializationsDisposable data types states)

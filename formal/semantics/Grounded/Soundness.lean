@@ -200,6 +200,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           ∃ next nextSelected,
             lookup name joined = some ⟨state.slot, next⟩ ∧
             next.selectFields program state.slot.type fields = some nextSelected ∧
+            (nextSelected.Disposable program.data selectedType → selectedState.Disposable program.data selectedType) ∧
             (¬ UsePermitted program.data .discard selectedType → nextSelected = .maybe → selectedState = .maybe) ∧
             (∀ identity declaration, selectedType = .nominal identity →
               program.data identity = some declaration → declaration.restriction = some .exact →
@@ -278,7 +279,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             simpa only [typeEq] using cellTyped.2
           obtain ⟨nextSelected, selectedAfter, selectedJoined⟩ :=
             path.approximate_initialization residentTyped approximation selection
-          refine ⟨next, nextSelected, found, selectedAfter,
+          refine ⟨next, nextSelected, found, selectedAfter, selectedJoined.disposable_before,
             fun required unknown => selectedJoined.no_new_nondiscardable_maybe required unknown, ?_⟩
           intro identity declaration same declared restricted
           subst selectedType
