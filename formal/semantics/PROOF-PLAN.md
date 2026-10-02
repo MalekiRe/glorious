@@ -124,42 +124,70 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   that contract. Retained-slot framing is not falsely extended past handoff:
   the continuation may subsequently modify those slots.
 
-Bounds: this remains an ownership-command frontend, not the full named source
-language. Field paths are resolved visible paths; shells carry resolved nominal
-metadata, not a source declaration/visibility elaborator. Exact occupancy and
-branch agreement are explicitly the current checking precision policy, not
-requirements of MIR execution; loop checking retains invariant contexts. No
-maybe-initialized admission was added. Ordinary whole moves and copies require
-initialization; internal cleanup/deconstruction may transfer residual
-structures. Protected results reside in slots outside the exiting scope;
-cleanup begins with an empty transfer register. Halting returns the remaining
-region and does not implicitly clean it. The source and MIR share fixed slots.
-Heap allocation, physical addresses, borrowing/lifetimes, recursive calls and
-caller frames, custom destructors, effects, foreign execution, CFG/SSA, and
-backend refinement remain outside this slice. Earlier compiler and Lean code
-are preserved, not silently replaced or granted these claims.
+- `Calls.lean`, `CallSafety.lean`: recursive calls are control transitions over
+  fresh frame-local slot regions and an unbounded continuation stack, not
+  terminating atomic instructions. Entry transfers the prepared argument pack
+  into slot zero and retains caller slots without a transfer register. Result
+  handoff uses the existing checked `put` into the caller, clears the callee
+  register, and starts ordinary lowered cleanup. Retirement requires the
+  entire callee state to be empty. `activationScope` contains every slot; no
+  externally supplied subset can hide callee-owned storage. Program admission
+  checks bodies against declarations, input/output readiness, and structural
+  residual disposability; it assumes no successful return or future run.
+- `CallOwnership.lean`, `CallShells.lean`: arbitrary additive tree measures
+  agree across argument transfer and protected result handoff. Joint resource
+  uniqueness covers the active state plus every retained caller, not merely
+  separate per-frame uniqueness. `Calls.program_safety` derives preservation,
+  progress, exact-resource conservation, affine bounds, noncopyable-shell
+  bounds, and exact-shell discharge accounting at every actual finite prefix.
+- `CallControl.lean`: deterministic activation transitions, finite-prefix
+  comparison, actual infinite executions, and checked nontermination iff no
+  terminal execution. Safety applies to every infinite-execution prefix.
+- `CallCleanup.lean`: the existing ordered scope-cleanup trace discharges all
+  activation slots before resumption. Every call-cleanup prefix either retains
+  the identical protected caller stack with the prescribed event prefix, or
+  has crossed complete retirement into the caller continuation. Cleanup
+  preserves and reflects continuation divergence. Result installation frames
+  every caller root outside its destination; deeper retained regions are
+  untouched by boundary operations.
+- `CallBoundary.lean`: appending retained caller storage preserves actual
+  transitions and executions. `Function.call_return` composes a real callee
+  return with entry, constructively checked result installation, complete
+  cleanup, and resumption, preserving caller roots outside the destination.
+  `Function.call_diverges` propagates actual recursive divergence through entry.
+  `Function.return_initialized` derives an initialized runtime result.
 
-The next call boundary must derive complete callee scope ownership from actual
-activation structure rather than assume a complete supplied list. Nominal/source
-integration must derive layout and principal restriction from declarations and
-deconstruction authority from the checking context, keeping field visibility
-separate. These remain obligations for their respective feature slices, not
-claims of this pre-call refactor.
-For the first call slice, install the result in caller-owned or explicitly
-protected storage before callee cleanup begins. Do not leave it in the transfer
-register and weaken the empty-register cleanup requirement. The activation
-representation must establish the result storage is outside the retiring scope
-and carry its ownership through handoff. Allocation and slot embedding remain
-decisions for that representation, not an additional pre-call storage framework.
+Bounds: this is the resolved ownership MIR slice, not the full named source
+language. The existing atomic ownership-command lowering/return/divergence
+theorems remain intact; they are not a source-call lowering theorem. Call
+admission currently starts from checked MIR function bodies and prepared
+argument packs. Named source resolution, argument-pack elaboration, and
+source-call refinement remain outside these claims. Field paths and nominal
+metadata are resolved; declaration-derived authority and visibility are not
+added. Exact occupancy and branch agreement remain checking precision policy;
+loops retain invariant contexts. No maybe-initialized admission is added.
 
+Each activation has the same arbitrary finite slot capacity, with slot indices
+in resolved acquisition order; the stack is unbounded. Region freshness is
+structural, not a physical allocation or address theorem. Cleanup visits every
+callee slot, and results reside in caller storage outside the retiring region.
+The outermost activation is an explicit caller boundary: a terminal execution
+returns its declared output context, including its residual region, rather than
+silently destroying it. Heap allocation/exhaustion, physical addresses,
+borrowing/lifetimes, custom destructors, effects, foreign execution, CFG/SSA,
+and backend refinement remain outside this slice. Earlier compiler and Lean
+code are preserved, not silently replaced or granted these claims.
 
-Verification: after `lake clean`, `lake build OwnershipMir.Trace` passed its
-standalone 9-job dependency graph without compiling lowering or cleanup. The
-subsequent `lake build OwnershipMir` passed all 19 jobs, with warnings as errors
-and auto-implicit parameters disabled. Axiom inspection of sixteen control,
-trace, lowering, adequacy, and continuation-cleanup theorems reported only `propext`,
-`Classical.choice`, and `Quot.sound`. No `sorry`, new axioms,
-concrete examples, or unit tests were used to bypass the general obligations.
+Nominal/source integration must derive layout and principal restriction from
+declarations and deconstruction authority from checking context, with field
+visibility separate. The call slice does not claim that integration.
+
+Verification: a fresh `lake clean && lake build OwnershipMir` in `formal/mir`
+passed all 26 jobs with warnings as errors and auto-implicit parameters
+disabled. Axiom inspection of twenty general activation, ownership, shell,
+cleanup, return, divergence, and existing lowering theorems reported only
+`propext`, `Classical.choice`, and `Quot.sound`. No `sorry`, new axioms, concrete
+examples, or unit tests were used to bypass the general obligations.
 
 
 ### Joint storage ownership

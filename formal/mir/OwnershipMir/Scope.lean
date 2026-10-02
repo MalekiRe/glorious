@@ -3,7 +3,8 @@ import OwnershipMir.Cleanup
 namespace OwnershipMir
 
 /-- Fixed-slot lexical ownership, in acquisition order. Protected results and
-retained storage are outside this list. Calls and heap frames are not modeled. -/
+retained storage are outside this list. Calls derive the list from their
+complete activation region; this module supplies local cleanup semantics. -/
 structure Scope (n : Nat) where
   owners : List (Fin n)
   distinct : owners.Nodup
