@@ -4178,3 +4178,34 @@ soundness and admitted-behavior closures contain only the standard three Lean
 axioms. This establishes ordinary owned acquisition for the modeled type family;
 expected-reference-driven reborrowing remains part of the unimplemented
 reference/lifetime boundary, not an implicit exception in this rule.
+
+
+## Constructive ordered source inputs through callee entry
+
+Independent ordinary source admissions now compose through the existing
+mode-sensitive Core `InputCompatible` contract. `recheck_input` transports
+an already-selected source input using the Core framing result, preserving
+source identity and its automatic or explicit Copy/move choice. It does not
+postulate pending source readiness in the intermediate context.
+
+`NamedExprsElaborate.compatible_inputs` constructs the ordered source batch.
+Its execution consumer proves actual argument execution with exactly the
+original pre-state observations, final binding realization, and unchanged
+caller scope and activation supply. Copy overlap remains admitted; destructive
+inputs use the same pre-state separation contract as Core, with no second alias
+analysis or blanket ban on overlapping reads.
+
+`NamedExpr.Elaborates.compatible_call_entry` consumes that batch through the
+real named-call admission, argument execution, parameter preparation and fresh
+activation allocation. It constructs the callee-entry run, proves its general
+configuration invariant, progress, caller consumption frame, binding uniqueness
+and ownership safety. Callee recursion/divergence is allowed; neither a completed
+call nor future heap readiness is supplied. The argument types are checked
+against the actual selected declaration.
+
+All 30 strict jobs passed. Inspected reconstruction, ordered source admission,
+execution, callee-entry and admitted-behavior closures use only the standard
+three Lean axioms. This closes the source-to-entry composition for the modeled
+owned Copy/move inputs. Loan creation, reborrowing, custody-sensitive resources,
+physical exhaustion and full-language input compatibility remain separate open
+obligations; the logical heap theorem does not establish them.

@@ -286,6 +286,164 @@ theorem NamedExprsElaborate.checked {program : Program} {home : Module} {names :
       have checked := first.checked slots
       exact .cons checked (ih rest (checked.slots.trans slots))
 
+/-- Rechecking an already selected ordinary input preserves its source identity
+and Copy/move choice. The new availability comes from the shared Core framing
+proof, not a separately assumed source post-state. -/
+theorem NamedExpr.Elaborates.recheck_input {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope}
+    {before after current final : FlowContext} {source : NamedExpr} {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program names home scope before source core type after)
+    (ordinary : ∃ place, core = .read place ∨ core = .move place)
+    (checked : HasType program home current core type final)
+    (slots : current.slots = scope.context) :
+    NamedExpr.Elaborates program names home scope current source core type final := by
+  obtain ⟨place, rfl | rfl⟩ := ordinary
+  · cases elaborated with
+    | read resolved _ _ _ _ _ =>
+      cases checked with
+      | read selected path selection ready copyable =>
+        have same := scope.selected_slot resolved slots selected
+        exact .read resolved selected (by simpa only [same] using path)
+          (by simpa only [same] using selection) ready copyable
+  · cases elaborated with
+    | readMove resolved _ _ _ _ noncopyable _ _ =>
+      cases checked with
+      | move selected path selection ready mask context =>
+        have same := scope.selected_slot resolved slots selected
+        exact .readMove resolved selected (by simpa only [same] using path)
+          (by simpa only [same] using selection) ready noncopyable
+          (by simpa only [same] using mask) context
+    | move resolved _ _ _ _ _ _ =>
+      cases checked with
+      | move selected path selection ready mask context =>
+        have same := scope.selected_slot resolved slots selected
+        exact .move resolved selected (by simpa only [same] using path)
+          (by simpa only [same] using selection) ready
+          (by simpa only [same] using mask) context
+
+/-- Independent ordinary source admissions compose in execution order under
+the same pre-state compatibility used by Core. Every pending source admission
+is reconstructed after the actual preceding mask update. -/
+theorem NamedExprsElaborate.compatible_inputs {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before : FlowContext}
+    {inputs : List (NamedExpr × Expr × Ty)}
+    (slots : before.slots = scope.context)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home scope.context left.2.1 right.2.1))
+    (ordinary : ∀ input ∈ inputs, ∃ place, input.2.1 = .read place ∨ input.2.1 = .move place)
+    (admitted : ∀ input ∈ inputs, ∃ after,
+      NamedExpr.Elaborates program names home scope before input.1 input.2.1 input.2.2 after) :
+    ∃ after, NamedExprsElaborate program names home scope before
+      (inputs.map Prod.fst) (inputs.map fun input => input.2.1) (inputs.map fun input => input.2.2) after := by
+  induction inputs generalizing before with
+  | nil => exact ⟨before, .nil⟩
+  | cons first rest ih =>
+    obtain ⟨middle, head⟩ := admitted first (by simp)
+    have headChecked := head.checked slots
+    have currentSlots := headChecked.slots.trans slots
+    have parts := List.pairwise_cons.mp compatible
+    obtain ⟨final, tail⟩ := ih currentSlots parts.2
+      (fun input member => ordinary input (List.mem_cons_of_mem first member)) (by
+        intro input member
+        obtain ⟨after, pending⟩ := admitted input (List.mem_cons_of_mem first member)
+        have compatible := parts.1 input member
+        rw [← slots] at compatible
+        obtain ⟨next, checked⟩ := compatible.admit_next headChecked (pending.checked slots)
+        exact ⟨next, pending.recheck_input (ordinary input (List.mem_cons_of_mem first member)) checked currentSlots⟩)
+    exact ⟨final, .cons head tail⟩
+/-- Execute the actual ordered source inputs with their original pre-state
+observations. Copy overlap is retained; destructive overlap is excluded only
+by the shared, mode-sensitive compatibility relation. -/
+theorem NamedExprsElaborate.compatible_inputs_execute {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before : FlowContext}
+    {inputs : List (NamedExpr × Expr × Ty)}
+    (slots : before.slots = scope.context)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home scope.context left.2.1 right.2.1))
+    (ordinary : ∀ input ∈ inputs, ∃ place, input.2.1 = .read place ∨ input.2.1 = .move place)
+    (admitted : ∀ input ∈ inputs, ∃ after,
+      NamedExpr.Elaborates program names home scope before input.1 input.2.1 input.2.2 after)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before) :
+    ∃ final after values,
+      NamedExprsElaborate program names home scope before
+        (inputs.map Prod.fst) (inputs.map fun input => input.2.1) (inputs.map fun input => input.2.2) final ∧
+      EvaluatesMany program environment (inputs.map fun input => input.2.1) values after ∧
+      ValuesHaveTypes program values (inputs.map fun input => input.2.2) ∧
+      values.map some = inputs.map (fun input => input.2.1.inputObservation program environment) ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.scope = environment.scope ∧ after.supply = environment.supply := by
+  obtain ⟨final, elaborated⟩ := NamedExprsElaborate.compatible_inputs slots compatible ordinary admitted
+  have coreCompatible : (inputs.map Prod.snd).Pairwise
+      (fun left right => InputCompatible program home before.slots left.1 right.1) := by
+    simpa only [List.pairwise_map, slots] using compatible
+  have coreOrdinary : ∀ input ∈ inputs.map Prod.snd, ∃ place, input.1 = .read place ∨ input.1 = .move place := by
+    intro input member
+    obtain ⟨source, included, rfl⟩ := List.mem_map.mp member
+    exact ordinary source included
+  have checked : HasTypes program home before ((inputs.map Prod.snd).map Prod.fst)
+      ((inputs.map Prod.snd).map Prod.snd) final := by
+    simpa only [List.map_map, Function.comp_def] using elaborated.checked slots
+  obtain ⟨after, values, executed, residents, observed, finalTyped, scopeSame, supplySame⟩ :=
+    HasTypes.compatible_inputs_execute coreCompatible coreOrdinary checked store
+  exact ⟨final, after, values, elaborated,
+    by simpa only [List.map_map, Function.comp_def] using executed,
+    by simpa only [List.map_map, Function.comp_def] using residents,
+    by simpa only [List.map_map, Function.comp_def] using observed,
+    finalTyped, scopeSame, supplySame⟩
+/-- Ordered ordinary source inputs construct actual callee entry. Parameter
+preparation and fresh activation allocation are conclusions; recursive callee
+bodies need no termination assumption. -/
+theorem NamedExpr.Elaborates.compatible_call_entry {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before : FlowContext}
+    {inputs : List (NamedExpr × Expr × Ty)} {name : FunctionName} {identity : Nat} {declaration : FunctionDecl}
+    (checkedProgram : program.Checked) (slots : before.slots = scope.context)
+    (unshadowed : name.Unshadowed scope) (resolved : names home name = some identity)
+    (declared : program.functions identity = some declaration)
+    (visible : declaration.visibility.Allows declaration.home home)
+    (types : inputs.map (fun input => input.2.2) = declaration.parameters.map (fun parameter => parameter.2.type))
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home scope.context left.2.1 right.2.1))
+    (ordinary : ∀ input ∈ inputs, ∃ place, input.2.1 = .read place ∨ input.2.1 = .move place)
+    (admitted : ∀ input ∈ inputs, ∃ after,
+      NamedExpr.Elaborates program names home scope before input.1 input.2.1 input.2.2 after)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ final values middle bindings,
+      NamedExpr.Elaborates program names home scope before (.call name (inputs.map Prod.fst))
+        (.call identity (inputs.map fun input => input.2.1)) declaration.result final ∧
+      EvaluatesMany program environment (inputs.map fun input => input.2.1) values middle ∧
+      values.map some = inputs.map (fun input => input.2.1.inputObservation program environment) ∧
+      prepareBindings declaration.parameters values = some bindings ∧ BindingInputsTyped program bindings ∧
+      Run program ⟨environment, .expression (.call identity (inputs.map fun input => input.2.1)), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ConfigurationTyped program final (.one declaration.result)
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      (∃ next, Step program
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next) ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment
+        (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+          [.restore middle.scope]⟩ : Configuration).outerEnvironment ∧
+      ((enterBindings middle.heap middle.supply bindings).bindings.map Prod.fst).Nodup ∧
+      (⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body,
+        [.restore middle.scope]⟩ : Configuration).OwnershipSafe program := by
+  obtain ⟨final, middle, values, arguments, executed, residents, observed, _, _, _⟩ :=
+    NamedExprsElaborate.compatible_inputs_execute slots compatible ordinary admitted store
+  have invocation : NamedExpr.Elaborates program names home scope before (.call name (inputs.map Prod.fst))
+      (.call identity (inputs.map fun input => input.2.1)) declaration.result final :=
+    .call unshadowed resolved declared visible (by rw [← types]; exact arguments)
+  rw [types] at residents
+  obtain ⟨bindings, prepared, inputsTyped, _⟩ :=
+    prepareBindings.progress residents (checkedProgram.functions _ _ declared).distinct
+  have run : Run program ⟨environment, .expression (.call identity (inputs.map fun input => input.2.1)), []⟩
+      ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ :=
+    .step (.call declared) ((Run.extend executed [.call declaration]).trans (.step (.callInputs prepared) (.refl _)))
+  have safety := (invocation.checked slots).soundness checkedProgram store issued run
+  have progress : ∃ next, Step program
+      ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ next := by
+    rcases safety.2.1 with terminal | next
+    · cases terminal
+    · exact next
+  exact ⟨final, values, middle, bindings, invocation, executed, observed, prepared, inputsTyped,
+    run, safety.1, progress, safety.2.2⟩
 /-- Every prefix of the selected elaboration is safe, including recursive calls.
 The only dynamic input evidence describes the actual incoming environment. -/
 theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
