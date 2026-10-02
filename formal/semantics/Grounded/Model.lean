@@ -37,6 +37,7 @@ def UnicodeScalar (number : Nat) : Prop :=
 
 inductive Ty where
   | unit
+  | never
   | integer (type : IntegerType)
   | character
   | tuple (head : Ty) (tail : List Ty)

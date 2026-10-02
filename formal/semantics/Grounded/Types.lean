@@ -63,6 +63,7 @@ inductive Annotation (aliases : Aliases) : Option TypeExpr → Ty → Prop where
 are no indirections in this subset; zero array length does not license Self. -/
 inductive FiniteLayout (target : Target) (data : DataDeclarations) : Ty → Prop where
   | unit : FiniteLayout target data .unit
+  | never : FiniteLayout target data .never
   | integer (type : IntegerType) : FiniteLayout target data (.integer type)
   | character : FiniteLayout target data .character
   | tuple {head : Ty} {tail : List Ty} (first : FiniteLayout target data head)
@@ -179,6 +180,7 @@ def UsePermission.Allows (permission : UsePermission) : Option Principal → Pro
 no custom Drop hooks or indirections; every resident contributes its permission. -/
 inductive UsePermitted (data : DataDeclarations) (permission : UsePermission) : Ty → Prop where
   | unit : UsePermitted data permission .unit
+  | never : UsePermitted data permission .never
   | integer (type : IntegerType) : UsePermitted data permission (.integer type)
   | character : UsePermitted data permission .character
   | tuple {head : Ty} {tail : List Ty} (first : UsePermitted data permission head)
@@ -205,6 +207,7 @@ theorem UsePermitted.copy_discard {data : DataDeclarations} {type : Ty}
     (copy : UsePermitted data .copy type) : UsePermitted data .discard type := by
   induction copy with
   | unit => exact .unit
+  | never => exact .never
   | integer type => exact .integer type
   | character => exact .character
   | tuple first rest firstIH restIH => exact .tuple firstIH restIH
@@ -261,6 +264,7 @@ theorem FiniteLayout.permission_cases {target : Target} {data : DataDeclarations
     UsePermitted data permission type ∨ ¬ UsePermitted data permission type := by
   induction finite with
   | unit => exact .inl .unit
+  | never => exact .inl .never
   | integer type => exact .inl (.integer type)
   | character => exact .inl .character
   | tuple first rest headIH tailIH =>
@@ -392,7 +396,7 @@ inductive InlineChild (data : DataDeclarations) : Ty → Ty → Prop where
 theorem FiniteLayout.accessible {target : Target} {data : DataDeclarations} {type : Ty}
     (finite : FiniteLayout target data type) : Acc (InlineChild data) type := by
   induction finite with
-  | unit | integer | character => constructor; intro child edge; cases edge
+  | unit | never | integer | character => constructor; intro child edge; cases edge
   | tuple first rest firstIH restIH =>
     constructor
     intro child edge

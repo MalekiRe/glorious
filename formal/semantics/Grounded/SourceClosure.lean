@@ -1239,6 +1239,26 @@ theorem SourceClosure.Admitted.behavior {packages : List PackageSource} {closure
             ¬ (trace index).Untracked identity) :=
   (elaborated.checked slots).behavior admitted.checked store issued
 
+/-- Source-admitted bottom produces no normal outcome. The infinite trace is
+obtained from general source safety/progress, not supplied by admission. -/
+theorem SourceClosure.Admitted.never_behavior {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core .never final)
+    (slots : before.slots = scope.context)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression core, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression core, []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity :=
+  (elaborated.checked slots).never_behavior admitted.checked store issued
 
 
 private theorem supplied_file_unique {files : SourceFiles}

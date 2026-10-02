@@ -52,6 +52,26 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
             ¬ (trace index).Untracked identity) := by
   exact (ConfigurationTyped.entry checked store issued).behavior checkedProgram
 
+/-- A checked bottom expression has an actual infinite execution in this
+fault-free fragment. Every prefix retains the ordinary ownership/storage contract;
+no normal value, normal output environment or disposal permission is constructed. -/
+theorem HasType.never_behavior (checkedProgram : program.Checked) {context final : FlowContext}
+    {expression : Expr} (checked : HasType program home context expression .never final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression expression, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression expression, []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨_, _, _, resident, _⟩ := normal
+    exact resident.not_never.elim
+  · exact infinite
 
 /-- Source safety protects outstanding descendants during the actual storage
 retirement transition, independently of whether later execution terminates. -/

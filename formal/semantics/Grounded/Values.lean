@@ -74,6 +74,10 @@ inductive ValuesHaveTypes (program : Program) : List Value → List Ty → Prop 
       ValuesHaveTypes program (head :: tail) (first :: rest)
 end
 
+/-- Bottom has no runtime inhabitant, including no successful function result. -/
+theorem ValueHasType.not_never {program : Program} {value : Value}
+    (typed : ValueHasType program value .never) : False := by cases typed
+
 /-- Owned-use permission is invariant under the possible typings of one value.
 In particular, an empty array's unconstrained element type cannot hide an owner. -/
 theorem ValueHasType.use_permission {program : Program} {value : Value} {type : Ty}

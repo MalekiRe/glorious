@@ -725,6 +725,7 @@ theorem FiniteLayout.disposable_cases {target : Target} {data : DataDeclarations
     state.Disposable data type ∨ ¬ state.Disposable data type := by
   induction finite generalizing state with
   | unit => exact .inl (.permitted .unit)
+  | never => exact .inl (.permitted .never)
   | integer type => exact .inl (.permitted (.integer type))
   | character => exact .inl (.permitted .character)
   | @array element length resident size ih =>
