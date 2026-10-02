@@ -4718,3 +4718,35 @@ named record-field/remainder elaboration, reference-pattern ergonomics, custom
 Drop, or whole-language soundness. All fourteen broad completion obligations
 remain open.
 
+## Declaration-ordered named record patterns
+
+Decoded named patterns now carry nominal record identities, variant tags and
+source field-label/subpattern pairs. Admission checks distinct supplied labels
+and resolves every supplied label through the selected constructor schema's
+existing `Fields.index`. Unknown labels cannot silently disappear.
+`recordPatternFields` emits subpatterns in declaration order, selecting supplied
+subpatterns by label and expanding omitted fields to ordinary wildcards.
+
+The same `NamedPatternsElaborate` allocates clause bindings and checks field
+ownership. The existing clause admission checks duplicate binder names across
+all supplied subpatterns. No second matching, ownership or cleanup analysis was
+added; the resulting Core node is consumed by existing coverage, first-match,
+execution, preservation/progress and public source-behavior proofs.
+
+`record_field` connects a supplied named subpattern to its actual declaration
+index, allocated lexical scopes and runtime subject observation. `record_omitted`
+derives both zero-use permission and membership of the actual omitted resident
+in a successful match's discard queue. `no_exact_record_omission` rejects an
+omitted exact-owned field, including a zero-field nominal resource. Visibility
+and closed-deconstruction authority are unchanged.
+
+All 30 strict Lean jobs passed. General transient proofs constructed admission
+for every authorized record whose omitted fields permit disposal and checked
+whole-record matching's reverse-order discard result. Inspected record and public
+source safety/behavior closures use only the standard Lean axioms. No concrete
+examples or permanent test fixtures were added.
+
+This is decoded record-pattern elaboration, not a parser or constructor-path
+resolver. Surface remainder-marker validation, reference-pattern ergonomics,
+custom Drop and all fourteen broad completion obligations remain open.
+

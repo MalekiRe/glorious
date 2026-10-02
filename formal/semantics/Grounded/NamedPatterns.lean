@@ -11,6 +11,7 @@ inductive NamedPattern where
   | node (head : Head) (fields : List NamedPattern)
   | constant (identity : Nat)
   | remainder (head : Head) (front back : List NamedPattern)
+  | record (identity : Nat) (tag : Option Nat) (fields : List (String × NamedPattern))
 
 mutual
 def NamedPattern.binders : NamedPattern → List Identifier
@@ -18,10 +19,24 @@ def NamedPattern.binders : NamedPattern → List Identifier
   | .binder name => [name]
   | .node _ fields => namedPatternBinders fields
   | .remainder _ front back => namedPatternBinders front ++ namedPatternBinders back
+  | .record _ _ fields => namedRecordPatternBinders fields
 def namedPatternBinders : List NamedPattern → List Identifier
   | [] => []
   | first :: rest => first.binders ++ namedPatternBinders rest
+def namedRecordPatternBinders : List (String × NamedPattern) → List Identifier
+  | [] => []
+  | (_, pattern) :: rest => pattern.binders ++ namedRecordPatternBinders rest
 end
+
+/-- Named source fields are arranged by declaration order. Missing entries are
+ordinary wildcard requests, never implicit permission to discard their types. -/
+def recordPatternFields (fields : List (String × Field))
+    (supplied : List (String × NamedPattern)) : List NamedPattern :=
+  fields.map fun field =>
+    match supplied.find? (fun entry => entry.1 == field.1) with
+    | some entry => entry.2
+    | none => .wildcard
+
 
 /-- Positional source syntax cannot name record fields or add a remainder to a
 scalar constant. Constructor identity and field shape use the declaration table. -/
@@ -59,6 +74,16 @@ inductive NamedPattern.Elaborates (program : Program) (home : Module) :
         types patterns bindings after) :
       NamedPattern.Elaborates program home scope (.remainder head front back) type
         (.node head patterns) bindings after
+  | record {scope after identity tag supplied declaration fields patterns bindings}
+      (declared : program.data identity = some declaration)
+      (chosen : declaration.constructor tag = some (.record fields))
+      (access : (Head.nominal identity tag).Accessible program home)
+      (distinct : (supplied.map Prod.fst).Nodup)
+      (known : ∀ entry ∈ supplied, ∃ index, (Fields.record fields).index (.named entry.1) = some index)
+      (residents : NamedPatternsElaborate program home scope (recordPatternFields fields supplied)
+        ((Fields.record fields).residents.map Field.type) patterns bindings after) :
+      NamedPattern.Elaborates program home scope (.record identity tag supplied) (.nominal identity)
+        (.node (.nominal identity tag) patterns) bindings after
 inductive NamedPatternsElaborate (program : Program) (home : Module) :
     SourceScope → List NamedPattern → List Ty → List Pattern → List (BindingId × BindingType) → SourceScope → Prop where
   | nil {scope} : NamedPatternsElaborate program home scope [] [] [] [] scope
@@ -85,6 +110,7 @@ theorem NamedPattern.Elaborates.checked {program : Program} {home : Module}
     exact ⟨.literal (Classical.choose_spec (Classical.choose_spec (constant_correctness typed))).2.1 discard, rfl⟩
   | node shape access _ ih => exact ⟨.node shape access ih.1, ih.2⟩
   | remainder shape access _ _ _ ih => exact ⟨.node shape access ih.1, ih.2⟩
+  | record declared chosen access _ _ _ ih => exact ⟨.node (.nominal declared chosen) access ih.1, ih.2⟩
   | nil => exact ⟨.nil, rfl⟩
   | cons _ _ tail head => exact ⟨.cons head.1 tail.1, by rw [head.2, tail.2, List.append_assoc]⟩
 
@@ -221,6 +247,125 @@ theorem NamedPattern.Elaborates.remainder_matching {program : Program} {home : M
     intro value first omitted rest firstLength omittedLength selected fields
     simp only [Pattern.matchValue, selected, ↓reduceIte, emitted, ← omittedLength, fields]
     exact matchPatterns.remainder (length.trans firstLength.symm)
+
+/-- The emitted field at an index is elaborated from the source field at that
+same index, with the actual lexical scopes chosen by batch allocation. -/
+theorem NamedPatternsElaborate.at {program : Program} {home : Module}
+    {scope after : SourceScope} {sources : List NamedPattern} {types : List Ty}
+    {patterns : List Pattern} {bindings : List (BindingId × BindingType)}
+    (elaborated : NamedPatternsElaborate program home scope sources types patterns bindings after)
+    {index : Nat} {source : NamedPattern} {type : Ty}
+    (sourceAt : sources[index]? = some source) (typeAt : types[index]? = some type) :
+    ∃ pattern locals before next, patterns[index]? = some pattern ∧
+      NamedPattern.Elaborates program home before source type pattern locals next := by
+  induction sources generalizing scope after types patterns bindings index with
+  | nil => simp at sourceAt
+  | cons first rest ih =>
+    cases elaborated with
+    | cons tail head =>
+      cases index with
+      | zero =>
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at sourceAt typeAt
+        cases sourceAt
+        cases typeAt
+        exact ⟨_, _, _, _, rfl, head⟩
+      | succ index =>
+        exact ih tail sourceAt typeAt
+
+/-- Absence of a source label selects a wildcard at the declaration's field
+position. The ordinary wildcard elaborator must then authorize its disposal. -/
+theorem NamedPattern.Elaborates.record_omitted {program : Program} {home : Module}
+    {scope after : SourceScope} {identity : Nat} {tag : Option Nat}
+    {supplied : List (String × NamedPattern)} {pattern : Pattern}
+    {bindings : List (BindingId × BindingType)}
+    (elaborated : NamedPattern.Elaborates program home scope (.record identity tag supplied)
+      (.nominal identity) pattern bindings after)
+    {declaration : DataDecl} {fields : List (String × Field)}
+    (declared : program.data identity = some declaration)
+    (chosen : declaration.constructor tag = some (.record fields))
+    {index : Nat} {name : String} {field : Field}
+    (fieldAt : fields[index]? = some (name, field))
+    (absent : name ∉ supplied.map Prod.fst) :
+    UsePermitted program.data .discard field.type ∧
+      ∀ (value resident : Value) (result : PatternMatch), value.head = .nominal identity tag →
+        value.children[index]? = some resident → pattern.matchValue value = some result →
+        resident ∈ result.discarded := by
+  have missing : supplied.find? (fun entry => entry.1 == name) = none := by
+    apply List.find?_eq_none.mpr
+    intro entry member same
+    apply absent
+    exact List.mem_map.mpr ⟨entry, member, by simpa using same⟩
+  cases elaborated with
+  | record original selected access distinct known residents =>
+    have declarationSame := Option.some.inj (original.symm.trans declared)
+    cases declarationSame
+    have fieldsSame := Option.some.inj (selected.symm.trans chosen)
+    cases fieldsSame
+    have sourceAt : (recordPatternFields fields supplied)[index]? = some .wildcard := by
+      simp [recordPatternFields, List.getElem?_map, fieldAt, missing]
+    have typeAt : ((Fields.record fields).residents.map Field.type)[index]? = some field.type := by
+      simp [Fields.residents, List.getElem?_map, fieldAt]
+    obtain ⟨child, locals, before, next, childAt, childTyped⟩ := residents.at sourceAt typeAt
+    cases childTyped with
+    | wildcard permission =>
+      refine ⟨permission, ?_⟩
+      intro value resident result head valueAt matched
+      have focus : Pattern.SubjectAt _ value .wildcard resident :=
+        .child head.symm childAt valueAt (.root .wildcard resident)
+      obtain ⟨inputs, front, back, selected, joined⟩ := focus.matched matched
+      have inputsSame : inputs = ⟨[], [resident]⟩ := by simpa [Pattern.matchValue] using selected.symm
+      simp [joined, inputsSame]
+
+
+/-- A supplied label selects its declaration-indexed resident and the same
+lexically allocated subpattern consumed by matching and clause-body checking. -/
+theorem NamedPattern.Elaborates.record_field {program : Program} {home : Module}
+    {scope after : SourceScope} {identity : Nat} {tag : Option Nat}
+    {supplied : List (String × NamedPattern)} {pattern : Pattern}
+    {bindings : List (BindingId × BindingType)}
+    (elaborated : NamedPattern.Elaborates program home scope (.record identity tag supplied)
+      (.nominal identity) pattern bindings after)
+    {declaration : DataDecl} {fields : List (String × Field)}
+    (declared : program.data identity = some declaration)
+    (chosen : declaration.constructor tag = some (.record fields))
+    {index : Nat} {name : String} {field : Field} {source : NamedPattern}
+    (fieldAt : fields[index]? = some (name, field))
+    (suppliedAt : supplied.find? (fun entry => entry.1 == name) = some (name, source)) :
+    ∃ child locals before next, NamedPattern.Elaborates program home before source field.type child locals next ∧
+      ∀ (value resident : Value), value.head = .nominal identity tag →
+        value.children[index]? = some resident → Pattern.SubjectAt pattern value child resident := by
+  cases elaborated with
+  | record original selected access distinct known residents =>
+    have declarationSame := Option.some.inj (original.symm.trans declared)
+    cases declarationSame
+    have fieldsSame := Option.some.inj (selected.symm.trans chosen)
+    cases fieldsSame
+    have sourceAt : (recordPatternFields fields supplied)[index]? = some source := by
+      simp [recordPatternFields, List.getElem?_map, fieldAt, suppliedAt]
+    have typeAt : ((Fields.record fields).residents.map Field.type)[index]? = some field.type := by
+      simp [Fields.residents, List.getElem?_map, fieldAt]
+    obtain ⟨child, locals, before, next, childAt, childTyped⟩ := residents.at sourceAt typeAt
+    refine ⟨child, locals, before, next, childTyped, ?_⟩
+    intro value resident head valueAt
+    exact .child head.symm childAt valueAt (.root child resident)
+
+/-- Omitting a named field cannot hide an exact-owned obligation. -/
+theorem NamedPattern.Elaborates.no_exact_record_omission {program : Program} {home : Module}
+    {scope after : SourceScope} {identity : Nat} {tag : Option Nat}
+    {supplied : List (String × NamedPattern)} {pattern : Pattern}
+    {bindings : List (BindingId × BindingType)}
+    (elaborated : NamedPattern.Elaborates program home scope (.record identity tag supplied)
+      (.nominal identity) pattern bindings after)
+    {declaration : DataDecl} {fields : List (String × Field)}
+    (declared : program.data identity = some declaration)
+    (chosen : declaration.constructor tag = some (.record fields))
+    {index : Nat} {name : String} {field : Field}
+    (fieldAt : fields[index]? = some (name, field)) (absent : name ∉ supplied.map Prod.fst)
+    (exactOwner : field.type.HasPrincipal program.data .exact) : False := by
+  have permission := (elaborated.record_omitted declared chosen fieldAt absent).1
+  have denied := (exactOwner .discard).mp permission
+  simp [UsePermission.Allows] at denied
+
 
 end
 end Grounded
