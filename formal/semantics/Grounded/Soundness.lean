@@ -651,6 +651,18 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       after.scope = caller ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
       (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
+      (current.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+        BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
+        current.retireBinding index = some next ∧
+        ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩) ∧
+      (∀ front back middle, current.bindings.releaseOrder = front ++ back →
+        current.heap.retireMany front = some middle →
+        let pending : Environment := { current with heap := middle, bindings := current.bindings.filter fun entry => decide (entry.2 ∉ front) }
+        ConfigurationTyped program final (.one type) ⟨pending, .result value, .restore caller :: stack⟩ ∧
+        (pending.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+          BindingMap.nextRelease pending.bindings pending.bindings = some (index, entry.2) ∧
+          pending.retireBinding index = some next ∧
+          ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩)) ∧
       ∀ front identity back, current.bindings.releaseOrder = front ++ identity :: back →
         ∃ middle next, current.heap.retireMany front = some middle ∧
           middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
@@ -679,9 +691,17 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             AddressedEnvironment.restore.progress currentStore callerTyped different
           have step : Step program ⟨current, .result value, .restore caller :: stack⟩
               ⟨after, .result value, stack⟩ := .restore restored
-          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved,
+          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved, original.restore_next, ?_,
             (fun _ _ _ split => original.ownership_safe.return_retirement step split)⟩
-          simp [AddressedEnvironment.scope, activation, bindings]
+          · simp [AddressedEnvironment.scope, activation, bindings]
+          · intro front back middle split executed
+            have owned : ∀ identity ∈ front, identity ∈ current.bindings.map Prod.snd := by
+              intro identity member
+              apply (BindingMap.releaseOrder_perm _).mem_iff.mp
+              rw [split]
+              exact List.mem_append_left _ member
+            have retained := original.restore_prefix owned executed
+            exact ⟨retained, retained.restore_next⟩
 
 /-- Actual caller restoration preserves live nondiscardable descendants,
 including those retained inside partially consumed aggregates. -/

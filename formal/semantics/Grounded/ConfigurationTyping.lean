@@ -708,6 +708,102 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
             obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
             exact .inr ⟨index, entry, next, chosen, localIndex, produced,
               original.retire_scope selected localIndex produced⟩
+/-- Retiring one callee owner preserves the returned payload, the saved caller,
+and every older continuation; it does not restore the caller prematurely. -/
+theorem ConfigurationTyped.retire_restore {context : FlowContext} {result : ResultType}
+    {before after : Environment} {value : Value} {caller : AddressedScope}
+    {index : Nat} {entry : BindingId × StorageId} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨before, .result value, .restore caller :: stack⟩)
+    (selected : before.bindings[index]? = some entry)
+    (retired : before.retireBinding index = some after) :
+    ConfigurationTyped program context result ⟨after, .result value, .restore caller :: stack⟩ := by
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        cases frame with | restore locals discard callerTyped callerIssued older =>
+          obtain ⟨next, produced, _, _, _, activation, supply, _, nextTyped, _, callers⟩ :=
+            AddressedEnvironment.retireBinding.progress store selected
+          cases Option.some.inj (retired.symm.trans produced)
+          have different : caller.activation ≠ before.activation := by
+            intro same
+            have equal := congrArg ActivationId.index same
+            omega
+          refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident)
+            (.cons (.restore _
+              (fun binding member => discard binding (List.mem_of_mem_eraseIdx member))
+              (callers caller _ callerTyped different).1
+              (by rw [supply]; exact callerIssued) (by rw [activation]; exact older)) ?_)
+          rw [supply]
+          apply tail.transport (fun _ previous => previous)
+          intro scope states scopeTyped previous
+          exact (callers scope states scopeTyped (by
+            intro same
+            have equal := congrArg ActivationId.index same
+            simp only [Frame.activation] at previous
+            omega)).1
+
+/-- A returning callee either has no remaining bindings or constructs its next
+canonical retirement with a fully preserved return continuation. -/
+theorem ConfigurationTyped.restore_next {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .restore caller :: stack⟩) :
+    current.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+      BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
+      current.retireBinding index = some next ∧
+      ConfigurationTyped program context result ⟨next, .result value, .restore caller :: stack⟩ := by
+  by_cases empty : current.bindings = []
+  · exact .inl empty
+  · have original := typed
+    cases typed with | intro store issued code continuation =>
+      obtain ⟨index, entry, chosen, selected, _, _⟩ := BindingMap.release_next _ _
+        store.addresses_distinct (fun _ member => member) empty
+      obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
+      exact .inr ⟨index, entry, next, chosen, produced, original.retire_restore selected produced⟩
+
+
+/-- Every actually executed callee-owned retirement prefix retains the full
+return continuation. Membership is checked against the pre-state owner map;
+no intermediate caller typing or pending-owner readiness is supplied. -/
+theorem ConfigurationTyped.restore_prefix {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .restore caller :: stack⟩)
+    {front : List StorageId} {middle : RuntimeHeap StorageCell}
+    (owned : ∀ identity ∈ front, identity ∈ current.bindings.map Prod.snd)
+    (executed : current.heap.retireMany front = some middle) :
+    ConfigurationTyped program context result
+      ⟨{ current with heap := middle, bindings := current.bindings.filter fun entry => decide (entry.2 ∉ front) },
+        .result value, .restore caller :: stack⟩ := by
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        cases frame with | restore locals discard callerTyped callerIssued older =>
+          obtain ⟨remaining, subset, retained⟩ := store.retirement_prefix executed
+          have callers : ∀ (scope : AddressedScope) states,
+              BindingMap.Typed program current.heap scope.activation scope.bindings states →
+              scope.activation ≠ current.activation →
+              BindingMap.Typed program middle scope.activation scope.bindings states := by
+            intro scope states scopeTyped different
+            apply scopeTyped.frame
+            intro identity member
+            apply RuntimeHeap.retireMany_outside executed
+            intro retired
+            exact (scopeTyped.apart_activations store different identity member) (owned identity retired)
+          have different : caller.activation ≠ current.activation := by
+            intro same
+            have equal := congrArg ActivationId.index same
+            omega
+          refine .intro retained issued (.result resident)
+            (.cons (.restore remaining (fun binding member => discard binding (subset.subset member))
+              (callers caller _ callerTyped different) callerIssued older) ?_)
+          apply tail.transport (fun _ previous => previous)
+          intro scope states scopeTyped previous
+          apply callers scope states scopeTyped
+          intro same
+          have equal := congrArg ActivationId.index same
+          simp only [Frame.activation] at previous
+          omega
+
+
 theorem ControlTyped.slots {current next control result}
     (typed : ControlTyped program current control result next) : next.slots = current.slots := by
   induction typed with

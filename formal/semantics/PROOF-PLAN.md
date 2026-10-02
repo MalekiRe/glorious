@@ -3964,3 +3964,19 @@ strict build jobs passed, and inspected producer/source proofs use only
 standard Lean axioms. These are constructive storage-operation preservation
 and progress results; they do not assert a new machine `Step` or an interleaved
 destruction run. The operational retirement-frame cutover remains open.
+
+Return retirement now has the corresponding complete-continuation boundary.
+`ConfigurationTyped.retire_restore` preserves the returned value, saved caller,
+and all older frames through one synchronized owner retirement.
+`restore_prefix` preserves that invariant across every actually executed
+callee-owned retirement prefix, using pre-state activation separation to frame
+callers and retaining the surviving source states verbatim. `restore_next`
+constructs the canonical next retirement or proves that the callee map is empty.
+`HasType.return_restores` consumes these results at every executed prefix of the
+existing acquisition order. Neither intermediate caller typing nor pending
+post-state readiness is assumed. All 30 strict build jobs passed; the inspected
+retirement, prefix, progress, reached-source return and maximal-behavior proofs
+depend only on `propext`, `Classical.choice`, and `Quot.sound`. This does not
+change the atomic return machine transition or establish interleaved resident
+destruction. The retirement-frame cutover and all broad completion obligations
+remain open.
