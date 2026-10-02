@@ -890,4 +890,16 @@ theorem BindingMap.take.read_before {after : RuntimeHeap StorageCell} {value : V
   simpa only [BindingMap.read, resolved, Option.bind_some] using StorageAddress.take.read_before moved
 
 
+theorem AddressedEnvironment.take.hole {before after : AddressedEnvironment} {value : Value}
+    (taken : before.take program place = some (value, after)) :
+    ∃ address old next, before.bindings.resolve place = some address ∧
+      before.heap.read address.root = some old ∧ after.heap.read address.root = some next ∧
+      next.activation = old.activation ∧ next.type = old.type ∧
+      next.resident.selectFields program next.type address.fields = some .hole := by
+  obtain ⟨pair, raw, same⟩ := Option.map_eq_some_iff.mp taken
+  cases same
+  obtain ⟨address, resolved, moved⟩ := Option.bind_eq_some_iff.mp raw
+  obtain ⟨old, next, original, live, activation, type, absent⟩ := StorageAddress.take.hole moved
+  exact ⟨address, old, next, resolved, original, live, activation, type, absent⟩
+
 end Grounded

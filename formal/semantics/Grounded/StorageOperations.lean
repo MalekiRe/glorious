@@ -352,4 +352,18 @@ theorem StorageAddress.restore.identity {program : Program} {heap after : Runtim
   exact RuntimeHeap.write_resident_identity original written found
 
 
+/-- Moving retains the same live cell, activation and declared type, with a
+concrete hole at the moved path; failed rereading is not evidence of retirement. -/
+theorem StorageAddress.take.hole {program : Program} {before after : RuntimeHeap StorageCell}
+    {address : StorageAddress} {value : Value}
+    (taken : address.take program before = some (value, after)) :
+    ∃ old next, before.read address.root = some old ∧ after.read address.root = some next ∧
+      next.activation = old.activation ∧ next.type = old.type ∧
+      next.resident.selectFields program next.type address.fields = some .hole := by
+  simp only [StorageAddress.take, Option.bind_eq_some_iff, Option.map_eq_some_iff] at taken
+  obtain ⟨cell, original, selected, _, resident, _, updated, changed, heap, written, same⟩ := taken
+  cases same
+  exact ⟨cell, { cell with resident := updated }, original, RuntimeHeap.write_read written,
+    rfl, rfl, PartialValue.write_select changed⟩
+
 end Grounded

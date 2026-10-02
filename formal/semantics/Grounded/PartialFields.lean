@@ -770,7 +770,20 @@ theorem PathDisjoint.ne {program : Program} {home : Module} {parent : Ty}
     intro same
     exact ih (List.cons.inj same).2
 
-
-
+/-- Successful path replacement exposes exactly the inserted partial resident,
+including a hole. This follows the actual update, without a typing premise. -/
+theorem PartialValue.write_select {program : Program} {parent : Ty}
+    {before after replacement : PartialValue} {path : List FieldKey}
+    (written : before.writeFields program parent path replacement = some after) :
+    after.selectFields program parent path = some replacement := by
+  induction path generalizing parent before after with
+  | nil => cases written; rfl
+  | cons key rest ih =>
+    simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, tail, closed⟩ := written
+    have reopened := PartialValue.closeFields_open (program := program) closed
+    have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
+    simp only [PartialValue.selectFields, info, Option.bind_some, reopened, atIndex]
+    exact ih tail
 
 end Grounded

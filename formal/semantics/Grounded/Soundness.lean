@@ -956,5 +956,56 @@ theorem HasType.projection_transfer (checkedProgram : program.Checked)
   rw [located] at retained
   exact permission.read_permission_as retained ownerTyped
 
+/-- A move reached during arbitrary checked execution transfers the original
+resident, leaves a real hole and preserves retained callers. No successful move
+or next-state realization is supplied. -/
+theorem HasType.move_transfers (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {place : Place} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .expression (.move place), stack⟩) :
+    ∃ after value movedType,
+      current.read program place = some value ∧ ValueHasType program value movedType ∧
+      Step program ⟨current, .expression (.move place), stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.take program place = none ∧ after.read program place = none ∧ after.scope = current.scope ∧
+      after.supply = current.supply ∧ after.heap.next = current.heap.next ∧
+      (∃ address old next, current.bindings.resolve place = some address ∧
+        current.heap.read address.root = some old ∧ after.heap.read address.root = some next ∧
+        next.activation = old.activation ∧ next.type = old.type ∧
+        next.resident.selectFields program next.type address.fields = some .hole) ∧
+      ∀ (caller : AddressedScope) states,
+        BindingMap.Typed program current.heap caller.activation caller.bindings states →
+        caller.activation ≠ current.activation →
+        BindingMap.Typed program after.heap caller.activation caller.bindings states ∧
+        (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
+  have typed := (checked.soundness checkedProgram store issued run).1
+  have original := typed
+  cases typed with
+  | intro currentStore currentIssued code continuation =>
+    cases code with
+    | expression checked =>
+      cases checked with
+      | move selected path selection ready mask context =>
+        obtain ⟨value, after, updated, nextContext, taken, resident, _, _, _, absent, scope, supply, next, retained⟩ :=
+          AddressedEnvironment.take.progress currentStore selected path selection ready
+        have observed : current.read program place = some value := by
+          obtain ⟨pair, raw, same⟩ := Option.map_eq_some_iff.mp taken
+          have valueSame : pair.1 = value := congrArg Prod.fst same
+          exact valueSame ▸ BindingMap.take.read_before raw
+        have entered : Step program ⟨current, .expression (.move place), stack⟩ ⟨after, .result value, stack⟩ := .move taken
+        have hole := AddressedEnvironment.take.hole taken
+        have unreadable : after.read program place = none := by
+          obtain ⟨address, old, next, resolved, _, found, _, _, empty⟩ := hole
+          have bindings : after.bindings = current.bindings := congrArg AddressedScope.bindings scope
+          change after.bindings.read program after.heap place = none
+          simp [BindingMap.read, bindings, resolved, StorageAddress.read, found, empty, PartialValue.read]
+        exact ⟨after, value, _, observed, resident, entered,
+          original.preservation checkedProgram entered, absent, unreadable, scope, supply, next, hole, retained⟩
+
 end Grounded
 

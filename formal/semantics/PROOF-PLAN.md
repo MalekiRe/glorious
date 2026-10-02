@@ -3557,3 +3557,26 @@ behavior; only standard Lean axioms occur. No tests or subagents were used.
 Custom Drop and reference-bearing assignment remain open, as do all fourteen
 broad completion obligations.
 
+## Reached source moves preserve a live initialization hole
+
+`PartialValue.write_select` derives exact runtime readback from the real path
+update, without typing or post-state assumptions. `StorageAddress.take.hole`
+and its addressed-environment consumer distinguish an initialization hole from
+retirement: the same resolved cell remains live, with its original activation
+and declared type, and the moved path selects exactly `.hole`.
+
+`HasType.move_transfers` consumes the actual move producer after an arbitrary
+checked execution prefix. It constructs the transition, proves the transferred
+value is the original pre-move resident, preserves the complete continuation
+typing through general preservation, and exposes the concrete live-cell hole.
+Both immediate rereading and retaking fail; scope, activation supply and heap
+frontier are unchanged. Every typed retained caller at another activation
+keeps its cells exactly and remains well typed. No completed move or future
+readiness is supplied. This covers whole and partial owned-place movement.
+
+All 30 Lean build jobs passed. Inspected producer, move-transfer, preservation
+and source-behavior dependencies contain only standard Lean axioms. No tests,
+examples or subagents were used. These are logical owned-cell semantics, not
+reference-hole restoration, custom Drop or physical memory proofs; none of the
+fourteen broad completion obligations is closed.
+
