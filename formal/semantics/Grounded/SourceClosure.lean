@@ -1559,6 +1559,35 @@ theorem SourceClosure.Admitted.bottom_function_call {packages : List PackageSour
 
 
 
+/-- Source-admitted operand evaluation either returns its typed ordered pack
+and retires all temporary storage, or has an infinite ownership-safe execution. -/
+theorem SourceClosure.Admitted.operand_behavior {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {context final : FlowContext}
+    {source : List NamedExpr} {expressions : List Expr} {types : List Ty}
+    (elaborated : NamedExprsElaborate program closure.functionNames home scope context source expressions types final)
+    (slots : context.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    (∃ after values, EvaluatesMany program environment expressions values after ∧
+      ValuesHaveTypes program values types ∧
+      BindingMap.Typed program after.heap after.activation after.bindings final ∧
+      after.supply.Issued after.activation ∧
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (⟨after, .results values, []⟩ : Configuration).OwnershipSafe program ∧
+      Configuration.ExternalFrame ⟨environment, .arguments expressions, []⟩ ⟨after, .results values, []⟩ ∧
+      ∀ identity, environment.heap.next ≤ identity.index → identity.index < after.heap.next →
+        after.heap.Retired identity) ∨
+    (∃ trace, InfiniteRun program ⟨environment, .arguments expressions, []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.many types) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .arguments expressions, []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) :=
+  (elaborated.checked slots).behavior admitted.checked store issued
+
 /-- Source operands admit bottom at an arbitrary ordered position. The same
 elaboration builds the complete pack and proves divergence without a completed
 prefix, invented argument value or permission to discard pending owners. -/
@@ -1588,9 +1617,11 @@ theorem SourceClosure.Admitted.bottom_operand_pack {packages : List PackageSourc
   have arguments := prefixTyped.bottom_operand expected bottom suffixTyped
   have prefixChecked := prefixTyped.checked slots
   have bottomChecked := bottom.checked (prefixChecked.slots.trans slots)
-  obtain ⟨trace, infinite, safe⟩ := (arguments.checked slots).bottom_behavior
-    admitted.checked prefixChecked bottomChecked store issued
-  exact ⟨arguments, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+  rcases admitted.operand_behavior arguments slots store issued with normal | infinite
+  · obtain ⟨_, _, evaluated, _⟩ := normal
+    exact False.elim (prefixChecked.bottom_no_evaluation admitted.checked bottomChecked store issued evaluated)
+  · obtain ⟨trace, infinite, safe⟩ := infinite
+    exact ⟨arguments, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
 /-- Source-selected calls admit a bottom operand at any ordered argument
 position. The same source derivations construct admission and prove divergence;

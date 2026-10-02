@@ -5301,3 +5301,18 @@ pack behavior and public source safety proofs use only propext, Classical.choice
 and Quot.sound. This concerns the admitted value/storage fragment; references,
 raw allocations and other whole-language completion families remain open, as do
 static operand-outcome propagation and unreachable continuation checking.
+
+## Source-admitted ordered operand behavior
+
+SourceClosure.Admitted.operand_behavior exposes the complete ordered-pack
+behavior directly from named source elaboration and ordinary closure admission.
+The normal alternative has actual typed values, realized output storage,
+framing and retirement of temporary allocations; the infinite alternative
+retains typing, ownership, framing and allocation tracking at every prefix.
+The existing public bottom-operand-pack theorem now consumes this shared source
+behavior. No operand termination or successful output is assumed by admission.
+
+All 30 strict Lean jobs passed. Inspected source operand behavior and its bottom
+consumer use only propext, Classical.choice and Quot.sound. The result remains
+bounded to the current admitted fragment: static normal-result outcome indexing,
+unreachable-continuation checking and fourteen completion families remain open.
