@@ -39,6 +39,12 @@ inductive Control where
   | cleanup (pending : List DisposalTask) (rest : Control)
   | install (home : Module) (place : Place) (value : Value) (rest : Expr)
 
+/-- Membership in an active or protected cleanup queue of the actual control.
+This observes saved control; it neither executes it nor assumes it will resume. -/
+inductive Control.Queued (task : DisposalTask) : Control → Prop where
+  | here {pending rest} (member : task ∈ pending) : Queued task (.cleanup pending rest)
+  | saved {pending rest} (queued : Queued task rest) : Queued task (.cleanup pending rest)
+
 inductive Frame where
   | sequence (rest : Expr)
   | bind (name : BindingId) (slot : BindingType) (body : Expr)

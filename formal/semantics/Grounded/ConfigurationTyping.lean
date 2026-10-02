@@ -45,14 +45,6 @@ theorem DisposalTask.Safe.expand {program : Program} {value : Value}
     · cases List.mem_singleton.mp member
       exact .release typed allowed
 
-private theorem PartialValuesTyped.empty_permissions {program : Program} {values types states}
-    (typed : PartialValuesTyped program values types states)
-    (empty : ∀ state ∈ states, state.Empty) : InitializationsDisposable program.data types states := by
-  induction types generalizing values states with
-  | nil => cases typed; exact .nil
-  | cons type types ih =>
-    cases typed with
-    | cons head tail => exact .cons (.empty (empty _ (by simp))) (ih tail (fun state member => empty state (by simp [member])))
 
 private theorem PartialValuesTyped.whole_permissions {program : Program} {values types states}
     (typed : PartialValuesTyped program values types states)
@@ -84,7 +76,7 @@ theorem PartialValue.Disposable.disposalTasks {program : Program} {value : Parti
       cases permission with
       | empty absent =>
         simp only [Initialization.Empty] at absent
-        exact (PartialValuesTyped.cons headTyped tailTyped).empty_permissions absent.2
+        exact InitializationsDisposable.of_empty (PartialValuesTyped.cons headTyped tailTyped).length.2 absent.2
       | permitted allowed =>
         cases allowed with
         | tuple first rest => exact (PartialValuesTyped.cons headTyped tailTyped).whole_permissions (by simpa using And.intro first rest)
@@ -104,7 +96,7 @@ theorem PartialValue.Disposable.disposalTasks {program : Program} {value : Parti
       cases permission with
       | empty absent =>
         simp only [Initialization.Empty] at absent
-        exact residents.empty_permissions absent.2
+        exact InitializationsDisposable.of_empty residents.length.2 absent.2
       | permitted allowed =>
         cases allowed with
         | nominal found restriction fields =>
@@ -1232,35 +1224,37 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | refl state => exact .refl _ _
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
-/-- Cleanup retains its protected continuation payload; installation retains
-the replacement until old-resident cleanup has finished. -/
-def Control.PrincipalConsistent (program : Program) : Control → Prop
+/-- Ownership authority includes every active and protected cleanup queue.
+Installation retains the replacement until old-resident cleanup has finished. -/
+def Control.OwnershipSafe (program : Program) : Control → Prop
   | .result value => value.PrincipalConsistent program
   | .results values => ∀ value ∈ values, value.PrincipalConsistent program
   | .cleanup pending rest =>
-      (∀ value, .enter value ∈ pending → value.PrincipalConsistent program) ∧
-        rest.PrincipalConsistent program
+      (∀ task ∈ pending, DisposalTask.Safe program task) ∧ rest.OwnershipSafe program
   | .install _ _ value _ => value.PrincipalConsistent program
   | _ => True
+
+theorem Control.Queued.safe {control : Control} {task : DisposalTask}
+    (queued : Control.Queued task control) :
+    control.OwnershipSafe program → DisposalTask.Safe program task := by
+  induction queued with
+  | here member => intro safe; exact safe.1 _ member
+  | saved queued ih => intro safe; exact ih safe.2
 
 def Frame.PrincipalConsistent (program : Program) : Frame → Prop
   | .tupleTail value | .argumentTail value => value.PrincipalConsistent program
   | _ => True
 
-theorem ControlTyped.principal_consistent {before after control result}
+theorem ControlTyped.ownership_safe {before after control result}
     (typed : ControlTyped program before control result after) :
-    control.PrincipalConsistent program := by
+    control.OwnershipSafe program := by
   induction typed with
   | result resident => exact resident.principal_consistent
   | results residents =>
     intro value member
     obtain ⟨_, _, resident⟩ := residents.member member
     exact resident.principal_consistent
-  | cleanup safe checked ih =>
-    refine ⟨?_, ih⟩
-    intro value member
-    cases safe (.enter value) member with
-    | enter resident allowed => exact resident.principal_consistent
+  | cleanup safe checked ih => exact ⟨safe, ih⟩
   | install resident => exact resident.principal_consistent
   | expression | arguments => trivial
 
@@ -1322,7 +1316,7 @@ and retained scopes preserve actual ownership and partial typing in the current
 heap. Copy and disposal share structural authority, and retirement preserves
 newest-owner-first order. No future readiness or completed run is assumed. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
-  (state.control.PrincipalConsistent program ∧
+  (state.control.OwnershipSafe program ∧
     (∀ frame ∈ state.continuation, frame.PrincipalConsistent program) ∧
     ∀ front back, state.continuation = front ++ back →
       ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
@@ -1330,10 +1324,6 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
           cell.activation = (continuationEnvironment state.environment front).activation ∧
           ∃ mask, cell.Typed program mask) ∧
   match state.control, state.continuation with
-  | .cleanup pending _, _ =>
-      (∀ task ∈ pending, DisposalTask.Safe program task) ∧
-      ∀ value type principal, .enter value ∈ pending → ValueHasType program value type →
-        type.HasPrincipal program.data principal → principal.Permits 0
   | .expression (.read place), _ =>
       BindingMap.CopySafe program state.environment.heap state.environment.bindings place ∧
       ∀ value type principal, state.environment.read program place = some value →
@@ -1372,10 +1362,8 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
   cases typed with
   | intro store issued code continuation =>
     constructor
-    · exact ⟨code.principal_consistent, continuation.principal_consistent, retained⟩
+    · exact ⟨code.ownership_safe, continuation.principal_consistent, retained⟩
     · cases code <;> try trivial
-      case cleanup safe checked =>
-        exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
       case install resident selected path writable selection discard mask context checked =>
         exact store.replacement_safe selected path selection discard
       case expression checked =>

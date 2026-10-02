@@ -664,23 +664,23 @@ theorem HasType.no_nondiscardable_discard (checkedProgram : program.Checked)
   obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   exact required (permission.read_permission_as (by simp [PartialValue.read]) resident)
 
-/-- No reached cleanup queue can schedule a resident whose inferred or manual
-principal has positive lower use. This covers nested field and pattern cleanup,
-not only an explicitly discarded nominal expression. -/
+/-- No active or protected cleanup queue can schedule an exact resident.
+The guarantee holds before a saved queue resumes; no cleanup completion or
+future execution is assumed. -/
 theorem HasType.no_exact_cleanup (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {pending : List DisposalTask} {rest : Control} {stack : List Frame}
+    {control : Control} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .cleanup pending rest, stack⟩)
-    {owner : Value} {ownerType : Ty} (queued : .enter owner ∈ pending)
+      ⟨current, control, stack⟩)
+    {owner : Value} {ownerType : Ty} (queued : Control.Queued (.enter owner) control)
     (resident : ValueHasType program owner ownerType)
     (classified : ownerType.HasPrincipal program.data .exact) : False := by
-  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2.2
-  have zero := safe.2 owner ownerType .exact queued resident classified
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2.1.1
+  have zero := (queued.safe safe).zero_use resident classified
   simp at zero
 /-- No checked execution prefix reaches a direct discard of a live exact
 nominal owner. This includes empty nominal payloads, not just inhabited fields. -/

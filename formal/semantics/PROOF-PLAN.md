@@ -66,7 +66,9 @@ maximal behavior constructs either a normal result with that unique principal
 or an infinite execution retaining prefix safety. `Configuration.OwnershipSafe`
 also classifies current results, argument packs, protected cleanup/installation
 payloads and values retained in tuple/argument continuation frames through the
-same finite resident evidence. This is not a closure-capture or reference model.
+same finite resident evidence. Its recursive control invariant carries disposal
+authority for active and protected cleanup queues before any saved queue resumes.
+This is not a closure-capture or reference model.
 
 `correctness` constructs a unique completed execution when supplied
 `FiniteCalls program expression`: accessibility of the static subexpression/
@@ -4448,3 +4450,28 @@ permission, future disposal or completed execution is assumed. All 30 strict
 Lean jobs passed; inspected join, general soundness and public source-behavior
 closures use only the standard Lean axioms. Custom destruction, reference
 restoration and whole-language completion remain open.
+
+## Protected cleanup queues retain disposal authority before resumption
+
+The previous control invariant classified protected residents but exported
+disposal authority only for the active cleanup queue. The authoritative
+`Control.OwnershipSafe` invariant now follows actual saved controls, carrying
+`DisposalTask.Safe` for every pending item at every nesting depth.
+`ControlTyped.ownership_safe` derives it directly from control typing;
+`ConfigurationTyped.ownership_safe` carries it through the existing general
+source prefix and maximal-behavior contracts. The weaker control predicate and
+duplicated active-only cleanup case are removed.
+
+`Control.Queued` observes membership in active or protected runtime queues;
+it is not a second execution relation or stored analysis. Its `safe` theorem
+supplies actual disposal authority. `HasType.no_exact_cleanup` now excludes
+exact residents from any such queue without assuming that preceding cleanup
+finishes. Principal consistency of queued residents remains derivable from
+their existing typed disposal evidence, including inferred exact classes.
+
+Branch approximation and actual partial cleanup also share
+`InitializationsDisposable.of_empty`; the duplicate typed-list induction was
+removed. All 30 strict Lean jobs passed. Inspected control, queue, general
+soundness and public source/invocation behavior closures use only the standard
+Lean axioms. Custom hooks, reference restoration and all fourteen broad
+whole-language completion obligations remain open.

@@ -353,7 +353,7 @@ private theorem InitializationsApproximate.lengths {data : DataDeclarations}
       obtain ⟨left, right⟩ := ih tail
       exact ⟨by simpa using congrArg Nat.succ left, by simpa using congrArg Nat.succ right⟩
 
-private theorem InitializationsDisposable.of_empty {data : DataDeclarations}
+theorem InitializationsDisposable.of_empty {data : DataDeclarations}
     {types : List Ty} {states : List Initialization}
     (lengths : states.length = types.length) (empty : ∀ state ∈ states, state.Empty) :
     InitializationsDisposable data types states := by
