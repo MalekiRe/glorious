@@ -104,7 +104,8 @@ language. Field paths are resolved visible paths; shells carry resolved nominal
 metadata, not a source declaration/visibility elaborator. Exact occupancy and
 branch agreement are explicitly the current checking precision policy, not
 requirements of MIR execution; loop checking retains invariant contexts. No
-maybe-initialized admission was added. Ordinary whole moves and copies
+maybe-initialized admission was added. Ordinary whole moves and copies require
+initialization; internal cleanup/deconstruction may transfer residual
 structures. Protected results reside in slots outside the exiting scope;
 cleanup begins with an empty transfer register. Halting returns the remaining
 region and does not implicitly clean it. The source and MIR share fixed slots.
