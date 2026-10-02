@@ -4492,12 +4492,26 @@ is not mistaken for consumed storage. Whole-owner permission reuses
 
 `BindingState.disposable_context_cases` composes these proofs into either
 complete context disposition or a particular binding with denied authority.
-`NamedFunction.elaborate_disposition` obtains the required finite types from
-parameter elaboration and the body checker's slot-preservation theorem. Given
-signature and body elaboration, it constructs both ordinary function admission
-and `FunctionChecked`, or identifies a denied final binding. Final disposition
-is a conclusion, not an additional premise. The positive result is the same
-contract consumed by general execution preservation and progress.
+`NamedFunction.BodyElaborates` is the authoritative signature/body product,
+including the actual final mask. Its `disposition_cases` theorem obtains finite
+types from parameter elaboration and slot preservation, then decides the masks.
+`NamedFunction.Elaborates` consumes that product plus certified cleanup; it no
+longer has an independent body-elaboration constructor. The former one-function
+`elaborate_disposition` interface is removed.
+
+`NamedFunctionBodiesElaborate` retains ordered body products before cleanup
+certification. `NamedFunctionsElaborate.disposition_cases` constructs admission
+for the exact emitted declaration list or a `NamedCleanupRejected` witness. The
+witness preserves the source/emission index, chosen body derivation, final mask
+and denied binding. No later function is substituted for a failed declaration.
+
+`NamedProgramAdmitted.disposition_cases` and `SourceClosure.disposition_cases`
+consume the batch decision together with ordinary declaration, namespace,
+visibility and package checks. They produce the same admission and
+`Program.Checked` contracts used by general prefix preservation/progress,
+maximal behavior and invocation consumers, without supplied final cleanup
+permission. Declaration-owner and visibility consumers are migrated to the
+shared emitted-origin proof.
 
 This decides the cleanup obligation of the supplied body elaboration; it is
 not a complete type-inference algorithm or a refutation of every possible

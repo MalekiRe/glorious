@@ -537,6 +537,33 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
   NamedProgramAdmitted closure.functionNames closure.functions program ∧
   ∀ loaded ∈ closure.modules, loaded.Valid
 
+/-- Package/namespace validation and emitted body products construct ordinary
+source admission, or identify an exact source-indexed cleanup obligation.
+No function's final disposal permission is supplied as an input. -/
+theorem SourceClosure.disposition_cases {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program}
+    {outputs : List (FunctionDecl × FlowContext)}
+    (packagesDistinct : (packages.map PackageSource.identity).Nodup)
+    (dependencies : ∀ package ∈ packages, package.DependenciesValid packages)
+    (access : ∀ entry ∈ closure.importEntries,
+      PackageAccess packages entry.home.package entry.target.package ∧
+        ModuleReachable closure.modules entry.home entry.target)
+    (imports : FunctionImportsValid closure.homes closure.functions closure.imports)
+    (modules : ∀ loaded ∈ closure.modules, loaded.Valid)
+    (distinct : (closure.functions.map fun declaration => (declaration.home, declaration.name)).Nodup)
+    (bodies : NamedFunctionBodiesElaborate program closure.functionNames closure.functions outputs)
+    (functions : program.functions = fun identity => (outputs.map Prod.fst)[identity]?)
+    (data : program.data.Valid program.target)
+    (aliases : program.aliases.Valid program.target program.data)
+    (constants : program.ConstantsChecked) :
+    (closure.Admitted program ∧ program.Checked) ∨
+      NamedCleanupRejected program closure.functionNames closure.functions outputs := by
+  rcases NamedProgramAdmitted.disposition_cases distinct bodies functions data aliases constants with
+    ⟨admitted, checked⟩ | rejected
+  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules⟩, checked⟩
+  · exact .inr rejected
+
+
 theorem SourceClosure.Admitted.root_visibility {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {loaded : LoadedModule} (included : loaded ∈ closure.modules) (root : loaded.home.path = []) :
@@ -726,9 +753,7 @@ theorem SourceClosure.Admitted.declaration {packages : List PackageSource} {clos
   obtain ⟨source, found, body⟩ := elaborated.selected_core selected
   obtain ⟨loaded, included, item, member, same⟩ := closure.function_owner (List.mem_of_getElem? found)
   subst source
-  refine ⟨loaded, included, item, member, ?_, body⟩
-  cases body
-  rfl
+  exact ⟨loaded, included, item, member, body.origin.1, body⟩
 
 theorem SourceClosure.Admitted.declaration_visibility {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
@@ -736,8 +761,7 @@ theorem SourceClosure.Admitted.declaration_visibility {packages : List PackageSo
     declaration.visibility.ValidAt declaration.home := by
   obtain ⟨loaded, included, source, member, _, elaborated⟩ := admitted.declaration selected
   have valid := (admitted.2.2.2.2.2 loaded included).1.1 source member
-  cases elaborated
-  exact valid
+  simpa only [elaborated.origin.1, elaborated.origin.2] using valid
 
 
 /-- General preservation, progress and consumption framing for elaboration
@@ -1231,8 +1255,7 @@ theorem SourceClosure.Admitted.candidate_visibility {packages : List PackageSour
   rw [functions] at declared
   obtain ⟨origin, found, body⟩ := elaborated.selected_core declared
   have authorized := candidate.origin_access found
-  cases body
-  exact authorized
+  simpa only [body.origin.1, body.origin.2] using authorized
 
 theorem SourceClosure.Admitted.resolved_visibility {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
@@ -1322,8 +1345,7 @@ theorem SourceClosure.Admitted.call_resolution {packages : List PackageSource} {
     subst emitted
     refine ⟨_, _, _, source, selected, rfl, declared, ?_, visible,
       closure.functionNames_selected.mp resolved⟩
-    cases body
-    rfl
+    exact body.origin.1
 
 theorem SourceClosure.Admitted.evaluation_soundness {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
@@ -1581,9 +1603,8 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
   obtain ⟨_, cores, bodies, functions, _⟩ := admitted.2.2.2.2.1
   obtain ⟨declaration, coreSelected, elaborated⟩ := bodies.selected originSelected
   have declared : program.functions identity = some declaration := by rw [functions]; exact coreSelected
-  have visibilityEq : declaration.visibility = origin.visibility ∧ declaration.home = origin.home := by
-    cases elaborated
-    exact ⟨rfl, rfl⟩
+  have visibilityEq : declaration.visibility = origin.visibility ∧ declaration.home = origin.home :=
+    ⟨elaborated.origin.2, elaborated.origin.1⟩
   have authorized : declaration.visibility.Allows declaration.home edge.home := by
     simpa only [visibilityEq.1, visibilityEq.2] using originVisible
   have select : declaration.visibility.Allows declaration.home caller →
