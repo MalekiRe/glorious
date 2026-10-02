@@ -820,6 +820,55 @@ theorem SourceClosure.Admitted.immutable_empty {packages : List PackageSource} {
   refine ⟨by simpa only [bindings] using mapped, ?_⟩
   exact (framed.2 name slot identity retained immutable mapped).empty found path empty
 
+/-- Existing residual cleanup permission survives every later source prefix
+for an immutable binding. The initial layout is derived from entry typing;
+no post-state mask, permission or successful cleanup is assumed. -/
+theorem SourceClosure.Admitted.immutable_disposable {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {earlier state : Configuration}
+    (reached : Run program ⟨environment, .expression core, []⟩ earlier)
+    (run : Run program earlier state)
+    {name : BindingId} {slot : BindingType} (selected : lookup name scope.context = some slot)
+    (immutable : slot.mutable = false) {identity : StorageId} {cell : StorageCell}
+    (mapped : lookup name earlier.outerEnvironment.bindings = some identity)
+    (found : earlier.outerEnvironment.heap.read identity = some cell)
+    (permission : cell.resident.Disposable program cell.type) :
+    lookup name state.outerEnvironment.bindings = some identity ∧
+      ∃ next, state.outerEnvironment.heap.read identity = some next ∧
+        next.activation = cell.activation ∧ next.type = cell.type ∧ next.WellTyped program ∧
+        next.resident.Disposable program next.type := by
+  have reachedSafe := admitted.soundness elaborated slots store issued reached
+  have prefixFrame := reachedSafe.2.2.1
+  have retained : lookup name final.slots = some slot := by
+    rw [(elaborated.checked slots).slots, slots]
+    exact selected
+  have entrySelected : lookup name before.slots = some slot := by rw [slots]; exact selected
+  rw [FlowContext.slots, lookup.map] at entrySelected
+  obtain ⟨bindingState, bindingSelected, _⟩ := Option.map_eq_some_iff.mp entrySelected
+  obtain ⟨initialIdentity, initialCell, initialMapped, initialFound, _, _, initialTyped, _⟩ :=
+    store.lookup bindingSelected
+  have initialBindings : earlier.outerEnvironment.bindings = environment.bindings :=
+    congrArg AddressedScope.bindings prefixFrame.1
+  have sameIdentity : initialIdentity = identity :=
+    Option.some.inj (initialMapped.symm.trans (by simpa only [initialBindings] using mapped))
+  subst initialIdentity
+  obtain ⟨actualCell, actualFound, _, _, actualTyped, _⟩ :=
+    (prefixFrame.2 name slot identity retained immutable initialMapped).preservation initialFound ⟨_, initialTyped⟩
+  cases Option.some.inj (actualFound.symm.trans found)
+  have framed := reachedSafe.1.consumption_run admitted.checked run
+  have bindings : state.outerEnvironment.bindings = earlier.outerEnvironment.bindings :=
+    congrArg AddressedScope.bindings framed.1
+  obtain ⟨next, finalFound, activation, sameType, nextTyped, preserved⟩ :=
+    (framed.2 name slot identity retained immutable mapped).preservation found actualTyped
+  exact ⟨by simpa only [bindings] using mapped, next, finalFound, activation, sameType, nextTyped, preserved permission⟩
+
 /-- Source admission determines a complete behavior without a termination or
 future-state premise. Infinite execution retains the same general safety contract
 as finite execution, rather than being encoded as an abort. -/

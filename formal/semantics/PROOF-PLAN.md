@@ -3676,3 +3676,30 @@ No tests or examples were added. This establishes arbitrary-depth observation
 stability in the logical owned fragment, not reference/loan semantics or
 custom destruction; all fourteen broad completion obligations remain open.
 
+## Residual disposal survives complete immutable consumption histories
+
+`PartialValue.Typed.open_fields` separates declared-layout opening from source
+visibility; `ProjectionType.open_partial` consumes that shared producer without
+changing access authority. `Ty.fieldTypes_finite_child` similarly supplies the
+physical child layout to both source projections and runtime erasure proofs.
+`PartialValue.Typed.write_hole` derives a matching initialization-mask update
+and typed resident from every actual successful arbitrary-depth hole write.
+No second source path judgment or post-state typing is supplied.
+
+`PartialValue.Disposable.write_hole` now consumes this physical preservation
+result; the existing source-move consumer is migrated. The authoritative
+`StorageCell.Consumption` history preserves resident typing, live-cell metadata
+and existing residual disposal permission through arbitrary compositions.
+`SourceClosure.Admitted.immutable_disposable` derives entry layout from binding
+typing, carries it to the earlier reached state through the actual prefix, then
+preserves its disposal permission through every later source suffix. Lexical
+identity, activation and declared type remain unchanged. Neither future cleanup
+success nor post-state permission is an admission premise.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of shared
+opening, child layout, runtime erasure, disposal closure, consumption preservation,
+the source-suffix theorem, source moves and maximal source behavior reported only
+`propext`, `Classical.choice` and `Quot.sound`. No tests or examples were added.
+These remain logical owned-cell results: custom Drop, reverse-field destruction
+execution, reference/loan semantics and physical memory are not established.
+All fourteen broad completion obligations remain open.

@@ -130,34 +130,37 @@ theorem PartialValuesTyped.uncertain {program : Program} {values : List PartialV
     | cons head tail => exact .cons (.uncertain head) (ih tail)
 
 
-/-- Opening derives the actual field list and its initialization states from
-the same checked projection. It works for absent, whole, and partial owners. -/
-private theorem ProjectionType.open_partial_known {program : Program} {home : Module} {parent child : Ty}
-    {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
-    {value : PartialValue} {state : Initialization} (typed : value.Typed program parent state)
+/-- Physical opening follows the declared layout and existing resident typing.
+It does not grant source visibility, access permission or readiness. -/
+private theorem PartialValue.Typed.open_fields_known {program : Program} {parent : Ty}
+    {types : List Ty} {value : PartialValue} {state : Initialization}
+    (typed : value.Typed program parent state) (layout : parent.fieldTypes program = some types)
     (certain : state ≠ .maybe) :
-    ∃ types, parent.fieldTypes program = some types ∧
-      ∃ fields, types[index]? = some child ∧ value.openFields program parent = some fields ∧
-        PartialValuesTyped program fields types (state.openFields types.length) := by
-  cases projection with
-  | @tuple first rest index child selected =>
-    refine ⟨first :: rest, rfl, ?_⟩
+    ∃ fields, value.openFields program parent = some fields ∧
+      PartialValuesTyped program fields types (state.openFields types.length) := by
+  cases parent with
+  | tuple first rest =>
+    simp only [Ty.fieldTypes, Option.some.injEq] at layout
+    subst types
     cases typed with
-    | hole => exact ⟨_, selected, rfl, PartialValuesTyped.holes program (first :: rest)⟩
+    | hole => exact ⟨_, rfl, PartialValuesTyped.holes program (first :: rest)⟩
     | resident resident =>
       cases resident with
-      | tuple head tail => exact ⟨_, selected, rfl, (ValuesHaveTypes.cons head tail).partialResidents⟩
-    | tuple head tail => exact ⟨_, selected, rfl, .cons head tail⟩
+      | tuple head tail => exact ⟨_, rfl, (ValuesHaveTypes.cons head tail).partialResidents⟩
+    | tuple head tail => exact ⟨_, rfl, .cons head tail⟩
     | uncertain => exact False.elim (certain rfl)
-  | @nominal identity index declaration schema field key declared structureOnly indexed selected visible =>
-    have chosen : declaration.constructor none = some schema := by
-      simp [DataDecl.constructor, structureOnly]
-    have child : (schema.residents.map Field.type)[index]? = some field.type := by
-      simp [List.getElem?_map, selected]
-    refine ⟨schema.residents.map Field.type, by simp [Ty.fieldTypes, declared, chosen], ?_⟩
+  | nominal identity =>
+    simp only [Ty.fieldTypes, Option.bind_eq_some_iff, Option.map_eq_some_iff] at layout
+    obtain ⟨declaration, declared, schema, chosen, rfl⟩ := layout
+    have structureOnly : declaration.shape = .structure schema := by
+      cases shape : declaration.shape with
+      | «structure» fields =>
+        simp only [DataDecl.constructor, shape, Option.some.injEq] at chosen
+        subst schema; rfl
+      | enumeration variants nonExhaustive => simp [DataDecl.constructor, shape] at chosen
     cases typed with
     | hole =>
-      refine ⟨List.replicate schema.residents.length .hole, child, ?_, ?_⟩
+      refine ⟨List.replicate schema.residents.length .hole, ?_, ?_⟩
       · simp [PartialValue.openFields, declared, chosen]
       · simpa only [List.length_map, Initialization.openFields] using
           PartialValuesTyped.holes program (schema.residents.map Field.type)
@@ -171,7 +174,7 @@ private theorem ProjectionType.open_partial_known {program : Program} {home : Mo
         | none =>
           have sameSchema := Option.some.inj (otherChosen.symm.trans chosen)
           subst otherSchema
-          exact ⟨_, child, by simp [PartialValue.openFields], residents.partialResidents⟩
+          exact ⟨_, by simp [PartialValue.openFields], residents.partialResidents⟩
     | @nominal _ tag otherDeclaration otherSchema fields states otherDeclared otherChosen finite residents =>
       have same := Option.some.inj (otherDeclared.symm.trans declared)
       subst otherDeclaration
@@ -180,29 +183,45 @@ private theorem ProjectionType.open_partial_known {program : Program} {home : Mo
       | none =>
         have sameSchema := Option.some.inj (otherChosen.symm.trans chosen)
         subst otherSchema
-        exact ⟨_, child, by simp [PartialValue.openFields], residents⟩
+        exact ⟨_, by simp [PartialValue.openFields], residents⟩
     | uncertain => exact False.elim (certain rfl)
+  | _ => simp [Ty.fieldTypes] at layout
 
-/-- Projection preserves uncertainty; it never upgrades possible occupancy to
-readiness. The runtime field list comes from the same checked projection. -/
+theorem PartialValue.Typed.open_fields {program : Program} {parent : Ty}
+    {types : List Ty} {value : PartialValue} {state : Initialization}
+    (typed : value.Typed program parent state) (layout : parent.fieldTypes program = some types) :
+    ∃ fields, value.openFields program parent = some fields ∧
+      PartialValuesTyped program fields types (state.openFields types.length) := by
+  induction typed using PartialValue.Typed.rec
+    (motive_2 := fun _ _ _ _ => True) generalizing types with
+  | hole => exact (PartialValue.Typed.hole _).open_fields_known layout (by intro same; cases same)
+  | resident resident => exact (PartialValue.Typed.resident resident).open_fields_known layout (by intro same; cases same)
+  | tuple head tail headIH tailIH =>
+    exact (PartialValue.Typed.tuple head tail).open_fields_known layout (by intro same; cases same)
+  | nominal declared chosen finite residents ih =>
+    exact (PartialValue.Typed.nominal declared chosen finite residents).open_fields_known layout (by intro same; cases same)
+  | uncertain typed ih =>
+    obtain ⟨fields, opened, residents⟩ := ih layout
+    exact ⟨fields, opened, residents.uncertain⟩
+  | nil | cons => trivial
+
+/-- Checked source projection consumes physical opening; it separately retains
+its actual module authority and selected child type. -/
 theorem ProjectionType.open_partial {program : Program} {home : Module} {parent child : Ty}
     {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
     {value : PartialValue} {state : Initialization} (typed : value.Typed program parent state) :
     ∃ types, parent.fieldTypes program = some types ∧
       ∃ fields, types[index]? = some child ∧ value.openFields program parent = some fields ∧
         PartialValuesTyped program fields types (state.openFields types.length) := by
-  induction typed using PartialValue.Typed.rec
-    (motive_2 := fun _ _ _ _ => True) generalizing child key index with
-  | hole => exact projection.open_partial_known (.hole _) (by intro same; cases same)
-  | resident resident => exact projection.open_partial_known (.resident resident) (by intro same; cases same)
-  | tuple head tail headIH tailIH =>
-    exact projection.open_partial_known (.tuple head tail) (by intro same; cases same)
-  | nominal declared chosen finite residents ih =>
-    exact projection.open_partial_known (.nominal declared chosen finite residents) (by intro same; cases same)
-  | uncertain typed ih =>
-    obtain ⟨types, layout, fields, member, opened, residents⟩ := ih projection
-    exact ⟨types, layout, fields, member, opened, residents.uncertain⟩
-  | nil | cons => trivial
+  cases projection with
+  | tuple selected =>
+    obtain ⟨fields, opened, residents⟩ := typed.open_fields rfl
+    exact ⟨_, rfl, fields, selected, opened, residents⟩
+  | @nominal identity index declaration schema field key declared shape indexed selected visible =>
+    have layout : (Ty.nominal identity).fieldTypes program = some (schema.residents.map Field.type) := by
+      simp [Ty.fieldTypes, declared, DataDecl.constructor, shape]
+    obtain ⟨fields, opened, residents⟩ := typed.open_fields layout
+    exact ⟨_, layout, fields, by simp [List.getElem?_map, selected], opened, residents⟩
 
 
 
@@ -285,24 +304,43 @@ theorem PartialValue.replaceField_siblings {program : Program} {parent : Ty}
 
 
 
-theorem ProjectionType.finite_child {program : Program} {home : Module} {parent child : Ty}
-    {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
-    (finite : FiniteLayout program.target program.data parent) :
+theorem Ty.fieldTypes_finite_child {program : Program} {parent child : Ty}
+    {types : List Ty} {index : Nat} (layout : parent.fieldTypes program = some types)
+    (selected : types[index]? = some child) (finite : FiniteLayout program.target program.data parent) :
     FiniteLayout program.target program.data child := by
-  cases projection with
-  | tuple selected =>
+  cases parent with
+  | tuple first rest =>
+    simp only [Ty.fieldTypes, Option.some.injEq] at layout
+    subst types
     cases finite with
     | tuple first rest =>
       have member := List.mem_of_getElem? selected
       cases member with
       | head => exact first
       | tail _ member => exact rest _ member
-  | nominal declared shape indexed selected visible =>
+  | nominal identity =>
+    simp only [Ty.fieldTypes, Option.bind_eq_some_iff, Option.map_eq_some_iff] at layout
+    obtain ⟨declaration, declared, schema, chosen, rfl⟩ := layout
     cases finite with
     | nominal otherDeclared schemas fields =>
-      have same := Option.some.inj (otherDeclared.symm.trans declared)
-      subst_vars
-      exact fields _ (by simp [DataDecl.schemas, shape]) _ (List.mem_of_getElem? selected)
+      cases Option.some.inj (otherDeclared.symm.trans declared)
+      have member : schema ∈ declaration.schemas := by
+        cases shape : declaration.shape <;> simp_all [DataDecl.constructor, DataDecl.schemas]
+      obtain ⟨field, included, same⟩ := List.mem_map.mp (List.mem_of_getElem? selected)
+      subst child
+      exact fields schema member field included
+  | _ => simp [Ty.fieldTypes] at layout
+
+theorem ProjectionType.finite_child {program : Program} {home : Module} {parent child : Ty}
+    {key : FieldKey} {index : Nat} (projection : ProjectionType program home parent key index child)
+    (finite : FiniteLayout program.target program.data parent) :
+    FiniteLayout program.target program.data child := by
+  cases projection with
+  | tuple selected => exact Ty.fieldTypes_finite_child rfl selected finite
+  | @nominal identity index declaration schema field key declared shape indexed selected visible =>
+    have layout : (Ty.nominal identity).fieldTypes program = some (schema.residents.map Field.type) := by
+      simp [Ty.fieldTypes, declared, DataDecl.constructor, shape]
+    exact Ty.fieldTypes_finite_child (index := index) layout (by simp [List.getElem?_map, selected]) finite
 
 def Ty.fieldIndex (program : Program) (parent : Ty) (key : FieldKey) : Option Nat :=
   match parent, key with
@@ -1096,19 +1134,48 @@ theorem Initialization.Disposable.write_absent {program : Program} {parent : Ty}
         cases tag <;> simp_all [DataDecl.constructor, Initialization.openFields]
       | enumeration variants nonexhaustive => simp [DataDecl.constructor, shape] at chosen
 
-/-- The actual erasure preserves residual disposal permission. Static and
-runtime updates are the paired products of the existing checked path producer. -/
-theorem PartialValue.Disposable.write_hole {program : Program} {parent child : Ty}
-    {before after : PartialValue} {home : Module} {path : List FieldKey}
+/-- Successful physical erasure preserves typing and derives its matching mask
+update. Layout evidence is not a grant of source visibility or ownership. -/
+theorem PartialValue.Typed.write_hole {program : Program} {parent : Ty}
+    {before after : PartialValue} {state : Initialization} {path : List FieldKey}
+    (typed : before.Typed program parent state)
+    (finite : FiniteLayout program.target program.data parent)
+    (written : before.writeFields program parent path .hole = some after) :
+    ∃ next, state.writeFields program parent path .absent = some next ∧ after.Typed program parent next := by
+  induction path generalizing parent before after state with
+  | nil => cases written; exact ⟨.absent, rfl, .hole _⟩
+  | cons key rest ih =>
+    simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, changed, closed⟩ := written
+    have layout := Ty.fieldInfo_layout info
+    have selected : types[index]? = some child := by
+      have actual := info
+      simp only [Ty.fieldInfo, layout, Option.bind_some, Option.bind_eq_some_iff, Option.map_eq_some_iff] at actual
+      obtain ⟨_, _, _, selected, same⟩ := actual
+      cases same
+      exact selected
+    obtain ⟨actual, actualOpened, fieldsTyped⟩ := typed.open_fields layout
+    cases Option.some.inj (actualOpened.symm.trans opened)
+    obtain ⟨original, originalState, originalFound, staticFound, originalTyped⟩ := fieldsTyped.select selected
+    cases Option.some.inj (originalFound.symm.trans found)
+    obtain ⟨nextState, stateChanged, updatedTyped⟩ :=
+      ih originalTyped (Ty.fieldTypes_finite_child layout selected finite) changed
+    obtain ⟨actualAfter, actualClosed, afterTyped, _⟩ :=
+      (fieldsTyped.set selected updatedTyped).close layout finite
+    cases Option.some.inj (actualClosed.symm.trans closed)
+    exact ⟨.fields ((state.openFields types.length).set index nextState),
+      by simp [Initialization.writeFields, info, staticFound, stateChanged], afterTyped⟩
+
+/-- Actual erasure preserves residual disposal without requiring a second source
+path judgment. Execution authority remains checked at the source producer. -/
+theorem PartialValue.Disposable.write_hole {program : Program} {parent : Ty}
+    {before after : PartialValue} {path : List FieldKey}
     (permission : before.Disposable program parent)
     (finite : FiniteLayout program.target program.data parent)
-    (checked : PathType program home parent path child)
     (written : before.writeFields program parent path .hole = some after) :
     after.Disposable program parent := by
   obtain ⟨state, typed, disposition⟩ := permission
-  obtain ⟨actual, next, stateWritten, actualWritten, actualTyped, _⟩ :=
-    checked.restore_partial finite typed (.hole child)
-  cases Option.some.inj (actualWritten.symm.trans written)
-  exact ⟨next, actualTyped, disposition.write_absent stateWritten⟩
+  obtain ⟨next, stateWritten, afterTyped⟩ := typed.write_hole finite written
+  exact ⟨next, afterTyped, disposition.write_absent stateWritten⟩
 
 end Grounded

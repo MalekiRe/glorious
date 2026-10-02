@@ -1100,14 +1100,14 @@ theorem HasType.move_transfers (checkedProgram : program.Checked)
         refine ⟨after, value, _, observed, resident, entered,
           original.preservation checkedProgram entered, absent, unreadable, scope, supply, next, ?_, retained⟩
         obtain ⟨address, old, remaining, resolved, found, live, activation, sameType, empty, erased⟩ := hole
-        obtain ⟨identity, cell, _, resolvedSource, stored, _, declared, cellTyped, _⟩ :=
+        obtain ⟨identity, cell, _, resolvedSource, stored, _, _, cellTyped, _⟩ :=
           currentStore.resolve selected path
         cases Option.some.inj (resolvedSource.symm.trans resolved)
         cases Option.some.inj (stored.symm.trans found)
         refine ⟨_, old, remaining, resolvedSource, found, live, activation, sameType, empty, ?_⟩
         intro permission
         rw [sameType]
-        exact permission.write_hole cellTyped.1 (by simpa only [declared] using path) erased
+        exact permission.write_hole cellTyped.1 erased
 
 end Grounded
 
