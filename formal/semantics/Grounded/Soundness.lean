@@ -374,7 +374,8 @@ theorem HasType.assignment_restores (checkedProgram : program.Checked)
       cases continuation with
       | cons frame tail =>
         cases frame with
-        | assign selected path writable selection discard mask context restTyped =>
+        | assign joined selected path writable selection discard mask context restTyped =>
+          have resident := (joined.on_return resident).1
           obtain ⟨actual, updated, next, produced, maskWritten, contextWritten, nextTyped,
             readback, _⟩ := AddressedEnvironment.write.progress currentStore selected path resident
           obtain ⟨old, oldType, oldSelected, permission⟩ :=
@@ -1613,5 +1614,33 @@ theorem HasType.bind_bottom_behavior (checkedProgram : program.Checked)
     obtain ⟨resident, _⟩ := bottom.evaluation_soundness checkedProgram store issued initialRun
     exact resident.not_never.elim
   · exact infinite
+/-- A bottom RHS cannot reach replacement cleanup or installation. Whole
+assignment divergence follows from the actual RHS frame transition. -/
+theorem HasType.assign_bottom_behavior (checkedProgram : program.Checked)
+    {before middle final : FlowContext} {value rest : Expr} {place : Place} {type : Ty}
+    (checked : HasType program home before (.assign home place value rest) type final)
+    (bottom : HasType program home before value .never middle)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.assign home place value rest), []⟩ trace ∧
+      ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.assign home place value rest), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity := by
+  rcases checked.behavior checkedProgram store issued with normal | infinite
+  · obtain ⟨after, result, evaluated, _⟩ := normal
+    obtain ⟨trace, divergent, _⟩ := bottom.never_behavior checkedProgram store issued
+    have start : Run program ⟨environment, .expression (.assign home place value rest), []⟩
+        (Configuration.extend ⟨environment, .expression value, []⟩ [.assign home place rest]) :=
+      .step .assign (.refl _)
+    obtain ⟨whole, infinite⟩ := start.prepend_infinite (divergent.extend [.assign home place rest])
+    exact False.elim (evaluated.excludes_infinite (.result after result) whole infinite)
+  · exact infinite
+
+
 end Grounded
 

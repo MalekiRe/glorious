@@ -83,7 +83,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
       obtain ⟨after, run, scope, heap⟩ := runs environment
       exact ⟨after, .construct run, scope, heap⟩
   | call declared visible inputs ih => intro closed; cases closed
-  | assign resident selected path writable selection discard mask context rest residentIH restIH => intro closed; cases closed
+  | assign resident joined selected path writable selection discard mask context rest residentIH restIH => intro closed; cases closed
   | applyPatterns arguments nonempty covered bodies argumentsIH bodiesIH => intro closed; cases closed
   | nil => exact ⟨[], .nil, fun environment => ⟨environment, .nil, rfl, rfl⟩⟩
   | @cons home before middle after head tail actual first rest headTyped tailTyped joined headIH tailIH =>
@@ -247,10 +247,10 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
               have equal := congrArg ActivationId.index same
               omega)
             exact ⟨value, after, .call declared prepared inputRun bodyRun restored⟩
-    | assign resident selected path writable selection discard mask context rest =>
+    | assign resident joined selected path writable selection discard mask context rest =>
       obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleIssued, _⟩ := ih _ .assignValue resident store issued
       obtain ⟨updated, updatedMask, updatedContext, written, maskWritten, contextWritten, updatedTyped,
-        _, scope, supply, _, _, _⟩ := AddressedEnvironment.write.progress middleTyped selected path valueTyped
+        _, scope, supply, _, _, _⟩ := AddressedEnvironment.write.progress middleTyped selected path (joined.on_return valueTyped).1
       cases Option.some.inj (mask.symm.trans maskWritten)
       cases Option.some.inj (context.symm.trans contextWritten)
       have activation := congrArg AddressedScope.activation scope

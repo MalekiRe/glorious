@@ -178,7 +178,8 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (inside : index < context.length)
       (discard : ∀ binding, context[index]? = some binding → binding.2.Disposable program.data) :
       FrameTyped program heap supply activation context (.one result) (.retire index) (context.eraseIdx index) (.one result)
-  | assign {home before restored after place type result rest state updated available}
+  | assign {home before restored after place actualType type result rest state updated available}
+      (joined : ReturnJoin program actualType before type before)
       (selected : lookup place.root before = some state)
       (path : PathType program home state.slot.type place.fields type)
       (writable : state.slot.mutable = true)
@@ -187,7 +188,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (mask : state.initialization.writeFields program state.slot.type place.fields .present = some updated)
       (context : replaceBinding place.root { state with initialization := updated } before = some restored)
       (checked : HasType program home restored rest result after) :
-      FrameTyped program heap supply activation before (.one type) (.assign home place rest) after (.one result)
+      FrameTyped program heap supply activation before (.one actualType) (.assign home place rest) after (.one result)
   | tupleHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
       FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (.tuple first types))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
@@ -317,7 +318,7 @@ theorem ConfigurationTyped.progress {context result state}
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
       | construct declared chosen finite visible access residents => exact ⟨_, .construct⟩
       | call declared visible inputs => exact ⟨_, .call declared⟩
-      | assign resident selected path writable selection discard mask context rest => exact ⟨_, .assign⟩
+      | assign resident joined selected path writable selection discard mask context rest => exact ⟨_, .assign⟩
       | applyPatterns arguments nonempty covered bodies => exact ⟨_, .applyPatterns⟩
     | arguments checked =>
       right
@@ -345,7 +346,7 @@ theorem ConfigurationTyped.progress {context result state}
           have selected := List.getElem?_eq_getElem bound
           obtain ⟨after, retired, _⟩ := AddressedEnvironment.retireBinding.progress store selected
           exact ⟨_, .retire retired⟩
-        | assign selected path writable selection discard mask context checked =>
+        | assign joined selected path writable selection discard mask context checked =>
           obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection discard).selection
           exact ⟨_, .assignResult selected⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
@@ -532,17 +533,17 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
               omega)).1
     | assign =>
       cases code with | expression checked =>
-        cases checked with | assign resident selected path writable selection discard mask context rest =>
+        cases checked with | assign resident joined selected path writable selection discard mask context rest =>
           exact .intro store issued (.expression resident)
-            (.cons (.assign selected path writable selection discard mask context rest) continuation)
+            (.cons (.assign joined selected path writable selection discard mask context rest) continuation)
     | assignResult actual =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | assign selected path writable selection discard mask context checked =>
+          cases frame with | assign joined selected path writable selection discard mask context checked =>
             obtain ⟨old, _, produced, permission⟩ := (store.replacement_safe selected path selection discard).selection
             cases Option.some.inj (actual.symm.trans produced)
             exact .intro store issued (.cleanup permission.disposalTasks
-              (.install resident selected path writable selection discard mask context checked)) tail
+              (.install (joined.on_return resident).1 selected path writable selection discard mask context checked)) tail
     | install written =>
       cases code with
       | install resident selected path writable selection discard mask context checked =>
@@ -982,7 +983,7 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     simpa [Frame.environment, Frame.activation, FlowContext.slots] using store.drop locals.length
   | @retire context result index inside discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using store.eraseIdx index
-  | assign selected path writable selection discard mask context checked =>
+  | assign joined selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using store
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
@@ -1012,7 +1013,7 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     simpa [Frame.environment, Frame.activation, FlowContext.slots] using framed.drop store locals.length
   | @retire context result index inside discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using framed.eraseIdx store index
-  | assign selected path writable selection discard mask context checked =>
+  | assign joined selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using framed
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using framed

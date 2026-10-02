@@ -175,10 +175,11 @@ theorem SourceScope.move_checked {scope : SourceScope} {spelling : Identifier} {
 
 /-- Destination selection uses the RHS output state, not the incoming state. -/
 theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier} {fields : List FieldKey}
-    {binding : SourceBinding} {type result : Ty} {value rest : Expr}
+    {binding : SourceBinding} {actualType type result : Ty} {value rest : Expr}
     {before evaluated restored after : FlowContext} {state : BindingState} {updated available : Initialization}
     (resolved : scope.resolve spelling = some binding) (slots : before.slots = scope.context)
-    (resident : HasType program home before value type evaluated)
+    (resident : HasType program home before value actualType evaluated)
+    (joined : ReturnJoin program actualType evaluated type evaluated)
     (selected : lookup binding.identity evaluated = some state)
     (path : PathType program home binding.slot.type fields type) (writable : binding.slot.mutable = true)
     (selection : state.initialization.selectFields program binding.slot.type fields = some available)
@@ -188,7 +189,7 @@ theorem SourceScope.assign_checked {scope : SourceScope} {spelling : Identifier}
     (continued : HasType program home restored rest result after) :
     HasType program home before (.assign home ⟨binding.identity, fields⟩ value rest) result after := by
   have same := scope.selected_slot resolved (resident.slots.trans slots) selected
-  exact .assign resident selected (by rw [same]; exact path) (by rw [same]; exact writable)
+  exact .assign resident joined selected (by rw [same]; exact path) (by rw [same]; exact writable)
     (by rw [same]; exact selection) discard
     (by rw [same]; exact mask) context continued
 

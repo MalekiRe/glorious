@@ -5074,3 +5074,29 @@ This migrates expected initializer types, not unreachable-suffix admission:
 the body still has a static checking derivation and return-disposition obligation.
 Assignment values and other scalar expected positions remain to be migrated.
 All fourteen whole-language completion families remain open.
+
+## Assignment RHS return joins and physical replacement safety
+
+Source assignment, SourceScope.assign_checked, HasType.assign and the actual
+assignment frame now share ReturnJoin from the inferred RHS type to the selected
+destination type. The physical install control still requires a real value of
+the destination type; preservation derives it only from an actual RHS return.
+Replacement permission, partial-initialization masks, writable-place checks and
+cleanup-before-install order remain unchanged. Finite-call execution and the
+general assignment replacement proof consume the same join.
+
+HasType.assign_bottom_behavior composes the actual assignment-entry transition
+with infinite RHS execution under the pending assignment frame. A completed
+assignment is impossible. SourceClosure.Admitted.bottom_assignment carries this
+through source admission to whole-assignment divergence, prefix ownership and
+storage safety, and nonresumption of any pending outer continuation.
+
+All 30 strict Lean jobs passed. Inspected assignment divergence, public source
+soundness/behavior, no-exact-cleanup and no-exact-resident-overwrite proofs use
+only propext, Classical.choice and Quot.sound. No operational rule or disposal
+permission was weakened.
+
+Unreachable-suffix admission is still restrictive: a bottom RHS does not yet
+remove static obligations on the hypothetical destination or continuation.
+This change repairs expected RHS typing, not that separate flow boundary.
+Other scalar checking contexts and all fourteen completion families remain open.

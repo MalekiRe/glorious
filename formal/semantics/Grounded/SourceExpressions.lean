@@ -221,9 +221,10 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (inputs : NamedExprsElaborate program names home scope before source core
         (declaration.parameters.map fun parameter => parameter.2.type) after) :
       NamedExpr.Elaborates program names home scope before (.call name source) (.call identity core) declaration.result after
-  | assign {scope before evaluated restored after name fields binding type result value rest coreValue coreRest state updated available}
+  | assign {scope before evaluated restored after name fields binding actualType type result value rest coreValue coreRest state updated available}
       (resolved : scope.resolve name = some binding)
-      (resident : NamedExpr.Elaborates program names home scope before value coreValue type evaluated)
+      (resident : NamedExpr.Elaborates program names home scope before value coreValue actualType evaluated)
+      (joined : ReturnJoin program actualType evaluated type evaluated)
       (selected : lookup binding.identity evaluated = some state)
       (path : PathType program home binding.slot.type fields type)
       (writable : binding.slot.mutable = true)
@@ -489,9 +490,9 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
     exact .construct declared chosen finite visible access (ih slots)
   | record _ _ ih => exact ih slots
   | call _ _ declared visible _ ih => exact .call declared visible (ih slots)
-  | assign resolved _ selected path writable selection discard mask context _ first rest =>
+  | assign resolved _ joined selected path writable selection discard mask context _ first rest =>
     have resident := first slots
-    apply SourceScope.assign_checked resolved slots resident selected path writable selection discard mask context
+    apply SourceScope.assign_checked resolved slots resident joined selected path writable selection discard mask context
     apply rest
     exact (replaceBinding.map_same BindingState.slot selected context rfl).trans (resident.slots.trans slots)
   | applyPatterns _ nonempty covered _ inputs bodies =>

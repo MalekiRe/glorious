@@ -1635,6 +1635,34 @@ theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource
   obtain ⟨trace, infinite, safe⟩ := (binding.checked slots).bind_bottom_behavior
     admitted.checked (bottom.checked slots) store issued
   exact ⟨binding, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+/-- The admitted source assignment retains the RHS's bottom derivation.
+No replacement value or successful cleanup is a premise. -/
+theorem SourceClosure.Admitted.bottom_assignment {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle final : FlowContext}
+    {sourceValue sourceRest : NamedExpr} {value rest : Expr} {name : Identifier}
+    {fields : List FieldKey} {place : Place} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.assign name fields sourceValue sourceRest) (.assign home place value rest) type final)
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceValue value .never middle)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.assign home place value rest), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.assign home place value rest), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.assign home place value rest), stack⟩ (done.extend stack) := by
+  obtain ⟨trace, infinite, safe⟩ := (elaborated.checked slots).assign_bottom_behavior
+    admitted.checked (bottom.checked slots) store issued
+  exact ⟨trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 /-- Every active and retained scope has live, correctly owned and typed partial
 storage throughout execution. Retired identities cannot reappear in those
 scopes; surviving old cells retain their original owner and declared type. -/
