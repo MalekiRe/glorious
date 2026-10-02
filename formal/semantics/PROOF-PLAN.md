@@ -4081,3 +4081,11 @@ theorems depend only on `propext`, `Classical.choice`, and `Quot.sound`. This
 closes operational interleaving for the currently modeled structural cleanup;
 custom destructor bodies, effects/divergence within destructors and the other
 whole-language completion obligations remain open.
+
+The source retirement traces now also carry an actual `Run` for every edge:
+each selected resident is structurally cleaned before its indexed storage
+retirement, with the protected payload and remaining scope/caller stack
+preserved. Complete batch execution reuses these same per-owner constructors.
+The storage trace is therefore connected stage-by-stage to the machine, not
+merely related by its final heap. All 30 strict build jobs and the inspected
+source-safety/maximal-behavior axiom closures passed.

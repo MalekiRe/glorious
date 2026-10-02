@@ -89,7 +89,9 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           BindingMap.nextRelease (List.take (count - position) (trace position).bindings) (trace position).bindings = some (index, identity) ∧
           index < count - position ∧ (trace position).heap.read identity = some cell ∧
           cell.resident.Disposable program cell.type ∧
-          (trace position).retireBinding index = some (trace (position + 1))) ∧
+          (trace position).retireBinding index = some (trace (position + 1)) ∧
+          Run program ⟨trace position, .result value, .scope (count - position) :: stack⟩
+            ⟨trace (position + 1), .result value, .scope (count - (position + 1)) :: stack⟩) ∧
         (∀ position ≤ count,
           ConfigurationTyped program final (.one type) ⟨trace position, .result value, .scope (count - position) :: stack⟩ ∧
           (trace position).exitScope (count - position) = some after)) ∧
@@ -179,7 +181,8 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               obtain ⟨index, identity, chosen, inside, operation⟩ := steps position bound
               have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
               obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
-              exact ⟨index, identity, cell, chosen, inside, found, allowed, operation⟩
+              refine ⟨index, identity, cell, chosen, inside, found, allowed, operation, ?_⟩
+              simpa only [Nat.sub_sub] using (Run.scope_owner (value := value) (stack := stack) chosen found operation)
             · intro position bound
               obtain ⟨pointTyped, pointSame⟩ := states position bound
               exact ⟨pointTyped, pointSame.trans produced⟩
@@ -682,7 +685,9 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
         (∀ position < current.bindings.length, ∃ (index : Nat) (identity : StorageId) (cell : StorageCell),
           BindingMap.nextRelease (trace position).bindings (trace position).bindings = some (index, identity) ∧
           (trace position).heap.read identity = some cell ∧ cell.resident.Disposable program cell.type ∧
-          (trace position).retireBinding index = some (trace (position + 1))) ∧
+          (trace position).retireBinding index = some (trace (position + 1)) ∧
+          Run program ⟨trace position, .result value, .restore caller :: stack⟩
+            ⟨trace (position + 1), .result value, .restore caller :: stack⟩) ∧
         (∀ position ≤ current.bindings.length,
           ConfigurationTyped program final (.one type) ⟨trace position, .result value, .restore caller :: stack⟩ ∧
           (trace position).restore caller = some after)) ∧
@@ -743,7 +748,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
               obtain ⟨index, identity, chosen, operation⟩ := steps position bound
               have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
               obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
-              exact ⟨index, identity, cell, chosen, found, allowed, operation⟩
+              exact ⟨index, identity, cell, chosen, found, allowed, operation, Run.restore_owner chosen found operation⟩
             · intro position bound
               obtain ⟨pointTyped, pointSame⟩ := states position bound
               exact ⟨pointTyped, pointSame.trans restored⟩

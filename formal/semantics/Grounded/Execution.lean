@@ -342,6 +342,27 @@ theorem Run.cleanup_decompose {before after : Configuration} (run : Run program 
     | cleanupEnter => exact ih _ _ _ _ rfl
     | cleanupRelease => exact ih _ _ _ _ rfl
     | cleanupDone => exact .inr tail
+/-- One canonical lexical owner is completely cleaned before its storage is
+retired. The remaining scope resumes in the actual retirement output. -/
+theorem Run.scope_owner {before after : Environment} {count index : Nat} {identity : StorageId}
+    {cell : StorageCell} {value : Value} {stack : List Frame}
+    (chosen : BindingMap.nextRelease (List.take count before.bindings) before.bindings = some (index, identity))
+    (found : before.heap.read identity = some cell) (retired : before.retireBinding index = some after) :
+    Run program ⟨before, .result value, .scope count :: stack⟩
+      ⟨after, .result value, .scope (count - 1) :: stack⟩ :=
+  .step (.scopeOwner chosen found)
+    ((Run.cleanup before (.result value) (.retire index :: .scope (count - 1) :: stack) cell.resident.disposalTasks).trans
+      (.step (.retire retired) (.refl _)))
+
+theorem Run.restore_owner {before after : Environment} {index : Nat} {identity : StorageId}
+    {cell : StorageCell} {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (chosen : BindingMap.nextRelease before.bindings before.bindings = some (index, identity))
+    (found : before.heap.read identity = some cell) (retired : before.retireBinding index = some after) :
+    Run program ⟨before, .result value, .restore caller :: stack⟩
+      ⟨after, .result value, .restore caller :: stack⟩ :=
+  .step (.restoreOwner chosen found)
+    ((Run.cleanup before (.result value) (.retire index :: .restore caller :: stack) cell.resident.disposalTasks).trans
+      (.step (.retire retired) (.refl _)))
 /-- Every successful batch exit is realized by resident cleanup followed by
 one indexed retirement at a time, with no assumed intermediate execution. -/
 theorem Run.scope {before after : Environment} {count : Nat} {value : Value} {stack : List Frame}
@@ -361,9 +382,7 @@ theorem Run.scope {before after : Environment} {count : Nat} {value : Value} {st
     have operation : before.retireBinding index = some middle :=
       AddressedEnvironment.retireBinding.eq_some_iff.mpr ⟨entry, selected, heap, primitive, rfl⟩
     have same := AddressedEnvironment.exitScope.retireBinding selected localIndex first operation
-    exact .step (.scopeOwner chosen found)
-      ((Run.cleanup before (.result value) (.retire index :: .scope (count - 1) :: stack) cell.resident.disposalTasks).trans
-        (.step (.retire operation) (Run.scope (same.trans exited))))
+    exact (Run.scope_owner chosen found operation).trans (Run.scope (same.trans exited))
 termination_by count
 
 theorem Run.restore {before after : Environment} {caller : AddressedScope} {value : Value} {stack : List Frame}
@@ -381,9 +400,7 @@ theorem Run.restore {before after : Environment} {caller : AddressedScope} {valu
     have operation : before.retireBinding index = some middle :=
       AddressedEnvironment.retireBinding.eq_some_iff.mpr ⟨entry, selected, heap, primitive, rfl⟩
     have same := AddressedEnvironment.restore.retireBinding selected first operation caller
-    exact .step (.restoreOwner chosen found)
-      ((Run.cleanup before (.result value) (.retire index :: .restore caller :: stack) cell.resident.disposalTasks).trans
-        (.step (.retire operation) (Run.restore (same.trans restored))))
+    exact (Run.restore_owner chosen found operation).trans (Run.restore (same.trans restored))
 termination_by before.bindings.length
 decreasing_by
   have descent := AddressedEnvironment.retireBinding.length_step operation
