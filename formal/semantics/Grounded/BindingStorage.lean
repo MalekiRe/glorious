@@ -453,6 +453,24 @@ theorem BindingMap.releaseOrder_perm (bindings : BindingMap) :
     identity ∈ bindings.releaseOrder ↔ identity ∈ bindings.map Prod.snd :=
   bindings.releaseOrder_perm.mem_iff
 
+/-- A nonempty pending batch has a real indexed binding for the next owner
+selected by the authoritative acquisition order. No chosen winner is assumed. -/
+theorem BindingMap.release_next (pending available : BindingMap)
+    (included : ∀ entry ∈ pending, entry ∈ available) (nonempty : pending ≠ []) :
+    ∃ (index : Nat) (entry : BindingId × StorageId), available[index]? = some entry ∧ entry ∈ pending ∧
+      pending.releaseOrder.head? = some entry.2 := by
+  have length := pending.releaseOrder_perm.length_eq
+  cases ordered : pending.releaseOrder with
+  | nil =>
+    have empty : pending.length = 0 := by simpa only [ordered, List.length_nil, List.length_map] using length.symm
+    exact False.elim (nonempty (List.length_eq_zero_iff.mp empty))
+  | cons identity rest =>
+    have member : identity ∈ pending.map Prod.snd := by
+      apply BindingMap.mem_releaseOrder.mp
+      simp only [ordered, List.mem_cons, true_or]
+    obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+    obtain ⟨index, selected⟩ := List.mem_iff_getElem?.mp (included entry member)
+    exact ⟨index, entry, selected, member, by simp only [List.head?_cons, same]⟩
 /-- Every later retirement is strictly older; each owned cell occurs exactly
 once because typed binding maps are injective in storage identity. -/
 theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)

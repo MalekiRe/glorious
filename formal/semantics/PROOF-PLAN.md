@@ -3893,3 +3893,12 @@ prefix contract. It does not assume successful next retirement or post-state
 realization. All 30 strict build jobs and inspected producer/source axiom
 closures passed. This closes the indexed binding-state transition prerequisite,
 not the remaining operational scope/return destruction integration.
+
+The reached-source prefix result now constructs the next owner rather than
+accepting an indexed winner as a premise. `BindingMap.release_next` derives an
+actual binding at the head of the existing `releaseOrder`; source cleanup
+returns either an empty pending-local batch or that owner's live resident,
+disposal permission, successful retirement and synchronized binding/state
+removal. The strict 30-job build and producer/source axiom inspections passed.
+This removes the conditional-selection gap without introducing a second
+scheduler. The operational scope/return cutover remains open.
