@@ -4028,3 +4028,16 @@ supply. General typed scope progress and the reached-source scope theorem
 consume this equality. All 30 strict build jobs and inspected proof closures
 passed. This supplies result correspondence for the scope machine cutover;
 interleaved destruction itself remains unimplemented.
+
+General typed scope and return states now construct complete finite canonical
+storage-retirement traces. Each successful indexed retirement removes exactly
+one binding. Well-founded construction therefore consumes one owner per stage,
+using the existing selector and physical operation, preserving the full typed
+continuation and the original batch result at every intermediate state. Scope
+traces end at the exact batch-exit environment; return traces empty the callee
+map and retain the same final caller-restoration result. The reached-source
+scope and return theorems consume these constructions. No supplied trace or
+intermediate readiness is a premise. All 30 strict build jobs passed, and the
+inspected trace/source proofs use only standard Lean axioms. These finite
+traces describe actual storage operations, not a new machine `Run`; resident
+destruction must still be interleaved through the retirement-frame cutover.

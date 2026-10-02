@@ -710,6 +710,47 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
             exact .inr ⟨index, entry, next, chosen, localIndex, produced,
               AddressedEnvironment.exitScope.retireBinding store selected localIndex first produced,
               original.retire_scope selected localIndex produced⟩
+/-- A typed scope constructs all canonical indexed retirements, preserving its
+continuation at every stage and producing exactly the existing batch exit. -/
+theorem ConfigurationTyped.scope_retirement_trace {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {count : Nat} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .scope count :: stack⟩) :
+    ∃ trace : Nat → Environment,
+      trace 0 = current ∧ current.exitScope count = some (trace count) ∧
+      (∀ position < count, ∃ (index : Nat) (identity : StorageId),
+        BindingMap.nextRelease (List.take (count - position) (trace position).bindings) (trace position).bindings = some (index, identity) ∧
+        index < count - position ∧ (trace position).retireBinding index = some (trace (position + 1))) ∧
+      (∀ position ≤ count,
+        ConfigurationTyped program context result ⟨trace position, .result value, .scope (count - position) :: stack⟩ ∧
+        (trace position).exitScope (count - position) = current.exitScope count) := by
+  cases count with
+  | zero =>
+    refine ⟨fun _ => current, rfl, by simp [AddressedEnvironment.exitScope, releaseBindings, BindingMap.releaseOrder, RuntimeHeap.retireMany], ?_, ?_⟩
+    · intro position bound
+      omega
+    · intro position bound
+      have zero : position = 0 := by omega
+      subst position
+      exact ⟨typed, rfl⟩
+  | succ count =>
+    rcases typed.scope_next with empty | ⟨index, entry, next, chosen, inside, produced, same, nextTyped⟩
+    · omega
+    · obtain ⟨trace, start, finish, steps, states⟩ := nextTyped.scope_retirement_trace
+      refine ⟨(fun position => match position with | 0 => current | position + 1 => trace position), rfl, ?_, ?_, ?_⟩
+      · exact same.symm.trans finish
+      · intro position bound
+        cases position with
+        | zero => exact ⟨index, entry.2, chosen, inside, by simpa only [start] using produced⟩
+        | succ position => simpa using steps position (by omega)
+      · intro position bound
+        cases position with
+        | zero => exact ⟨typed, rfl⟩
+        | succ position =>
+          obtain ⟨pointTyped, pointSame⟩ := states position (by omega)
+          exact ⟨by simpa using pointTyped, by simpa using pointSame.trans same⟩
+termination_by count
+
+
 /-- Retiring one callee owner preserves the returned payload, the saved caller,
 and every older continuation; it does not restore the caller prematurely. -/
 theorem ConfigurationTyped.retire_restore {context : FlowContext} {result : ResultType}
@@ -767,6 +808,43 @@ theorem ConfigurationTyped.restore_next {context : FlowContext} {result : Result
         original.retire_restore selected produced⟩
       rw [bindings]
       exact BindingMap.releaseOrder_eraseIdx store.addresses_distinct selected first
+
+
+/-- Canonical callee retirement constructs a finite physical trace with one
+operation per original binding. Every intermediate state preserves the full
+return continuation and the exact original restoration result. -/
+theorem ConfigurationTyped.restore_retirement_trace {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .restore caller :: stack⟩) :
+    ∃ trace : Nat → Environment,
+      trace 0 = current ∧ (trace current.bindings.length).bindings = [] ∧
+      (∀ position < current.bindings.length, ∃ (index : Nat) (identity : StorageId),
+        BindingMap.nextRelease (trace position).bindings (trace position).bindings = some (index, identity) ∧
+        (trace position).retireBinding index = some (trace (position + 1))) ∧
+      (∀ position ≤ current.bindings.length,
+        ConfigurationTyped program context result ⟨trace position, .result value, .restore caller :: stack⟩ ∧
+        (trace position).restore caller = current.restore caller) := by
+  rcases typed.restore_next with empty | ⟨index, entry, next, chosen, produced, order, same, nextTyped⟩
+  · refine ⟨fun _ => current, rfl, empty, ?_, ?_⟩
+    · intro position bound
+      simp [empty] at bound
+    · intro position bound
+      exact ⟨typed, rfl⟩
+  · have size := AddressedEnvironment.retireBinding.length_step produced
+    obtain ⟨trace, start, finish, steps, states⟩ := nextTyped.restore_retirement_trace
+    refine ⟨(fun position => match position with | 0 => current | position + 1 => trace position), rfl, ?_, ?_, ?_⟩
+    · simpa only [← size] using finish
+    · intro position bound
+      cases position with
+      | zero => exact ⟨index, entry.2, chosen, by simpa only [start] using produced⟩
+      | succ position => exact steps position (by omega)
+    · intro position bound
+      cases position with
+      | zero => exact ⟨typed, rfl⟩
+      | succ position =>
+        obtain ⟨pointTyped, pointSame⟩ := states position (by omega)
+        exact ⟨pointTyped, pointSame.trans same⟩
+termination_by current.bindings.length
 
 
 /-- Every actually executed callee-owned retirement prefix retains the full

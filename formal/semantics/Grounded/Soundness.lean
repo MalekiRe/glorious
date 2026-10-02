@@ -84,6 +84,13 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               PathType program observer cell.type fields (.nominal nominal) →
               program.data nominal = some declaration → declaration.restriction = some .exact →
               ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty) ∧
+      (∃ trace : Nat → Environment, trace 0 = current ∧ trace count = after ∧
+        (∀ position < count, ∃ (index : Nat) (identity : StorageId),
+          BindingMap.nextRelease (List.take (count - position) (trace position).bindings) (trace position).bindings = some (index, identity) ∧
+          index < count - position ∧ (trace position).retireBinding index = some (trace (position + 1))) ∧
+        (∀ position ≤ count,
+          ConfigurationTyped program final (.one type) ⟨trace position, .result value, .scope (count - position) :: stack⟩ ∧
+          (trace position).exitScope (count - position) = some after)) ∧
       (count = 0 ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
         BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
         index < count ∧ current.retireBinding index = some next ∧
@@ -163,7 +170,12 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
-            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_, ?_⟩
+            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_, ?_, ?_⟩
+          · obtain ⟨trace, start, finish, steps, states⟩ := original.scope_retirement_trace
+            refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), steps, ?_⟩
+            intro position bound
+            obtain ⟨pointTyped, pointSame⟩ := states position bound
+            exact ⟨pointTyped, pointSame.trans produced⟩
           · exact original.scope_next
           · intro index entry next selected inside produced
             exact ((checked.soundness checkedProgram store issued run).2.2.1).trans
@@ -660,6 +672,14 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       after.scope = caller ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
       (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) ∧
+      (∃ trace : Nat → Environment,
+        trace 0 = current ∧ (trace current.bindings.length).bindings = [] ∧
+        (∀ position < current.bindings.length, ∃ (index : Nat) (identity : StorageId),
+          BindingMap.nextRelease (trace position).bindings (trace position).bindings = some (index, identity) ∧
+          (trace position).retireBinding index = some (trace (position + 1))) ∧
+        (∀ position ≤ current.bindings.length,
+          ConfigurationTyped program final (.one type) ⟨trace position, .result value, .restore caller :: stack⟩ ∧
+          (trace position).restore caller = some after)) ∧
       (current.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
         BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
         current.retireBinding index = some next ∧
@@ -708,9 +728,14 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             AddressedEnvironment.restore.progress currentStore callerTyped different
           have step : Step program ⟨current, .result value, .restore caller :: stack⟩
               ⟨after, .result value, stack⟩ := .restore restored
-          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved, original.restore_next, ?_,
+          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved, ?_, original.restore_next, ?_,
             (fun _ _ _ split => original.ownership_safe.return_retirement step split)⟩
           · simp [AddressedEnvironment.scope, activation, bindings]
+          · obtain ⟨trace, start, finish, steps, states⟩ := original.restore_retirement_trace
+            refine ⟨trace, start, finish, steps, ?_⟩
+            intro position bound
+            obtain ⟨pointTyped, pointSame⟩ := states position bound
+            exact ⟨pointTyped, pointSame.trans restored⟩
           · intro front back middle split executed
             have owned : ∀ identity ∈ front, identity ∈ current.bindings.map Prod.snd := by
               intro identity member

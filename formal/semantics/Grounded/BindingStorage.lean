@@ -964,6 +964,24 @@ def AddressedEnvironment.retireBinding (current : AddressedEnvironment) (index :
   let heap ← current.heap.retire entry.2
   pure { current with heap := heap, bindings := current.bindings.eraseIdx index }
 
+/-- Every successful synchronized retirement consumes exactly one binding. -/
+theorem AddressedEnvironment.retireBinding.length_step {before after : AddressedEnvironment}
+    {index : Nat} (retired : before.retireBinding index = some after) :
+    after.bindings.length + 1 = before.bindings.length := by
+  cases selected : before.bindings[index]? with
+  | none => simp [AddressedEnvironment.retireBinding, selected] at retired
+  | some entry =>
+    cases released : before.heap.retire entry.2 with
+    | none => simp [AddressedEnvironment.retireBinding, selected, released] at retired
+    | some heap =>
+      have same : { before with heap := heap, bindings := before.bindings.eraseIdx index } = after := by
+        simpa [AddressedEnvironment.retireBinding, selected, released] using retired
+      cases same
+      obtain ⟨bound, _⟩ := List.getElem?_eq_some_iff.mp selected
+      simp only [List.length_eraseIdx_of_lt bound]
+      omega
+
+
 theorem AddressedEnvironment.retireBinding.progress {current : AddressedEnvironment}
     {context : List (BindingId × BindingState)}
     (typed : BindingMap.Typed program current.heap current.activation current.bindings context)
