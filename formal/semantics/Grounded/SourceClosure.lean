@@ -1677,5 +1677,53 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
   · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, run.call_cleanup⟩
   · exact .inr ⟨trace, infinite, safe⟩
 
+/-- Ordered Copy/move inputs and complete invocation share one pre-state
+compatibility contract. Actual inputs retain their original observations; no
+intermediate readiness, supplied argument values or callee termination is assumed. -/
+theorem SourceClosure.Admitted.compatible_call_behavior {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {name : FunctionName} {identity : Nat}
+    (selected : closure.functionNames home name = some identity)
+    {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
+    {before : FlowContext} {inputs : List (Expr × Ty)}
+    (arguments : inputs.map Prod.snd = declaration.parameters.map fun parameter => parameter.2.type)
+    (compatible : inputs.Pairwise (fun left right => InputCompatible program home before.slots left.1 right.1))
+    (ordinary : ∀ input ∈ inputs, ∃ place, input.1 = .read place ∨ input.1 = .move place)
+    (inputsAdmitted : ∀ input ∈ inputs, ∃ after, HasType program home before input.1 input.2 after)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ final middle values bindings,
+      HasType program home before (.call identity (inputs.map Prod.fst)) declaration.result final ∧
+      EvaluatesMany program environment (inputs.map Prod.fst) values middle ∧
+      values.map some = inputs.map (fun input => input.1.inputObservation program environment) ∧
+      prepareBindings declaration.parameters values = some bindings ∧
+      Run program ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩
+        ⟨enterBindings middle.heap middle.supply bindings, .expression declaration.body, [.restore middle.scope]⟩ ∧
+      ((∃ after value, Evaluates program environment (.call identity (inputs.map Prod.fst)) value after ∧
+        ValueHasType program value declaration.result ∧
+        BindingMap.Typed program after.heap after.activation after.bindings final ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+        (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+        ∀ identity ∈ (enterBindings middle.heap middle.supply bindings).bindings.map Prod.snd,
+          after.heap.Retired identity) ∨
+      (∃ trace, InfiniteRun program ⟨environment, .expression (.call identity (inputs.map Prod.fst)), []⟩ trace ∧
+        ∀ index, ConfigurationTyped program final (.one declaration.result) (trace index) ∧
+          AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+          (trace index).OwnershipSafe program)) := by
+  obtain ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, typed, _⟩ :=
+    HasType.compatible_call_entry admitted.checked declared (admitted.resolved_visibility selected declared)
+      arguments compatible ordinary inputsAdmitted store issued
+  refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, ?_⟩
+  rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe⟩ | ⟨trace, infinite, _⟩
+  · have run := entered.trans returned
+    have framed := (checked.soundness admitted.checked store issued run).2.2.1
+    exact .inl ⟨after, value, run, resident, stored, framed, safe, returned.body_return_retires⟩
+  · obtain ⟨whole, execution⟩ := entered.prepend_infinite infinite
+    refine .inr ⟨whole, execution, ?_⟩
+    intro index
+    have safe := checked.soundness admitted.checked store issued (execution.prefix index)
+    exact ⟨safe.1, safe.2.2.1, safe.2.2.2.2⟩
+
 
 end Grounded

@@ -326,6 +326,21 @@ theorem Run.excludes_infinite {before after : Configuration}
     have same := head.unique first
     exact ih done (fun index => trace (index + 1)) ⟨same, fun index => infinite.steps (index + 1)⟩
 
+/-- Finite setup composes with an infinite execution using only actual steps. -/
+theorem Run.prepend_infinite {before after : Configuration} (run : Run program before after)
+    {trace : Nat → Configuration} (infinite : InfiniteRun program after trace) :
+    ∃ whole, InfiniteRun program before whole := by
+  induction run with
+  | refl => exact ⟨trace, infinite⟩
+  | @step before middle after head tail ih =>
+    obtain ⟨continued, execution⟩ := ih infinite
+    refine ⟨(fun index => match index with | 0 => before | index + 1 => continued index), rfl, ?_⟩
+    intro index
+    cases index with
+    | zero => simpa only [execution.initial] using head
+    | succ index => exact execution.steps index
+
+
 /-- Reachable-state progress constructs an unbounded execution when no terminal
 state is reachable. Source consumers derive progress from preservation. -/
 theorem Run.terminal_or_infinite (before : Configuration)

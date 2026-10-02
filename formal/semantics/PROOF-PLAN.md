@@ -3138,3 +3138,32 @@ standard Lean axioms. The scope remains the current logical owned-value machine;
 custom destruction, loans, physical resource limits and whole-language completion
 remain open. No unit tests or concrete examples were added.
 
+## Ordered pre-state-compatible inputs reach complete invocation behavior
+
+`SourceClosure.Admitted.compatible_call_behavior` now consumes the constructive
+ordered Copy/move batch and entry theorem all the way through maximal invocation.
+It derives original-declaration visibility from source resolution, retains each
+argument's original pre-state observation, and constructs parameter preparation
+and the actual run to the callee body with its return frame.
+
+From that reached configuration, general preservation/progress yields either an
+actual typed return with caller consumption framing and permanent retirement of
+every callee parameter cell, or an infinite actual call execution preserving
+typing, framing and ownership safety at every index. `Run.prepend_infinite`
+composes the constructed finite setup with the divergent callee execution using
+the existing steps. There is no second invocation evaluator.
+
+The compatibility premise is the existing ordered `InputCompatible` relation,
+not blanket disjointness. Copy overlap is retained, and moves preserve pending
+observations through the shared address-framing producer. All input admission
+uses the original context; actual values, intermediate readiness and body
+termination are conclusions or absent, never supplied successful execution.
+Inputs here are resolved Core read/move places, not a newly implemented source
+parser or borrowed-input contract.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+of finite/infinite composition and the public source-selected call theorem found
+only standard Lean axioms. No examples or unit tests were added. Reference/loan
+compatibility, physical exhaustion and the other whole-language obligations remain
+open; this closes the maximal-behavior consumer of the logical Copy/move chain.
+
