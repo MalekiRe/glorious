@@ -580,9 +580,17 @@ theorem NamedExpr.Elaborates.correctness {program : Program} {home : Module}
     ∃ value after, Evaluates program environment core value after ∧ ValueHasType program value type ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (∃ principal, type.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter →
-        other = value ∧ otherAfter = after :=
-  Grounded.correctness checkedProgram (elaborated.checked slots) finite store issued
+        other = value ∧ otherAfter = after := by
+  obtain ⟨value, after, executed, resident, afterTyped, afterIssued, framed, unique⟩ :=
+    Grounded.correctness checkedProgram (elaborated.checked slots) finite store issued
+  obtain ⟨principal, classified, _⟩ := Ty.principal_exists resident.finite
+  exact ⟨value, after, executed, resident, afterTyped, afterIssued, framed,
+    ⟨principal, classified, fun _ _ original originalClass =>
+      (original.principal resident originalClass).unique classified⟩, unique⟩
 
 
 end Grounded

@@ -1344,6 +1344,9 @@ theorem SourceClosure.Admitted.correctness {packages : List PackageSource} {clos
     ∃ value after, Evaluates program environment core value after ∧ ValueHasType program value type ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      (∃ principal, type.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
       ∀ other otherAfter, Evaluates program environment core other otherAfter → other = value ∧ otherAfter = after :=
   admitted.2.2.2.2.1.correctness elaborated slots finite store issued
 

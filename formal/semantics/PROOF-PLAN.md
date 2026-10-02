@@ -4317,3 +4317,11 @@ class when an expression constructs a different value, or model references.
 All 30 strict jobs passed. Inspected resident-principal, completed-source and
 maximal-behavior proof closures use only the standard three Lean axioms.
 Custom Drop, borrowing and the remaining full-language obligations stay open.
+
+The finite-call source correctness chain also constructs the returned principal
+from the produced resident and proves it agrees with every other valid typing
+and principal interpretation of that resident. Named-expression, named-program
+and source-closure consumers carry the result with their constructed execution,
+heap framing and execution uniqueness. No result typing or principal is supplied
+as a future-state assumption. All 30 strict jobs and inspected source-correctness
+and maximal-behavior proof dependencies passed after this integration.
