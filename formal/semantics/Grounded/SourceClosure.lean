@@ -1692,6 +1692,25 @@ theorem SourceClosure.Admitted.bottom_tuple_head {packages : List PackageSource}
   obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
   exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
+/-- Bottom propagation cannot change the selected nominal identity on an
+actual source-record return. Execution supplies the resident; admission does not. -/
+theorem SourceClosure.Admitted.record_return_type {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before after : FlowContext}
+    {identity : Nat} {tag : Option Nat} {fields : List (String × NamedExpr)}
+    {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.record identity tag fields) core type after)
+    (slots : before.slots = scope.context) {environment final : Environment} {value : Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    (executed : Evaluates program environment core value final) :
+    type = .nominal identity := by
+  have resident := ((elaborated.checked slots).evaluation_soundness admitted.checked store issued executed).1
+  cases elaborated with
+  | record complete built =>
+    exact built.result_shape.resolve_left resident.type_ne_never
+
 /-- Projection from a bottom computation neither produces a field value nor
 requires disposal authority for an aggregate that never exists. -/
 theorem SourceClosure.Admitted.bottom_projection {packages : List PackageSource}

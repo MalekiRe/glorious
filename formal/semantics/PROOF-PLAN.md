@@ -5238,3 +5238,14 @@ soundness/behavior and no-exact-cleanup proofs use only propext,
 Classical.choice and Quot.sound. General operand-list outcome propagation,
 unreachable continuation checking and all fourteen completion families remain
 open.
+
+## Returned record types preserve nominal identity
+
+SourceClosure.Admitted.record_return_type connects the inferred record-result
+index to actual execution. General evaluation soundness supplies the returned
+resident, excluding bottom; NamedRecordBuild.result_shape then fixes its type
+to the selected nominal identity. No successful execution or resident is added
+to source admission. All 30 strict Lean jobs passed, and the public theorem
+uses only propext, Classical.choice and Quot.sound. This closes the returning
+side of the record result-index migration, not operand-list outcomes or any
+of the fourteen still-open whole-language completion families.
