@@ -1023,6 +1023,30 @@ theorem SourceClosure.call_dependency {packages : List PackageSource} {closure :
     · obtain ⟨dependency, member, decoded, target⟩ := PackageSource.resolveDependency_selected found
       exact ⟨package, included, owner, dependency, member, target, normalized, decoded⟩
 
+/-- Candidate access is transported through actual source elaboration to the
+runtime declaration. Alias visibility cannot replace original authority. -/
+theorem SourceClosure.Admitted.candidate_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {caller home : Module} {name : Identifier} {identity : Nat}
+    (candidate : VisibleFunctionCandidate closure.functions closure.imports caller home name identity)
+    {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
+    declaration.visibility.Allows declaration.home caller := by
+  obtain ⟨_, cores, elaborated, functions, _⟩ := admitted.2.2.2.2.1
+  rw [functions] at declared
+  obtain ⟨origin, found, body⟩ := elaborated.selected_core declared
+  have authorized := candidate.origin_access found
+  cases body
+  exact authorized
+
+theorem SourceClosure.Admitted.resolved_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {caller : Module} {name : FunctionName} {identity : Nat}
+    (selected : closure.functionNames caller name = some identity)
+    {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
+    declaration.visibility.Allows declaration.home caller := by
+  obtain ⟨_, _, _, _, resolution⟩ := closure.functionNames_selected.mp selected
+  exact admitted.candidate_visibility resolution.1 declared
+
 /-- A real dependency binding and visible candidate construct authorized
 selection and source call elaboration, then the existing machine theorem proves
 preservation, progress and framing for the emitted call. -/
@@ -1038,7 +1062,7 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
     (reachable : ModuleReachable closure.modules home ⟨dependency.target, children⟩)
     (candidate : VisibleFunctionCandidate closure.functions closure.imports home ⟨dependency.target, children⟩ spelling identity)
     (declared : program.functions identity = some declaration)
-    (visible : declaration.visibility.Allows declaration.home home)
+
     (argumentsTyped : NamedExprsElaborate program closure.functionNames home scope before
       arguments inputs (declaration.parameters.map fun parameter => parameter.2.type) after)
     (slots : before.slots = scope.context) {environment : Environment}
@@ -1063,7 +1087,7 @@ theorem SourceClosure.Admitted.dependency_call_soundness {packages : List Packag
   have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
       (.call (.qualified (.dependency normalized children) spelling) arguments)
       (.call identity inputs) declaration.result after :=
-    .call trivial resolved declared visible argumentsTyped
+    .call trivial resolved declared (admitted.candidate_visibility candidate declared) argumentsTyped
   exact admitted.soundness elaborated slots store issued run
 
 
@@ -1076,7 +1100,7 @@ theorem SourceClosure.Admitted.resolves {packages : List PackageSource} {closure
   obtain ⟨_, cores, elaborated, functions, _⟩ := admitted.2.2.2.2.1
   obtain ⟨_, _, _, _, resolution⟩ := closure.functionNames_selected.mp resolved
   have base := Grounded.functionNames.selected_iff.mpr resolution
-  obtain ⟨source, selected⟩ := Grounded.functionNames.selected base
+  obtain ⟨source, selected, _⟩ := Grounded.functionNames.selected base
   obtain ⟨core, emitted, checked⟩ := elaborated.selected selected
   exact ⟨source, core, selected, by rw [functions]; exact emitted, checked⟩
 
@@ -1332,8 +1356,8 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
     (access : PackageAccess packages caller.package edge.home.package)
     (reachable : ModuleReachable closure.modules caller edge.home)
     (bindingVisible : edge.visibility.Allows edge.home caller) :
-    ∃ identity declaration, closure.functionNames caller name = some identity ∧
-      program.functions identity = some declaration ∧
+    ∃ identity declaration, program.functions identity = some declaration ∧
+      (closure.functionNames caller name = some identity ↔ declaration.visibility.Allows declaration.home caller) ∧
       declaration.visibility.Allows declaration.home edge.home ∧
       ∀ {scope : SourceScope} {before after : FlowContext} {arguments : List NamedExpr} {inputs : List Expr},
         name.Unshadowed scope → declaration.visibility.Allows declaration.home caller →
@@ -1353,24 +1377,30 @@ theorem SourceClosure.Admitted.imported_call_soundness {packages : List PackageS
     List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
   have valid := admitted.2.2.2.1
   obtain ⟨identity, candidate, origin, originSelected, originVisible⟩ := valid.explicit_binding member kind
-  have selectedBinding := valid.resolve_existing (valid.2.2.1 edge member).1
-    ⟨edge.visibility, candidate, bindingVisible⟩
-  have selected : closure.functionNames caller name = some identity := by
+  obtain ⟨_, cores, bodies, functions, _⟩ := admitted.2.2.2.2.1
+  obtain ⟨declaration, coreSelected, elaborated⟩ := bodies.selected originSelected
+  have declared : program.functions identity = some declaration := by rw [functions]; exact coreSelected
+  have visibilityEq : declaration.visibility = origin.visibility ∧ declaration.home = origin.home := by
+    cases elaborated
+    exact ⟨rfl, rfl⟩
+  have authorized : declaration.visibility.Allows declaration.home edge.home := by
+    simpa only [visibilityEq.1, visibilityEq.2] using originVisible
+  have select : declaration.visibility.Allows declaration.home caller →
+      closure.functionNames caller name = some identity := by
+    intro visible
+    have originalAccess : FunctionAccess closure.functions identity caller :=
+      ⟨origin, originSelected, by simpa only [visibilityEq.1, visibilityEq.2] using visible⟩
+    have selectedBinding := valid.resolve_existing (valid.2.2.1 edge member).1
+      ⟨edge.visibility, candidate, bindingVisible, originalAccess⟩
     apply closure.functionNames_selected.mpr
     refine ⟨edge.home, namespaceResolved, access, reachable, ?_⟩
     rw [spelling]
     exact Grounded.functionNames.selected_iff.mp selectedBinding
-  obtain ⟨actual, declaration, sourceSelected, declared, elaborated⟩ := admitted.resolves selected
-  have originEq := Option.some.inj (originSelected.symm.trans sourceSelected)
-  subst actual
-  have authorized : declaration.visibility.Allows declaration.home edge.home := by
-    cases elaborated
-    exact originVisible
-  refine ⟨identity, declaration, selected, declared, authorized, ?_⟩
+  refine ⟨identity, declaration, declared, ⟨fun selected => admitted.resolved_visibility selected declared, select⟩, authorized, ?_⟩
   intro scope before after arguments inputs unshadowed visible argumentsTyped slots environment store issued state run
   have elaborated : NamedExpr.Elaborates program closure.functionNames caller scope before
       (.call name arguments) (.call identity inputs) declaration.result after :=
-    .call unshadowed selected declared visible argumentsTyped
+    .call unshadowed (select visible) declared visible argumentsTyped
   exact admitted.soundness elaborated slots store issued run
 
 
@@ -1537,7 +1567,7 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
     ∃ declaration, closure.functionNames loaded.home (.unqualified name) = some identity ∧
       program.functions identity = some declaration ∧
       ∀ {scope : SourceScope} {before after : FlowContext} {arguments : List NamedExpr} {inputs : List Expr},
-        scope.resolve name = none → declaration.visibility.Allows declaration.home loaded.home →
+        scope.resolve name = none →
         NamedExprsElaborate program closure.functionNames loaded.home scope before arguments inputs
           (declaration.parameters.map fun parameter => parameter.2.type) after →
         before.slots = scope.context →
@@ -1568,10 +1598,10 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
   have selected := admitted.local_selected included selectedCore
   obtain ⟨_, declaration, _, declared, _⟩ := admitted.resolves selected
   refine ⟨declaration, selected, declared, ?_⟩
-  intro scope before after arguments inputs lexical visible argumentsTyped slots environment store issued state run
+  intro scope before after arguments inputs lexical argumentsTyped slots environment store issued state run
   have elaborated : NamedExpr.Elaborates program closure.functionNames loaded.home scope before
       (.call (.unqualified name) arguments) (.call identity inputs) declaration.result after :=
-    .call lexical selected declared visible argumentsTyped
+    .call lexical selected declared (admitted.resolved_visibility selected declared) argumentsTyped
   exact admitted.soundness elaborated slots store issued run
 
 
@@ -1587,37 +1617,6 @@ theorem SourceClosure.Admitted.import_request_visibility {packages : List Packag
   · obtain ⟨package, _, _, selected⟩ := resolvePackagePrelude.origin automatic
     obtain ⟨_, _, target, _, rfl⟩ := (package.preludeRequest_selected source).mp selected
     simp [Visibility.ValidAt, Visibility.Allows]
-
-
-/-- Every explicit source import checks the original emitted declaration's
-authority, even when unused or reached through public aliases. This consumes
-the same inclusion, grouped-import emission and function elaboration products
-as invocation; no file-based or alias-based privacy authority is substituted. -/
-theorem SourceClosure.Admitted.source_import_origin_visibility {packages : List PackageSource}
-    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
-    {source : FunctionImportSyntax} (sourceIncluded : source ∈ loaded.importRequests packages)
-    {target : Module}
-    (path : source.target.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some target)
-    {edge : FunctionImport}
-    (emitted : ImportSelection.Emits loaded.home source.visibility target source.selection (.binding edge))
-    {sourceName localName : Identifier} (kind : edge.kind = .explicit sourceName localName)
-    {identity : Nat}
-    (candidate : VisibleFunctionCandidate closure.functions closure.imports edge.home edge.target sourceName identity)
-    {declaration : FunctionDecl} (declared : program.functions identity = some declaration) :
-    declaration.visibility.Allows declaration.home loaded.home := by
-  have entryMember := closure.import_emitted included sourceIncluded path emitted
-  have member : edge ∈ closure.imports :=
-    List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
-  obtain ⟨_, cores, elaborated, functions, _⟩ := admitted.2.2.2.2.1
-  rw [functions] at declared
-  obtain ⟨origin, found, body⟩ := elaborated.selected_core declared
-  have authorized := admitted.2.2.2.1.explicit_origin member kind candidate found
-  have owner : edge.home = loaded.home := emitted.home
-  rw [owner] at authorized
-  cases body
-  exact authorized
-
 
 
 

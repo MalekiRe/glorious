@@ -290,6 +290,20 @@ theorem ExplicitFunctionBinding.imports_congr {sources : List NamedFunction}
   simp only [ExplicitFunctionBinding, same]
 
 
+/-- Access is checked at the original declaration, not merely at the most
+recent alias. This same contract guards discovery, import hops and selection. -/
+def FunctionAccess (sources : List NamedFunction) (identity : Nat) (caller : Module) : Prop :=
+  ∃ declaration, sources[identity]? = some declaration ∧
+    declaration.visibility.Allows declaration.home caller
+
+theorem FunctionAccess.allows {sources : List NamedFunction} {identity : Nat} {caller : Module}
+    (access : FunctionAccess sources identity caller) {declaration : NamedFunction}
+    (found : sources[identity]? = some declaration) :
+    declaration.visibility.Allows declaration.home caller := by
+  obtain ⟨original, selected, allowed⟩ := access
+  cases Option.some.inj (selected.symm.trans found)
+  exact allowed
+
 /-- One declaration-seeded path producer, parameterized by admissible import
 edges. Discovery and priority selection share this relation. -/
 inductive FunctionProvenance (sources : List NamedFunction) (imports : List FunctionImport)
@@ -300,7 +314,8 @@ inductive FunctionProvenance (sources : List NamedFunction) (imports : List Func
   | imported {edge name sourceName identity visibility}
       (member : edge ∈ imports) (selected : selects edge name sourceName)
       (target : FunctionProvenance sources imports selects edge.target sourceName identity visibility)
-      (accessible : visibility.Allows edge.target edge.home) :
+      (accessible : visibility.Allows edge.target edge.home)
+      (authorized : FunctionAccess sources identity edge.home) :
       FunctionProvenance sources imports selects edge.home name identity edge.visibility
 
 /-- Discovery enforces explicit-binding shadowing before comparing glob and
@@ -326,7 +341,7 @@ def GlobFunctionBinding (sources : List NamedFunction) (imports : List FunctionI
     (home : Module) (name : Identifier) : Prop :=
   ∃ edge ∈ imports, edge.home = home ∧ edge.kind = .glob ∧
     ∃ identity visibility, RawFunctionCandidate sources imports edge.target name identity visibility ∧
-      visibility.Allows edge.target edge.home
+      visibility.Allows edge.target edge.home ∧ FunctionAccess sources identity edge.home
 
 theorem RawFunctionCandidate.transport_imports {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
@@ -335,8 +350,8 @@ theorem RawFunctionCandidate.transport_imports {sources : List NamedFunction}
     RawFunctionCandidate sources second home name identity visibility := by
   induction candidate with
   | declaration found => exact .declaration found
-  | imported member selected _ accessible ih =>
-    refine .imported ((same _).mp member) ?_ ih accessible
+  | imported member selected _ accessible authorized ih =>
+    refine .imported ((same _).mp member) ?_ ih accessible authorized
     cases selected with
     | explicit kind => exact .explicit kind
     | glob kind unshadowed =>
@@ -379,8 +394,8 @@ theorem FunctionCandidate.raw {sources : List NamedFunction} {imports : List Fun
     RawFunctionCandidate sources imports home name identity visibility := by
   induction candidate with
   | declaration found => exact .declaration found
-  | imported member selected _ accessible ih =>
-    apply FunctionProvenance.imported member _ ih accessible
+  | imported member selected _ accessible authorized ih =>
+    apply FunctionProvenance.imported member _ ih accessible authorized
     cases selected with
     | explicit kind => exact .explicit kind
     | glob kind unshadowed => exact .glob kind unshadowed
@@ -393,7 +408,7 @@ theorem FunctionCandidate.origin {sources : List NamedFunction} {imports : List 
     ∃ declaration, sources[identity]? = some declaration := by
   induction candidate with
   | declaration found => exact ⟨_, found⟩
-  | imported _ _ _ _ ih => exact ih
+  | imported _ _ _ _ _ ih => exact ih
 
 /-- Leastness excludes unsupported fixed points, including self-supporting
 cycles. The comparison relation is arbitrary and must satisfy exactly the
@@ -404,13 +419,14 @@ theorem FunctionCandidate.least {sources : List NamedFunction} {imports : List F
       relation declaration.home declaration.name identity declaration.visibility)
     (steps : ∀ edge name sourceName identity visibility, edge ∈ imports →
       edge.Selects sources imports name sourceName → relation edge.target sourceName identity visibility →
-      visibility.Allows edge.target edge.home → relation edge.home name identity edge.visibility)
+      visibility.Allows edge.target edge.home → FunctionAccess sources identity edge.home →
+      relation edge.home name identity edge.visibility)
     {home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
     (candidate : FunctionCandidate sources imports home name identity visibility) :
     relation home name identity visibility := by
   induction candidate with
   | declaration found => exact declarations _ _ found
-  | imported member selected _ accessible ih => exact steps _ _ _ _ _ member selected ih accessible
+  | imported member selected _ accessible authorized ih => exact steps _ _ _ _ _ member selected ih accessible authorized
 
 
 /-- Only accessible candidates participate in lookup. Repeated routes to the
@@ -418,7 +434,7 @@ same identity are not an overload set or an ambiguity. -/
 def VisibleFunctionCandidate (sources : List NamedFunction) (imports : List FunctionImport)
     (caller home : Module) (name : Identifier) (identity : Nat) : Prop :=
   ∃ visibility, FunctionCandidate sources imports home name identity visibility ∧
-    visibility.Allows home caller
+    visibility.Allows home caller ∧ FunctionAccess sources identity caller
 
 def FunctionResolution (sources : List NamedFunction) (imports : List FunctionImport)
     (caller home : Module) (name : Identifier) (identity : Nat) : Prop :=
@@ -461,9 +477,10 @@ theorem functionNames.selected_iff {sources : List NamedFunction} {imports : Lis
 theorem functionNames.selected {sources : List NamedFunction} {imports : List FunctionImport}
     {caller home : Module} {name : Identifier} {identity : Nat}
     (resolved : functionNames sources imports caller home name = some identity) :
-    ∃ declaration, sources[identity]? = some declaration := by
-  obtain ⟨visibility, candidate, _⟩ := (functionNames.selected_iff.mp resolved).1
-  exact candidate.origin
+    ∃ declaration, sources[identity]? = some declaration ∧
+      declaration.visibility.Allows declaration.home caller := by
+  obtain ⟨_, _, _, authorized⟩ := (functionNames.selected_iff.mp resolved).1
+  exact authorized
 
 /-- An unseeded cycle cannot resolve, whatever its length or visibility. -/
 theorem functionNames.empty (imports : List FunctionImport) (caller home : Module) (name : Identifier) :
@@ -471,7 +488,7 @@ theorem functionNames.empty (imports : List FunctionImport) (caller home : Modul
   cases found : functionNames [] imports caller home name with
   | none => rfl
   | some identity =>
-    obtain ⟨declaration, impossible⟩ := functionNames.selected found
+    obtain ⟨declaration, impossible, _⟩ := functionNames.selected found
     simp at impossible
 
 /-- Actual conflicting declaration identities are rejected, rather than chosen
@@ -495,8 +512,8 @@ theorem FunctionCandidate.transport_imports {sources : List NamedFunction}
     FunctionCandidate sources second home name identity visibility := by
   induction candidate with
   | declaration found => exact .declaration found
-  | imported member selected _ accessible ih =>
-    refine .imported ((same _).mp member) ?_ ih accessible
+  | imported member selected _ accessible authorized ih =>
+    refine .imported ((same _).mp member) ?_ ih accessible authorized
     cases selected with
     | explicit kind => exact .explicit kind
     | glob kind unshadowed =>
@@ -550,9 +567,7 @@ def FunctionImportsValid (modules : List Module) (sources : List NamedFunction)
   (∀ declaration ∈ sources, declaration.home ∈ modules) ∧
   (∀ edge ∈ imports, edge.home ∈ modules ∧ edge.target ∈ modules ∧
     ∀ sourceName localName, edge.kind = .explicit sourceName localName →
-      ∃ identity, VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity ∧
-        ∃ declaration, sources[identity]? = some declaration ∧
-          declaration.visibility.Allows declaration.home edge.home) ∧
+      ∃ identity, VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity) ∧
   (∀ caller home, home ∈ modules → ∀ name first second,
     VisibleFunctionCandidate sources imports caller home name first →
     VisibleFunctionCandidate sources imports caller home name second → first = second)
@@ -577,9 +592,9 @@ theorem FunctionImportsValid.explicit_binding {modules : List Module} {sources :
     ∃ identity, FunctionCandidate sources imports edge.home localName identity edge.visibility ∧
       ∃ declaration, sources[identity]? = some declaration ∧
         declaration.visibility.Allows declaration.home edge.home := by
-  obtain ⟨identity, ⟨visibility, candidate, accessible⟩, declaration, found, authorized⟩ :=
+  obtain ⟨identity, visibility, candidate, accessible, authorization⟩ :=
     (valid.2.2.1 edge member).2.2 sourceName localName kind
-  exact ⟨identity, .imported member (.explicit kind) candidate accessible, declaration, found, authorized⟩
+  exact ⟨identity, .imported member (.explicit kind) candidate accessible authorization, authorization⟩
 
 
 theorem FunctionImportsValid.imports_congr {modules : List Module} {sources : List NamedFunction}
@@ -589,23 +604,36 @@ theorem FunctionImportsValid.imports_congr {modules : List Module} {sources : Li
     VisibleFunctionCandidate, FunctionCandidate.imports_congr same]
 
 
-/-- An alias cannot launder declaration privacy at an explicit import. The
-candidate may have any finite re-export provenance; uniqueness identifies it
-with the declaration authorized by the actual import admission rule. -/
-theorem FunctionImportsValid.explicit_origin {modules : List Module} {sources : List NamedFunction}
-    {imports : List FunctionImport} (valid : FunctionImportsValid modules sources imports)
-    {edge : FunctionImport} (member : edge ∈ imports) {sourceName localName : Identifier}
-    (kind : edge.kind = .explicit sourceName localName) {identity : Nat}
-    (candidate : VisibleFunctionCandidate sources imports edge.home edge.target sourceName identity)
+/-- Visible lookup itself supplies original-declaration authority; import
+admission and caller-namespace uniqueness are not privacy evidence. -/
+theorem VisibleFunctionCandidate.origin_access {sources : List NamedFunction} {imports : List FunctionImport}
+    {caller home : Module} {name : Identifier} {identity : Nat}
+    (candidate : VisibleFunctionCandidate sources imports caller home name identity)
     {declaration : NamedFunction} (declared : sources[identity]? = some declaration) :
-    declaration.visibility.Allows declaration.home edge.home := by
-  obtain ⟨other, selected, origin, found, authorized⟩ :=
-    (valid.2.2.1 edge member).2.2 sourceName localName kind
-  have same := valid.2.2.2 edge.home edge.target (valid.2.2.1 edge member).2.1
-    sourceName identity other candidate selected
-  subst other
-  cases Option.some.inj (found.symm.trans declared)
-  exact authorized
+    declaration.visibility.Allows declaration.home caller :=
+  candidate.choose_spec.2.2.allows declared
+/-- No alias or re-export path can select a declaration outside its own
+visibility, even if every intervening binding is public. -/
+theorem functionNames.inaccessible {sources : List NamedFunction} {imports : List FunctionImport}
+    {caller home : Module} {name : Identifier} {identity : Nat} {declaration : NamedFunction}
+    (declared : sources[identity]? = some declaration)
+    (hidden : ¬ declaration.visibility.Allows declaration.home caller) :
+    functionNames sources imports caller home name ≠ some identity := by
+  intro selected
+  exact hidden ((functionNames.selected_iff.mp selected).1.origin_access declared)
+
+/-- A glob cannot suppress the automatic tier using declarations that are
+inaccessible at the importing module, regardless of their alias visibility. -/
+theorem GlobFunctionBinding.absent_of_private_origins {sources : List NamedFunction} {imports : List FunctionImport}
+    {home : Module} {name : Identifier}
+    (hidden : ∀ edge ∈ imports, edge.home = home → edge.kind = .glob →
+      ∀ identity visibility, RawFunctionCandidate sources imports edge.target name identity visibility →
+        ∀ declaration, sources[identity]? = some declaration →
+          ¬ declaration.visibility.Allows declaration.home home) :
+    ¬ GlobFunctionBinding sources imports home name := by
+  rintro ⟨edge, member, owned, kind, identity, visibility, candidate, _, declaration, declared, authorized⟩
+  exact hidden edge member owned kind identity visibility candidate declaration declared (owned ▸ authorized)
+
 
 
 /-- A real authored-glob candidate excludes direct automatic-prelude selection
@@ -615,14 +643,15 @@ theorem FunctionImport.Selects.prelude_excluded {sources : List NamedFunction} {
     (member : ordinary ∈ imports) (kind : ordinary.kind = .glob)
     (sameHome : ordinary.home = automatic.home) (automaticKind : automatic.kind = .prelude)
     (target : FunctionCandidate sources imports ordinary.target name identity visibility)
-    (accessible : visibility.Allows ordinary.target ordinary.home) :
+    (accessible : visibility.Allows ordinary.target ordinary.home)
+    (authorized : FunctionAccess sources identity ordinary.home) :
     ¬ automatic.Selects sources imports name name := by
   intro selected
   cases selected with
   | explicit selectedKind => simp [automaticKind] at selectedKind
   | glob selectedKind _ => simp [automaticKind] at selectedKind
   | prelude _ _ noGlob =>
-    exact noGlob ⟨ordinary, member, sameHome, kind, identity, visibility, target.raw, accessible⟩
+    exact noGlob ⟨ordinary, member, sameHome, kind, identity, visibility, target.raw, accessible, authorized⟩
 
 /-- With one authored incoming glob, any number of automatic prelude edges
 cannot make its uniquely resolved target ambiguous. No successful local lookup
@@ -636,27 +665,27 @@ theorem functionNames.glob_over_prelude {sources : List NamedFunction} {imports 
     (targetResolved : FunctionResolution sources imports home ordinary.target name identity)
     (incoming : ∀ edge ∈ imports, edge.home = home → edge = ordinary ∨ edge.kind = .prelude) :
     functionNames sources imports home home name = some identity := by
-  obtain ⟨visibility, target, accessible⟩ := targetResolved.1
+  obtain ⟨visibility, target, accessible, authorized⟩ := targetResolved.1
   have access : visibility.Allows ordinary.target ordinary.home := by simpa only [owned] using accessible
   have noExplicit : ¬ ExplicitFunctionBinding sources imports ordinary.home name := by
     simpa only [owned] using unshadowed
   have candidate : FunctionCandidate sources imports home name identity ordinary.visibility := by
-    simpa only [owned] using FunctionProvenance.imported member (.glob kind noExplicit) target access
+    simpa only [owned] using FunctionProvenance.imported member (.glob kind noExplicit) target access (by simpa only [owned] using authorized)
   apply functionNames.selected_iff.mpr
-  refine ⟨⟨ordinary.visibility, candidate, localAccess⟩, ?_⟩
+  refine ⟨⟨ordinary.visibility, candidate, localAccess, authorized⟩, ?_⟩
   intro other observed
   obtain ⟨otherVisibility, otherCandidate, _⟩ := observed
   cases otherCandidate with
   | declaration found =>
     exact False.elim (unshadowed (.inl ⟨_, List.mem_of_getElem? found, rfl, rfl⟩))
-  | @imported edge localName sourceName other visibility memberOther selected original accessibleOther =>
+  | @imported edge localName sourceName other visibility memberOther selected original accessibleOther authorizedOther =>
     rcases incoming edge memberOther rfl with same | automatic
     · subst edge
       cases selected with
       | explicit selectedKind => simp [kind] at selectedKind
       | prelude selectedKind _ _ => simp [kind] at selectedKind
-      | glob _ _ => exact targetResolved.2 other ⟨visibility, original, accessibleOther⟩
-    · have blocked := FunctionImport.Selects.prelude_excluded member kind owned automatic target access
+      | glob _ _ => exact targetResolved.2 other ⟨visibility, original, accessibleOther, authorizedOther⟩
+    · have blocked := FunctionImport.Selects.prelude_excluded member kind owned automatic target access (by simpa only [owned] using authorized)
       cases selected with
       | explicit selectedKind => simp [automatic] at selectedKind
       | glob selectedKind _ => simp [automatic] at selectedKind
@@ -685,8 +714,8 @@ theorem RawFunctionCandidate.selected_without_prelude {sources : List NamedFunct
     FunctionCandidate sources imports home name identity visibility := by
   induction candidate with
   | declaration found => exact .declaration found
-  | imported member route _ accessible ih =>
-    refine .imported member ?_ ih accessible
+  | imported member route _ accessible authorized ih =>
+    refine .imported member ?_ ih accessible authorized
     cases route with
     | explicit kind => exact .explicit kind
     | glob kind unshadowed => exact .glob kind unshadowed
@@ -705,7 +734,7 @@ theorem RawFunctionCandidate.hidden_local {sources : List NamedFunction} {import
     (accessible : visibility.Allows home caller) : False := by
   cases candidate with
   | declaration found => exact hidden _ _ found rfl rfl accessible
-  | @imported edge localName sourceName identity visibility member route target access =>
+  | @imported edge localName sourceName identity visibility member route target access authorized =>
     cases route with
     | explicit kind => exact noAlias edge member rfl sourceName kind
     | glob _ unshadowed | prelude _ unshadowed => exact unshadowed shadowed
@@ -723,31 +752,31 @@ theorem functionNames.prelude_without_glob {sources : List NamedFunction} {impor
     (targetResolved : FunctionResolution sources imports home automatic.target name identity)
     (oneAutomatic : ∀ edge ∈ imports, edge.home = home → edge.kind = .prelude → edge = automatic) :
     functionNames sources imports home home name = some identity := by
-  obtain ⟨visibility, target, accessible⟩ := targetResolved.1
+  obtain ⟨visibility, target, accessible, authorized⟩ := targetResolved.1
   have access : visibility.Allows automatic.target automatic.home := by simpa only [owned] using accessible
   have noExplicit : ¬ ExplicitFunctionBinding sources imports automatic.home name := by
     simpa only [owned] using unshadowed
   have noOrdinary : ¬ GlobFunctionBinding sources imports automatic.home name := by
     simpa only [owned] using noGlob
   have candidate : FunctionCandidate sources imports home name identity automatic.visibility := by
-    simpa only [owned] using FunctionProvenance.imported member (.prelude kind noExplicit noOrdinary) target access
+    simpa only [owned] using FunctionProvenance.imported member (.prelude kind noExplicit noOrdinary) target access (by simpa only [owned] using authorized)
   apply functionNames.selected_iff.mpr
-  refine ⟨⟨automatic.visibility, candidate, localAccess⟩, ?_⟩
+  refine ⟨⟨automatic.visibility, candidate, localAccess, authorized⟩, ?_⟩
   intro other observed
   obtain ⟨otherVisibility, otherCandidate, _⟩ := observed
   cases otherCandidate with
   | declaration found =>
     exact False.elim (unshadowed (.inl ⟨_, List.mem_of_getElem? found, rfl, rfl⟩))
-  | @imported edge localName sourceName other visibility memberOther selected original accessibleOther =>
+  | @imported edge localName sourceName other visibility memberOther selected original accessibleOther authorizedOther =>
     cases selected with
     | explicit selectedKind =>
       exact False.elim (unshadowed (.inr ⟨edge, memberOther, rfl, sourceName, selectedKind⟩))
     | glob selectedKind _ =>
-      exact False.elim (noGlob ⟨edge, memberOther, rfl, selectedKind, other, visibility, FunctionCandidate.raw original, accessibleOther⟩)
+      exact False.elim (noGlob ⟨edge, memberOther, rfl, selectedKind, other, visibility, FunctionCandidate.raw original, accessibleOther, authorizedOther⟩)
     | prelude selectedKind _ _ =>
       have same := oneAutomatic edge memberOther rfl selectedKind
       subst edge
-      exact targetResolved.2 other ⟨visibility, original, accessibleOther⟩
+      exact targetResolved.2 other ⟨visibility, original, accessibleOther, authorizedOther⟩
 
 /-- Private local bindings in imported modules cannot turn shadowed public
 routes into a phantom glob claim. This conclusion is consumed by ordinary
@@ -760,7 +789,7 @@ theorem GlobFunctionBinding.absent_of_hidden_locals {sources : List NamedFunctio
       (∀ (identity : Nat) (declaration : NamedFunction), sources[identity]? = some declaration →
         declaration.home = edge.target → declaration.name = name → ¬ declaration.visibility.Allows edge.target edge.home)) :
     ¬ GlobFunctionBinding sources imports home name := by
-  rintro ⟨edge, member, owned, kind, identity, visibility, candidate, accessible⟩
+  rintro ⟨edge, member, owned, kind, identity, visibility, candidate, accessible, _⟩
   obtain ⟨shadowed, noAlias, inaccessible⟩ := hidden edge member owned kind
   exact candidate.hidden_local shadowed noAlias inaccessible accessible
 

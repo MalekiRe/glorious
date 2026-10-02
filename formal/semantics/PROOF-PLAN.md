@@ -1700,12 +1700,12 @@ still violate uniqueness. No second resolver or alternate import table exists.
 statement in an included module and one of its source-rule-emitted explicit
 bindings, including arbitrarily nested groups. It constructs a unique callable
 identity and the actual admitted core declaration **before** quantifying over
-arguments. It then constructs call elaboration and derives general configuration
+arguments. Under namespace and binding access, selection of that identity is
+equivalent to the original declaration being accessible to the caller. For an
+authorized caller it constructs call elaboration and derives general configuration
 typing, terminal-or-step progress, storage consumption framing and environment
-binding uniqueness for every typed execution prefix. The caller supplies static
-namespace access, binding/declaration visibility and argument typing, plus the
-current typed store and activation issuance; no successful callable lookup,
-completed execution or future-state readiness is a premise.
+binding uniqueness for every typed execution prefix. No successful callable
+lookup, completed execution or future-state readiness is a premise.
 
 The constructed declaration comes from the existing exact source-declaration
 product. Visibility and dependency checks remain distinct: exposing a binding
@@ -1792,9 +1792,9 @@ callee from the profile, emitted automatic edge and finite visible target
 candidate, under explicit/glob shadowing exclusion and namespace-access checks.
 It constructs selection before argument checking and proves configuration typing,
 terminal-or-step progress, consumption framing and binding uniqueness for every
-typed execution prefix. Lexical shadowing and original declaration visibility
-remain mandatory. No completed callable lookup, execution or post-state readiness
-is supplied as an assumption.
+typed execution prefix. Lexical shadowing remains checked; original-declaration
+visibility is derived from resolved provenance, not separately supplied. No
+completed callable lookup, execution or post-state readiness is assumed.
 
 Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
 axiom inspection covered 3,677 declarations; only standard Lean axioms occur.
@@ -1826,8 +1826,8 @@ module table, guessed path or assumed successful resolver result is used.
 `SourceClosure.Admitted.local_resolution` combines this constructive access
 proof with inclusion-derived package provenance and the shared candidate resolver.
 `prelude_call_soundness` consumes it directly: the former `homeReachable`
-premise is removed, while all argument, original-declaration visibility,
-shadowing and execution-prefix guarantees remain unchanged.
+premise is removed. Original-declaration visibility is now derived from lookup;
+argument, shadowing and execution-prefix guarantees remain unchanged.
 
 Fresh source-only `lake build Grounded` passed (30 jobs). Exhaustive imported
 axiom inspection covered 3,684 declarations; only standard Lean axioms occur.
@@ -2692,20 +2692,20 @@ declaration's visibility. A public alias could therefore admit an unused import
 of a private function into another package. Call elaboration already rejected
 invoking that function; deferring the import error until invocation was wrong.
 
-`FunctionImportsValid` now checks the exact source declaration identity selected
-by every explicit import, including unused imports. `explicit_binding` carries
-that authority together with its existing seeded candidate. `explicit_origin`
-proves that any visible candidate for the admitted explicit import has the same
-authorized original identity, for arbitrary finite alias/re-export chains.
+The repair now lives in the shared `FunctionAccess` contract consumed by
+`FunctionProvenance`, glob discovery and visible selection. `FunctionImportsValid`
+requires a visible seeded candidate for every explicit import, including unused
+ones; the duplicate original-authority conjunct is removed. `explicit_binding`
+still carries that authority with its existing seeded candidate.
 
-`SourceClosure.Admitted.source_import_origin_visibility` transfers that guarantee
-to the actual emitted `FunctionDecl`, using inclusion-assigned module ownership,
-grouped-import emission, and named declaration elaboration. The existing
-`imported_call_soundness` consumer now also exports original-declaration authority
-at the import's owner while preserving its full execution-prefix safety result.
-An arbitrary later caller must still have its own declaration authority; public
-aliases cannot enlarge private authority. Public declarations re-exported through
-hidden module paths retain the existing identity-preserving behavior.
+`VisibleFunctionCandidate.origin_access` and
+`SourceClosure.Admitted.candidate_visibility` replace the explicit-only privacy
+APIs. They transfer original authority through actual named declaration
+elaboration for any selected import kind. `imported_call_soundness` exports
+original-declaration authority at the import owner and characterizes caller
+selection by the original declaration visibility. Public aliases cannot enlarge
+private authority. Public declarations re-exported through hidden module paths
+retain identity-preserving behavior.
 
 Strict scoped `lake build Grounded.SourceClosure` passed in an isolated source-only
 workspace. Transient parametric Lean proofs established that the previous
@@ -3041,4 +3041,42 @@ authored-glob precedence, automatic-edge uniqueness, source/prelude soundness,
 file-order invariance and general machine preservation/progress. Only standard
 Lean axioms occurred. No unit tests or concrete examples were added. The broad
 source-resolution and whole-language obligations remain open.
+
+## Original-declaration privacy in discovery and selected lookup
+
+A parametric pre-repair Lean proof established that a public alias was a visible
+callable candidate even when its original declaration was private to the caller.
+Later invocation checking rejected the call, but lookup and glob/prelude priority
+had already counted the inaccessible identity.
+
+The shared `FunctionProvenance` producer now checks `FunctionAccess` at every
+import hop. That contract reads the original declaration identity and visibility;
+it is not a separate name analysis or permission table. Discovery, glob name
+claims and final visible selection consume it. Explicit-import admission no longer
+carries a duplicate declaration-access premise. `functionNames.selected` now
+returns the accessible original declaration, and `functionNames.inaccessible`
+excludes its selection through arbitrary alias/re-export paths.
+
+`GlobFunctionBinding.absent_of_private_origins` proves that inaccessible origins
+cannot suppress a prelude merely because their alias bindings are public. The
+existing authored-glob precedence, constructive fallback and import-order proofs
+continue through the repaired shared relation. Authorized public declarations
+re-exported through hidden modules are not blanket-rejected.
+
+`SourceClosure.Admitted.candidate_visibility` and `resolved_visibility` transport
+this authority through actual named-function elaboration. Dependency and prelude
+call soundness now derive original-declaration visibility instead of asking the
+caller to supply it again. Explicit-alias call soundness constructs the original
+core declaration and proves an exact equivalence: with the stated namespace and
+binding access, selection of that identity holds iff its original declaration
+is accessible to the caller. It then constructs the authorized call and retains
+general configuration typing, progress, consumption framing and ownership safety
+for every execution prefix. The superseded explicit-only privacy APIs are removed.
+
+Verification: an independent source-only `lake build Grounded` passed all 30
+jobs. Axiom inspection of privacy exclusion, discovery/fallback, source call
+soundness, file-order admission invariance and general machine preservation and
+progress found only `propext`, `Classical.choice` and `Quot.sound`. No unit tests
+or concrete examples were added. Whole-language soundness and the broad source
+and invocation boundaries remain open.
 
