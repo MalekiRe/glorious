@@ -3999,3 +3999,12 @@ execution prefix, starting its guarantee at the original entry environment.
 All 30 strict build jobs and inspected source/producer axiom closures passed.
 The scope and return machine transitions still need interleaved destruction;
 this closes their storage-operation observation obligation, not that cutover.
+
+Canonical single-owner retirement now preserves the exact remaining release
+queue. Filtering a typed owner map commutes with acquisition-order sorting;
+removing its selected newest owner leaves exactly the old queue tail. The
+constructive return producer and its reached-source prefix consumer carry
+this equality for the actual produced binding map. This connects successive
+indexed retirements to the existing batch order without a second scheduler
+or a post-state ordering assumption. All 30 strict build jobs and inspected
+axiom closures passed. Operational interleaving remains open.

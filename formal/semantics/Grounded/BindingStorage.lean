@@ -620,6 +620,43 @@ theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)
     cases a; cases b; simpa using same
   omega
 
+/-- Filtering owners commutes with their canonical acquisition order. -/
+theorem BindingMap.releaseOrder_filter (bindings : BindingMap)
+    (distinct : (bindings.map Prod.snd).Nodup) (keep : StorageId → Bool) :
+    BindingMap.releaseOrder (bindings.filter fun entry => keep entry.2) = bindings.releaseOrder.filter keep := by
+  have mapped : (bindings.filter fun entry => keep entry.2).map Prod.snd =
+      (bindings.map Prod.snd).filter keep := List.filter_map.symm
+  have remaining : ((bindings.filter fun entry => keep entry.2).map Prod.snd).Nodup := by
+    rw [mapped]
+    exact distinct.filter keep
+  apply List.Perm.eq_of_pairwise (le := fun a b : StorageId => b.index < a.index)
+  · intro a b _ _ first second
+    omega
+  · exact BindingMap.releaseOrder_decreasing _ remaining
+  · exact List.Pairwise.filter keep (bindings.releaseOrder_decreasing distinct)
+  · apply (BindingMap.releaseOrder_perm _).trans
+    rw [mapped]
+    exact (bindings.releaseOrder_perm.filter keep).symm
+
+/-- Removing the selected newest owner leaves exactly the previous release
+queue's tail, not merely some permutation of the remaining owners. -/
+theorem BindingMap.releaseOrder_eraseIdx {bindings : BindingMap} {index : Nat} {entry : BindingId × StorageId}
+    (distinct : (bindings.map Prod.snd).Nodup) (selected : bindings[index]? = some entry)
+    (first : bindings.releaseOrder.head? = some entry.2) :
+    BindingMap.releaseOrder (bindings.eraseIdx index) = bindings.releaseOrder.tail := by
+  rw [BindingMap.eraseIdx_filter distinct selected,
+    BindingMap.releaseOrder_filter bindings distinct (fun identity => decide (identity ≠ entry.2))]
+  obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+  have unique := bindings.releaseOrder_perm.nodup_iff.mpr distinct
+  rw [ordered] at unique
+  have fresh := (List.nodup_cons.mp unique).1
+  simp only [ordered, List.filter_cons, ne_eq, not_true_eq_false, decide_false,
+    Bool.false_eq_true, ↓reduceIte, List.tail_cons]
+  apply List.filter_eq_self.mpr
+  intro identity member
+  exact decide_eq_true_eq.mpr (fun same => fresh (same ▸ member))
+
+
 /-- Source-ordered parameter acquisition is released in reverse acquisition
 order. This follows for arbitrary batches, not a distinguished two-input case. -/
 theorem allocateBindings.releaseOrder_reverse (heap : RuntimeHeap StorageCell)

@@ -662,6 +662,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       (current.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
         BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
         current.retireBinding index = some next ∧
+        next.bindings.releaseOrder = current.bindings.releaseOrder.tail ∧
         ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩) ∧
       (∀ front back middle, current.bindings.releaseOrder = front ++ back →
         current.heap.retireMany front = some middle →
@@ -673,6 +674,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
         (pending.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
           BindingMap.nextRelease pending.bindings pending.bindings = some (index, entry.2) ∧
           pending.retireBinding index = some next ∧
+          next.bindings.releaseOrder = pending.bindings.releaseOrder.tail ∧
           ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩)) ∧
       ∀ front identity back, current.bindings.releaseOrder = front ++ identity :: back →
         ∃ middle next, current.heap.retireMany front = some middle ∧

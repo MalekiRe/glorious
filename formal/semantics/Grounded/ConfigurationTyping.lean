@@ -750,15 +750,18 @@ theorem ConfigurationTyped.restore_next {context : FlowContext} {result : Result
     current.bindings = [] ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
       BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
       current.retireBinding index = some next ∧
+      next.bindings.releaseOrder = current.bindings.releaseOrder.tail ∧
       ConfigurationTyped program context result ⟨next, .result value, .restore caller :: stack⟩ := by
   by_cases empty : current.bindings = []
   · exact .inl empty
   · have original := typed
     cases typed with | intro store issued code continuation =>
-      obtain ⟨index, entry, chosen, selected, _, _⟩ := BindingMap.release_next _ _
+      obtain ⟨index, entry, chosen, selected, _, first⟩ := BindingMap.release_next _ _
         store.addresses_distinct (fun _ member => member) empty
-      obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
-      exact .inr ⟨index, entry, next, chosen, produced, original.retire_restore selected produced⟩
+      obtain ⟨next, produced, _, _, _, _, _, bindings, _⟩ := AddressedEnvironment.retireBinding.progress store selected
+      refine .inr ⟨index, entry, next, chosen, produced, ?_, original.retire_restore selected produced⟩
+      rw [bindings]
+      exact BindingMap.releaseOrder_eraseIdx store.addresses_distinct selected first
 
 
 /-- Every actually executed callee-owned retirement prefix retains the full
