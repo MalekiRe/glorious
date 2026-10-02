@@ -3951,3 +3951,16 @@ caller framing. Thus a subsequent prefix instantiation consumes the actual
 produced state, not a promised future realization. All 30 strict build jobs and
 inspected axiom closures passed. The staged scope/return machine cutover remains
 open; no broad completion obligation is closed.
+
+`ConfigurationTyped.retire_scope` now preserves the complete remaining scope
+continuation through a real indexed environment retirement. It removes the
+corresponding local source state, decrements the scope count, preserves disposal
+authority for the surviving locals, and transports retained caller frames.
+`ConfigurationTyped.scope_next` constructs this operation and its fully typed
+result for every nonempty typed scope; the empty alternative is exactly count
+zero. The reached-source scope theorem consumes this general producer rather
+than reconstructing selection or assuming its post-state continuation. All 30
+strict build jobs passed, and inspected producer/source proofs use only
+standard Lean axioms. These are constructive storage-operation preservation
+and progress results; they do not assert a new machine `Step` or an interleaved
+destruction run. The operational retirement-frame cutover remains open.

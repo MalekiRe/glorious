@@ -84,6 +84,10 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               PathType program observer cell.type fields (.nominal nominal) →
               program.data nominal = some declaration → declaration.restriction = some .exact →
               ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty) ∧
+      (count = 0 ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+        BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
+        index < count ∧ current.retireBinding index = some next ∧
+        ConfigurationTyped program final (.one type) ⟨next, .result value, .scope (count - 1) :: stack⟩) ∧
       (∀ front middle, current.heap.retireMany front = some middle →
         ∃ original remaining,
           BindingMap.Typed program current.heap current.activation current.bindings original ∧
@@ -153,7 +157,8 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
-            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_⟩
+            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_⟩
+          · exact original.scope_next
           · intro front middle executed
             obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
             have permission := safe.1.retirement_prefix executed

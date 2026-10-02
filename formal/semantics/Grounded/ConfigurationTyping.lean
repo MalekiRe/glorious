@@ -645,7 +645,69 @@ theorem ConfigurationTyped.normal_form {context type state}
       cases continuation
       cases code
 
+/-- One actual retirement inside the local prefix preserves the remaining
+scope continuation, including its decremented local count and retained callers. -/
+theorem ConfigurationTyped.retire_scope {context : FlowContext} {result : ResultType}
+    {before after : Environment} {value : Value} {count index : Nat} {stack : List Frame}
+    {entry : BindingId × StorageId}
+    (typed : ConfigurationTyped program context result ⟨before, .result value, .scope count :: stack⟩)
+    (selected : before.bindings[index]? = some entry) (inside : index < count)
+    (retired : before.retireBinding index = some after) :
+    ConfigurationTyped program context result ⟨after, .result value, .scope (count - 1) :: stack⟩ := by
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        cases frame with | scope locals discard joined =>
+          obtain ⟨next, produced, _, _, _, activation, supply, _, nextTyped, _, callers⟩ :=
+            AddressedEnvironment.retireBinding.progress store selected
+          cases Option.some.inj (retired.symm.trans produced)
+          rw [List.eraseIdx_append_of_lt_length inside] at nextTyped
+          have length := List.length_eraseIdx_of_lt inside
+          rw [← length]
+          refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident)
+            (.cons (.scope (locals.eraseIdx index) (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) joined) ?_)
+          rw [supply, activation]
+          apply tail.transport (fun _ previous => previous)
+          intro caller states callerTyped older
+          exact (callers caller states callerTyped (by
+            intro same
+            have equal := congrArg ActivationId.index same
+            simp only [Frame.activation] at older
+            omega)).1
 
+/-- A typed nonempty scope constructs the canonical next retirement and its
+fully typed remaining continuation, without a successful operation premise. -/
+theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {count : Nat} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .scope count :: stack⟩) :
+    count = 0 ∨ ∃ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+      BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
+      index < count ∧ current.retireBinding index = some next ∧
+      ConfigurationTyped program context result ⟨next, .result value, .scope (count - 1) :: stack⟩ := by
+  have original := typed
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        cases frame with | scope locals discard joined =>
+          by_cases empty : locals.length = 0
+          · exact .inl empty
+          · have length := congrArg List.length store.keys
+            simp only [List.length_map] at length
+            have nonempty : List.take locals.length current.bindings ≠ [] := by
+              intro absent
+              have short := congrArg List.length absent
+              simp only [List.length_take, List.length_nil] at short
+              simp only [List.length_append] at length
+              omega
+            obtain ⟨index, entry, chosen, selected, _, _⟩ := BindingMap.release_next _ _
+              store.addresses_distinct (fun _ member => List.mem_of_mem_take member) nonempty
+            have inside := BindingMap.nextRelease.in_prefix (List.take_prefix locals.length current.bindings) chosen
+            have localIndex : index < locals.length := by
+              simp only [List.length_take] at inside
+              omega
+            obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
+            exact .inr ⟨index, entry, next, chosen, localIndex, produced,
+              original.retire_scope selected localIndex produced⟩
 theorem ControlTyped.slots {current next control result}
     (typed : ControlTyped program current control result next) : next.slots = current.slots := by
   induction typed with
