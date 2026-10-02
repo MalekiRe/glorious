@@ -66,7 +66,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       BindingMap.Disposable program current.heap (List.take count current.bindings) ∧
       (BindingMap.releaseOrder (List.take count current.bindings)).Pairwise
         (fun newer older => older.index < newer.index) ∧
-      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       (∀ identity ∈ (List.take count current.bindings).map Prod.snd, after.heap.Retired identity) ∧
       BindingMap.Typed program after.heap after.activation after.bindings branch ∧
@@ -165,14 +165,14 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
         | scope locals discard joined =>
           obtain ⟨after, produced, afterTyped, _, _, _, retired, _, preserved⟩ :=
             AddressedEnvironment.exitScope.progress currentStore locals.length
-          have step : Step program ⟨current, .result value, .scope locals.length :: stack⟩
+          have step : Run program ⟨current, .result value, .scope locals.length :: stack⟩
               ⟨after, .result value, stack⟩ := .scope produced
           have branchTyped : BindingMap.Typed program after.heap after.activation after.bindings _ :=
             (by simpa using afterTyped)
           have safe := original.ownership_safe
-          refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
+          refine ⟨after, _, _, safe.1, safe.2, step, original.run checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
-            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_, ?_, ?_⟩
+            (fun _ _ _ split => safe.scope_retirement (Run.scope (stack := []) produced) split), ?_, ?_, ?_, ?_, ?_⟩
           · obtain ⟨trace, start, finish, steps, states⟩ := original.scope_retirement_trace
             refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), ?_, ?_⟩
             · intro position bound
@@ -647,18 +647,18 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
     (resident : cell.resident.selectFields program cell.type fields = some owner)
     (required : ¬ owner.Disposable program selectedType) :
     ∃ after : Environment,
-      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.heap.read address = some cell := by
-  obtain ⟨after, _, _, disposition, _, step, preserved, _⟩ :=
+  obtain ⟨after, _, _, disposition, _, step, preserved, _, _, _, _, _, _, trace, _⟩ :=
     checked.scope_join_preserves_ownership checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
-  cases step with
-  | scope retired =>
-    simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at retired
-    obtain ⟨heap, released, same⟩ := retired
-    subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
+  obtain ⟨trace, start, _, _, states⟩ := trace
+  have exited := (states 0 (Nat.zero_le _)).2
+  simp only [start, Nat.sub_zero] at exited
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+  cases same
+  exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
 
 /-- Returning from a checked call constructs actual local retirement and caller
 restoration. The returned payload and remaining continuation are preserved. -/
@@ -672,7 +672,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .restore caller :: stack⟩) :
     ∃ after : Environment,
-      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.scope = caller ∧
       (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
@@ -732,10 +732,10 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             omega
           obtain ⟨after, restored, _, activation, bindings, _, _, retired, preserved, _⟩ :=
             AddressedEnvironment.restore.progress currentStore callerTyped different
-          have step : Step program ⟨current, .result value, .restore caller :: stack⟩
+          have step : Run program ⟨current, .result value, .restore caller :: stack⟩
               ⟨after, .result value, stack⟩ := .restore restored
-          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved, ?_, original.restore_next, ?_,
-            (fun _ _ _ split => original.ownership_safe.return_retirement step split)⟩
+          refine ⟨after, step, original.run checkedProgram step, ?_, retired, preserved, ?_, original.restore_next, ?_,
+            (fun _ _ _ split => original.ownership_safe.return_retirement (Run.restore (stack := []) restored) split)⟩
           · simp [AddressedEnvironment.scope, activation, bindings]
           · obtain ⟨trace, start, finish, steps, states⟩ := original.restore_retirement_trace
             refine ⟨trace, start, finish, ?_, ?_⟩
@@ -777,18 +777,18 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
     (resident : cell.resident.selectFields program cell.type fields = some owner)
     (required : ¬ owner.Disposable program selectedType) :
     ∃ after : Environment,
-      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.heap.read address = some cell := by
-  obtain ⟨after, step, preserved, _⟩ := checked.return_restores checkedProgram store issued run
+  obtain ⟨after, step, preserved, _, _, _, trace, _⟩ := checked.return_restores checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
-  cases step with
-  | restore retired =>
-    simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at retired
-    obtain ⟨heap, released, same⟩ := retired
-    subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
+  obtain ⟨trace, start, _, _, states⟩ := trace
+  have restored := (states 0 (Nat.zero_le _)).2
+  rw [start] at restored
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+  cases same
+  exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
 
 
 /-- Constructed lexical cleanup preserves any cell containing an unconsumed
@@ -809,18 +809,18 @@ theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
     (unconsumed : ¬ owner.Empty) :
     ∃ after : Environment,
-      Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.heap.read address = some cell := by
-  obtain ⟨after, _, _, disposition, _, step, preserved, _⟩ :=
+  obtain ⟨after, _, _, disposition, _, step, preserved, _, _, _, _, _, _, trace, _⟩ :=
     checked.scope_join_preserves_ownership checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
-  cases step with
-  | scope exited =>
-    simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at exited
-    obtain ⟨heap, released, same⟩ := exited
-    subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition released found path declared restricted resident unconsumed
+  obtain ⟨trace, start, _, _, states⟩ := trace
+  have exited := (states 0 (Nat.zero_le _)).2
+  simp only [start, Nat.sub_zero] at exited
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+  cases same
+  exact BindingMap.Disposable.release_preserves_exact disposition released found path declared restricted resident unconsumed
 
 /-- Constructed caller restoration preserves cells containing unconsumed exact
 descendants; partial initialization cannot hide an outstanding obligation. -/
@@ -840,18 +840,18 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
     (unconsumed : ¬ owner.Empty) :
     ∃ after : Environment,
-      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      Run program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
       after.heap.read address = some cell := by
-  obtain ⟨after, step, preserved, _⟩ := checked.return_restores checkedProgram store issued run
+  obtain ⟨after, step, preserved, _, _, _, trace, _⟩ := checked.return_restores checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
-  cases step with
-  | restore restored =>
-    simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at restored
-    obtain ⟨heap, released, same⟩ := restored
-    subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found path declared restricted resident unconsumed
+  obtain ⟨trace, start, _, _, states⟩ := trace
+  have restored := (states 0 (Nat.zero_le _)).2
+  rw [start] at restored
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+  cases same
+  exact BindingMap.Disposable.release_preserves_exact disposition.1 released found path declared restricted resident unconsumed
 
 /-- After RHS evaluation, replacement cannot discard an unconsumed exact
 descendant, including a partial owner with no successful whole-value read. -/

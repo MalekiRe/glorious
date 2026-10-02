@@ -172,6 +172,10 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
       (joined : BindingContextApprox program.data context after) :
       FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) after (.one result)
+  | retire {context : FlowContext} {result index}
+      (inside : index < context.length)
+      (discard : ∀ binding, context[index]? = some binding → binding.2.Disposable program.data) :
+      FrameTyped program heap supply activation context (.one result) (.retire index) (context.eraseIdx index) (.one result)
   | assign {home before restored after place type result rest state updated available}
       (selected : lookup place.root before = some state)
       (path : PathType program home state.slot.type place.fields type)
@@ -276,7 +280,7 @@ carry static output contexts, never assumptions that future heaps are ready. -/
 theorem ConfigurationTyped.progress {context result state}
     (typed : ConfigurationTyped program context result state) : Terminal state ∨ ∃ next, Step program state next := by
   cases typed with
-  | intro store issued code continuation =>
+  | @intro current next input environment control stack store issued code continuation =>
     cases code with
     | @cleanup pending rest result after safe checked =>
       right
@@ -325,8 +329,18 @@ theorem ConfigurationTyped.progress {context result state}
         | sequence discard checked => exact ⟨_, .sequenceResult⟩
         | bind discard checked fresh => exact ⟨_, .bindResult⟩
         | scope locals discard joined =>
-          obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress store locals.length
-          exact ⟨_, .scope exited⟩
+          by_cases empty : List.take locals.length environment.bindings = []
+          · exact ⟨_, .scope empty⟩
+          · obtain ⟨index, entry, chosen, _, member, _⟩ := BindingMap.release_next _ _ (List.take_prefix _ _) empty
+            obtain ⟨cell, found⟩ := (store.take locals.length).live _ (List.mem_map_of_mem (f := Prod.snd) member)
+            exact ⟨_, .scopeOwner chosen found⟩
+        | @retire current result index inside discard =>
+          have length := congrArg List.length store.keys
+          simp only [List.length_map] at length
+          have bound : index < environment.bindings.length := by omega
+          have selected := List.getElem?_eq_getElem bound
+          obtain ⟨after, retired, _⟩ := AddressedEnvironment.retireBinding.progress store selected
+          exact ⟨_, .retire retired⟩
         | assign selected path writable selection discard mask context checked =>
           obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection discard).selection
           exact ⟨_, .assignResult selected⟩
@@ -335,9 +349,11 @@ theorem ConfigurationTyped.progress {context result state}
           obtain ⟨value, remainder, selected, _⟩ := projection.take_progress resident mask discard
           exact ⟨_, .projectResult selected⟩
         | restore locals discard retained callerIssued older =>
-          obtain ⟨after, restored, _⟩ := AddressedEnvironment.restore.progress store retained (by
-            intro same; have := congrArg ActivationId.index same; omega)
-          exact ⟨_, .restore restored⟩
+          by_cases empty : environment.bindings = []
+          · exact ⟨_, .restore empty⟩
+          · obtain ⟨index, entry, chosen, _, member, _⟩ := BindingMap.release_next _ _ ⟨[], List.append_nil _⟩ empty
+            obtain ⟨cell, found⟩ := store.live _ (List.mem_map_of_mem (f := Prod.snd) member)
+            exact ⟨_, .restoreOwner chosen found⟩
         | argumentHead checked => exact ⟨_, .argumentHead⟩
     | results residents =>
       cases continuation with
@@ -451,15 +467,61 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | scope locals discard joined =>
-            obtain ⟨after, produced, afterTyped, activation, supply, _, _, retained, _⟩ :=
-              AddressedEnvironment.exitScope.progress store locals.length
-            cases Option.some.inj (exited.symm.trans produced)
-            refine .intro ((BindingMap.Typed.approximate (by simpa using afterTyped) joined)) (by rw [supply, activation]; exact issued) (.result resident) ?_
-            rw [activation, supply]
+            have empty : locals = [] := by
+              have length := congrArg List.length store.keys
+              have zero := congrArg List.length exited
+              simp only [List.length_map, List.length_append, List.length_take, List.length_nil] at length zero
+              exact List.eq_nil_of_length_eq_zero (by omega)
+            subst locals
+            exact .intro (store.approximate joined) issued (.result resident) tail
+    | scopeOwner chosen found =>
+      cases code with | result resident =>
+        cases continuation with | cons frame tail =>
+          cases frame with | scope locals discard joined =>
+            have inside := BindingMap.nextRelease.in_prefix (List.take_prefix _ _) chosen
+            simp only [List.length_take] at inside
+            have localIndex := Nat.lt_of_lt_of_le inside (Nat.min_le_left _ _)
+            have safe := (store.take locals.length).disposable (by simpa using discard)
+            obtain ⟨cell, actual, permission⟩ := safe _ (BindingMap.nextRelease.member chosen)
+            cases Option.some.inj (actual.symm.trans found)
+            refine .intro store issued (.cleanup permission.disposalTasks (.result resident))
+              (.cons (.retire (by simp only [List.length_append]; omega) ?_) ?_)
+            · intro binding selected
+              rw [List.getElem?_append_left localIndex] at selected
+              exact discard binding (List.mem_of_getElem? selected)
+            · rw [List.eraseIdx_append_of_lt_length localIndex]
+              have length := List.length_eraseIdx_of_lt localIndex
+              rw [← length]
+              exact .cons (.scope _ (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) joined) tail
+    | restoreOwner chosen found =>
+      cases code with | result resident =>
+        cases continuation with | cons frame tail =>
+          cases frame with | restore locals discard callerTyped callerIssued older =>
+            obtain ⟨entry, selected, matching⟩ := BindingMap.nextRelease.binding chosen
+            obtain ⟨state, cell, source, actual, _⟩ := store.index selected
+            have inside := (List.getElem?_eq_some_iff.mp source).1
+            obtain ⟨cell, actual, permission⟩ := store.disposable discard _ (BindingMap.nextRelease.member chosen)
+            cases Option.some.inj (actual.symm.trans found)
+            exact .intro store issued (.cleanup permission.disposalTasks (.result resident))
+              (.cons (.retire inside (fun binding selected => discard binding (List.mem_of_getElem? selected)))
+                (.cons (.restore _ (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) callerTyped callerIssued older) tail))
+    | retire operation =>
+      cases code with | result resident =>
+        cases continuation with | cons frame tail =>
+          cases frame with | retire inside discard =>
+            obtain ⟨entry, selected, _, _, _⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp operation
+            obtain ⟨next, produced, _, _, _, activation, supply, _, nextTyped, _, callers⟩ :=
+              AddressedEnvironment.retireBinding.progress store selected
+            cases Option.some.inj (operation.symm.trans produced)
+            refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident) ?_
+            rw [supply, activation]
             apply tail.transport (fun _ previous => previous)
-            intro scope states typed older
-            simp only [Frame.activation] at older
-            exact (retained scope states typed (by intro same; have := congrArg ActivationId.index same; omega)).1
+            intro caller states callerTyped older
+            exact (callers caller states callerTyped (by
+              intro same
+              have equal := congrArg ActivationId.index same
+              simp only [Frame.activation] at older
+              omega)).1
     | assign =>
       cases code with | expression checked =>
         cases checked with | assign resident selected path writable selection discard mask context rest =>
@@ -529,17 +591,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | restore locals discard callerTyped callerIssued older =>
-            obtain ⟨after, produced, afterTyped, activation, bindings, supply, _, _, _, retained⟩ :=
-              AddressedEnvironment.restore.progress store callerTyped (by
-                intro same; have := congrArg ActivationId.index same; omega)
-            cases Option.some.inj (restored.symm.trans produced)
-            refine .intro (by rw [activation, bindings]; exact afterTyped)
-              (by rw [supply, activation]; exact callerIssued) (.result resident) ?_
-            rw [activation, supply]
-            apply tail.transport (fun _ previous => previous)
-            intro previous states typed oldest
-            exact (retained previous states typed (by
-              intro same; have := congrArg ActivationId.index same; simp only [Frame.activation] at oldest; omega)).1
+            exact .intro callerTyped callerIssued (.result resident) tail
     | construct =>
       cases code with | expression checked =>
         cases checked with | construct declared chosen finite visible access residents =>
@@ -708,7 +760,7 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
               omega
             obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
             exact .inr ⟨index, entry, next, chosen, localIndex, produced,
-              AddressedEnvironment.exitScope.retireBinding (store.take locals.length).addresses_distinct selected localIndex first produced,
+              AddressedEnvironment.exitScope.retireBinding selected localIndex first produced,
               original.retire_scope selected localIndex produced⟩
 /-- A typed scope constructs all canonical indexed retirements, preserving its
 continuation at every stage and producing exactly the existing batch exit. -/
@@ -804,10 +856,10 @@ theorem ConfigurationTyped.restore_next {context : FlowContext} {result : Result
         ⟨[], List.append_nil _⟩ empty
       obtain ⟨next, produced, _, _, _, _, _, bindings, _⟩ := AddressedEnvironment.retireBinding.progress store selected
       refine .inr ⟨index, entry, next, chosen, produced, ?_,
-        AddressedEnvironment.restore.retireBinding store.addresses_distinct selected first produced caller,
+        AddressedEnvironment.restore.retireBinding selected first produced caller,
         original.retire_restore selected produced⟩
       rw [bindings]
-      exact BindingMap.releaseOrder_eraseIdx store.addresses_distinct selected first
+      exact BindingMap.releaseOrder_eraseIdx selected first
 
 
 /-- Canonical callee retirement constructs a finite physical trace with one
@@ -911,6 +963,8 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     simpa only [Frame.environment, Frame.activation, same] using store
   | scope locals discard joined =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using store.drop locals.length
+  | @retire context result index inside discard =>
+    simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using store.eraseIdx index
   | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using store
@@ -938,6 +992,8 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     simpa only [Frame.environment, Frame.activation, same] using framed
   | scope locals discard joined =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using framed.drop store locals.length
+  | @retire context result index inside discard =>
+    simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using framed.eraseIdx store index
   | assign selected path writable selection discard mask context checked =>
     have same : next.slots = current.slots := checked.slots.trans (replaceBinding.map_same BindingState.slot selected context rfl)
     simpa only [Frame.environment, Frame.activation, same] using framed
@@ -1103,28 +1159,42 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
           (continuationEnvironment ((Frame.scope bindings.length).environment (env.extend bindings)) stack)
         rw [Frame.scope_extension]
         exact tail.consumption_allocation outerDeclared env.activation bindings env.supply
-    case scope after stack count value exited =>
+    case scope stack count value empty =>
+      have suffix : env.bindings.drop count = env.bindings := by
+        simpa [empty] using List.take_append_drop count env.bindings
+      simp only [Configuration.outerEnvironment, continuationEnvironment, Frame.environment, Frame.activation, suffix]
+      exact .refl _ _
+    case scopeOwner stack count index identity value cell chosen found =>
+      have inside := BindingMap.nextRelease.in_prefix (List.take_prefix _ _) chosen
+      simp only [List.length_take] at inside
+      have localIndex := Nat.lt_of_lt_of_le inside (Nat.min_le_left _ _)
+      simp only [Configuration.outerEnvironment, continuationEnvironment, Frame.environment, Frame.activation,
+        BindingMap.eraseIdx_drop _ localIndex]
+      exact .refl _ _
+    case retire after stack index value operation =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | scope locals discard joined =>
-            obtain ⟨producedAfter, produced, _, _, _, _, _, retained, preserved⟩ :=
-              AddressedEnvironment.exitScope.progress store locals.length
-            cases Option.some.inj (exited.symm.trans produced)
-            have scopeEq : after.scope = ((Frame.scope locals.length).environment env).scope := by
-              obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp exited
-              cases same
-              rfl
-            refine tail.consumption_frame (before := (Frame.scope locals.length).environment env) (after := after)
-              ⟨_, store.drop locals.length, by simpa [FlowContext.slots] using joined.slots.symm⟩ (.of_cells scopeEq ?_) ?_
+          have projected := frame.declares declared
+          cases frame with | retire inside discard =>
+            obtain ⟨entry, selected, _, _, _⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp operation
+            obtain ⟨next, produced, _, _, _, activation, supply, bindings, _, outside, callers⟩ :=
+              AddressedEnvironment.retireBinding.progress store selected
+            cases Option.some.inj (operation.symm.trans produced)
+            apply tail.consumption_frame (before := (Frame.retire index).environment env) (after := after) projected (.of_cells ?_ ?_) ?_
+            · simp only [Frame.environment, Frame.activation, AddressedEnvironment.scope, activation, bindings]
             · intro identity member
-              apply preserved identity
-              have maps := congrArg AddressedScope.bindings scopeEq
-              change after.bindings = env.bindings.drop locals.length at maps
-              rw [maps]
-              exact member
-            · intro scope states realized older
-              change scope.activation.index < env.activation.index at older
-              exact (retained scope states realized (by intro same; have := congrArg ActivationId.index same; omega)).2
+              apply outside identity
+              intro same
+              obtain ⟨binding, member, matching⟩ := List.mem_map.mp member
+              change binding ∈ env.bindings.eraseIdx index at member
+              rw [BindingMap.eraseIdx_filter store.addresses_distinct selected] at member
+              exact (of_decide_eq_true (List.mem_filter.mp member).2) (matching.trans same)
+            · intro caller states callerTyped older
+              exact (callers caller states callerTyped (by
+                intro same
+                have equal := congrArg ActivationId.index same
+                simp only [Frame.environment, Frame.activation] at older
+                omega)).2
     case install after stack place rest value written =>
       cases code with
       | install resident selected path writable selection discard mask context checked =>
@@ -1138,21 +1208,6 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
             have framed := AddressedEnvironment.write.consumption_frame declared selectedSlot writable written
             apply continuation.consumption_frame declared framed
             intro scope states realized older
-            exact (retained scope states realized (by intro same; have := congrArg ActivationId.index same; omega)).2
-    case restore after caller stack value restored =>
-      cases code with | result resident =>
-        cases continuation with | cons frame tail =>
-          cases frame with | restore locals discard callerTyped callerIssued older =>
-            obtain ⟨producedAfter, produced, _, activation, bindings, _, _, _, preserved, retained⟩ :=
-              AddressedEnvironment.restore.progress store callerTyped (by
-                intro same; have := congrArg ActivationId.index same; omega)
-            cases Option.some.inj (restored.symm.trans produced)
-            have scopeEq : after.scope = caller := by
-              simp only [AddressedEnvironment.scope, activation, bindings]
-            refine tail.consumption_frame (before := (Frame.restore caller).environment env) (after := after)
-              ⟨_, callerTyped, rfl⟩ (.of_cells scopeEq preserved) ?_
-            intro scope states realized oldest
-            change scope.activation.index < caller.activation.index at oldest
             exact (retained scope states realized (by intro same; have := congrArg ActivationId.index same; omega)).2
 
 theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : ResultType} {before after : Configuration}
@@ -1255,14 +1310,14 @@ theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment}
 
 /-- Source-prefix ownership safety constrains every actual lexical retirement,
 including its intermediate heap transitions and strict acquisition order. -/
-theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {after : Configuration}
-    {value : Value} {count : Nat} {stack : List Frame}
+theorem Configuration.OwnershipSafe.scope_retirement {before after : Environment}
+    {value returned : Value} {count : Nat} {stack : List Frame}
     (safe : (⟨before, .result value, .scope count :: stack⟩ : Configuration).OwnershipSafe program)
-    (step : Step program ⟨before, .result value, .scope count :: stack⟩ after)
+    (run : Run program ⟨before, .result value, [.scope count]⟩ ⟨after, .result returned, []⟩)
     {front back : List StorageId} {identity : StorageId}
     (split : BindingMap.releaseOrder (List.take count before.bindings) = front ++ identity :: back) :
     ∃ middle next, before.heap.retireMany front = some middle ∧
-      middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
       ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
         cell.resident.Disposable program cell.type ∧
@@ -1270,22 +1325,21 @@ theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {aft
           PathType program observer cell.type fields (.nominal nominal) →
           program.data nominal = some declaration → declaration.restriction = some .exact →
           ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
-  cases step with
-  | scope exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    exact BindingMap.Disposable.release_prefix safe.1 released split
+  obtain ⟨_, exited⟩ := run.scope_result
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+  cases same
+  exact BindingMap.Disposable.release_prefix safe.1 released split
 
 /-- Function return consumes the same release producer as lexical scope exit;
 parameter-list order cannot override actual newest-owner-first retirement. -/
-theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {after : Configuration}
-    {value : Value} {caller : AddressedScope} {stack : List Frame}
+theorem Configuration.OwnershipSafe.return_retirement {before after : Environment}
+    {value returned : Value} {caller : AddressedScope} {stack : List Frame}
     (safe : (⟨before, .result value, .restore caller :: stack⟩ : Configuration).OwnershipSafe program)
-    (step : Step program ⟨before, .result value, .restore caller :: stack⟩ after)
+    (run : Run program ⟨before, .result value, [.restore caller]⟩ ⟨after, .result returned, []⟩)
     {front back : List StorageId} {identity : StorageId}
     (split : before.bindings.releaseOrder = front ++ identity :: back) :
     ∃ middle next, before.heap.retireMany front = some middle ∧
-      middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
       ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
         cell.resident.Disposable program cell.type ∧
@@ -1293,11 +1347,10 @@ theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {af
           PathType program observer cell.type fields (.nominal nominal) →
           program.data nominal = some declaration → declaration.restriction = some .exact →
           ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
-  cases step with
-  | restore restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    exact BindingMap.Disposable.release_prefix safe.1 released split
+  obtain ⟨_, restored⟩ := run.restore_result
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+  cases same
+  exact BindingMap.Disposable.release_prefix safe.1 released split
 
 /-- Every retained scope is realized in the current heap, not merely the active
 scope or the outermost caller. Traversing frames does not execute pending code. -/

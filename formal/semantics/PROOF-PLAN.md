@@ -4057,5 +4057,27 @@ the actual-prefix order/disposal consumers derive strict acquisition order from
 these facts rather than accepting an additional ordering premise. All existing
 typed progress and source consumers use the migrated contracts. All 30 strict
 build jobs and inspected producer/source axiom closures passed. These results
-prepare the untyped completed-evaluation boundary as well as source safety;
-the machine retirement-frame integration remains open.
+prepare the untyped completed-evaluation boundary as well as source safety.
+
+The retirement-frame machine cutover is now integrated. Nonempty scope and
+return states select the canonical newest resident, execute its existing
+partial-resident cleanup, retire exactly that indexed owner, then repeat on
+the resulting binding map. Empty scope/return transitions alone resume the
+continuation. No atomic batch-retirement execution rule remains.
+
+`Run.scope` and `Run.restore` construct complete interleaved executions from
+successful batch storage operations; their result inversions recover exactly
+the original environment and protected payload from completed staged runs.
+General configuration preservation/progress, immutable consumption framing,
+callee external-cell framing, evaluation composition/inversion, finite-call
+termination, and reached-source cleanup guarantees use the new transitions.
+Source scope/return guarantees construct `Run`, not a fictitious single `Step`.
+Disposal authority comes from the current source masks and actual resident.
+Indexed continuation projection retains all other source observations.
+
+All 30 strict build jobs passed. The inspected construction, inversion,
+preservation, progress, framing, source cleanup and admitted maximal-behavior
+theorems depend only on `propext`, `Classical.choice`, and `Quot.sound`. This
+closes operational interleaving for the currently modeled structural cleanup;
+custom destructor bodies, effects/divergence within destructors and the other
+whole-language completion obligations remain open.

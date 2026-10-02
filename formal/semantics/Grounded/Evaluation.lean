@@ -55,7 +55,7 @@ theorem Evaluates.bind {environment middle localAfter after : Environment} {muta
       (exited : localAfter.exitScope 1 = some after) :
       Evaluates program environment (.bind mutable name localType initial body) value after :=
   .step .bind ((Run.extend initialized [.bind name ⟨localType, mutable⟩ body]).trans
-    (.step .bindResult ((Run.extend continued [.scope 1]).trans (.step (.scope exited) (.refl _)))))
+    (.step .bindResult ((Run.extend continued [.scope 1]).trans (Run.scope exited))))
 
 theorem Evaluates.assign {home : Module} {environment middle updated after : Environment} {place : Place}
       {expression rest : Expr} {resident value : Value} {old : PartialValue}
@@ -95,7 +95,7 @@ theorem Evaluates.constant {environment localAfter after : Environment} {name : 
       (restored : localAfter.restore environment.scope = some after) :
       Evaluates program environment (.constant name) value after :=
   .step (.constant declared) ((Run.extend initialized [.restore environment.scope]).trans
-    (.step (.restore restored) (.refl _)))
+    (Run.restore restored))
 
 theorem Evaluates.construct {environment after : Environment} {identity : Nat} {tag : Option Nat}
       {fields : List Expr} {values : List Value} (residents : EvaluatesMany program environment fields values after) :
@@ -111,7 +111,7 @@ theorem Evaluates.call {environment middle localAfter after : Environment} {iden
       (restored : localAfter.restore middle.scope = some after) :
       Evaluates program environment (.call identity arguments) value after :=
   .step (.call declared) ((Run.extend inputs [.call declaration]).trans
-    (.step (.callInputs prepared) ((Run.extend body [.restore middle.scope]).trans (.step (.restore restored) (.refl _)))))
+    (.step (.callInputs prepared) ((Run.extend body [.restore middle.scope]).trans (Run.restore restored))))
 
 theorem Evaluates.applyPatterns {environment middle localAfter after : Environment} {inputs : List Ty} {arguments : List Expr}
       {home : Module} {arms : List (Pattern × Expr)} {values : List Value}
@@ -123,7 +123,7 @@ theorem Evaluates.applyPatterns {environment middle localAfter after : Environme
       Evaluates program environment (.applyPatterns home inputs arguments arms) value after :=
   .step .applyPatterns ((Run.extend argumentsEval [.patterns home arms]).trans
     (.step (.selectedPattern selected) ((Run.extend bodyEval [.scope bindings.length]).trans
-      (.step (.scope exited) (.refl _)))))
+      (Run.scope exited))))
 
 theorem EvaluatesMany.nil {environment : Environment} : EvaluatesMany program environment [] [] environment :=
   .step .nil (.refl _)
@@ -172,13 +172,9 @@ theorem Evaluates.call_iff {environment after : Environment} {identity : Nat}
                 cases returned with
                 | step head rest => cases head
               | result localAfter result =>
-                cases returned with
-                | step head rest =>
-                  cases head with
-                  | restore restored =>
-                    cases rest with
-                    | refl => exact ⟨_, _, _, _, _, declared, inputs, prepared, body, restored⟩
-                    | step head rest => cases head
+                obtain ⟨same, restored⟩ := Run.restore_result returned
+                subst result
+                exact ⟨_, _, _, _, _, declared, inputs, prepared, body, restored⟩
   · rintro ⟨declaration, values, middle, bindings, localAfter, declared, inputs, prepared, body, restored⟩
     exact .call declared prepared inputs body restored
 
@@ -324,13 +320,9 @@ theorem Evaluates.applyPatterns_iff {environment after : Environment} {inputs : 
                 cases exited with
                 | step head rest => cases head
               | result localAfter result =>
-                cases exited with
-                | step head rest =>
-                  cases head with
-                  | scope retired =>
-                    cases rest with
-                    | refl => exact ⟨_, _, _, _, _, argumentsRun, selected, bodyRun, retired⟩
-                    | step head rest => cases head
+                obtain ⟨same, retired⟩ := Run.scope_result exited
+                subst result
+                exact ⟨_, _, _, _, _, argumentsRun, selected, bodyRun, retired⟩
   · rintro ⟨values, middle, bindings, body, localAfter, argumentsRun, selected, bodyRun, retired⟩
     exact .applyPatterns argumentsRun selected bodyRun retired
 

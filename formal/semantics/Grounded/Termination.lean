@@ -239,9 +239,14 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered middle.supply.allocate_issued
       have invocation := ConfigurationTyped.invoke middleTyped middleIssued .nil inputsTyped bodyTyped discard
       have returned := invocation.run checkedProgram (Run.extend bodyRun [.restore middle.scope])
-      obtain done | ⟨next, stepped⟩ := returned.progress
-      · cases done
-      · cases stepped with | restore restored => exact ⟨value, _, .call declared prepared inputRun bodyRun restored⟩
+      cases returned with | intro localStore localIssued code continuation =>
+        cases continuation with | cons frame tail =>
+          cases frame with | restore locals discard retained callerIssued older =>
+            obtain ⟨after, restored, _⟩ := AddressedEnvironment.restore.progress localStore retained (by
+              intro same
+              have equal := congrArg ActivationId.index same
+              omega)
+            exact ⟨value, after, .call declared prepared inputRun bodyRun restored⟩
     | assign resident selected path writable selection discard mask context rest =>
       obtain ⟨value, middle, valueRun, valueTyped, middleTyped, middleIssued, _⟩ := ih _ .assignValue resident store issued
       obtain ⟨updated, updatedMask, updatedContext, written, maskWritten, contextWritten, updatedTyped,

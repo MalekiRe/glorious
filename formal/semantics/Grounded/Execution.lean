@@ -43,6 +43,7 @@ inductive Frame where
   | sequence (rest : Expr)
   | bind (name : BindingId) (slot : BindingType) (body : Expr)
   | scope (count : Nat)
+  | retire (index : Nat)
   | assign (home : Module) (place : Place) (rest : Expr)
   | tupleHead (tail : List Expr)
   | tupleTail (head : Value)
@@ -67,6 +68,7 @@ def Frame.environment (frame : Frame) (current : Environment) : Environment :=
     activation := frame.activation current.activation
     bindings := match frame with
       | .scope count => current.bindings.drop count
+      | .retire index => current.bindings.eraseIdx index
       | .restore caller => caller.bindings
       | _ => current.bindings }
 
@@ -128,10 +130,18 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | bindResult {env : Environment} {stack : List Frame} {name : BindingId} {slot : BindingType} {body : Expr} {value : Value} :
       Step program ⟨env, .result value, .bind name slot body :: stack⟩
         ⟨env.extend [⟨name, slot, value⟩], .expression body, .scope 1 :: stack⟩
-  | scope {env after : Environment} {stack : List Frame} {count : Nat} {value : Value}
-      (exited : env.exitScope count = some after) :
+  | scope {env : Environment} {stack : List Frame} {count : Nat} {value : Value}
+      (empty : List.take count env.bindings = []) :
+      Step program ⟨env, .result value, .scope count :: stack⟩ ⟨env, .result value, stack⟩
+  | scopeOwner {env : Environment} {stack : List Frame} {count index : Nat} {identity : StorageId}
+      {value : Value} {cell : StorageCell}
+      (chosen : BindingMap.nextRelease (List.take count env.bindings) env.bindings = some (index, identity))
+      (found : env.heap.read identity = some cell) :
       Step program ⟨env, .result value, .scope count :: stack⟩
-        ⟨after, .result value, stack⟩
+        ⟨env, .cleanup cell.resident.disposalTasks (.result value), .retire index :: .scope (count - 1) :: stack⟩
+  | retire {env after : Environment} {stack : List Frame} {index : Nat} {value : Value}
+      (retired : env.retireBinding index = some after) :
+      Step program ⟨env, .result value, .retire index :: stack⟩ ⟨after, .result value, stack⟩
   | assign {home : Module} {env : Environment} {stack : List Frame} {place : Place} {value rest : Expr} :
       Step program ⟨env, .expression (.assign home place value rest), stack⟩
         ⟨env, .expression value, .assign home place rest :: stack⟩
@@ -168,10 +178,16 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       (declared : program.constants name = some declaration) :
       Step program ⟨env, .expression (.constant name), stack⟩
         ⟨enterBindings env.heap env.supply [], .expression declaration.body, .restore env.scope :: stack⟩
-  | restore {env after : Environment} {caller : AddressedScope} {stack : List Frame} {value : Value}
-      (restored : env.restore caller = some after) :
+  | restore {env : Environment} {caller : AddressedScope} {stack : List Frame} {value : Value}
+      (empty : env.bindings = []) :
       Step program ⟨env, .result value, .restore caller :: stack⟩
-        ⟨after, .result value, stack⟩
+        ⟨{ env with activation := caller.activation, bindings := caller.bindings }, .result value, stack⟩
+  | restoreOwner {env : Environment} {caller : AddressedScope} {stack : List Frame}
+      {index : Nat} {identity : StorageId} {value : Value} {cell : StorageCell}
+      (chosen : BindingMap.nextRelease env.bindings env.bindings = some (index, identity))
+      (found : env.heap.read identity = some cell) :
+      Step program ⟨env, .result value, .restore caller :: stack⟩
+        ⟨env, .cleanup cell.resident.disposalTasks (.result value), .retire index :: .restore caller :: stack⟩
   | construct {env : Environment} {stack : List Frame} {identity : Nat} {tag : Option Nat} {fields : List Expr} :
       Step program ⟨env, .expression (.construct identity tag fields), stack⟩
         ⟨env, .arguments fields, .construct identity tag :: stack⟩
@@ -326,6 +342,107 @@ theorem Run.cleanup_decompose {before after : Configuration} (run : Run program 
     | cleanupEnter => exact ih _ _ _ _ rfl
     | cleanupRelease => exact ih _ _ _ _ rfl
     | cleanupDone => exact .inr tail
+/-- Every successful batch exit is realized by resident cleanup followed by
+one indexed retirement at a time, with no assumed intermediate execution. -/
+theorem Run.scope {before after : Environment} {count : Nat} {value : Value} {stack : List Frame}
+    (exited : before.exitScope count = some after) :
+    Run program ⟨before, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ := by
+  by_cases empty : List.take count before.bindings = []
+  · cases Option.some.inj ((AddressedEnvironment.exitScope.empty empty).symm.trans exited)
+    exact .step (.scope empty) (.refl _)
+  · obtain ⟨index, entry, chosen, selected, member, first⟩ :=
+      BindingMap.release_next _ _ (List.take_prefix count before.bindings) empty
+    have inside := BindingMap.nextRelease.in_prefix (List.take_prefix count before.bindings) chosen
+    have localIndex : index < count := by simp only [List.length_take] at inside; omega
+    obtain ⟨finalHeap, released, _⟩ := Option.map_eq_some_iff.mp exited
+    obtain ⟨cell, found⟩ := (releaseBindings.preconditions released).2 entry.2 (List.mem_map_of_mem member)
+    obtain ⟨heap, primitive⟩ := RuntimeHeap.retire_exists found
+    let middle : Environment := { before with heap := heap, bindings := before.bindings.eraseIdx index }
+    have operation : before.retireBinding index = some middle :=
+      AddressedEnvironment.retireBinding.eq_some_iff.mpr ⟨entry, selected, heap, primitive, rfl⟩
+    have same := AddressedEnvironment.exitScope.retireBinding selected localIndex first operation
+    exact .step (.scopeOwner chosen found)
+      ((Run.cleanup before (.result value) (.retire index :: .scope (count - 1) :: stack) cell.resident.disposalTasks).trans
+        (.step (.retire operation) (Run.scope (same.trans exited))))
+termination_by count
+
+theorem Run.restore {before after : Environment} {caller : AddressedScope} {value : Value} {stack : List Frame}
+    (restored : before.restore caller = some after) :
+    Run program ⟨before, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ := by
+  by_cases empty : before.bindings = []
+  · cases Option.some.inj ((AddressedEnvironment.restore.empty caller empty).symm.trans restored)
+    exact .step (.restore empty) (.refl _)
+  · obtain ⟨index, entry, chosen, selected, member, first⟩ :=
+      BindingMap.release_next _ _ ⟨[], List.append_nil _⟩ empty
+    obtain ⟨finalHeap, released, _⟩ := Option.map_eq_some_iff.mp restored
+    obtain ⟨cell, found⟩ := (releaseBindings.preconditions released).2 entry.2 (List.mem_map_of_mem member)
+    obtain ⟨heap, primitive⟩ := RuntimeHeap.retire_exists found
+    let middle : Environment := { before with heap := heap, bindings := before.bindings.eraseIdx index }
+    have operation : before.retireBinding index = some middle :=
+      AddressedEnvironment.retireBinding.eq_some_iff.mpr ⟨entry, selected, heap, primitive, rfl⟩
+    have same := AddressedEnvironment.restore.retireBinding selected first operation caller
+    exact .step (.restoreOwner chosen found)
+      ((Run.cleanup before (.result value) (.retire index :: .restore caller :: stack) cell.resident.disposalTasks).trans
+        (.step (.retire operation) (Run.restore (same.trans restored))))
+termination_by before.bindings.length
+decreasing_by
+  have descent := AddressedEnvironment.retireBinding.length_step operation
+  dsimp [middle] at descent
+  omega
+
+/-- A completed staged scope has exactly the batch result and preserves its
+protected return value. This inspects actual execution, including all cleanup. -/
+theorem Run.scope_result {before after : Environment} {count : Nat} {value returned : Value}
+    (run : Run program ⟨before, .result value, [.scope count]⟩ ⟨after, .result returned, []⟩) :
+    returned = value ∧ before.exitScope count = some after := by
+  cases run with
+  | step head tail =>
+    cases head with
+    | scope empty =>
+      cases tail with
+      | refl => exact ⟨rfl, AddressedEnvironment.exitScope.empty empty⟩
+      | step head _ => cases head
+    | scopeOwner chosen found =>
+      obtain ⟨entry, selected, matching⟩ := BindingMap.nextRelease.binding chosen
+      have first := (BindingMap.nextRelease.eq_some_iff.mp chosen).1
+      rw [← matching] at first
+      have inside := BindingMap.nextRelease.in_prefix (List.take_prefix count before.bindings) chosen
+      simp only [List.length_take] at inside
+      have localIndex := Nat.lt_of_lt_of_le inside (Nat.min_le_left _ _)
+      rcases tail.cleanup_decompose _ _ _ _ rfl with ⟨pending, impossible⟩ | resumed
+      · cases impossible
+      · cases resumed with
+        | step head rest =>
+          cases head with
+          | retire operation =>
+            have next := Run.scope_result rest
+            exact ⟨next.1, (AddressedEnvironment.exitScope.retireBinding selected localIndex first operation).symm.trans next.2⟩
+termination_by count
+
+theorem Run.restore_result {before after : Environment} {caller : AddressedScope} {value returned : Value}
+    (run : Run program ⟨before, .result value, [.restore caller]⟩ ⟨after, .result returned, []⟩) :
+    returned = value ∧ before.restore caller = some after := by
+  cases run with
+  | step head tail =>
+    cases head with
+    | restore empty =>
+      cases tail with
+      | refl => exact ⟨rfl, AddressedEnvironment.restore.empty caller empty⟩
+      | step head _ => cases head
+    | restoreOwner chosen found =>
+      obtain ⟨entry, selected, matching⟩ := BindingMap.nextRelease.binding chosen
+      have first := (BindingMap.nextRelease.eq_some_iff.mp chosen).1
+      rw [← matching] at first
+      rcases tail.cleanup_decompose _ _ _ _ rfl with ⟨pending, impossible⟩ | resumed
+      · cases impossible
+      · cases resumed with
+        | step head rest =>
+          cases head with
+          | retire operation =>
+            have next := Run.restore_result rest
+            exact ⟨next.1, (AddressedEnvironment.restore.retireBinding selected first operation caller).symm.trans next.2⟩
+termination_by before.bindings.length
+decreasing_by have descent := AddressedEnvironment.retireBinding.length_step operation; omega
 /-- Until a subcomputation has a terminal control, its caller frames cannot
 participate in a transition. This is an operational fact, not admission evidence. -/
 theorem Step.unextend {before after : Configuration} {tail : List Frame}
@@ -348,7 +465,10 @@ theorem Step.unextend {before after : Configuration} {tail : List Frame}
       cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
   | cons frame stack =>
     cases control <;> cases frame <;> cases step <;>
-      exact ⟨_, by constructor <;> assumption, rfl⟩
+      first
+      | exact ⟨_, by constructor <;> assumption, rfl⟩
+      | exact ⟨_, .scopeOwner (by assumption) (by assumption), rfl⟩
+      | exact ⟨_, .restoreOwner (by assumption) (by assumption), rfl⟩
 
 /-- A prefix either still executes above the saved continuation or has reached
 its first terminal control and then continued through that saved continuation. -/
@@ -387,7 +507,8 @@ theorem Run.unextend {before after : Configuration} (run : Run program before af
 
 theorem Step.unique {before first second : Configuration} (left : Step program before first)
     (right : Step program before second) : second = first := by
-  cases left <;> cases right <;> simp_all
+  cases left <;> cases right <;> simp_all [BindingMap.nextRelease.eq_some_iff, BindingMap.releaseOrder]
+  all_goals rcases ‹_ ∨ _› with h | h <;> simp_all
 
 theorem Run.unique {before first second : Configuration} (left : Run program before first)
     (right : Run program before second)
@@ -544,18 +665,23 @@ theorem Step.outer_scope {before after : Configuration} (step : Step program bef
     rw [extended]
     apply continuationEnvironment.scope_congr
     rfl
-  case scope env after stack count value exited =>
-    obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
+  case scope env stack count value empty =>
+    have suffix : env.bindings.drop count = env.bindings := by
+      simpa only [empty, List.nil_append] using List.take_append_drop count env.bindings
+    apply continuationEnvironment.scope_congr
+    simp [Frame.environment, Frame.activation, AddressedEnvironment.scope, suffix]
+  case scopeOwner env stack count index identity value cell chosen found =>
+    have inside := BindingMap.nextRelease.in_prefix (List.take_prefix count env.bindings) chosen
+    have localIndex : index < count := by simp only [List.length_take] at inside; omega
+    simp only [Configuration.outerEnvironment, continuationEnvironment]
+    apply continuationEnvironment.scope_congr
+    simp [Frame.environment, Frame.activation, AddressedEnvironment.scope, BindingMap.eraseIdx_drop env.bindings localIndex]
+  case retire env after stack index value retired =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
     apply continuationEnvironment.scope_congr
     rfl
   case install home env after stack place rest value written =>
     obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp written
-    cases same
-    apply continuationEnvironment.scope_congr
-    rfl
-  case restore env after caller stack value restored =>
-    obtain ⟨heap, _, same⟩ := Option.map_eq_some_iff.mp restored
     cases same
     apply continuationEnvironment.scope_congr
     rfl
@@ -629,14 +755,9 @@ theorem Step.heap_history {before after : Configuration} (step : Step program be
     cases same
     obtain ⟨identity, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     exact StorageAddress.restore.history raw
-  | scope exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    exact RuntimeHeap.retireMany_history released
-  | restore restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    exact RuntimeHeap.retireMany_history released
+  | retire retired =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
+    exact .step (.retire primitive) (.refl _)
   | bindResult => exact allocateBindings.history _ _ _
   | selectedPattern _ => exact allocateBindings.history _ _ _
   | constant _ => exact allocateBindings.history _ _ _
@@ -673,31 +794,27 @@ theorem Run.retired_inaccessible {before after : Configuration} {identity : Stor
 
 /-- Actual lexical-scope retirement permanently kills every released identity;
 the following run need not return or preserve the original lexical environment. -/
-theorem Run.scope_retired {before : Environment} {middle after : Configuration}
-    {value : Value} {count : Nat} {stack : List Frame}
-    (exit : Step program ⟨before, .result value, .scope count :: stack⟩ middle)
-    (run : Run program middle after) {identity : StorageId}
+theorem Run.scope_retired {before middle : Environment} {after : Configuration}
+    {value returned : Value} {count : Nat} {stack : List Frame}
+    (exit : Run program ⟨before, .result value, [.scope count]⟩ ⟨middle, .result returned, []⟩)
+    (run : Run program ⟨middle, .result returned, stack⟩ after) {identity : StorageId}
     (member : identity ∈ (List.take count before.bindings).map Prod.snd) :
     after.environment.heap.Retired identity := by
-  cases exit with
-  | scope exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    exact run.retired (releaseBindings.retired released identity member)
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exit.scope_result.2
+  cases same
+  exact run.retired (releaseBindings.retired released identity member)
 
 /-- Returning from a function retires its own binding identities, not the
 caller's names; no subsequent execution can allocate those identities again. -/
-theorem Run.return_retired {before : Environment} {middle after : Configuration}
-    {value : Value} {caller : AddressedScope} {stack : List Frame}
-    (exit : Step program ⟨before, .result value, .restore caller :: stack⟩ middle)
-    (run : Run program middle after) {identity : StorageId}
+theorem Run.return_retired {before middle : Environment} {after : Configuration}
+    {value returned : Value} {caller : AddressedScope} {stack : List Frame}
+    (exit : Run program ⟨before, .result value, [.restore caller]⟩ ⟨middle, .result returned, []⟩)
+    (run : Run program ⟨middle, .result returned, stack⟩ after) {identity : StorageId}
     (member : identity ∈ before.bindings.map Prod.snd) :
     after.environment.heap.Retired identity := by
-  cases exit with
-  | restore restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    exact run.retired (releaseBindings.retired released identity member)
+  obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exit.restore_result.2
+  cases same
+  exact run.retired (releaseBindings.retired released identity member)
 
 /-- Finishing a body through its real return frame permanently retires the
 entry bindings, even when the body performs nested calls or lexical allocations. -/
@@ -711,11 +828,9 @@ theorem Run.body_return_retires {entry after : Environment} {caller : AddressedS
   | result current resident =>
     have bindings : current.bindings = entry.bindings :=
       congrArg AddressedScope.bindings bodyRun.outer_scope
-    cases suffix with
-    | step head tail =>
-      intro identity member
-      apply Run.return_retired head tail
-      simpa only [bindings] using member
+    intro identity member
+    apply Run.return_retired (stack := []) suffix (.refl _)
+    simpa only [bindings] using member
   | results current residents =>
     cases suffix with
     | step head tail => cases head
@@ -752,14 +867,9 @@ theorem Step.storage_origin {before after : Configuration} (step : Step program 
     cases same
     obtain ⟨address, _, raw⟩ := Option.bind_eq_some_iff.mp operation
     exact StorageAddress.restore.identity raw found
-  | scope exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    exact ⟨result, RuntimeHeap.retireMany_origin released found, rfl, rfl⟩
-  | restore restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    exact ⟨result, RuntimeHeap.retireMany_origin released found, rfl, rfl⟩
+  | retire retired =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
+    exact ⟨result, (RuntimeHeap.Typed.retire (fun _ _ old => old) primitive) identity result found, rfl, rfl⟩
   | bindResult => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
   | selectedPattern _ => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
   | constant _ => exact ⟨result, (allocateBindings.old _ _ _ allocated).symm.trans found, rfl, rfl⟩
@@ -857,27 +967,18 @@ theorem Step.untracked_origin {before after : Configuration} (step : Step progra
         identity ∉ env.bindings.map Prod.snd := by
       simpa only [AddressedEnvironment.extend, List.map_append, List.mem_append, not_or] using outside
     exact ⟨⟨cell, (allocateBindings.outside _ _ _ parts.1).symm.trans found⟩, by simpa using parts.2⟩
-  case restore env after caller stack value restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    refine ⟨⟨cell, RuntimeHeap.retireMany_origin released found⟩, ?_, untracked.1⟩
+  case retire env after stack index value retired =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
+    refine ⟨⟨cell, (RuntimeHeap.Typed.retire (fun _ _ old => old) primitive) identity cell found⟩, ?_⟩
     intro name member
-    have absent := (releaseBindings.retired released identity (List.mem_map_of_mem (f := Prod.snd) member)).2
-    rw [absent] at found
-    cases found
-  case scope env after stack count value exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    refine ⟨⟨cell, RuntimeHeap.retireMany_origin released found⟩, ?_⟩
-    intro name member
-    have split : (name, identity) ∈ List.take count env.bindings ∨ (name, identity) ∈ env.bindings.drop count := by
-      rw [← List.mem_append, List.take_append_drop]
-      exact member
-    rcases split with removed | retained
-    · have absent := (releaseBindings.retired released identity (List.mem_map_of_mem (f := Prod.snd) removed)).2
+    obtain ⟨position, located⟩ := List.mem_iff_getElem?.mp member
+    by_cases same : position = index
+    · subst position
+      cases Option.some.inj (selected.symm.trans located)
+      have absent := RuntimeHeap.retire_read primitive
       rw [absent] at found
       cases found
-    · exact untracked.1 name retained
+    · exact untracked.1 name (List.mem_eraseIdx_iff_getElem?.mpr ⟨position, same, located⟩)
 
 /-- Storage accountability composes through arbitrary finite execution. -/
 theorem Run.untracked_origin {before after : Configuration} (run : Run program before after)
@@ -980,22 +1081,14 @@ theorem Step.untracked_frame {before after : Configuration} (step : Step program
         (List.mem_map_of_mem (f := Prod.snd) fresh)
       omega
     · exact untracked.1 name previous
-  case restore env after caller stack value restored =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-    cases same
-    have outside : identity ∉ env.bindings.map Prod.snd := by simpa using untracked.1
-    exact ⟨(releaseBindings.outside released outside).trans found, untracked.2.1⟩
-  case scope env after stack count value exited =>
-    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
-    cases same
-    have outside : identity ∉ (List.take count env.bindings).map Prod.snd := by
-      intro member
-      obtain ⟨⟨name, address⟩, included, same⟩ := List.mem_map.mp member
-      cases same
-      exact untracked.1 name (List.mem_of_mem_take included)
-    refine ⟨(releaseBindings.outside released outside).trans found, ?_⟩
+  case retire env after stack index value retired =>
+    obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
+    have apart : identity ≠ entry.2 := by
+      intro same
+      exact untracked.1 entry.1 (same ▸ List.mem_of_getElem? selected)
+    refine ⟨(RuntimeHeap.retire_other primitive apart).trans found, ?_⟩
     intro name member
-    exact untracked.1 name (List.mem_of_mem_drop member)
+    exact untracked.1 name (List.mem_of_mem_eraseIdx member)
 
 /-- The entire external live cell survives, including partial residents,
 allocation owner and declared type. No future liveness is required. -/
@@ -1012,6 +1105,34 @@ theorem Run.external_frame {before after : Configuration} (run : Run program bef
     obtain ⟨middle, retained⟩ := head.untracked_frame outside found
     exact ih retained middle
 
+/-- Every prefix of staged return cleanup preserves external cells, including
+cells retained by the caller. No completed return is assumed. -/
+theorem Run.restore_frame {before : Environment} {after : Configuration} {caller : AddressedScope}
+    {value : Value} {identity : StorageId} {cell : StorageCell}
+    (run : Run program ⟨before, .result value, [.restore caller]⟩ after)
+    (outside : identity ∉ before.bindings.map Prod.snd) (found : before.heap.read identity = some cell) :
+    after.environment.heap.read identity = some cell := by
+  cases run with
+  | refl => exact found
+  | step head tail =>
+    cases head with
+    | restore empty =>
+      cases tail with
+      | refl => exact found
+      | step head _ => cases head
+    | restoreOwner chosen residentFound =>
+      rcases tail.cleanup_decompose _ _ _ _ rfl with ⟨pending, same⟩ | resumed
+      · subst after
+        exact found
+      · cases resumed with
+        | refl => exact found
+        | step head rest =>
+          cases head with
+          | retire operation =>
+            obtain ⟨preserved, retained⟩ := AddressedEnvironment.retireBinding.frame operation outside
+            exact Run.restore_frame rest retained (preserved.trans found)
+termination_by before.bindings.length
+decreasing_by have descent := AddressedEnvironment.retireBinding.length_step operation; omega
 /-- A callee cannot mutate cells outside its entry ownership, even when they
 occur in the saved caller. Covers every prefix, including the return cleanup. -/
 theorem Run.body_frame {entry : Environment} {after : Configuration} {caller : AddressedScope}
@@ -1029,16 +1150,7 @@ theorem Run.body_frame {entry : Environment} {after : Configuration} {caller : A
   · obtain ⟨preserved, remaining⟩ := prefixRun.external_frame identity cell untracked found
     cases terminal with
     | result current value =>
-      cases suffix with
-      | refl => exact preserved
-      | step head tail =>
-        cases head with
-        | restore restored =>
-          obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
-          cases same
-          cases tail with
-          | refl => exact (releaseBindings.outside released remaining.1).trans preserved
-          | step impossible rest => cases impossible
+      exact suffix.restore_frame remaining.1 preserved
     | results current values =>
       cases suffix with
       | refl => exact preserved

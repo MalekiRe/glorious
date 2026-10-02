@@ -557,22 +557,34 @@ def BindingMap.nextRelease (pending available : BindingMap) : Option (Nat × Sto
   let index ← available.findIdx? fun entry => decide (entry.2 = identity)
   pure (index, identity)
 
+theorem BindingMap.nextRelease.eq_some_iff {pending available : BindingMap} {index : Nat} {identity : StorageId} :
+    BindingMap.nextRelease pending available = some (index, identity) ↔
+      pending.releaseOrder.head? = some identity ∧
+      available.findIdx? (fun entry => decide (entry.2 = identity)) = some index := by
+  simp [BindingMap.nextRelease, Option.bind_eq_some_iff, Prod.mk.injEq]
+  constructor
+  · rintro ⟨root, first, position, found, rfl, rfl⟩
+    exact ⟨first, found⟩
+  · rintro ⟨first, found⟩
+    exact ⟨identity, first, index, found, rfl, rfl⟩
+
+/-- The selected index names the same storage identity as the canonical head. -/
+theorem BindingMap.nextRelease.binding {pending available : BindingMap} {index : Nat} {identity : StorageId}
+    (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
+    ∃ entry, available[index]? = some entry ∧ entry.2 = identity := by
+  have searched := (BindingMap.nextRelease.eq_some_iff.mp chosen).2
+  obtain ⟨inside, same⟩ := List.findIdx?_eq_some_iff_findIdx_eq.mp searched
+  have selected : available[index]? = some (available[index]'inside) := List.getElem?_eq_getElem inside
+  refine ⟨available[index]'inside, selected, of_decide_eq_true ?_⟩
+  apply List.findIdx_of_getElem?_eq_some (xs := available) (p := fun entry : BindingId × StorageId => decide (entry.2 = identity))
+  simpa only [same] using selected
 /-- Every successful selection names an owner in the actual pending map. -/
 theorem BindingMap.nextRelease.member {pending available : BindingMap} {index : Nat} {identity : StorageId}
     (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
     identity ∈ pending.map Prod.snd := by
-  cases first : pending.releaseOrder.head? with
-  | none => simp [BindingMap.nextRelease, first] at chosen
-  | some root =>
-    cases searched : available.findIdx? (fun entry => decide (entry.2 = root)) with
-    | none => simp [BindingMap.nextRelease, first, searched] at chosen
-    | some position =>
-      have same : position = index ∧ root = identity := by
-        simpa [BindingMap.nextRelease, first, searched] using chosen
-      obtain ⟨rfl, rfl⟩ := same
-      apply BindingMap.mem_releaseOrder.mp
-      obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
-      simp only [ordered, List.mem_cons, true_or]
+  apply BindingMap.mem_releaseOrder.mp
+  obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp (BindingMap.nextRelease.eq_some_iff.mp chosen).1
+  simp only [ordered, List.mem_cons, true_or]
 
 
 /-- Selecting a pending lexical prefix cannot select a retained outer binding,
@@ -581,24 +593,14 @@ theorem BindingMap.nextRelease.in_prefix {pending available : BindingMap} {index
     (leading : pending <+: available)
     (chosen : BindingMap.nextRelease pending available = some (index, identity)) :
     index < pending.length := by
-  have pendingMember := BindingMap.nextRelease.member chosen
-  cases first : pending.releaseOrder.head? with
-  | none => simp [BindingMap.nextRelease, first] at chosen
-  | some root =>
-    cases searched : available.findIdx? (fun entry => decide (entry.2 = root)) with
-    | none => simp [BindingMap.nextRelease, first, searched] at chosen
-    | some position =>
-      have same : position = index ∧ root = identity := by
-        simpa [BindingMap.nextRelease, first, searched] using chosen
-      obtain ⟨rfl, rfl⟩ := same
-      have member := pendingMember
-      obtain ⟨entry, member, same⟩ := List.mem_map.mp member
-      have bound := List.findIdx_lt_length_of_exists
-        (xs := pending) (p := fun entry => decide (entry.2 = root))
-        ⟨entry, member, by simp only [same, decide_true]⟩
-      rw [← (List.findIdx?_eq_some_iff_findIdx_eq.mp searched).2,
-        leading.findIdx_eq_of_findIdx_lt_length bound]
-      exact bound
+  have searched := (BindingMap.nextRelease.eq_some_iff.mp chosen).2
+  obtain ⟨entry, member, same⟩ := List.mem_map.mp (BindingMap.nextRelease.member chosen)
+  have bound := List.findIdx_lt_length_of_exists
+    (xs := pending) (p := fun entry => decide (entry.2 = identity))
+    ⟨entry, member, by simp only [same, decide_true]⟩
+  rw [← (List.findIdx?_eq_some_iff_findIdx_eq.mp searched).2,
+    leading.findIdx_eq_of_findIdx_lt_length bound]
+  exact bound
 /-- Every nonempty pending lexical prefix has an executable next owner.
 Storage uniqueness and typing are not prerequisites for the search itself. -/
 theorem BindingMap.release_next (pending available : BindingMap)
@@ -620,31 +622,31 @@ theorem BindingMap.release_next (pending available : BindingMap)
     have witness : ∃ binding ∈ available, decide (binding.2 = identity) = true :=
       ⟨entry, leading.subset member, by simp only [same, decide_true]⟩
     let index := available.findIdx fun binding => decide (binding.2 = identity)
-    have bound := List.findIdx_lt_length_of_exists witness
-    have selected : available[index]? = some (available[index]'bound) := List.getElem?_eq_getElem bound
-    have matching : (available[index]'bound).2 = identity :=
-      of_decide_eq_true (List.findIdx_of_getElem?_eq_some
-        (p := fun binding : BindingId × StorageId => decide (binding.2 = identity)) selected)
-    have chosen : BindingMap.nextRelease pending available = some (index, (available[index]'bound).2) := by
-      simp [BindingMap.nextRelease, ordered, List.findIdx?_eq_some_of_exists witness, matching, index]
+    have chosen : BindingMap.nextRelease pending available = some (index, identity) :=
+      BindingMap.nextRelease.eq_some_iff.mpr ⟨by simp only [ordered, List.head?_cons],
+        List.findIdx?_eq_some_of_exists witness⟩
+    obtain ⟨actual, selected, matching⟩ := BindingMap.nextRelease.binding chosen
     have inside := BindingMap.nextRelease.in_prefix leading chosen
-    have localSelected : pending[index]? = some (available[index]'bound) := by
+    have localSelected : pending[index]? = some actual := by
       obtain ⟨back, same⟩ := leading
       simpa only [← same, List.getElem?_append_left inside] using selected
-    exact ⟨index, available[index]'bound, chosen, selected, List.mem_of_getElem? localSelected,
+    exact ⟨index, actual, by simpa only [matching] using chosen, selected, List.mem_of_getElem? localSelected,
       by simp only [List.head?_cons, matching]⟩
-/-- Every later retirement is strictly older; each owned cell occurs exactly
-once because typed binding maps are injective in storage identity. -/
-theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)
-    (distinct : (bindings.map Prod.snd).Nodup) :
-    bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index) := by
+/-- Canonical acquisition order is defined even for an untyped map with aliases. -/
+theorem BindingMap.releaseOrder_sorted (bindings : BindingMap) :
+    bindings.releaseOrder.Pairwise (fun newer older => older.index ≤ newer.index) := by
   have sorted := List.pairwise_mergeSort
     (le := fun left right : StorageId => decide (right.index ≤ left.index))
     (by intro a b c first second; simp only [decide_eq_true_eq] at *; omega)
     (by intro a b; simp only [Bool.or_eq_true, decide_eq_true_eq]; omega)
     (bindings.map Prod.snd)
-  have weak : bindings.releaseOrder.Pairwise (fun a b => b.index ≤ a.index) := by
-    simpa only [BindingMap.releaseOrder, decide_eq_true_eq] using sorted
+  simpa only [BindingMap.releaseOrder, decide_eq_true_eq] using sorted
+/-- Every later retirement is strictly older; each owned cell occurs exactly
+once because typed binding maps are injective in storage identity. -/
+theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)
+    (distinct : (bindings.map Prod.snd).Nodup) :
+    bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index) := by
+  have weak := bindings.releaseOrder_sorted
   have unequal : bindings.releaseOrder.Nodup := bindings.releaseOrder_perm.nodup_iff.mpr distinct
   apply (weak.and unequal).imp
   intro a b pair
@@ -656,18 +658,16 @@ theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)
 
 /-- Filtering owners commutes with their canonical acquisition order. -/
 theorem BindingMap.releaseOrder_filter (bindings : BindingMap)
-    (distinct : (bindings.map Prod.snd).Nodup) (keep : StorageId → Bool) :
+    (keep : StorageId → Bool) :
     BindingMap.releaseOrder (bindings.filter fun entry => keep entry.2) = bindings.releaseOrder.filter keep := by
   have mapped : (bindings.filter fun entry => keep entry.2).map Prod.snd =
       (bindings.map Prod.snd).filter keep := List.filter_map.symm
-  have remaining : ((bindings.filter fun entry => keep entry.2).map Prod.snd).Nodup := by
-    rw [mapped]
-    exact distinct.filter keep
-  apply List.Perm.eq_of_pairwise (le := fun a b : StorageId => b.index < a.index)
+  apply List.Perm.eq_of_pairwise (le := fun a b : StorageId => b.index ≤ a.index)
   · intro a b _ _ first second
-    omega
-  · exact BindingMap.releaseOrder_decreasing _ remaining
-  · exact List.Pairwise.filter keep (bindings.releaseOrder_decreasing distinct)
+    have same := Nat.le_antisymm second first
+    cases a; cases b; simpa using same
+  · exact BindingMap.releaseOrder_sorted _
+  · exact List.Pairwise.filter keep bindings.releaseOrder_sorted
   · apply (BindingMap.releaseOrder_perm _).trans
     rw [mapped]
     exact (bindings.releaseOrder_perm.filter keep).symm
@@ -675,20 +675,33 @@ theorem BindingMap.releaseOrder_filter (bindings : BindingMap)
 /-- Removing the selected newest owner leaves exactly the previous release
 queue's tail, not merely some permutation of the remaining owners. -/
 theorem BindingMap.releaseOrder_eraseIdx {bindings : BindingMap} {index : Nat} {entry : BindingId × StorageId}
-    (distinct : (bindings.map Prod.snd).Nodup) (selected : bindings[index]? = some entry)
+    (selected : bindings[index]? = some entry)
     (first : bindings.releaseOrder.head? = some entry.2) :
     BindingMap.releaseOrder (bindings.eraseIdx index) = bindings.releaseOrder.tail := by
-  rw [BindingMap.eraseIdx_filter distinct selected,
-    BindingMap.releaseOrder_filter bindings distinct (fun identity => decide (identity ≠ entry.2))]
-  obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
-  have unique := bindings.releaseOrder_perm.nodup_iff.mpr distinct
-  rw [ordered] at unique
-  have fresh := (List.nodup_cons.mp unique).1
-  simp only [ordered, List.filter_cons, ne_eq, not_true_eq_false, decide_false,
-    Bool.false_eq_true, ↓reduceIte, List.tail_cons]
-  apply List.filter_eq_self.mpr
-  intro identity member
-  exact decide_eq_true_eq.mpr (fun same => fresh (same ▸ member))
+  have removal : (entry.2 :: (bindings.eraseIdx index).map Prod.snd).Perm (bindings.map Prod.snd) := by
+    clear first
+    induction bindings generalizing index with
+    | nil => simp at selected
+    | cons binding bindings ih =>
+      cases index with
+      | zero =>
+        simp only [List.getElem?_cons_zero, Option.some.injEq] at selected
+        cases selected
+        exact .refl _
+      | succ index =>
+        simp only [List.getElem?_cons_succ] at selected
+        exact (List.Perm.swap _ _ _).trans ((ih selected).cons binding.2)
+  apply List.Perm.eq_of_pairwise (le := fun a b : StorageId => b.index ≤ a.index)
+  · intro a b _ _ left right
+    have same := Nat.le_antisymm right left
+    cases a; cases b; simpa using same
+  · exact BindingMap.releaseOrder_sorted _
+  · exact bindings.releaseOrder_sorted.tail
+  · obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+    have whole : (entry.2 :: BindingMap.releaseOrder (bindings.eraseIdx index)).Perm bindings.releaseOrder :=
+      ((BindingMap.releaseOrder_perm _).cons entry.2).trans (removal.trans bindings.releaseOrder_perm.symm)
+    rw [ordered] at whole
+    simpa only [ordered, List.tail_cons] using whole.cons_inv
 
 /-- Removing an executed prefix leaves precisely its original ordered suffix. -/
 theorem BindingMap.releaseOrder_remove_prefix {bindings : BindingMap}
@@ -698,7 +711,7 @@ theorem BindingMap.releaseOrder_remove_prefix {bindings : BindingMap}
   have unique := bindings.releaseOrder_perm.nodup_iff.mpr distinct
   rw [split] at unique
   have apart := (List.nodup_append.mp unique).2.2
-  rw [BindingMap.releaseOrder_filter bindings distinct (fun identity => decide (identity ∉ front)),
+  rw [BindingMap.releaseOrder_filter bindings (fun identity => decide (identity ∉ front)),
     split, List.filter_append]
   have gone : front.filter (fun identity => decide (identity ∉ front)) = [] := by
     apply List.filter_eq_nil_iff.mpr
@@ -994,6 +1007,20 @@ theorem AddressedEnvironment.retireBinding.eq_some_iff {before after : Addressed
       before.heap.retire entry.2 = some heap ∧
       { before with heap := heap, bindings := before.bindings.eraseIdx index } = after := by
   simp [AddressedEnvironment.retireBinding, Option.bind_eq_some_iff]
+/-- Indexed retirement preserves every external cell and its exclusion from
+active ownership; it cannot make an external identity a local owner. -/
+theorem AddressedEnvironment.retireBinding.frame {before after : AddressedEnvironment}
+    {index : Nat} {identity : StorageId} (retired : before.retireBinding index = some after)
+    (outside : identity ∉ before.bindings.map Prod.snd) :
+    after.heap.read identity = before.heap.read identity ∧ identity ∉ after.bindings.map Prod.snd := by
+  obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
+  have apart : identity ≠ entry.2 := by
+    intro same
+    exact outside (same ▸ List.mem_map_of_mem (f := Prod.snd) (List.mem_of_getElem? selected))
+  refine ⟨RuntimeHeap.retire_other primitive apart, ?_⟩
+  intro member
+  obtain ⟨binding, member, same⟩ := List.mem_map.mp member
+  exact outside (List.mem_map.mpr ⟨binding, List.mem_of_mem_eraseIdx member, same⟩)
 /-- Every successful synchronized retirement consumes exactly one binding. -/
 theorem AddressedEnvironment.retireBinding.length_step {before after : AddressedEnvironment}
     {index : Nat} (retired : before.retireBinding index = some after) :
@@ -1035,18 +1062,21 @@ def AddressedEnvironment.restore (current : AddressedEnvironment) (caller : Addr
     Option AddressedEnvironment :=
   (releaseBindings current.heap current.bindings).map fun heap =>
     { current with activation := caller.activation, bindings := caller.bindings, heap := heap }
+theorem AddressedEnvironment.restore.empty {current : AddressedEnvironment} (caller : AddressedScope)
+    (empty : current.bindings = []) :
+    current.restore caller = some { current with activation := caller.activation, bindings := caller.bindings } := by
+  simp [AddressedEnvironment.restore, releaseBindings, empty, BindingMap.releaseOrder, RuntimeHeap.retireMany]
 /-- Canonical single-owner retirement factors the existing batch restoration:
 continuing from its actual output has exactly the same final result. -/
 theorem AddressedEnvironment.restore.retireBinding {before after : AddressedEnvironment}
     {index : Nat} {entry : BindingId × StorageId}
-    (distinct : (before.bindings.map Prod.snd).Nodup)
     (selected : before.bindings[index]? = some entry)
     (first : before.bindings.releaseOrder.head? = some entry.2)
     (retired : before.retireBinding index = some after) (caller : AddressedScope) :
     after.restore caller = before.restore caller := by
   obtain ⟨actual, found, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp retired
   cases Option.some.inj (selected.symm.trans found)
-  have order := BindingMap.releaseOrder_eraseIdx distinct selected first
+  have order := BindingMap.releaseOrder_eraseIdx selected first
   obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
   simp only [AddressedEnvironment.restore, releaseBindings, order, ordered, List.tail_cons,
     RuntimeHeap.retireMany, primitive, Option.bind_some]
@@ -1322,12 +1352,16 @@ def AddressedEnvironment.exitScope (current : AddressedEnvironment) (count : Nat
     Option AddressedEnvironment :=
   (releaseBindings current.heap (current.bindings.take count)).map fun heap =>
     { current with bindings := current.bindings.drop count, heap := heap }
+theorem AddressedEnvironment.exitScope.empty {current : AddressedEnvironment} {count : Nat}
+    (empty : List.take count current.bindings = []) : current.exitScope count = some current := by
+  have suffix : current.bindings.drop count = current.bindings := by
+    simpa only [empty, List.nil_append] using List.take_append_drop count current.bindings
+  simp [AddressedEnvironment.exitScope, releaseBindings, empty, BindingMap.releaseOrder, RuntimeHeap.retireMany, suffix]
 
 /-- Canonical retirement inside a scope factors its existing batch exit,
 including the exact retained lexical suffix and both supplies. -/
 theorem AddressedEnvironment.exitScope.retireBinding {before after : AddressedEnvironment}
     {index count : Nat} {entry : BindingId × StorageId}
-    (distinct : ((before.bindings.take count).map Prod.snd).Nodup)
     (selected : before.bindings[index]? = some entry) (inside : index < count)
     (first : (BindingMap.releaseOrder (before.bindings.take count)).head? = some entry.2)
     (retired : before.retireBinding index = some after) :
@@ -1339,7 +1373,7 @@ theorem AddressedEnvironment.exitScope.retireBinding {before after : AddressedEn
   have order : BindingMap.releaseOrder ((before.bindings.eraseIdx index).take (count - 1)) =
       (BindingMap.releaseOrder (before.bindings.take count)).tail := by
     rw [BindingMap.eraseIdx_take before.bindings inside]
-    exact BindingMap.releaseOrder_eraseIdx distinct selectedLocal first
+    exact BindingMap.releaseOrder_eraseIdx selectedLocal first
   have suffix := BindingMap.eraseIdx_drop before.bindings inside
   obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
   simp only [AddressedEnvironment.exitScope, releaseBindings, order, suffix, ordered, List.tail_cons,

@@ -849,6 +849,30 @@ theorem AddressedEnvironment.ConsumptionFrame.drop {before after : AddressedEnvi
   exact typed.context_distinct
 
 
+theorem AddressedEnvironment.Declares.eraseIdx {current : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} (declared : current.Declares program slots) (index : Nat) :
+    ({ current with bindings := current.bindings.eraseIdx index } : AddressedEnvironment).Declares program (slots.eraseIdx index) := by
+  obtain ⟨states, typed, same⟩ := declared
+  exact ⟨states.eraseIdx index, typed.eraseIdx index, by
+    simp only [List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop, same]⟩
+
+theorem AddressedEnvironment.ConsumptionFrame.eraseIdx {before after : AddressedEnvironment}
+    {slots : List (BindingId × BindingType)} (declared : before.Declares program slots)
+    (framed : ConsumptionFrame program slots before after) (index : Nat) :
+    ConsumptionFrame program (slots.eraseIdx index) { before with bindings := before.bindings.eraseIdx index }
+      { after with bindings := after.bindings.eraseIdx index } := by
+  obtain ⟨states, typed, same⟩ := declared
+  have keys : slots.map Prod.fst = states.map Prod.fst := by
+    rw [← same]; simp only [List.map_map, Function.comp_def]
+  have distinct : (slots.map Prod.fst).Nodup := by rw [keys]; exact typed.context_distinct
+  refine ⟨congrArg (fun scope : AddressedScope =>
+    (⟨scope.activation, scope.bindings.eraseIdx index⟩ : AddressedScope)) framed.1, ?_⟩
+  intro name slot identity selected immutable mapped
+  apply framed.2 name slot identity
+    (lookup.of_mem distinct (List.mem_of_mem_eraseIdx (lookup.mem selected))) immutable
+  apply lookup.of_mem _ (List.mem_of_mem_eraseIdx (lookup.mem mapped))
+  rw [typed.keys]
+  exact typed.context_distinct
 theorem BindingMap.restore.read_disjoint
     {after : RuntimeHeap StorageCell} {identity : StorageId} {cell : StorageCell} {other : Place} {value : Value}
     (mapped : Grounded.lookup place.root bindings = some identity)
