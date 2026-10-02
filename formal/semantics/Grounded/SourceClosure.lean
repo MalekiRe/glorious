@@ -1436,6 +1436,19 @@ theorem SourceClosure.Admitted.self_reachable {packages : List PackageSource}
   closure.included.self_reachable (fun loaded member => (admitted.2.2.2.2.2 loaded member).1)
     (fun _ member => member) loaded included
 
+/-- A resolved local identity receives namespace access from source inclusion,
+not from a separately assumed access table. -/
+theorem SourceClosure.Admitted.local_selected {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules) {name : Identifier} {identity : Nat}
+    (selected : Grounded.functionNames closure.functions closure.imports loaded.home loaded.home name = some identity) :
+    closure.functionNames loaded.home (.unqualified name) = some identity := by
+  obtain ⟨package, packageIncluded, owner, _⟩ := closure.included.provenance included
+  exact closure.functionNames_selected.mpr ⟨loaded.home, rfl,
+    ⟨package, packageIncluded, owner.symm, .inl rfl⟩, admitted.self_reachable included,
+    Grounded.functionNames.selected_iff.mp selected⟩
+
+
 /-- Bare callable lookup derives namespace access from the actual source closure. -/
 theorem SourceClosure.Admitted.local_resolution {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
@@ -1443,10 +1456,7 @@ theorem SourceClosure.Admitted.local_resolution {packages : List PackageSource}
     (candidate : VisibleFunctionCandidate closure.functions closure.imports loaded.home loaded.home name identity) :
     closure.functionNames loaded.home (.unqualified name) = some identity := by
   have selected := admitted.2.2.2.1.resolve_existing (List.mem_map.mpr ⟨loaded, included, rfl⟩) candidate
-  obtain ⟨package, packageIncluded, owner, _⟩ := closure.included.provenance included
-  exact closure.functionNames_selected.mpr ⟨loaded.home, rfl,
-    ⟨package, packageIncluded, owner.symm, .inl rfl⟩, admitted.self_reachable included,
-    Grounded.functionNames.selected_iff.mp selected⟩
+  exact admitted.local_selected included selected
 
 
 
@@ -1458,6 +1468,57 @@ theorem LoadedModule.importRequests_suppressed {packages : List PackageSource}
   unfold LoadedModule.importRequests
   rw [← owner, resolvePackagePrelude.existing distinct member, package.preludeRequest_suppressed suppressed]
   simp
+
+/-- Every automatic-priority edge comes from the enabled driver-selected
+prelude, never from an authored item, group or nested import. -/
+theorem SourceClosure.Admitted.automatic_import_origin {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {edge : FunctionImport} (member : edge ∈ closure.imports) (automatic : edge.kind = .prelude) :
+    ∃ loaded ∈ closure.modules, ∃ package ∈ packages, ∃ path,
+      edge.home = loaded.home ∧ package.identity = loaded.home.package ∧
+      package.noStd = false ∧ package.noImplicitPrelude = false ∧
+      package.standardPrelude = some path ∧ edge.visibility = .private ∧
+      path.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some edge.target := by
+  obtain ⟨loaded, included, source, requested, home, visibility, target, resolved, emitted⟩ := closure.import_origin member
+  rcases (loaded.importRequests_origin packages source).mp requested with authored | generated
+  · exact False.elim (((admitted.2.2.2.2.2 loaded included).2 source authored).emitted_kind emitted automatic)
+  · obtain ⟨package, packageIncluded, owner, selected⟩ := resolvePackagePrelude.origin generated
+    obtain ⟨enabled, implicitEnabled, path, profile, same⟩ := (package.preludeRequest_selected source).mp selected
+    subst source
+    cases emitted
+    exact ⟨loaded, included, package, packageIncluded, path, rfl, owner,
+      enabled, implicitEnabled, profile, rfl, resolved⟩
+
+/-- Each module has one driver-selected automatic edge, independent of source
+file order and repeated provenance paths. Uniqueness is derived from package
+identity, the selected profile and actual path resolution. -/
+theorem SourceClosure.Admitted.automatic_import_unique {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {first second : FunctionImport} (firstMember : first ∈ closure.imports) (secondMember : second ∈ closure.imports)
+    (firstKind : first.kind = .prelude) (secondKind : second.kind = .prelude)
+    (same : first.home = second.home) : first = second := by
+  obtain ⟨left, _, leftPackage, leftIncluded, leftPath, leftHome, leftOwner, _, _, leftProfile, leftVisibility, leftResolved⟩ :=
+    admitted.automatic_import_origin firstMember firstKind
+  obtain ⟨right, _, rightPackage, rightIncluded, rightPath, rightHome, rightOwner, _, _, rightProfile, rightVisibility, rightResolved⟩ :=
+    admitted.automatic_import_origin secondMember secondKind
+  have homes : left.home = right.home := leftHome.symm.trans (same.trans rightHome)
+  have owners : leftPackage.identity = rightPackage.identity :=
+    leftOwner.trans ((congrArg Module.package homes).trans rightOwner.symm)
+  have packagesSame := unique_key_member admitted.1 leftIncluded rightIncluded owners
+  cases packagesSame
+  cases Option.some.inj (leftProfile.symm.trans rightProfile)
+  rw [homes] at leftResolved
+  have targets := Option.some.inj (leftResolved.symm.trans rightResolved)
+  have kinds := firstKind.trans secondKind.symm
+  have visibilities := leftVisibility.trans rightVisibility.symm
+  cases first
+  cases second
+  cases same
+  cases targets
+  cases kinds
+  cases visibilities
+  rfl
+
 
 /-- Automatic prelude lookup consumes lowest-priority selection. Explicit and
 authored-glob bindings suppress it before argument checking; invocation checks
@@ -1498,11 +1559,13 @@ theorem SourceClosure.Admitted.prelude_call_soundness {packages : List PackageSo
     closure.import_emitted included sourceIncluded pathResolved (.item .prelude)
   have member : edge ∈ closure.imports :=
     List.mem_flatMap.mpr ⟨.binding edge, entryMember, by simp [ImportEntry.bindings]⟩
-  obtain ⟨visibility, original, accessible⟩ := candidate
-  have imported : FunctionCandidate closure.functions closure.imports loaded.home name identity .private :=
-    .imported member (.prelude rfl unshadowed noGlob) original accessible
-  have selected := admitted.local_resolution included
-    ⟨.private, imported, by simp [Visibility.Allows]⟩
+  have targetIncluded := (admitted.2.2.2.1.2.2.1 edge member).2.1
+  have resolvedTarget := admitted.2.2.2.1.resolve_existing targetIncluded candidate
+  have selectedCore := Grounded.functionNames.prelude_without_glob member rfl rfl
+    (by simp [edge, Visibility.Allows]) unshadowed noGlob
+    (Grounded.functionNames.selected_iff.mp resolvedTarget)
+    (fun other otherMember same kind => admitted.automatic_import_unique otherMember member kind rfl same)
+  have selected := admitted.local_selected included selectedCore
   obtain ⟨_, declaration, _, declared, _⟩ := admitted.resolves selected
   refine ⟨declaration, selected, declared, ?_⟩
   intro scope before after arguments inputs lexical visible argumentsTyped slots environment store issued state run
@@ -1556,25 +1619,6 @@ theorem SourceClosure.Admitted.source_import_origin_visibility {packages : List 
   exact authorized
 
 
-/-- Every automatic-priority edge comes from the enabled driver-selected
-prelude, never from an authored item, group or nested import. -/
-theorem SourceClosure.Admitted.automatic_import_origin {packages : List PackageSource}
-    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {edge : FunctionImport} (member : edge ∈ closure.imports) (automatic : edge.kind = .prelude) :
-    ∃ loaded ∈ closure.modules, ∃ package ∈ packages, ∃ path,
-      edge.home = loaded.home ∧ package.identity = loaded.home.package ∧
-      package.noStd = false ∧ package.noImplicitPrelude = false ∧
-      package.standardPrelude = some path ∧ edge.visibility = .private ∧
-      path.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some edge.target := by
-  obtain ⟨loaded, included, source, requested, home, visibility, target, resolved, emitted⟩ := closure.import_origin member
-  rcases (loaded.importRequests_origin packages source).mp requested with authored | generated
-  · exact False.elim (((admitted.2.2.2.2.2 loaded included).2 source authored).emitted_kind emitted automatic)
-  · obtain ⟨package, packageIncluded, owner, selected⟩ := resolvePackagePrelude.origin generated
-    obtain ⟨enabled, implicitEnabled, path, profile, same⟩ := (package.preludeRequest_selected source).mp selected
-    subst source
-    cases emitted
-    exact ⟨loaded, included, package, packageIncluded, path, rfl, owner,
-      enabled, implicitEnabled, profile, rfl, resolved⟩
 
 
 end Grounded

@@ -283,6 +283,13 @@ def ExplicitFunctionBinding (sources : List NamedFunction) (imports : List Funct
   (∃ declaration ∈ sources, declaration.home = home ∧ declaration.name = name) ∨
   ∃ edge ∈ imports, edge.home = home ∧ ∃ sourceName, edge.kind = .explicit sourceName name
 
+theorem ExplicitFunctionBinding.imports_congr {sources : List NamedFunction}
+    {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
+    (home : Module) (name : Identifier) :
+    ExplicitFunctionBinding sources first home name ↔ ExplicitFunctionBinding sources second home name := by
+  simp only [ExplicitFunctionBinding, same]
+
+
 /-- One declaration-seeded path producer, parameterized by admissible import
 edges. Discovery and priority selection share this relation. -/
 inductive FunctionProvenance (sources : List NamedFunction) (imports : List FunctionImport)
@@ -296,15 +303,22 @@ inductive FunctionProvenance (sources : List NamedFunction) (imports : List Func
       (accessible : visibility.Allows edge.target edge.home) :
       FunctionProvenance sources imports selects edge.home name identity edge.visibility
 
-/-- Discovery retains all declared import routes before priority filtering. -/
-inductive FunctionImport.Routes (edge : FunctionImport) : Identifier → Identifier → Prop where
+/-- Discovery enforces explicit-binding shadowing before comparing glob and
+prelude tiers. A hidden lower-priority route cannot claim an exported name. -/
+inductive FunctionImport.Routes (sources : List NamedFunction) (imports : List FunctionImport)
+    (edge : FunctionImport) : Identifier → Identifier → Prop where
   | explicit {sourceName localName} (kind : edge.kind = .explicit sourceName localName) :
-      edge.Routes localName sourceName
-  | glob {name} (kind : edge.kind = .glob) : edge.Routes name name
-  | prelude {name} (kind : edge.kind = .prelude) : edge.Routes name name
+      edge.Routes sources imports localName sourceName
+  | glob {name} (kind : edge.kind = .glob)
+      (unshadowed : ¬ ExplicitFunctionBinding sources imports edge.home name) :
+      edge.Routes sources imports name name
+  | prelude {name} (kind : edge.kind = .prelude)
+      (unshadowed : ¬ ExplicitFunctionBinding sources imports edge.home name) :
+      edge.Routes sources imports name name
 
 abbrev RawFunctionCandidate (sources : List NamedFunction) (imports : List FunctionImport) :=
-  FunctionProvenance sources imports FunctionImport.Routes
+  FunctionProvenance sources imports (FunctionImport.Routes sources imports)
+
 
 /-- An authored glob claims only names backed by an accessible finite path.
 The mere presence of an unrelated or empty glob never suppresses a prelude. -/
@@ -321,7 +335,14 @@ theorem RawFunctionCandidate.transport_imports {sources : List NamedFunction}
     RawFunctionCandidate sources second home name identity visibility := by
   induction candidate with
   | declaration found => exact .declaration found
-  | imported member selected _ accessible ih => exact .imported ((same _).mp member) selected ih accessible
+  | imported member selected _ accessible ih =>
+    refine .imported ((same _).mp member) ?_ ih accessible
+    cases selected with
+    | explicit kind => exact .explicit kind
+    | glob kind unshadowed =>
+      exact .glob kind (fun shadowed => unshadowed ((ExplicitFunctionBinding.imports_congr same _ _).mpr shadowed))
+    | prelude kind unshadowed =>
+      exact .prelude kind (fun shadowed => unshadowed ((ExplicitFunctionBinding.imports_congr same _ _).mpr shadowed))
 
 theorem RawFunctionCandidate.imports_congr {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
@@ -362,8 +383,8 @@ theorem FunctionCandidate.raw {sources : List NamedFunction} {imports : List Fun
     apply FunctionProvenance.imported member _ ih accessible
     cases selected with
     | explicit kind => exact .explicit kind
-    | glob kind _ => exact .glob kind
-    | prelude kind _ _ => exact .prelude kind
+    | glob kind unshadowed => exact .glob kind unshadowed
+    | prelude kind unshadowed _ => exact .prelude kind unshadowed
 
 
 theorem FunctionCandidate.origin {sources : List NamedFunction} {imports : List FunctionImport}
@@ -466,11 +487,6 @@ theorem functionNames.ambiguous {sources : List NamedFunction} {imports : List F
     have resolved := functionNames.selected_iff.mp found
     exact False.elim (different ((resolved.2 first left).trans (resolved.2 second right).symm))
 
-theorem ExplicitFunctionBinding.imports_congr {sources : List NamedFunction}
-    {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
-    (home : Module) (name : Identifier) :
-    ExplicitFunctionBinding sources first home name ↔ ExplicitFunctionBinding sources second home name := by
-  simp only [ExplicitFunctionBinding, same]
 
 theorem FunctionCandidate.transport_imports {sources : List NamedFunction}
     {first second : List FunctionImport} (same : ∀ edge, edge ∈ first ↔ edge ∈ second)
@@ -645,6 +661,108 @@ theorem functionNames.glob_over_prelude {sources : List NamedFunction} {imports 
       | explicit selectedKind => simp [automatic] at selectedKind
       | glob selectedKind _ => simp [automatic] at selectedKind
       | prelude selectedKind noExplicit noGlob => exact False.elim (blocked (.prelude selectedKind noExplicit noGlob))
+
+
+/-- Highest-priority bindings exclude both weak discovery routes, not only
+final selection. This prevents hidden imports from claiming exported names. -/
+theorem FunctionImport.Routes.weak_excluded {sources : List NamedFunction} {imports : List FunctionImport}
+    {edge : FunctionImport} {name sourceName : Identifier}
+    (weak : edge.kind = .glob ∨ edge.kind = .prelude)
+    (shadowed : ExplicitFunctionBinding sources imports edge.home name) :
+    ¬ edge.Routes sources imports name sourceName := by
+  intro route
+  cases route with
+  | explicit kind => rcases weak with weak | weak <;> simp [kind] at weak
+  | glob _ unshadowed | prelude _ unshadowed => exact unshadowed shadowed
+
+/-- In an authored-only import graph, discovery and selected provenance agree
+for arbitrary finite paths, including cyclic graphs. Only the automatic tier
+requires the second priority comparison. -/
+theorem RawFunctionCandidate.selected_without_prelude {sources : List NamedFunction} {imports : List FunctionImport}
+    (authored : ∀ edge ∈ imports, edge.kind ≠ .prelude)
+    {home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
+    (candidate : RawFunctionCandidate sources imports home name identity visibility) :
+    FunctionCandidate sources imports home name identity visibility := by
+  induction candidate with
+  | declaration found => exact .declaration found
+  | imported member route _ accessible ih =>
+    refine .imported member ?_ ih accessible
+    cases route with
+    | explicit kind => exact .explicit kind
+    | glob kind unshadowed => exact .glob kind unshadowed
+    | prelude kind _ => exact False.elim (authored _ member kind)
+
+/-- No discovered name hidden behind a private local binding can be exported
+through a weak import. The premises describe declarations and import syntax,
+not a supplied failure or success of the resolver. -/
+theorem RawFunctionCandidate.hidden_local {sources : List NamedFunction} {imports : List FunctionImport}
+    {caller home : Module} {name : Identifier} {identity : Nat} {visibility : Visibility}
+    (shadowed : ExplicitFunctionBinding sources imports home name)
+    (noAlias : ∀ edge ∈ imports, edge.home = home → ∀ sourceName, edge.kind ≠ .explicit sourceName name)
+    (hidden : ∀ (identity : Nat) (declaration : NamedFunction), sources[identity]? = some declaration →
+      declaration.home = home → declaration.name = name → ¬ declaration.visibility.Allows home caller)
+    (candidate : RawFunctionCandidate sources imports home name identity visibility)
+    (accessible : visibility.Allows home caller) : False := by
+  cases candidate with
+  | declaration found => exact hidden _ _ found rfl rfl accessible
+  | @imported edge localName sourceName identity visibility member route target access =>
+    cases route with
+    | explicit kind => exact noAlias edge member rfl sourceName kind
+    | glob _ unshadowed | prelude _ unshadowed => exact unshadowed shadowed
+
+
+/-- When no authored glob supplies this name, the automatic edge selects its
+uniquely resolved target without assuming successful local lookup. Other names
+and unrelated glob imports do not interfere. -/
+theorem functionNames.prelude_without_glob {sources : List NamedFunction} {imports : List FunctionImport}
+    {home : Module} {automatic : FunctionImport} {name : Identifier} {identity : Nat}
+    (member : automatic ∈ imports) (owned : automatic.home = home) (kind : automatic.kind = .prelude)
+    (localAccess : automatic.visibility.Allows home home)
+    (unshadowed : ¬ ExplicitFunctionBinding sources imports home name)
+    (noGlob : ¬ GlobFunctionBinding sources imports home name)
+    (targetResolved : FunctionResolution sources imports home automatic.target name identity)
+    (oneAutomatic : ∀ edge ∈ imports, edge.home = home → edge.kind = .prelude → edge = automatic) :
+    functionNames sources imports home home name = some identity := by
+  obtain ⟨visibility, target, accessible⟩ := targetResolved.1
+  have access : visibility.Allows automatic.target automatic.home := by simpa only [owned] using accessible
+  have noExplicit : ¬ ExplicitFunctionBinding sources imports automatic.home name := by
+    simpa only [owned] using unshadowed
+  have noOrdinary : ¬ GlobFunctionBinding sources imports automatic.home name := by
+    simpa only [owned] using noGlob
+  have candidate : FunctionCandidate sources imports home name identity automatic.visibility := by
+    simpa only [owned] using FunctionProvenance.imported member (.prelude kind noExplicit noOrdinary) target access
+  apply functionNames.selected_iff.mpr
+  refine ⟨⟨automatic.visibility, candidate, localAccess⟩, ?_⟩
+  intro other observed
+  obtain ⟨otherVisibility, otherCandidate, _⟩ := observed
+  cases otherCandidate with
+  | declaration found =>
+    exact False.elim (unshadowed (.inl ⟨_, List.mem_of_getElem? found, rfl, rfl⟩))
+  | @imported edge localName sourceName other visibility memberOther selected original accessibleOther =>
+    cases selected with
+    | explicit selectedKind =>
+      exact False.elim (unshadowed (.inr ⟨edge, memberOther, rfl, sourceName, selectedKind⟩))
+    | glob selectedKind _ =>
+      exact False.elim (noGlob ⟨edge, memberOther, rfl, selectedKind, other, visibility, FunctionCandidate.raw original, accessibleOther⟩)
+    | prelude selectedKind _ _ =>
+      have same := oneAutomatic edge memberOther rfl selectedKind
+      subst edge
+      exact targetResolved.2 other ⟨visibility, original, accessibleOther⟩
+
+/-- Private local bindings in imported modules cannot turn shadowed public
+routes into a phantom glob claim. This conclusion is consumed by ordinary
+prelude selection, rather than special-casing a particular name or program. -/
+theorem GlobFunctionBinding.absent_of_hidden_locals {sources : List NamedFunction} {imports : List FunctionImport}
+    {home : Module} {name : Identifier}
+    (hidden : ∀ edge ∈ imports, edge.home = home → edge.kind = .glob →
+      ExplicitFunctionBinding sources imports edge.target name ∧
+      (∀ nested ∈ imports, nested.home = edge.target → ∀ sourceName, nested.kind ≠ .explicit sourceName name) ∧
+      (∀ (identity : Nat) (declaration : NamedFunction), sources[identity]? = some declaration →
+        declaration.home = edge.target → declaration.name = name → ¬ declaration.visibility.Allows edge.target edge.home)) :
+    ¬ GlobFunctionBinding sources imports home name := by
+  rintro ⟨edge, member, owned, kind, identity, visibility, candidate, accessible⟩
+  obtain ⟨shadowed, noAlias, inaccessible⟩ := hidden edge member owned kind
+  exact candidate.hidden_local shadowed noAlias inaccessible accessible
 
 
 end Grounded

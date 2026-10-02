@@ -1790,7 +1790,7 @@ file permutation leaves the selected profile and suppression policy unchanged.
 `SourceClosure.Admitted.prelude_call_soundness` constructs the actual selected
 callee from the profile, emitted automatic edge and finite visible target
 candidate, under explicit/glob shadowing exclusion and namespace-access checks.
-constructs selection before argument checking and proves configuration typing,
+It constructs selection before argument checking and proves configuration typing,
 terminal-or-step progress, consumption framing and binding uniqueness for every
 typed execution prefix. Lexical shadowing and original declaration visibility
 remain mandatory. No completed callable lookup, execution or post-state readiness
@@ -3009,4 +3009,36 @@ No unit tests or concrete examples were added.
 This repairs decoded callable-prelude priority. Other namespaces, source-text
 parsing, library/runtime profiles and the remaining whole-language obligations
 remain open; no broad completion task is marked complete.
+
+
+## Explicit shadowing in discovery and constructive prelude fallback
+
+A general pre-repair proof established that discovery admitted a weak import
+route even while an explicit binding prohibited selecting that same route.
+That could turn a public route hidden by a private local declaration into a
+phantom authored-glob claim, incorrectly suppressing a caller's prelude.
+
+`FunctionImport.Routes` now consumes the same explicit-binding exclusion as
+selection. `Routes.weak_excluded` rules out both weak discovery routes under a
+strong binding. `RawFunctionCandidate.selected_without_prelude` proves discovery
+and selection agree on authored-only graphs, including arbitrary finite paths
+through cyclic imports. `hidden_local` and
+`GlobFunctionBinding.absent_of_hidden_locals` prove inaccessible local bindings
+cannot expose shadowed routes or create phantom glob claims.
+
+`functionNames.prelude_without_glob` constructs local fallback from unique
+target resolution and actual name-specific absence, without assuming successful
+local lookup. `SourceClosure.Admitted.automatic_import_unique` derives the
+single automatic edge from package identity, profile and path resolution.
+The existing `prelude_call_soundness` consumer now uses that producer and the
+constructive fallback theorem rather than invoking global uniqueness at the
+caller namespace to select the prelude. Original declaration visibility,
+argument elaboration and the complete execution-prefix safety contract remain.
+
+Verification: `lake build Grounded` passed all 30 jobs. Explicit axiom inspection
+covered exclusion, discovery exactness, private-name exclusion, fallback,
+authored-glob precedence, automatic-edge uniqueness, source/prelude soundness,
+file-order invariance and general machine preservation/progress. Only standard
+Lean axioms occurred. No unit tests or concrete examples were added. The broad
+source-resolution and whole-language obligations remain open.
 
