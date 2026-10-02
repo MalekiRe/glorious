@@ -93,12 +93,18 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           BindingMap.Disposable program middle
             ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)) ∧
           (((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)) = [] ∨
-            ∃ (index : Nat) (entry : BindingId × StorageId) (cell : StorageCell) (next : AddressedEnvironment),
+            ∃ (index : Nat) (entry : BindingId × StorageId) (state : BindingState)
+                (cell : StorageCell) (next : AddressedEnvironment),
               BindingMap.nextRelease
                 ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front))
                 (current.bindings.filter fun entry => decide (entry.2 ∉ front)) = some (index, entry.2) ∧
               index < ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)).length ∧
               (current.bindings.filter fun entry => decide (entry.2 ∉ front))[index]? = some entry ∧
+              remaining[index]? = some (entry.1, state) ∧
+              cell.type = state.slot.type ∧ cell.Typed program state.initialization ∧
+              BindingMap.Typed program middle current.activation
+                ((current.bindings.filter fun entry => decide (entry.2 ∉ front)).eraseIdx index)
+                (remaining.eraseIdx index) ∧
               entry ∈ List.take count current.bindings ∧
               (BindingMap.releaseOrder ((List.take count current.bindings).filter
                 fun binding : BindingId × StorageId => decide (binding.2 ∉ front))).head? = some entry.2 ∧
@@ -158,13 +164,17 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
                 obtain ⟨member, kept⟩ := List.mem_filter.mp member
                 exact List.mem_filter.mpr ⟨List.mem_of_mem_take member, kept⟩) finished
               obtain ⟨cell, found, allowed⟩ := permission entry.2 (List.mem_map.mpr ⟨entry, pending, rfl⟩)
+              obtain ⟨state, actualCell, sourceSelected, actualFound, _, cellType, cellTyped⟩ := retained.index selected
+              have sameCell : actualCell = cell := Option.some.inj (actualFound.symm.trans found)
+              subst actualCell
               obtain ⟨next, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩ :=
                 AddressedEnvironment.retireBinding.progress
                   (current := { current with heap := middle, bindings :=
                     (current.bindings.filter fun entry => decide (entry.2 ∉ front)) }) retained selected
               have localIndex := BindingMap.nextRelease.in_prefix
                 (List.IsPrefix.filter _ (List.take_prefix locals.length current.bindings)) chosen
-              exact .inr ⟨index, entry, cell, next, chosen, localIndex, selected, (List.mem_filter.mp pending).1, first,
+              exact .inr ⟨index, entry, state, cell, next, chosen, localIndex, selected, sourceSelected,
+                cellType, cellTyped, retained.eraseIdx index, (List.mem_filter.mp pending).1, first,
                 found, allowed, retired, primitive, absent, frontier, activation, supply, bindings, nextTyped, outside, callers⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected

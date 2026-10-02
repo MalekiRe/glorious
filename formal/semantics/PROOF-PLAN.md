@@ -3923,9 +3923,19 @@ previous retirements. The source scope theorem consumes this bound; the next
 retirement cannot select a retained outer binding. The strict build and axiom
 checks passed.
 
-The next operational cutover must also migrate `ControlTyped.slots`, whose
-current conclusion requires unchanged slot lists, and its consumption-frame
-and live-scope consumers. A control performing synchronized retirement removes
-a binding; retaining this equality would be the wrong phase contract. Scope
+The operational cutover can preserve `ControlTyped.slots`: retirement belongs
+in a continuation frame, alongside the existing scope and restoration frames,
+rather than in a control that violates the unchanged-slot invariant. Such a
+frame must project its one binding removal through `Frame.environment` and
+the existing declaration, consumption-frame and live-scope consumers. Scope
 and return completion must be derived through the resulting intermediate
-controls, not recovered by assuming their final cleanup run.
+states, not assumed as a final cleanup run.
+
+`BindingMap.Typed.index` now connects the selected runtime index to its exact
+source binding state and physical resident typing. `Typed.eraseIdx` preserves
+the projected remaining map before physical retirement; the existing physical
+retirement theorem preserves that same map afterward. The reached-source scope
+theorem consumes both results, retaining the actual initialization mask rather
+than reconstructing readiness. All 30 strict build jobs and inspected axiom
+closures passed. This establishes the typing bridge needed by the retirement
+frame, not the unimplemented operational scope/return cutover.

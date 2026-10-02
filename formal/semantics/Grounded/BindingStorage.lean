@@ -222,6 +222,43 @@ theorem BindingMap.Typed.frame (typed : BindingMap.Typed program heap activation
     exact .cons ((unchanged _ (by simp)).trans found) owner declared resident
       (ih (fun identity member => unchanged identity (List.mem_cons_of_mem _ member))) freshName freshStorage
 
+/-- Indexed runtime bindings and source states share the same lexical position. -/
+theorem BindingMap.Typed.index
+    (typed : BindingMap.Typed program heap activation bindings context)
+    {index : Nat} {entry : BindingId × StorageId} (selected : bindings[index]? = some entry) :
+    ∃ state cell, context[index]? = some (entry.1, state) ∧ heap.read entry.2 = some cell ∧
+      cell.activation = activation ∧ cell.type = state.slot.type ∧ cell.Typed program state.initialization := by
+  induction typed generalizing index with
+  | nil => simp at selected
+  | @cons name identity cell state bindings context found owner declared resident tail freshName freshStorage ih =>
+    cases index with
+    | zero =>
+      simp only [List.getElem?_cons_zero] at selected
+      cases Option.some.inj selected
+      exact ⟨state, cell, rfl, found, owner, declared, resident⟩
+    | succ index =>
+      simp only [List.getElem?_cons_succ] at selected ⊢
+      exact ih selected
+
+/-- Projecting out a retiring binding keeps the other bindings realized before
+physical retirement. Continuation metadata does not itself change the heap. -/
+theorem BindingMap.Typed.eraseIdx
+    (typed : BindingMap.Typed program heap activation bindings context) (index : Nat) :
+    BindingMap.Typed program heap activation (bindings.eraseIdx index) (context.eraseIdx index) := by
+  induction typed generalizing index with
+  | nil => simpa using (BindingMap.Typed.nil (program := program) (heap := heap) (activation := activation))
+  | @cons name identity cell state bindings context found owner declared resident tail freshName freshStorage ih =>
+    cases index with
+    | zero => simpa using tail
+    | succ index =>
+      simp only [List.eraseIdx_cons_succ]
+      refine .cons found owner declared resident (ih index) ?_ ?_
+      · intro member
+        obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+        exact freshName (List.mem_map.mpr ⟨entry, List.mem_of_mem_eraseIdx member, same⟩)
+      · intro member
+        obtain ⟨entry, member, same⟩ := List.mem_map.mp member
+        exact freshStorage (List.mem_map.mpr ⟨entry, List.mem_of_mem_eraseIdx member, same⟩)
 /-- One actual cell retirement removes the corresponding lexical position and
 its exact source state. Other masks and storage identities are unchanged. -/
 theorem BindingMap.Typed.retire_at
