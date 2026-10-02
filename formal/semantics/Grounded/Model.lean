@@ -45,11 +45,11 @@ inductive Ty where
 /-- Decoded type expressions retain alias references until static resolution. -/
 inductive TypeExpr where
   | concrete (type : Ty)
-  | alias (name : String)
+  | alias (identity : Nat)
   | tuple (head : TypeExpr) (tail : List TypeExpr)
   | array (element : TypeExpr) (length : Nat)
 
-abbrev Aliases := String → Option TypeExpr
+abbrev Aliases := Nat → Option TypeExpr
 /-- Resolved module identity, including the package boundary (§2.2). -/
 structure Module where
   package : Nat

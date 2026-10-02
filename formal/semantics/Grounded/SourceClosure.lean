@@ -38,25 +38,36 @@ def ConstantSyntax.elaborate (source : ConstantSyntax) (home : Module) : Constan
   ⟨home, source.visibility, source.type, source.body⟩
 
 
+/-- Alias references in the decoded body are declaration identities; the
+source name and visibility remain attached to the inclusion-derived scope. -/
+structure AliasSyntax where
+  name : Identifier
+  visibility : Visibility
+  body : TypeExpr
+
+
 inductive ModuleSource where
   | body (functions : List FunctionSyntax) (imports : List FunctionImportSyntax)
       (children : List (Identifier × Visibility × Option ModuleSource)) (data : List DataSyntax)
-      (constants : List ConstantSyntax)
+      (constants : List ConstantSyntax) (aliases : List AliasSyntax)
 
 def ModuleSource.functions : ModuleSource → List FunctionSyntax
-  | .body functions _ _ _ _ => functions
+  | .body functions _ _ _ _ _ => functions
 
 def ModuleSource.imports : ModuleSource → List FunctionImportSyntax
-  | .body _ imports _ _ _ => imports
+  | .body _ imports _ _ _ _ => imports
 
 def ModuleSource.children : ModuleSource → List (Identifier × Visibility × Option ModuleSource)
-  | .body _ _ children _ _ => children
+  | .body _ _ children _ _ _ => children
 
 def ModuleSource.data : ModuleSource → List DataSyntax
-  | .body _ _ _ data _ => data
+  | .body _ _ _ data _ _ => data
 
 def ModuleSource.constants : ModuleSource → List ConstantSyntax
-  | .body _ _ _ _ constants => constants
+  | .body _ _ _ _ constants _ => constants
+
+def ModuleSource.aliases : ModuleSource → List AliasSyntax
+  | .body _ _ _ _ _ aliases => aliases
 
 abbrev SourceFiles := List (SourcePath × ModuleSource)
 
@@ -112,11 +123,11 @@ def childFile (directory : SourcePath) (name : Identifier) : SourcePath :=
 mutual
 inductive ModuleSource.Loads (files : SourceFiles) :
     Module → SourcePath → SourcePath → ModuleSource → List LoadedModule → Prop where
-  | body {home origin directory functions imports children data constants descendants}
+  | body {home origin directory functions imports children data constants aliases descendants}
       (distinct : (children.map Prod.fst).Nodup)
       (included : ModuleChildrenLoad files home origin directory children descendants) :
-      ModuleSource.Loads files home origin directory (.body functions imports children data constants)
-        (⟨home, origin, directory, .body functions imports children data constants⟩ :: descendants)
+      ModuleSource.Loads files home origin directory (.body functions imports children data constants aliases)
+        (⟨home, origin, directory, .body functions imports children data constants aliases⟩ :: descendants)
 
 inductive ModuleChildrenLoad (files : SourceFiles) : Module → SourcePath → SourcePath →
     List (Identifier × Visibility × Option ModuleSource) → List LoadedModule → Prop where
@@ -591,6 +602,20 @@ def SourceClosure.ConstantsAdmitted {packages : List PackageSource} (closure : S
       source.visibility.ValidAt loaded.home
 
 
+/-- Alias metadata is source-owned; only its body survives type expansion. -/
+def SourceClosure.aliases {packages : List PackageSource} (closure : SourceClosure packages) :
+    List (Module × AliasSyntax) :=
+  closure.modules.flatMap fun loaded => loaded.source.aliases.map fun source => (loaded.home, source)
+
+def SourceClosure.AliasesAdmitted {packages : List PackageSource} (closure : SourceClosure packages)
+    (program : Program) : Prop :=
+  program.aliases = (fun identity => (closure.aliases[identity]?).map fun entry => entry.2.body) ∧
+    ((closure.nominals.map fun entry => (entry.2.home, entry.1)) ++
+      (closure.aliases.map fun entry => (entry.1, entry.2.name))).Nodup ∧
+    ∀ loaded ∈ closure.modules, ∀ source ∈ loaded.source.aliases,
+      source.visibility.ValidAt loaded.home
+
+
 /-- Static module inclusion feeds the same elaboration and machine contract.
 There is no independently supplied module list or declaration-owner table. -/
 def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClosure packages)
@@ -602,7 +627,7 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
   FunctionImportsValid closure.homes closure.functions closure.imports ∧
   NamedProgramAdmitted closure.functionNames closure.functions program ∧
   (∀ loaded ∈ closure.modules, loaded.Valid) ∧ closure.NominalsAdmitted program ∧
-    closure.ConstantsAdmitted program
+    closure.ConstantsAdmitted program ∧ closure.AliasesAdmitted program
 
 theorem SourceClosure.Admitted.modules_valid {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program) :
@@ -629,12 +654,13 @@ theorem SourceClosure.disposition_cases {packages : List PackageSource}
     (aliases : program.aliases.Valid program.target program.data)
     (constants : program.ConstantsChecked)
     (nominals : closure.NominalsAdmitted program)
-    (constantSources : closure.ConstantsAdmitted program) :
+    (constantSources : closure.ConstantsAdmitted program)
+    (aliasSources : closure.AliasesAdmitted program) :
     (closure.Admitted program ∧ program.Checked) ∨
       NamedCleanupRejected program closure.functionNames closure.functions outputs := by
   rcases NamedProgramAdmitted.disposition_cases distinct bodies functions data aliases constants with
     ⟨admitted, checked⟩ | rejected
-  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules, nominals, constantSources⟩, checked⟩
+  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules, nominals, constantSources, aliasSources⟩, checked⟩
   · exact .inr rejected
 
 
@@ -769,10 +795,47 @@ theorem SourceClosure.Admitted.no_interface_inline_cycle {packages : List Packag
   exact ⟨fun parameter member => (layouts.1 parameter member).no_inline_cycle, layouts.2.no_inline_cycle⟩
 
 
+/-- The alias body consumed by expansion is exactly an included emission. -/
+theorem SourceClosure.Admitted.alias_selected {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {body : TypeExpr} :
+    program.aliases identity = some body ↔
+      ∃ entry, closure.aliases[identity]? = some entry ∧ body = entry.2.body := by
+  rw [admitted.2.2.2.2.2.2.2.2.1]
+  constructor
+  · intro declared
+    obtain ⟨entry, selected, same⟩ := Option.map_eq_some_iff.mp declared
+    exact ⟨entry, selected, same.symm⟩
+  · rintro ⟨entry, selected, rfl⟩
+    exact Option.map_eq_some_iff.mpr ⟨entry, selected, rfl⟩
+
+theorem SourceClosure.Admitted.alias_origin {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {body : TypeExpr} (declared : program.aliases identity = some body) :
+    ∃ loaded ∈ closure.modules, ∃ source ∈ loaded.source.aliases,
+      body = source.body ∧ source.visibility.ValidAt loaded.home := by
+  obtain ⟨entry, selected, bodyEq⟩ := admitted.alias_selected.mp declared
+  obtain ⟨loaded, included, member⟩ := List.mem_flatMap.mp (List.mem_of_getElem? selected)
+  obtain ⟨source, authored, same⟩ := List.mem_map.mp member
+  exact ⟨loaded, included, source, authored,
+    bodyEq.trans (congrArg (fun entry : Module × AliasSyntax => entry.2.body) same).symm,
+    admitted.2.2.2.2.2.2.2.2.2.2 loaded included source authored⟩
+
+theorem SourceClosure.Admitted.alias_emitted {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : AliasSyntax} (authored : source ∈ loaded.source.aliases) :
+    ∃ identity, program.aliases identity = some source.body := by
+  have member : (loaded.home, source) ∈ closure.aliases :=
+    List.mem_flatMap.mpr ⟨loaded, included, List.mem_map.mpr ⟨source, authored, rfl⟩⟩
+  obtain ⟨identity, selected⟩ := List.mem_iff_getElem?.mp member
+  exact ⟨identity, admitted.alias_selected.mpr ⟨(loaded.home, source), selected, rfl⟩⟩
+
+
 /-- Every admitted alias, including an unused one, resolves to one finite type. -/
 theorem SourceClosure.Admitted.alias_resolution {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {name : String} {body : TypeExpr} (declared : program.aliases name = some body) :
+    {name : Nat} {body : TypeExpr} (declared : program.aliases name = some body) :
     ∃ type, ResolvesType program.aliases (.alias name) type ∧ FiniteLayout program.target program.data type ∧
       ∀ other, ResolvesType program.aliases (.alias name) other → other = type := by
   obtain ⟨type, expanded, finite⟩ := admitted.checked.aliases name body declared
@@ -781,7 +844,7 @@ theorem SourceClosure.Admitted.alias_resolution {packages : List PackageSource}
 
 theorem SourceClosure.Admitted.no_alias_cycle {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {name : String} {body : TypeExpr} (declared : program.aliases name = some body) :
+    {name : Nat} {body : TypeExpr} (declared : program.aliases name = some body) :
     ¬ Relation.TransGen (AliasDependency program.aliases) name name := by
   obtain ⟨type, resolved, _⟩ := admitted.alias_resolution declared
   exact resolved.no_alias_cycle
@@ -790,12 +853,37 @@ theorem SourceClosure.Admitted.no_alias_cycle {packages : List PackageSource}
 function uses the alias. References nested inside tuples and arrays are covered. -/
 theorem SourceClosure.Admitted.no_unresolved_alias {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {name reference : String} {body : TypeExpr} (declared : program.aliases name = some body)
+    {name reference : Nat} {body : TypeExpr} (declared : program.aliases name = some body)
     (mentioned : body.MentionsAlias reference) (missing : program.aliases reference = none) : False := by
   obtain ⟨type, expanded, _⟩ := admitted.checked.aliases name body declared
   obtain ⟨definition, found⟩ := (expanded.alias_dependencies reference mentioned).1
   rw [missing] at found
   cases found
+
+
+/-- Included aliases, including unused ones, have finite unique expansion.
+Every body dependency is another included alias with a well-founded expansion;
+no ambient definition or successful future elaboration is supplied. -/
+theorem SourceClosure.Admitted.source_alias_resolution {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : AliasSyntax} (authored : source ∈ loaded.source.aliases) :
+    ∃ identity type, program.aliases identity = some source.body ∧
+      ResolvesType program.aliases (.alias identity) type ∧ FiniteLayout program.target program.data type ∧
+      (∀ other, ResolvesType program.aliases (.alias identity) other → other = type) ∧
+      (¬ Relation.TransGen (AliasDependency program.aliases) identity identity) ∧
+      ∀ reference, source.body.MentionsAlias reference →
+        ∃ owner ∈ closure.modules, ∃ dependency ∈ owner.source.aliases,
+          program.aliases reference = some dependency.body ∧
+          dependency.visibility.ValidAt owner.home ∧ Acc (AliasDependency program.aliases) reference := by
+  obtain ⟨identity, declared⟩ := admitted.alias_emitted included authored
+  obtain ⟨type, expanded, finite⟩ := admitted.checked.aliases identity source.body declared
+  have resolved := ResolvesType.alias declared expanded
+  refine ⟨identity, type, declared, resolved, finite, resolved.unique, resolved.no_alias_cycle, ?_⟩
+  intro reference mentioned
+  obtain ⟨⟨body, found⟩, wellFounded⟩ := expanded.alias_dependencies reference mentioned
+  obtain ⟨owner, ownerIncluded, dependency, dependencyIncluded, same, valid⟩ := admitted.alias_origin found
+  exact ⟨owner, ownerIncluded, dependency, dependencyIncluded, same ▸ found, valid, wellFounded⟩
 
 
 /-- Constant execution and pattern normalization select the same emitted ID. -/
@@ -804,7 +892,7 @@ theorem SourceClosure.Admitted.constant_selected {packages : List PackageSource}
     {identity : Nat} {declaration : ConstantDecl} :
     program.constants identity = some declaration ↔
       ∃ name, closure.constants[identity]? = some (name, declaration) := by
-  rw [admitted.2.2.2.2.2.2.2.1]
+  rw [admitted.2.2.2.2.2.2.2.1.1]
   simp only [Option.map_eq_some_iff]
   constructor
   · rintro ⟨⟨name, emitted⟩, selected, rfl⟩
@@ -821,7 +909,7 @@ theorem SourceClosure.Admitted.constant_origin {packages : List PackageSource}
   obtain ⟨loaded, included, member⟩ := List.mem_flatMap.mp (List.mem_of_getElem? selected)
   obtain ⟨source, authored, same⟩ := List.mem_map.mp member
   exact ⟨loaded, included, source, authored, (congrArg Prod.snd same).symm,
-    admitted.2.2.2.2.2.2.2.2.2 loaded included source authored⟩
+    admitted.2.2.2.2.2.2.2.1.2.2 loaded included source authored⟩
 
 /-- Unused source constants cannot disappear from the checked runtime table. -/
 theorem SourceClosure.Admitted.constant_emitted {packages : List PackageSource}
@@ -1262,6 +1350,7 @@ theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (clos
   simp only [SourceClosure.Admitted, names]
   simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions, SourceClosure.imports, SourceClosure.importEntries,
     SourceClosure.NominalsAdmitted, SourceClosure.nominals, SourceClosure.ConstantsAdmitted, SourceClosure.constants,
+    SourceClosure.AliasesAdmitted, SourceClosure.aliases,
     PackageSource.DependenciesValid, PackageAccess.reorder, List.map_map, Function.comp_def]
 
 
@@ -1816,13 +1905,13 @@ theorem ModuleSource.Loads.self_reachable {whole : List LoadedModule}
       (∀ node ∈ modules, node ∈ whole) →
       (∀ child ∈ children, ModuleReachable whole (home.child child.1) (home.child child.1)) →
       ∀ node ∈ modules, ModuleReachable whole node.home node.home) with
-  | @body home origin directory functions imports children data constants descendants _ _ ih =>
+  | @body home origin directory functions imports children data constants aliases descendants _ _ ih =>
     intro subset reachable node member
     rcases List.mem_cons.mp member with same | member
     · subst node; exact reachable
     · apply ih (fun other found => subset other (.tail _ found)) ?_ node member
       intro child declared
-      have parentIncluded : (⟨home, origin, directory, .body functions imports children data constants⟩ : LoadedModule) ∈ whole :=
+      have parentIncluded : (⟨home, origin, directory, .body functions imports children data constants aliases⟩ : LoadedModule) ∈ whole :=
         subset _ (.head _)
       have scope := (valid _ parentIncluded).2.2 child declared
       exact .child parentIncluded (reachable.descendant_caller rfl ⟨[child.1], rfl⟩) declared

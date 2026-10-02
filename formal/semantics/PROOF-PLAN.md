@@ -4583,7 +4583,7 @@ only `propext`, `Classical.choice` and `Quot.sound`.
 
 This closes nominal source ownership, not source type-name elaboration. Decoded
 field types still contain resolved Core types. Type namespace/import resolution,
-generic nominal elaboration, source-owned alias emission, custom Drop
+generic nominal elaboration, custom Drop
 and references remain open; none of the fourteen broad completion obligations
 is marked complete.
 
@@ -4615,7 +4615,38 @@ uniqueness, admission, permutation and general public proof closures use only
 
 This is declaration-origin integration, not a claim of full constant source
 syntax. Constant path/import resolution, bare-pattern identifier versus constant
-selection, generic constant schemes, alias source ownership, references and
+selection, generic constant schemes, alias access-path resolution, references and
 custom Drop remain open. Constant bodies still enter as decoded Core expressions;
 all fourteen broad completion obligations remain open.
+
+
+## Alias expansion is tied to included declarations
+
+`Aliases` and `TypeExpr.alias` now use declaration indices, not unscoped string
+keys. The existing expansion, uniqueness, dependency and cycle proofs consume
+these identities directly. `AliasSyntax` retains name, visibility and decoded
+body; `SourceClosure.aliases` assigns its scope from the included module.
+`AliasesAdmitted` requires exact body-table emission, valid visibility and
+unique qualified names across nominal declarations and aliases in the type
+namespace. No second expansion algorithm or runtime alias identity is added.
+
+`alias_selected`, `alias_origin` and `alias_emitted` prove correspondence
+between the actual expansion table and included declarations. The general
+`SourceClosure.Admitted.source_alias_resolution` consumes complete emission:
+every included alias, even unused, has an emitted identity and a unique finite
+resolved type; cycles are excluded. Each alias reference in its body has an
+included source declaration and well-founded expansion dependencies. The proof
+uses the existing `ResolvesType.alias_dependencies`, not a separate analysis.
+
+Source admission construction, public safety/behavior, constant materialization
+and supplied-file permutation preserve the exact alias contract. All 30 strict
+Lean jobs passed. Inspected source expansion/origin, missing-reference rejection,
+permutation, admission, constant correctness and public soundness/behavior proof
+closures use only the standard Lean axioms.
+
+All four current declaration tables—functions, nominal data, constants and
+aliases—are now tied to included source emission. This is not full source
+elaboration: alias and nominal access paths/imports, visibility authorization
+at each type reference, generics, and decoding into resolved declaration
+identities remain obligations. No broad completion item is marked complete.
 

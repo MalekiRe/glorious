@@ -9,7 +9,7 @@ mutual
 identity survives in the resolved type (§4.3). -/
 inductive ResolvesType (aliases : Aliases) : TypeExpr → Ty → Prop where
   | concrete (type : Ty) : ResolvesType aliases (.concrete type) type
-  | alias {name : String} {body : TypeExpr} {type : Ty}
+  | alias {name : Nat} {body : TypeExpr} {type : Ty}
       (declared : aliases name = some body) (expanded : ResolvesType aliases body type) :
       ResolvesType aliases (.alias name) type
   | tuple {head : TypeExpr} {tail : List TypeExpr} {first : Ty} {rest : List Ty}
@@ -433,7 +433,7 @@ structure DataDeclarations.Valid (data : DataDeclarations) (target : Target) : P
     FiniteLayout target data (.nominal identity)
 
 /-- Syntactic alias references whose expansion is required by a decoded type. -/
-inductive TypeExpr.MentionsAlias (name : String) : TypeExpr → Prop where
+inductive TypeExpr.MentionsAlias (name : Nat) : TypeExpr → Prop where
   | alias : TypeExpr.MentionsAlias name (.alias name)
   | tupleHead {head : TypeExpr} {tail : List TypeExpr} (mentioned : TypeExpr.MentionsAlias name head) :
       TypeExpr.MentionsAlias name (.tuple head tail)
@@ -443,8 +443,8 @@ inductive TypeExpr.MentionsAlias (name : String) : TypeExpr → Prop where
   | array {element : TypeExpr} {length : Nat} (mentioned : TypeExpr.MentionsAlias name element) :
       TypeExpr.MentionsAlias name (.array element length)
 
-inductive AliasDependency (aliases : Aliases) : String → String → Prop where
-  | intro {parent child : String} {body : TypeExpr} (declared : aliases parent = some body)
+inductive AliasDependency (aliases : Aliases) : Nat → Nat → Prop where
+  | intro {parent child : Nat} {body : TypeExpr} (declared : aliases parent = some body)
       (mentioned : body.MentionsAlias child) : AliasDependency aliases child parent
 
 /-- The actual expansion derivation supplies declaration existence and
@@ -481,7 +481,7 @@ theorem ResolvesType.alias_dependencies {aliases : Aliases} {source : TypeExpr} 
     | head => exact headIH name mentioned
     | tail _ member => exact tailIH source member name mentioned
 
-theorem ResolvesType.no_alias_cycle {aliases : Aliases} {name : String} {type : Ty}
+theorem ResolvesType.no_alias_cycle {aliases : Aliases} {name : Nat} {type : Ty}
     (resolved : ResolvesType aliases (.alias name) type) :
     ¬ Relation.TransGen (AliasDependency aliases) name name :=
   accessible_not_cycle (resolved.alias_dependencies name .alias).2
