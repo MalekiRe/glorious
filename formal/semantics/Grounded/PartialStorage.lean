@@ -634,7 +634,7 @@ theorem PartialValue.Disposable.zero_use {program : Program} {value : PartialVal
     {owner : Value} {principal : Principal} (permission : value.Disposable program type)
     (observed : value.read = some owner) (classified : type.HasPrincipal program.data principal) :
     principal.Permits 0 :=
-  ((classified .discard).mp (permission.read_permission observed)) 0 (by simp)
+  ((classified .discard).mp (permission.read_permission observed)).2 0 (by simp [UsePermission.request, QuantityBound.Contains])
 
 
 /-- Another valid typing of the observed value cannot weaken its owned-use

@@ -87,20 +87,89 @@ inductive UsePermission where
   | .affine, quantity => quantity ≤ 1
   | .exact, quantity => quantity = 1
 
-/-- A public bound requests an interval contained in the actual principal.
-In particular, an exact-once request does not assert an exact-linear principal. -/
-def Principal.Satisfies (principal requested : Principal) : Prop :=
-  ∀ quantity, requested.Permits quantity → principal.Permits quantity
+/-- Requested owned-use counts are not principal declarations. An absent upper
+endpoint denotes infinity; reversed finite intervals are not valid requests. -/
+structure QuantityBound where
+  lower : Nat
+  upper : Option Nat
 
-@[simp] theorem Principal.satisfies_iff (principal requested : Principal) :
-    principal.Satisfies requested ↔
-      principal = .duplicable ∨ requested = .exact ∨ principal = requested := by
-  cases principal <;> cases requested <;> simp [Satisfies]
+def QuantityBound.Contains (bound : QuantityBound) (quantity : Nat) : Prop :=
+  bound.lower ≤ quantity ∧ match bound.upper with
+    | none => True
+    | some upper => quantity ≤ upper
+
+def QuantityBound.Valid (bound : QuantityBound) : Prop :=
+  match bound.upper with
+  | none => True
+  | some upper => bound.lower ≤ upper
+
+/-- Zero-only use is an internal destruction predicate, not a public bound. -/
+def QuantityBound.Public (bound : QuantityBound) : Prop :=
+  bound.Valid ∧ bound.upper ≠ some 0
+
+/-- A public request denotes an interval contained in the actual principal,
+not a claim that the principal equals that interval. -/
+def Principal.Satisfies (principal : Principal) (requested : QuantityBound) : Prop :=
+  requested.Public ∧ ∀ quantity, requested.Contains quantity → principal.Permits quantity
+
+theorem Principal.satisfies_iff (principal : Principal) (requested : QuantityBound) :
+    principal.Satisfies requested ↔ requested.Public ∧
+      (requested.Contains 0 → principal ≠ .exact) ∧
+      ((∃ quantity, 1 < quantity ∧ requested.Contains quantity) → principal = .duplicable) := by
+  constructor
+  · rintro ⟨admissible, permitted⟩
+    refine ⟨admissible, ?_, ?_⟩
+    · intro zero
+      have allowed := permitted 0 zero
+      cases principal <;> simp_all
+    · rintro ⟨quantity, multiple, member⟩
+      have allowed := permitted quantity member
+      cases principal with
+      | duplicable => rfl
+      | affine => have bound : quantity ≤ 1 := allowed; omega
+      | exact => have once : quantity = 1 := allowed; omega
+  · rintro ⟨admissible, zero, multiple⟩
+    refine ⟨admissible, fun quantity member => ?_⟩
+    cases principal with
+    | duplicable => trivial
+    | affine =>
+      by_cases atMost : quantity ≤ 1
+      · exact atMost
+      · have impossible := multiple ⟨quantity, by omega, member⟩
+        contradiction
+    | exact =>
+      have positive : quantity ≠ 0 := by
+        intro absent
+        subst quantity
+        exact zero member rfl
+      by_cases atMost : quantity ≤ 1
+      · exact Nat.le_antisymm atMost (by omega)
+      · have impossible := multiple ⟨quantity, by omega, member⟩
+        contradiction
+
+@[simp] theorem Principal.satisfies_copy (principal : Principal) :
+    principal.Satisfies ⟨0, none⟩ ↔ principal = .duplicable := by
+  cases principal <;> simp [Satisfies, QuantityBound.Public, QuantityBound.Valid, QuantityBound.Contains]
   all_goals first | exact ⟨0, by omega⟩ | exact ⟨2, by omega⟩
 
-@[simp] def UsePermission.request : UsePermission → Principal
-  | .copy => .duplicable
-  | .discard => .affine
+@[simp] theorem Principal.satisfies_discard (principal : Principal) :
+    principal.Satisfies ⟨0, some 1⟩ ↔ principal ≠ .exact := by
+  cases principal <;> simp [Satisfies, QuantityBound.Public, QuantityBound.Valid, QuantityBound.Contains]
+  exact ⟨0, by omega⟩
+
+@[simp] theorem Principal.satisfies_once (principal : Principal) :
+    principal.Satisfies ⟨1, some 1⟩ := by
+  refine ⟨by simp [QuantityBound.Public, QuantityBound.Valid], ?_⟩
+  intro quantity member
+  have same : quantity = 1 := by
+    simp only [QuantityBound.Contains] at member
+    omega
+  subst quantity
+  cases principal <;> simp
+
+@[simp] def UsePermission.request : UsePermission → QuantityBound
+  | .copy => ⟨0, none⟩
+  | .discard => ⟨0, some 1⟩
 
 def UsePermission.Allows (permission : UsePermission) : Option Principal → Prop
   | none => True
@@ -142,12 +211,13 @@ theorem UsePermitted.copy_discard {data : DataDeclarations} {type : Ty}
   | array length resident ih => exact .array length ih
   | emptyArray element => exact .emptyArray element
   | nominal declared restriction fields ih => exact .nominal declared (UsePermission.copy_allows_discard restriction) ih
-/-- Public bound interpretation consumes the same Copy/MayDiscard producer as
-checking. Exact-once requests add neither copying nor disposal permission. -/
-def Ty.SatisfiesUse (data : DataDeclarations) (type : Ty) : Principal → Prop
-  | .duplicable => UsePermitted data .copy type
-  | .affine => UsePermitted data .discard type
-  | .exact => True
+/-- All requested counts use the same Copy/MayDiscard producer. Count one
+requires neither capability; zero requires disposal, and repeated use requires
+Copy. Invalid and zero-only public requests are rejected before interpretation. -/
+def Ty.SatisfiesUse (data : DataDeclarations) (type : Ty) (requested : QuantityBound) : Prop :=
+  requested.Public ∧
+    (requested.Contains 0 → UsePermitted data .discard type) ∧
+    ((∃ quantity, 1 < quantity ∧ requested.Contains quantity) → UsePermitted data .copy type)
 
 /-- Principal classification is an interpretation of existing permissions, not
 another structural inference pass or a second permission table. -/
@@ -163,12 +233,13 @@ theorem Ty.HasPrincipal.unique {data : DataDeclarations} {type : Ty} {first seco
   cases first <;> cases second <;> simp_all [UsePermission.Allows]
 
 theorem Ty.HasPrincipal.satisfies {data : DataDeclarations} {type : Ty} {principal : Principal}
-    (classified : type.HasPrincipal data principal) (requested : Principal) :
+    (classified : type.HasPrincipal data principal) (requested : QuantityBound) :
     type.SatisfiesUse data requested ↔ principal.Satisfies requested := by
-  cases requested with
-  | duplicable => exact classified .copy
-  | affine => exact classified .discard
-  | exact => simp [Ty.SatisfiesUse]
+  have copies : UsePermitted data .copy type ↔ principal = .duplicable := by
+    simpa [UsePermission.Allows] using classified .copy
+  have discards : UsePermitted data .discard type ↔ principal ≠ .exact := by
+    simpa [UsePermission.Allows] using classified .discard
+  simp only [Ty.SatisfiesUse, Principal.satisfies_iff, copies, discards]
 
 theorem finite_permissions {α : Type} (items : List α) (permission : α → Prop)
     (each : ∀ item ∈ items, permission item ∨ ¬ permission item) :

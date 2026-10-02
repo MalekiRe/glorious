@@ -212,7 +212,7 @@ theorem BindingMap.CopySafe.permitted_uses (safe : BindingMap.CopySafe program h
     (read : bindings.read program heap place = some value) (resident : ValueHasType program value type)
     (classified : type.HasPrincipal program.data principal) : ∀ count, principal.Permits count := by
   have allowed := (classified .copy).mp (safe.read_permission read resident)
-  exact fun count => allowed count trivial
+  exact fun count => allowed.2 count (by simp [UsePermission.request, QuantityBound.Contains])
 /-- A move changes the checking state and the actual resident together. The
 same binding map survives; every other storage identity is framed. -/
 theorem BindingMap.take.progress (typed : BindingMap.Typed program heap activation bindings context)

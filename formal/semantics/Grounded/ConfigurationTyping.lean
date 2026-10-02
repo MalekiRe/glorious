@@ -31,7 +31,7 @@ theorem DisposalTask.Safe.zero_use {program : Program} {value : Value} {type : T
   cases safe with
   | enter typed allowed =>
     have permission := typed.use_permission resident allowed
-    exact ((classified .discard).mp permission) 0 (by simp)
+    exact ((classified .discard).mp permission).2 0 (by simp [UsePermission.request, QuantityBound.Contains])
 theorem DisposalTask.Safe.expand {program : Program} {value : Value}
     (safe : DisposalTask.Safe program (.enter value)) :
     ∀ task ∈ DisposalTask.expand value, DisposalTask.Safe program task := by

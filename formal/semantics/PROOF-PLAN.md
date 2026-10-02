@@ -4520,3 +4520,38 @@ or successful cleanup. All 30 strict Lean jobs passed; inspected emptiness,
 residual/context decisions, named-function admission and public source
 soundness/behavior closures use only the standard Lean axioms. Custom Drop,
 reference restoration and the fourteen whole-language obligations remain open.
+
+
+## Public quantity requests are intervals, not principal declarations
+
+The previous `Ty.SatisfiesUse` interface restricted requests to the three
+`Principal` constructors. Sections 7.1 and 7.6 distinguish arbitrary requested
+intervals from the three legal ordinary principal declarations. The interface
+now accepts `QuantityBound`: a natural lower endpoint and optional finite upper
+endpoint. Public requests must be nonempty, correctly ordered intervals and
+cannot be the zero-only interval. Unbounded upper endpoints are explicit.
+Nominal principal declarations remain restricted to the same three classes.
+
+`Principal.Satisfies` requires public admissibility and inclusion of every
+requested count in the actual principal. `Principal.satisfies_iff` proves the
+complete characterization by zero-use and repeated-use requirements.
+`Ty.SatisfiesUse` interprets those requirements through the existing shared
+`UsePermitted` relation. `Ty.HasPrincipal.satisfies` proves equivalence for every
+interval, not only the three conventional bounds. Copy/MayDiscard requests use
+this same interval interpretation; exact-once still accepts every principal
+without independently granting Copy or disposal. Existing destruction and Copy
+proofs now select actual count membership from the interval contract.
+
+`NamedExpr.Elaborates.ordinary_progress` returns the generalized interpretation
+alongside its actual Copy/take transition. `Value.PrincipalConsistent` also
+carries it under every valid typing of each reached resident, so the general
+ownership invariant and public source soundness/maximal-behavior consumers
+preserve all requested intervals through current results, protected payloads
+and retained value frames. No second permission inference or runtime metadata
+is introduced.
+
+All 30 strict Lean jobs passed. The checked acquisition theorem quantifies over
+`QuantityBound`; inspected classification, acquisition, ownership, exact-cleanup
+and source soundness/behavior closures use only standard Lean axioms. This
+corrects public bound semantics; generic elaboration, custom Drop, references
+and the fourteen broad completion obligations remain open.
