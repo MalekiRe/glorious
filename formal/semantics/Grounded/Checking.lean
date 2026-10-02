@@ -220,10 +220,10 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     {subject result : Ty} {previous : List Pattern} {arms : List (Pattern × Expr)}
     (checked : ArmsType program home before subject result previous arms after)
     {value : Value} (resident : ValueHasType program value subject)
-    {bindings : List BindingInput} {body : Expr}
+    {bindings : PatternMatch} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals localsAfter branchAfter pattern, (pattern, body) ∈ arms ∧
-      BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = locals ∧
+      BindingInputsTyped program bindings.bindings ∧ (bindings.bindings.map fun input => (input.name, input.slot)) = locals ∧
       (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧

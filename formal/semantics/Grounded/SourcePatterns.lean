@@ -236,9 +236,18 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
       EvaluatesMany program environment arguments values middle ∧ ValuesHaveTypes program values inputs ∧
       BindingMap.Typed program middle.heap middle.activation middle.bindings evaluated ∧
       selectArm (argumentValue values) checked.normalize.val = some (bindings, body) ∧
-      BindingInputsTyped program bindings ∧
-      Evaluates program (middle.extend bindings) body value localAfter ∧
-      localAfter.exitScope bindings.length = some after ∧
+      BindingInputsTyped program bindings.bindings ∧
+      (∀ resident ∈ bindings.discarded, ∃ type, ValueHasType program resident type ∧
+        UsePermitted program.data .discard type) ∧
+      Step program ⟨middle, .results values, .patterns home checked.normalize.val :: []⟩
+        ⟨middle.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body),
+          [.scope bindings.bindings.length]⟩ ∧
+      Run program
+        ⟨middle.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body),
+          [.scope bindings.bindings.length]⟩
+        ⟨middle.extend bindings.bindings, .expression body, [.scope bindings.bindings.length]⟩ ∧
+      Evaluates program (middle.extend bindings.bindings) body value localAfter ∧
+      localAfter.exitScope bindings.bindings.length = some after ∧
       ValueHasType program value result ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧
@@ -253,8 +262,13 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
   obtain ⟨_, _, _, _, _, inputsTyped, _⟩ := bodies.selected residents.argument selected
   obtain ⟨resident, afterTyped, afterIssued, framed⟩ :=
     (checked.admits argumentsTyped nonempty covered bodies).evaluation_soundness checkedProgram store issued run
+  have reached : Run program ⟨environment, .expression (.applyPatterns home inputs arguments checked.normalize.val), []⟩
+      ⟨middle, .results values, [.patterns home checked.normalize.val]⟩ :=
+    .step .applyPatterns (Run.extend argumentsRun [.patterns home checked.normalize.val])
+  obtain ⟨discards, entered, cleaned, _⟩ :=
+    (checked.admits argumentsTyped nonempty covered bodies).pattern_cleanup checkedProgram store issued reached selected
   refine ⟨values, middle, bindings, body, localAfter, argumentsRun, residents, middleTyped,
-    selected, inputsTyped, bodyRun, retired, resident, afterTyped, afterIssued, framed, ?_⟩
+    selected, inputsTyped, discards, entered, cleaned, bodyRun, retired, resident, afterTyped, afterIssued, framed, ?_⟩
   intro front back same
   exact EvaluatesMany.append_iff.mp (same ▸ argumentsRun)
 

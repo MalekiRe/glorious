@@ -205,11 +205,11 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | applyPatterns {home : Module} {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
       Step program ⟨env, .expression (.applyPatterns home inputs arguments arms), stack⟩
         ⟨env, .arguments arguments, .patterns home arms :: stack⟩
-  | selectedPattern {home : Module} {env : Environment} {bindings : List BindingInput} {stack : List Frame} {values : List Value}
+  | selectedPattern {home : Module} {env : Environment} {bindings : PatternMatch} {stack : List Frame} {values : List Value}
       {arms : List (Pattern × Expr)} {body : Expr}
       (selected : selectArm (argumentValue values) arms = some (bindings, body)) :
       Step program ⟨env, .results values, .patterns home arms :: stack⟩
-        ⟨env.extend bindings, .expression body, .scope bindings.length :: stack⟩
+        ⟨env.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body), .scope bindings.bindings.length :: stack⟩
   | nil {env : Environment} {stack : List Frame} :
       Step program ⟨env, .arguments [], stack⟩ ⟨env, .results [], stack⟩
   | cons {env : Environment} {stack : List Frame} {head : Expr} {tail : List Expr} :
@@ -703,7 +703,7 @@ theorem Step.outer_scope {before after : Configuration} (step : Step program bef
     apply continuationEnvironment.scope_congr
     rfl
   case selectedPattern env bindings stack values arms body selected =>
-    change (continuationEnvironment ((Frame.scope bindings.length).environment (env.extend bindings)) stack).scope = _
+    change (continuationEnvironment ((Frame.scope bindings.bindings.length).environment (env.extend bindings.bindings)) stack).scope = _
     rw [Frame.scope_extension]
     apply continuationEnvironment.scope_congr
     rfl
@@ -979,8 +979,8 @@ theorem Step.untracked_origin {before after : Configuration} (step : Step progra
       simpa only [AddressedEnvironment.extend, List.map_append, List.mem_append, not_or] using outside
     exact ⟨⟨cell, (allocateBindings.outside _ _ _ parts.1).symm.trans found⟩, by simpa using parts.2⟩
   case selectedPattern env inputs stack values arms body selected =>
-    have outside : identity ∉ (env.extend inputs).bindings.map Prod.snd := by simpa using untracked.1
-    have parts : identity ∉ (allocateBindings env.heap env.activation inputs).1.map Prod.snd ∧
+    have outside : identity ∉ (env.extend inputs.bindings).bindings.map Prod.snd := by simpa using untracked.1
+    have parts : identity ∉ (allocateBindings env.heap env.activation inputs.bindings).1.map Prod.snd ∧
         identity ∉ env.bindings.map Prod.snd := by
       simpa only [AddressedEnvironment.extend, List.map_append, List.mem_append, not_or] using outside
     exact ⟨⟨cell, (allocateBindings.outside _ _ _ parts.1).symm.trans found⟩, by simpa using parts.2⟩
@@ -1094,7 +1094,7 @@ theorem Step.untracked_frame {before after : Configuration} (step : Step program
     refine ⟨(allocateBindings.old _ _ _ old).trans found, ?_⟩
     intro name member
     rcases List.mem_append.mp member with fresh | previous
-    · have bound := allocateBindings.bounds env.heap env.activation inputs identity
+    · have bound := allocateBindings.bounds env.heap env.activation inputs.bindings identity
         (List.mem_map_of_mem (f := Prod.snd) fresh)
       omega
     · exact untracked.1 name previous

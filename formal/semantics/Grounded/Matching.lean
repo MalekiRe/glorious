@@ -4,19 +4,53 @@ import Grounded.BindingStorage
 the pattern subject; it does not change the callable argument-list shape. -/
 namespace Grounded
 
+/-- One successful match partitions its subject into retained bindings and
+ discarded residents. Discards are ordered newest field first. -/
+structure PatternMatch where
+  bindings : List BindingInput
+  discarded : List Value
+
+def PatternMatch.empty : PatternMatch := ⟨[], []⟩
+
+def PatternMatch.append (first second : PatternMatch) : PatternMatch :=
+  ⟨first.bindings ++ second.bindings, second.discarded ++ first.discarded⟩
+
+instance : Append PatternMatch := ⟨PatternMatch.append⟩
+
+@[simp] theorem PatternMatch.append_bindings (first second : PatternMatch) :
+    (first ++ second).bindings = first.bindings ++ second.bindings := rfl
+
+@[simp] theorem PatternMatch.append_discarded (first second : PatternMatch) :
+    (first ++ second).discarded = second.discarded ++ first.discarded := rfl
+
+@[simp] theorem PatternMatch.empty_append (result : PatternMatch) : empty ++ result = result := by
+  change mk ([] ++ result.bindings) (result.discarded ++ []) = result
+  simp only [List.nil_append, List.append_nil]
+
+@[simp] theorem PatternMatch.append_empty (result : PatternMatch) : result ++ empty = result := by
+  change mk (result.bindings ++ []) ([] ++ result.discarded) = result
+  simp only [List.nil_append, List.append_nil]
+
+theorem PatternMatch.append_assoc (first second third : PatternMatch) :
+    (first ++ second) ++ third = first ++ (second ++ third) := by
+  change mk ((first.bindings ++ second.bindings) ++ third.bindings)
+    (third.discarded ++ (second.discarded ++ first.discarded)) =
+    mk (first.bindings ++ (second.bindings ++ third.bindings))
+      ((third.discarded ++ second.discarded) ++ first.discarded)
+  simp only [List.append_assoc]
 mutual
-def Pattern.matchValue (pattern : Pattern) (value : Value) : Option (List BindingInput) :=
+def Pattern.matchValue (pattern : Pattern) (value : Value) : Option PatternMatch :=
   match pattern with
-  | .wildcard => some []
-  | .binder name type => some [⟨name, ⟨type, false⟩, value⟩]
-  | .literal _ expected => if value = expected then some [] else none
+  | .wildcard => some ⟨[], [value]⟩
+  | .binder name type => some ⟨[⟨name, ⟨type, false⟩, value⟩], []⟩
+  | .literal _ expected => if value = expected then some ⟨[], [value]⟩ else none
   | .node head fields =>
       if head = value.head then matchPatterns fields value.children else none
 termination_by sizeOf pattern
 
-def matchPatterns (patterns : List Pattern) (values : List Value) : Option (List BindingInput) :=
+def matchPatterns (patterns : List Pattern) (values : List Value) : Option PatternMatch :=
   match patterns, values with
-  | [], [] => some []
+  | [], [] => some .empty
   | pattern :: patterns, value :: values => do
       let first ← pattern.matchValue value
       let rest ← matchPatterns patterns values
@@ -38,7 +72,7 @@ def argumentValue : List Value → Value
   | [value] => value
   | head :: next :: tail => .tuple head (next :: tail)
 
-def selectArm (value : Value) : List (Pattern × Expr) → Option (List BindingInput × Expr)
+def selectArm (value : Value) : List (Pattern × Expr) → Option (PatternMatch × Expr)
   | [] => none
   | (pattern, body) :: rest =>
       match pattern.matchValue value with
@@ -95,7 +129,7 @@ inductive Pattern.SubjectAt : Pattern → Value → Pattern → Value → Prop w
 
 /-- Successful aggregate matching uses the actual pattern/value pair at every
 position, not an independently reconstructed child input. -/
-theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindings : List BindingInput}
+theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindings : PatternMatch}
     (matched : matchPatterns patterns values = some bindings) {index : Nat}
     {pattern : Pattern} {value : Value} (patternAt : patterns[index]? = some pattern)
     (valueAt : values[index]? = some value) :
@@ -115,23 +149,23 @@ theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindin
           have joined : bindings = front ++ back := by
             simpa [matchPatterns, headMatch, tailMatch] using matched.symm
           cases index with
-          | zero => cases patternAt; cases valueAt; exact ⟨front, [], back, headMatch, joined⟩
+          | zero => cases patternAt; cases valueAt; exact ⟨front, .empty, back, headMatch, by simpa using joined⟩
           | succ index =>
             obtain ⟨inputs, before, after, selected, split⟩ := ih tailMatch patternAt valueAt
-            exact ⟨inputs, front ++ before, after, selected, by simp [joined, split, List.append_assoc]⟩
+            exact ⟨inputs, front ++ before, after, selected, by simp [joined, split, PatternMatch.append_assoc]⟩
 
 /-- Observing a subtree of a successful match exposes a successful use of the
 same matcher; the observation itself supplies no success premise. -/
 theorem Pattern.SubjectAt.matched {pattern selected : Pattern} {value owner : Value}
-    (focus : Pattern.SubjectAt pattern value selected owner) {bindings : List BindingInput}
+    (focus : Pattern.SubjectAt pattern value selected owner) {bindings : PatternMatch}
     (matched : pattern.matchValue value = some bindings) :
     ∃ inputs front back, selected.matchValue owner = some inputs ∧ bindings = front ++ inputs ++ back := by
   induction focus generalizing bindings with
-  | root => exact ⟨bindings, [], [], matched, by simp⟩
+  | root => exact ⟨bindings, .empty, .empty, matched, by simp⟩
   | child same patternAt valueAt nested ih =>
     simp only [Pattern.matchValue, same, ↓reduceIte] at matched
     obtain ⟨inputs, front, back, childMatch, split⟩ := matchPatterns.at matched patternAt valueAt
     obtain ⟨selectedInputs, before, after, selectedMatch, childSplit⟩ := ih childMatch
-    exact ⟨selectedInputs, front ++ before, after ++ back, selectedMatch, by simp [split, childSplit, List.append_assoc]⟩
+    exact ⟨selectedInputs, front ++ before, after ++ back, selectedMatch, by simp [split, childSplit, PatternMatch.append_assoc]⟩
 
 end Grounded

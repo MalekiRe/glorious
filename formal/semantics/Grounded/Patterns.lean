@@ -175,13 +175,13 @@ theorem ValuesHaveTypes.argument {values : List Value} {types : List Ty}
 
 theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (BindingId × BindingType)}
     (typed : PatternType program home pattern type context) {value : Value}
-    (valueTyped : ValueHasType program value type) {bindings : List BindingInput}
+    (valueTyped : ValueHasType program value type) {bindings : PatternMatch}
     (matched : pattern.matchValue value = some bindings) (distinct : (context.map Prod.fst).Nodup) :
-    BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = context := by
+    BindingInputsTyped program bindings.bindings ∧ (bindings.bindings.map fun input => (input.name, input.slot)) = context := by
   induction typed using PatternType.rec
     (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
       ∀ bindings, matchPatterns patterns values = some bindings → (context.map Prod.fst).Nodup →
-        BindingInputsTyped program bindings ∧ (bindings.map fun input => (input.name, input.slot)) = context)
+        BindingInputsTyped program bindings.bindings ∧ (bindings.bindings.map fun input => (input.name, input.slot)) = context)
     generalizing value bindings with
   | wildcard discard =>
     simp only [Pattern.matchValue, Option.some.injEq] at matched
@@ -232,14 +232,83 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (Bi
           have separated := List.nodup_append.mp (by simpa only [List.map_append] using distinct)
           obtain ⟨frontTyped, frontSlots⟩ := headIH first headMatch separated.1
           obtain ⟨backTyped, backSlots⟩ := tailIH _ rest _ tailMatch separated.2.1
-          have slots : ((front ++ back).map fun input => (input.name, input.slot)) =
-              frontContext ++ backContext := by simp only [List.map_append, frontSlots, backSlots]
+          have slots : ((front ++ back).bindings.map fun input => (input.name, input.slot)) =
+              frontContext ++ backContext := by simp only [PatternMatch.append_bindings, List.map_append, frontSlots, backSlots]
           refine ⟨frontTyped.append backTyped ?_, slots⟩
           have names := congrArg (List.map Prod.fst) slots
           simp only [List.map_map, Function.comp_def] at names
           rw [← names] at distinct
           exact distinct
 
+/-- Every resident scheduled by the actual successful match has zero-use
+permission from the same pattern derivation; failed alternatives supply nothing. -/
+theorem PatternType.discarded {pattern : Pattern} {type : Ty} {context : List (BindingId × BindingType)}
+    (typed : PatternType program home pattern type context) {value : Value}
+    (valueTyped : ValueHasType program value type) {result : PatternMatch}
+    (matched : pattern.matchValue value = some result) :
+    ∀ resident ∈ result.discarded, ∃ type, ValueHasType program resident type ∧
+      UsePermitted program.data .discard type := by
+  induction typed using PatternType.rec
+    (motive_2 := fun patterns types context _ => ∀ values, ValuesHaveTypes program values types →
+      ∀ result, matchPatterns patterns values = some result →
+        ∀ resident ∈ result.discarded, ∃ type, ValueHasType program resident type ∧
+          UsePermitted program.data .discard type)
+    generalizing value result with
+  | wildcard discard =>
+    simp only [Pattern.matchValue] at matched
+    cases Option.some.inj matched
+    intro resident member
+    have same : resident = value := by simpa using member
+    subst resident
+    exact ⟨_, valueTyped, discard⟩
+  | binder name =>
+    simp only [Pattern.matchValue] at matched
+    cases Option.some.inj matched
+    simp
+  | literal typed discard =>
+    simp only [Pattern.matchValue] at matched
+    split at matched
+    next same =>
+      cases Option.some.inj matched
+      intro resident member
+      have equal : resident = value := by simpa using member
+      subst resident
+      exact ⟨_, valueTyped, discard⟩
+    next impossible => contradiction
+  | @node head patterns type fields context shape access fieldsTyped fieldsIH =>
+    simp only [Pattern.matchValue] at matched
+    split at matched
+    next same =>
+      obtain ⟨types, actual, children⟩ := valueTyped.decompose
+      rw [← same] at actual
+      have aligned : fields = types := by
+        cases shape <;> cases actual <;> simp_all
+      subst types
+      exact fieldsIH _ children result matched
+    next impossible => contradiction
+  | nil =>
+    rename_i values valuesTyped result matched resident member
+    cases valuesTyped
+    simp only [matchPatterns, Option.some.injEq] at matched
+    subst result
+    simp [PatternMatch.empty] at member
+  | @cons pattern patterns type types frontContext backContext head tail headIH tailIH =>
+    rename_i values valuesTyped result matched resident member
+
+    cases valuesTyped with
+    | @cons value values type types first rest =>
+      cases headMatch : pattern.matchValue value with
+      | none => simp [matchPatterns, headMatch] at matched
+      | some front =>
+        cases tailMatch : matchPatterns patterns values with
+        | none => simp [matchPatterns, headMatch, tailMatch] at matched
+        | some back =>
+          have joined : front ++ back = result := by
+            simpa [matchPatterns, headMatch, tailMatch] using matched
+          subst result
+          rcases List.mem_append.mp member with member | member
+          · exact tailIH _ rest _ tailMatch resident member
+          · exact headIH first headMatch resident member
 /-- Constructor-space coverage constructs an actual first matching clause. No
 post-evaluation match result occurs among the admission premises. -/
 theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Value}
@@ -288,8 +357,8 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
         cases head : pattern.matchValue value <;>
           cases front : matchPatterns patterns values <;>
           cases back : matchPatterns tail rest <;>
-          simp [List.append_assoc]
-  have literalFields : ∀ (expected actual : List Value) (bindings : List BindingInput),
+          simp [PatternMatch.append_assoc]
+  have literalFields : ∀ (expected actual : List Value) (bindings : PatternMatch),
       matchPatterns (expected.map (Pattern.literal none)) actual = some bindings → expected = actual := by
     intro expected
     induction expected with
@@ -307,11 +376,9 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
         split at matched
         next same =>
           subst value
-          have tailMatch : matchPatterns (rest.map (Pattern.literal none)) values = some bindings := by
-            simpa using matched
-          have sameTail := ih values bindings tailMatch
-          subst values
-          rfl
+          cases tailMatch : matchPatterns (rest.map (Pattern.literal none)) values with
+          | none => simp [tailMatch] at matched
+          | some result => exact congrArg (List.cons expected) (ih values result tailMatch)
         next different => simp at matched
   have valueExt : ∀ (left right : Value), left.head = right.head → left.children = right.children → left = right := by
     intro left right heads children
@@ -324,7 +391,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
     | done contained =>
       intro values typed
       cases typed
-      exact ⟨[], contained, [], by simp [matchPatterns]⟩
+      exact ⟨[], contained, .empty, by simp [matchPatterns]⟩
     | @fallback type types rows remaining ih =>
       intro values typed
       cases typed with
@@ -338,11 +405,11 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
           | wildcard =>
             simp only [defaultRow, Option.some.injEq] at selected
             subst row
-            exact ⟨_, originalIncluded, bindings, by simp [matchPatterns, Pattern.matchValue, matched]⟩
+            exact ⟨_, originalIncluded, (⟨[], [value]⟩ : PatternMatch) ++ bindings, by simp [matchPatterns, Pattern.matchValue, matched]⟩
           | binder name slot =>
             simp only [defaultRow, Option.some.injEq] at selected
             subst row
-            exact ⟨_, originalIncluded, ⟨name, ⟨slot, false⟩, value⟩ :: bindings,
+            exact ⟨_, originalIncluded, (⟨[⟨name, ⟨slot, false⟩, value⟩], []⟩ : PatternMatch) ++ bindings,
               by simp [matchPatterns, Pattern.matchValue, matched]⟩
           | literal _ _ | node _ _ => simp [defaultRow] at selected
     | @split type types rows closed branches ih =>
@@ -381,8 +448,8 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
           obtain ⟨firstBindings, firstMatched, restBindings, restMatched, _⟩ := matched
           have originalMatches : ∃ result, pattern.matchValue value = some result := by
             cases pattern with
-            | wildcard => exact ⟨[], by simp [Pattern.matchValue]⟩
-            | binder name type => exact ⟨[⟨name, ⟨type, false⟩, value⟩], by simp [Pattern.matchValue]⟩
+            | wildcard => exact ⟨⟨[], [value]⟩, by simp [Pattern.matchValue]⟩
+            | binder name type => exact ⟨⟨[⟨name, ⟨type, false⟩, value⟩], []⟩, by simp [Pattern.matchValue]⟩
             | node head children =>
               simp only [Pattern.specialize] at frontSelected
               split at frontSelected
@@ -399,7 +466,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
                 subst front
                 have childrenEqual := literalFields expected.children value.children firstBindings firstMatched
                 have equal := valueExt expected value selected.1 childrenEqual
-                exact ⟨[], by simp [Pattern.matchValue, equal]⟩
+                exact ⟨⟨[], [value]⟩, by simp [Pattern.matchValue, equal]⟩
               next impossible => contradiction
           obtain ⟨headBindings, headMatched⟩ := originalMatches
           exact ⟨pattern :: patterns, originalIncluded, headBindings ++ restBindings,

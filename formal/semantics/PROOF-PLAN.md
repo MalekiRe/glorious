@@ -4100,3 +4100,41 @@ cleanup nor future termination. The strengthened fact propagates through
 source admission and maximal behavior. All 30 strict build jobs passed; the
 inspected ownership, source-retirement and admitted-behavior proofs use only
 the three standard Lean axioms listed above.
+
+
+## Selected-pattern residents execute cleanup before the body
+
+The binding-only matcher previously lost wildcard and literal subjects:
+`Step.selectedPattern` allocated the returned bindings and entered the body
+without visiting the cleanup machine. A general Lean witness reproduced that
+transition for every wildcard subject, rather than relying on a concrete test.
+
+`PatternMatch` now carries both retained bindings and discarded residents.
+The existing recursive matcher is the sole producer. Composition preserves
+source binding order and reverses field order for disposal; failed alternatives
+produce no executable cleanup. There is no second pattern walker or retained
+binding-only compatibility path.
+
+Selected entry protects the bindings in fresh storage, then executes the
+matcher-produced queue through `Control.cleanup` before the body. Coverage,
+first-match provenance, nested subject observation, general preservation and
+progress, physical framing, evaluation construction/inversion, termination,
+and source consumers all use this result. `PatternType.discarded` derives
+zero-use permission for every scheduled resident from the actual source
+pattern and its typed subject.
+
+`HasType.pattern_cleanup` constructs the selected transition and cleanup run
+from any reached source boundary. Every prefix either remains in cleanup with
+the protected environment and continuation unchanged, or has resumed the
+selected body. `SourceArmsChecked.evaluation_soundness` consumes that theorem
+and exposes the actual cleanup segment and disposal authority. A general
+negative proof also establishes that no pattern-entry step can jump directly
+to an expression control state.
+
+All 30 strict Lean build jobs passed. Inspected discard authority, general
+preservation/progress, reached-source cleanup, decoded-source evaluation, and
+admitted maximal-behavior closures use only `propext`, `Classical.choice`,
+and `Quot.sound`. No unit tests, axioms, or proof placeholders were added.
+This closes the selected-pattern structural-disposal omission, not custom Drop
+execution or whole-language soundness. Custom destructor bodies and divergence,
+and the fourteen broad completion obligations, remain open.

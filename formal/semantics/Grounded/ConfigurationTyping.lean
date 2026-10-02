@@ -623,11 +623,11 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | expression checked =>
         cases checked with | applyPatterns arguments nonempty covered bodies =>
           exact .intro store issued (.arguments arguments) (.cons (.patterns nonempty covered bodies) continuation)
-    | selectedPattern selected =>
+    | @selectedPattern patternHome env bindings stack values arms body selected =>
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, localsAfter, branchAfter, _, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, _⟩ :=
+            obtain ⟨locals, localsAfter, branchAfter, pattern, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, patternTyped, matched, _⟩ :=
               checked.selected residents.argument selected
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store inputsTyped (by
               rw [← slots] at distinct
@@ -636,7 +636,12 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             simp only [initializedContext, List.map_map, Function.comp_def] at states
             change List.map BindingInput.state _ = initializedContext locals at states
             rw [states] at entered
-            refine .intro entered issued (.expression bodyTyped) (.cons ?_
+            have safe : ∀ task ∈ bindings.discarded.map DisposalTask.enter, DisposalTask.Safe program task := by
+              intro task member
+              obtain ⟨resident, included, rfl⟩ := List.mem_map.mp member
+              obtain ⟨type, typed, allowed⟩ := patternTyped.discarded residents.argument matched resident included
+              exact .enter typed allowed
+            refine .intro entered issued (.cleanup safe (.expression bodyTyped)) (.cons ?_
               (tail.transport (fun _ previous => previous)
                 (fun scope states typed _ => (retained scope.activation scope.bindings states typed).1)))
             have length := congrArg List.length slots
@@ -1156,9 +1161,9 @@ theorem ConfigurationTyped.consumption_step {context : FlowContext} {result : Re
         have outerDeclared := frame.declares declared
         cases frame
         change AddressedEnvironment.ConsumptionFrame program context.slots (continuationEnvironment env stack)
-          (continuationEnvironment ((Frame.scope bindings.length).environment (env.extend bindings)) stack)
+          (continuationEnvironment ((Frame.scope bindings.bindings.length).environment (env.extend bindings.bindings)) stack)
         rw [Frame.scope_extension]
-        exact tail.consumption_allocation outerDeclared env.activation bindings env.supply
+        exact tail.consumption_allocation outerDeclared env.activation bindings.bindings env.supply
     case scope stack count value empty =>
       have suffix : env.bindings.drop count = env.bindings := by
         simpa [empty] using List.take_append_drop count env.bindings
@@ -1324,7 +1329,7 @@ theorem Configuration.OwnershipSafe.retire_preserves_nondiscardable
 arbitrary clause with the same body or the same produced binding pack. -/
 theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment} {values : List Value}
     {stack : List Frame} {front back : List (Pattern × Expr)} {pattern : Pattern} {body : Expr}
-    {patternHome : Module} {bindings : List BindingInput}
+    {patternHome : Module} {bindings : PatternMatch}
     (safe : (⟨environment, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ : Configuration).OwnershipSafe program)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
     (matched : pattern.matchValue (argumentValue values) = some bindings) :

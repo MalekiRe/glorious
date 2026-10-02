@@ -1065,7 +1065,7 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
-    {pattern discarded : Pattern} {owner : Value} {body : Expr} {bindings : List BindingInput} {subjectType : Ty}
+    {pattern discarded : Pattern} {owner : Value} {body : Expr} {bindings : PatternMatch} {subjectType : Ty}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
@@ -1073,7 +1073,7 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     (focus : Pattern.SubjectAt pattern (argumentValue values) discarded owner)
     (discards : discarded = .wildcard ∨ ∃ annotation expected, discarded = .literal annotation expected)
     (resident : ValueHasType program owner subjectType) :
-    UsePermitted program.data .discard subjectType ∧ discarded.matchValue owner = some [] := by
+    UsePermitted program.data .discard subjectType ∧ discarded.matchValue owner = some ⟨[], [owner]⟩ := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
   obtain ⟨subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
   obtain ⟨childType, childBindings, childResident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
@@ -1088,6 +1088,39 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     · simp only [Pattern.matchValue] at childMatch ⊢
       split at childMatch <;> simp_all
 
+/-- At every reached pattern-entry boundary, the selected match supplies the
+actual cleanup queue. Protected bindings are installed first; no body execution
+or disposal permission for a failed alternative is assumed. -/
+theorem HasType.pattern_cleanup (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {patternHome : Module} {values : List Value} {stack : List Frame}
+    {arms : List (Pattern × Expr)} {result : PatternMatch} {body : Expr}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .results values, .patterns patternHome arms :: stack⟩)
+    (selected : selectArm (argumentValue values) arms = some (result, body)) :
+    (∀ resident ∈ result.discarded, ∃ type, ValueHasType program resident type ∧
+      UsePermitted program.data .discard type) ∧
+    Step program ⟨current, .results values, .patterns patternHome arms :: stack⟩
+      ⟨current.extend result.bindings, .cleanup (result.discarded.map DisposalTask.enter) (.expression body),
+        .scope result.bindings.length :: stack⟩ ∧
+    Run program
+      ⟨current.extend result.bindings, .cleanup (result.discarded.map DisposalTask.enter) (.expression body),
+        .scope result.bindings.length :: stack⟩
+      ⟨current.extend result.bindings, .expression body, .scope result.bindings.length :: stack⟩ ∧
+    (∀ after, Run program
+      ⟨current.extend result.bindings, .cleanup (result.discarded.map DisposalTask.enter) (.expression body),
+        .scope result.bindings.length :: stack⟩ after →
+      (∃ pending, after = ⟨current.extend result.bindings, .cleanup pending (.expression body),
+        .scope result.bindings.length :: stack⟩) ∨
+      Run program ⟨current.extend result.bindings, .expression body, .scope result.bindings.length :: stack⟩ after) := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨subject, locals, pattern, front, back, resident, typed, _, _, matched⟩ := safe result body selected
+  exact ⟨typed.discarded resident matched, .selectedPattern selected, Run.cleanup _ _ _ _,
+    fun _ prefixRun => Run.cleanup_decompose prefixRun _ _ _ _ rfl⟩
 /-- An arbitrary nested binder in the first selected clause transfers its exact
 resident into fresh storage through the real pattern-entry transition. The
 position is derived from the matcher's ordered output, not supplied as readiness. -/
@@ -1098,7 +1131,7 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
-    {pattern : Pattern} {body : Expr} {bindings : List BindingInput}
+    {pattern : Pattern} {body : Expr} {bindings : PatternMatch}
     {name : BindingId} {boundType : Ty} {owner : Value}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
@@ -1116,19 +1149,19 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
   obtain ⟨childType, childBindings, resident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
   cases childPattern
   obtain ⟨inputs, before, after, childMatch, split⟩ := focus.matched matched
-  have single : inputs = [⟨name, ⟨boundType, false⟩, owner⟩] := by
+  have single : inputs = (⟨[⟨name, ⟨boundType, false⟩, owner⟩], []⟩ : PatternMatch) := by
     simpa only [Pattern.matchValue, Option.some.injEq] using childMatch.symm
-  have inputAt : bindings[before.length]? = some ⟨name, ⟨boundType, false⟩, owner⟩ := by
+  have inputAt : bindings.bindings[before.bindings.length]? = some ⟨name, ⟨boundType, false⟩, owner⟩ := by
     simp [split, single, List.append_assoc]
   obtain ⟨identity, found, cell, position⟩ := allocateBindings.at current.heap current.activation inputAt
   have selected : selectArm (argumentValue values) (front ++ (pattern, body) :: back) = some (bindings, body) := by
     rw [selectArm.skip_missed _ _ _ missed]
     simp only [selectArm, matched]
-  let result : Configuration := ⟨current.extend bindings, .expression body, .scope bindings.length :: stack⟩
+  let result : Configuration := ⟨current.extend bindings.bindings, .cleanup (bindings.discarded.map DisposalTask.enter) (.expression body), .scope bindings.bindings.length :: stack⟩
   have entered : Step program
       ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ result :=
     .selectedPattern selected
-  have located : result.environment.bindings[before.length]? = some (name, identity) := by
+  have located : result.environment.bindings[before.bindings.length]? = some (name, identity) := by
     simp only [result, AddressedEnvironment.extend]
     exact List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1 |>.trans found
   have preserved := ConfigurationTyped.preservation checkedProgram
@@ -1137,7 +1170,7 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     dsimp only [result] at preserved ⊢
     cases preserved with
     | intro store issued code continuation => exact store.keys.symm ▸ store.context_distinct
-  exact ⟨result, identity, before.length, entered, located,
+  exact ⟨result, identity, before.bindings.length, entered, located,
     lookup.of_mem distinct (List.mem_of_getElem? located), cell, position, resident⟩
 
 /-- Every reached owned deconstruction uses authority from the module stored
@@ -1150,7 +1183,7 @@ theorem HasType.pattern_deconstruction (checkedProgram : program.Checked)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
-    {pattern : Pattern} {body : Expr} {bindings : List BindingInput}
+    {pattern : Pattern} {body : Expr} {bindings : PatternMatch}
     {head : Head} {fields : List Pattern} {owner : Value}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
@@ -1174,7 +1207,7 @@ theorem HasType.pattern_external_exact_transfer (checkedProgram : program.Checke
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
-    {pattern selected : Pattern} {body : Expr} {bindings : List BindingInput}
+    {pattern selected : Pattern} {body : Expr} {bindings : PatternMatch}
     {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl} {variants : List Fields}
     (declared : program.data identity = some declaration)
     (shape : declaration.shape = .enumeration variants true)

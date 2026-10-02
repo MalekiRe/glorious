@@ -115,15 +115,15 @@ theorem Evaluates.call {environment middle localAfter after : Environment} {iden
 
 theorem Evaluates.applyPatterns {environment middle localAfter after : Environment} {inputs : List Ty} {arguments : List Expr}
       {home : Module} {arms : List (Pattern × Expr)} {values : List Value}
-      {bindings : List BindingInput} {body : Expr} {value : Value}
+      {bindings : PatternMatch} {body : Expr} {value : Value}
       (argumentsEval : EvaluatesMany program environment arguments values middle)
       (selected : selectArm (argumentValue values) arms = some (bindings, body))
-      (bodyEval : Evaluates program (middle.extend bindings) body value localAfter)
-      (exited : localAfter.exitScope bindings.length = some after) :
+      (bodyEval : Evaluates program (middle.extend bindings.bindings) body value localAfter)
+      (exited : localAfter.exitScope bindings.bindings.length = some after) :
       Evaluates program environment (.applyPatterns home inputs arguments arms) value after :=
   .step .applyPatterns ((Run.extend argumentsEval [.patterns home arms]).trans
-    (.step (.selectedPattern selected) ((Run.extend bodyEval [.scope bindings.length]).trans
-      (Run.scope exited))))
+    (.step (.selectedPattern selected) ((Run.cleanup _ _ _ _).trans ((Run.extend bodyEval [.scope bindings.bindings.length]).trans
+      (Run.scope exited)))))
 
 theorem EvaluatesMany.nil {environment : Environment} : EvaluatesMany program environment [] [] environment :=
   .step .nil (.refl _)
@@ -294,8 +294,8 @@ theorem Evaluates.applyPatterns_iff {environment after : Environment} {inputs : 
       ∃ values middle bindings body localAfter,
         EvaluatesMany program environment arguments values middle ∧
         selectArm (argumentValue values) arms = some (bindings, body) ∧
-        Evaluates program (middle.extend bindings) body value localAfter ∧
-        localAfter.exitScope bindings.length = some after := by
+        Evaluates program (middle.extend bindings.bindings) body value localAfter ∧
+        localAfter.exitScope bindings.bindings.length = some after := by
   constructor
   · intro evaluated
     cases evaluated with
@@ -313,6 +313,8 @@ theorem Evaluates.applyPatterns_iff {environment after : Environment} {inputs : 
           | step head rest =>
             cases head with
             | selectedPattern selected =>
+              rcases Run.cleanup_decompose rest _ _ _ _ rfl with ⟨remaining, impossible⟩ | rest
+              · cases impossible
               obtain ⟨done, terminal, bodyRun, exited⟩ := rest.unextend
                 ⟨_, .expression _, []⟩ [_] rfl (by simp)
               cases terminal with

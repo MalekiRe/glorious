@@ -273,7 +273,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       change List.map BindingInput.state _ = initializedContext locals at states
       rw [states] at entered
       obtain ⟨value, localAfter, bodyRun, _, localTyped, _, _⟩ := ih _ (.patternBody member) bodyTyped entered middleIssued
-      obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped bindings.length
+      obtain ⟨after, exited, _⟩ := AddressedEnvironment.exitScope.progress localTyped bindings.bindings.length
       exact ⟨value, after, .applyPatterns argumentsRun selected bodyRun exited⟩
 
 /-- Finite argument evaluation constructs the actual ordered machine run without
