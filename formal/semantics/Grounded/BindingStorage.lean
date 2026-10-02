@@ -251,6 +251,21 @@ theorem allocateBindings.bounds (heap : RuntimeHeap StorageCell) (activation : A
     | head => exact Nat.le_refl _
     | tail _ member => exact Nat.le_trans (Nat.le_succ _) (ih _ identity member)
 
+/-- Ordered argument and pattern batches acquire storage from oldest to newest. -/
+theorem allocateBindings.increasing (heap : RuntimeHeap StorageCell) (activation : ActivationId)
+    (inputs : List BindingInput) :
+    ((allocateBindings heap activation inputs).1.map Prod.snd).Pairwise
+      (fun older newer => older.index < newer.index) := by
+  induction inputs generalizing heap with
+  | nil => exact .nil
+  | cons input rest ih =>
+    apply List.pairwise_cons.mpr
+    refine ⟨?_, ih _⟩
+    intro identity member
+    have bound := allocateBindings.bounds (heap.allocate (input.cell activation)).2 activation rest identity member
+    exact Nat.lt_of_lt_of_le (Nat.lt_succ_self _) bound
+
+
 theorem allocateBindings.keys (heap : RuntimeHeap StorageCell) (activation : ActivationId)
     (inputs : List BindingInput) :
     (allocateBindings heap activation inputs).1.map Prod.fst = inputs.map BindingInput.name := by
@@ -290,9 +305,95 @@ theorem BindingMap.Typed.allocate (typed : BindingMap.Typed program heap activat
     BindingMap.Typed program (allocateBindings heap owner inputs).2 activation bindings context :=
   typed.frame (typed.allocate_preserves owner inputs)
 
-/-- Scope release retires identities, not lexical names or activation counters. -/
+/-- Binding presentation order is lexical, not acquisition order. Fresh storage
+identities already record acquisition order, including ordered parameter batches. -/
+def BindingMap.releaseOrder (bindings : BindingMap) : List StorageId :=
+  (bindings.map Prod.snd).mergeSort (fun older newer => decide (newer.index ≤ older.index))
+
+theorem BindingMap.releaseOrder_perm (bindings : BindingMap) :
+    bindings.releaseOrder.Perm (bindings.map Prod.snd) :=
+  List.mergeSort_perm _ _
+
+@[simp] theorem BindingMap.mem_releaseOrder {bindings : BindingMap} {identity : StorageId} :
+    identity ∈ bindings.releaseOrder ↔ identity ∈ bindings.map Prod.snd :=
+  bindings.releaseOrder_perm.mem_iff
+
+/-- Every later retirement is strictly older; each owned cell occurs exactly
+once because typed binding maps are injective in storage identity. -/
+theorem BindingMap.releaseOrder_decreasing (bindings : BindingMap)
+    (distinct : (bindings.map Prod.snd).Nodup) :
+    bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index) := by
+  have sorted := List.pairwise_mergeSort
+    (le := fun left right : StorageId => decide (right.index ≤ left.index))
+    (by intro a b c first second; simp only [decide_eq_true_eq] at *; omega)
+    (by intro a b; simp only [Bool.or_eq_true, decide_eq_true_eq]; omega)
+    (bindings.map Prod.snd)
+  have weak : bindings.releaseOrder.Pairwise (fun a b => b.index ≤ a.index) := by
+    simpa only [BindingMap.releaseOrder, decide_eq_true_eq] using sorted
+  have unequal : bindings.releaseOrder.Nodup := bindings.releaseOrder_perm.nodup_iff.mpr distinct
+  apply (weak.and unequal).imp
+  intro a b pair
+  have different : a.index ≠ b.index := by
+    intro same
+    apply pair.2
+    cases a; cases b; simpa using same
+  omega
+
+/-- Source-ordered parameter acquisition is released in reverse acquisition
+order. This follows for arbitrary batches, not a distinguished two-input case. -/
+theorem allocateBindings.releaseOrder_reverse (heap : RuntimeHeap StorageCell)
+    (activation : ActivationId) (inputs : List BindingInput) :
+    (allocateBindings heap activation inputs).1.releaseOrder =
+      ((allocateBindings heap activation inputs).1.map Prod.snd).reverse := by
+  have increasing := allocateBindings.increasing heap activation inputs
+  have distinct : ((allocateBindings heap activation inputs).1.map Prod.snd).Nodup := by
+    apply increasing.imp
+    intro a b older same
+    cases same
+    exact Nat.lt_irrefl _ older
+  have first := BindingMap.releaseOrder_decreasing _ distinct
+  have second := List.pairwise_reverse.mpr increasing
+  apply List.Perm.eq_of_pairwise (le := fun newer older : StorageId => older.index < newer.index)
+    (fun _ _ _ _ forward backward => False.elim (Nat.lt_asymm forward backward)) first second
+  exact (BindingMap.releaseOrder_perm _).trans (List.reverse_perm _).symm
+
+
+/-- Scope release retires actual owners newest-first, independently of lexical
+name order. Disposal permission remains the responsibility of source checking. -/
 def releaseBindings (heap : RuntimeHeap StorageCell) (bindings : BindingMap) : Option (RuntimeHeap StorageCell) :=
-  heap.retireMany (bindings.map Prod.snd)
+  heap.retireMany bindings.releaseOrder
+
+theorem releaseBindings.outside {heap after : RuntimeHeap StorageCell} {bindings : BindingMap}
+    (released : releaseBindings heap bindings = some after) {identity : StorageId}
+    (outside : identity ∉ bindings.map Prod.snd) : after.read identity = heap.read identity :=
+  RuntimeHeap.retireMany_outside released (by simpa only [BindingMap.mem_releaseOrder] using outside)
+
+theorem releaseBindings.retired {heap after : RuntimeHeap StorageCell} {bindings : BindingMap}
+    (released : releaseBindings heap bindings = some after) :
+    ∀ identity ∈ bindings.map Prod.snd, after.Retired identity := by
+  intro identity member
+  exact RuntimeHeap.retireMany_retired released identity
+    (by simpa only [BindingMap.mem_releaseOrder] using member)
+
+/-- Factor the actual shared retirement operation at any point. Its next
+retirement precedes only strictly older owners, not merely an unordered set of
+final absences. The witnesses are the intermediate heaps used by retireMany. -/
+theorem releaseBindings.prefix_step {heap after : RuntimeHeap StorageCell} {bindings : BindingMap}
+    (released : releaseBindings heap bindings = some after)
+    (ordered : bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index))
+    {front back : List StorageId} {identity : StorageId}
+    (split : bindings.releaseOrder = front ++ identity :: back) :
+    ∃ middle next, heap.retireMany front = some middle ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after ∧
+      ∀ older ∈ back, older.index < identity.index := by
+  change heap.retireMany bindings.releaseOrder = some after at released
+  rw [split, RuntimeHeap.retireMany_append] at released
+  obtain ⟨middle, prefixRun, remaining⟩ := Option.bind_eq_some_iff.mp released
+  obtain ⟨next, retired, suffixRun⟩ := Option.bind_eq_some_iff.mp remaining
+  refine ⟨middle, next, prefixRun, retired, suffixRun, ?_⟩
+  rw [split] at ordered
+  exact (List.pairwise_cons.mp (List.pairwise_append.mp ordered).2.1).1
+
 
 /-- A live nondiscardable descendant protects its entire containing cell from
 retirement, including when other fields have been consumed. -/
@@ -311,7 +412,7 @@ theorem BindingMap.Disposable.release_preserves_nondiscardable
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
     exact required (permission.selected_permission path resident)
-  exact (RuntimeHeap.retireMany_outside released outside).trans found
+  exact (releaseBindings.outside released outside).trans found
 
 
 /-- Retirement leaves every live exact nominal owner untouched, including owners
@@ -329,7 +430,7 @@ theorem BindingMap.Disposable.release_preserves_exact
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
     exact PartialValue.Disposable.not_exact_read declared restricted resident permission
-  exact (RuntimeHeap.retireMany_outside released outside).trans found
+  exact (releaseBindings.outside released outside).trans found
 
 
 theorem BindingMap.Typed.release (typed : BindingMap.Typed program heap activation bindings context) :
@@ -337,9 +438,11 @@ theorem BindingMap.Typed.release (typed : BindingMap.Typed program heap activati
       after.next = heap.next ∧
       (∀ identity ∈ bindings.map Prod.snd, after.Retired identity) ∧
       (∀ identity, identity ∉ bindings.map Prod.snd → after.read identity = heap.read identity) := by
-  obtain ⟨after, released⟩ := heap.retireMany_exists _ typed.addresses_distinct typed.live
+  obtain ⟨after, released⟩ := heap.retireMany_exists bindings.releaseOrder
+    (bindings.releaseOrder_perm.nodup_iff.mpr typed.addresses_distinct)
+    (fun identity member => typed.live identity (BindingMap.mem_releaseOrder.mp member))
   exact ⟨after, released, RuntimeHeap.retireMany_next released,
-    RuntimeHeap.retireMany_retired released, fun _ outside => RuntimeHeap.retireMany_outside released outside⟩
+    releaseBindings.retired released, fun _ outside => releaseBindings.outside released outside⟩
 
 theorem BindingMap.Typed.lookup (typed : BindingMap.Typed program heap activation bindings context)
     {name : BindingId} {state : BindingState} (selected : lookup name context = some state) :
@@ -743,7 +846,7 @@ theorem AddressedEnvironment.exitScope.progress {current : AddressedEnvironment}
   intro caller states callerTyped different
   have framed : ∀ identity ∈ caller.bindings.map Prod.snd, heap.read identity = current.heap.read identity := by
     intro identity member
-    exact RuntimeHeap.retireMany_outside released
+    exact releaseBindings.outside released
       (callerTyped.apart_activations (typed.take count) different identity member)
   exact ⟨callerTyped.frame framed, framed⟩
 

@@ -511,7 +511,7 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at retired
     obtain ⟨heap, released, same⟩ := retired
     subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
 
 /-- Actual caller restoration preserves live nondiscardable descendants,
 including those retained inside partially consumed aggregates. -/
@@ -538,7 +538,7 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
     simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at retired
     obtain ⟨heap, released, same⟩ := retired
     subst_vars
-    exact BindingMap.Disposable.release_preserves_nondiscardable disposition released found path resident required
+    exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
 
 
 /-- An actual lexical retirement after a checked prefix cannot retire or alter a
@@ -564,7 +564,7 @@ theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at exited
     obtain ⟨heap, released, same⟩ := exited
     subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
+    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found declared restricted resident
 
 /-- An actual caller restoration after a checked prefix cannot retire or alter a
 live exact nominal owner in the heap. -/
@@ -589,7 +589,7 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at restored
     obtain ⟨heap, released, same⟩ := restored
     subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
+    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found declared restricted resident
 
 /-- Selection is observed after RHS evaluation. A moved-out slot may be restored,
 but a still-live exact selected owner cannot be overwritten. -/

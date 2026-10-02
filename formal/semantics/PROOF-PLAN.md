@@ -3199,3 +3199,41 @@ This is decoded owned-value semantics, not attribute parsing, borrowed matching,
 separate-compilation compatibility or whole-language completion. Those and the
 other broad obligations remain open.
 
+## Newest-owner-first retirement through actual source execution
+
+A general pre-repair Lean derivation exposed the shared release implementation's
+ordering mismatch: two arbitrary inputs allocate older then newer storage, while
+`releaseBindings` threaded retirement through the same lexical list. Lexical
+presentation is not acquisition order; reversing that list indiscriminately
+would also mishandle scopes containing prepended locals.
+
+The existing fresh storage identities provide the authoritative acquisition
+order. `BindingMap.releaseOrder` derives a descending permutation of those
+identities, and the actual shared `releaseBindings` operation consumes it. No
+second allocation clock or ownership stack is introduced. General proofs show
+that this order contains precisely the scope's cells, strictly newest-first,
+and that arbitrary source-ordered input batches retire in reverse acquisition
+order. Parameter acquisition itself remains left-to-right.
+
+`releaseBindings.prefix_step` factors the real retirement operation at every
+position into actual prefix, single-cell and suffix heap transitions. The scope
+exit and caller-return consumers derive this factorization from reached-state
+`Configuration.OwnershipSafe`. That public invariant now includes retirement
+order alongside existing disposal permission. General source-prefix soundness
+and maximal source behavior therefore retain the stronger contract; it is not
+a standalone ordering fact. Exact-owner and nondiscardable-descendant protection,
+caller framing, permanent retirement and constructive release progress all
+consume the changed operation.
+
+Verification: an independent source-only build passed all 30 Lean jobs. Explicit
+axiom inspection of batch ordering, retirement factorization, actual scope/return
+consumers, ownership safety, preservation/progress, call cleanup and public
+source behavior found only standard Lean axioms. No unit tests or concrete
+examples were added. The preliminary ordering derivation was checked through
+stdin; no throwaway source file remains in the repository.
+
+This specifies logical cell-retirement order. Custom Drop execution, ordered
+resident-field destruction, divergence during hooks, references/loans and
+physical-resource behavior remain open; atomic retirement is not claimed to
+implement those missing semantics. No broad completion obligation is closed.
+

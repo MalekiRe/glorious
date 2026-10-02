@@ -543,7 +543,7 @@ theorem Run.scope_retired {before : Environment} {middle after : Configuration}
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
     cases same
-    exact run.retired (RuntimeHeap.retireMany_retired released identity member)
+    exact run.retired (releaseBindings.retired released identity member)
 
 /-- Returning from a function retires its own binding identities, not the
 caller's names; no subsequent execution can allocate those identities again. -/
@@ -557,7 +557,7 @@ theorem Run.return_retired {before : Environment} {middle after : Configuration}
   | restore restored =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
     cases same
-    exact run.retired (RuntimeHeap.retireMany_retired released identity member)
+    exact run.retired (releaseBindings.retired released identity member)
 
 /-- Finishing a body through its real return frame permanently retires the
 entry bindings, even when the body performs nested calls or lexical allocations. -/

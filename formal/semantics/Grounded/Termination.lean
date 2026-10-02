@@ -72,7 +72,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     have empty : localAfter.bindings = [] := congrArg AddressedScope.bindings scope
     let after : Environment := { localAfter with activation := environment.activation, bindings := environment.bindings }
     have restored : localAfter.restore environment.scope = some after := by
-      simp [AddressedEnvironment.restore, releaseBindings, RuntimeHeap.retireMany, empty, after, AddressedEnvironment.scope]
+      simp [AddressedEnvironment.restore, releaseBindings, BindingMap.releaseOrder, RuntimeHeap.retireMany, empty, after, AddressedEnvironment.scope]
     exact ⟨after, .constant declared run restored, rfl, heap⟩
   | construct declared chosen finite visible access residents ih =>
     intro closed

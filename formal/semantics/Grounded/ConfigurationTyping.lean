@@ -667,15 +667,19 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
 
 
 /-- Actual copy reads and all modeled disposal sites respect the same structural
-owned-use authority. These are current-state facts, not future readiness. -/
+owned-use authority. Scope retirement also preserves newest-owner-first order.
+These are current-state facts, not future readiness. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
   match state.control, state.continuation with
   | .expression (.read place), _ =>
       BindingMap.CopySafe program state.environment.heap state.environment.bindings place
   | .result _, .scope count :: _ =>
-      BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings)
+      BindingMap.Disposable program state.environment.heap (List.take count state.environment.bindings) ∧
+        (BindingMap.releaseOrder (List.take count state.environment.bindings)).Pairwise
+          (fun newer older => older.index < newer.index)
   | .result _, .restore _ :: _ =>
-      BindingMap.Disposable program state.environment.heap state.environment.bindings
+      BindingMap.Disposable program state.environment.heap state.environment.bindings ∧
+        state.environment.bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index)
   | .result _, .assign place _ :: _ =>
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
   | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
@@ -698,14 +702,50 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
       case cons frame tail =>
         cases frame <;> try trivial
         case scope locals discard joined =>
-          exact (store.take locals.length).disposable (by simpa using discard)
-        case restore => exact store.disposable (by assumption)
+          exact ⟨(store.take locals.length).disposable (by simpa using discard),
+            BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
+        case restore =>
+          exact ⟨store.disposable (by assumption), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
         case assign =>
           exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
         case project =>
           exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
         case sequence =>
           exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
+
+/-- Source-prefix ownership safety constrains every actual lexical retirement,
+including its intermediate heap transitions and strict acquisition order. -/
+theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {after : Configuration}
+    {value : Value} {count : Nat} {stack : List Frame}
+    (safe : (⟨before, .result value, .scope count :: stack⟩ : Configuration).OwnershipSafe program)
+    (step : Step program ⟨before, .result value, .scope count :: stack⟩ after)
+    {front back : List StorageId} {identity : StorageId}
+    (split : BindingMap.releaseOrder (List.take count before.bindings) = front ++ identity :: back) :
+    ∃ middle next, before.heap.retireMany front = some middle ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
+      ∀ older ∈ back, older.index < identity.index := by
+  cases step with
+  | scope exited =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
+    cases same
+    exact releaseBindings.prefix_step released safe.2 split
+
+/-- Function return consumes the same release producer as lexical scope exit;
+parameter-list order cannot override actual newest-owner-first retirement. -/
+theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {after : Configuration}
+    {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (safe : (⟨before, .result value, .restore caller :: stack⟩ : Configuration).OwnershipSafe program)
+    (step : Step program ⟨before, .result value, .restore caller :: stack⟩ after)
+    {front back : List StorageId} {identity : StorageId}
+    (split : before.bindings.releaseOrder = front ++ identity :: back) :
+    ∃ middle next, before.heap.retireMany front = some middle ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
+      ∀ older ∈ back, older.index < identity.index := by
+  cases step with
+  | restore restored =>
+    obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
+    cases same
+    exact releaseBindings.prefix_step released safe.2 split
 
 /-- Every retained scope is realized in the current heap, not merely the active
 scope or the outermost caller. Traversing frames does not execute pending code. -/

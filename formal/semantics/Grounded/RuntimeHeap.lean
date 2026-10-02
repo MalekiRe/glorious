@@ -251,6 +251,18 @@ def retireMany (heap : RuntimeHeap α) : List StorageId → Option (RuntimeHeap 
   | [] => some heap
   | identity :: rest => (heap.retire identity).bind (fun after => retireMany after rest)
 
+theorem retireMany_append (heap : RuntimeHeap α) (front back : List StorageId) :
+    heap.retireMany (front ++ back) =
+      (heap.retireMany front).bind (fun middle => middle.retireMany back) := by
+  induction front generalizing heap with
+  | nil => rfl
+  | cons identity rest ih =>
+    simp only [List.cons_append, retireMany, Option.bind_assoc]
+    congr 1
+    funext middle
+    exact ih middle
+
+
 theorem allocateMany_next (heap : RuntimeHeap α) (values : List α) :
     (heap.allocateMany values).2.next = heap.next + values.length := by
   induction values generalizing heap with
