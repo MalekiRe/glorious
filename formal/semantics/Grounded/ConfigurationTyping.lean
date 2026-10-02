@@ -885,6 +885,40 @@ theorem ContinuationTyped.consumption_frame {before after : Environment} {curren
       intro scope states realized older
       exact retained scope states realized (Nat.lt_of_lt_of_le older head.activation_le)
 
+/-- Callee retirement preserves observations through the entire caller stack,
+not only its typing. Retired roots belong to the pre-state callee activation. -/
+theorem ConfigurationTyped.restore_prefix_consumption {context : FlowContext} {result : ResultType}
+    {current : Environment} {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (typed : ConfigurationTyped program context result ⟨current, .result value, .restore caller :: stack⟩)
+    {front : List StorageId} {middle : RuntimeHeap StorageCell}
+    (owned : ∀ identity ∈ front, identity ∈ current.bindings.map Prod.snd)
+    (executed : current.heap.retireMany front = some middle) :
+    AddressedEnvironment.ConsumptionFrame program context.slots
+      (⟨current, .result value, .restore caller :: stack⟩ : Configuration).outerEnvironment
+      (⟨{ current with heap := middle, bindings := current.bindings.filter fun entry => decide (entry.2 ∉ front) },
+        .result value, .restore caller :: stack⟩ : Configuration).outerEnvironment := by
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        cases frame with | restore locals discard callerTyped callerIssued older =>
+          have preserved : ∀ (scope : AddressedScope) states,
+              BindingMap.Typed program current.heap scope.activation scope.bindings states →
+              scope.activation.index < current.activation.index →
+              ∀ identity ∈ scope.bindings.map Prod.snd, middle.read identity = current.heap.read identity := by
+            intro scope states scopeTyped previous identity member
+            apply RuntimeHeap.retireMany_outside executed
+            intro retired
+            apply scopeTyped.apart_activations store (fun same => ?_) identity member (owned identity retired)
+            have equal := congrArg ActivationId.index same
+            omega
+          apply tail.consumption_frame
+            (before := Frame.environment (.restore caller) current)
+            (after := { current with heap := middle, activation := caller.activation, bindings := caller.bindings })
+            ⟨_, callerTyped, rfl⟩ (.of_cells rfl (preserved caller _ callerTyped older))
+          intro scope states scopeTyped previous
+          exact preserved scope states scopeTyped (Nat.lt_trans previous older)
+
+
 theorem ContinuationTyped.consumption_allocation {before : Environment} {current final : FlowContext}
     {input result : ResultType} {stack : List Frame}
     (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)

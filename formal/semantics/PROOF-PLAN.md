@@ -3980,3 +3980,12 @@ depend only on `propext`, `Classical.choice`, and `Quot.sound`. This does not
 change the atomic return machine transition or establish interleaved resident
 destruction. The retirement-frame cutover and all broad completion obligations
 remain open.
+
+The same return-prefix boundary now preserves observations, not only typing.
+`ConfigurationTyped.restore_prefix_consumption` frames the entire caller stack
+through actual callee-owned retirement. The source return theorem composes this
+with the executed source prefix, so its consumption guarantee starts at the
+original source-entry environment. No intermediate observation or caller
+readiness is assumed. All 30 strict build jobs and the inspected producer/source
+axiom closures passed. This strengthens the storage-prefix invariant; the
+interleaved destruction/retirement machine integration is still open.
