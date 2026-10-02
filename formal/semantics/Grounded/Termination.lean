@@ -98,7 +98,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
   | empty => trivial
   | clause patternTyped distinct useful bodyTyped localSlots disposable joined tailTyped bodyIH tailIH => trivial
 
-theorem constant_correctness {name : String} {type : Ty}
+theorem constant_correctness {name : Nat} {type : Ty}
     (checked : HasType program home [] (.constant name) type []) :
     ∃ value after, Evaluates program AddressedEnvironment.empty (.constant name) value after ∧ ValueHasType program value type ∧
       ∀ other otherAfter, Evaluates program AddressedEnvironment.empty (.constant name) other otherAfter →

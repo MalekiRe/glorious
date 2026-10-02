@@ -71,7 +71,7 @@ inductive NamedExpr where
   | tuple (head : NamedExpr) (tail : List NamedExpr)
   | project (body : NamedExpr) (key : FieldKey)
   | array (elements : List NamedExpr)
-  | constant (name : String)
+  | constant (identity : Nat)
   | construct (identity : Nat) (tag : Option Nat) (fields : List NamedExpr)
   | call (name : FunctionName) (arguments : List NamedExpr)
   | assign (name : Identifier) (fields : List FieldKey) (value rest : NamedExpr)

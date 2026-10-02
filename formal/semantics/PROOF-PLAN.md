@@ -2703,9 +2703,9 @@ all decoded constants, including unused declarations. `ConstantChecked` uses
 exactly the existing structural-syntax, alias-resolution and body-typing
 premises of constant access; it assumes no completed evaluation.
 
-`SourceClosure.Admitted.constant_correctness` consumes this declaration
-checking through the actual `HasType.constant` rule and the shared structural
-normalization theorem. It constructs a typed value and actual evaluation from
+`SourceClosure.Admitted.constant_correctness` now starts from an included source
+constant, derives its emitted identity, and consumes declaration checking through
+`HasType.constant` and shared structural normalization. It constructs a typed value and actual evaluation from
 any caller environment, proves preservation of that caller's lexical scope and
 heap, and proves uniqueness of both returned value and final environment.
 Function termination is not required. No alternate evaluator was introduced.
@@ -4583,7 +4583,39 @@ only `propext`, `Classical.choice` and `Quot.sound`.
 
 This closes nominal source ownership, not source type-name elaboration. Decoded
 field types still contain resolved Core types. Type namespace/import resolution,
-generic nominal elaboration, source-owned alias/constant emission, custom Drop
+generic nominal elaboration, source-owned alias emission, custom Drop
 and references remain open; none of the fourteen broad completion obligations
 is marked complete.
+
+
+## Constant identities and ownership originate in source inclusion
+
+The independently supplied string-keyed constant table is removed. Constants
+now use indexed declaration identities consistently in Core expressions,
+decoded expressions/patterns, structural checking, execution and normalization.
+`ConstantSyntax` retains the source name, visibility, type and decoded body;
+inclusion supplies its owner. `SourceClosure.ConstantsAdmitted` requires the
+entire `Program.constants` table to equal the ordered source emission, validates
+visibility at that owner, and rejects duplicate function/constant names in the
+same module. Different modules may retain the same source spelling.
+
+`constant_selected` and `constant_origin` exclude ambient entries and forged
+owners. `constant_emitted` proves every included constant is emitted. The
+public `SourceClosure.Admitted.constant_correctness` theorem now starts from
+an included source declaration, constructs its emitted identity, and derives
+both its structural pattern normal form and unique actual materialization from
+any caller environment. Heap and lexical-scope preservation are unchanged. No
+normalization result, completed evaluation or function termination is supplied.
+
+Public admission, soundness, maximal behavior, compatible invocation and file
+permutation consumers retain exact constant emission. All 30 strict Lean jobs
+passed; inspected source-origin, source constant correctness, normalization
+uniqueness, admission, permutation and general public proof closures use only
+`propext`, `Classical.choice` and `Quot.sound`.
+
+This is declaration-origin integration, not a claim of full constant source
+syntax. Constant path/import resolution, bare-pattern identifier versus constant
+selection, generic constant schemes, alias source ownership, references and
+custom Drop remain open. Constant bodies still enter as decoded Core expressions;
+all fourteen broad completion obligations remain open.
 

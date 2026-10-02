@@ -13,7 +13,7 @@ inductive SourcePattern where
   | wildcard
   | binder (name : BindingId) (type : Ty)
   | node (head : Head) (fields : List SourcePattern)
-  | constant (name : String)
+  | constant (identity : Nat)
 
 mutual
 /-- Compile-time inputs: source syntax and ordinary closed constant typing. -/
@@ -23,7 +23,7 @@ inductive SourcePattern.Checked (program : Program) (home : Module) : SourcePatt
   | node {head : Head} {fields : List SourcePattern}
       (checked : SourcePatternsChecked program home fields) :
       SourcePattern.Checked program home (.node head fields)
-  | constant {name : String} (type : Ty)
+  | constant {name : Nat} (type : Ty)
       (typed : HasType program home [] (.constant name) type []) :
       SourcePattern.Checked program home (.constant name)
 inductive SourcePatternsChecked (program : Program) (home : Module) : List SourcePattern → Type where
@@ -42,7 +42,7 @@ inductive NormalizesPattern (program : Program) (home : Module) : SourcePattern 
   | node {head : Head} {fields : List SourcePattern} {patterns : List Pattern}
       (fieldsNormalize : NormalizesPatterns program home fields patterns) :
       NormalizesPattern program home (.node head fields) (.node head patterns)
-  | constant {name : String} {type : Ty} {value : Value} {after : Environment}
+  | constant {name : Nat} {type : Ty} {value : Value} {after : Environment}
       (typed : HasType program home [] (.constant name) type [])
       (evaluated : Evaluates program AddressedEnvironment.empty (.constant name) value after) :
       NormalizesPattern program home (.constant name) (.literal (some type) value)
@@ -57,7 +57,7 @@ end
 
 variable {program : Program} {home : Module}
 
-private theorem constant_type_unique {name : String} {first second : Ty}
+private theorem constant_type_unique {name : Nat} {first second : Ty}
     (typed : HasType program home [] (.constant name) first [])
     (other : HasType program home [] (.constant name) second []) : second = first := by
   cases typed with

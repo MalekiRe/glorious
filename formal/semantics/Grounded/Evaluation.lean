@@ -89,7 +89,7 @@ theorem Evaluates.array {environment after : Environment} {elements : List Expr}
       Evaluates program environment (.array elements) (.array values) after :=
   .step .array ((Run.extend residents [.array]).trans (.step .arrayResult (.refl _)))
 
-theorem Evaluates.constant {environment localAfter after : Environment} {name : String} {declaration : ConstantDecl}
+theorem Evaluates.constant {environment localAfter after : Environment} {name : Nat} {declaration : ConstantDecl}
       {value : Value} (declared : program.constants name = some declaration)
       (initialized : Evaluates program (enterBindings environment.heap environment.supply []) declaration.body value localAfter)
       (restored : localAfter.restore environment.scope = some after) :

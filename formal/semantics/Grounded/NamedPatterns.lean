@@ -9,7 +9,7 @@ inductive NamedPattern where
   | wildcard
   | binder (name : Identifier)
   | node (head : Head) (fields : List NamedPattern)
-  | constant (name : String)
+  | constant (identity : Nat)
 
 mutual
 def NamedPattern.binders : NamedPattern → List Identifier

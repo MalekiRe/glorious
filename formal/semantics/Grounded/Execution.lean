@@ -180,7 +180,7 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       Step program ⟨env, .expression (.array elements), stack⟩ ⟨env, .arguments elements, .array :: stack⟩
   | arrayResult {env : Environment} {stack : List Frame} {values : List Value} :
       Step program ⟨env, .results values, .array :: stack⟩ ⟨env, .result (.array values), stack⟩
-  | constant {env : Environment} {stack : List Frame} {name : String} {declaration : ConstantDecl}
+  | constant {env : Environment} {stack : List Frame} {name : Nat} {declaration : ConstantDecl}
       (declared : program.constants name = some declaration) :
       Step program ⟨env, .expression (.constant name), stack⟩
         ⟨enterBindings env.heap env.supply [], .expression declaration.body, .restore env.scope :: stack⟩

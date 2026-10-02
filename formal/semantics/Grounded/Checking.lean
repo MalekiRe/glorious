@@ -18,7 +18,7 @@ inductive Structural : Expr → Prop where
   | array {elements : List Expr} (residents : ∀ expression ∈ elements, Structural expression) :
       Structural (.array elements)
   | project {home : Module} {body : Expr} (closed : Structural body) (key : FieldKey) : Structural (.project home body key)
-  | constant (name : String) : Structural (.constant name)
+  | constant (name : Nat) : Structural (.constant name)
   | construct {fields : List Expr} (identity : Nat) (tag : Option Nat)
       (residents : ∀ expression ∈ fields, Structural expression) :
       Structural (.construct identity tag fields)

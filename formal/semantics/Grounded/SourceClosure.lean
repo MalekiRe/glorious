@@ -26,21 +26,37 @@ def DataSyntax.ValidAt (source : DataSyntax) (home : Module) : Prop :=
       field.visibility.ValidAt home
 
 
+/-- Decoded closed constant body. Expression/type name elaboration precedes
+this boundary; source inclusion alone assigns the declaring module. -/
+structure ConstantSyntax where
+  name : Identifier
+  visibility : Visibility
+  type : TypeExpr
+  body : Expr
+
+def ConstantSyntax.elaborate (source : ConstantSyntax) (home : Module) : ConstantDecl :=
+  ⟨home, source.visibility, source.type, source.body⟩
+
+
 inductive ModuleSource where
   | body (functions : List FunctionSyntax) (imports : List FunctionImportSyntax)
       (children : List (Identifier × Visibility × Option ModuleSource)) (data : List DataSyntax)
+      (constants : List ConstantSyntax)
 
 def ModuleSource.functions : ModuleSource → List FunctionSyntax
-  | .body functions _ _ _ => functions
+  | .body functions _ _ _ _ => functions
 
 def ModuleSource.imports : ModuleSource → List FunctionImportSyntax
-  | .body _ imports _ _ => imports
+  | .body _ imports _ _ _ => imports
 
 def ModuleSource.children : ModuleSource → List (Identifier × Visibility × Option ModuleSource)
-  | .body _ _ children _ => children
+  | .body _ _ children _ _ => children
 
 def ModuleSource.data : ModuleSource → List DataSyntax
-  | .body _ _ _ data => data
+  | .body _ _ _ data _ => data
+
+def ModuleSource.constants : ModuleSource → List ConstantSyntax
+  | .body _ _ _ _ constants => constants
 
 abbrev SourceFiles := List (SourcePath × ModuleSource)
 
@@ -96,11 +112,11 @@ def childFile (directory : SourcePath) (name : Identifier) : SourcePath :=
 mutual
 inductive ModuleSource.Loads (files : SourceFiles) :
     Module → SourcePath → SourcePath → ModuleSource → List LoadedModule → Prop where
-  | body {home origin directory functions imports children data descendants}
+  | body {home origin directory functions imports children data constants descendants}
       (distinct : (children.map Prod.fst).Nodup)
       (included : ModuleChildrenLoad files home origin directory children descendants) :
-      ModuleSource.Loads files home origin directory (.body functions imports children data)
-        (⟨home, origin, directory, .body functions imports children data⟩ :: descendants)
+      ModuleSource.Loads files home origin directory (.body functions imports children data constants)
+        (⟨home, origin, directory, .body functions imports children data constants⟩ :: descendants)
 
 inductive ModuleChildrenLoad (files : SourceFiles) : Module → SourcePath → SourcePath →
     List (Identifier × Visibility × Option ModuleSource) → List LoadedModule → Prop where
@@ -560,6 +576,21 @@ def SourceClosure.NominalsAdmitted {packages : List PackageSource} (closure : So
     ∀ loaded ∈ closure.modules, ∀ source ∈ loaded.source.data, source.ValidAt loaded.home
 
 
+/-- Constant identities share source inclusion order, never global spelling. -/
+def SourceClosure.constants {packages : List PackageSource} (closure : SourceClosure packages) :
+    List (Identifier × ConstantDecl) :=
+  closure.modules.flatMap fun loaded => loaded.source.constants.map fun source =>
+    (source.name, source.elaborate loaded.home)
+
+def SourceClosure.ConstantsAdmitted {packages : List PackageSource} (closure : SourceClosure packages)
+    (program : Program) : Prop :=
+  program.constants = (fun identity => (closure.constants[identity]?).map Prod.snd) ∧
+    ((closure.functions.map fun declaration => (declaration.home, declaration.name)) ++
+      (closure.constants.map fun entry => (entry.2.home, entry.1))).Nodup ∧
+    ∀ loaded ∈ closure.modules, ∀ source ∈ loaded.source.constants,
+      source.visibility.ValidAt loaded.home
+
+
 /-- Static module inclusion feeds the same elaboration and machine contract.
 There is no independently supplied module list or declaration-owner table. -/
 def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClosure packages)
@@ -570,7 +601,8 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
     ModuleReachable closure.modules entry.home entry.target) ∧
   FunctionImportsValid closure.homes closure.functions closure.imports ∧
   NamedProgramAdmitted closure.functionNames closure.functions program ∧
-  (∀ loaded ∈ closure.modules, loaded.Valid) ∧ closure.NominalsAdmitted program
+  (∀ loaded ∈ closure.modules, loaded.Valid) ∧ closure.NominalsAdmitted program ∧
+    closure.ConstantsAdmitted program
 
 theorem SourceClosure.Admitted.modules_valid {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program) :
@@ -596,12 +628,13 @@ theorem SourceClosure.disposition_cases {packages : List PackageSource}
     (data : program.data.Valid program.target)
     (aliases : program.aliases.Valid program.target program.data)
     (constants : program.ConstantsChecked)
-    (nominals : closure.NominalsAdmitted program) :
+    (nominals : closure.NominalsAdmitted program)
+    (constantSources : closure.ConstantsAdmitted program) :
     (closure.Admitted program ∧ program.Checked) ∨
       NamedCleanupRejected program closure.functionNames closure.functions outputs := by
   rcases NamedProgramAdmitted.disposition_cases distinct bodies functions data aliases constants with
     ⟨admitted, checked⟩ | rejected
-  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules, nominals⟩, checked⟩
+  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules, nominals, constantSources⟩, checked⟩
   · exact .inr rejected
 
 
@@ -627,7 +660,7 @@ theorem SourceClosure.Admitted.nominal_selected {packages : List PackageSource}
     {identity : Nat} {declaration : DataDecl} :
     program.data identity = some declaration ↔
       ∃ name, closure.nominals[identity]? = some (name, declaration) := by
-  rw [admitted.2.2.2.2.2.2.1]
+  rw [admitted.2.2.2.2.2.2.1.1]
   simp only [Option.map_eq_some_iff]
   constructor
   · rintro ⟨⟨name, emitted⟩, selected, rfl⟩
@@ -666,7 +699,7 @@ theorem SourceClosure.Admitted.nominal_visibility {packages : List PackageSource
       ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
         field.visibility.ValidAt declaration.home := by
   obtain ⟨loaded, included, source, authored, rfl⟩ := admitted.nominal_origin declared
-  exact admitted.2.2.2.2.2.2.2.2 loaded included source authored
+  exact admitted.2.2.2.2.2.2.1.2.2 loaded included source authored
 
 
 /-- Source admission preserves the meaning of every explicit principal class. -/
@@ -765,26 +798,68 @@ theorem SourceClosure.Admitted.no_unresolved_alias {packages : List PackageSourc
   cases found
 
 
+/-- Constant execution and pattern normalization select the same emitted ID. -/
+theorem SourceClosure.Admitted.constant_selected {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : ConstantDecl} :
+    program.constants identity = some declaration ↔
+      ∃ name, closure.constants[identity]? = some (name, declaration) := by
+  rw [admitted.2.2.2.2.2.2.2.1]
+  simp only [Option.map_eq_some_iff]
+  constructor
+  · rintro ⟨⟨name, emitted⟩, selected, rfl⟩
+    exact ⟨name, selected⟩
+  · rintro ⟨name, selected⟩
+    exact ⟨(name, declaration), selected, rfl⟩
+
+theorem SourceClosure.Admitted.constant_origin {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : ConstantDecl} (declared : program.constants identity = some declaration) :
+    ∃ loaded ∈ closure.modules, ∃ source ∈ loaded.source.constants,
+      declaration = source.elaborate loaded.home ∧ source.visibility.ValidAt loaded.home := by
+  obtain ⟨name, selected⟩ := admitted.constant_selected.mp declared
+  obtain ⟨loaded, included, member⟩ := List.mem_flatMap.mp (List.mem_of_getElem? selected)
+  obtain ⟨source, authored, same⟩ := List.mem_map.mp member
+  exact ⟨loaded, included, source, authored, (congrArg Prod.snd same).symm,
+    admitted.2.2.2.2.2.2.2.2.2 loaded included source authored⟩
+
+/-- Unused source constants cannot disappear from the checked runtime table. -/
+theorem SourceClosure.Admitted.constant_emitted {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : ConstantSyntax} (authored : source ∈ loaded.source.constants) :
+    ∃ identity, program.constants identity = some (source.elaborate loaded.home) := by
+  have member : (source.name, source.elaborate loaded.home) ∈ closure.constants :=
+    List.mem_flatMap.mpr ⟨loaded, included, List.mem_map.mpr ⟨source, authored, rfl⟩⟩
+  obtain ⟨identity, selected⟩ := List.mem_iff_getElem?.mp member
+  exact ⟨identity, admitted.constant_selected.mpr ⟨source.name, selected⟩⟩
+
+
 /-- Every admitted decoded constant materializes a unique typed value through
 actual evaluation, preserving the caller's heap and lexical scope. Termination
 is derived from structural checking, including unused declarations. -/
 theorem SourceClosure.Admitted.constant_correctness {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
-    {name : String} {declaration : ConstantDecl} {home : Module}
-    (declared : program.constants name = some declaration)
-    (visible : declaration.visibility.Allows declaration.home home) :
-    ∃ type value, ResolvesType program.aliases declaration.type type ∧ ValueHasType program value type ∧
-      ∀ environment : Environment, ∃ after,
-        Evaluates program environment (.constant name) value after ∧
-        after.scope = environment.scope ∧ after.heap = environment.heap ∧
-        ∀ other otherAfter, Evaluates program environment (.constant name) other otherAfter →
-          other = value ∧ otherAfter = after := by
-  have checked := admitted.checked.constants name declaration declared
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : ConstantSyntax} (authored : source ∈ loaded.source.constants) {home : Module}
+    (visible : source.visibility.Allows loaded.home home) :
+    ∃ name, program.constants name = some (source.elaborate loaded.home) ∧
+      ∃ type value, ResolvesType program.aliases source.type type ∧ ValueHasType program value type ∧
+        NormalizesPattern program home (.constant name) (.literal (some type) value) ∧
+        ∀ environment : Environment, ∃ after,
+          Evaluates program environment (.constant name) value after ∧
+          after.scope = environment.scope ∧ after.heap = environment.heap ∧
+          ∀ other otherAfter, Evaluates program environment (.constant name) other otherAfter →
+            other = value ∧ otherAfter = after := by
+  obtain ⟨name, declared⟩ := admitted.constant_emitted included authored
+  refine ⟨name, declared, ?_⟩
+  have checked := admitted.checked.constants name (source.elaborate loaded.home) declared
   obtain ⟨type, resolved, initialized⟩ := checked.body
   have access : HasType program home [] (.constant name) type [] :=
     .constant declared visible resolved checked.structural initialized
   obtain ⟨value, resident, runs⟩ := access.structural_value (.constant name)
-  refine ⟨type, value, resolved, resident, ?_⟩
+  obtain ⟨normalAfter, normalized, _, _⟩ := runs AddressedEnvironment.empty
+  refine ⟨type, value, resolved, resident, .constant access normalized, ?_⟩
   intro environment
   obtain ⟨after, run, scope, heap⟩ := runs environment
   exact ⟨after, run, scope, heap, fun _ _ other => run.unique other⟩
@@ -1186,7 +1261,7 @@ theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (clos
     simp only [SourceClosure.functionNames, namespaces, bindings]
   simp only [SourceClosure.Admitted, names]
   simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions, SourceClosure.imports, SourceClosure.importEntries,
-    SourceClosure.NominalsAdmitted, SourceClosure.nominals,
+    SourceClosure.NominalsAdmitted, SourceClosure.nominals, SourceClosure.ConstantsAdmitted, SourceClosure.constants,
     PackageSource.DependenciesValid, PackageAccess.reorder, List.map_map, Function.comp_def]
 
 
@@ -1741,13 +1816,13 @@ theorem ModuleSource.Loads.self_reachable {whole : List LoadedModule}
       (∀ node ∈ modules, node ∈ whole) →
       (∀ child ∈ children, ModuleReachable whole (home.child child.1) (home.child child.1)) →
       ∀ node ∈ modules, ModuleReachable whole node.home node.home) with
-  | @body home origin directory functions imports children data descendants _ _ ih =>
+  | @body home origin directory functions imports children data constants descendants _ _ ih =>
     intro subset reachable node member
     rcases List.mem_cons.mp member with same | member
     · subst node; exact reachable
     · apply ih (fun other found => subset other (.tail _ found)) ?_ node member
       intro child declared
-      have parentIncluded : (⟨home, origin, directory, .body functions imports children data⟩ : LoadedModule) ∈ whole :=
+      have parentIncluded : (⟨home, origin, directory, .body functions imports children data constants⟩ : LoadedModule) ∈ whole :=
         subset _ (.head _)
       have scope := (valid _ parentIncluded).2.2 child declared
       exact .child parentIncluded (reachable.descendant_caller rfl ⟨[child.1], rfl⟩) declared

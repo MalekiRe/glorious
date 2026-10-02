@@ -218,7 +218,7 @@ inductive Expr where
   | tuple (head : Expr) (tail : List Expr)
   | project (home : Module) (body : Expr) (key : FieldKey)
   | array (elements : List Expr)
-  | constant (name : String)
+  | constant (identity : Nat)
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
   | call (identity : Nat) (arguments : List Expr)
   | assign (home : Module) (place : Place) (value rest : Expr)
@@ -230,7 +230,7 @@ structure ConstantDecl where
   type : TypeExpr
   body : Expr
 
-abbrev Constants := String → Option ConstantDecl
+abbrev Constants := Nat → Option ConstantDecl
 
 /-- Direct, noncapturing, effect-free functions; omitted results denote unit. -/
 structure FunctionDecl where
