@@ -17,6 +17,9 @@ def Code.append {n : Nat} {α : Type} : Code n α → Code n α → Code n α
   | .branch guard yes no, tail => .branch guard (yes.append tail) (no.append tail)
   | .loop guard body next, tail => .loop guard body (next.append tail)
 
+/-- Precision policy: both branches establish the same exact Context and a
+loop preserves its invariant Context. These are checking restrictions, not
+requirements imposed by Code execution on arbitrary machine states. -/
 inductive Code.Checked {n : Nat} {α : Type} (rule : Context n → α → Context n → Prop) :
     Context n → Code n α → Context n → Prop where
   | halt {context} : Checked rule context .halt context

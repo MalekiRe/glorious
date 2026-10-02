@@ -39,10 +39,15 @@ structure State (n : Nat) where
   slots : Fin n → Option Value
   temp : Option Value
 
+/-- Exact-occupancy checking policy: absence, holes, and live shells remain
+distinct. This is a static abstraction of State, not another runtime state.
+It intentionally does not admit maybe-initialized joins. -/
 structure Context (n : Nat) where
   slots : Fin n → Option Shape
   temp : Option Shape
 
+/-- Realization boundary. The checker demands one exact structural shape;
+execution itself neither reads a Context nor relies on branch agreement. -/
 def State.Typed {n : Nat} (signature : Signature) (state : State n) (context : Context n) : Prop :=
   (∀ i, (state.slots i).map (Value.kind signature) = context.slots i) ∧
   state.temp.map (Value.kind signature) = context.temp

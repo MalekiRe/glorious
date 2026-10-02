@@ -1,8 +1,8 @@
-import OwnershipMir.Machine
+import OwnershipMir.Blocks
 
-/-! Atomic ownership commands lower to two MIR operations. Field paths use the
-same focus/rebuild contract as whole slots; the explicit transfer register
-accounts for ownership between the two physical steps. -/
+/-! Atomic commands refine to nonempty finite MIR blocks. Field paths use the
+same focus/rebuild contract as whole slots; transient registers belong to the
+actual machine state throughout block execution. -/
 namespace OwnershipMir
 
 inductive Command (n : Nat) where
@@ -56,17 +56,16 @@ inductive Command.Checked {n : Nat} : Context n → Command n → Context n → 
       (layout : source.layout = shape.layout id) (allowed : shape.disposable) (exhausted : shape.shallow) :
       Checked context (.dispose source) ⟨source.write context.slots origin none, none⟩
 
-def Command.first {n : Nat} : Command n → Op n
-  | .move mode source _ => .take source mode
-  | .copy source _ => .copy source
-  | .dispose source => .take source .whole
+def Command.block {n : Nat} : Command n → List (Op n)
+  | .move mode source target => [.take source mode, .put target]
+  | .copy source target => [.copy source, .put target]
+  | .dispose source => [.take source .whole, .drop]
 
-def Command.last {n : Nat} : Command n → Op n
-  | .move _ _ target | .copy _ target => .put target
-  | .dispose _ => .drop
+theorem Command.block_nonempty {n : Nat} (command : Command n) : command.block ≠ [] := by
+  cases command <;> simp [Command.block]
 
 def Command.emit {n : Nat} (command : Command n) (next : Code n (Op n)) : Code n (Op n) :=
-  .act command.first (.act command.last next)
+  Block.emit command.block next
 
 def lower {n : Nat} : Code n (Command n) → Code n (Op n)
   | .halt => .halt
@@ -103,36 +102,29 @@ theorem lower_checked {n : Nat} {before after : Context n} {source : Code n (Com
   | branch scalar left right leftIH rightIH => exact .branch scalar leftIH rightIH
   | loop scalar body tail bodyIH tailIH => exact .loop scalar bodyIH tailIH
 
-/-- Equality is proved between independently defined atomic and granular
-execution functions, rather than defining the source to run the compiler. -/
+/-- Source semantics equals execution of the emitted finite block. -/
 theorem Command.exec_eq {n : Nat} (command : Command n) (state : State n) :
-    command.exec state = (command.first.exec state).bind command.last.exec := by
+    command.exec state = Block.exec Op.exec command.block state := by
   cases command <;> cases unused : state.temp <;>
-    simp [Command.exec, Command.first, Command.last, Op.exec, unused, Extract.apply, Option.bind_assoc]
+    simp [Command.exec, Command.block, Block.exec, Op.exec, unused, Extract.apply, Option.bind_assoc]
 
-theorem Command.exec_lower {n : Nat} {command : Command n} {before after : State n}
-    (executed : command.exec before = some after) :
-    ∃ middle, command.first.exec before = some middle ∧ command.last.exec middle = some after := by
-  simpa only [Command.exec_eq, Option.bind_eq_some_iff] using executed
-
-/-- Nonempty simulation: even a source loop step performs an actual MIR step.
-Primitive lowering has one additional step, never an unbounded silent phase. -/
+/-- Positive finite simulation; no two-step shape appears in this interface. -/
 theorem lower_step {n : Nat} {before after : Configuration n (Command n)}
     (step : Step Command.exec before after) :
     ∃ middle, Step Op.exec ⟨lower before.code, before.state⟩ middle ∧
-      (middle = ⟨lower after.code, after.state⟩ ∨
-        Step Op.exec middle ⟨lower after.code, after.state⟩) := by
+      Run Op.exec middle ⟨lower after.code, after.state⟩ := by
   cases step with
-  | act executed =>
-    obtain ⟨middle, first, last⟩ := Command.exec_lower executed
-    exact ⟨_, .act first, Or.inr (.act last)⟩
+  | @act command next state after executed =>
+    exact Block.exec_positive command.block command.block_nonempty
+      (by rwa [Command.exec_eq] at executed) (lower next)
   | @branch guard yes no state choice observed =>
-    cases choice <;> exact ⟨_, .branch observed, Or.inl rfl⟩
+    cases choice <;> exact ⟨_, .branch observed, .refl _⟩
   | @loop guard body next state choice observed =>
     cases choice
-    · exact ⟨_, .loop observed, Or.inl rfl⟩
-    · refine ⟨_, .loop observed, Or.inl ?_⟩
-      simp [lower_append, lower]
+    · exact ⟨_, .loop observed, .refl _⟩
+    · refine ⟨_, .loop observed, ?_⟩
+      simpa [lower_append, lower] using (Run.refl (exec := Op.exec)
+        (Configuration.mk (lower (body.append (.loop guard body next))) state))
 
 theorem lower_run {n : Nat} {before after : Configuration n (Command n)}
     (run : Run Command.exec before after) :
@@ -140,10 +132,8 @@ theorem lower_run {n : Nat} {before after : Configuration n (Command n)}
   induction run with
   | refl => exact .refl _
   | step head tail ih =>
-    obtain ⟨middle, first, last⟩ := lower_step head
-    rcases last with same | last
-    · subst middle; exact .step first ih
-    · exact .step first (.step last ih)
+    obtain ⟨middle, first, rest⟩ := lower_step head
+    exact .step first (rest.trans ih)
 
 /-- Public vertical-slice theorem: syntactic command checking supplies MIR
 admission; arbitrary physical prefixes, including half-completed transfers,

@@ -46,15 +46,9 @@ theorem Op.Checked.shell_balance {n : Nat} {signature : Signature} {before after
     {op : Op n} (checked : Op.Checked before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.shells + op.shellDebit state = state.shells := by
-  cases checked with
-  | @take p mode input output lens empty found selected layout extract =>
-    have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
-    obtain ⟨result, extracted, _, _⟩ := extract.realized classified
-    have actualExec : (Op.take p mode).exec state = some ⟨p.write state.slots actual none, some result⟩ := by
-      simp [Op.exec, actualFound, live, extracted, unused]
-    cases Option.some.inj (executed.symm.trans actualExec)
+  obtain ⟨effect, _, allowed⟩ := checked.effect typed executed
+  cases effect with
+  | @take _ p mode actual value result actualFound live extracted unused =>
     have frame := p.shells_write state actual actualFound none (some result)
     have discharge := Extract.shell_balance extracted
     simp only [live, unused, shellWeight, cellMass] at frame
@@ -63,34 +57,18 @@ theorem Op.Checked.shell_balance {n : Nat} {signature : Signature} {before after
     change _ + mode.debit value = _
     unfold shellMass at discharge
     omega
-  | @put p shape lens resident found fits =>
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨available, _⟩ := fits.realized actualTyped
-    obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
-    have actualExec : (Op.put p).exec state = some ⟨p.write state.slots actual (some value), none⟩ := by
-      simp [Op.exec, actualFound, live, available]
-    cases Option.some.inj (executed.symm.trans actualExec)
+  | @put _ p actual value actualFound live available =>
     have frame := p.shells_write state actual actualFound (some value) none
     rw [vacant_shell_zero available, live] at frame
     simp only [shellWeight, cellMass] at frame
     simp only [Op.shellDebit, Nat.add_zero]
     omega
-  | @copy p shape lens empty found selected allowed =>
-    have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
-    have actualExec : (Op.copy p).exec state = some {state with temp := some value} := by
-      simp [Op.exec, actualFound, live, unused]
-    cases Option.some.inj (executed.symm.trans actualExec)
-    have zero : shellWeight (some value) = 0 :=
-      Value.disposable_shell_zero (Tree.copyable_disposable (classified.symm ▸ allowed))
+  | @copy _ p actual value actualFound live unused =>
+    have zero : shellWeight (some value) = 0 := Value.disposable_shell_zero (Tree.copyable_disposable allowed)
     simp only [Op.shellDebit, State.shells, zero, unused]
     rfl
-  | @drop shape resident allowed exhausted =>
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
-    have actualExec : Op.drop.exec state = some {state with temp := none} := by simp [Op.exec, live]
-    cases Option.some.inj (executed.symm.trans actualExec)
-    have zero : shellWeight (some value) = 0 := Value.disposable_shell_zero (classified.symm ▸ allowed)
+  | @drop _ value live =>
+    have zero : shellWeight (some value) = 0 := Value.disposable_shell_zero allowed
     simp only [Op.shellDebit, State.shells, live, zero]
     rfl
 
@@ -135,11 +113,6 @@ private theorem copyable_linear_zero {signature : Signature} {value : Value}
     (allowed : (value.kind signature).copyable) : value.mass (fun _ => 0) noncopyShell = 0 := by
   induction value <;> simp_all [Value.kind, Tree.map, Tree.copyable, Tree.mass, noncopyShell]
 
-private theorem vacant_mass_zero {cell : Cell Atom} (leaf : Atom → Nat) (shell : Shell → Nat)
-    (empty : vacant cell = true) : cellMass leaf shell cell = 0 := by
-  cases cell with
-  | none => rfl
-  | some tree => cases tree <;> simp [vacant] at empty <;> rfl
 
 private theorem extract_mass_le {mode : Extract} {value result : Value}
     (executed : mode.apply value = some result) (leaf : Atom → Nat) (shell : Shell → Nat) :
@@ -158,47 +131,25 @@ theorem Op.Checked.linear_shells {n : Nat} {signature : Signature} {before after
     {op : Op n} (checked : Op.Checked before op after) {state next : State n}
     (typed : state.Typed signature before) (executed : op.exec state = some next) :
     next.linearShells ≤ state.linearShells := by
-  cases checked with
-  | @take p mode input output lens empty found selected layout extract =>
-    have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
-    obtain ⟨result, extracted, _, _⟩ := extract.realized classified
-    have actualExec : (Op.take p mode).exec state = some ⟨p.write state.slots actual none, some result⟩ := by
-      simp [Op.exec, actualFound, live, extracted, unused]
-    cases Option.some.inj (executed.symm.trans actualExec)
+  obtain ⟨effect, _, allowed⟩ := checked.effect typed executed
+  cases effect with
+  | @take _ p mode actual value result actualFound live extracted unused =>
     have frame := p.mass_write state actual actualFound none (some result) (fun _ => 0) noncopyShell
     have consumed := extract_mass_le extracted (fun _ => 0) noncopyShell
     simp only [live, unused, cellMass] at frame
     unfold State.linearShells
     omega
-  | @put p shape lens resident found fits =>
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨available, _⟩ := fits.realized actualTyped
-    obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
-    have actualExec : (Op.put p).exec state = some ⟨p.write state.slots actual (some value), none⟩ := by
-      simp [Op.exec, actualFound, live, available]
-    cases Option.some.inj (executed.symm.trans actualExec)
+  | @put _ p actual value actualFound live available =>
     have frame := p.mass_write state actual actualFound (some value) none (fun _ => 0) noncopyShell
     rw [vacant_mass_zero _ _ available, live] at frame
     simp only [cellMass] at frame
     unfold State.linearShells
     omega
-  | @copy p shape lens empty found selected allowed =>
-    have unused : state.temp = none := by simpa [empty] using typed.2
-    obtain ⟨actual, actualFound, actualTyped, _⟩ := p.realized typed lens found
-    obtain ⟨value, live, classified⟩ := Option.map_eq_some_iff.mp (actualTyped.trans selected)
-    have actualExec : (Op.copy p).exec state = some {state with temp := some value} := by
-      simp [Op.exec, actualFound, live, unused]
-    cases Option.some.inj (executed.symm.trans actualExec)
-    have zero := copyable_linear_zero (classified.symm ▸ allowed)
+  | @copy _ p actual value actualFound live unused =>
+    have zero := copyable_linear_zero allowed
     simp only [State.linearShells, State.mass, cellMass, unused, zero]
     exact Nat.le_refl _
-  | @drop shape resident allowed exhausted =>
-    obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans resident)
-    have actualExec : Op.drop.exec state = some {state with temp := none} := by simp [Op.exec, live]
-    cases Option.some.inj (executed.symm.trans actualExec)
-    simp [State.linearShells, State.mass, cellMass]
+  | drop live => simp [State.linearShells, State.mass, cellMass]
 
 theorem Safe.linear_shells_step {n : Nat} {signature : Signature} {final : Context n}
     {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)

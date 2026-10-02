@@ -99,15 +99,14 @@ inductive Extract.Checked : Extract → Shape → Shape → Prop where
 
 theorem Extract.Checked.realized {signature : Signature} {mode : Extract} {before after : Shape}
     (checked : mode.Checked before after) {value : Value} (typed : value.kind signature = before) :
-    ∃ result : Value, mode.apply value = some result ∧ result.kind signature = after ∧
-      ∀ identity, resourceMass identity result = resourceMass identity value := by
+    ∃ result : Value, mode.apply value = some result ∧ result.kind signature = after := by
   cases checked with
-  | whole shape => exact ⟨value, rfl, typed, fun _ => rfl⟩
+  | whole shape => exact ⟨value, rfl, typed⟩
   | @deconstruct shell body authorized =>
     cases value <;> simp only [Value.kind, Tree.map, Tree.wrap.injEq] at typed
     all_goals try { contradiction }
     obtain ⟨rfl, bodyTyped⟩ := typed
-    exact ⟨_, rfl, bodyTyped, fun _ => by simp [resourceMass, Tree.mass]⟩
+    exact ⟨_, rfl, bodyTyped⟩
 
 /-- A drop step releases only a scalar or a structurally exhausted container.
 Children must have been handled by earlier instructions. -/

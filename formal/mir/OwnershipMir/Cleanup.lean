@@ -16,23 +16,6 @@ namespace OwnershipMir
   · subst j; simp [update]
   · simp [update, same]
 
-/-- Finite instruction sequences compose with the existing structured code. -/
-def sequence {n : Nat} {α : Type} : List α → Code n α
-  | [] => .halt
-  | op :: rest => .act op (sequence rest)
-
-@[simp] theorem sequence_append {n : Nat} {α : Type} (first last : List α) :
-    sequence (n := n) (first ++ last) = (sequence first).append (sequence last) := by
-  induction first <;> simp_all [sequence, Code.append]
-
-theorem sequence_checked_append {n : Nat} {α : Type} {rule : Context n → α → Context n → Prop}
-    {before middle after : Context n} {first last : List α}
-    (head : Code.Checked rule before (sequence first) middle)
-    (tail : Code.Checked rule middle (sequence last) after) :
-    Code.Checked rule before (sequence (first ++ last)) after := by
-  rw [sequence_append]
-  exact head.append tail
-
 def disposeAt {n : Nat} (root : Fin n) (path : List Direction) (layout : Layout) : Command n :=
   .dispose ⟨root, path, layout⟩
 
@@ -159,13 +142,7 @@ theorem sequence_run {n : Nat} {signature : Signature} (commands : List (Command
     {state : State n} (typed : state.Typed signature before) :
     ∃ result, Run Command.exec ⟨sequence commands, state⟩ ⟨.halt, result⟩ ∧
       result.Typed signature after ∧ Conserves signature state result := by
-  induction commands generalizing before state with
-  | nil => cases checked; exact ⟨state, .refl _, typed, Conserves.refl _ _⟩
-  | cons command commands ih =>
-    cases checked with
-    | act head tail =>
-      obtain ⟨middle, executed, realized, conserved⟩ := head.sound typed
-      obtain ⟨result, run, final, remaining⟩ := ih tail realized
-      exact ⟨result, .step (.act executed) run, final, conserved.trans remaining⟩
+  obtain ⟨result, executed, final, conserved⟩ := Block.checked_exec Command.Checked.sound commands checked typed
+  exact ⟨result, Block.exec_run commands executed .halt, final, conserved⟩
 
 end OwnershipMir

@@ -8,16 +8,10 @@ theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : 
     {command : Command n} (checked : Command.Checked before command after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ next, command.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
-  have program := checked.lower (Code.Checked.halt (rule := Op.Checked))
-  cases program with
-  | act head tail =>
-    cases tail with
-    | act last terminal =>
-      obtain ⟨middle, firstRun, middleTyped, firstConserved⟩ := head.sound typed
-      obtain ⟨next, lastRun, nextTyped, lastConserved⟩ := last.sound middleTyped
-      cases terminal
-      exact ⟨next, by rw [Command.exec_eq, firstRun]; exact lastRun,
-        nextTyped, firstConserved.trans lastConserved⟩
+  have checkedBlock : Code.Checked Op.Checked before (sequence command.block) after := checked.lower .halt
+  obtain ⟨result, executed, realized, conserved⟩ :=
+    Block.checked_exec Op.Checked.sound command.block checkedBlock typed
+  exact ⟨result, by rwa [Command.exec_eq], realized, conserved⟩
 
 theorem Step.deterministic {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     {before first second : Configuration n α} (left : Step exec before first)
@@ -28,32 +22,37 @@ theorem Step.not_halt {n : Nat} {α : Type} {exec : α → State n → Option (S
     {before after : Configuration n α} (step : Step exec before after) : before.code ≠ .halt := by
   cases step <;> simp
 
+theorem Run.from_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
+    {before after : Configuration n α} (run : Run exec before after) (halted : before.code = .halt) : after = before := by
+  cases run with
+  | refl => rfl
+  | step head tail => exact False.elim (head.not_halt halted)
+
 @[simp] theorem lower_halt {n : Nat} (source : Code n (Command n)) :
     lower source = .halt ↔ source = .halt := by
-  cases source <;> simp [lower, Command.emit]
+  cases source <;> simp [lower, Command.emit, Command.block_nonempty]
 
-/-- A target prefix is either at a source boundary or one physical step before
-it. The latter accounts for the live transfer register, not an assumed atomic
-implementation. It cannot match a halted or infinitely stuttering target. -/
+/-- A pending target prefix has a finite residual execution to its source
+boundary. No fixed instruction count or intermediate-state shape is assumed. -/
 def Matches {n : Nat} (source : Configuration n (Command n)) (target : Configuration n (Op n)) : Prop :=
-  target = ⟨lower source.code, source.state⟩ ∨
-    Step Op.exec target ⟨lower source.code, source.state⟩
+  Run Op.exec target ⟨lower source.code, source.state⟩
 
 theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
     (matched : Matches source before) (safe : Safe signature Command.Checked final source)
     (step : Step Op.exec before after) :
     ∃ next, Run Command.exec source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
-  rcases matched with boundary | pending
-  · subst before
+  cases matched with
+  | refl =>
     rcases safe.progress Command.Checked.sound with halted | ⟨next, sourceStep⟩
     · exact False.elim (step.not_halt (by simp [halted, lower]))
-    · obtain ⟨middle, first, last⟩ := lower_step sourceStep
+    · obtain ⟨middle, first, rest⟩ := lower_step sourceStep
       have same := first.deterministic step
       subst middle
-      exact ⟨next, .step sourceStep (.refl _), (safe.step Command.Checked.sound sourceStep).1, last⟩
-  · have same := pending.deterministic step
-    exact ⟨source, .refl _, safe, Or.inl same.symm⟩
+      exact ⟨next, .step sourceStep (.refl _), (safe.step Command.Checked.sound sourceStep).1, rest⟩
+  | step pending rest =>
+    cases pending.deterministic step
+    exact ⟨source, .refl _, safe, rest⟩
 
 theorem Matches.run {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
@@ -77,13 +76,12 @@ theorem compiled_return_iff {n : Nat} {signature : Signature} {before final : Co
   constructor
   · intro run
     obtain ⟨next, sourceRun, _, relation⟩ :=
-      Matches.run (source := ⟨source, initial⟩) (Or.inl rfl) ⟨before, typed, checked⟩ run
-    rcases relation with boundary | pending
-    · have code : next.code = .halt := (lower_halt _).mp (congrArg Configuration.code boundary).symm
-      have state : next.state = result := (congrArg Configuration.state boundary).symm
-      have same : next = ⟨.halt, result⟩ := by cases next; simp_all
-      exact same ▸ sourceRun
-    · exact False.elim (pending.not_halt rfl)
+      Matches.run (source := ⟨source, initial⟩) (.refl _) ⟨before, typed, checked⟩ run
+    have boundary := Run.from_halt relation rfl
+    have code : next.code = .halt := (lower_halt _).mp (congrArg Configuration.code boundary)
+    have state : next.state = result := congrArg Configuration.state boundary
+    have same : next = ⟨.halt, result⟩ := by cases next; simp_all
+    exact same ▸ sourceRun
   · exact lower_run
 
 /-- A checked program either returns or has an actual infinite step trace.

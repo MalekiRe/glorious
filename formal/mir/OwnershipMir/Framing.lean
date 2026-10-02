@@ -11,34 +11,11 @@ def Op.Fixes {n : Nat} (slot : Fin n) : Op n → Prop
 theorem Op.exec_frame {n : Nat} {op : Op n} {before after : State n} (slot : Fin n)
     (fixes : op.Fixes slot) (executed : op.exec before = some after) :
     after.slots slot = before.slots slot := by
-  cases op with
-  | take p mode =>
-    cases found : p.find before.slots <;> simp [Op.exec, found] at executed
-    rename_i lens
-    cases live : lens.selected <;> simp [live] at executed
-    rename_i value
-    cases extracted : mode.apply value <;> simp [extracted] at executed
-    cases empty : before.temp <;> simp [empty] at executed
-    cases executed
-    exact update_other _ _ _ _ fixes
-  | put p =>
-    cases found : p.find before.slots <;> simp [Op.exec, found] at executed
-    rename_i lens
-    cases live : before.temp <;> simp [live] at executed
-    by_cases available : vacant lens.selected = true <;> simp [available] at executed
-    cases executed
-    exact update_other _ _ _ _ fixes
-  | copy p =>
-    cases found : p.find before.slots <;> simp [Op.exec, found] at executed
-    rename_i lens
-    cases live : lens.selected <;> simp [live] at executed
-    cases empty : before.temp <;> simp [empty] at executed
-    cases executed
-    rfl
-  | drop =>
-    cases live : before.temp <;> simp [Op.exec, live] at executed
-    cases executed
-    rfl
+  cases Op.effect_of_exec executed with
+  | take found live extracted empty => exact update_other _ _ _ _ fixes
+  | put found live available => exact update_other _ _ _ _ fixes
+  | copy found live empty => rfl
+  | drop live => rfl
 
 def Code.Fixes {n : Nat} (slot : Fin n) : Code n (Op n) → Prop
   | .halt => True
