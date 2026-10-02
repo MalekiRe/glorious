@@ -663,10 +663,12 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
         BindingMap.nextRelease current.bindings current.bindings = some (index, entry.2) ∧
         current.retireBinding index = some next ∧
         next.bindings.releaseOrder = current.bindings.releaseOrder.tail ∧
+        next.restore caller = current.restore caller ∧
         ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩) ∧
       (∀ front back middle, current.bindings.releaseOrder = front ++ back →
         current.heap.retireMany front = some middle →
         let pending : Environment := { current with heap := middle, bindings := current.bindings.filter fun entry => decide (entry.2 ∉ front) }
+        pending.bindings.releaseOrder = back ∧ pending.restore caller = some after ∧
         ConfigurationTyped program final (.one type) ⟨pending, .result value, .restore caller :: stack⟩ ∧
         AddressedEnvironment.ConsumptionFrame program final.slots
           environment
@@ -675,6 +677,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
           BindingMap.nextRelease pending.bindings pending.bindings = some (index, entry.2) ∧
           pending.retireBinding index = some next ∧
           next.bindings.releaseOrder = pending.bindings.releaseOrder.tail ∧
+          next.restore caller = pending.restore caller ∧
           ConfigurationTyped program final (.one type) ⟨next, .result value, .restore caller :: stack⟩)) ∧
       ∀ front identity back, current.bindings.releaseOrder = front ++ identity :: back →
         ∃ middle next, current.heap.retireMany front = some middle ∧
@@ -714,7 +717,9 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
               rw [split]
               exact List.mem_append_left _ member
             have retained := original.restore_prefix owned executed
-            exact ⟨retained, ((checked.soundness checkedProgram store issued run).2.2.1).trans
+            exact ⟨BindingMap.releaseOrder_remove_prefix currentStore.addresses_distinct split,
+              (AddressedEnvironment.restore.retirement_prefix currentStore.addresses_distinct split executed caller).trans restored,
+              retained, ((checked.soundness checkedProgram store issued run).2.2.1).trans
               (original.restore_prefix_consumption owned executed), retained.restore_next⟩
 
 /-- Actual caller restoration preserves live nondiscardable descendants,

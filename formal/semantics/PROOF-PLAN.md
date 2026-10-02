@@ -4008,3 +4008,14 @@ this equality for the actual produced binding map. This connects successive
 indexed retirements to the existing batch order without a second scheduler
 or a post-state ordering assumption. All 30 strict build jobs and inspected
 axiom closures passed. Operational interleaving remains open.
+
+The indexed and prefix operations now factor the authoritative batch return
+operation exactly. Continuing restoration after one canonical retirement, or
+after any executed canonical prefix, produces the same environment as the
+original restoration, including its heap, caller bindings and supply. The
+source return theorem derives the exact remaining queue and the same previously
+constructed final environment at every prefix. It does not assume a new final
+result or an intermediate realization. All 30 strict build jobs passed, with
+only standard Lean axioms in the inspected producer and source closures. This
+closes batch/staged storage-result correspondence for return; the machine still
+needs to interleave resident destruction and retirement.

@@ -656,6 +656,26 @@ theorem BindingMap.releaseOrder_eraseIdx {bindings : BindingMap} {index : Nat} {
   intro identity member
   exact decide_eq_true_eq.mpr (fun same => fresh (same ▸ member))
 
+/-- Removing an executed prefix leaves precisely its original ordered suffix. -/
+theorem BindingMap.releaseOrder_remove_prefix {bindings : BindingMap}
+    (distinct : (bindings.map Prod.snd).Nodup) {front back : List StorageId}
+    (split : bindings.releaseOrder = front ++ back) :
+    BindingMap.releaseOrder (bindings.filter fun entry => decide (entry.2 ∉ front)) = back := by
+  have unique := bindings.releaseOrder_perm.nodup_iff.mpr distinct
+  rw [split] at unique
+  have apart := (List.nodup_append.mp unique).2.2
+  rw [BindingMap.releaseOrder_filter bindings distinct (fun identity => decide (identity ∉ front)),
+    split, List.filter_append]
+  have gone : front.filter (fun identity => decide (identity ∉ front)) = [] := by
+    apply List.filter_eq_nil_iff.mpr
+    intro identity member
+    simpa using member
+  rw [gone, List.nil_append]
+  apply List.filter_eq_self.mpr
+  intro identity member
+  exact decide_eq_true_eq.mpr (fun earlier => apart identity earlier identity member rfl)
+
+
 
 /-- Source-ordered parameter acquisition is released in reverse acquisition
 order. This follows for arbitrary batches, not a distinguished two-input case. -/
@@ -957,6 +977,43 @@ def AddressedEnvironment.restore (current : AddressedEnvironment) (caller : Addr
     Option AddressedEnvironment :=
   (releaseBindings current.heap current.bindings).map fun heap =>
     { current with activation := caller.activation, bindings := caller.bindings, heap := heap }
+/-- Canonical single-owner retirement factors the existing batch restoration:
+continuing from its actual output has exactly the same final result. -/
+theorem AddressedEnvironment.restore.retireBinding {before after : AddressedEnvironment}
+    {context : List (BindingId × BindingState)} {index : Nat} {entry : BindingId × StorageId}
+    (typed : BindingMap.Typed program before.heap before.activation before.bindings context)
+    (selected : before.bindings[index]? = some entry)
+    (first : before.bindings.releaseOrder.head? = some entry.2)
+    (retired : before.retireBinding index = some after) (caller : AddressedScope) :
+    after.restore caller = before.restore caller := by
+  obtain ⟨next, produced, primitive, _, _, _, supply, bindings, _⟩ :=
+    AddressedEnvironment.retireBinding.progress typed selected
+  cases Option.some.inj (retired.symm.trans produced)
+  have order : after.bindings.releaseOrder = before.bindings.releaseOrder.tail := by
+    rw [bindings]
+    exact BindingMap.releaseOrder_eraseIdx typed.addresses_distinct selected first
+  obtain ⟨tail, ordered⟩ := List.head?_eq_some_iff.mp first
+  simp only [AddressedEnvironment.restore, releaseBindings, order, ordered, List.tail_cons,
+    RuntimeHeap.retireMany, primitive, Option.bind_some]
+  congr 1
+  funext heap
+  exact congrArg (fun supply => (⟨caller.activation, supply, caller.bindings, heap⟩ : AddressedEnvironment)) supply
+
+
+
+/-- The remaining restoration after any executed canonical prefix has exactly
+the original result, including the same heap, caller scope and supply. -/
+theorem AddressedEnvironment.restore.retirement_prefix {current : AddressedEnvironment}
+    (distinct : (current.bindings.map Prod.snd).Nodup)
+    {front back : List StorageId} {middle : RuntimeHeap StorageCell}
+    (split : current.bindings.releaseOrder = front ++ back)
+    (executed : current.heap.retireMany front = some middle) (caller : AddressedScope) :
+    ({ current with heap := middle, bindings := current.bindings.filter fun entry => decide (entry.2 ∉ front) } :
+      AddressedEnvironment).restore caller = current.restore caller := by
+  simp only [AddressedEnvironment.restore, releaseBindings,
+    BindingMap.releaseOrder_remove_prefix distinct split, split,
+    RuntimeHeap.retireMany_append, executed, Option.bind_some]
+
 
 theorem AddressedEnvironment.restore.progress {current : AddressedEnvironment} {caller : AddressedScope}
     {locals callerContext : List (BindingId × BindingState)}
