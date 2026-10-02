@@ -22,7 +22,7 @@ inductive Frame where
   | assign (place : Place) (rest : Expr)
   | tupleHead (tail : List Expr)
   | tupleTail (head : Value)
-  | project (key : FieldKey)
+  | project (home : Module) (key : FieldKey)
   | array
   | construct (identity : Nat) (tag : Option Nat)
   | call (declaration : FunctionDecl)
@@ -115,12 +115,12 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
         ⟨env, .arguments tail, .tupleTail head :: stack⟩
   | tupleTail {env : Environment} {stack : List Frame} {head : Value} {tail : List Value} :
       Step program ⟨env, .results tail, .tupleTail head :: stack⟩ ⟨env, .result (.tuple head tail), stack⟩
-  | project {env : Environment} {stack : List Frame} {body : Expr} {key : FieldKey} :
-      Step program ⟨env, .expression (.project body key), stack⟩
-        ⟨env, .expression body, .project key :: stack⟩
-  | projectResult {env : Environment} {stack : List Frame} {aggregate value : Value} {key : FieldKey} {index : Nat}
+  | project {home : Module} {env : Environment} {stack : List Frame} {body : Expr} {key : FieldKey} :
+      Step program ⟨env, .expression (.project home body key), stack⟩
+        ⟨env, .expression body, .project home key :: stack⟩
+  | projectResult {home : Module} {env : Environment} {stack : List Frame} {aggregate value : Value} {key : FieldKey} {index : Nat}
       (selected : aggregate.projectField program key = some (index, value)) :
-      Step program ⟨env, .result aggregate, .project key :: stack⟩ ⟨env, .result value, stack⟩
+      Step program ⟨env, .result aggregate, .project home key :: stack⟩ ⟨env, .result value, stack⟩
   | array {env : Environment} {stack : List Frame} {elements : List Expr} :
       Step program ⟨env, .expression (.array elements), stack⟩ ⟨env, .arguments elements, .array :: stack⟩
   | arrayResult {env : Environment} {stack : List Frame} {values : List Value} :

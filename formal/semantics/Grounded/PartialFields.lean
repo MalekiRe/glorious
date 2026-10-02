@@ -589,9 +589,9 @@ theorem Initialization.write_overwrite {program : Program} {parent : Ty}
 
 /-- The selected value transfers out; the shared field update exposes precisely
 the remaining temporary aggregate whose residents will be discarded. -/
-def Value.ProjectionCleanupSafe (program : Program) (aggregate : Value) (key : FieldKey) : Prop :=
+def Value.ProjectionCleanupSafe (program : Program) (home : Module) (aggregate : Value) (key : FieldKey) : Prop :=
   ∃ parent type index selected remainder,
-    ValueHasType program aggregate parent ∧
+    ValueHasType program aggregate parent ∧ ProjectionType program home parent key index type ∧
     aggregate.projectField program key = some (index, selected) ∧
     ValueHasType program selected type ∧
     (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
@@ -603,13 +603,13 @@ theorem ProjectionType.cleanup_safe {program : Program} {home : Module} {parent 
     (resident : ValueHasType program aggregate parent)
     (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
     (discard : residual.Disposable program.data parent) :
-    aggregate.ProjectionCleanupSafe program key := by
+    aggregate.ProjectionCleanupSafe program home key := by
   have path : PathType program home parent [key] type := .step projection (.here type)
   obtain ⟨remainder, state, writtenMask, written, remainderTyped, absent⟩ :=
     path.restore_partial resident.finite (.resident resident) (.hole type)
   cases Option.some.inj (writtenMask.symm.trans mask)
   obtain ⟨selected, found, selectedTyped, _⟩ := projection.access resident
-  exact ⟨parent, type, index, selected, remainder, resident, found, selectedTyped,
+  exact ⟨parent, type, index, selected, remainder, resident, projection, found, selectedTyped,
     written, absent, discard.realizes remainderTyped⟩
 
 

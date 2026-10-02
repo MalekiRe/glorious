@@ -72,12 +72,12 @@ theorem Evaluates.tuple {environment middle after : Environment} {head : Expr} {
   .step .tuple ((Run.extend headEval [.tupleHead tail]).trans
     (.step .tupleHead ((Run.extend tailEval [.tupleTail first]).trans (.step .tupleTail (.refl _)))))
 
-theorem Evaluates.project {environment after : Environment} {body : Expr} {key : FieldKey} {index : Nat}
+theorem Evaluates.project {home : Module} {environment after : Environment} {body : Expr} {key : FieldKey} {index : Nat}
       {aggregate value : Value}
       (source : Evaluates program environment body aggregate after)
       (selected : aggregate.projectField program key = some (index, value)) :
-      Evaluates program environment (.project body key) value after :=
-  .step .project ((Run.extend source [.project key]).trans (.step (.projectResult selected) (.refl _)))
+      Evaluates program environment (.project home body key) value after :=
+  .step .project ((Run.extend source [.project home key]).trans (.step (.projectResult selected) (.refl _)))
 
 theorem Evaluates.array {environment after : Environment} {elements : List Expr} {values : List Value}
       (residents : EvaluatesMany program environment elements values after) :

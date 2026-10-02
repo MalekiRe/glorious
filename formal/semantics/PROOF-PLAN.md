@@ -3506,3 +3506,23 @@ found only standard Lean axioms. No examples, tests or parallel authority table
 were added. Borrowed matching, custom Drop and the other broad completion
 obligations remain open.
 
+## Projection transfer preserves source-module authority
+
+Projection expressions and runtime frames now retain the module produced by
+source elaboration. `Value.ProjectionCleanupSafe` retains the existing
+`ProjectionType` evidence at that module along with residual disposal; it no
+longer erases field-access authority. General preservation and every source
+behavior consumer carry this strengthened ownership invariant.
+
+`HasType.projection_transfer` consumes it to construct the actual field-transfer
+step with the selected resident typed and the exact residual aggregate
+discardable, including the hole left by transfer. Authority comes from the
+real elaborated module, not an existential alternative scope. Evaluation and
+termination consumers use the same module-bearing constructors.
+
+All 30 Lean build jobs passed. Axiom inspection of the transfer theorem, general
+preservation and source maximal behavior found only standard Lean axioms.
+No examples or tests were added. This does not implement custom destructor
+execution, borrowed projection or physical cleanup; all fourteen broad
+completion obligations remain open.
+

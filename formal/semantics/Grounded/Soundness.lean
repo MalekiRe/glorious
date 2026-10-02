@@ -916,5 +916,30 @@ theorem HasType.pattern_external_exact_transfer (checkedProgram : program.Checke
       checked.pattern_binding checkedProgram store issued run missed matched focus
     exact ⟨name, after, storage, position, rfl, entered, mapped, stored, fresh⟩
 
+/-- Every reached projection transfers a well-typed field with authority at
+its elaborated module and leaves exactly a discardable residual aggregate. -/
+theorem HasType.projection_transfer (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {projectionHome : Module} {aggregate : Value} {key : FieldKey} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result aggregate, .project projectionHome key :: stack⟩) :
+    ∃ parent child index selected remainder,
+      ValueHasType program aggregate parent ∧
+      ProjectionType program projectionHome parent key index child ∧
+      Step program ⟨current, .result aggregate, .project projectionHome key :: stack⟩
+        ⟨current, .result selected, stack⟩ ∧
+      ValueHasType program selected child ∧
+      (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
+      remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  change aggregate.ProjectionCleanupSafe program projectionHome key at safe
+  obtain ⟨parent, child, index, selected, remainder, resident, access, found, typed, written, absent, disposable⟩ := safe
+  exact ⟨parent, child, index, selected, remainder, resident, access, .projectResult found,
+    typed, written, absent, disposable⟩
+
 end Grounded
 

@@ -216,7 +216,7 @@ inductive Expr where
   | sequence (first rest : Expr)
   | bind (mutable : Bool) (name : BindingId) (localType : Ty) (initial body : Expr)
   | tuple (head : Expr) (tail : List Expr)
-  | project (body : Expr) (key : FieldKey)
+  | project (home : Module) (body : Expr) (key : FieldKey)
   | array (elements : List Expr)
   | constant (name : String)
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)

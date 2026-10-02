@@ -52,7 +52,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (discard : residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index result) :
-      FrameTyped program heap supply activation context (.one parent) (.project key) context (.one result)
+      FrameTyped program heap supply activation context (.one parent) (.project home key) context (.one result)
   | array {context element length} (finite : FiniteLayout program.target program.data element)
       (size : length < 2 ^ program.target.pointerBits) :
       FrameTyped program heap supply activation context (.many (List.replicate length element)) .array context (.one (.array element length))
@@ -682,7 +682,7 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
         state.environment.bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index)
   | .result _, .assign place _ :: _ =>
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
-  | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
+  | .result aggregate, .project home key :: _ => aggregate.ProjectionCleanupSafe program home key
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
   | .results values, .patterns home arms :: _ =>
       ∀ bindings body, selectArm (argumentValue values) arms = some (bindings, body) →

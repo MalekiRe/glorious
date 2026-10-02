@@ -17,7 +17,7 @@ inductive Structural : Expr → Prop where
       (rest : ∀ expression ∈ tail, Structural expression) : Structural (.tuple head tail)
   | array {elements : List Expr} (residents : ∀ expression ∈ elements, Structural expression) :
       Structural (.array elements)
-  | project {body : Expr} (closed : Structural body) (key : FieldKey) : Structural (.project body key)
+  | project {home : Module} {body : Expr} (closed : Structural body) (key : FieldKey) : Structural (.project home body key)
   | constant (name : String) : Structural (.constant name)
   | construct {fields : List Expr} (identity : Nat) (tag : Option Nat)
       (residents : ∀ expression ∈ fields, Structural expression) :
@@ -71,7 +71,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (discard : residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index type) :
-      HasType program home before (.project body key) type after
+      HasType program home before (.project home body key) type after
   | array {home before after elements element length}
       (residents : HasTypes program home before elements (List.replicate length element) after)
       (elementValid : FiniteLayout program.target program.data element)

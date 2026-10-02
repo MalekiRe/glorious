@@ -129,7 +129,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (discard : residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index type) :
-      NamedExpr.Elaborates program names home scope before (.project source key) (.project core key) type after
+      NamedExpr.Elaborates program names home scope before (.project source key) (.project home core key) type after
   | array {scope before after source core element length}
       (residents : NamedExprsElaborate program names home scope before source core (List.replicate length element) after)
       (finite : FiniteLayout program.target program.data element) (size : length < 2 ^ program.target.pointerBits) :

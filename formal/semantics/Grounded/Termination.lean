@@ -122,7 +122,7 @@ inductive EvaluationDependency (program : Program) : Expr → Expr → Prop wher
   | tupleHead {head : Expr} {tail : List Expr} : EvaluationDependency program head (.tuple head tail)
   | tupleTail {head expression : Expr} {tail : List Expr} (member : expression ∈ tail) :
       EvaluationDependency program expression (.tuple head tail)
-  | project {body : Expr} {key : FieldKey} : EvaluationDependency program body (.project body key)
+  | project {home : Module} {body : Expr} {key : FieldKey} : EvaluationDependency program body (.project home body key)
   | array {expression : Expr} {elements : List Expr} (member : expression ∈ elements) :
       EvaluationDependency program expression (.array elements)
   | construct {identity : Nat} {tag : Option Nat} {expression : Expr} {fields : List Expr}
