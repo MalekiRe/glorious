@@ -33,13 +33,13 @@ inductive OwnershipTrace {n : Nat} :
       OwnershipTrace before after (before.events ++ events)
 
 theorem OwnershipTrace.run {n : Nat} {before after : Configuration n (Op n)} {events}
-    (trace : OwnershipTrace before after events) : Run Op.exec before after := by
+    (trace : OwnershipTrace before after events) : Run (Step Op.exec) before after := by
   induction trace with
   | refl => exact .refl _
   | step head tail ih => exact .step head ih
 
 theorem OwnershipTrace.of_run {n : Nat} {before after : Configuration n (Op n)}
-    (run : Run Op.exec before after) : ∃ events, OwnershipTrace before after events := by
+    (run : Run (Step Op.exec) before after) : ∃ events, OwnershipTrace before after events := by
   induction run with
   | refl => exact ⟨[], .refl _⟩
   | step head tail ih => obtain ⟨events, trace⟩ := ih; exact ⟨_, .step head trace⟩

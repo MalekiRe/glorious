@@ -42,7 +42,7 @@ theorem Step.frame {n : Nat} {slot : Fin n} {before after : Configuration n (Op 
     · exact ⟨fixes.2, rfl⟩
 
 theorem Run.frame {n : Nat} {slot : Fin n} {before after : Configuration n (Op n)}
-    (fixes : before.code.Fixes slot) (run : Run Op.exec before after) :
+    (fixes : before.code.Fixes slot) (run : Run (Step Op.exec) before after) :
     after.code.Fixes slot ∧ after.state.slots slot = before.state.slots slot := by
   induction run with
   | refl => exact ⟨fixes, rfl⟩
@@ -69,7 +69,7 @@ theorem lowered_disposal_fixes {n : Nat} (commands : List (Command n)) (owners :
 unchanged, including prefixes paused with a resident in the transfer register. -/
 theorem Scope.cleanup_frame {n : Nat} (scope : Scope n) (context : Context n)
     {initial : State n} {reached : Configuration n (Op n)}
-    (run : Run Op.exec ⟨lower (sequence (scope.commands context)), initial⟩ reached)
+    (run : Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), initial⟩ reached)
     (slot : Fin n) (retained : slot ∉ scope.owners) : reached.state.slots slot = initial.slots slot := by
   have within : ∀ command ∈ scope.commands context, command.DisposesIn scope.owners := by
     intro command member
@@ -80,31 +80,18 @@ theorem Scope.cleanup_frame {n : Nat} (scope : Scope n) (context : Context n)
     | dispose place => exact List.mem_reverse.mp located
   exact (run.frame (lowered_disposal_fixes _ _ within slot retained)).2
 
-private theorem Run.terminal_unique {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {start left right : Configuration n α} (first : Run exec start left) (halted : left.code = .halt)
-    (second : Run exec start right) (returned : right.code = .halt) : left = right := by
-  induction first generalizing right with
-  | refl => cases second with
-    | refl => rfl
-    | step head tail => exact False.elim (head.not_halt halted)
-  | step head tail ih =>
-    cases second with
-    | refl => exact False.elim (head.not_halt returned)
-    | step other rest =>
-      cases head.deterministic other
-      exact ih halted rest returned
-
 /-- Determinism rules out additional terminal outcomes, not just extra steps. -/
 theorem Run.return_unique {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     {start : Configuration n α} {left right : State n}
-    (first : Run exec start ⟨.halt, left⟩) (second : Run exec start ⟨.halt, right⟩) : left = right :=
-  congrArg Configuration.state (first.terminal_unique rfl second rfl)
+    (first : Run (Step exec) start ⟨.halt, left⟩) (second : Run (Step exec) start ⟨.halt, right⟩) : left = right :=
+  congrArg Configuration.state (first.terminal_unique second Step.deterministic
+    (fun _ step => step.not_halt rfl) (fun _ step => step.not_halt rfl))
 
 /-- Full return correspondence for the independently specified atomic scope
 boundary. Cleanup has exactly its prescribed result, not merely a safe one. -/
 theorem Scope.exit_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
     (admitted : scope.Admitted context) {state result : State n} (typed : state.Typed signature context) :
-    Run Op.exec ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, result⟩ ↔ result = scope.exit state := by
+    Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, result⟩ ↔ result = scope.exit state := by
   constructor
   · intro run
     exact run.return_unique (Scope.exit_run admitted typed).1

@@ -77,7 +77,7 @@ inductive ShellTrace {n : Nat} (program : Program n) : Configuration n → Confi
 
 theorem Safe.shell_execution {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
-    (run : Execution program before after) :
+    (run : Run (Transition program) before after) :
     after.linearShells ≤ before.linearShells ∧
       ∃ amount, ShellTrace program before after amount ∧ after.shells + amount = before.shells := by
   induction run with
@@ -104,7 +104,7 @@ theorem program_safety {n : Nat} {program : Program n} {signature : Signature} {
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {argument : Value} (typed : argument.kind signature = function.input)
     (unique : (function.start argument).Unique) {after : Configuration n}
-    (run : Execution program (function.start argument) after) :
+    (run : Run (Transition program) (function.start argument) after) :
     Safe program signature function.exit after ∧ after.Unique ∧ Preserves signature (function.start argument) after ∧
       (after.Terminal ∨ ∃ next, Transition program after next) ∧
       after.linearShells ≤ (function.start argument).linearShells ∧

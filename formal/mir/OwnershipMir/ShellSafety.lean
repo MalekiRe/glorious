@@ -97,7 +97,7 @@ theorem Safe.shell_step {n : Nat} {signature : Signature} {final : Context n}
 
 theorem Safe.shell_run {n : Nat} {signature : Signature} {final : Context n}
     {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
-    (run : Run Op.exec before after) :
+    (run : Run (Step Op.exec) before after) :
     ∃ amount, ShellTrace before after amount ∧ after.state.shells + amount = before.state.shells := by
   induction run with
   | refl => exact ⟨0, .refl _, Nat.add_zero _⟩
@@ -165,7 +165,7 @@ theorem Safe.linear_shells_step {n : Nat} {signature : Signature} {final : Conte
 
 theorem Safe.linear_shells_run {n : Nat} {signature : Signature} {final : Context n}
     {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
-    (run : Run Op.exec before after) : after.state.linearShells ≤ before.state.linearShells := by
+    (run : Run (Step Op.exec) before after) : after.state.linearShells ≤ before.state.linearShells := by
   induction run with
   | refl => exact Nat.le_refl _
   | step head tail ih =>

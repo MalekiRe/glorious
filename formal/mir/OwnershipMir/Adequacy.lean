@@ -20,13 +20,13 @@ theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : 
 /-- A pending target prefix has a finite residual execution to its source
 boundary. No fixed instruction count or intermediate-state shape is assumed. -/
 def Matches {n : Nat} (source : Configuration n (Command n)) (target : Configuration n (Op n)) : Prop :=
-  Run Op.exec target ⟨lower source.code, source.state⟩
+  Run (Step Op.exec) target ⟨lower source.code, source.state⟩
 
 theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
     (matched : Matches source before) (safe : Safe signature Command.Checked final source)
     (step : Step Op.exec before after) :
-    ∃ next, Run Command.exec source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
+    ∃ next, Run (Step Command.exec) source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
   cases matched with
   | refl =>
     rcases safe.progress Command.Checked.sound with halted | ⟨next, sourceStep⟩
@@ -42,8 +42,8 @@ theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
 theorem Matches.run {n : Nat} {signature : Signature} {final : Context n}
     {source : Configuration n (Command n)} {before after : Configuration n (Op n)}
     (matched : Matches source before) (safe : Safe signature Command.Checked final source)
-    (run : Run Op.exec before after) :
-    ∃ next, Run Command.exec source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
+    (run : Run (Step Op.exec) before after) :
+    ∃ next, Run (Step Command.exec) source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
   induction run generalizing source with
   | refl => exact ⟨source, .refl _, safe, matched⟩
   | step head tail ih =>
@@ -56,13 +56,13 @@ in both directions, including every slot's value and initialization hole. -/
 theorem compiled_return_iff {n : Nat} {signature : Signature} {before final : Context n}
     {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
     {initial result : State n} (typed : initial.Typed signature before) :
-    Run Op.exec ⟨lower source, initial⟩ ⟨.halt, result⟩ ↔
-      Run Command.exec ⟨source, initial⟩ ⟨.halt, result⟩ := by
+    Run (Step Op.exec) ⟨lower source, initial⟩ ⟨.halt, result⟩ ↔
+      Run (Step Command.exec) ⟨source, initial⟩ ⟨.halt, result⟩ := by
   constructor
   · intro run
     obtain ⟨next, sourceRun, _, relation⟩ :=
       Matches.run (source := ⟨source, initial⟩) (.refl _) ⟨before, typed, checked⟩ run
-    have boundary := Run.from_halt relation rfl
+    have boundary := relation.from_terminal (fun _ step => step.not_halt rfl)
     have code : next.code = .halt := (lower_halt _).mp (congrArg Configuration.code boundary)
     have state : next.state = result := congrArg Configuration.state boundary
     have same : next = ⟨.halt, result⟩ := by cases next; simp_all
@@ -75,14 +75,14 @@ theorem Safe.behavior {n : Nat} {α : Type} {signature : Signature} {final : Con
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {start : Configuration n α} (safe : Safe signature rule final start)
     (localSound : InstructionSound signature rule exec) :
-    (∃ result, Run exec start ⟨.halt, result⟩) ∨
+    (∃ result, Run (Step exec) start ⟨.halt, result⟩) ∨
     (∃ trace : Nat → Configuration n α, trace 0 = start ∧
-      ∀ i, Step exec (trace i) (trace (i + 1)) ∧ Run exec start (trace i) ∧
+      ∀ i, Step exec (trace i) (trace (i + 1)) ∧ Run (Step exec) start (trace i) ∧
         Safe signature rule final (trace i) ∧ Conserves signature start.state (trace i).state) := by
   classical
-  by_cases returned : ∃ result, Run exec start ⟨.halt, result⟩
+  by_cases returned : ∃ result, Run (Step exec) start ⟨.halt, result⟩
   · exact Or.inl returned
-  · have advances : ∀ state, Run exec start state → ∃ next, Step exec state next := by
+  · have advances : ∀ state, Run (Step exec) start state → ∃ next, Step exec state next := by
       intro state reached
       rcases (safe.run localSound reached).1.progress localSound with halted | next
       · apply False.elim
@@ -91,65 +91,19 @@ theorem Safe.behavior {n : Nat} {α : Type} {signature : Signature} {final : Con
         have same : state = ⟨.halt, state.state⟩ := by cases state; simp_all
         exact same ▸ reached
       · exact next
-    let trace : Nat → {state : Configuration n α // Run exec start state} :=
-      Nat.rec ⟨start, .refl _⟩ (fun _ previous =>
-        ⟨Classical.choose (advances previous.val previous.property),
-          previous.property.trans (.step (Classical.choose_spec (advances previous.val previous.property)) (.refl _))⟩)
-    refine Or.inr ⟨fun i => (trace i).val, rfl, fun i => ?_⟩
-    exact ⟨Classical.choose_spec (advances (trace i).val (trace i).property),
-      (trace i).property, safe.run localSound (trace i).property⟩
+    obtain ⟨trace, initial, steps⟩ := diverges_of_progress advances
+    exact Or.inr ⟨trace, initial, fun i =>
+      ⟨steps i, trace_reachable initial steps i, safe.run localSound (trace_reachable initial steps i)⟩⟩
 
-def Diverges {n : Nat} {α : Type} (exec : α → State n → Option (State n))
-    (start : Configuration n α) : Prop :=
-  ∃ trace : Nat → Configuration n α, trace 0 = start ∧
-    ∀ i, Step exec (trace i) (trace (i + 1))
-
-theorem Run.excludes_divergence {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before after : Configuration n α} (run : Run exec before after) (halted : after.code = .halt) :
-    ¬ Diverges exec before := by
-  induction run with
-  | refl =>
-    rintro ⟨trace, initial, steps⟩
-    exact (steps 0).not_halt (by rw [initial]; exact halted)
-  | @step before middle after head tail ih =>
-    rintro ⟨trace, initial, steps⟩
-    have first : Step exec before (trace 1) := by simpa [initial] using steps 0
-    have same := head.deterministic first
-    apply ih halted
-    exact ⟨fun i => trace (i + 1), same.symm, fun i => by
-      simpa [Nat.add_assoc] using steps (i + 1)⟩
-
-/-- A concrete finite prefix preserves and reflects actual divergence,
-without a safety or termination assumption about its endpoint. -/
-theorem Run.diverges_iff {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before after : Configuration n α} (run : Run exec before after) :
-    Diverges exec before ↔ Diverges exec after := by
-  induction run with
-  | refl => rfl
-  | @step before middle after head tail ih =>
-    constructor
-    · rintro ⟨trace, initial, steps⟩
-      have first : Step exec before (trace 1) := by simpa [initial] using steps 0
-      have same := head.deterministic first
-      apply ih.mp
-      exact ⟨fun i => trace (i + 1), same.symm, fun i => by
-        simpa [Nat.add_assoc] using steps (i + 1)⟩
-    · intro infinite
-      obtain ⟨trace, initial, steps⟩ := ih.mpr infinite
-      refine ⟨(fun i => match i with | 0 => before | j + 1 => trace j), rfl, ?_⟩
-      intro i
-      cases i with
-      | zero => simpa [initial] using head
-      | succ i => exact steps i
 
 theorem Safe.diverges_iff {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {start : Configuration n α} (safe : Safe signature rule final start)
     (localSound : InstructionSound signature rule exec) :
-    Diverges exec start ↔ ¬ ∃ result, Run exec start ⟨.halt, result⟩ := by
+    Diverges (Step exec) start ↔ ¬ ∃ result, Run (Step exec) start ⟨.halt, result⟩ := by
   constructor
   · intro infinite ⟨result, returned⟩
-    exact returned.excludes_divergence rfl infinite
+    exact returned.excludes_divergence Step.deterministic (fun _ step => step.not_halt rfl) infinite
   · intro absent
     rcases safe.behavior localSound with returned | ⟨trace, initial, safeSteps⟩
     · exact False.elim (absent returned)
@@ -160,7 +114,7 @@ not identified with stuckness or inferred merely from an absent result. -/
 theorem compiled_diverges_iff {n : Nat} {signature : Signature} {before final : Context n}
     {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
     {initial : State n} (typed : initial.Typed signature before) :
-    Diverges Op.exec ⟨lower source, initial⟩ ↔ Diverges Command.exec ⟨source, initial⟩ := by
+    Diverges (Step Op.exec) ⟨lower source, initial⟩ ↔ Diverges (Step Command.exec) ⟨source, initial⟩ := by
   have targetSafe : Safe signature Op.Checked final ⟨lower source, initial⟩ :=
     ⟨before, typed, lower_checked checked⟩
   have sourceSafe : Safe signature Command.Checked final ⟨source, initial⟩ := ⟨before, typed, checked⟩

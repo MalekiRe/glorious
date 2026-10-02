@@ -102,10 +102,6 @@ inductive Transition {n : Nat} (program : Program n) : Configuration n → Confi
       Transition program ⟨.cleaning .halt, emptyState n, frame :: stack⟩
         ⟨.body frame.next frame.cleanup, frame.state, stack⟩
 
-inductive Execution {n : Nat} (program : Program n) : Configuration n → Configuration n → Prop where
-  | refl (state) : Execution program state state
-  | step {before middle after} (head : Transition program before middle)
-      (tail : Execution program middle after) : Execution program before after
 
 def Configuration.Terminal {n : Nat} (config : Configuration n) : Prop :=
   ∃ cleanup, config.control = .body .halt cleanup ∧ config.stack = []

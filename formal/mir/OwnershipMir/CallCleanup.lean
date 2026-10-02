@@ -2,10 +2,10 @@ import OwnershipMir.CallControl
 
 namespace OwnershipMir.Calls
 
-theorem Execution.cleaning {n : Nat} {program : Program n}
+theorem Run.cleaning {n : Nat} {program : Program n}
     {before after : OwnershipMir.Configuration (n + 1) (Op (n + 1))}
-    (run : Run Op.exec before after) (stack : List (Frame n)) :
-    Execution program ⟨.cleaning before.code, before.state, stack⟩ ⟨.cleaning after.code, after.state, stack⟩ := by
+    (run : Run (Step Op.exec) before after) (stack : List (Frame n)) :
+    Run (Transition program) ⟨.cleaning before.code, before.state, stack⟩ ⟨.cleaning after.code, after.state, stack⟩ := by
   induction run with
   | refl => exact .refl _
   | step head tail ih => exact .step (.clean head) ih
@@ -28,19 +28,19 @@ theorem Function.cleanup_trace {n : Nat} {signature : Signature} {function : Fun
 theorem Function.cleanup_returns {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
-    Execution program ⟨.cleaning function.cleanup, state, frame :: stack⟩
+    Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩
       ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
-  (Execution.cleaning (function.cleanup_trace admitted typed).run _).trans (.step .retire (.refl _))
+  (Run.cleaning (function.cleanup_trace admitted typed).run _).trans (.step .retire (.refl _))
 
 /-- Every observed prefix stops inside the SAME cleanup with every protected
 caller unchanged, or crosses the fully empty retirement boundary first. -/
 theorem cleanup_prefix {n : Nat} {program : Program n}
     {start : OwnershipMir.Configuration (n + 1) (Op (n + 1))}
-    (complete : Run Op.exec start ⟨.halt, emptyState n⟩) (frame : Frame n) (stack : List (Frame n))
+    (complete : Run (Step Op.exec) start ⟨.halt, emptyState n⟩) (frame : Frame n) (stack : List (Frame n))
     {after : Configuration n}
-    (observed : Execution program ⟨.cleaning start.code, start.state, frame :: stack⟩ after) :
-    (∃ current, Run Op.exec start current ∧ after = ⟨.cleaning current.code, current.state, frame :: stack⟩) ∨
-      Execution program ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
+    (observed : Run (Transition program) ⟨.cleaning start.code, start.state, frame :: stack⟩ after) :
+    (∃ current, Run (Step Op.exec) start current ∧ after = ⟨.cleaning current.code, current.state, frame :: stack⟩) ∨
+      Run (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
   generalize finishEq : (OwnershipMir.Configuration.mk .halt (emptyState n)) = finish at complete
   induction complete generalizing after with
   | refl =>
@@ -67,12 +67,12 @@ theorem Function.cleanup_prefix {n : Nat} {program : Program n} {signature : Sig
     (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n))
     {after : Configuration n}
-    (observed : Execution program ⟨.cleaning function.cleanup, state, frame :: stack⟩ after) :
+    (observed : Run (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ after) :
     (∃ current events,
       OwnershipTrace ⟨function.cleanup, state⟩ current events ∧
       events.IsPrefix ((activationScope n).cleanupOrder function.cleanupContext) ∧
       after = ⟨.cleaning current.code, current.state, frame :: stack⟩) ∨
-      Execution program ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
+      Run (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ after := by
   rcases Calls.cleanup_prefix (function.cleanup_trace admitted typed).run frame stack observed with
     ⟨current, run, same⟩ | resumed
   · obtain ⟨events, trace⟩ := OwnershipTrace.of_run run
@@ -82,9 +82,9 @@ theorem Function.cleanup_prefix {n : Nat} {program : Program n} {signature : Sig
 theorem Function.cleanup_diverges_iff {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (admitted : (activationScope n).Admitted function.cleanupContext) {state : State (n + 1)}
     (typed : state.Typed signature function.cleanupContext) (frame : Frame n) (stack : List (Frame n)) :
-    Diverges program ⟨.cleaning function.cleanup, state, frame :: stack⟩ ↔
-      Diverges program ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
-  (function.cleanup_returns admitted typed frame stack).diverges_iff
+    Diverges (Transition program) ⟨.cleaning function.cleanup, state, frame :: stack⟩ ↔
+      Diverges (Transition program) ⟨.body frame.next frame.cleanup, frame.state, stack⟩ :=
+  (function.cleanup_returns admitted typed frame stack).diverges_iff Transition.deterministic
 
 /-- A boundary operation may change the top caller, never any deeper retained
 caller. Interior frames may be pushed/popped without touching that suffix. -/

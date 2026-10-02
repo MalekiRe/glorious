@@ -151,7 +151,7 @@ theorem Command.dispose_frame {n : Nat} {place : Place n} {before after : State 
 /-- Exact retained values, not merely their classifications or owner counts. -/
 theorem sequence_disposal_frame {n : Nat} (commands : List (Command n)) (owners : List (Fin n))
     (within : ∀ command ∈ commands, command.DisposesIn owners) {before after : State n}
-    (run : Run Command.exec ⟨sequence commands, before⟩ ⟨.halt, after⟩)
+    (run : Run (Step Command.exec) ⟨sequence commands, before⟩ ⟨.halt, after⟩)
     (slot : Fin n) (retained : slot ∉ owners) : after.slots slot = before.slots slot := by
   induction commands generalizing before with
   | nil => cases run with
@@ -177,7 +177,7 @@ all local roots and unchanged retained/result slots. Permission is wholly a
 pre-state structural condition; termination and the final state are derived. -/
 theorem Scope.exit_run {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
     (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context) :
-    Run Op.exec ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, scope.exit state⟩ ∧
+    Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ ⟨.halt, scope.exit state⟩ ∧
       (scope.exit state).Typed signature (clearContext scope.owners context) ∧
       Conserves signature state (scope.exit state) := by
   obtain ⟨result, run, final, conserved⟩ := sequence_run (scope.commands context) (Scope.checked admitted) typed
@@ -210,7 +210,7 @@ theorem Scope.program_safety {n : Nat} {signature : Signature} {scope : Scope n}
     (checked : Code.Checked Command.Checked before body middle) (admitted : scope.Admitted middle)
     {initial : State n} (typed : initial.Typed signature before) (unique : initial.Unique)
     {reached : Configuration n (Op n)}
-    (run : Run Op.exec ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ reached) :
+    (run : Run (Step Op.exec) ⟨lower (body.append (sequence (scope.commands middle))), initial⟩ reached) :
     Safe signature Op.Checked (clearContext scope.owners middle) reached ∧ reached.state.Unique ∧
       Conserves signature initial reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) ∧

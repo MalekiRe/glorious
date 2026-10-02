@@ -17,15 +17,15 @@ theorem Transition.retain {n : Nat} {program : Program n} {before after : Config
   | clean step => exact .clean step
   | retire => exact .retire
 
-theorem Execution.retain {n : Nat} {program : Program n} {before after : Configuration n}
-    (run : Execution program before after) (callers : List (Frame n)) :
-    Execution program (before.retain callers) (after.retain callers) := by
+theorem Run.retain {n : Nat} {program : Program n} {before after : Configuration n}
+    (run : Run (Transition program) before after) (callers : List (Frame n)) :
+    Run (Transition program) (before.retain callers) (after.retain callers) := by
   induction run with
   | refl => exact .refl _
   | step head tail ih => exact .step (head.retain callers) ih
 
 theorem Diverges.retain {n : Nat} {program : Program n} {start : Configuration n}
-    (infinite : Diverges program start) (callers : List (Frame n)) : Diverges program (start.retain callers) := by
+    (infinite : Diverges (Transition program) start) (callers : List (Frame n)) : Diverges (Transition program) (start.retain callers) := by
   obtain ⟨trace, initial, steps⟩ := infinite
   exact ⟨fun i => (trace i).retain callers, congrArg (·.retain callers) initial, fun i => (steps i).retain callers⟩
 
@@ -51,10 +51,10 @@ theorem Function.call_return {n : Nat} {program : Program n} {signature : Signat
     (callerTyped : caller.Typed signature before) {destination : Place (n + 1)}
     (checked : Instruction.Checked program before (.call identity destination) after)
     {argument : Value} (resident : caller.temp = some argument) {returned : State (n + 1)}
-    (bodyRun : Execution program (function.start argument) ⟨.body .halt function.cleanup, returned, []⟩)
+    (bodyRun : Run (Transition program) (function.start argument) ⟨.body .halt function.cleanup, returned, []⟩)
     (next : Body n) (cleanup : Code (n + 1) (Op (n + 1))) (stack : List (Frame n)) :
     ∃ slots,
-      Execution program ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩
+      Run (Transition program) ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩
         ⟨.body next cleanup, ⟨slots, none⟩, stack⟩ ∧
       (State.mk slots none).Typed signature after ∧
       (∀ slot, slot ≠ destination.root → slots slot = caller.slots slot) := by
@@ -78,7 +78,7 @@ theorem Function.call_return {n : Nat} {program : Program n} {signature : Signat
         ⟨returnedTyped.1, rfl⟩
       have release := Function.cleanup_returns (program := program) (functions identity function selected).2.1
         releaseTyped ({frame with slots := slots}) stack
-      refine ⟨slots, .step (.enter selected resident) ((bodyRun.retain (frame :: stack)).trans (.step (.handoff installed) release)), typed, ?_⟩
+      refine ⟨slots, .step (.enter selected resident) ((Run.retain bodyRun (frame :: stack)).trans (.step (.handoff installed) release)), typed, ?_⟩
       exact handoff_frame returned frame installed
 
 /-- Recursive divergence propagates through actual call entry with all caller
@@ -86,20 +86,20 @@ regions retained. A call is never collapsed into a terminating instruction. -/
 theorem Function.call_diverges {n : Nat} {program : Program n} {function : Function n}
     {identity : Nat} (selected : program identity = some function) {caller : State (n + 1)}
     {argument : Value} (resident : caller.temp = some argument)
-    (infinite : Diverges program (function.start argument)) (destination : Place (n + 1))
+    (infinite : Diverges (Transition program) (function.start argument)) (destination : Place (n + 1))
     (next : Body n) (cleanup : Code (n + 1) (Op (n + 1))) (stack : List (Frame n)) :
-    Diverges program ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩ := by
-  have entry : Execution program ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩
+    Diverges (Transition program) ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩ := by
+  have entry : Run (Transition program) ⟨.body (.act (.call identity destination) next) cleanup, caller, stack⟩
       ((function.start argument).retain (⟨caller.slots, next, cleanup, destination⟩ :: stack)) :=
     .step (.enter selected resident) (.refl _)
-  exact entry.diverges_iff.mpr (infinite.retain _)
+  exact (entry.diverges_iff Transition.deterministic).mpr (Diverges.retain infinite _)
 
 /-- Ready source-facing signature shapes imply actual initialized residents,
 not merely initialized static annotations. -/
 theorem Function.return_initialized {n : Nat} {program : Program n} {signature : Signature} {function : Function n}
     (functions : program.Checked) {identity : Nat} (selected : program identity = some function)
     {argument : Value} (typed : argument.kind signature = function.input) {after : Configuration n}
-    (run : Execution program (function.start argument) after) (terminal : after.Terminal) :
+    (run : Run (Transition program) (function.start argument) after) (terminal : after.Terminal) :
     ∃ value, after.state.temp = some value ∧ value.kind signature = function.output ∧ value.ready := by
   have returned := ((Function.start_safe functions selected typed).execution functions run).terminal_typed terminal
   obtain ⟨value, stored, classified⟩ := Option.map_eq_some_iff.mp returned.2

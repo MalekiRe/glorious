@@ -93,13 +93,23 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   composes user code and scope exit into preservation, progress, resource
   uniqueness/conservation, and both shell bounds.
 
+- `Execution.lean`: one finite `Run` and one `Diverges` definition over an
+  arbitrary transition relation. Shared proofs provide composition, terminal
+  inversion/uniqueness, deterministic prefix comparison, divergence transport
+  and exclusion, and infinite-trace construction from reachable progress.
+  This module imports no machine, typing, or ownership definitions and uses
+  explicit hypotheses, not machine records or typeclasses. Local execution
+  uses `Run (Step exec)`; activation execution uses `Run (Transition program)`.
+  Both consumers migrate directly; the old activation `Execution` relation
+  and duplicate divergence/sequence proofs are removed without aliases.
 - `Trace.lean`: reusable ownership events, trace composition/comparison, and
   block observations depend only on `Blocks` and its machine prerequisites,
-  not source lowering, scope cleanup, or framing. Generic step determinism,
-  inability to step from halt, and halt-run inversion live in `Machine.lean`.
+  not source lowering, scope cleanup, or framing. Concrete step determinism
+  and inability to step from halt remain in `Machine.lean`; execution-sequence
+  facts live in `Execution.lean`.
   `OwnershipTrace.terminal_unique` and `.prefix` derive from `.compare`, rather
   than repeat deterministic-step alignment. Command observations live with
-  their translation in `Lowering.lean`; names and theorem statements are unchanged.
+  their translation in `Lowering.lean`; observational guarantees are unchanged.
 - `CleanupTrace.lean`: scope-specific ordering and handoff consume those shared
   observations of successful MIR transitions, including separate detach and
   release actions. An independent structural specification visits newest roots first, fields right-to-left,
@@ -140,9 +150,10 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   separate per-frame uniqueness. `Calls.program_safety` derives preservation,
   progress, exact-resource conservation, affine bounds, noncopyable-shell
   bounds, and exact-shell discharge accounting at every actual finite prefix.
-- `CallControl.lean`: deterministic activation transitions, finite-prefix
-  comparison, actual infinite executions, and checked nontermination iff no
-  terminal execution. Safety applies to every infinite-execution prefix.
+- `CallControl.lean`: concrete activation determinism and terminality feed
+  shared execution proofs. Checked nontermination iff no terminal execution
+  consumes shared infinite-trace construction; infinite-prefix safety consumes
+  shared trace reachability. No activation transition rule is changed.
 - `CallCleanup.lean`: the existing ordered scope-cleanup trace discharges all
   activation slots before resumption. Every call-cleanup prefix either retains
   the identical protected caller stack with the prescribed event prefix, or
@@ -182,12 +193,16 @@ Nominal/source integration must derive layout and principal restriction from
 declarations and deconstruction authority from checking context, with field
 visibility separate. The call slice does not claim that integration.
 
-Verification: a fresh `lake clean && lake build OwnershipMir` in `formal/mir`
-passed all 26 jobs with warnings as errors and auto-implicit parameters
-disabled. Axiom inspection of twenty general activation, ownership, shell,
-cleanup, return, divergence, and existing lowering theorems reported only
-`propext`, `Classical.choice`, and `Quot.sound`. No `sorry`, new axioms, concrete
-examples, or unit tests were used to bypass the general obligations.
+Verification: after `lake clean`, standalone `lake build OwnershipMir.Execution`
+passed its 2-job build without machine dependencies; `lake build OwnershipMir`
+then passed all 27 jobs, with warnings as errors and auto-implicit parameters
+disabled. Twenty shared and consumer theorems were inspected: seven shared
+theorems use no axioms, infinite-trace construction uses only `Classical.choice`,
+and the remaining dependencies are limited to `propext`, `Classical.choice`,
+and `Quot.sound`. Existing source/MIR return and divergence correspondence,
+ordered cleanup, recursive call composition, and full ownership/shell safety
+all consume the migrated relations. No `sorry`, new axioms, concrete examples,
+or unit tests were used to bypass the general obligations.
 
 
 ### Joint storage ownership

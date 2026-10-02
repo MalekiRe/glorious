@@ -112,7 +112,7 @@ theorem Command.exec_eq {n : Nat} (command : Command n) (state : State n) :
 theorem lower_step {n : Nat} {before after : Configuration n (Command n)}
     (step : Step Command.exec before after) :
     ∃ middle, Step Op.exec ⟨lower before.code, before.state⟩ middle ∧
-      Run Op.exec middle ⟨lower after.code, after.state⟩ := by
+      Run (Step Op.exec) middle ⟨lower after.code, after.state⟩ := by
   cases step with
   | @act command next state after executed =>
     exact Block.exec_positive command.block command.block_nonempty
@@ -123,12 +123,12 @@ theorem lower_step {n : Nat} {before after : Configuration n (Command n)}
     cases choice
     · exact ⟨_, .loop observed, .refl _⟩
     · refine ⟨_, .loop observed, ?_⟩
-      simpa [lower_append, lower] using (Run.refl (exec := Op.exec)
+      simpa [lower_append, lower] using (Run.refl (next := Step Op.exec)
         (Configuration.mk (lower (body.append (.loop guard body next))) state))
 
 theorem lower_run {n : Nat} {before after : Configuration n (Command n)}
-    (run : Run Command.exec before after) :
-    Run Op.exec ⟨lower before.code, before.state⟩ ⟨lower after.code, after.state⟩ := by
+    (run : Run (Step Command.exec) before after) :
+    Run (Step Op.exec) ⟨lower before.code, before.state⟩ ⟨lower after.code, after.state⟩ := by
   induction run with
   | refl => exact .refl _
   | step head tail ih =>
@@ -143,7 +143,7 @@ theorem compiled_ownership_safety {n : Nat} {signature : Signature}
     (checked : Code.Checked Command.Checked before source final) {initial : State n}
     (typed : initial.Typed signature before) (unique : initial.Unique)
     {reached : Configuration n (Op n)}
-    (run : Run Op.exec ⟨lower source, initial⟩ reached) :
+    (run : Run (Step Op.exec) ⟨lower source, initial⟩ reached) :
     Safe signature Op.Checked final reached ∧ reached.state.Unique ∧
       Conserves signature initial reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) :=
@@ -155,8 +155,8 @@ theorem compiled_return {n : Nat} {signature : Signature} {before final : Contex
     {source : Code n (Command n)} (checked : Code.Checked Command.Checked before source final)
     {initial result : State n} (typed : initial.Typed signature before)
     (empty : final.temp = none)
-    (run : Run Command.exec ⟨source, initial⟩ ⟨.halt, result⟩) :
-    Run Op.exec ⟨lower source, initial⟩ ⟨.halt, result⟩ ∧
+    (run : Run (Step Command.exec) ⟨source, initial⟩ ⟨.halt, result⟩) :
+    Run (Step Op.exec) ⟨lower source, initial⟩ ⟨.halt, result⟩ ∧
       result.Typed signature final ∧ result.temp = none ∧ Conserves signature initial result := by
   have lowered := lower_run run
   obtain ⟨⟨current, realized, remaining⟩, conserved⟩ :=

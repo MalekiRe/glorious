@@ -152,7 +152,7 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
 
 theorem Safe.execution {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
-    (run : Execution program before after) : Safe program signature final after := by
+    (run : Run (Transition program) before after) : Safe program signature final after := by
   induction run with
   | refl => exact safe
   | step head tail ih => exact ih (safe.preservation functions head)

@@ -1,4 +1,5 @@
 import OwnershipMir.Instructions
+import OwnershipMir.Execution
 
 /-! Source commands and MIR share only structured control. Their primitive
 operations and operational meanings are different. Loops unfold at runtime;
@@ -64,17 +65,6 @@ inductive Step {n : Nat} {α : Type} (exec : α → State n → Option (State n)
       Step exec ⟨.loop guard body next, state⟩
         ⟨if choice then body.append (.loop guard body next) else next, state⟩
 
-inductive Run {n : Nat} {α : Type} (exec : α → State n → Option (State n)) :
-    Configuration n α → Configuration n α → Prop where
-  | refl (state) : Run exec state state
-  | step {before middle after} (head : Step exec before middle) (tail : Run exec middle after) :
-      Run exec before after
-
-theorem Run.trans {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {a b c : Configuration n α} (first : Run exec a b) (last : Run exec b c) : Run exec a c := by
-  induction first with
-  | refl => exact last
-  | step head tail ih => exact .step head (ih last)
 
 theorem Step.deterministic {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     {before first second : Configuration n α} (left : Step exec before first)
@@ -85,11 +75,6 @@ theorem Step.not_halt {n : Nat} {α : Type} {exec : α → State n → Option (S
     {before after : Configuration n α} (step : Step exec before after) : before.code ≠ .halt := by
   cases step <;> simp
 
-theorem Run.from_halt {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
-    {before after : Configuration n α} (run : Run exec before after) (halted : before.code = .halt) : after = before := by
-  cases run with
-  | refl => rfl
-  | step head tail => exact False.elim (head.not_halt halted)
 
 def Safe {n : Nat} {α : Type} (signature : Signature)
     (rule : Context n → α → Context n → Prop) (final : Context n) (config : Configuration n α) : Prop :=
@@ -165,7 +150,7 @@ theorem Safe.step {n : Nat} {α : Type} {signature : Signature} {final : Context
 theorem Safe.run {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {before after : Configuration n α} (safe : Safe signature rule final before)
-    (localSound : InstructionSound signature rule exec) (run : Run exec before after) :
+    (localSound : InstructionSound signature rule exec) (run : Run (Step exec) before after) :
     Safe signature rule final after ∧ Conserves signature before.state after.state := by
   induction run with
   | refl => exact ⟨safe, Conserves.refl _ _⟩
@@ -177,7 +162,7 @@ theorem Safe.run {n : Nat} {α : Type} {signature : Signature} {final : Context 
 /-- This includes intermediate transfer states, not only instruction boundaries. -/
 theorem ownership_safety {n : Nat} {signature : Signature} {final : Context n}
     {before after : Configuration n (Op n)} (safe : Safe signature Op.Checked final before)
-    (unique : before.state.Unique) (run : Run Op.exec before after) :
+    (unique : before.state.Unique) (run : Run (Step Op.exec) before after) :
     Safe signature Op.Checked final after ∧ after.state.Unique ∧
       Conserves signature before.state after.state ∧
       (after.code = .halt ∨ ∃ next, Step Op.exec after next) := by

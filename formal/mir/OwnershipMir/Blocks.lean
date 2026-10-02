@@ -40,7 +40,7 @@ def Block.exec {n : Nat} {α : Type} (exec : α → State n → Option (State n)
 
 theorem Block.exec_run {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     (ops : List α) {before after : State n} (executed : Block.exec exec ops before = some after)
-    (next : Code n α) : Run exec ⟨Block.emit ops next, before⟩ ⟨next, after⟩ := by
+    (next : Code n α) : Run (Step exec) ⟨Block.emit ops next, before⟩ ⟨next, after⟩ := by
   induction ops generalizing before with
   | nil => cases Option.some.inj executed; exact .refl _
   | cons op rest ih =>
@@ -52,7 +52,7 @@ steps. No global bound on block length is built into the refinement proof. -/
 theorem Block.exec_positive {n : Nat} {α : Type} {exec : α → State n → Option (State n)}
     (ops : List α) (nonempty : ops ≠ []) {before after : State n}
     (executed : Block.exec exec ops before = some after) (next : Code n α) :
-    ∃ middle, Step exec ⟨Block.emit ops next, before⟩ middle ∧ Run exec middle ⟨next, after⟩ := by
+    ∃ middle, Step exec ⟨Block.emit ops next, before⟩ middle ∧ Run (Step exec) middle ⟨next, after⟩ := by
   cases ops with
   | nil => exact False.elim (nonempty rfl)
   | cons op rest =>

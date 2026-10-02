@@ -106,7 +106,7 @@ theorem Scope.cleanup_then_return_iff {n : Nat} {signature : Signature} {scope :
   · intro observed
     rcases Scope.cleanup_then_prefix admitted typed next observed with ⟨rest, equal, residual⟩ | completed
     · have empty := residual.empty_of_halt rfl
-      have boundary := residual.run.from_halt rfl
+      have boundary := residual.run.from_terminal (fun _ step => step.not_halt rfl)
       exact ⟨[], by simpa only [empty, List.append_nil] using equal,
         by rw [boundary]; exact .refl _⟩
     · exact completed
@@ -118,9 +118,9 @@ theorem Scope.cleanup_then_return_iff {n : Nat} {signature : Signature} {scope :
 theorem Scope.cleanup_then_diverges_iff {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
     (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
     (next : Code n (Op n)) :
-    Diverges Op.exec ⟨(lower (sequence (scope.commands context))).append next, state⟩ ↔
-      Diverges Op.exec ⟨next, scope.exit state⟩ :=
-  (Scope.exit_trace_then admitted typed next).run.diverges_iff
+    Diverges (Step Op.exec) ⟨(lower (sequence (scope.commands context))).append next, state⟩ ↔
+      Diverges (Step Op.exec) ⟨next, scope.exit state⟩ :=
+  (Scope.exit_trace_then admitted typed next).run.diverges_iff Step.deterministic
 
 /-- Safety composes with checking of the continuation at the cleared context.
 Unlike cleanup itself, the continuation may modify previously retained slots. -/
@@ -129,7 +129,7 @@ theorem Scope.cleanup_then_safety {n : Nat} {signature : Signature} {scope : Sco
     (unique : state.Unique) {next : Code n (Op n)}
     (checked : Code.Checked Op.Checked (clearContext scope.owners context) next final)
     {reached : Configuration n (Op n)}
-    (run : Run Op.exec ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached) :
+    (run : Run (Step Op.exec) ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached) :
     Safe signature Op.Checked final reached ∧ reached.state.Unique ∧ Conserves signature state reached.state ∧
       ∃ events, OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩ reached events ∧
         ((∃ rest, events ++ rest = scope.cleanupOrder context ∧ OwnershipTrace reached ⟨next, scope.exit state⟩ rest) ∨
@@ -175,7 +175,7 @@ run while retaining the existing preservation and retained-storage guarantees. -
 theorem Scope.cleanup_observed_safety {n : Nat} {signature : Signature} {scope : Scope n} {context : Context n}
     (admitted : scope.Admitted context) {state : State n} (typed : state.Typed signature context)
     (unique : state.Unique) {reached : Configuration n (Op n)}
-    (run : Run Op.exec ⟨lower (sequence (scope.commands context)), state⟩ reached) :
+    (run : Run (Step Op.exec) ⟨lower (sequence (scope.commands context)), state⟩ reached) :
     Safe signature Op.Checked (clearContext scope.owners context) reached ∧ reached.state.Unique ∧
       Conserves signature state reached.state ∧
       (reached.code = .halt ∨ ∃ next, Step Op.exec reached next) ∧

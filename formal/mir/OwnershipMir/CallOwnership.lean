@@ -110,14 +110,14 @@ theorem Safe.ownership_step {n : Nat} {program : Program n} {signature : Signatu
 
 theorem Safe.ownership_execution {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
-    (run : Execution program before after) : Preserves signature before after := by
+    (run : Run (Transition program) before after) : Preserves signature before after := by
   induction run with
   | refl => exact Preserves.refl _ _
   | step head tail ih => exact (safe.ownership_step head).trans (ih (safe.preservation functions head))
 
 theorem ownership_safety {n : Nat} {program : Program n} {signature : Signature} {final : Context (n + 1)}
     (functions : program.Checked) {before after : Configuration n} (safe : Safe program signature final before)
-    (unique : before.Unique) (run : Execution program before after) :
+    (unique : before.Unique) (run : Run (Transition program) before after) :
     Safe program signature final after ∧ after.Unique ∧ Preserves signature before after ∧
       (after.Terminal ∨ ∃ next, Transition program after next) := by
   have preserved := safe.execution functions run
