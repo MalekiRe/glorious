@@ -40,19 +40,7 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
       ∀ index, ConfigurationTyped program final (.one type) (trace index) ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
         (trace index).OwnershipSafe program) := by
-  have entry := ConfigurationTyped.entry checked store issued
-  rcases Run.terminal_or_infinite ⟨environment, .expression expression, []⟩
-      (fun _ run => (entry.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
-  · left
-    have safe := checked.soundness checkedProgram store issued run
-    obtain ⟨after, value, same, typed, _, resident⟩ := safe.1.normal_form done
-    subst state
-    exact ⟨after, value, run, resident, typed, safe.2.2.1, safe.2.2.2.2⟩
-  · right
-    refine ⟨trace, infinite, ?_⟩
-    intro index
-    have safe := checked.soundness checkedProgram store issued (infinite.prefix index)
-    exact ⟨safe.1, safe.2.2.1, safe.2.2.2.2⟩
+  exact (ConfigurationTyped.entry checked store issued).behavior checkedProgram
 
 
 /-- Actual scope retirement retains its outer cells and joins each descendant

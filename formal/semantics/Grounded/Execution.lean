@@ -544,6 +544,40 @@ theorem Run.return_retired {before : Environment} {middle after : Configuration}
     cases same
     exact run.retired (RuntimeHeap.retireMany_retired released identity member)
 
+/-- Finishing a body through its real return frame permanently retires the
+entry bindings, even when the body performs nested calls or lexical allocations. -/
+theorem Run.body_return_retires {entry after : Environment} {caller : AddressedScope}
+    {body : Expr} {value : Value}
+    (run : Run program ⟨entry, .expression body, [.restore caller]⟩ ⟨after, .result value, []⟩) :
+    ∀ identity ∈ entry.bindings.map Prod.snd, after.heap.Retired identity := by
+  obtain ⟨done, terminal, bodyRun, suffix⟩ := run.unextend
+    ⟨entry, .expression body, []⟩ [.restore caller] rfl (by simp)
+  cases terminal with
+  | result current resident =>
+    have bindings : current.bindings = entry.bindings :=
+      congrArg AddressedScope.bindings bodyRun.outer_scope
+    cases suffix with
+    | step head tail =>
+      intro identity member
+      apply Run.return_retired head tail
+      simpa only [bindings] using member
+  | results current residents =>
+    cases suffix with
+    | step head tail => cases head
+
+/-- A completed invocation witnesses actual parameter preparation and retirement
+of the corresponding fresh callee cells, not merely a compatible final heap. -/
+theorem Run.call_cleanup {before after : Environment} {declaration : FunctionDecl}
+    {values : List Value} {value : Value}
+    (run : Run program ⟨before, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩) :
+    ∃ inputs, prepareBindings declaration.parameters values = some inputs ∧
+      ∀ identity ∈ (enterBindings before.heap before.supply inputs).bindings.map Prod.snd,
+        after.heap.Retired identity := by
+  cases run with
+  | step head tail =>
+    cases head with
+    | callInputs prepared => exact ⟨_, prepared, tail.body_return_retires⟩
+
 
 /-- An already-issued storage identity can survive a step only with its
 original allocation owner and declared type; only its resident may change. -/

@@ -1643,5 +1643,39 @@ theorem SourceClosure.Admitted.import_request_visibility {packages : List Packag
     simp [Visibility.ValidAt, Visibility.Allows]
 
 
+/-- Already-evaluated arguments enter the real call frame. Normal completion
+includes callee retirement and restoration of the caller's scope; divergence
+keeps every pending continuation well typed. Lookup supplies call authority. -/
+theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {caller : Module} {name : FunctionName} {identity : Nat}
+    (selected : closure.functionNames caller name = some identity)
+    {declaration : FunctionDecl} (declared : program.functions identity = some declaration)
+    {values : List Value}
+    (arguments : ValuesHaveTypes program values (declaration.parameters.map fun parameter => parameter.2.type))
+    {context : FlowContext} {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) :
+    declaration.visibility.Allows declaration.home caller ∧
+    ((∃ after value, Run program ⟨environment, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩ ∧
+      ValueHasType program value declaration.result ∧ after.scope = environment.scope ∧
+      BindingMap.Typed program after.heap after.activation after.bindings context ∧
+      AddressedEnvironment.ConsumptionFrame program context.slots environment after ∧
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
+      ∃ inputs, prepareBindings declaration.parameters values = some inputs ∧
+        ∀ identity ∈ (enterBindings environment.heap environment.supply inputs).bindings.map Prod.snd,
+          after.heap.Retired identity) ∨
+    (∃ trace, InfiniteRun program ⟨environment, .results values, [.call declaration]⟩ trace ∧
+      ∀ index, ConfigurationTyped program context (.one declaration.result) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program context.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program)) := by
+  refine ⟨admitted.resolved_visibility selected declared, ?_⟩
+  have entry : ConfigurationTyped program context (.one declaration.result)
+      ⟨environment, .results values, [.call declaration]⟩ :=
+    .intro store issued (.results arguments) (.cons (.call declared) .nil)
+  rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe⟩ | ⟨trace, infinite, safe⟩
+  · exact .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, run.call_cleanup⟩
+  · exact .inr ⟨trace, infinite, safe⟩
+
 
 end Grounded

@@ -3110,3 +3110,31 @@ unit tests were added. Physical exhaustion, effects, foreign boundaries and
 whole-language completion remain separate open obligations; this theorem does
 not reinterpret their missing transitions as divergence.
 
+## Maximal invocation behavior includes actual caller restoration and cleanup
+
+`ConfigurationTyped.behavior` now owns maximal behavior for arbitrary typed
+control and continuations. `HasType.behavior` consumes that theorem; its duplicated
+trace-construction proof is removed. This includes already-evaluated arguments
+waiting in a real `Frame.call`, not only expressions with empty continuations.
+
+`Run.body_return_retires` decomposes actual execution at the return frame and
+uses the body's scope-preservation proof to identify the original entry bindings.
+`Run.call_cleanup` extracts real parameter preparation and proves permanent
+retirement of every corresponding callee cell on completed invocation. Nested
+calls and lexical allocations are covered; future heap readiness and a supplied
+cleanup result are not premises.
+
+`SourceClosure.Admitted.invocation_behavior` consumes resolved source authority,
+typed actual argument values and the current caller store. It derives a typed
+return with the original caller scope restored and all parameter cells retired,
+or an infinite actual execution preserving configuration typing, caller framing
+and ownership safety at every index. The supplied store is the caller state
+after argument evaluation; this is not a theorem assuming arbitrary argument
+expressions terminate. Source-expression behavior covers those expressions.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of actual
+cleanup, generalized maximal behavior and both public source consumers found only
+standard Lean axioms. The scope remains the current logical owned-value machine;
+custom destruction, loans, physical resource limits and whole-language completion
+remain open. No unit tests or concrete examples were added.
+

@@ -749,6 +749,34 @@ theorem ConfigurationTyped.retired_not_retained {context result state} {identity
   rw [retired.2] at found
   cases found
 
+/-- Maximal behavior starts from the actual typed control and continuation,
+including partially evaluated calls and pending caller restoration. -/
+theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
+    {context : FlowContext} {type : Ty} {before : Configuration}
+    (typed : ConfigurationTyped program context (.one type) before) :
+    (∃ after value, Run program before ⟨after, .result value, []⟩ ∧
+      ValueHasType program value type ∧
+      BindingMap.Typed program after.heap after.activation after.bindings context ∧
+      AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment after ∧
+      (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program) ∨
+    (∃ trace, InfiniteRun program before trace ∧
+      ∀ index, ConfigurationTyped program context (.one type) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program) := by
+  rcases Run.terminal_or_infinite before
+      (fun _ run => (typed.run checkedProgram run).progress) with ⟨state, run, done⟩ | ⟨trace, infinite⟩
+  · left
+    have current := typed.run checkedProgram run
+    obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
+    subst state
+    exact ⟨after, value, run, resident, store, typed.consumption_run checkedProgram run, current.ownership_safe⟩
+  · right
+    refine ⟨trace, infinite, ?_⟩
+    intro index
+    have run := infinite.prefix index
+    have current := typed.run checkedProgram run
+    exact ⟨current, typed.consumption_run checkedProgram run, current.ownership_safe⟩
+
 
 end Grounded
 
