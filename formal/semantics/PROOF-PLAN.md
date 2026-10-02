@@ -3167,3 +3167,35 @@ only standard Lean axioms. No examples or unit tests were added. Reference/loan
 compatibility, physical exhaustion and the other whole-language obligations remain
 open; this closes the maximal-behavior consumer of the logical Copy/move chain.
 
+## Non-exhaustive enum authority reaches source coverage and machine progress
+
+Decoded enum shapes now carry their specified non-exhaustive marker. The shared
+`DataDecl.ClosedAt` contract permits closed constructor reasoning inside the
+defining package and for exhaustive enums; it does not grant visibility. Both
+owned constructor-pattern access and coverage splitting consume this authority.
+
+Coverage now carries the checking module through Core admission, named-source
+elaboration, normalized constant-pattern admission and actual pattern frames.
+Its constructor-independent fallback matrix retains only wildcard/whole-binder
+rows. The general `Covers.selectArm` proof constructs the actual first match for
+this rule, and existing general preservation/progress and maximal source behavior
+consume the migrated contract. Runtime matching is unchanged; no extra evaluator
+or parallel declaration table supplies permission.
+
+General exclusion proofs establish that an external non-exhaustive enum requires
+a whole-value coverage row, including when its currently declared variant list
+is empty. For an owner without discard permission, every admitted owned pattern
+is a whole binder with exactly that owner's type and binding. Thus neither a
+wildcard, a constant pattern nor field extraction can erase an exact-linear
+external owner. Nested matrix columns use the same rule. Whole forwarding does
+not acquire Copy or discard permission; body checking still owns that obligation.
+
+Verification: an independent source-only `lake build Grounded` passed all 30
+jobs. Axiom inspection of coverage construction, both general exclusion proofs,
+named-pattern checking, general preservation/progress and both maximal source
+behavior consumers found only `propext`, `Classical.choice` and `Quot.sound`.
+No examples, unit tests, new axioms or assumed matching outcomes were introduced.
+This is decoded owned-value semantics, not attribute parsing, borrowed matching,
+separate-compilation compatibility or whole-language completion. Those and the
+other broad obligations remain open.
+

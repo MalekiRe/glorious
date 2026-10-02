@@ -67,7 +67,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       FrameTyped program heap supply activation context (.many (declaration.parameters.map fun parameter => parameter.2.type))
         (.call declaration) context (.one declaration.result)
   | patterns {home before after inputs arms result}
-      (nonempty : arms ≠ []) (covered : Covers program [argumentType inputs] (arms.map fun arm => [arm.1]))
+      (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))
       (checked : ArmsType program home before (argumentType inputs) result [] arms after) :
       FrameTyped program heap supply activation before (.many inputs) (.patterns arms) after (.one result)
   | restore {context : FlowContext} (locals : FlowContext) {result} {caller : AddressedScope}

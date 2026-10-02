@@ -166,7 +166,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
         (.assign ⟨binding.identity, fields⟩ coreValue coreRest) result after
   | applyPatterns {scope before evaluated after arguments coreArguments inputs arms coreArms result}
       (inputsTyped : NamedExprsElaborate program names home scope before arguments coreArguments inputs evaluated)
-      (nonempty : coreArms ≠ []) (covered : Covers program [argumentType inputs] (coreArms.map fun arm => [arm.1]))
+      (nonempty : coreArms ≠ []) (covered : Covers program home [argumentType inputs] (coreArms.map fun arm => [arm.1]))
       (bodies : NamedArmsElaborate program names home scope evaluated (argumentType inputs) result [] arms coreArms after) :
       NamedExpr.Elaborates program names home scope before (.applyPatterns arguments arms)
         (.applyPatterns inputs coreArguments coreArms) result after

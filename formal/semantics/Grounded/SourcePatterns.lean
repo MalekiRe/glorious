@@ -165,7 +165,7 @@ theorem SourceArmsChecked.admits {source : List (SourcePattern × Expr)}
     {context evaluated final : FlowContext} {arguments : List Expr} {inputs : List Ty} {result : Ty}
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs evaluated) (nonempty : source ≠ [])
-    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final) :
     HasType program home context (.applyPatterns inputs arguments checked.normalize.val) result final := by
   have normalizedNonempty : checked.normalize.val ≠ [] := by
@@ -181,7 +181,7 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     (checkedProgram : program.Checked)
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs evaluated) (nonempty : source ≠ [])
-    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation) {state : Configuration}
@@ -202,7 +202,7 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs evaluated)
     (nonempty : source ≠ [])
-    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
     (finite : FiniteCalls program (.applyPatterns inputs arguments checked.normalize.val))
     (environmentTyped : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
@@ -227,7 +227,7 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
     {arguments : List Expr} {inputs : List Ty} {result : Ty} {value : Value}
     (checkedProgram : program.Checked) (checked : SourceArmsChecked program home source)
     (argumentsTyped : HasTypes program home context arguments inputs evaluated) (nonempty : source ≠ [])
-    (covered : Covers program [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
+    (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)

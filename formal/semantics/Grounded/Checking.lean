@@ -108,7 +108,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       HasType program home before (.assign place value rest) result after
   | applyPatterns {home before evaluated after inputs arguments arms result}
       (argumentsTyped : HasTypes program home before arguments inputs evaluated)
-      (nonempty : arms ≠ []) (covered : Covers program [argumentType inputs] (arms.map fun arm => [arm.1]))
+      (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))
       (bodies : ArmsType program home evaluated (argumentType inputs) result [] arms after) :
       HasType program home before (.applyPatterns inputs arguments arms) result after
 

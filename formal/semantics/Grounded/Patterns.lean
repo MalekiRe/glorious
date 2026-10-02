@@ -23,6 +23,7 @@ def Head.Accessible (program : Program) (home : Module) : Head → Prop
   | .nominal identity tag => ∃ declaration schema,
       program.data identity = some declaration ∧ declaration.constructor tag = some schema ∧
       declaration.visibility.Allows declaration.home home ∧
+      declaration.ClosedAt home ∧
       ∀ field ∈ schema.residents, field.visibility.Allows declaration.home home
   | _ => True
 
@@ -56,12 +57,27 @@ def specializeRow (head : Head) (arity : Nat) : List Pattern → Option (List Pa
   | [] => none
   | pattern :: tail => (pattern.specialize head arity).map (· ++ tail)
 
-inductive Covers (program : Program) : List Ty → List (List Pattern) → Prop where
-  | done {rows : List (List Pattern)} (empty : [] ∈ rows) : Covers program [] rows
+/-- Closed-head coverage and owned deconstruction use the same declaration
+authority. An external non-exhaustive enum must be covered through whole values. -/
+def Ty.ClosedHeads (program : Program) (home : Module) : Ty → Prop
+  | .nominal identity => ∃ declaration, program.data identity = some declaration ∧ declaration.ClosedAt home
+  | _ => True
+
+/-- Rows that remain applicable independently of the observed constructor. -/
+def defaultRow : List Pattern → Option (List Pattern)
+  | .wildcard :: tail | .binder _ _ :: tail => some tail
+  | _ => none
+
+inductive Covers (program : Program) (home : Module) : List Ty → List (List Pattern) → Prop where
+  | done {rows : List (List Pattern)} (empty : [] ∈ rows) : Covers program home [] rows
+  | fallback {type : Ty} {types : List Ty} {rows : List (List Pattern)}
+      (remaining : Covers program home types (rows.filterMap defaultRow)) :
+      Covers program home (type :: types) rows
   | split {type : Ty} {types : List Ty} {rows : List (List Pattern)}
+      (closed : type.ClosedHeads program home)
       (branches : ∀ head fields, HeadType program head type fields →
-        Covers program (fields ++ types) (rows.filterMap (specializeRow head fields.length))) :
-      Covers program (type :: types) rows
+        Covers program home (fields ++ types) (rows.filterMap (specializeRow head fields.length))) :
+      Covers program home (type :: types) rows
 
 
 /-- A static witness distinguishes each clause from its source-order predecessors.
@@ -71,6 +87,69 @@ def Useful (program : Program) (type : Ty) (previous : List Pattern) (pattern : 
     ∀ earlier ∈ previous, earlier.matchValue value = none
 
 variable {program : Program} {home : Module}
+
+/-- A declared external non-exhaustive enum cannot be justified by enumerating
+its currently known constructors, even when there are no current variants. -/
+theorem Ty.ClosedHeads.nonexhaustive_external {identity : Nat} {declaration : DataDecl}
+    {variants : List Fields} (declared : program.data identity = some declaration)
+    (shape : declaration.shape = .enumeration variants true)
+    (external : home.package ≠ declaration.home.package) :
+    ¬ Ty.ClosedHeads program home (.nominal identity) := by
+  intro closed
+  obtain ⟨actual, found, authority⟩ := closed
+  cases Option.some.inj (found.symm.trans declared)
+  simp [DataDecl.ClosedAt, shape, external] at authority
+
+/-- Owned field matching requires the same closed-constructor authority used
+by exhaustive splitting; visibility alone cannot create that authority. -/
+theorem HeadType.closed_of_access {head : Head} {type : Ty} {fields : List Ty}
+    (shape : HeadType program head type fields) (access : head.Accessible program home) :
+    type.ClosedHeads program home := by
+  cases shape <;> try trivial
+  obtain ⟨declaration, schema, found, chosen, visible, closed, fields⟩ := access
+  exact ⟨declaration, found, closed⟩
+
+/-- Coverage of an open constructor space necessarily covers the remaining
+columns through constructor-independent rows. Known variants cannot discharge it. -/
+theorem Covers.open_requires_default {type : Ty} {types : List Ty} {rows : List (List Pattern)}
+    (covered : Covers program home (type :: types) rows) (openHeads : ¬ type.ClosedHeads program home) :
+    Covers program home types (rows.filterMap defaultRow) := by
+  cases covered with
+  | fallback remaining => exact remaining
+  | split closed branches => exact False.elim (openHeads closed)
+
+theorem Covers.nonexhaustive_requires_whole {identity : Nat} {declaration : DataDecl}
+    {variants : List Fields} {rows : List (List Pattern)}
+    (declared : program.data identity = some declaration)
+    (shape : declaration.shape = .enumeration variants true)
+    (external : home.package ≠ declaration.home.package)
+    (covered : Covers program home [.nominal identity] rows) :
+    ∃ row ∈ rows, defaultRow row = some [] := by
+  have remaining := covered.open_requires_default
+    (Ty.ClosedHeads.nonexhaustive_external declared shape external)
+  cases remaining with
+  | done included => exact List.mem_filterMap.mp included
+
+/-- For exact-linear external enums, owned matching can only bind the whole
+owner. Wildcards, constant comparison and field extraction cannot erase it.
+The negative permission may come from an explicit principal or resident fields. -/
+theorem PatternType.nonexhaustive_exact_forward {identity : Nat} {declaration : DataDecl}
+    {variants : List Fields} {pattern : Pattern} {bindings : List (BindingId × BindingType)}
+    (declared : program.data identity = some declaration)
+    (shape : declaration.shape = .enumeration variants true)
+    (external : home.package ≠ declaration.home.package)
+    (exactOwner : ¬ UsePermitted program.data .discard (.nominal identity))
+    (typed : PatternType program home pattern (.nominal identity) bindings) :
+    ∃ name, pattern = .binder name (.nominal identity) ∧
+      bindings = [(name, ⟨.nominal identity, false⟩)] := by
+  cases typed with
+  | wildcard discard => exact False.elim (exactOwner discard)
+  | binder name => exact ⟨name, rfl, rfl⟩
+  | literal resident discard => exact False.elim (exactOwner discard)
+  | node headShape access fields =>
+    exact False.elim (Ty.ClosedHeads.nonexhaustive_external declared shape external
+      (headShape.closed_of_access access))
+
 
 /-- Runtime typing produces the constructor signature consumed by both pattern
 binding and exhaustive dispatch; neither consumer guesses resident types. -/
@@ -164,7 +243,7 @@ theorem PatternType.bindings {pattern : Pattern} {type : Ty} {context : List (Bi
 /-- Constructor-space coverage constructs an actual first matching clause. No
 post-evaluation match result occurs among the admission premises. -/
 theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Value}
-    (covered : Covers program [type] (arms.map (fun arm => [arm.1])))
+    (covered : Covers program home [type] (arms.map (fun arm => [arm.1])))
     (typed : ValueHasType program value type) :
     ∃ bindings body, selectArm value arms = some (bindings, body) := by
   have lengths : ∀ {values : List Value} {types : List Ty},
@@ -237,7 +316,7 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
   have valueExt : ∀ (left right : Value), left.head = right.head → left.children = right.children → left = right := by
     intro left right heads children
     cases left <;> cases right <;> simp_all [Value.head, Value.children]
-  have matrixSound : ∀ {types : List Ty} {rows : List (List Pattern)}, Covers program types rows →
+  have matrixSound : ∀ {types : List Ty} {rows : List (List Pattern)}, Covers program home types rows →
       ∀ values, ValuesHaveTypes program values types →
       ∃ row ∈ rows, ∃ bindings, matchPatterns row values = some bindings := by
     intro types rows coverage
@@ -246,7 +325,27 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
       intro values typed
       cases typed
       exact ⟨[], contained, [], by simp [matchPatterns]⟩
-    | @split type types rows branches ih =>
+    | @fallback type types rows remaining ih =>
+      intro values typed
+      cases typed with
+      | @cons value values _ _ first rest =>
+        obtain ⟨row, included, bindings, matched⟩ := ih _ rest
+        obtain ⟨original, originalIncluded, selected⟩ := List.mem_filterMap.mp included
+        cases original with
+        | nil => simp [defaultRow] at selected
+        | cons pattern patterns =>
+          cases pattern with
+          | wildcard =>
+            simp only [defaultRow, Option.some.injEq] at selected
+            subst row
+            exact ⟨_, originalIncluded, bindings, by simp [matchPatterns, Pattern.matchValue, matched]⟩
+          | binder name slot =>
+            simp only [defaultRow, Option.some.injEq] at selected
+            subst row
+            exact ⟨_, originalIncluded, ⟨name, ⟨slot, false⟩, value⟩ :: bindings,
+              by simp [matchPatterns, Pattern.matchValue, matched]⟩
+          | literal _ _ | node _ _ => simp [defaultRow] at selected
+    | @split type types rows closed branches ih =>
       intro values typed
       cases typed with
       | @cons value values _ _ first rest =>

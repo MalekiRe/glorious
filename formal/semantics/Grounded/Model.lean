@@ -132,7 +132,7 @@ def Fields.index : Fields → FieldKey → Option Nat
 
 inductive DataShape where
   | «structure» (fields : Fields)
-  | enumeration (variants : List Fields)
+  | enumeration (variants : List Fields) (nonExhaustive : Bool := false)
 
 inductive Principal where
   | duplicable | affine | exact
@@ -143,16 +143,24 @@ structure DataDecl where
   shape : DataShape
   restriction : Option Principal := none
 
+/-- Non-exhaustive enums have a closed constructor space only inside their
+defining package. This does not grant access to private declarations or fields. -/
+def DataDecl.ClosedAt (declaration : DataDecl) (home : Module) : Prop :=
+  match declaration.shape with
+  | .structure _ => True
+  | .enumeration _ nonExhaustive => nonExhaustive = false ∨ home.package = declaration.home.package
+
+
 def DataDecl.schemas (declaration : DataDecl) : List Fields :=
   match declaration.shape with
   | .structure fields => [fields]
-  | .enumeration variants => variants
+  | .enumeration variants _ => variants
 
 /-- No variant tag denotes a struct; an explicit tag denotes an enum variant. -/
 def DataDecl.constructor (declaration : DataDecl) (tag : Option Nat) : Option Fields :=
   match declaration.shape, tag with
   | .structure fields, none => some fields
-  | .enumeration variants, some index => variants[index]?
+  | .enumeration variants _, some index => variants[index]?
   | _, _ => none
 
 theorem DataDecl.constructor_exists {declaration : DataDecl} {schema : Fields}
@@ -162,7 +170,7 @@ theorem DataDecl.constructor_exists {declaration : DataDecl} {schema : Fields}
     simp [DataDecl.schemas, shape] at member
     subst schema
     exact ⟨none, by simp [DataDecl.constructor, shape]⟩
-  | enumeration variants =>
+  | enumeration variants nonExhaustive =>
     have included : schema ∈ variants := by simpa [DataDecl.schemas, shape] using member
     obtain ⟨index, selected⟩ := List.getElem?_of_mem included
     exact ⟨some index, by simp [DataDecl.constructor, shape, selected]⟩
