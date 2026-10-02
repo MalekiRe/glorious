@@ -3491,6 +3491,15 @@ authority for every reached nested owned deconstruction at the module stored
 in its actual frame. For nominal heads this includes declaration and field
 visibility and the package authority required to open non-exhaustive enums.
 
+`HasType.pattern_external_exact_transfer` consumes this module-specific
+authority and the existing non-exhaustive ownership rule: any reached nested
+external non-exhaustive owner lacking discard permission must be matched by a
+whole-owner binder. It then constructs the actual entry step and fresh cell,
+including successful lexical lookup and the unchanged nominal resident. Thus
+the negative restriction feeds a positive runtime transfer theorem, not just
+an isolated static rejection. Permission absence may be structural or explicit.
+This theorem also passed the full build and standard-axiom inspection.
+
 Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of
 deconstruction, general preservation, source maximal behavior and nested binding
 found only standard Lean axioms. No examples, tests or parallel authority table

@@ -879,5 +879,42 @@ theorem HasType.pattern_deconstruction (checkedProgram : program.Checked)
   cases childPattern with
   | node shape access children => exact access
 
+/-- A reached external non-exhaustive exact owner is not discarded or opened:
+it is forwarded whole into an actual fresh binding, even when nested inside a
+larger selected pattern. The externality test uses the frame's source module. -/
+theorem HasType.pattern_external_exact_transfer (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
+    {pattern selected : Pattern} {body : Expr} {bindings : List BindingInput}
+    {identity : Nat} {tag : Option Nat} {fields : List Value} {declaration : DataDecl} {variants : List Fields}
+    (declared : program.data identity = some declaration)
+    (shape : declaration.shape = .enumeration variants true)
+    (external : patternHome.package ≠ declaration.home.package)
+    (exactOwner : ¬ UsePermitted program.data .discard (.nominal identity))
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
+    (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
+    (matched : pattern.matchValue (argumentValue values) = some bindings)
+    (focus : Pattern.SubjectAt pattern (argumentValue values) selected (.nominal identity tag fields)) :
+    ∃ name after storage position, selected = .binder name (.nominal identity) ∧
+      Step program ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ after ∧
+      lookup name after.environment.bindings = some storage ∧
+      after.environment.heap.read storage = some ⟨current.activation, .nominal identity, .resident (.nominal identity tag fields)⟩ ∧
+      storage.index = current.heap.next + position := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
+  obtain ⟨childType, childBindings, resident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
+  cases resident with
+  | nominal found chosen finite residents =>
+    obtain ⟨name, same, _⟩ := childPattern.nonexhaustive_exact_forward declared shape external exactOwner
+    subst selected
+    obtain ⟨after, storage, position, entered, _, mapped, stored, fresh, _⟩ :=
+      checked.pattern_binding checkedProgram store issued run missed matched focus
+    exact ⟨name, after, storage, position, rfl, entered, mapped, stored, fresh⟩
+
 end Grounded
 
