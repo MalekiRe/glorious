@@ -4150,3 +4150,31 @@ consume this property for every split of the matcher's reverse-order resident
 queue. All 30 strict jobs passed; inspected execution, source-ordering and
 admitted-behavior closures contain only the standard three Lean axioms. This
 does not add custom destructor execution or assume its termination.
+
+
+## Ordinary owned source uses select Copy or move
+
+A general inversion proof exposed another ownership mismatch: the former bare
+named-place elaboration admitted only Copy-capable types. Nonduplicable owners
+therefore required explicit `move`, contrary to language §5.3.
+
+The existing `NamedExpr.Elaborates` relation now has complementary guarded
+cases for ordinary syntax: Copy-capable types retain the existing Core read;
+nonduplicable types produce the existing Core move and its authoritative mask
+update. Explicit move still forces transfer without a non-Copy restriction.
+No additional source walker, capability producer, or runtime operation was added.
+
+`ordinary_exists` constructs the elaboration and static successor from only
+resolved pre-state availability, using `Initialization.write_exists` and
+`replaceBinding.exists` for the move case. `ordinary_progress` consumes it
+through general source soundness and preservation to construct an actual typed
+machine successor. The changed elaboration rule is also consumed by ordinary
+function/declaration/closure admission and maximal behavior.
+
+All 30 strict jobs passed. General inversion checks establish that ordinary
+Core reads require Copy, ordinary Core moves require non-Copy, and explicit
+moves always elaborate to Core moves. Inspected construction, progress, source
+soundness and admitted-behavior closures contain only the standard three Lean
+axioms. This establishes ordinary owned acquisition for the modeled type family;
+expected-reference-driven reborrowing remains part of the unimplemented
+reference/lifetime boundary, not an implicit exception in this rule.

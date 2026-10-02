@@ -97,6 +97,15 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (selection : state.initialization.selectFields program binding.slot.type fields = some available)
       (ready : available.Ready) (copyable : UsePermitted program.data .copy type) :
       NamedExpr.Elaborates program names home scope context (.read name fields) (.read ⟨binding.identity, fields⟩) type context
+  | readMove {scope before after name fields binding type state available updated}
+      (resolved : scope.resolve name = some binding)
+      (selected : lookup binding.identity before = some state)
+      (path : PathType program home binding.slot.type fields type)
+      (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+      (ready : available.Ready) (noncopyable : ¬ UsePermitted program.data .copy type)
+      (mask : state.initialization.writeFields program binding.slot.type fields .absent = some updated)
+      (context : replaceBinding binding.identity { state with initialization := updated } before = some after) :
+      NamedExpr.Elaborates program names home scope before (.read name fields) (.move ⟨binding.identity, fields⟩) type after
   | move {scope before after name fields binding type state available updated}
       (resolved : scope.resolve name = some binding)
       (selected : lookup binding.identity before = some state)
@@ -220,6 +229,8 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | group _ ih => exact .group (ih slots)
   | read resolved selected path selection ready copyable =>
     exact SourceScope.read_checked resolved slots selected path selection ready copyable
+  | readMove resolved selected path selection ready noncopyable mask context =>
+    exact SourceScope.move_checked resolved slots selected path selection ready mask context
   | move resolved selected path selection ready mask context =>
     exact SourceScope.move_checked resolved slots selected path selection ready mask context
   | sequence _ discard _ head tail =>
@@ -292,6 +303,57 @@ theorem NamedExpr.Elaborates.soundness {program : Program} {home : Module}
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   (elaborated.checked slots).soundness checkedProgram store issued run
 
+/-- Ordinary owned syntax chooses Copy exactly when the selected type permits
+it. Otherwise it constructs the same mask update as an explicit move. -/
+theorem NamedExpr.Elaborates.ordinary_exists {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before : FlowContext}
+    {name : Identifier} {fields : List FieldKey} {binding : SourceBinding} {type : Ty}
+    {state : BindingState} {available : Initialization}
+    (resolved : scope.resolve name = some binding)
+    (selected : lookup binding.identity before = some state)
+    (path : PathType program home binding.slot.type fields type)
+    (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+    (ready : available.Ready) :
+    ∃ core after, NamedExpr.Elaborates program names home scope before (.read name fields) core type after ∧
+      (UsePermitted program.data .copy type → core = .read ⟨binding.identity, fields⟩ ∧ after = before) ∧
+      (¬ UsePermitted program.data .copy type → core = .move ⟨binding.identity, fields⟩) := by
+  classical
+  by_cases copyable : UsePermitted program.data .copy type
+  · exact ⟨_, before, .read resolved selected path selection ready copyable,
+      fun _ => ⟨rfl, rfl⟩, fun denied => False.elim (denied copyable)⟩
+  · obtain ⟨updated, mask⟩ := Initialization.write_exists selection .absent
+    obtain ⟨after, context⟩ := replaceBinding.exists selected { state with initialization := updated }
+    exact ⟨_, after, .readMove resolved selected path selection ready copyable mask context,
+      fun allowed => False.elim (copyable allowed), fun _ => rfl⟩
+
+/-- Construct source acquisition and its actual typed successor from incoming
+readiness. Neither a future mask, successful move, nor executable realization
+is an admission premise. Explicit move remains independent of Copy capability. -/
+theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before : FlowContext}
+    {name : Identifier} {fields : List FieldKey} {binding : SourceBinding} {type : Ty}
+    {state : BindingState} {available : Initialization}
+    (resolved : scope.resolve name = some binding)
+    (selected : lookup binding.identity before = some state)
+    (path : PathType program home binding.slot.type fields type)
+    (selection : state.initialization.selectFields program binding.slot.type fields = some available)
+    (ready : available.Ready) (slots : before.slots = scope.context)
+    (checkedProgram : program.Checked) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    ∃ core after next,
+      NamedExpr.Elaborates program names home scope before (.read name fields) core type after ∧
+      (UsePermitted program.data .copy type → core = .read ⟨binding.identity, fields⟩ ∧ after = before) ∧
+      (¬ UsePermitted program.data .copy type → core = .move ⟨binding.identity, fields⟩) ∧
+      Step program ⟨environment, .expression core, []⟩ next ∧
+      ConfigurationTyped program after (.one type) next := by
+  obtain ⟨core, after, elaborated, copies, moves⟩ :=
+    NamedExpr.Elaborates.ordinary_exists (names := names) resolved selected path selection ready
+  have initial := elaborated.soundness slots checkedProgram store issued (.refl _)
+  rcases initial.2.1 with terminal | ⟨next, stepped⟩
+  · cases terminal
+  · exact ⟨core, after, next, elaborated, copies, moves, stepped,
+      initial.1.preservation checkedProgram stepped⟩
 /-- Completed executions preserve the declared result and caller environment;
 termination is not assumed by source admission. -/
 theorem NamedExpr.Elaborates.evaluation_soundness {program : Program} {home : Module}
