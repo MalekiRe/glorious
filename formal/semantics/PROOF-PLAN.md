@@ -3237,3 +3237,22 @@ resident-field destruction, divergence during hooks, references/loans and
 physical-resource behavior remain open; atomic retirement is not claimed to
 implement those missing semantics. No broad completion obligation is closed.
 
+## Disposal permission survives every intermediate retirement prefix
+
+`BindingMap.Disposable.release_prefix` now derives the actual cell and its
+residual disposal permission immediately before each retirement in a scope.
+Strict acquisition order excludes the current identity from the completed
+prefix; the shared heap-framing theorem preserves its actual resident. No
+intermediate readiness, permission or heap realization is supplied.
+
+Both `Configuration.OwnershipSafe.scope_retirement` and `return_retirement`
+consume this producer and export the stronger intermediate-state guarantee.
+Their ownership-safety input is already derived by general source-prefix
+soundness and maximal source behavior. This extends the real retirement
+consumers, rather than merely recording a separate pre-state permission list.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of the
+new producer, both consumers and public source soundness found only standard
+Lean axioms. No examples or unit tests were added. Custom Drop and field-by-field
+destruction remain outside the current logical retirement operation.
+

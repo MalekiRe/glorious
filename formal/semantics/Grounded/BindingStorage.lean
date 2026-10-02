@@ -395,6 +395,33 @@ theorem releaseBindings.prefix_step {heap after : RuntimeHeap StorageCell} {bind
   exact (List.pairwise_cons.mp (List.pairwise_append.mp ordered).2.1).1
 
 
+/-- Earlier retirements preserve the actual resident and its residual disposal
+permission until this owner's turn. No intermediate heap readiness is assumed. -/
+theorem BindingMap.Disposable.release_prefix
+    (disposition : BindingMap.Disposable program heap bindings)
+    {after : RuntimeHeap StorageCell} (released : releaseBindings heap bindings = some after)
+    (ordered : bindings.releaseOrder.Pairwise (fun newer older => older.index < newer.index))
+    {front back : List StorageId} {identity : StorageId}
+    (split : bindings.releaseOrder = front ++ identity :: back) :
+    ∃ middle next, heap.retireMany front = some middle ∧
+      middle.retire identity = some next ∧ next.retireMany back = some after ∧
+      (∀ older ∈ back, older.index < identity.index) ∧
+      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
+  obtain ⟨middle, next, prefixRun, retired, suffixRun, older⟩ :=
+    releaseBindings.prefix_step released ordered split
+  have member : identity ∈ bindings.map Prod.snd := by
+    apply BindingMap.mem_releaseOrder.mp
+    rw [split]
+    simp
+  obtain ⟨cell, found, permission⟩ := disposition identity member
+  have outside : identity ∉ front := by
+    intro included
+    rw [split] at ordered
+    exact Nat.lt_irrefl _ ((List.pairwise_append.mp ordered).2.2 identity included identity (by simp))
+  exact ⟨middle, next, prefixRun, retired, suffixRun, older, cell,
+    (RuntimeHeap.retireMany_outside prefixRun outside).trans found, permission⟩
+
+
 /-- A live nondiscardable descendant protects its entire containing cell from
 retirement, including when other fields have been consumed. -/
 theorem BindingMap.Disposable.release_preserves_nondiscardable

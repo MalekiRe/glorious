@@ -723,12 +723,13 @@ theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {aft
     (split : BindingMap.releaseOrder (List.take count before.bindings) = front ++ identity :: back) :
     ∃ middle next, before.heap.retireMany front = some middle ∧
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
-      ∀ older ∈ back, older.index < identity.index := by
+      (∀ older ∈ back, older.index < identity.index) ∧
+      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
   cases step with
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
     cases same
-    exact releaseBindings.prefix_step released safe.2 split
+    exact BindingMap.Disposable.release_prefix safe.1 released safe.2 split
 
 /-- Function return consumes the same release producer as lexical scope exit;
 parameter-list order cannot override actual newest-owner-first retirement. -/
@@ -740,12 +741,13 @@ theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {af
     (split : before.bindings.releaseOrder = front ++ identity :: back) :
     ∃ middle next, before.heap.retireMany front = some middle ∧
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
-      ∀ older ∈ back, older.index < identity.index := by
+      (∀ older ∈ back, older.index < identity.index) ∧
+      ∃ cell, middle.read identity = some cell ∧ cell.resident.Disposable program cell.type := by
   cases step with
   | restore restored =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
     cases same
-    exact releaseBindings.prefix_step released safe.2 split
+    exact BindingMap.Disposable.release_prefix safe.1 released safe.2 split
 
 /-- Every retained scope is realized in the current heap, not merely the active
 scope or the outermost caller. Traversing frames does not execute pending code. -/
