@@ -3295,3 +3295,63 @@ by logical retirement. The declarations checked by source admission remain the
 decoded fragment described above, not the complete normative language or library.
 No broad completion obligation is marked complete.
 
+## Explicit normative completion audit after storage accountability
+
+Result: **not complete**. The audit compared the public theorem signatures and
+admission premises with language §§2–21 and the language/library conformance
+inventories (L01–L48 and S01–S96). Kernel-checked proofs of the decoded fragment
+are not evidence that missing source constructs have semantics. No conformance
+case is credited merely because its input cannot be expressed or admitted.
+
+The checked `Ty` constructors are unit, integer, character, tuple, array and
+nominal identity. `NamedExpr` has direct calls and immediate pattern application,
+not callable values, borrows, effects, labels or foreign leaves. `Program` carries
+target, aliases, constants, nominal data and direct functions. `Program.Checked`
+checks these products. `SourceClosure.Admitted` derives direct-function checking
+from source elaboration, but still requires supplied nominal/alias validity and
+constant checking through `NamedProgramAdmitted`. It is not full source admission.
+
+| Completion family | Proved boundary | Missing normative boundary |
+| --- | --- | --- |
+| Ownership, partial initialization, destruction (§7) | Structural Copy/discard, residual masks, ordered logical retirement, complete new-cell accounting | Custom Drop, reverse field destruction, hook divergence, cleanup-bearing nonlocal outcomes and correlated exact states |
+| Namespaces, source closure, lexing (§§2–3,20) | Decoded modules, direct-callable resolution, visibility, selected preludes, identifier/scalar validation | Complete namespace/declaration inventory, byte-level lexing/parsing and all literal materialization |
+| Types, aliases, representation (§4) | Finite owned layouts, nominal constructors, aliases and external non-exhaustive matching restrictions | Generic type families, references, pointers, callable types, floats and exact target/ABI layouts |
+| Application and patterns (§§5–6) | Ordered direct calls, named patterns, first-arm selection and coverage | First-class/contextual callables, receiver modes and full callable inference |
+| Captures and guarded control (§8) | Ordinary argument compatibility and consumption framing | Captured environments in the same invocation relation, guarded alternative ownership and nonescape |
+| Lifetimes, borrowing, refinements (§9) | Stable logical addresses and retired-address exclusion | Loan creation/termination, reference carriers, unique holes, NLL, higher-ranked lifetimes and refinement evidence |
+| Effects and resumptions (§10) | No claim | Exact-instance routing, deep handlers, quantities, replay, cancellation and terminal cleanup |
+| Labels and proper tail calls (§§11–12) | Recursive ordinary call safety, not a tail-space bound | Generative destinations, protected transfers, fusion and bounded live control |
+| Traits and generics (§13) | Monomorphic structural permission derivation | Kinds, substitutions, coherence, associated projections, higher ranks and bounded inference |
+| Operators and conversion (§14) | Structural constant normalization for the decoded fragment | Fixity resolution, generic constants, conversion contracts and scalar operation laws |
+| Unsafe memory and safe libraries (§15) | Logical heap identity and resident movement only | Physical allocation/provenance, raw operations and private invariant establishment |
+| Foreign boundaries (§16) | No claim | C layouts, configured imports, callbacks, retention and cross-boundary lifetimes |
+| VM/native ABI and compilation (§§17,19) | Source-to-logical-machine preservation/progress | Artifact admission, concrete representation, shared backing storage and backend refinement |
+| Failures, determinism and limits (§18) | Deterministic logical steps and finite/infinite exclusivity | Distinct abort/fault/resource outcomes, host nondeterminism and bounded static solvers |
+
+Language L01–L11 and L19–L21 intersect the current fragment only partially;
+L13's clause scope is modeled but its bottom clause is not. These are not full
+conformance results. L12, L14–L18 and L22–L48 require boundaries absent above.
+In particular, L22 cannot be inferred from cell-retirement order, L38 cannot be
+inferred from ordinary recursive safety, and L43 cannot be inferred from logical
+storage identity.
+
+Library S01–S30 require canonical generic declarations, traits, first-class
+control or labels beyond the direct-call fragment. S31–S35 require scalar
+operation/conversion/float laws, not merely integer literal bounds. S36–S64
+require actual text, view, collection, iterator, algorithm, hashing and formatting
+contracts. S65–S79 require physical/foreign storage and bounded compiler-library
+contracts. S80–S96 require hosted effects, I/O and task/resumption protocols.
+Owned-value lemmas support some prerequisites (for example S07/S21 wildcard or
+discard restrictions), but do not establish those source-owned library APIs.
+The optional compiler-library profile does not become a mandatory bootstrap
+profile through this inventory; obligations apply when the profile is supported.
+
+Audit evidence: Lean printed the actual type/source/program constructors and
+admission definitions, and checked the general preservation, progress and source
+behavior signatures. The independent 30-job build and 4,511-declaration axiom
+audit above establish proof integrity of that scope, not its normative adequacy.
+The completion audit is performed; all fourteen semantic completion families
+remain open. Continue the authoritative ownership/cleanup dependency chain,
+including reference semantics needed by custom Drop, rather than treating this
+negative audit or another isolated lemma as whole-language completion.
+
