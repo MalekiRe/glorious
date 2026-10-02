@@ -108,6 +108,19 @@ theorem BindingContextApprox.keys {data : DataDeclarations} {before after : List
     (approximation : BindingContextApprox data before after) : after.map Prod.fst = before.map Prod.fst := by
   simpa only [List.map_map, Function.comp_def] using congrArg (List.map Prod.fst) approximation.slots
 
+/-- A join preserves exactly the permission to retire an entire context,
+not just the permission of one selected place. -/
+theorem BindingContextApprox.disposable_iff {data : DataDeclarations}
+    {before after : List (BindingId × BindingState)}
+    (joined : BindingContextApprox data before after) :
+    (∀ binding ∈ before, binding.2.Disposable data) ↔
+      (∀ binding ∈ after, binding.2.Disposable data) := by
+  induction joined with
+  | nil => rfl
+  | cons head tail ih =>
+    simp only [List.forall_mem_cons]
+    exact and_congr head.disposable_iff ih
+
 theorem BindingMap.Typed.approximate {program : Program} {heap : RuntimeHeap StorageCell}
     {activation : ActivationId} {bindings : BindingMap} {before after : List (BindingId × BindingState)}
     (typed : BindingMap.Typed program heap activation bindings before) (approximation : BindingContextApprox program.data before after) :

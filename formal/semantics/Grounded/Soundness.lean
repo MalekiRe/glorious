@@ -120,7 +120,9 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       (∀ identity ∈ (List.take count current.bindings).map Prod.snd, after.heap.Retired identity) ∧
       BindingMap.Typed program after.heap after.activation after.bindings branch ∧
       BindingMap.Typed program after.heap after.activation after.bindings joined ∧
-      BindingContextApprox program.data branch joined ∧
+      (BindingContextApprox program.data branch joined ∧
+        ((∀ binding ∈ branch, binding.2.Disposable program.data) ↔
+          (∀ binding ∈ joined, binding.2.Disposable program.data))) ∧
       (∀ address ∈ after.bindings.map Prod.snd, after.heap.read address = current.heap.read address) ∧
       (∀ front identity back,
         BindingMap.releaseOrder (List.take count current.bindings) = front ++ identity :: back →
@@ -223,7 +225,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             (by simpa using afterTyped)
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.2.1, safe.2.2, step, original.run checkedProgram step, retired,
-            branchTyped, branchTyped.approximate joined, joined, preserved,
+            branchTyped, branchTyped.approximate joined, ⟨joined, joined.disposable_iff⟩, preserved,
             (fun _ _ _ split => safe.scope_retirement (Run.scope (stack := []) produced) split), ?_, ?_, ?_, ?_, ?_⟩
           · obtain ⟨trace, start, finish, steps, states⟩ := original.scope_retirement_trace
             refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), ?_, ?_⟩

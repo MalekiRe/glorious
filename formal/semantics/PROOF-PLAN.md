@@ -4444,13 +4444,15 @@ preserves legal residual cleanup. Both derive from the same approximation
 constructors, including every nominal variant and explicit exact-shell
 consumption. No runtime realization is assumed by this static theorem.
 
-`HasType.scope_join_preserves_ownership` consumes the equivalence for every
-selected descendant in actual reached branch and joined contexts. Existing
-unknown-state and explicit exact-shell guarantees remain unchanged. The two
-directional inductions are private; the public boundary exposes the complete
-equivalence. All 30 strict Lean jobs passed; inspected join, general soundness
-and public source-behavior closures use only the standard Lean axioms. Custom
-destruction, reference restoration and whole-language completion remain open.
+`BindingContextApprox.disposable_iff` lifts the same equivalence to permission
+to retire every binding in a context. `HasType.scope_join_preserves_ownership`
+consumes both results for the actual reached branch and joined contexts and
+their selected descendants. Existing unknown-state and explicit exact-shell
+guarantees remain unchanged. The directional mask inductions are private;
+public boundaries expose the complete equivalence. All 30 strict Lean jobs
+passed; inspected context, join, general soundness and public source-soundness
+closures use only the standard Lean axioms. Custom destruction, reference
+restoration and whole-language completion remain open.
 
 ## Protected cleanup queues retain disposal authority before resumption
 
