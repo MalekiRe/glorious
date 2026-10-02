@@ -133,6 +133,7 @@ theorem ValueHasType.principal {program : Program} {value : Value} {before after
     exact (classified permission).mp (returned.use_permission original allowed)
   · intro allowed
     exact original.use_permission returned ((classified permission).mpr allowed)
+
 def Value.head : Value → Head
   | .unit => .unit
   | .integer type number => .integer type number
@@ -183,6 +184,17 @@ theorem ValueHasType.finite {value : Value} {type : Ty}
     cases member with
     | head => exact headIH
     | tail _ member => exact tailIH type member
+
+/-- A returned resident determines one principal under every valid typing.
+Finite permission decisions come from the resident, not a future-state premise. -/
+theorem ValueHasType.principal_exists {program : Program} {value : Value} {type : Ty}
+    (resident : ValueHasType program value type) :
+    ∃ principal, type.HasPrincipal program.data principal ∧
+      ∀ originalType originalPrincipal, ValueHasType program value originalType →
+        originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal := by
+  obtain ⟨principal, classified, _⟩ := Ty.principal_exists resident.finite
+  exact ⟨principal, classified, fun _ _ original originalClass =>
+    (original.principal resident originalClass).unique classified⟩
 
 
 theorem ValuesHaveTypes.member_permission {values : List Value} {types : List Ty}

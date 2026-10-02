@@ -33,6 +33,9 @@ theorem HasType.behavior (checkedProgram : program.Checked) {context final : Flo
     (issued : environment.supply.Issued environment.activation) :
     (∃ after value, Evaluates program environment expression value after ∧
       ValueHasType program value type ∧
+      (∃ principal, type.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧

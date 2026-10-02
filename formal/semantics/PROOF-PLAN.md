@@ -4325,3 +4325,15 @@ and source-closure consumers carry the result with their constructed execution,
 heap framing and execution uniqueness. No result typing or principal is supplied
 as a future-state assumption. All 30 strict jobs and inspected source-correctness
 and maximal-behavior proof dependencies passed after this integration.
+
+Principal construction now reaches unrestricted maximal behavior as well, not
+only the optional finite-call corollary. `ConfigurationTyped.behavior` produces
+the unique returned principal in its normal alternative from the preserved
+resident; its infinite alternative keeps the existing per-prefix ownership,
+framing and allocation-tracking guarantees. General Core/source behavior,
+resolved invocation and compatible-input call behavior all consume that result.
+Neither termination nor successful callee execution is a new premise.
+The finite-call theorem reuses the same resident producer. All 30 strict jobs
+and the inspected general/source/invocation behavior axiom closures passed.
+This closes this result-principal integration, not custom Drop or any of the
+fourteen whole-language completion obligations.

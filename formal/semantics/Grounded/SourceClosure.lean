@@ -931,6 +931,9 @@ theorem SourceClosure.Admitted.behavior {packages : List PackageSource} {closure
     (issued : environment.supply.Issued environment.activation) :
     (∃ after value, Evaluates program environment core value after ∧
       ValueHasType program value type ∧
+      (∃ principal, type.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
       BindingMap.Typed program after.heap after.activation after.bindings final ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
@@ -1830,7 +1833,11 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
     (issued : environment.supply.Issued environment.activation) :
     declaration.visibility.Allows declaration.home caller ∧
     ((∃ after value, Run program ⟨environment, .results values, [.call declaration]⟩ ⟨after, .result value, []⟩ ∧
-      ValueHasType program value declaration.result ∧ after.scope = environment.scope ∧
+      ValueHasType program value declaration.result ∧
+      (∃ principal, declaration.result.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
+      after.scope = environment.scope ∧
       BindingMap.Typed program after.heap after.activation after.bindings context ∧
       AddressedEnvironment.ConsumptionFrame program context.slots environment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
@@ -1855,8 +1862,8 @@ theorem SourceClosure.Admitted.invocation_behavior {packages : List PackageSourc
   have entry : ConfigurationTyped program context (.one declaration.result)
       ⟨environment, .results values, [.call declaration]⟩ :=
     .intro store issued (.results arguments) (.cons (.call declared) .nil)
-  rcases entry.behavior admitted.checked with ⟨after, value, run, typed, stored, framed, safe, external, retired⟩ | ⟨trace, infinite, safe⟩
-  · refine .inl ⟨after, value, run, typed, run.outer_scope, stored, framed, safe, external,
+  rcases entry.behavior admitted.checked with ⟨after, value, run, typed, principal, stored, framed, safe, external, retired⟩ | ⟨trace, infinite, safe⟩
+  · refine .inl ⟨after, value, run, typed, principal, run.outer_scope, stored, framed, safe, external,
       run.call_heap ?_, retired, run.call_cleanup⟩
     intro identity member
     obtain ⟨cell, found⟩ := store.live identity member
@@ -1894,6 +1901,9 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
         ∀ identity cell, middle.heap.read identity = some cell → state.environment.heap.read identity = some cell) ∧
       ((∃ after value, Evaluates program environment (.call identity (inputs.map Prod.fst)) value after ∧
         ValueHasType program value declaration.result ∧
+        (∃ principal, declaration.result.HasPrincipal program.data principal ∧
+          ∀ originalType originalPrincipal, ValueHasType program value originalType →
+            originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
         BindingMap.Typed program after.heap after.activation after.bindings final ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
         (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
@@ -1918,14 +1928,14 @@ theorem SourceClosure.Admitted.compatible_call_behavior {packages : List Package
   refine ⟨final, middle, values, bindings, checked, evaluated, observed, prepared, entered, ?_, ?_⟩
   · intro state suffix identity cell found
     exact (Run.step (Step.callInputs prepared) suffix).call_frame found
-  rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, stored, _, safe, _, _⟩ | ⟨trace, infinite, _⟩
+  rcases typed.behavior admitted.checked with ⟨after, value, returned, resident, principal, stored, _, safe, _, _⟩ | ⟨trace, infinite, _⟩
   · have run := entered.trans returned
     have framed := (checked.soundness admitted.checked store issued run).2.2.1
     have bounded : ∀ identity ∈ environment.bindings.map Prod.snd, identity.index < environment.heap.next := by
       intro identity member
       obtain ⟨cell, found⟩ := store.live identity member
       exact environment.heap.bounded _ _ found
-    refine .inl ⟨after, value, run, resident, stored, framed, safe, run.external_frame,
+    refine .inl ⟨after, value, run, resident, principal, stored, framed, safe, run.external_frame,
       (Run.step (Step.callInputs prepared) returned).call_heap ?_,
       run.return_retires_all bounded, returned.body_return_retires⟩
     intro identity member

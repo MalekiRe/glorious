@@ -587,10 +587,8 @@ theorem NamedExpr.Elaborates.correctness {program : Program} {home : Module}
         other = value ∧ otherAfter = after := by
   obtain ⟨value, after, executed, resident, afterTyped, afterIssued, framed, unique⟩ :=
     Grounded.correctness checkedProgram (elaborated.checked slots) finite store issued
-  obtain ⟨principal, classified, _⟩ := Ty.principal_exists resident.finite
   exact ⟨value, after, executed, resident, afterTyped, afterIssued, framed,
-    ⟨principal, classified, fun _ _ original originalClass =>
-      (original.principal resident originalClass).unique classified⟩, unique⟩
+    resident.principal_exists, unique⟩
 
 
 end Grounded

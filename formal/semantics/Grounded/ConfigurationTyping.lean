@@ -1458,6 +1458,9 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
     (typed : ConfigurationTyped program context (.one type) before) :
     (∃ after value, Run program before ⟨after, .result value, []⟩ ∧
       ValueHasType program value type ∧
+      (∃ principal, type.HasPrincipal program.data principal ∧
+        ∀ originalType originalPrincipal, ValueHasType program value originalType →
+          originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal) ∧
       BindingMap.Typed program after.heap after.activation after.bindings context ∧
       AddressedEnvironment.ConsumptionFrame program context.slots before.outerEnvironment after ∧
       (⟨after, .result value, []⟩ : Configuration).OwnershipSafe program ∧
@@ -1478,7 +1481,7 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
     have current := typed.run checkedProgram run
     obtain ⟨after, value, same, store, _, resident⟩ := current.normal_form done
     subst state
-    refine ⟨after, value, run, resident, store, typed.consumption_run checkedProgram run,
+    refine ⟨after, value, run, resident, resident.principal_exists, store, typed.consumption_run checkedProgram run,
       current.ownership_safe, run.external_frame, run.return_retires_all ?_⟩
     intro identity member
     obtain ⟨cell, found⟩ := typed.live_scopes before.continuation [] (by simp) identity member
