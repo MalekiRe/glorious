@@ -41,6 +41,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     cases closed with | tuple first rest =>
       obtain ⟨value, resident, heads⟩ := headIH first
       obtain ⟨values, residents, tails⟩ := tailIH rest
+      rw [resident.sequenceResult _]
       refine ⟨_, .tuple resident residents, ?_⟩
       intro environment
       obtain ⟨middle, headRun, headScope, headHeap⟩ := heads environment

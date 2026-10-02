@@ -5199,3 +5199,20 @@ bottom-initializer and public safety proofs use only propext, Classical.choice
 and Quot.sound. Runtime transitions are unchanged. Operand-list outcome
 propagation and unreachable continuation checking remain open, as do all
 fourteen whole-language completion families.
+
+## Tuple-head result composition
+
+Tuple checking, source elaboration and the physical tuple-head frame now use
+Ty.sequenceResult for the head computation. A bottom head makes the entire
+tuple expression bottom rather than inventing a normal tuple result. On an
+actual head return, its typed resident recovers the ordinary tuple result before
+the machine evaluates the tail. Structural termination uses the same witness.
+
+SourceClosure.Admitted.bottom_tuple_head derives source admission, infinite
+execution, prefix ownership/storage safety and pending-frame nonresumption from
+general source soundness. It assumes no tuple resident or tail execution.
+All 30 strict Lean jobs passed; the new theorem and inspected public soundness,
+behavior and cleanup proofs use only propext, Classical.choice and Quot.sound.
+Runtime transitions and cleanup permissions are unchanged. Outcome propagation
+from an operand list (including tuple tails) and unreachable-continuation
+checking remain open, along with all fourteen completion families.

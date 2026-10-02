@@ -189,7 +189,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
   | tuple {scope before middle after head tail first rest type types}
       (initial : NamedExpr.Elaborates program names home scope before head first type middle)
       (continued : NamedExprsElaborate program names home scope middle tail rest types after) :
-      NamedExpr.Elaborates program names home scope before (.tuple head tail) (.tuple first rest) (.tuple type types) after
+      NamedExpr.Elaborates program names home scope before (.tuple head tail) (.tuple first rest) (type.sequenceResult (.tuple type types)) after
   | project {scope before after source core key parent type index residual}
       (body : NamedExpr.Elaborates program names home scope before source core parent after)
       (discard : residual.Disposable program.data parent)

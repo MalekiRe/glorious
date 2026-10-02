@@ -190,7 +190,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (checked : HasType program home restored rest result after) :
       FrameTyped program heap supply activation before (.one actualType) (.assign home place rest) after (.one (actualType.sequenceResult result))
   | tupleHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
-      FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (.tuple first types))
+      FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (first.sequenceResult (.tuple first types)))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
       FrameTyped program heap supply activation context (.many types) (.tupleTail head) context (.one (.tuple first types))
   | project {home context parent result key index residual}
@@ -571,6 +571,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | tupleHead checked =>
+            rw [resident.sequenceResult _] at tail
             exact .intro store issued (.arguments checked) (.cons (.tupleTail resident) tail)
     | tupleTail =>
       cases code with | results residents =>

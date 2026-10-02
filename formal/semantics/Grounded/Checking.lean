@@ -152,7 +152,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
   | tuple {home before middle after head tail first rest}
       (headTyped : HasType program home before head first middle)
       (tailTyped : HasTypes program home middle tail rest after) :
-      HasType program home before (.tuple head tail) (.tuple first rest) after
+      HasType program home before (.tuple head tail) (first.sequenceResult (.tuple first rest)) after
   | project {home before after body key parent type index residual}
       (source : HasType program home before body parent after)
       (discard : residual.Disposable program.data parent)

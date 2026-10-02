@@ -1664,6 +1664,35 @@ theorem SourceClosure.Admitted.bottom_sequence {packages : List PackageSource}
   obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
   exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
+/-- A nonreturning tuple head prevents construction of a tuple value and
+resumption of pending frames. No execution of the remaining operands is assumed. -/
+theorem SourceClosure.Admitted.bottom_tuple_head {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle final : FlowContext}
+    {sourceHead : NamedExpr} {sourceTail : List NamedExpr} {head : Expr} {tail : List Expr} {types : List Ty}
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceHead head .never middle)
+    (continued : NamedExprsElaborate program closure.functionNames home scope middle sourceTail tail types final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.tuple sourceHead sourceTail) (.tuple head tail) .never final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.tuple head tail), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.tuple head tail), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.tuple head tail), stack⟩ (done.extend stack) := by
+  have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.tuple sourceHead sourceTail) (.tuple head tail) .never final := .tuple bottom continued
+  obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
+  exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 
 /-- A bottom RHS admits assignment without permission to discard the old
 resident. No return, replacement value or successful cleanup is assumed. -/
