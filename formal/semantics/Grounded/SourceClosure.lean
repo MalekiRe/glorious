@@ -8,18 +8,39 @@ namespace Grounded
 
 abbrev SourcePath := List String
 
+/-- Decoded nominal declarations retain their source name and restriction.
+Field types are resolved Core types at this boundary; type-path elaboration is
+separate. The declaring module is assigned only by source inclusion. -/
+structure DataSyntax where
+  name : Identifier
+  visibility : Visibility
+  shape : DataShape
+  restriction : Option Principal := none
+
+def DataSyntax.elaborate (source : DataSyntax) (home : Module) : DataDecl :=
+  ⟨home, source.visibility, source.shape, source.restriction⟩
+
+def DataSyntax.ValidAt (source : DataSyntax) (home : Module) : Prop :=
+  source.visibility.ValidAt home ∧
+    ∀ schema ∈ (source.elaborate home).schemas, ∀ field ∈ schema.residents,
+      field.visibility.ValidAt home
+
+
 inductive ModuleSource where
   | body (functions : List FunctionSyntax) (imports : List FunctionImportSyntax)
-      (children : List (Identifier × Visibility × Option ModuleSource))
+      (children : List (Identifier × Visibility × Option ModuleSource)) (data : List DataSyntax)
 
 def ModuleSource.functions : ModuleSource → List FunctionSyntax
-  | .body functions _ _ => functions
+  | .body functions _ _ _ => functions
 
 def ModuleSource.imports : ModuleSource → List FunctionImportSyntax
-  | .body _ imports _ => imports
+  | .body _ imports _ _ => imports
 
 def ModuleSource.children : ModuleSource → List (Identifier × Visibility × Option ModuleSource)
-  | .body _ _ children => children
+  | .body _ _ children _ => children
+
+def ModuleSource.data : ModuleSource → List DataSyntax
+  | .body _ _ _ data => data
 
 abbrev SourceFiles := List (SourcePath × ModuleSource)
 
@@ -75,11 +96,11 @@ def childFile (directory : SourcePath) (name : Identifier) : SourcePath :=
 mutual
 inductive ModuleSource.Loads (files : SourceFiles) :
     Module → SourcePath → SourcePath → ModuleSource → List LoadedModule → Prop where
-  | body {home origin directory functions imports children descendants}
+  | body {home origin directory functions imports children data descendants}
       (distinct : (children.map Prod.fst).Nodup)
       (included : ModuleChildrenLoad files home origin directory children descendants) :
-      ModuleSource.Loads files home origin directory (.body functions imports children)
-        (⟨home, origin, directory, .body functions imports children⟩ :: descendants)
+      ModuleSource.Loads files home origin directory (.body functions imports children data)
+        (⟨home, origin, directory, .body functions imports children data⟩ :: descendants)
 
 inductive ModuleChildrenLoad (files : SourceFiles) : Module → SourcePath → SourcePath →
     List (Identifier × Visibility × Option ModuleSource) → List LoadedModule → Prop where
@@ -525,6 +546,20 @@ theorem SourceClosure.functionNames_selected {packages : List PackageSource} (cl
     SourceClosure.bindingNames_selected]
 
 
+/-- Nominal identities are positions in the source-inclusion emission order.
+Names and declaration owners come from the same included module product. -/
+def SourceClosure.nominals {packages : List PackageSource} (closure : SourceClosure packages) :
+    List (Identifier × DataDecl) :=
+  closure.modules.flatMap fun loaded => loaded.source.data.map fun source =>
+    (source.name, source.elaborate loaded.home)
+
+def SourceClosure.NominalsAdmitted {packages : List PackageSource} (closure : SourceClosure packages)
+    (program : Program) : Prop :=
+  program.data = (fun identity => (closure.nominals[identity]?).map Prod.snd) ∧
+    (closure.nominals.map fun entry => (entry.2.home, entry.1)).Nodup ∧
+    ∀ loaded ∈ closure.modules, ∀ source ∈ loaded.source.data, source.ValidAt loaded.home
+
+
 /-- Static module inclusion feeds the same elaboration and machine contract.
 There is no independently supplied module list or declaration-owner table. -/
 def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClosure packages)
@@ -535,7 +570,12 @@ def SourceClosure.Admitted {packages : List PackageSource} (closure : SourceClos
     ModuleReachable closure.modules entry.home entry.target) ∧
   FunctionImportsValid closure.homes closure.functions closure.imports ∧
   NamedProgramAdmitted closure.functionNames closure.functions program ∧
-  ∀ loaded ∈ closure.modules, loaded.Valid
+  (∀ loaded ∈ closure.modules, loaded.Valid) ∧ closure.NominalsAdmitted program
+
+theorem SourceClosure.Admitted.modules_valid {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program) :
+    ∀ loaded ∈ closure.modules, loaded.Valid := admitted.2.2.2.2.2.1
+
 
 /-- Package/namespace validation and emitted body products construct ordinary
 source admission, or identify an exact source-indexed cleanup obligation.
@@ -555,12 +595,13 @@ theorem SourceClosure.disposition_cases {packages : List PackageSource}
     (functions : program.functions = fun identity => (outputs.map Prod.fst)[identity]?)
     (data : program.data.Valid program.target)
     (aliases : program.aliases.Valid program.target program.data)
-    (constants : program.ConstantsChecked) :
+    (constants : program.ConstantsChecked)
+    (nominals : closure.NominalsAdmitted program) :
     (closure.Admitted program ∧ program.Checked) ∨
       NamedCleanupRejected program closure.functionNames closure.functions outputs := by
   rcases NamedProgramAdmitted.disposition_cases distinct bodies functions data aliases constants with
     ⟨admitted, checked⟩ | rejected
-  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules⟩, checked⟩
+  · exact .inl ⟨⟨packagesDistinct, dependencies, access, imports, admitted, modules, nominals⟩, checked⟩
   · exact .inr rejected
 
 
@@ -570,7 +611,7 @@ theorem SourceClosure.Admitted.root_visibility {packages : List PackageSource}
     (∀ declaration ∈ loaded.source.functions, declaration.visibility ≠ .parent) ∧
     (∀ source ∈ loaded.source.imports, source.visibility ≠ .parent) ∧
     (∀ child ∈ loaded.source.children, child.2.1 ≠ .parent) := by
-  have valid := (admitted.2.2.2.2.2 loaded included).1
+  have valid := (admitted.modules_valid loaded included).1
   exact ⟨fun declaration member => (valid.1 declaration member).not_parent_at_root root,
     fun source member => (valid.2.1 source member).not_parent_at_root root,
     fun child member => (valid.2.2 child member).not_parent_at_root root⟩
@@ -580,6 +621,54 @@ theorem SourceClosure.Admitted.checked {packages : List PackageSource} {closure 
     {program : Program} (admitted : closure.Admitted program) : program.Checked :=
   admitted.2.2.2.2.1.checked
 
+/-- Runtime lookup is exactly indexed source emission, in both directions. -/
+theorem SourceClosure.Admitted.nominal_selected {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} :
+    program.data identity = some declaration ↔
+      ∃ name, closure.nominals[identity]? = some (name, declaration) := by
+  rw [admitted.2.2.2.2.2.2.1]
+  simp only [Option.map_eq_some_iff]
+  constructor
+  · rintro ⟨⟨name, emitted⟩, selected, rfl⟩
+    exact ⟨name, selected⟩
+  · rintro ⟨name, selected⟩
+    exact ⟨(name, declaration), selected, rfl⟩
+
+/-- No ambient nominal declaration can enter the admitted runtime table. -/
+theorem SourceClosure.Admitted.nominal_origin {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} (declared : program.data identity = some declaration) :
+    ∃ loaded ∈ closure.modules, ∃ source ∈ loaded.source.data,
+      declaration = source.elaborate loaded.home := by
+  obtain ⟨name, selected⟩ := admitted.nominal_selected.mp declared
+  obtain ⟨loaded, included, member⟩ := List.mem_flatMap.mp (List.mem_of_getElem? selected)
+  obtain ⟨source, authored, same⟩ := List.mem_map.mp member
+  exact ⟨loaded, included, source, authored, (congrArg Prod.snd same).symm⟩
+
+/-- Every included nominal declaration is emitted, including unused ones. -/
+theorem SourceClosure.Admitted.nominal_emitted {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : DataSyntax} (authored : source ∈ loaded.source.data) :
+    ∃ identity, program.data identity = some (source.elaborate loaded.home) := by
+  have member : (source.name, source.elaborate loaded.home) ∈ closure.nominals :=
+    List.mem_flatMap.mpr ⟨loaded, included, List.mem_map.mpr ⟨source, authored, rfl⟩⟩
+  obtain ⟨identity, selected⟩ := List.mem_iff_getElem?.mp member
+  exact ⟨identity, admitted.nominal_selected.mpr ⟨source.name, selected⟩⟩
+
+/-- Inclusion supplies the scope in which declaration and field visibility
+must be valid. Neither a forged owner nor parent visibility at a root passes. -/
+theorem SourceClosure.Admitted.nominal_visibility {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {identity : Nat} {declaration : DataDecl} (declared : program.data identity = some declaration) :
+    declaration.visibility.ValidAt declaration.home ∧
+      ∀ schema ∈ declaration.schemas, ∀ field ∈ schema.residents,
+        field.visibility.ValidAt declaration.home := by
+  obtain ⟨loaded, included, source, authored, rfl⟩ := admitted.nominal_origin declared
+  exact admitted.2.2.2.2.2.2.2.2 loaded included source authored
+
+
 /-- Source admission preserves the meaning of every explicit principal class. -/
 theorem SourceClosure.Admitted.principal {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
@@ -588,6 +677,19 @@ theorem SourceClosure.Admitted.principal {packages : List PackageSource}
     (manual : declaration.restriction = some principal) :
     Ty.HasPrincipal program.data (.nominal identity) principal :=
   admitted.checked.data.principals.principal declared manual
+
+/-- A source restriction is interpreted at its actual emitted identity. The
+class is proved from checked resident permissions, not assumed from syntax. -/
+theorem SourceClosure.Admitted.source_principal {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {loaded : LoadedModule} (included : loaded ∈ closure.modules)
+    {source : DataSyntax} (authored : source ∈ loaded.source.data) {principal : Principal}
+    (manual : source.restriction = some principal) :
+    ∃ identity, program.data identity = some (source.elaborate loaded.home) ∧
+      Ty.HasPrincipal program.data (.nominal identity) principal := by
+  obtain ⟨identity, declared⟩ := admitted.nominal_emitted included authored
+  exact ⟨identity, declared, admitted.principal declared manual⟩
+
 
 /-- A manual declaration cannot advertise permission absent from an owned field,
 including a field of an inactive variant or of an unused declaration. -/
@@ -760,7 +862,7 @@ theorem SourceClosure.Admitted.declaration_visibility {packages : List PackageSo
     {identity : Nat} {declaration : FunctionDecl} (selected : program.functions identity = some declaration) :
     declaration.visibility.ValidAt declaration.home := by
   obtain ⟨loaded, included, source, member, _, elaborated⟩ := admitted.declaration selected
-  have valid := (admitted.2.2.2.2.2 loaded included).1.1 source member
+  have valid := (admitted.modules_valid loaded included).1.1 source member
   simpa only [elaborated.origin.1, elaborated.origin.2] using valid
 
 
@@ -1084,6 +1186,7 @@ theorem SourceClosure.Admitted.reorder_iff {packages : List PackageSource} (clos
     simp only [SourceClosure.functionNames, namespaces, bindings]
   simp only [SourceClosure.Admitted, names]
   simp [SourceClosure.reorder, SourceClosure.homes, SourceClosure.functions, SourceClosure.imports, SourceClosure.importEntries,
+    SourceClosure.NominalsAdmitted, SourceClosure.nominals,
     PackageSource.DependenciesValid, PackageAccess.reorder, List.map_map, Function.comp_def]
 
 
@@ -1638,13 +1741,13 @@ theorem ModuleSource.Loads.self_reachable {whole : List LoadedModule}
       (∀ node ∈ modules, node ∈ whole) →
       (∀ child ∈ children, ModuleReachable whole (home.child child.1) (home.child child.1)) →
       ∀ node ∈ modules, ModuleReachable whole node.home node.home) with
-  | @body home origin directory functions imports children descendants _ _ ih =>
+  | @body home origin directory functions imports children data descendants _ _ ih =>
     intro subset reachable node member
     rcases List.mem_cons.mp member with same | member
     · subst node; exact reachable
     · apply ih (fun other found => subset other (.tail _ found)) ?_ node member
       intro child declared
-      have parentIncluded : (⟨home, origin, directory, .body functions imports children⟩ : LoadedModule) ∈ whole :=
+      have parentIncluded : (⟨home, origin, directory, .body functions imports children data⟩ : LoadedModule) ∈ whole :=
         subset _ (.head _)
       have scope := (valid _ parentIncluded).2.2 child declared
       exact .child parentIncluded (reachable.descendant_caller rfl ⟨[child.1], rfl⟩) declared
@@ -1685,7 +1788,7 @@ theorem SourceClosure.Admitted.self_reachable {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {loaded : LoadedModule} (included : loaded ∈ closure.modules) :
     ModuleReachable closure.modules loaded.home loaded.home :=
-  closure.included.self_reachable (fun loaded member => (admitted.2.2.2.2.2 loaded member).1)
+  closure.included.self_reachable (fun loaded member => (admitted.modules_valid loaded member).1)
     (fun _ member => member) loaded included
 
 /-- A resolved local identity receives namespace access from source inclusion,
@@ -1733,7 +1836,7 @@ theorem SourceClosure.Admitted.automatic_import_origin {packages : List PackageS
       path.resolve (resolvePackageDependency packages loaded.home.package) loaded.home = some edge.target := by
   obtain ⟨loaded, included, source, requested, home, visibility, target, resolved, emitted⟩ := closure.import_origin member
   rcases (loaded.importRequests_origin packages source).mp requested with authored | generated
-  · exact False.elim (((admitted.2.2.2.2.2 loaded included).2 source authored).emitted_kind emitted automatic)
+  · exact False.elim (((admitted.modules_valid loaded included).2 source authored).emitted_kind emitted automatic)
   · obtain ⟨package, packageIncluded, owner, selected⟩ := resolvePackagePrelude.origin generated
     obtain ⟨enabled, implicitEnabled, path, profile, same⟩ := (package.preludeRequest_selected source).mp selected
     subst source
@@ -1835,7 +1938,7 @@ theorem SourceClosure.Admitted.import_request_visibility {packages : List Packag
     {source : FunctionImportSyntax} (member : source ∈ loaded.importRequests packages) :
     source.visibility.ValidAt loaded.home := by
   rcases (loaded.importRequests_origin packages source).mp member with authored | automatic
-  · exact (admitted.2.2.2.2.2 loaded included).1.2.1 source authored
+  · exact (admitted.modules_valid loaded included).1.2.1 source authored
   · obtain ⟨package, _, _, selected⟩ := resolvePackagePrelude.origin automatic
     obtain ⟨_, _, target, _, rfl⟩ := (package.preludeRequest_selected source).mp selected
     simp [Visibility.ValidAt, Visibility.Allows]

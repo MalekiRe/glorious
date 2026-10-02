@@ -4555,3 +4555,35 @@ All 30 strict Lean jobs passed. The checked acquisition theorem quantifies over
 and source soundness/behavior closures use only standard Lean axioms. This
 corrects public bound semantics; generic elaboration, custom Drop, references
 and the fourteen broad completion obligations remain open.
+
+
+## Nominal declarations originate in included source modules
+
+`ModuleSource` now contains decoded `DataSyntax` declarations. Emission assigns
+`DataDecl.home` from the actual included module and preserves the source
+visibility, shape and explicit restriction. `SourceClosure.nominals` computes
+the ordered named declaration product from that same module list; there is no
+separately supplied nominal owner table.
+
+Public `SourceClosure.Admitted` now requires the entire runtime `Program.data`
+table to equal indexed nominal emission. It also rejects duplicate qualified
+nominal names and invalid declaration/field visibility in the inclusion-derived
+scope. `nominal_selected`, `nominal_origin` and `nominal_emitted` prove both
+lookup correspondence and complete emission, including unused declarations.
+`nominal_visibility` transports source visibility validity to the runtime
+consumer. `source_principal` derives the declared principal at its actual
+emitted identity using the existing checked resident-permission producer.
+
+Declaration-wide cleanup admission consumes the strengthened source contract;
+general source safety, maximal behavior and compatible invocation retain it.
+Supplied-file permutation preserves admission with the same nominal identities.
+All 30 strict Lean jobs passed. Inspected origin, complete emission, visibility,
+principal, permutation, admission and public safety/behavior proof closures use
+only `propext`, `Classical.choice` and `Quot.sound`.
+
+This closes nominal source ownership, not source type-name elaboration. Decoded
+field types still contain resolved Core types. Type namespace/import resolution,
+generic nominal elaboration, source-owned alias/constant emission, custom Drop
+and references remain open; none of the fourteen broad completion obligations
+is marked complete.
+
