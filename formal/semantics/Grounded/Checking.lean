@@ -153,12 +153,13 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (headTyped : HasType program home before head first middle)
       (tailTyped : HasTypes program home middle tail rest after) :
       HasType program home before (.tuple head tail) (first.sequenceResult (.tuple first rest)) after
-  | project {home before after body key parent type index residual}
-      (source : HasType program home before body parent after)
-      (discard : residual.Disposable program.data parent)
+  | project {home before after body key actual parent type index residual}
+      (source : HasType program home before body actual after)
+      (joined : ReturnJoin program actual after parent after)
+      (discard : actual ≠ .never → residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index type) :
-      HasType program home before (.project home body key) type after
+      HasType program home before (.project home body key) (actual.sequenceResult type) after
   | array {home before after elements element length}
       (residents : HasTypes program home before elements (List.replicate length element) after)
       (elementValid : FiniteLayout program.target program.data element)
@@ -277,7 +278,7 @@ theorem HasType.slots {program : Program} {home : Module} {before after : FlowCo
     (motive_2 := fun _ before _ _ after _ => after.slots = before.slots)
     (motive_3 := fun _ before _ _ _ arms after _ => arms ≠ [] → after.slots = before.slots) with
   | unit | integer | character | read | constant => rfl
-  | group _ ih | project _ _ _ _ ih | array _ _ _ ih | construct _ _ _ _ _ _ ih | call _ _ _ ih => exact ih
+  | group _ ih | project _ _ _ _ _ ih | array _ _ _ ih | construct _ _ _ _ _ _ ih | call _ _ _ ih => exact ih
   | move selected path selection ready mask context =>
     exact replaceBinding.map_same BindingState.slot selected context rfl
   | sequence head drop tail headIH tailIH => exact tailIH.trans headIH

@@ -1692,6 +1692,37 @@ theorem SourceClosure.Admitted.bottom_tuple_head {packages : List PackageSource}
   obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
   exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
 
+/-- Projection from a bottom computation neither produces a field value nor
+requires disposal authority for an aggregate that never exists. -/
+theorem SourceClosure.Admitted.bottom_projection {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before final : FlowContext}
+    {sourceHead : NamedExpr} {head : Expr} {parent type : Ty} {key : FieldKey} {index : Nat} {residual : Initialization}
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceHead head .never final)
+    (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
+    (selected : ProjectionType program home parent key index type)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.project sourceHead key) (.project home head key) .never final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.project home head key), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.project home head key), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.project home head key), stack⟩ (done.extend stack) := by
+  have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.project sourceHead key) (.project home head key) .never final :=
+    .project bottom (.nonreturning _ rfl) (fun impossible => (impossible rfl).elim) mask selected
+  obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
+  exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 
 
 /-- A bottom RHS admits assignment without permission to discard the old

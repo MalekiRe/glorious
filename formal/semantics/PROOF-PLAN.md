@@ -5216,3 +5216,25 @@ behavior and cleanup proofs use only propext, Classical.choice and Quot.sound.
 Runtime transitions and cleanup permissions are unchanged. Outcome propagation
 from an operand list (including tuple tails) and unreachable-continuation
 checking remain open, along with all fourteen completion families.
+
+## Projection operands use actual return evidence
+
+HasType.project, source projection elaboration and FrameTyped.project retain the
+operand's inferred type and use ReturnJoin to the selected aggregate type.
+Residual disposal authority is guarded by the operand being non-bottom. The
+whole projection result uses Ty.sequenceResult. Neither a projected field nor
+an aggregate requiring disposal is fabricated for a nonreturning computation.
+
+Actual projection progress, preservation, structural and finite evaluation,
+and the general cleanup-safety proof discharge both conversion and disposal
+from the returned resident. Field selection, visibility and residual-mask
+checking remain mandatory. Runtime projection and cleanup steps are unchanged.
+SourceClosure.Admitted.bottom_projection proves admission, whole-expression
+infinite execution, prefix ownership/storage safety and pending-stack isolation
+without aggregate disposal permission or a successful execution premise.
+
+All 30 strict Lean jobs passed. Inspected bottom-projection, public source
+soundness/behavior and no-exact-cleanup proofs use only propext,
+Classical.choice and Quot.sound. General operand-list outcome propagation,
+unreachable continuation checking and all fourteen completion families remain
+open.

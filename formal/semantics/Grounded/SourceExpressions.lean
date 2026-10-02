@@ -190,12 +190,13 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (initial : NamedExpr.Elaborates program names home scope before head first type middle)
       (continued : NamedExprsElaborate program names home scope middle tail rest types after) :
       NamedExpr.Elaborates program names home scope before (.tuple head tail) (.tuple first rest) (type.sequenceResult (.tuple type types)) after
-  | project {scope before after source core key parent type index residual}
-      (body : NamedExpr.Elaborates program names home scope before source core parent after)
-      (discard : residual.Disposable program.data parent)
+  | project {scope before after source core key actual parent type index residual}
+      (body : NamedExpr.Elaborates program names home scope before source core actual after)
+      (joined : ReturnJoin program actual after parent after)
+      (discard : actual ≠ .never → residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index type) :
-      NamedExpr.Elaborates program names home scope before (.project source key) (.project home core key) type after
+      NamedExpr.Elaborates program names home scope before (.project source key) (.project home core key) (actual.sequenceResult type) after
   | array {scope before after source core element length}
       (residents : NamedExprsElaborate program names home scope before source core (List.replicate length element) after)
       (finite : FiniteLayout program.target program.data element) (size : length < 2 ^ program.target.pointerBits) :
@@ -503,7 +504,7 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | tuple _ _ head tail =>
     have first := head slots
     exact .tuple first (tail (first.slots.trans slots))
-  | project _ discard mask selected ih => exact .project (ih slots) discard mask selected
+  | project _ joined discard mask selected ih => exact .project (ih slots) joined discard mask selected
   | array _ finite size ih => exact .array (ih slots) finite size
   | constant checked => cases checked with
     | constant declared visible resolved structural initialized => exact .constant declared visible resolved structural initialized

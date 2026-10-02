@@ -193,11 +193,12 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       FrameTyped program heap supply activation before (.one first) (.tupleHead tail) after (.one (first.sequenceResult (.tuple first types)))
   | tupleTail {context first types head} (resident : ValueHasType program head first) :
       FrameTyped program heap supply activation context (.many types) (.tupleTail head) context (.one (.tuple first types))
-  | project {home context parent result key index residual}
-      (discard : residual.Disposable program.data parent)
+  | project {home context actual parent result key index residual}
+      (joined : ReturnJoin program actual context parent context)
+      (discard : actual ≠ .never → residual.Disposable program.data parent)
       (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
       (selected : ProjectionType program home parent key index result) :
-      FrameTyped program heap supply activation context (.one parent) (.project home key) context (.one result)
+      FrameTyped program heap supply activation context (.one actual) (.project home key) context (.one (actual.sequenceResult result))
   | array {context element length} (finite : FiniteLayout program.target program.data element)
       (size : length < 2 ^ program.target.pointerBits) :
       FrameTyped program heap supply activation context (.many (List.replicate length element)) .array context (.one (.array element length))
@@ -313,7 +314,7 @@ theorem ConfigurationTyped.progress {context result state}
       | sequence head discard tail => exact ⟨_, .sequence⟩
       | bind initial joined discard body fresh => exact ⟨_, .bind⟩
       | tuple head tail => exact ⟨_, .tuple⟩
-      | project source discard mask selected => exact ⟨_, .project⟩
+      | project source joined discard mask selected => exact ⟨_, .project⟩
       | array residents finite size => exact ⟨_, .array⟩
       | constant declared visible resolved structural body => exact ⟨_, .constant declared⟩
       | construct declared chosen finite visible access residents => exact ⟨_, .construct⟩
@@ -350,8 +351,8 @@ theorem ConfigurationTyped.progress {context result state}
           obtain ⟨old, _, selected, _⟩ := (store.replacement_safe selected path selection (discard resident.type_ne_never)).selection
           exact ⟨_, .assignResult selected⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
-        | project discard mask projection =>
-          obtain ⟨value, remainder, selected, _⟩ := projection.take_progress resident mask discard
+        | project joined discard mask projection =>
+          obtain ⟨value, remainder, selected, _⟩ := projection.take_progress (joined.on_return resident).1 mask (discard resident.type_ne_never)
           exact ⟨_, .projectResult selected⟩
         | restore locals discard joined retained callerIssued older =>
           by_cases empty : environment.bindings = []
@@ -579,13 +580,14 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
           cases frame with | tupleTail head => exact .intro store issued (.result (.tuple head residents)) tail
     | project =>
       cases code with | expression checked =>
-        cases checked with | project source discard mask selected =>
-          exact .intro store issued (.expression source) (.cons (.project discard mask selected) continuation)
+        cases checked with | project source joined discard mask selected =>
+          exact .intro store issued (.expression source) (.cons (.project joined discard mask selected) continuation)
     | projectResult selected =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | project discard mask projection =>
-            obtain ⟨value, remainder, found, valueTyped, _, _, disposable⟩ := projection.take_progress resident mask discard
+          cases frame with | project joined discard mask projection =>
+            rw [resident.sequenceResult _] at tail
+            obtain ⟨value, remainder, found, valueTyped, _, _, disposable⟩ := projection.take_progress (joined.on_return resident).1 mask (discard resident.type_ne_never)
             cases Option.some.inj (selected.symm.trans found)
             exact .intro store issued (.cleanup disposable.disposalTasks (.result valueTyped)) tail
     | array =>
@@ -1411,8 +1413,8 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
             apply store.replacement_safe (by assumption) (by assumption) (by assumption)
             apply_assumption
             exact resident.type_ne_never
-          case project =>
-            exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
+          case project mask selected discard joined =>
+            exact selected.cleanup_safe (joined.on_return resident).1 mask (discard resident.type_ne_never)
           case sequence =>
             exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
       case results residents =>
