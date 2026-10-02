@@ -28,6 +28,26 @@ abbrev FlowContext := List (BindingId × BindingState)
 def FlowContext.slots (context : FlowContext) : List (BindingId × BindingType) :=
   context.map fun entry => (entry.1, entry.2.slot)
 
+/-- Return cleanup is either checked normally or unreachable because the
+function result is bottom. Neither case postulates execution or a result value. -/
+inductive ReturnDisposition (program : Program) : Ty → FlowContext → Prop where
+  | returning {result locals} (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
+      ReturnDisposition program result locals
+  | nonreturning (locals) : ReturnDisposition program .never locals
+
+theorem ReturnDisposition.on_return {program : Program} {result locals value}
+    (exit : ReturnDisposition program result locals) (resident : ValueHasType program value result) :
+    ∀ binding ∈ locals, binding.2.Disposable program.data := by
+  cases exit with
+  | returning discard => exact discard
+  | nonreturning => exact resident.not_never.elim
+
+theorem ReturnDisposition.restrict {program : Program} {result locals remaining}
+    (exit : ReturnDisposition program result locals) (subset : ∀ binding ∈ remaining, binding ∈ locals) :
+    ReturnDisposition program result remaining := by
+  cases exit with
+  | returning discard => exact .returning (fun binding member => discard binding (subset binding member))
+  | nonreturning => exact .nonreturning _
 mutual
 inductive HasType (program : Program) : Module → FlowContext → Expr → Ty → FlowContext → Prop where
   | unit {home context} : HasType program home context .unit .unit context
@@ -57,7 +77,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       HasType program home before (.sequence first rest) type after
   | bind {home before middle after mutable name initial body localType type finalMask}
       (initialized : HasType program home before initial localType middle)
-      (drop : finalMask.Disposable program.data localType)
+      (drop : ReturnDisposition program type [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (continued : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body type
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ middle.map Prod.fst) :
@@ -127,7 +147,7 @@ inductive ArmsType (program : Program) :
       (useful : Useful program subject previous pattern)
       (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ branchAfter))
       (localSlots : FlowContext.slots localsAfter = bindings)
-      (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
+      (disposable : ReturnDisposition program result localsAfter)
       (joined : BindingContextApprox program.data branchAfter after)
       (tailTyped : ArmsType program home before subject result (previous ++ [pattern]) rest after) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
@@ -224,7 +244,7 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     (selected : selectArm value arms = some (bindings, body)) :
     ∃ locals localsAfter branchAfter pattern, (pattern, body) ∈ arms ∧
       BindingInputsTyped program bindings.bindings ∧ (bindings.bindings.map fun input => (input.name, input.slot)) = locals ∧
-      (∀ binding ∈ localsAfter, binding.2.Disposable program.data) ∧
+      ReturnDisposition program result localsAfter ∧
       HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧
       BindingContextApprox program.data branchAfter after ∧
@@ -269,26 +289,6 @@ def Program.ConstantsChecked (program : Program) : Prop :=
   ∀ name declaration, program.constants name = some declaration → ConstantChecked program declaration
 
 
-/-- Return cleanup is either checked normally or unreachable because the
-function result is bottom. Neither case postulates execution or a result value. -/
-inductive ReturnDisposition (program : Program) : Ty → FlowContext → Prop where
-  | returning {result locals} (discard : ∀ binding ∈ locals, binding.2.Disposable program.data) :
-      ReturnDisposition program result locals
-  | nonreturning (locals) : ReturnDisposition program .never locals
-
-theorem ReturnDisposition.on_return {program : Program} {result locals value}
-    (exit : ReturnDisposition program result locals) (resident : ValueHasType program value result) :
-    ∀ binding ∈ locals, binding.2.Disposable program.data := by
-  cases exit with
-  | returning discard => exact discard
-  | nonreturning => exact resident.not_never.elim
-
-theorem ReturnDisposition.restrict {program : Program} {result locals remaining}
-    (exit : ReturnDisposition program result locals) (subset : ∀ binding ∈ remaining, binding ∈ locals) :
-    ReturnDisposition program result remaining := by
-  cases exit with
-  | returning discard => exact .returning (fun binding member => discard binding (subset binding member))
-  | nonreturning => exact .nonreturning _
 
 
 /-- Bodies certify disposition from their final masks, never from a completed run. -/

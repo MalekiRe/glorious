@@ -4915,3 +4915,25 @@ nonresumption theorem depend only on the standard Lean axioms. This repairs
 the function-return boundary, not arbitrary expected-result bottom elimination,
 lexical binding exits or mixed returning/diverging clause joins. Those consumers
 still require coordinated migration; all fourteen completion families remain open.
+
+## Shared return-sensitive lexical disposition
+
+The same ReturnDisposition now governs HasType.bind, ArmsType.clause,
+FrameTyped.bind and FrameTyped.scope, rather than leaving lexical exits on an
+independent unconditional disposal path. Named expression/clause elaboration
+and SourceScope.bind_checked produce that contract. Generated record temporaries
+use its ordinary returning alternative with the existing absent-mask proof.
+
+Scope-owner cleanup derives its permission from the actual typed returned
+value through ReturnDisposition.on_return. Scope retirement restricts the same
+disposition to remaining locals; OwnershipSafe uses the same permission producer.
+Bottom-typed lexical bodies can therefore retain nondiscardable locals during
+infinite execution without gaining permission to clean them up. No runtime
+step changes, fake return value or absent-mask fabrication is involved.
+
+All 30 strict Lean jobs passed. Public source soundness, maximal behavior,
+nonresumption, no-exact-cleanup and record-execution proofs were checked and use
+only standard Lean axioms. Mixed normal/diverging clauses still require a
+return-sensitive result/environment join; their current common-result type and
+BindingContextApprox premise remain unchanged. Arbitrary expected-result bottom
+elimination and the fourteen completion families remain open.

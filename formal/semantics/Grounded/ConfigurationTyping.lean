@@ -164,13 +164,13 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (discard : UsePermitted program.data .discard discarded) (checked : HasType program home before rest result after) :
       FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one result)
   | bind {home before after name mutable localType result body finalMask}
-      (discard : finalMask.Disposable program.data localType)
+      (discard : ReturnDisposition program result [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (checked : HasType program home ((name, ⟨⟨localType, mutable⟩, .present⟩) :: before) body result
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
       FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
   | scope {context after : FlowContext} (locals : FlowContext) {result}
-      (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
+      (discard : ReturnDisposition program result locals)
       (joined : BindingContextApprox program.data context after) :
       FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) after (.one result)
   | retire {context : FlowContext} {result index}
@@ -461,7 +461,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store
               (inputs := [⟨name, ⟨_, mutable⟩, value⟩]) (.cons resident .nil (by simp))
               (by simpa using List.nodup_cons.mpr ⟨fresh, contextDistinct⟩)
-            refine .intro entered issued (.expression checked) (.cons (.scope [_] (by simpa [BindingState.Disposable] using discard) (.refl _)) ?_)
+            refine .intro entered issued (.expression checked) (.cons (.scope [_] discard (.refl _)) ?_)
             exact tail.transport (fun _ previous => previous)
               (fun scope states typed _ => (retained scope.activation scope.bindings states typed).1)
     | scope exited =>
@@ -479,21 +479,22 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | scope locals discard joined =>
+            have allowed := discard.on_return resident
             have inside := BindingMap.nextRelease.in_prefix (List.take_prefix _ _) chosen
             simp only [List.length_take] at inside
             have localIndex := Nat.lt_of_lt_of_le inside (Nat.min_le_left _ _)
-            have safe := (store.take locals.length).disposable (by simpa using discard)
+            have safe := (store.take locals.length).disposable (by simpa using allowed)
             obtain ⟨cell, actual, permission⟩ := safe _ (BindingMap.nextRelease.member chosen)
             cases Option.some.inj (actual.symm.trans found)
             refine .intro store issued (.cleanup permission.disposalTasks (.result resident))
               (.cons (.retire (by simp only [List.length_append]; omega) ?_) ?_)
             · intro binding selected
               rw [List.getElem?_append_left localIndex] at selected
-              exact discard binding (List.mem_of_getElem? selected)
+              exact allowed binding (List.mem_of_getElem? selected)
             · rw [List.eraseIdx_append_of_lt_length localIndex]
               have length := List.length_eraseIdx_of_lt localIndex
               rw [← length]
-              exact .cons (.scope _ (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) joined) tail
+              exact .cons (.scope _ (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member)) joined) tail
     | restoreOwner chosen found =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
@@ -724,7 +725,7 @@ theorem ConfigurationTyped.retire_scope {context : FlowContext} {result : Result
           have length := List.length_eraseIdx_of_lt inside
           rw [← length]
           refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident)
-            (.cons (.scope (locals.eraseIdx index) (fun binding member => discard binding (List.mem_of_mem_eraseIdx member)) joined) ?_)
+            (.cons (.scope (locals.eraseIdx index) (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member)) joined) ?_)
           rw [supply, activation]
           apply tail.transport (fun _ previous => previous)
           intro caller states callerTyped older
@@ -1378,7 +1379,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
         case cons frame tail =>
           cases frame <;> try trivial
           case scope locals discard joined =>
-            exact ⟨(store.take locals.length).disposable (by simpa using discard),
+            exact ⟨(store.take locals.length).disposable (by simpa using discard.on_return resident),
               BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
           case restore =>
             exact ⟨store.disposable (ReturnDisposition.on_return (by assumption) resident), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩

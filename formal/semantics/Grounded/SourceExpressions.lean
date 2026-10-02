@@ -179,7 +179,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
   | bind {scope before middle after mutable name annotation initial body first rest localType type finalMask}
       (initialized : NamedExpr.Elaborates program names home scope before initial first localType middle)
-      (discard : finalMask.Disposable program.data localType)
+      (discard : ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
       (annotated : Annotation program.aliases annotation localType)
       (continued : NamedExpr.Elaborates program names home (scope.enter (some name) ⟨localType, mutable⟩)
         ((⟨scope.next⟩, ⟨⟨localType, mutable⟩, .present⟩) :: middle) body rest type
@@ -256,7 +256,7 @@ inductive NamedArmsElaborate (program : Program) (names : Module → FunctionNam
       (bodyTyped : NamedExpr.Elaborates program names home localScope (initializedContext bindings ++ before)
         body coreBody result (localsAfter ++ branchAfter))
       (localSlots : localsAfter.slots = bindings)
-      (disposable : ∀ binding ∈ localsAfter, binding.2.Disposable program.data)
+      (disposable : ReturnDisposition program result localsAfter)
       (joined : BindingContextApprox program.data branchAfter after)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
@@ -513,7 +513,11 @@ theorem NamedExpr.Elaborates.checked {program : Program} {home : Module} {names 
   | field selected initialized continued first rest =>
     rename_i slots
     have initial := first slots
-    apply SourceScope.bind_checked _ false slots initial (.empty (state := .absent) (by simp [Initialization.Empty]))
+    apply SourceScope.bind_checked _ false (finalMask := .absent) slots initial (.returning (by
+      simp only [List.mem_singleton]
+      intro binding same
+      subst binding
+      exact Initialization.Disposable.empty (by simp [Initialization.Empty])))
     apply rest
     simp only [FlowContext.slots, SourceScope.context, SourceScope.enter, List.map_cons]
     congr 1
