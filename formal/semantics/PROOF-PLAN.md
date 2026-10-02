@@ -2,8 +2,9 @@
 
 ## Authority and current status
 
-This is the single active proof plan for the new development in
-`formal/semantics/`. The requirements in [AGENTS.md](../../AGENTS.md) govern it.
+This plan records the proved baseline in `formal/semantics/` and the newly
+authorized semantic MIR ownership slice in `formal/mir/`, described below.
+The requirements in [AGENTS.md](../../AGENTS.md) govern both.
 The [compiler architecture contract](../../docs/compiler-architecture.md)
 governs semantic authority; the
 [language specification](../../glorious-language-specification.md) and relevant
@@ -20,18 +21,63 @@ See the durable serial-work-only rule in `AGENTS.md`.
 
 ## Active scope: ownership proofs only
 
-The user has frozen new language-feature goals. Work stays in this existing
-core and strengthens its ownership contracts and general proofs; no new
-semantic subsystem, replacement project, or delegated implementation lane is
-authorized. Existing source consumers remain integration obligations. The
-older whole-language roadmap below is historical/deferred, not an instruction
-to resume feature expansion. Feature work requires a new user instruction.
+New language-feature goals remain frozen. The admitted-core ownership safety
+milestone below is complete. The user has now authorized a separate semantic
+MIR ownership slice in a new directory, while preserving this existing core.
+That authorization does not reopen the older whole-language feature roadmap
+or imply that the new slice replaces the existing source development.
 
 The current ownership baseline covers structural principals, partial
 initialization, moves, replacement, authorized structural cleanup, recursive
 direct calls, retained callers, and nonreturning execution. It does not claim
 borrowing, custom destruction hooks, closure captures, effects, raw memory,
 foreign calls, or backend refinement. Those feature goals remain frozen.
+
+## Verified semantic MIR ownership slice
+
+The user subsequently authorized a new proof in `formal/mir/`. That project
+is the active architecture slice; `formal/semantics/` remains the preserved,
+verified admitted-core baseline. Neither development inherits the other's
+soundness claims. The frozen whole-language feature roadmap remains deferred.
+Work remains serial, without delegated implementation lanes.
+
+The new slice has 731 Lean lines across six files, including its entrypoint.
+It uses one structured-control definition instantiated with independently
+defined atomic ownership commands and four MIR operations: take, put, copy,
+and drop. A command lowers to two MIR operations through an explicit transfer
+register. Branches and loops share the control-composition proof.
+
+- `Model.lean`: fixed slots, an immutable resource-principal signature, store
+  realization, and ownership counts computed from actual slots plus register.
+- `Instructions.lean`: raw execution and syntactic checking. Unchecked copy
+  and drop can violate ownership; checking, not runtime permission guards,
+  establishes conservation and instruction progress.
+- `Machine.lean`: shared preservation/progress and arbitrary-prefix ownership
+  safety from the local instruction contract.
+- `Lowering.lean`: checking preservation, nonempty one-or-two-step simulation,
+  and `compiled_ownership_safety`, including intermediate transfer states.
+- `Adequacy.lean`: reverse prefix matching, `compiled_return_iff` for exact
+  returned-state correspondence, and `compiled_diverges_iff` for actual
+  infinite executions. Maximal behavior is derived, never assumed in admission.
+
+Bounds: this is an ownership-command frontend, not the full named language.
+It models scalar data and opaque affine/exact owners in a fixed region, with
+exact branch-context agreement and invariant loop contexts. Writes require
+vacancy. Halting returns the entire remaining region; it does not implicitly
+dispose it. The source and MIR share the finite-slot carrier. There is no claim
+of physical-heap lowering, allocation, aggregate shells/partial field moves,
+function calls, lexical cleanup, borrowing, effects, or backend correctness.
+Those require further semantic boundaries, not unchecked extension of this
+slice's theorem statements. The existing compiler and old Lean proofs are
+unchanged.
+
+Verification: a clean `lake build OwnershipMir` in `formal/mir` passed all
+8 jobs with warnings as errors and auto-implicit parameters disabled. Axiom
+inspection of instruction soundness, lowering, prefix safety, returned-state
+adequacy and divergence adequacy reported only standard Lean axioms; checking
+preservation and one-or-two-step simulation depend only on `propext`.
+No concrete examples or unit tests were used as proof evidence.
+
 
 ### Joint storage ownership
 
