@@ -526,25 +526,67 @@ theorem HasType.scope_preserves_nondiscardable (checkedProgram : program.Checked
     subst_vars
     exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
 
+/-- Returning from a checked call constructs actual local retirement and caller
+restoration. The returned payload and remaining continuation are preserved. -/
+theorem HasType.return_restores (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {value : Value} {caller : AddressedScope} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .restore caller :: stack⟩) :
+    ∃ after : Environment,
+      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.scope = caller ∧
+      (∀ identity ∈ current.bindings.map Prod.snd, after.heap.Retired identity) ∧
+      (∀ identity ∈ caller.bindings.map Prod.snd, after.heap.read identity = current.heap.read identity) := by
+  have typed := (checked.soundness checkedProgram store issued run).1
+  have original := typed
+  cases typed with
+  | intro currentStore currentIssued code continuation =>
+    cases code with
+    | result resident =>
+      cases continuation with
+      | cons frame tail =>
+        cases frame with
+        | restore locals discard callerTyped callerIssued older =>
+          have different : caller.activation ≠ current.activation := by
+            intro same
+            have equal := congrArg ActivationId.index same
+            omega
+          obtain ⟨after, restored, _, activation, bindings, _, _, retired, preserved, _⟩ :=
+            AddressedEnvironment.restore.progress currentStore callerTyped different
+          have step : Step program ⟨current, .result value, .restore caller :: stack⟩
+              ⟨after, .result value, stack⟩ := .restore restored
+          refine ⟨after, step, original.preservation checkedProgram step, ?_, retired, preserved⟩
+          simp [AddressedEnvironment.scope, activation, bindings]
+
 /-- Actual caller restoration preserves live nondiscardable descendants,
 including those retained inside partially consumed aggregates. -/
 theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current : Environment} {after : Configuration}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {value : Value} {caller : AddressedScope} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .restore caller :: stack⟩)
-    (step : Step program ⟨current, .result value, .restore caller :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {selectedHome : Module} {selectedType : Ty} {fields : List FieldKey}
     (path : PathType program selectedHome cell.type fields selectedType)
     {owner : Value}
     (resident : ((cell.resident.selectFields program cell.type fields).bind PartialValue.read) = some owner)
     (required : ¬ UsePermitted program.data .discard selectedType) :
-    after.environment.heap.read address = some cell := by
+    ∃ after : Environment,
+      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.heap.read address = some cell := by
+  obtain ⟨after, step, preserved, _⟩ := checked.return_restores checkedProgram store issued run
+  refine ⟨after, step, preserved, ?_⟩
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
   | restore retired =>
@@ -584,18 +626,22 @@ live exact nominal owner in the heap. -/
 theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
-    {environment current : Environment} {after : Configuration}
+    {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {value : Value} {caller : AddressedScope} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .restore caller :: stack⟩)
-    (step : Step program ⟨current, .result value, .restore caller :: stack⟩ after)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
     {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
     (resident : cell.resident.read = some (.nominal identity tag fields)) :
-    after.environment.heap.read address = some cell := by
+    ∃ after : Environment,
+      Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
+      after.heap.read address = some cell := by
+  obtain ⟨after, step, preserved, _⟩ := checked.return_restores checkedProgram store issued run
+  refine ⟨after, step, preserved, ?_⟩
   have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
   cases step with
   | restore restored =>

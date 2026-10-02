@@ -2095,11 +2095,15 @@ derives that the cell cannot belong to the retired address list from the shared
 runtime disposition proof, then consumes `RuntimeHeap.retireMany_outside`.
 The owner need not be in the current lexical environment.
 
-`HasType.scope_preserves_exact` and `HasType.restore_preserves_exact` carry this
-result through an arbitrary checked execution prefix and the actual following
-lexical-retirement or caller-restoration step. Their conclusions preserve the
-same logical heap cell, not merely its type or a supplied liveness predicate.
-They assume neither termination nor a future readiness certificate.
+`HasType.scope_preserves_exact` carries this result through an arbitrary checked
+execution prefix and an observed lexical-retirement step.
+`HasType.return_restores` constructs caller restoration from the reached return
+frame, preserving the returned payload and continuation typing, retiring all
+callee bindings and retaining caller cells exactly.
+`HasType.restore_preserves_exact` consumes that producer: it constructs the
+actual restoration and proves the exact owner cell is unchanged, rather than
+requiring a completed return. `Step.unique` identifies any observed restoration
+with the constructed transition. No termination or future readiness is assumed.
 
 `HasType.no_exact_overwrite` observes the selected resident through the runtime
 binding map, heap lookup and field selection immediately after RHS evaluation.
@@ -2174,7 +2178,12 @@ future-state admission premise is introduced.
 prove that an actual retirement step preserves any readable heap cell whose
 structural type forbids discard. They require neither an explicit exact nominal
 annotation nor a syntactic resident wrapper. The earlier exact-value guarantees
-remain valid, including for cells outside the current lexical scope.
+remain valid, including for cells outside the current lexical scope. The return
+consumer now uses `HasType.return_restores` to construct the actual transition
+and preserve continuation typing before applying the nondiscardable-cell
+argument; no successful caller-restoration step is a premise. All 30 build jobs
+and explicit producer/consumer axiom inspection passed after this migration.
+This remains logical owned-cell cleanup, not custom Drop or physical release.
 
 `lake build Grounded` passed all 30 jobs. Explicit axiom inspection of residual
 permission recovery, both general retirement theorems and source-function
