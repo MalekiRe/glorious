@@ -4394,3 +4394,13 @@ entry points are removed. All 30 strict jobs passed. Inspected stored-typing,
 retained-scope, retirement-exclusion and source-behavior closures use only the
 standard Lean axioms. This is owned storage, not a proof of reference loans or
 the outstanding full-language obligations.
+
+Typed scope realization is also a component of the authoritative
+`Configuration.OwnershipSafe` invariant, alongside current/protected resident
+principal consistency and retained-frame consistency. General Core and named
+source prefix safety, maximal behavior and compatible-input invocation behavior
+therefore preserve actual active/caller partial-storage typing at every reached
+state, rather than exporting it only from the specialized function-storage
+theorem. The retained-scope producer was promoted before its invariant consumer;
+no duplicate derivation was introduced. All 30 strict jobs and inspected general
+ownership/source/invocation behavior axiom closures passed after integration.

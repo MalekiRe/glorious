@@ -1283,13 +1283,52 @@ theorem ContinuationTyped.principal_consistent {heap supply activation context f
     · exact ih frame member
 
 
-/-- Current results and argument packs retain a principal consistent under every
-valid resident typing. Copy reads and disposal sites respect the same structural
-authority; scope retirement preserves newest-owner-first order. No future
-readiness or completed execution is assumed. -/
+/-- Every active and retained scope keeps its actual owning activation and
+typed partial residents in the current heap. No saved heap is substituted. -/
+theorem ContinuationTyped.typed_scopes {before : Environment} {current final : FlowContext}
+    {input result : ResultType} {stack : List Frame}
+    (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)
+    (store : before.Declares program current.slots) :
+    ∀ front back, stack = front ++ back →
+      ∀ identity ∈ (continuationEnvironment before front).bindings.map Prod.snd,
+        ∃ cell, before.heap.read identity = some cell ∧
+          cell.activation = (continuationEnvironment before front).activation ∧
+          ∃ state, cell.Typed program state := by
+  intro front
+  induction front generalizing before current input stack with
+  | nil =>
+    intro back same identity member
+    obtain ⟨states, residents, _⟩ := store
+    exact residents.live_typed identity member
+  | cons frame front ih =>
+    intro back same identity member
+    subst stack
+    cases typed with
+    | cons head tail => exact ih tail (head.declares store) back rfl identity member
+
+theorem ConfigurationTyped.typed_scopes {context result state}
+    (typed : ConfigurationTyped program context result state) :
+    ∀ front back, state.continuation = front ++ back →
+      ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
+        ∃ cell, state.environment.heap.read identity = some cell ∧
+          cell.activation = (continuationEnvironment state.environment front).activation ∧
+          ∃ mask, cell.Typed program mask := by
+  cases typed with
+  | intro store issued code continuation =>
+    exact continuation.typed_scopes ⟨_, store, code.slots.symm⟩
+
+/-- Current and retained control residents preserve their principals; active
+and retained scopes preserve actual ownership and partial typing in the current
+heap. Copy and disposal share structural authority, and retirement preserves
+newest-owner-first order. No future readiness or completed run is assumed. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
   (state.control.PrincipalConsistent program ∧
-    ∀ frame ∈ state.continuation, frame.PrincipalConsistent program) ∧
+    (∀ frame ∈ state.continuation, frame.PrincipalConsistent program) ∧
+    ∀ front back, state.continuation = front ++ back →
+      ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
+        ∃ cell, state.environment.heap.read identity = some cell ∧
+          cell.activation = (continuationEnvironment state.environment front).activation ∧
+          ∃ mask, cell.Typed program mask) ∧
   match state.control, state.continuation with
   | .cleanup pending _, _ =>
       (∀ task ∈ pending, DisposalTask.Safe program task) ∧
@@ -1329,10 +1368,11 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
 theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : ResultType}
     {state : Configuration} (typed : ConfigurationTyped program context result state) :
     state.OwnershipSafe program := by
+  have retained := typed.typed_scopes
   cases typed with
   | intro store issued code continuation =>
     constructor
-    · exact ⟨code.principal_consistent, continuation.principal_consistent⟩
+    · exact ⟨code.principal_consistent, continuation.principal_consistent, retained⟩
     · cases code <;> try trivial
       case cleanup safe checked =>
         exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
@@ -1464,39 +1504,6 @@ theorem Configuration.OwnershipSafe.return_retirement {before after : Environmen
   cases same
   exact BindingMap.Disposable.release_prefix safe.2.1 released split
 
-/-- Every active and retained scope keeps its actual owning activation and
-typed partial residents in the current heap. No saved heap is substituted. -/
-theorem ContinuationTyped.typed_scopes {before : Environment} {current final : FlowContext}
-    {input result : ResultType} {stack : List Frame}
-    (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)
-    (store : before.Declares program current.slots) :
-    ∀ front back, stack = front ++ back →
-      ∀ identity ∈ (continuationEnvironment before front).bindings.map Prod.snd,
-        ∃ cell, before.heap.read identity = some cell ∧
-          cell.activation = (continuationEnvironment before front).activation ∧
-          ∃ state, cell.Typed program state := by
-  intro front
-  induction front generalizing before current input stack with
-  | nil =>
-    intro back same identity member
-    obtain ⟨states, residents, _⟩ := store
-    exact residents.live_typed identity member
-  | cons frame front ih =>
-    intro back same identity member
-    subst stack
-    cases typed with
-    | cons head tail => exact ih tail (head.declares store) back rfl identity member
-
-theorem ConfigurationTyped.typed_scopes {context result state}
-    (typed : ConfigurationTyped program context result state) :
-    ∀ front back, state.continuation = front ++ back →
-      ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
-        ∃ cell, state.environment.heap.read identity = some cell ∧
-          cell.activation = (continuationEnvironment state.environment front).activation ∧
-          ∃ mask, cell.Typed program mask := by
-  cases typed with
-  | intro store issued code continuation =>
-    exact continuation.typed_scopes ⟨_, store, code.slots.symm⟩
 
 /-- Retired identities cannot remain in any active or retained caller binding
 map of a well-typed machine configuration. This is not reference-loan typing. -/
