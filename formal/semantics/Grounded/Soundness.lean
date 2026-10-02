@@ -792,7 +792,7 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
   obtain ⟨selectedHome, subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
   obtain ⟨childType, childBindings, childResident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
-  obtain ⟨inputs, childMatch⟩ := focus.matched matched
+  obtain ⟨inputs, _, _, childMatch, _⟩ := focus.matched matched
   constructor
   · apply childResident.use_permission resident
     rcases discards with rfl | ⟨annotation, expected, rfl⟩
@@ -802,6 +802,46 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     · simp only [Pattern.matchValue]
     · simp only [Pattern.matchValue] at childMatch ⊢
       split at childMatch <;> simp_all
+
+/-- An arbitrary nested binder in the first selected clause transfers its exact
+resident into fresh storage through the real pattern-entry transition. The
+position is derived from the matcher's ordered output, not supplied as readiness. -/
+theorem HasType.pattern_binding (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
+    {pattern : Pattern} {body : Expr} {bindings : List BindingInput}
+    {name : BindingId} {boundType : Ty} {owner : Value}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩)
+    (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
+    (matched : pattern.matchValue (argumentValue values) = some bindings)
+    (focus : Pattern.SubjectAt pattern (argumentValue values) (.binder name boundType) owner) :
+    ∃ after identity position,
+      Step program ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ after ∧
+      after.environment.bindings[position]? = some (name, identity) ∧
+      after.environment.heap.read identity = some ⟨current.activation, boundType, .resident owner⟩ ∧
+      identity.index = current.heap.next + position ∧ ValueHasType program owner boundType := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨selectedHome, subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
+  obtain ⟨childType, childBindings, resident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
+  cases childPattern
+  obtain ⟨inputs, before, after, childMatch, split⟩ := focus.matched matched
+  have single : inputs = [⟨name, ⟨boundType, false⟩, owner⟩] := by
+    simpa only [Pattern.matchValue, Option.some.injEq] using childMatch.symm
+  have inputAt : bindings[before.length]? = some ⟨name, ⟨boundType, false⟩, owner⟩ := by
+    simp [split, single, List.append_assoc]
+  obtain ⟨identity, found, cell, position⟩ := allocateBindings.at current.heap current.activation inputAt
+  have selected : selectArm (argumentValue values) (front ++ (pattern, body) :: back) = some (bindings, body) := by
+    rw [selectArm.skip_missed _ _ _ missed]
+    simp only [selectArm, matched]
+  refine ⟨⟨current.extend bindings, .expression body, .scope bindings.length :: stack⟩,
+    identity, before.length, .selectedPattern selected, ?_, cell, position, resident⟩
+  simp only [AddressedEnvironment.extend]
+  exact List.getElem?_append_left (List.getElem?_eq_some_iff.mp found).1 |>.trans found
 
 end Grounded
 

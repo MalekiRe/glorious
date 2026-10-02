@@ -3460,3 +3460,15 @@ execution prefixes and nesting, not examples or a second matching evaluator.
 All 30 build jobs passed; the new producers and public consumer depend only
 on standard Lean axioms. Borrowed matching and custom Drop remain open.
 
+Nested binder transfer is constructive as well: `Pattern.SubjectAt.matched`
+now derives the exact contiguous output segment produced by the observed
+subpattern, preserving order through arbitrary nesting. `allocateBindings.at`
+derives the actual cell contents and fresh identity for every input position.
+`HasType.pattern_binding` consumes both producers and source-prefix ownership
+safety to construct the real pattern-entry step with the exact nested resident
+installed in its new binding, with its original type and activation. Neither
+successful allocation nor post-state typing is an admission premise. This is
+logical unbounded allocation, not a physical allocation/exhaustion theorem.
+All 30 build jobs passed; inspection of both transfer producers and the source
+transfer/disposal consumers found only standard Lean axioms.
+

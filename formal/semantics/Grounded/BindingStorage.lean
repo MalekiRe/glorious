@@ -283,6 +283,26 @@ theorem allocateBindings.keys (heap : RuntimeHeap StorageCell) (activation : Act
   induction inputs generalizing heap with
   | nil => rfl
   | cons input rest ih => exact congrArg (List.cons input.name) (ih _)
+/-- The real input at each position becomes a live cell at a distinct fresh
+identity. No value, declaration type or activation is reconstructed afterwards. -/
+theorem allocateBindings.at (heap : RuntimeHeap StorageCell) (activation : ActivationId)
+    {inputs : List BindingInput} {index : Nat} {input : BindingInput}
+    (selected : inputs[index]? = some input) :
+    ∃ identity, (allocateBindings heap activation inputs).1[index]? = some (input.name, identity) ∧
+      (allocateBindings heap activation inputs).2.read identity = some (input.cell activation) ∧
+      identity.index = heap.next + index := by
+  induction inputs generalizing heap index with
+  | nil => simp at selected
+  | cons first rest ih =>
+    cases index with
+    | zero =>
+      cases selected
+      exact ⟨_, rfl, (allocateBindings.old (heap.allocate (input.cell activation)).2 activation rest
+        (Nat.lt_succ_self _)).trans (heap.allocate_read _), rfl⟩
+    | succ index =>
+      obtain ⟨identity, found, resident, position⟩ := ih (heap.allocate (first.cell activation)).2 selected
+      refine ⟨identity, found, resident, ?_⟩
+      simpa only [RuntimeHeap.allocate, Nat.add_assoc, Nat.add_comm 1 index] using position
 
 theorem allocateBindings.typed {inputs : List BindingInput} (typed : BindingInputsTyped program inputs)
     (heap : RuntimeHeap StorageCell) (activation : ActivationId) :

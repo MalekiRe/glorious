@@ -98,7 +98,8 @@ position, not an independently reconstructed child input. -/
 theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindings : List BindingInput}
     (matched : matchPatterns patterns values = some bindings) {index : Nat}
     {pattern : Pattern} {value : Value} (patternAt : patterns[index]? = some pattern)
-    (valueAt : values[index]? = some value) : ∃ inputs, pattern.matchValue value = some inputs := by
+    (valueAt : values[index]? = some value) :
+    ∃ inputs front back, pattern.matchValue value = some inputs ∧ bindings = front ++ inputs ++ back := by
   induction patterns generalizing values bindings index with
   | nil => simp at patternAt
   | cons head tail ih =>
@@ -111,21 +112,26 @@ theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindin
         cases tailMatch : matchPatterns tail rest with
         | none => simp [matchPatterns, headMatch, tailMatch] at matched
         | some back =>
+          have joined : bindings = front ++ back := by
+            simpa [matchPatterns, headMatch, tailMatch] using matched.symm
           cases index with
-          | zero => cases patternAt; cases valueAt; exact ⟨front, headMatch⟩
-          | succ index => exact ih tailMatch patternAt valueAt
+          | zero => cases patternAt; cases valueAt; exact ⟨front, [], back, headMatch, joined⟩
+          | succ index =>
+            obtain ⟨inputs, before, after, selected, split⟩ := ih tailMatch patternAt valueAt
+            exact ⟨inputs, front ++ before, after, selected, by simp [joined, split, List.append_assoc]⟩
 
 /-- Observing a subtree of a successful match exposes a successful use of the
 same matcher; the observation itself supplies no success premise. -/
 theorem Pattern.SubjectAt.matched {pattern selected : Pattern} {value owner : Value}
     (focus : Pattern.SubjectAt pattern value selected owner) {bindings : List BindingInput}
     (matched : pattern.matchValue value = some bindings) :
-    ∃ inputs, selected.matchValue owner = some inputs := by
+    ∃ inputs front back, selected.matchValue owner = some inputs ∧ bindings = front ++ inputs ++ back := by
   induction focus generalizing bindings with
-  | root => exact ⟨bindings, matched⟩
+  | root => exact ⟨bindings, [], [], matched, by simp⟩
   | child same patternAt valueAt nested ih =>
     simp only [Pattern.matchValue, same, ↓reduceIte] at matched
-    obtain ⟨inputs, childMatch⟩ := matchPatterns.at matched patternAt valueAt
-    exact ih childMatch
+    obtain ⟨inputs, front, back, childMatch, split⟩ := matchPatterns.at matched patternAt valueAt
+    obtain ⟨selectedInputs, before, after, selectedMatch, childSplit⟩ := ih childMatch
+    exact ⟨selectedInputs, front ++ before, after ++ back, selectedMatch, by simp [split, childSplit, List.append_assoc]⟩
 
 end Grounded
