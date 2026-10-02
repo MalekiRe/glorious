@@ -98,7 +98,8 @@ theorem Block.no_infinite {n : Nat} {α : Type} (exec : α → State n → Optio
 soundness, rather than supplied as a block-execution assumption. -/
 theorem Block.checked_exec {n : Nat} {α : Type} {signature : Signature}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
-    (sound : InstructionSound signature rule exec) (ops : List α) {before after : Context n}
+    (progress : InstructionProgress signature rule exec)
+    (preservation : InstructionPreservation signature rule exec) (ops : List α) {before after : Context n}
     (checked : Code.Checked rule before (sequence ops) after) {state : State n}
     (typed : state.Typed signature before) :
     ∃ result, Block.exec exec ops state = some result ∧ result.Typed signature after ∧
@@ -108,8 +109,21 @@ theorem Block.checked_exec {n : Nat} {α : Type} {signature : Signature}
   | cons op rest ih =>
     cases checked with
     | act head tail =>
-      obtain ⟨middle, executed, realized, first⟩ := sound head typed
+      obtain ⟨middle, executed⟩ := progress head typed
+      obtain ⟨realized, first⟩ := preservation head typed executed
       obtain ⟨result, remainder, final, last⟩ := ih tail realized
       exact ⟨result, by simp [Block.exec, executed, remainder], final, first.trans last⟩
+
+/-- An observed block needs preservation only, not a second successful run. -/
+theorem Block.executed {n : Nat} {α : Type} {signature : Signature}
+    {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
+    (preservation : InstructionPreservation signature rule exec) (ops : List α) {before after : Context n}
+    (checked : Code.Checked rule before (sequence ops) after) {state result : State n}
+    (typed : state.Typed signature before) (executed : Block.exec exec ops state = some result) :
+    result.Typed signature after ∧ Conserves signature state result := by
+  have safe : Safe signature rule after ⟨sequence ops, state⟩ := ⟨before, typed, checked⟩
+  obtain ⟨⟨_, realized, remaining⟩, conserved⟩ := safe.run preservation (Block.exec_run ops executed .halt)
+  cases remaining
+  exact ⟨realized, conserved⟩
 
 end OwnershipMir

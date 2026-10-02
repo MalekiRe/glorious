@@ -142,7 +142,7 @@ theorem sequence_run {n : Nat} {signature : Signature} (commands : List (Command
     {state : State n} (typed : state.Typed signature before) :
     ∃ result, Run (Step Command.exec) ⟨sequence commands, state⟩ ⟨.halt, result⟩ ∧
       result.Typed signature after ∧ Conserves signature state result := by
-  obtain ⟨result, executed, final, conserved⟩ := Block.checked_exec Command.Checked.sound commands checked typed
+  obtain ⟨result, executed, final, conserved⟩ := Block.checked_exec Command.Checked.progress Command.Checked.executed commands checked typed
   exact ⟨result, Block.exec_run commands executed .halt, final, conserved⟩
 
 end OwnershipMir

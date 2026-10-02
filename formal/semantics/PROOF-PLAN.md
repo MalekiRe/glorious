@@ -55,8 +55,8 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   classification correspondence, and an additive ownership-frame equation.
   Whole slots use the empty path. Restoration requires vacancy and, for field
   holes, agreement with the recorded layout. No post-state readiness is assumed.
-- `Model.lean`, `Instructions.lean`: exact runtime occupancy and one local
-  progress/preservation contract for take, put, copy, and drop. Constructive
+- `Model.lean`, `Instructions.lean`: exact runtime occupancy and constructive
+  local progress/preservation proofs for take, put, copy, and drop. Constructive
   checking produces an `Op.Effect` witness of actual selection, extraction,
   replacement, and register contents. `Op.Checked.realize` and `.effect` expose
   full resident-level `Effect.Legal` evidence: take layout and deconstruction
@@ -76,6 +76,13 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   not a distinguished second instruction. Physical block steps consume a
   strictly decreasing pending-list rank; infinite internal block execution is
   impossible. Ordinary source moves still require actual initialization.
+  Shared control now separates `InstructionProgress` (construct an execution)
+  from `InstructionPreservation` (type and conserve an actual execution).
+  `Safe.step` and `Safe.run` require preservation only; `Safe.progress` requires
+  progress only. Block construction and divergence consumers explicitly take
+  both. `Block.executed` transports preservation through an observed block;
+  source-command preservation consumes it rather than constructing a second
+  execution. Concrete proofs reuse the existing instruction effect producer.
 - `ShellSafety.lean`: nonincrease of all noncopyable-shell occurrences and
   exact-shell accounting at every prefix. Any exact-shell decrease is counted
   from actual deconstruction steps. These are interpretations of actual
@@ -144,6 +151,10 @@ ownership pipeline. The transfer register is part of the actual runtime state.
   externally supplied subset can hide callee-owned storage. Program admission
   checks bodies against declarations, input/output readiness, and structural
   residual disposability; it assumes no successful return or future run.
+  Call-body preservation now instantiates the same shared `Safe.step` via
+  `Instruction.Checked.executed`; the duplicate `Calls.local_step` branch/loop
+  proof and the bundled `InstructionSound` interface are removed. Calls still
+  advance through activation transitions, never a fictitious local execution.
 - `CallOwnership.lean`, `CallShells.lean`: arbitrary additive tree measures
   agree across argument transfer and protected result handoff. Joint resource
   uniqueness covers the active state plus every retained caller, not merely
@@ -193,16 +204,16 @@ Nominal/source integration must derive layout and principal restriction from
 declarations and deconstruction authority from checking context, with field
 visibility separate. The call slice does not claim that integration.
 
-Verification: after `lake clean`, standalone `lake build OwnershipMir.Execution`
-passed its 2-job build without machine dependencies; `lake build OwnershipMir`
-then passed all 27 jobs, with warnings as errors and auto-implicit parameters
-disabled. Twenty shared and consumer theorems were inspected: seven shared
-theorems use no axioms, infinite-trace construction uses only `Classical.choice`,
-and the remaining dependencies are limited to `propext`, `Classical.choice`,
-and `Quot.sound`. Existing source/MIR return and divergence correspondence,
-ordered cleanup, recursive call composition, and full ownership/shell safety
-all consume the migrated relations. No `sorry`, new axioms, concrete examples,
-or unit tests were used to bypass the general obligations.
+Verification: a fresh `lake clean && lake build OwnershipMir` passed all 27
+jobs with warnings as errors and auto-implicit parameters disabled. Lean
+signature inspection confirms `Safe.step` requires preservation only and
+`Safe.progress` requires progress only. Seventeen instruction, block, shared
+control, lowering, cleanup, and call theorem dependencies were inspected and
+use only `propext`, `Classical.choice`, and `Quot.sound`. Existing source/MIR
+return and divergence correspondence, ordered cleanup, recursive call
+composition, and full ownership/shell safety all consume the split contracts.
+No `sorry`, new axioms, concrete examples, or unit tests were used to bypass
+the general obligations.
 
 
 ### Joint storage ownership

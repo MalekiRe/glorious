@@ -160,7 +160,7 @@ theorem compiled_return {n : Nat} {signature : Signature} {before final : Contex
       result.Typed signature final ∧ result.temp = none ∧ Conserves signature initial result := by
   have lowered := lower_run run
   obtain ⟨⟨current, realized, remaining⟩, conserved⟩ :=
-    (Safe.run (signature := signature) ⟨before, typed, lower_checked checked⟩ Op.Checked.sound lowered)
+    (Safe.run (signature := signature) ⟨before, typed, lower_checked checked⟩ Op.Checked.executed lowered)
   cases remaining with
   | halt => exact ⟨lowered, realized, by simpa [empty] using realized.2, conserved⟩
 

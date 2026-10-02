@@ -80,12 +80,18 @@ def Safe {n : Nat} {α : Type} (signature : Signature)
     (rule : Context n → α → Context n → Prop) (final : Context n) (config : Configuration n α) : Prop :=
   ∃ current, config.state.Typed signature current ∧ Code.Checked rule current config.code final
 
-/-- The only interface required by shared control composition. Both concrete
-instructions and lowered source commands discharge it constructively. -/
-def InstructionSound {n : Nat} {α : Type} (signature : Signature)
+/-- Progress is required only when constructing an instruction step. -/
+def InstructionProgress {n : Nat} {α : Type} (signature : Signature)
     (rule : Context n → α → Context n → Prop) (exec : α → State n → Option (State n)) : Prop :=
   ∀ {before after op}, rule before op after → ∀ {state}, state.Typed signature before →
-    ∃ next, exec op state = some next ∧ next.Typed signature after ∧ Conserves signature state next
+    ∃ next, exec op state = some next
+
+/-- Preservation consumes an actual execution, without assuming local progress.
+Control operations may instead advance through activation transitions. -/
+def InstructionPreservation {n : Nat} {α : Type} (signature : Signature)
+    (rule : Context n → α → Context n → Prop) (exec : α → State n → Option (State n)) : Prop :=
+  ∀ {before after op}, rule before op after → ∀ {state next}, state.Typed signature before →
+    exec op state = some next → next.Typed signature after ∧ Conserves signature state next
 
 theorem observe_ready {n : Nat} {signature : Signature} {state : State n} {context : Context n}
     (typed : state.Typed signature context) {guard : Fin n} (scalar : context.slots guard = some (.leaf .data)) :
@@ -101,7 +107,7 @@ theorem observe_ready {n : Nat} {signature : Signature} {state : State n} {conte
 theorem Safe.progress {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {config : Configuration n α} (safe : Safe signature rule final config)
-    (localSound : InstructionSound signature rule exec) :
+    (localProgress : InstructionProgress signature rule exec) :
     config.code = .halt ∨ ∃ next, Step exec config next := by
   obtain ⟨current, typed, checked⟩ := safe
   cases config with
@@ -109,7 +115,7 @@ theorem Safe.progress {n : Nat} {α : Type} {signature : Signature} {final : Con
     cases checked with
     | halt => exact Or.inl rfl
     | act head tail =>
-      obtain ⟨after, executed, _⟩ := localSound head typed
+      obtain ⟨after, executed⟩ := localProgress head typed
       exact Or.inr ⟨_, .act executed⟩
     | branch scalar left right =>
       obtain ⟨choice, observed⟩ := observe_ready typed scalar
@@ -122,15 +128,14 @@ theorem Safe.progress {n : Nat} {α : Type} {signature : Signature} {final : Con
 theorem Safe.step {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {before after : Configuration n α} (safe : Safe signature rule final before)
-    (localSound : InstructionSound signature rule exec) (step : Step exec before after) :
+    (preservation : InstructionPreservation signature rule exec) (step : Step exec before after) :
     Safe signature rule final after ∧ Conserves signature before.state after.state := by
   obtain ⟨current, typed, checked⟩ := safe
   cases step with
   | act executed =>
     cases checked with
     | act head tail =>
-      obtain ⟨next, actual, realized, conserved⟩ := localSound head typed
-      cases Option.some.inj (executed.symm.trans actual)
+      obtain ⟨realized, conserved⟩ := preservation head typed executed
       exact ⟨⟨_, realized, tail⟩, conserved⟩
   | @branch guard yes no state choice observed =>
     cases checked with
@@ -150,12 +155,12 @@ theorem Safe.step {n : Nat} {α : Type} {signature : Signature} {final : Context
 theorem Safe.run {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {before after : Configuration n α} (safe : Safe signature rule final before)
-    (localSound : InstructionSound signature rule exec) (run : Run (Step exec) before after) :
+    (preservation : InstructionPreservation signature rule exec) (run : Run (Step exec) before after) :
     Safe signature rule final after ∧ Conserves signature before.state after.state := by
   induction run with
   | refl => exact ⟨safe, Conserves.refl _ _⟩
   | step head tail ih =>
-    obtain ⟨middle, first⟩ := safe.step localSound head
+    obtain ⟨middle, first⟩ := safe.step preservation head
     obtain ⟨last, rest⟩ := ih middle
     exact ⟨last, first.trans rest⟩
 
@@ -166,7 +171,7 @@ theorem ownership_safety {n : Nat} {signature : Signature} {final : Context n}
     Safe signature Op.Checked final after ∧ after.state.Unique ∧
       Conserves signature before.state after.state ∧
       (after.code = .halt ∨ ∃ next, Step Op.exec after next) := by
-  obtain ⟨preserved, conserved⟩ := safe.run Op.Checked.sound run
-  exact ⟨preserved, conserved.unique unique, conserved, preserved.progress Op.Checked.sound⟩
+  obtain ⟨preserved, conserved⟩ := safe.run Op.Checked.executed run
+  exact ⟨preserved, conserved.unique unique, conserved, preserved.progress Op.Checked.progress⟩
 
 end OwnershipMir

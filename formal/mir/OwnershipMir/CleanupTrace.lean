@@ -73,7 +73,7 @@ theorem Scope.exit_trace_then {n : Nat} {signature : Signature} {scope : Scope n
     OwnershipTrace ⟨(lower (sequence (scope.commands context))).append next, state⟩
       ⟨next, scope.exit state⟩ (scope.cleanupOrder context) := by
   obtain ⟨result, executed, _, _⟩ :=
-    Block.checked_exec Command.Checked.sound (scope.commands context) (Scope.checked admitted) typed
+    Block.checked_exec Command.Checked.progress Command.Checked.executed (scope.commands context) (Scope.checked admitted) typed
   have trace := commands_trace (scope.commands context) executed next
   have same : result = scope.exit state := (Scope.exit_iff admitted typed).mp (lower_run (Block.exec_run _ executed .halt))
   rw [same, scope.commands_order] at trace
@@ -186,7 +186,7 @@ theorem Scope.cleanup_observed_safety {n : Nat} {signature : Signature} {scope :
     (Code.Checked.halt (rule := Op.Checked)) (by simpa only [Code.append_halt] using run)
   have observed : OwnershipTrace ⟨lower (sequence (scope.commands context)), state⟩ reached events :=
     by simpa only [Code.append_halt] using trace
-  exact ⟨safe, distinct, conserved, safe.progress Op.Checked.sound, scope.cleanup_frame context run,
+  exact ⟨safe, distinct, conserved, safe.progress Op.Checked.progress, scope.cleanup_frame context run,
     events, observed, Scope.cleanup_prefix_order admitted typed observed⟩
 
 end OwnershipMir

@@ -29,36 +29,8 @@ theorem Instruction.Checked.executed {n : Nat} {program : Program n} {signature 
     (typed : state.Typed signature before) (executed : instruction.exec state = some next) :
     next.Typed signature after ∧ Conserves signature state next := by
   cases checked with
-  | operation checked =>
-    obtain ⟨effect, realized, legal⟩ := checked.effect typed executed
-    exact ⟨realized, effect.conserves legal.conservationAllowed⟩
+  | operation checked => exact checked.executed typed executed
   | call => cases executed
-
-theorem local_step {n : Nat} {program : Program n} {signature : Signature}
-    {before output : Context (n + 1)} {code next : Body n} {state after : State (n + 1)}
-    (typed : state.Typed signature before)
-    (checked : Code.Checked (Instruction.Checked program) before code output)
-    (step : OwnershipMir.Step Instruction.exec ⟨code, state⟩ ⟨next, after⟩) :
-    ∃ current, after.Typed signature current ∧ Code.Checked (Instruction.Checked program) current next output ∧
-      Conserves signature state after := by
-  cases step with
-  | act executed =>
-    cases checked with
-    | act head tail =>
-      obtain ⟨realized, conserved⟩ := head.executed typed executed
-      exact ⟨_, realized, tail, conserved⟩
-  | branch observed =>
-    cases checked with
-    | branch scalar left right =>
-      split
-      · exact ⟨_, typed, left, Conserves.refl _ _⟩
-      · exact ⟨_, typed, right, Conserves.refl _ _⟩
-  | loop observed =>
-    cases checked with
-    | loop scalar body tail =>
-      split
-      · exact ⟨_, typed, body.append (.loop scalar body tail), Conserves.refl _ _⟩
-      · exact ⟨_, typed, tail, Conserves.refl _ _⟩
 
 /-- The activation invariant follows every physical phase: body execution,
 argument transfer, protected result installation, cleanup, and empty retirement. -/
@@ -69,7 +41,8 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
   | operation step =>
     cases safe with
     | body typed checked retained =>
-      obtain ⟨current, realized, remaining, _⟩ := local_step typed checked step
+      obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
+        OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
       exact .body realized remaining retained
   | @enter identity destination next cleanup state stack function argument resolved resident =>
     cases safe with
@@ -96,7 +69,7 @@ theorem Safe.preservation {n : Nat} {program : Program n} {signature : Signature
     cases safe with
     | cleaning typed checked retained =>
       obtain ⟨⟨current, realized, remaining⟩, _⟩ :=
-        (OwnershipMir.Safe.step (signature := signature) ⟨_, typed, checked⟩ Op.Checked.sound step)
+        (OwnershipMir.Safe.step (signature := signature) ⟨_, typed, checked⟩ Op.Checked.executed step)
       exact .cleaning realized remaining retained
   | retire =>
     cases safe with
@@ -127,7 +100,7 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
     | act head tail =>
       cases head with
       | operation checked =>
-        obtain ⟨next, executed, _, _⟩ := checked.sound typed
+        obtain ⟨next, executed⟩ := checked.progress typed
         exact Or.inr ⟨_, .operation (.act executed)⟩
       | call resolved argument result =>
         obtain ⟨value, live, _⟩ := Option.map_eq_some_iff.mp (typed.2.trans argument)
@@ -140,7 +113,7 @@ theorem Safe.progress {n : Nat} {program : Program n} {signature : Signature} {f
       exact Or.inr ⟨_, .operation (.loop observed)⟩
   | @cleaning code state stack before typed checked retained =>
     have start : OwnershipMir.Safe signature Op.Checked (emptyContext n) ⟨code, state⟩ := ⟨before, typed, checked⟩
-    rcases start.progress Op.Checked.sound with halted | ⟨next, step⟩
+    rcases start.progress Op.Checked.progress with halted | ⟨next, step⟩
     · cases halted
       cases checked
       have same := typed_empty typed

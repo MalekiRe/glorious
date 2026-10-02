@@ -88,7 +88,8 @@ theorem Safe.ownership_step {n : Nat} {program : Program n} {signature : Signatu
   | operation step =>
     cases safe with
     | body typed checked retained =>
-      obtain ⟨_, _, _, preserved⟩ := local_step typed checked step
+      obtain ⟨_, preserved⟩ :=
+        OwnershipMir.Safe.step ⟨_, typed, checked⟩ Instruction.Checked.executed step
       exact Preserves.local preserved _ _ _
   | enter resolved resident =>
     apply Preserves.of_mass
@@ -102,7 +103,7 @@ theorem Safe.ownership_step {n : Nat} {program : Program n} {signature : Signatu
     cases safe with
     | cleaning typed checked retained =>
       have start : OwnershipMir.Safe signature Op.Checked _ ⟨_, _⟩ := ⟨_, typed, checked⟩
-      exact Preserves.local (start.step Op.Checked.sound step).2 _ _ _
+      exact Preserves.local (start.step Op.Checked.executed step).2 _ _ _
   | retire =>
     apply Preserves.of_mass
     intro leaf shell

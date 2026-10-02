@@ -103,7 +103,7 @@ theorem Safe.shell_run {n : Nat} {signature : Signature} {final : Context n}
   | refl => exact ⟨0, .refl _, Nat.add_zero _⟩
   | step head tail ih =>
     have first := safe.shell_step head
-    obtain ⟨amount, trace, rest⟩ := ih (safe.step Op.Checked.sound head).1
+    obtain ⟨amount, trace, rest⟩ := ih (safe.step Op.Checked.executed head).1
     exact ⟨_, .step head trace, by omega⟩
 
 private def noncopyShell (shell : Shell) : Nat := if shell.restriction = .data then 0 else 1
@@ -169,6 +169,6 @@ theorem Safe.linear_shells_run {n : Nat} {signature : Signature} {final : Contex
   induction run with
   | refl => exact Nat.le_refl _
   | step head tail ih =>
-    exact Nat.le_trans (ih (safe.step Op.Checked.sound head).1) (safe.linear_shells_step head)
+    exact Nat.le_trans (ih (safe.step Op.Checked.executed head).1) (safe.linear_shells_step head)
 
 end OwnershipMir

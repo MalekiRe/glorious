@@ -10,8 +10,21 @@ theorem Command.Checked.sound {n : Nat} {signature : Signature} {before after : 
     ∃ next, command.exec state = some next ∧ next.Typed signature after ∧ Conserves signature state next := by
   have checkedBlock : Code.Checked Op.Checked before (sequence command.block) after := checked.lower .halt
   obtain ⟨result, executed, realized, conserved⟩ :=
-    Block.checked_exec Op.Checked.sound command.block checkedBlock typed
+    Block.checked_exec Op.Checked.progress Op.Checked.executed command.block checkedBlock typed
   exact ⟨result, by rwa [Command.exec_eq], realized, conserved⟩
+
+theorem Command.Checked.progress {n : Nat} {signature : Signature} {before after : Context n}
+    {command : Command n} (checked : Command.Checked before command after) {state : State n}
+    (typed : state.Typed signature before) : ∃ next, command.exec state = some next := by
+  obtain ⟨next, executed, _, _⟩ := checked.sound typed
+  exact ⟨next, executed⟩
+
+theorem Command.Checked.executed {n : Nat} {signature : Signature} {before after : Context n}
+    {command : Command n} (checked : Command.Checked before command after) {state next : State n}
+    (typed : state.Typed signature before) (executed : command.exec state = some next) :
+    next.Typed signature after ∧ Conserves signature state next := by
+  exact Block.executed Op.Checked.executed command.block (checked.lower .halt) typed
+    (by rwa [Command.exec_eq] at executed)
 
 @[simp] theorem lower_halt {n : Nat} (source : Code n (Command n)) :
     lower source = .halt ↔ source = .halt := by
@@ -29,12 +42,12 @@ theorem Matches.advance {n : Nat} {signature : Signature} {final : Context n}
     ∃ next, Run (Step Command.exec) source next ∧ Safe signature Command.Checked final next ∧ Matches next after := by
   cases matched with
   | refl =>
-    rcases safe.progress Command.Checked.sound with halted | ⟨next, sourceStep⟩
+    rcases safe.progress Command.Checked.progress with halted | ⟨next, sourceStep⟩
     · exact False.elim (step.not_halt (by simp [halted, lower]))
     · obtain ⟨middle, first, rest⟩ := lower_step sourceStep
       have same := first.deterministic step
       subst middle
-      exact ⟨next, .step sourceStep (.refl _), (safe.step Command.Checked.sound sourceStep).1, rest⟩
+      exact ⟨next, .step sourceStep (.refl _), (safe.step Command.Checked.executed sourceStep).1, rest⟩
   | step pending rest =>
     cases pending.deterministic step
     exact ⟨source, .refl _, safe, rest⟩
@@ -74,7 +87,8 @@ Safety is carried by every finite prefix; no termination premise is introduced. 
 theorem Safe.behavior {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {start : Configuration n α} (safe : Safe signature rule final start)
-    (localSound : InstructionSound signature rule exec) :
+    (progress : InstructionProgress signature rule exec)
+    (preservation : InstructionPreservation signature rule exec) :
     (∃ result, Run (Step exec) start ⟨.halt, result⟩) ∨
     (∃ trace : Nat → Configuration n α, trace 0 = start ∧
       ∀ i, Step exec (trace i) (trace (i + 1)) ∧ Run (Step exec) start (trace i) ∧
@@ -84,7 +98,7 @@ theorem Safe.behavior {n : Nat} {α : Type} {signature : Signature} {final : Con
   · exact Or.inl returned
   · have advances : ∀ state, Run (Step exec) start state → ∃ next, Step exec state next := by
       intro state reached
-      rcases (safe.run localSound reached).1.progress localSound with halted | next
+      rcases (safe.run preservation reached).1.progress progress with halted | next
       · apply False.elim
         apply returned
         refine ⟨state.state, ?_⟩
@@ -93,19 +107,20 @@ theorem Safe.behavior {n : Nat} {α : Type} {signature : Signature} {final : Con
       · exact next
     obtain ⟨trace, initial, steps⟩ := diverges_of_progress advances
     exact Or.inr ⟨trace, initial, fun i =>
-      ⟨steps i, trace_reachable initial steps i, safe.run localSound (trace_reachable initial steps i)⟩⟩
+      ⟨steps i, trace_reachable initial steps i, safe.run preservation (trace_reachable initial steps i)⟩⟩
 
 
 theorem Safe.diverges_iff {n : Nat} {α : Type} {signature : Signature} {final : Context n}
     {rule : Context n → α → Context n → Prop} {exec : α → State n → Option (State n)}
     {start : Configuration n α} (safe : Safe signature rule final start)
-    (localSound : InstructionSound signature rule exec) :
+    (progress : InstructionProgress signature rule exec)
+    (preservation : InstructionPreservation signature rule exec) :
     Diverges (Step exec) start ↔ ¬ ∃ result, Run (Step exec) start ⟨.halt, result⟩ := by
   constructor
   · intro infinite ⟨result, returned⟩
     exact returned.excludes_divergence Step.deterministic (fun _ step => step.not_halt rfl) infinite
   · intro absent
-    rcases safe.behavior localSound with returned | ⟨trace, initial, safeSteps⟩
+    rcases safe.behavior progress preservation with returned | ⟨trace, initial, safeSteps⟩
     · exact False.elim (absent returned)
     · exact ⟨trace, initial, fun i => (safeSteps i).1⟩
 
@@ -118,7 +133,8 @@ theorem compiled_diverges_iff {n : Nat} {signature : Signature} {before final : 
   have targetSafe : Safe signature Op.Checked final ⟨lower source, initial⟩ :=
     ⟨before, typed, lower_checked checked⟩
   have sourceSafe : Safe signature Command.Checked final ⟨source, initial⟩ := ⟨before, typed, checked⟩
-  rw [targetSafe.diverges_iff Op.Checked.sound, sourceSafe.diverges_iff Command.Checked.sound]
+  rw [targetSafe.diverges_iff Op.Checked.progress Op.Checked.executed,
+    sourceSafe.diverges_iff Command.Checked.progress Command.Checked.executed]
   constructor
   · intro absent ⟨result, run⟩
     exact absent ⟨result, lower_run run⟩

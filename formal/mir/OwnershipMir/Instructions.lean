@@ -238,4 +238,17 @@ theorem Op.Checked.sound {n : Nat} {signature : Signature} {before after : Conte
   obtain ⟨next, effect, realized, allowed⟩ := checked.realize typed
   exact ⟨next, effect.exec, realized, effect.conserves allowed.conservationAllowed⟩
 
+theorem Op.Checked.progress {n : Nat} {signature : Signature} {before after : Context n}
+    {op : Op n} (checked : Op.Checked before op after) {state : State n}
+    (typed : state.Typed signature before) : ∃ next, op.exec state = some next := by
+  obtain ⟨next, effect, _, _⟩ := checked.realize typed
+  exact ⟨next, effect.exec⟩
+
+theorem Op.Checked.executed {n : Nat} {signature : Signature} {before after : Context n}
+    {op : Op n} (checked : Op.Checked before op after) {state next : State n}
+    (typed : state.Typed signature before) (executed : op.exec state = some next) :
+    next.Typed signature after ∧ Conserves signature state next := by
+  obtain ⟨effect, realized, legal⟩ := checked.effect typed executed
+  exact ⟨realized, effect.conserves legal.conservationAllowed⟩
+
 end OwnershipMir
