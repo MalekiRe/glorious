@@ -104,17 +104,25 @@ theorem BindingMap.ReplacementSafe.not_nondiscardable
 
 theorem BindingMap.ReplacementSafe.not_exact
     (safe : BindingMap.ReplacementSafe program home heap bindings place)
-    {address : StorageId} {cell : StorageCell}
+    {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : Grounded.lookup place.root bindings = some address) (found : heap.read address = some cell)
-    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (path : PathType program selectedHome cell.type place.fields selectedType)
+    {descendantHome : Module} {identity : Nat} {declaration : DataDecl} {fields : List FieldKey}
+    (descendant : PathType program descendantHome selectedType fields (.nominal identity))
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
-      some (.nominal identity tag fields)) : False := by
-  obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound, actualSelected, _, permission⟩ := safe
+    {owner : PartialValue}
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
+      old.selectFields program selectedType fields) = some owner)
+    (unconsumed : ¬ owner.Empty) : False := by
+  obtain ⟨actualAddress, actualCell, value, type, actualMapped, actualFound,
+    actualSelected, actualPath, permission⟩ := safe
   cases Option.some.inj (actualMapped.symm.trans mapped)
   cases Option.some.inj (actualFound.symm.trans found)
+  cases actualPath.result_unique path
   rw [actualSelected] at selected
-  exact PartialValue.Disposable.not_exact_read declared restricted selected permission
+  obtain ⟨selectedOwner, selectedOwnerFound, selectedPermission⟩ := descendant.disposable permission
+  cases Option.some.inj (selectedOwnerFound.symm.trans selected)
+  exact unconsumed (selectedPermission.exact_nominal_empty declared restricted)
 
 
 theorem BindingMap.Typed.replacement_safe

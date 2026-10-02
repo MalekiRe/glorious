@@ -677,8 +677,8 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     subst_vars
     exact BindingMap.Disposable.release_preserves_exact disposition.1 released found path declared restricted resident unconsumed
 
-/-- Selection is observed after RHS evaluation. A moved-out slot may be restored,
-but a still-live exact selected owner cannot be overwritten. -/
+/-- After RHS evaluation, replacement cannot discard an unconsumed exact
+descendant, including a partial owner with no successful whole-value read. -/
 theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -688,14 +688,19 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
     {assignmentHome : Module} {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .assign assignmentHome place rest :: stack⟩)
-    {address : StorageId} {cell : StorageCell}
+    {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
     (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
-    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    (path : PathType program selectedHome cell.type place.fields selectedType)
+    {descendantHome : Module} {identity : Nat} {declaration : DataDecl} {fields : List FieldKey}
+    (descendant : PathType program descendantHome selectedType fields (.nominal identity))
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (selected : ((cell.resident.selectFields program cell.type place.fields).bind PartialValue.read) =
-      some (.nominal identity tag fields)) : False := by
+    {owner : PartialValue}
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
+      old.selectFields program selectedType fields) = some owner)
+    (unconsumed : ¬ owner.Empty) : False := by
   exact BindingMap.ReplacementSafe.not_exact
-    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found declared restricted selected
+    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path descendant
+      declared restricted selected unconsumed
 
 
 /-- After RHS evaluation, no checked prefix overwrites an ancestor of a live

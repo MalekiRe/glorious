@@ -2113,11 +2113,15 @@ passed. Axiom inspection of the residual producer, retirement theorem, both
 constructive consumers and maximal source behavior found only standard Lean
 axioms. This does not add custom Drop or field-by-field destruction execution.
 
-`HasType.no_exact_overwrite` observes the selected resident through the runtime
-binding map, heap lookup and field selection immediately after RHS evaluation.
-The general soundness invariant rules out overwriting a still-live exact nominal
-owner. This does not forbid restoration after the RHS has moved that owner out.
-The underlying exclusion lemma is consumed by this public execution theorem.
+`HasType.no_exact_overwrite` now excludes every unconsumed exact descendant
+beneath the destination immediately after RHS evaluation, even when that
+descendant is partially consumed and unreadable. The runtime binding map, heap
+lookup and nested checked selection identify the actual old owner. Shared
+residual permission would force it to be structurally empty; its remaining
+ownership contradicts that conclusion. A fully moved-out slot may still be
+restored. Both the replacement producer and source-prefix consumer were migrated.
+All 30 Lean build jobs and standard-axiom inspection of replacement exclusion,
+the public source theorem and maximal source behavior passed after this change.
 
 `lake build Grounded` passed (30 jobs). Exhaustive imported axiom inspection
 covered 3,799 declarations with only standard Lean axioms. The actual release,
