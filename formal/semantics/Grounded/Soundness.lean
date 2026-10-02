@@ -973,6 +973,32 @@ theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
   exact BindingMap.ReplacementSafe.not_nondiscardable
     (checked.soundness checkedProgram store issued run).2.2.2.2.2 mapped found path descendant selected required
 
+/-- A readable exact descendant blocks replacement of its ancestor. The class
+may be inferred; no separate nondisposability or successful future cleanup is assumed. -/
+theorem HasType.no_exact_resident_overwrite (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {assignmentHome : Module} {value : Value} {place : Place} {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .result value, .assign assignmentHome place rest :: stack⟩)
+    {address : StorageId} {cell : StorageCell} {selectedHome : Module} {selectedType : Ty}
+    (mapped : lookup place.root current.bindings = some address) (found : current.heap.read address = some cell)
+    (path : PathType program selectedHome cell.type place.fields selectedType)
+    {descendantHome : Module} {descendantType : Ty} {fields : List FieldKey}
+    (descendant : PathType program descendantHome selectedType fields descendantType)
+    {owner : PartialValue}
+    (selected : ((cell.resident.selectFields program cell.type place.fields).bind fun old =>
+      old.selectFields program selectedType fields) = some owner)
+    {observed : Value} (read : owner.read = some observed)
+    (classified : descendantType.HasPrincipal program.data .exact) : False := by
+  apply checked.no_nondiscardable_overwrite checkedProgram store issued run mapped found path descendant selected
+  intro permission
+  have zero := permission.zero_use read classified
+  simp at zero
+
 
 /-- Completed execution realizes exactly the declared output masks. No completed
 run or future readiness is a premise of checking or progress. -/

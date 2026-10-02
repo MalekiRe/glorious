@@ -4422,3 +4422,12 @@ cleanup of an inferred-exact aggregate after all exact descendants have moved.
 All 30 strict jobs passed; inspected quantitative retirement, general ownership
 and public source-soundness/behavior closures use only the standard Lean axioms.
 Custom destructor and reference restoration obligations remain open.
+
+The same quantitative producer now rules out ancestor replacement of a
+readable exact descendant after RHS evaluation.
+`HasType.no_exact_resident_overwrite` derives nondisposability from the selected
+descendant's principal and reached occupancy, including inferred classes and
+partially moved enclosing destinations. It consumes the existing general
+replacement invariant; no target read, future cleanup or extra admission
+certificate is assumed. All 30 strict jobs and inspected replacement, retirement
+and public source-soundness/behavior axiom closures passed.
