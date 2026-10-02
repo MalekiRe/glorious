@@ -757,6 +757,31 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
+/-- At every admitted source prefix, an immutable whole binding is either
+unreadable through consumption or still yields exactly its incoming value.
+This also excludes resurrection of an initially unreadable whole binding. -/
+theorem SourceClosure.Admitted.immutable_read {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {state : Configuration} (run : Run program ⟨environment, .expression core, []⟩ state)
+    {name : BindingId} {slot : BindingType} (selected : lookup name scope.context = some slot)
+    (immutable : slot.mutable = false) :
+    state.outerEnvironment.read program ⟨name, []⟩ = none ∨
+      state.outerEnvironment.read program ⟨name, []⟩ = environment.read program ⟨name, []⟩ := by
+  have framed := (admitted.soundness elaborated slots store issued run).2.2.1
+  have retained : lookup name final.slots = some slot := by
+    rw [(elaborated.checked slots).slots, slots]
+    exact selected
+  cases observed : state.outerEnvironment.read program ⟨name, []⟩ with
+  | none => exact Or.inl rfl
+  | some value => exact Or.inr (framed.read_before retained immutable observed).symm
+
 /-- Source admission determines a complete behavior without a termination or
 future-state premise. Infinite execution retains the same general safety contract
 as finite execution, rather than being encoded as an abort. -/

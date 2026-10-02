@@ -786,4 +786,41 @@ theorem PartialValue.write_select {program : Program} {parent : Ty}
     simp only [PartialValue.selectFields, info, Option.bind_some, reopened, atIndex]
     exact ih tail
 
+private theorem readPartialValues_none_of_member {values : List PartialValue} {value : PartialValue}
+    (member : value ∈ values) (missing : value.read = none) : readPartialValues values = none := by
+  induction values with
+  | nil => cases member
+  | cons head tail ih =>
+    cases member with
+    | head => simp [readPartialValues, missing]
+    | tail _ member => simp [readPartialValues, ih member]
+
+private theorem closeFields_read_none {parent : Ty} {fields : List PartialValue} {after : PartialValue}
+    (closed : PartialValue.closeFields parent fields = some after)
+    (missing : readPartialValues fields = none) : after.read = none := by
+  cases parent <;> cases fields <;> simp [PartialValue.closeFields] at closed
+  all_goals subst after
+  case tuple.cons first rest head tail =>
+    cases found : head.read with
+    | none => simp [PartialValue.read, found]
+    | some value =>
+      have absent : readPartialValues tail = none := by simpa [readPartialValues, found] using missing
+      simp [PartialValue.read, found, absent]
+  all_goals simp [PartialValue.read, missing]
+
+/-- Erasing any path prevents reconstruction of the whole owner. In particular,
+consumption cannot turn an unavailable aggregate into a readable value. -/
+theorem PartialValue.write_hole_unreadable {program : Program} {parent : Ty}
+    {before after : PartialValue} {path : List FieldKey}
+    (written : before.writeFields program parent path .hole = some after) : after.read = none := by
+  induction path generalizing parent before after with
+  | nil => cases written; simp [PartialValue.read]
+  | cons key rest ih =>
+    simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+    obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, tail, closed⟩ := written
+    apply closeFields_read_none closed
+    apply readPartialValues_none_of_member
+      (List.mem_of_getElem? (List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1))
+    exact ih tail
+
 end Grounded
