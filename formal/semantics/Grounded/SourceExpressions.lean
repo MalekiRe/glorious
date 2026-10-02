@@ -322,6 +322,70 @@ theorem NamedRecordBuild.first_execution {program : Program} {home : Module}
     obtain ⟨resident, middle, localAfter, headRun, tailRun, exited⟩ := Evaluates.bind_iff.mp executed
     exact ⟨_, _, _, _, _, resident, middle, localAfter, selected, initialized, continued, rfl, headRun, tailRun, exited⟩
 
+/-- Every completed record run contains its actual declaration-ordered transfer
+phase, followed by construction and retirement of all generated scopes. -/
+theorem NamedRecordBuild.assembly {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {identity : Nat} {tag : Option Nat}
+    {constructor : RecordConstructor program home identity tag} {scope : SourceScope}
+    {before final : FlowContext} {source : List (String × NamedExpr)}
+    {prepared : List (String × BindingId)} {core : Expr}
+    (built : NamedRecordBuild program names home identity tag constructor scope before source prepared core final)
+    {environment after : Environment} {value : Value}
+    (executed : Evaluates program environment core value after) :
+    ∃ values preparedFinal moves entry exit,
+      recordMoves constructor.fields preparedFinal = some moves ∧
+      value = .nominal identity tag values ∧
+      Run program ⟨environment, .expression core, []⟩
+        ⟨entry, .arguments moves, .construct identity tag :: List.replicate source.length (.scope 1)⟩ ∧
+      EvaluatesMany program entry moves values exit ∧
+      Run program ⟨exit, .results values, .construct identity tag :: List.replicate source.length (.scope 1)⟩
+        ⟨after, .result value, []⟩ := by
+  induction source generalizing scope before final prepared core environment after with
+  | nil =>
+    cases built with
+    | finish ordered transferred =>
+      obtain ⟨values, rfl, residents⟩ := Evaluates.construct_iff.mp executed
+      exact ⟨values, _, _, environment, after, ordered, rfl,
+        .step .construct (.refl _), residents, .step .constructResult (.refl _)⟩
+  | cons first rest ih =>
+    cases built with
+    | field selected initialized continued =>
+      obtain ⟨resident, middle, localAfter, headRun, tailRun, exited⟩ := Evaluates.bind_iff.mp executed
+      obtain ⟨values, preparedFinal, moves, entry, exit, ordered, same, front, residents, back⟩ := ih continued tailRun
+      refine ⟨values, preparedFinal, moves, entry, exit, ordered, same, ?_, residents, ?_⟩
+      · have lifted := Run.extend front [.scope 1]
+        simp only [Configuration.extend, List.nil_append, List.cons_append, List.length_cons, List.replicate_succ'] at lifted ⊢
+        exact .step .bind ((Run.extend headRun [.bind _ _ _]).trans (.step .bindResult lifted))
+      · have lifted := Run.extend back [.scope 1]
+        simp only [Configuration.extend, List.nil_append, List.cons_append, List.length_cons, List.replicate_succ'] at lifted ⊢
+        exact lifted.trans (Run.scope exited)
+
+/-- Source record execution returns the selected nominal constructor. Its real
+assembly cut uses the declaration-indexed moves and retains exactly one pending
+scope retirement per source initializer. This is stronger than nominal typing. -/
+theorem NamedExpr.Elaborates.record_execution {program : Program} {home : Module}
+    {names : Module → FunctionName → Option Nat} {scope : SourceScope} {before final : FlowContext}
+    {identity : Nat} {tag : Option Nat} {source : List (String × NamedExpr)} {core : Expr} {type : Ty}
+    (elaborated : NamedExpr.Elaborates program names home scope before (.record identity tag source) core type final)
+    {environment after : Environment} {value : Value}
+    (executed : Evaluates program environment core value after) :
+    ∃ (constructor : RecordConstructor program home identity tag) (values : List Value)
+      (prepared : List (String × BindingId)) (moves : List Expr) (entry exit : Environment),
+      (source.map Prod.fst).Perm (constructor.fields.map Prod.fst) ∧
+      value = .nominal identity tag values ∧
+      (∀ (index : Nat) (field : String × Field), constructor.fields[index]? = some field → ∃ binding,
+        prepared.find? (fun entry => entry.1 == field.1) = some binding ∧
+        moves[index]? = some (Expr.move ⟨binding.2, []⟩)) ∧
+      Run program ⟨environment, .expression core, []⟩
+        ⟨entry, .arguments moves, .construct identity tag :: List.replicate source.length (.scope 1)⟩ ∧
+      EvaluatesMany program entry moves values exit ∧
+      Run program ⟨exit, .results values, .construct identity tag :: List.replicate source.length (.scope 1)⟩
+        ⟨after, .result value, []⟩ := by
+  cases elaborated with
+  | record complete built =>
+    obtain ⟨values, prepared, moves, entry, exit, ordered, same, front, residents, back⟩ := built.assembly executed
+    exact ⟨_, values, prepared, moves, entry, exit, complete, same, recordMoves.ordered ordered, front, residents, back⟩
+
 /-- Field-label permutation within any record clause preserves its exact Core
 clause, body scope, masks, coverage history and first-match priority. -/
 theorem NamedArmsElaborate.record_permute {program : Program}

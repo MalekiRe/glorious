@@ -141,6 +141,36 @@ theorem Evaluates.construct {environment after : Environment} {identity : Nat} {
       Evaluates program environment (.construct identity tag fields) (.nominal identity tag values) after :=
   .step .construct ((Run.extend residents [.construct identity tag]).trans (.step .constructResult (.refl _)))
 
+/-- Construction returns the selected tag and precisely the values computed by
+its ordered resident expressions, not merely some value of the nominal type. -/
+theorem Evaluates.construct_iff {environment after : Environment} {identity : Nat}
+    {tag : Option Nat} {fields : List Expr} {value : Value} :
+    Evaluates program environment (.construct identity tag fields) value after ↔
+      ∃ values, value = .nominal identity tag values ∧
+        EvaluatesMany program environment fields values after := by
+  constructor
+  · intro evaluated
+    cases evaluated with
+    | step first remaining =>
+      cases first with
+      | construct =>
+        obtain ⟨done, terminal, residents, continued⟩ := remaining.unextend
+          ⟨environment, .arguments fields, []⟩ [_] rfl (by simp)
+        cases terminal with
+        | result middle result =>
+          cases continued with
+          | step first remaining => cases first
+        | results middle values =>
+          cases continued with
+          | step first remaining =>
+            cases first with
+            | constructResult =>
+              cases remaining with
+              | refl => exact ⟨values, rfl, residents⟩
+              | step first remaining => cases first
+  · rintro ⟨values, rfl, residents⟩
+    exact .construct residents
+
 theorem Evaluates.call {environment middle localAfter after : Environment} {identity : Nat} {arguments : List Expr}
       {declaration : FunctionDecl} {values : List Value} {value : Value} {bindings : List BindingInput}
       (declared : program.functions identity = some declaration)

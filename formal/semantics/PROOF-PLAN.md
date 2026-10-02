@@ -4807,3 +4807,23 @@ and Quot.sound.
 This closes the decoded named-record construction cutover, not textual parsing,
 constructor-path resolution, references, custom Drop or whole-language soundness.
 All fourteen broad completion obligations remain open.
+
+## Record execution exposes its actual assembly cut
+
+Evaluates.construct_iff derives the selected nominal identity, exact variant
+tag and ordered resident evaluation from the machine run. Nominal result typing
+alone would not establish preservation of the selected variant.
+
+NamedRecordBuild.assembly carries this inversion through every generated
+initializer binding. It extracts an actual run prefix to the declaration-ordered
+move list, the move-list evaluation and a suffix that constructs the result and
+retires exactly one generated scope per source initializer. Intermediate heaps
+and the pending constructor/scope stack come from the execution; none is an
+admission assumption. NamedExpr.Elaborates.record_execution exposes this at the
+source boundary and consumes recordMoves.ordered for declaration-indexed
+source-temporary correspondence.
+
+All 30 strict Lean jobs passed. The new inversion, assembly and source execution
+proofs, together with public source soundness and behavior, use only the standard
+Lean axioms. This strengthens execution fidelity of the admitted decoded record
+boundary; all fourteen whole-language completion obligations remain open.
