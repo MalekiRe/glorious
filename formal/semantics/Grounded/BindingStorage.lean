@@ -181,15 +181,22 @@ theorem BindingMap.Typed.addresses_distinct (typed : BindingMap.Typed program he
   | nil => exact .nil
   | cons found owner declared resident tail freshName freshStorage ih => exact List.nodup_cons.mpr ⟨freshStorage, ih⟩
 
-theorem BindingMap.Typed.live (typed : BindingMap.Typed program heap activation bindings context) :
-    ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell := by
+theorem BindingMap.Typed.live_typed (typed : BindingMap.Typed program heap activation bindings context) :
+    ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell ∧
+      cell.activation = activation ∧ ∃ state, cell.Typed program state := by
   induction typed with
   | nil => simp
   | cons found owner declared resident tail freshName freshStorage ih =>
     intro identity member
     cases member with
-    | head => exact ⟨_, found⟩
+    | head => exact ⟨_, found, owner, _, resident⟩
     | tail _ member => exact ih identity member
+
+theorem BindingMap.Typed.live (typed : BindingMap.Typed program heap activation bindings context) :
+    ∀ identity ∈ bindings.map Prod.snd, ∃ cell, heap.read identity = some cell := by
+  intro identity member
+  obtain ⟨cell, found, _, _⟩ := typed.live_typed identity member
+  exact ⟨cell, found⟩
 
 theorem BindingMap.Typed.owns (typed : BindingMap.Typed program heap activation bindings context)
     {identity : StorageId} {cell : StorageCell} (member : identity ∈ bindings.map Prod.snd)

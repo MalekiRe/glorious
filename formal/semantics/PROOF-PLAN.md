@@ -2903,9 +2903,10 @@ restoration operations, including arbitrary descendant paths and stale binding
 maps. `Run.scope_retired` and `Run.return_retired` derive permanent retirement
 from the actual scope-exit/return transitions and the released binding identities.
 
-`ConfigurationTyped.live_scopes` establishes present heap realization at every
-continuation-prefix scope, not only the active or outermost frame. Consequently
-retired identities cannot occur in any of those realized binding maps.
+`ConfigurationTyped.typed_scopes` establishes present heap realization, actual
+owning activation and typed partial occupancy at every continuation-prefix
+scope, not only the active or outermost frame. Consequently retired identities
+cannot occur in any of those realized binding maps.
 `SourceClosure.Admitted.storage_lifetime_safety` composes actual function entry,
 source-derived prefix soundness, heap-history production and retained-scope
 liveness. It requires neither termination nor future-state liveness assumptions.
@@ -4375,3 +4376,21 @@ Queued residents obtain their classification from `DisposalTask.Safe`; release
 markers remain shell metadata, not duplicated owners. The strengthened cleanup
 case passed all 30 strict jobs and the inspected general ownership, exact-cleanup
 exclusion and public source-behavior dependency checks.
+
+## Retained scopes preserve actual partial-resident typing
+
+The previous retained-scope theorem exposed only live cells. Its replacement
+`ConfigurationTyped.typed_scopes` derives each cell's actual owning activation
+and `StorageCell.Typed` witness in the current heap, including partial occupancy
+and finite declared layout. `BindingMap.Typed.live_typed` supplies the shared
+producer; ordinary liveness is now its projection. Scope traversal consumes
+the existing frame declaration transport instead of recovering storage facts
+from source syntax or using a saved heap.
+
+The public `SourceClosure.Admitted.storage_lifetime_safety` contract now exposes
+these facts after every body-execution prefix. Retired-address exclusion and
+maximal behavior are migrated to the stronger producer; old `live_scopes`
+entry points are removed. All 30 strict jobs passed. Inspected stored-typing,
+retained-scope, retirement-exclusion and source-behavior closures use only the
+standard Lean axioms. This is owned storage, not a proof of reference loans or
+the outstanding full-language obligations.

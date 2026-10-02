@@ -1154,9 +1154,9 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
     fun _ run => body.soundness admitted.checked typed issued run⟩
 
 
-/-- Source admission keeps every active and retained scope live through actual
-execution. Identities retired before entry remain dead and cannot reappear in
-those scopes. Surviving old cells retain their original owner and declared type. -/
+/-- Every active and retained scope has live, correctly owned and typed partial
+storage throughout execution. Retired identities cannot reappear in those
+scopes; surviving old cells retain their original owner and declared type. -/
 theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
     {identity : Nat} {declaration : FunctionDecl}
@@ -1167,7 +1167,9 @@ theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageS
       ∀ state, Run program ⟨entry, .expression declaration.body, []⟩ state →
         (∀ front back, state.continuation = front ++ back →
           ∀ address ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
-            ∃ cell, state.environment.heap.read address = some cell) ∧
+            ∃ cell, state.environment.heap.read address = some cell ∧
+              cell.activation = (continuationEnvironment state.environment front).activation ∧
+              ∃ mask, cell.Typed program mask) ∧
         (∀ address, address.index < heap.next → ∀ cell, state.environment.heap.read address = some cell →
           ∃ old, heap.read address = some old ∧ cell.activation = old.activation ∧ cell.type = old.type) ∧
         ∀ address, heap.Retired address → state.environment.heap.Retired address ∧
@@ -1185,7 +1187,7 @@ theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageS
   refine ⟨entry, entered, ?_⟩
   intro state run
   have typed := (safe state run).1
-  refine ⟨typed.live_scopes, ?_, ?_⟩
+  refine ⟨typed.typed_scopes, ?_, ?_⟩
   · intro address allocated cell found
     obtain ⟨old, original, owner, type⟩ :=
       run.storage_origin (Nat.lt_of_lt_of_le allocated entryHistory.next_le) found

@@ -1464,35 +1464,39 @@ theorem Configuration.OwnershipSafe.return_retirement {before after : Environmen
   cases same
   exact BindingMap.Disposable.release_prefix safe.2.1 released split
 
-/-- Every retained scope is realized in the current heap, not merely the active
-scope or the outermost caller. Traversing frames does not execute pending code. -/
-theorem ContinuationTyped.live_scopes {before : Environment} {current final : FlowContext}
+/-- Every active and retained scope keeps its actual owning activation and
+typed partial residents in the current heap. No saved heap is substituted. -/
+theorem ContinuationTyped.typed_scopes {before : Environment} {current final : FlowContext}
     {input result : ResultType} {stack : List Frame}
     (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)
     (store : before.Declares program current.slots) :
     ∀ front back, stack = front ++ back →
       ∀ identity ∈ (continuationEnvironment before front).bindings.map Prod.snd,
-        ∃ cell, before.heap.read identity = some cell := by
+        ∃ cell, before.heap.read identity = some cell ∧
+          cell.activation = (continuationEnvironment before front).activation ∧
+          ∃ state, cell.Typed program state := by
   intro front
   induction front generalizing before current input stack with
   | nil =>
     intro back same identity member
     obtain ⟨states, residents, _⟩ := store
-    exact residents.live identity member
+    exact residents.live_typed identity member
   | cons frame front ih =>
     intro back same identity member
     subst stack
     cases typed with
     | cons head tail => exact ih tail (head.declares store) back rfl identity member
 
-theorem ConfigurationTyped.live_scopes {context result state}
+theorem ConfigurationTyped.typed_scopes {context result state}
     (typed : ConfigurationTyped program context result state) :
     ∀ front back, state.continuation = front ++ back →
       ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
-        ∃ cell, state.environment.heap.read identity = some cell := by
+        ∃ cell, state.environment.heap.read identity = some cell ∧
+          cell.activation = (continuationEnvironment state.environment front).activation ∧
+          ∃ mask, cell.Typed program mask := by
   cases typed with
   | intro store issued code continuation =>
-    exact continuation.live_scopes ⟨_, store, code.slots.symm⟩
+    exact continuation.typed_scopes ⟨_, store, code.slots.symm⟩
 
 /-- Retired identities cannot remain in any active or retained caller binding
 map of a well-typed machine configuration. This is not reference-loan typing. -/
@@ -1502,7 +1506,7 @@ theorem ConfigurationTyped.retired_not_retained {context result state} {identity
     {front back : List Frame} (split : state.continuation = front ++ back) :
     identity ∉ (continuationEnvironment state.environment front).bindings.map Prod.snd := by
   intro member
-  obtain ⟨cell, found⟩ := typed.live_scopes front back split identity member
+  obtain ⟨cell, found, _, _⟩ := typed.typed_scopes front back split identity member
   rw [retired.2] at found
   cases found
 
@@ -1539,7 +1543,7 @@ theorem ConfigurationTyped.behavior (checkedProgram : program.Checked)
     refine ⟨after, value, run, resident, resident.principal_exists, store, typed.consumption_run checkedProgram run,
       current.ownership_safe, run.external_frame, run.return_retires_all ?_⟩
     intro identity member
-    obtain ⟨cell, found⟩ := typed.live_scopes before.continuation [] (by simp) identity member
+    obtain ⟨cell, found, _, _⟩ := typed.typed_scopes before.continuation [] (by simp) identity member
     exact before.environment.heap.bounded _ _ found
   · right
     refine ⟨trace, infinite, ?_⟩
