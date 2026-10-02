@@ -79,7 +79,11 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
           (∀ older ∈ back, older.index < identity.index) ∧
           ∃ cell, current.heap.read identity = some cell ∧ middle.read identity = some cell ∧
-            cell.resident.Disposable program cell.type) ∧
+            cell.resident.Disposable program cell.type ∧
+            ∀ (observer : Module) (fields : List FieldKey) (nominal : Nat) (declaration : DataDecl),
+              PathType program observer cell.type fields (.nominal nominal) →
+              program.data nominal = some declaration → declaration.restriction = some .exact →
+              ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -560,7 +564,11 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
           middle.retire identity = some next ∧ next.retireMany back = some after.heap ∧
           (∀ older ∈ back, older.index < identity.index) ∧
           ∃ cell, current.heap.read identity = some cell ∧ middle.read identity = some cell ∧
-            cell.resident.Disposable program cell.type := by
+            cell.resident.Disposable program cell.type ∧
+            ∀ (observer : Module) (fields : List FieldKey) (nominal : Nat) (declaration : DataDecl),
+              PathType program observer cell.type fields (.nominal nominal) →
+              program.data nominal = some declaration → declaration.restriction = some .exact →
+              ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
   have typed := (checked.soundness checkedProgram store issued run).1
   have original := typed
   cases typed with

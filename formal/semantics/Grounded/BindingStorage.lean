@@ -438,7 +438,11 @@ theorem BindingMap.Disposable.release_prefix
       middle.retire identity = some next ∧ next.retireMany back = some after ∧
       (∀ older ∈ back, older.index < identity.index) ∧
       ∃ cell, heap.read identity = some cell ∧ middle.read identity = some cell ∧
-        cell.resident.Disposable program cell.type := by
+        cell.resident.Disposable program cell.type ∧
+        ∀ (observer : Module) (fields : List FieldKey) (nominal : Nat) (declaration : DataDecl),
+          PathType program observer cell.type fields (.nominal nominal) →
+          program.data nominal = some declaration → declaration.restriction = some .exact →
+          ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
   obtain ⟨middle, next, prefixRun, retired, suffixRun, older⟩ :=
     releaseBindings.prefix_step released ordered split
   have member : identity ∈ bindings.map Prod.snd := by
@@ -450,8 +454,11 @@ theorem BindingMap.Disposable.release_prefix
     intro included
     rw [split] at ordered
     exact Nat.lt_irrefl _ ((List.pairwise_append.mp ordered).2.2 identity included identity (by simp))
-  exact ⟨middle, next, prefixRun, retired, suffixRun, older, cell, found,
-    (RuntimeHeap.retireMany_outside prefixRun outside).trans found, permission⟩
+  refine ⟨middle, next, prefixRun, retired, suffixRun, older, cell, found,
+    (RuntimeHeap.retireMany_outside prefixRun outside).trans found, permission, ?_⟩
+  intro observer fields nominal declaration path declared restricted
+  obtain ⟨part, selected, disposable⟩ := path.disposable permission
+  exact ⟨part, selected, disposable.exact_nominal_empty declared restricted⟩
 
 
 /-- A live nondiscardable descendant protects its entire containing cell from

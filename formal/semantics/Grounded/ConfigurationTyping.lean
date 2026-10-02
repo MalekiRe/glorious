@@ -763,7 +763,11 @@ theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {aft
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
       ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
-        cell.resident.Disposable program cell.type := by
+        cell.resident.Disposable program cell.type ∧
+        ∀ (observer : Module) (fields : List FieldKey) (nominal : Nat) (declaration : DataDecl),
+          PathType program observer cell.type fields (.nominal nominal) →
+          program.data nominal = some declaration → declaration.restriction = some .exact →
+          ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
   cases step with
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
@@ -782,7 +786,11 @@ theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {af
       middle.retire identity = some next ∧ next.retireMany back = some after.environment.heap ∧
       (∀ older ∈ back, older.index < identity.index) ∧
       ∃ cell, before.heap.read identity = some cell ∧ middle.read identity = some cell ∧
-        cell.resident.Disposable program cell.type := by
+        cell.resident.Disposable program cell.type ∧
+        ∀ (observer : Module) (fields : List FieldKey) (nominal : Nat) (declaration : DataDecl),
+          PathType program observer cell.type fields (.nominal nominal) →
+          program.data nominal = some declaration → declaration.restriction = some .exact →
+          ∃ part, cell.resident.selectFields program cell.type fields = some part ∧ part.Empty := by
   cases step with
   | restore restored =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored

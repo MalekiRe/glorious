@@ -3270,6 +3270,15 @@ heaps. Strict acquisition order excludes its identity from the completed
 prefix; the shared heap-framing theorem preserves the resident. No intermediate
 readiness or replacement resident is assumed.
 
+For every checked path to a manually exact nominal descendant, this same
+producer now constructs the selected partial resident and proves it is
+structurally empty immediately before retirement. Neither whole-value
+readability nor future absence is assumed. Both configuration-level retirement
+consumers and the constructive source scope-exit and caller-return theorems
+export this guarantee for every split of the actual retirement order.
+All 30 Lean build jobs and explicit standard-axiom inspection of the producer,
+constructive source consumers and maximal source behavior passed.
+
 Both `Configuration.OwnershipSafe.scope_retirement` and `return_retirement`
 consume this producer and export the stronger intermediate-state guarantee.
 `HasType.scope_join_preserves_ownership` and `HasType.return_restores` consume
