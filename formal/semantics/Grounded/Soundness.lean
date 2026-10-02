@@ -771,8 +771,8 @@ theorem unit_agreement : HasType program home [] .unit .unit [] ∧
     subst value
     exact .unit
 
-/-- Every reached wildcard or constant-pattern disposal has the subject's
-actual zero-use permission. Matching a later clause cannot justify this one. -/
+/-- Every reached wildcard or constant-pattern disposal, including an arbitrary
+nested subtree, has that resident's actual zero-use permission. -/
 theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -780,20 +780,28 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
     {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
-    {pattern : Pattern} {body : Expr} {bindings : List BindingInput} {subjectType : Ty}
+    {pattern discarded : Pattern} {owner : Value} {body : Expr} {bindings : List BindingInput} {subjectType : Ty}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
     (matched : pattern.matchValue (argumentValue values) = some bindings)
-    (discards : pattern = .wildcard ∨ ∃ annotation expected, pattern = .literal annotation expected)
-    (resident : ValueHasType program (argumentValue values) subjectType) :
-    UsePermitted program.data .discard subjectType := by
+    (focus : Pattern.SubjectAt pattern (argumentValue values) discarded owner)
+    (discards : discarded = .wildcard ∨ ∃ annotation expected, discarded = .literal annotation expected)
+    (resident : ValueHasType program owner subjectType) :
+    UsePermitted program.data .discard subjectType ∧ discarded.matchValue owner = some [] := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
   obtain ⟨selectedHome, subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
-  apply actual.use_permission resident
-  rcases discards with rfl | ⟨annotation, expected, rfl⟩
-  · cases patternTyped with | wildcard permission => exact permission
-  · cases patternTyped with | literal typed permission => exact permission
+  obtain ⟨childType, childBindings, childResident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
+  obtain ⟨inputs, childMatch⟩ := focus.matched matched
+  constructor
+  · apply childResident.use_permission resident
+    rcases discards with rfl | ⟨annotation, expected, rfl⟩
+    · cases childPattern with | wildcard permission => exact permission
+    · cases childPattern with | literal typed permission => exact permission
+  · rcases discards with rfl | ⟨annotation, expected, rfl⟩
+    · simp only [Pattern.matchValue]
+    · simp only [Pattern.matchValue] at childMatch ⊢
+      split at childMatch <;> simp_all
 
 end Grounded
 

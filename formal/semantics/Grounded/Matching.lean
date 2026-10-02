@@ -81,4 +81,51 @@ theorem selectArm.first_unique {value : Value} {front back otherFront otherBack 
         (fun earlier member => missed earlier (List.mem_cons_of_mem _ member))
         (fun earlier member => otherMissed earlier (List.mem_cons_of_mem _ member))
 
+/-- A positional observation inside the same pattern/subject pair used by
+matchValue. This grants no matching, ownership or deconstruction permission. -/
+inductive Pattern.SubjectAt : Pattern → Value → Pattern → Value → Prop where
+  | root (pattern : Pattern) (value : Value) : SubjectAt pattern value pattern value
+  | child {head : Head} {patterns : List Pattern} {value childValue owner : Value}
+      {index : Nat} {childPattern selected : Pattern}
+      (shape : head = value.head)
+      (patternAt : patterns[index]? = some childPattern)
+      (valueAt : value.children[index]? = some childValue)
+      (nested : SubjectAt childPattern childValue selected owner) :
+      SubjectAt (.node head patterns) value selected owner
+
+/-- Successful aggregate matching uses the actual pattern/value pair at every
+position, not an independently reconstructed child input. -/
+theorem matchPatterns.at {patterns : List Pattern} {values : List Value} {bindings : List BindingInput}
+    (matched : matchPatterns patterns values = some bindings) {index : Nat}
+    {pattern : Pattern} {value : Value} (patternAt : patterns[index]? = some pattern)
+    (valueAt : values[index]? = some value) : ∃ inputs, pattern.matchValue value = some inputs := by
+  induction patterns generalizing values bindings index with
+  | nil => simp at patternAt
+  | cons head tail ih =>
+    cases values with
+    | nil => simp [matchPatterns] at matched
+    | cons first rest =>
+      cases headMatch : head.matchValue first with
+      | none => simp [matchPatterns, headMatch] at matched
+      | some front =>
+        cases tailMatch : matchPatterns tail rest with
+        | none => simp [matchPatterns, headMatch, tailMatch] at matched
+        | some back =>
+          cases index with
+          | zero => cases patternAt; cases valueAt; exact ⟨front, headMatch⟩
+          | succ index => exact ih tailMatch patternAt valueAt
+
+/-- Observing a subtree of a successful match exposes a successful use of the
+same matcher; the observation itself supplies no success premise. -/
+theorem Pattern.SubjectAt.matched {pattern selected : Pattern} {value owner : Value}
+    (focus : Pattern.SubjectAt pattern value selected owner) {bindings : List BindingInput}
+    (matched : pattern.matchValue value = some bindings) :
+    ∃ inputs, selected.matchValue owner = some inputs := by
+  induction focus generalizing bindings with
+  | root => exact ⟨bindings, matched⟩
+  | child same patternAt valueAt nested ih =>
+    simp only [Pattern.matchValue, same, ↓reduceIte] at matched
+    obtain ⟨inputs, childMatch⟩ := matchPatterns.at matched patternAt valueAt
+    exact ih childMatch
+
 end Grounded

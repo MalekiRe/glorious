@@ -3447,11 +3447,16 @@ the selected clause itself even when distinct clauses share bodies and binding
 outputs. `Configuration.OwnershipSafe.selected_pattern` recovers authority for
 that exact clause. `HasType.pattern_discard_permission` consumes general
 source-prefix soundness and proves zero-use permission for every reached
-whole-subject wildcard or constant-pattern disposal, under any valid typing
-of the actual subject. Thus nondiscardable subjects cannot take those disposal
-paths. This is a general theorem over programs and execution prefixes, not a
-concrete example. All 30 build jobs passed; the new producer and consumers
-depend only on standard Lean axioms. Nested deconstruction continues to use
-the existing recursive `PatternType` authority; no new matching evaluator was
-introduced.
+wildcard or constant-pattern disposal, including arbitrarily nested subjects,
+under any valid typing of the actual discarded resident. It also proves that
+the same runtime matcher succeeds with no bindings at that disposal site.
+`Pattern.SubjectAt` is only a positional observation in the original matched
+pattern and value: it assumes neither successful matching nor permission.
+Success is derived from the enclosing match; resident typing and permission
+are derived from the existing recursive `PatternType` authority. Thus
+nondiscardable subjects cannot take these disposal paths, including inside
+tuples, arrays and nominal variants. These are general theorems over programs,
+execution prefixes and nesting, not examples or a second matching evaluator.
+All 30 build jobs passed; the new producers and public consumer depend only
+on standard Lean axioms. Borrowed matching and custom Drop remain open.
 

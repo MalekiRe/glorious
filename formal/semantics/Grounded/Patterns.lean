@@ -431,4 +431,41 @@ theorem Covers.selectArm {type : Ty} {arms : List (Pattern × Expr)} {value : Va
 
 
 
+/-- Positional selection retains the existing pattern derivation and field type. -/
+theorem PatternsType.at {patterns : List Pattern} {types : List Ty} {context : List (BindingId × BindingType)}
+    (typed : PatternsType program home patterns types context) {index : Nat} {pattern : Pattern}
+    (selected : patterns[index]? = some pattern) :
+    ∃ type bindings, types[index]? = some type ∧ PatternType program home pattern type bindings := by
+  induction patterns generalizing types context index with
+  | nil => simp at selected
+  | cons head tail ih =>
+    cases typed with
+    | cons first rest =>
+      cases index with
+      | zero => cases selected; exact ⟨_, _, rfl, first⟩
+      | succ index => exact ih rest selected
+
+/-- Every observed subpattern inherits its actual resident typing and ownership
+rules from the selected pattern's single authoritative derivation. -/
+theorem PatternType.subject_at {pattern selected : Pattern} {value owner : Value}
+    (focus : Pattern.SubjectAt pattern value selected owner)
+    {type : Ty} {context : List (BindingId × BindingType)}
+    (typed : PatternType program home pattern type context) (resident : ValueHasType program value type) :
+    ∃ childType bindings, ValueHasType program owner childType ∧ PatternType program home selected childType bindings := by
+  induction focus generalizing type context with
+  | root => exact ⟨_, _, resident, typed⟩
+  | child same patternAt valueAt nested ih =>
+    cases typed with
+    | node shape access fieldsTyped =>
+      rename_i fields
+      obtain ⟨types, actual, children⟩ := resident.decompose
+      rw [← same] at actual
+      have aligned : fields = types := by
+        cases shape <;> cases actual <;> simp_all
+      subst types
+      obtain ⟨childType, bindings, typeAt, childTyped⟩ := fieldsTyped.at patternAt
+      obtain ⟨child, found, childResident⟩ := children.select _ _ typeAt
+      cases Option.some.inj (found.symm.trans valueAt)
+      exact ih childTyped childResident
+
 end Grounded
