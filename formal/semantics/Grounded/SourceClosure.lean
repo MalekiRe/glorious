@@ -1301,6 +1301,25 @@ theorem SourceClosure.Admitted.never_no_resume
   exact infinite.no_resume terminal stack
 
 
+/-- Once execution reaches an admitted bottom body, its actual pending scope
+and caller frames remain below an infinite suffix. This applies inside a caller
+whose other clauses return normally; the caller's overall result need not be bottom. -/
+theorem SourceClosure.Admitted.nonreturning_suffix
+    {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core .never final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {start : Configuration} {stack : List Frame}
+    (prefixRun : Run program start ⟨environment, .expression core, stack⟩) :
+    ∃ trace, InfiniteRun program start trace := by
+  obtain ⟨_, infinite, _⟩ := admitted.never_behavior elaborated slots store issued
+  exact prefixRun.prepend_infinite (infinite.extend stack)
+
+
 private theorem supplied_file_unique {files : SourceFiles}
     (distinct : (files.map Prod.fst).Nodup) {path : SourcePath} {first second : ModuleSource}
     (left : (path, first) ∈ files) (right : (path, second) ∈ files) : first = second := by

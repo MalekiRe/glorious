@@ -169,10 +169,10 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
         ((name, ⟨⟨localType, mutable⟩, finalMask⟩) :: after))
       (fresh : name ∉ before.map Prod.fst) :
       FrameTyped program heap supply activation before (.one localType) (.bind name ⟨localType, mutable⟩ body) after (.one result)
-  | scope {context after : FlowContext} (locals : FlowContext) {result}
-      (discard : ReturnDisposition program result locals)
-      (joined : BindingContextApprox program.data context after) :
-      FrameTyped program heap supply activation (locals ++ context) (.one result) (.scope locals.length) after (.one result)
+  | scope {context after : FlowContext} (locals : FlowContext) {input result}
+      (discard : ReturnDisposition program input locals)
+      (joined : ReturnJoin program input context result after) :
+      FrameTyped program heap supply activation (locals ++ context) (.one input) (.scope locals.length) after (.one result)
   | retire {context : FlowContext} {result index}
       (inside : index < context.length)
       (discard : ∀ binding, context[index]? = some binding → binding.2.Disposable program.data) :
@@ -474,7 +474,8 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
               simp only [List.length_map, List.length_append, List.length_take, List.length_nil] at length zero
               exact List.eq_nil_of_length_eq_zero (by omega)
             subst locals
-            exact .intro (store.approximate joined) issued (.result resident) tail
+            obtain ⟨returned, normal⟩ := joined.on_return resident
+            exact .intro (store.approximate normal) issued (.result returned) tail
     | scopeOwner chosen found =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
@@ -630,7 +631,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | results residents =>
         cases continuation with | cons frame tail =>
           cases frame with | patterns nonempty covered checked =>
-            obtain ⟨locals, localsAfter, branchAfter, pattern, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, patternTyped, matched, _⟩ :=
+            obtain ⟨locals, localsAfter, branchAfter, pattern, branchResult, _, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, patternTyped, matched, _⟩ :=
               checked.selected residents.argument selected
             obtain ⟨entered, _, _, retained⟩ := AddressedEnvironment.extend.typed store inputsTyped (by
               rw [← slots] at distinct
@@ -970,7 +971,8 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using store
   | scope locals discard joined =>
-    simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using store.drop locals.length
+    rw [joined.slots]
+    simpa [Frame.environment, Frame.activation, FlowContext.slots] using store.drop locals.length
   | @retire context result index inside discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using store.eraseIdx index
   | assign selected path writable selection discard mask context checked =>
@@ -999,7 +1001,8 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     have same : next.slots = current.slots := congrArg List.tail checked.slots
     simpa only [Frame.environment, Frame.activation, same] using framed
   | scope locals discard joined =>
-    simpa [Frame.environment, Frame.activation, FlowContext.slots, joined.slots] using framed.drop store locals.length
+    rw [joined.slots]
+    simpa [Frame.environment, Frame.activation, FlowContext.slots] using framed.drop store locals.length
   | @retire context result index inside discard =>
     simpa [Frame.environment, Frame.activation, FlowContext.slots, List.eraseIdx_eq_take_drop_succ, List.map_append, List.map_take, List.map_drop] using framed.eraseIdx store index
   | assign selected path writable selection discard mask context checked =>
@@ -1378,7 +1381,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
         · trivial
         case cons frame tail =>
           cases frame <;> try trivial
-          case scope locals discard joined =>
+          case scope locals output discard joined =>
             exact ⟨(store.take locals.length).disposable (by simpa using discard.on_return resident),
               BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
           case restore =>
@@ -1404,7 +1407,7 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
           cases frame <;> try trivial
           case patterns nonempty covered checked =>
             intro bindings body selected
-            obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
+            obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
               checked.selected residents.argument selected
             exact ⟨_, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
 

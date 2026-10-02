@@ -48,6 +48,31 @@ theorem ReturnDisposition.restrict {program : Program} {result locals remaining}
   cases exit with
   | returning discard => exact .returning (fun binding member => discard binding (subset binding member))
   | nonreturning => exact .nonreturning _
+/-- Only normal returns contribute a value and post-environment join. A
+bottom branch preserves declaration slots, but asserts no normal mask relation. -/
+inductive ReturnJoin (program : Program) : Ty → FlowContext → Ty → FlowContext → Prop where
+  | returning {type before after} (joined : BindingContextApprox program.data before after) :
+      ReturnJoin program type before type after
+  | nonreturning {before after} (type : Ty) (slots : after.slots = before.slots) :
+      ReturnJoin program .never before type after
+
+theorem ReturnJoin.slots {program : Program} {input output before after}
+    (joined : ReturnJoin program input before output after) : after.slots = before.slots := by
+  cases joined with
+  | returning normal => exact normal.slots
+  | nonreturning _ same => exact same
+
+theorem ReturnJoin.refl {program : Program} {type : Ty} (context : FlowContext) :
+    ReturnJoin program type context type context := .returning (.refl _)
+
+theorem ReturnJoin.on_return {program : Program} {input output before after value}
+    (joined : ReturnJoin program input before output after) (resident : ValueHasType program value input) :
+    ValueHasType program value output ∧ BindingContextApprox program.data before after := by
+  cases joined with
+  | returning normal => exact ⟨resident, normal⟩
+  | nonreturning => exact resident.not_never.elim
+
+
 mutual
 inductive HasType (program : Program) : Module → FlowContext → Expr → Ty → FlowContext → Prop where
   | unit {home context} : HasType program home context .unit .unit context
@@ -141,14 +166,14 @@ inductive HasTypes (program : Program) : Module → FlowContext → List Expr �
 inductive ArmsType (program : Program) :
     Module → FlowContext → Ty → Ty → List Pattern → List (Pattern × Expr) → FlowContext → Prop where
   | empty {home before after subject result previous} : ArmsType program home before subject result previous [] after
-  | clause {home before after branchAfter subject result previous pattern body rest bindings localsAfter}
+  | clause {home before after branchAfter subject result previous pattern body rest bindings localsAfter branchResult}
       (patternTyped : PatternType program home pattern subject bindings)
       (distinct : ((bindings ++ before.slots).map Prod.fst).Nodup)
       (useful : Useful program subject previous pattern)
-      (bodyTyped : HasType program home (initializedContext bindings ++ before) body result (localsAfter ++ branchAfter))
+      (bodyTyped : HasType program home (initializedContext bindings ++ before) body branchResult (localsAfter ++ branchAfter))
       (localSlots : FlowContext.slots localsAfter = bindings)
-      (disposable : ReturnDisposition program result localsAfter)
-      (joined : BindingContextApprox program.data branchAfter after)
+      (disposable : ReturnDisposition program branchResult localsAfter)
+      (joined : ReturnJoin program branchResult branchAfter result after)
       (tailTyped : ArmsType program home before subject result (previous ++ [pattern]) rest after) :
       ArmsType program home before subject result previous ((pattern, body) :: rest) after
 end
@@ -242,12 +267,12 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
     {value : Value} (resident : ValueHasType program value subject)
     {bindings : PatternMatch} {body : Expr}
     (selected : selectArm value arms = some (bindings, body)) :
-    ∃ locals localsAfter branchAfter pattern, (pattern, body) ∈ arms ∧
+    ∃ locals localsAfter branchAfter pattern branchResult, (pattern, body) ∈ arms ∧
       BindingInputsTyped program bindings.bindings ∧ (bindings.bindings.map fun input => (input.name, input.slot)) = locals ∧
-      ReturnDisposition program result localsAfter ∧
-      HasType program home (initializedContext locals ++ before) body result (localsAfter ++ branchAfter) ∧
+      ReturnDisposition program branchResult localsAfter ∧
+      HasType program home (initializedContext locals ++ before) body branchResult (localsAfter ++ branchAfter) ∧
       FlowContext.slots localsAfter = locals ∧ ((locals ++ before.slots).map Prod.fst).Nodup ∧
-      BindingContextApprox program.data branchAfter after ∧
+      ReturnJoin program branchResult branchAfter result after ∧
       PatternType program home pattern subject locals ∧ pattern.matchValue value = some bindings ∧
       ∃ front back, arms = front ++ (pattern, body) :: back ∧
         ∀ earlier ∈ front, earlier.1.matchValue value = none := by
@@ -256,21 +281,21 @@ theorem ArmsType.selected {program : Program} {home : Module} {before after : Fl
   | cons arm arms ih =>
     cases checked with
     | clause patternTyped distinct useful bodyTyped localSlots disposable joined tailTyped =>
-      rename_i branchAfter candidate candidateBody candidateBindings localsAfter
+      rename_i branchAfter candidate candidateBody candidateBindings localsAfter branchResult
       simp only [selectArm] at selected
       split at selected
       next matched found =>
         cases Option.some.inj selected
         obtain ⟨inputsTyped, slots⟩ := patternTyped.bindings resident found
           (List.nodup_append.mp (by simpa only [List.map_append] using distinct)).1
-        exact ⟨_, _, _, _, List.mem_cons_self,
+        exact ⟨_, _, _, _, _, List.mem_cons_self,
           inputsTyped, slots, disposable, bodyTyped, localSlots, distinct, joined, patternTyped, found,
           [], arms, rfl, by simp⟩
       next missed =>
-        obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, disposable, bodyTyped,
+        obtain ⟨locals, localsAfter, branchAfter, pattern, branchResult, member, inputsTyped, slots, disposable, bodyTyped,
           localSlots, distinct, joined, patternTyped, matched, front, back, split, earlier⟩ :=
           ih tailTyped selected
-        refine ⟨locals, localsAfter, branchAfter, pattern, List.mem_cons_of_mem _ member, inputsTyped, slots,
+        refine ⟨locals, localsAfter, branchAfter, pattern, branchResult, List.mem_cons_of_mem _ member, inputsTyped, slots,
           disposable, bodyTyped, localSlots, distinct, joined, patternTyped, matched, (candidate, candidateBody) :: front, back,
           by simp only [List.cons_append, split], ?_⟩
         intro previous member

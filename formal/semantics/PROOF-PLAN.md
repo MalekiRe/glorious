@@ -4937,3 +4937,32 @@ only standard Lean axioms. Mixed normal/diverging clauses still require a
 return-sensitive result/environment join; their current common-result type and
 BindingContextApprox premise remain unchanged. Arbitrary expected-result bottom
 elimination and the fourteen completion families remain open.
+
+## Mixed returning and bottom clause joins
+
+ReturnJoin is now the authoritative clause result/environment contract.
+A returning branch retains its exact result type and BindingContextApprox;
+a bottom branch contributes neither a runtime result nor a normal mask join.
+Both preserve declaration slots, which remain necessary for retained-storage
+framing. ReturnJoin.on_return derives the normal relation from an actual typed
+resident; the bottom alternative is impossible by ValueHasType.not_never.
+
+ArmsType.clause, its selected-body theorem, NamedArmsElaborate.clause and the
+physical FrameTyped.scope consume that same contract. Scope return preservation
+uses the derived normal relation. Declaration/consumption framing uses only
+slot equality. Reached-scope ownership and retirement proofs derive normal mask
+approximation from the actual returned value rather than assuming it for every
+clause. Termination and source pattern consumers carry the selected branch's
+own result type. Runtime steps are unchanged.
+
+SourceClosure.Admitted.nonreturning_suffix composes an observed prefix reaching
+an admitted bottom source body with its proved infinite execution under the
+actual pending scope/caller frames. The enclosing caller need not have bottom
+result type. The observed prefix is a theorem premise about execution, not a
+source-admission or progress premise.
+
+All 30 strict Lean jobs passed. Inspected return-join, public source soundness,
+maximal behavior, nonreturning-suffix and no-exact-cleanup proofs depend only on
+propext, Classical.choice and Quot.sound. This closes mixed clause joins for
+the current admitted fragment, not arbitrary expected-result bottom elimination.
+All fourteen whole-language completion families remain open.

@@ -259,6 +259,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
       | cons frame tail =>
         cases frame with
         | scope locals discard joined =>
+          have joined := (joined.on_return resident).2
           obtain ⟨after, produced, afterTyped, _, _, _, retired, _, preserved⟩ :=
             AddressedEnvironment.exitScope.progress currentStore locals.length
           have step : Run program ⟨current, .result value, .scope locals.length :: stack⟩

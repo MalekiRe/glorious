@@ -269,7 +269,7 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
   obtain ⟨values, middle, bindings, body, localAfter, argumentsRun, selected, bodyRun, retired⟩ :=
     Evaluates.applyPatterns_iff.mp run
   obtain ⟨residents, middleTyped, _, _⟩ := argumentsTyped.evaluation_soundness checkedProgram store issued argumentsRun
-  obtain ⟨_, _, _, _, _, inputsTyped, _⟩ := bodies.selected residents.argument selected
+  obtain ⟨_, _, _, _, _, _, inputsTyped, _⟩ := bodies.selected residents.argument selected
   obtain ⟨resident, afterTyped, afterIssued, framed⟩ :=
     (checked.admits argumentsTyped nonempty covered bodies).evaluation_soundness checkedProgram store issued run
   have reached : Run program ⟨environment, .expression (.applyPatterns home inputs arguments checked.normalize.val), []⟩

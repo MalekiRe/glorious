@@ -263,7 +263,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       obtain ⟨values, middle, argumentsRun, residents, middleTyped, middleIssued⟩ :=
         many arguments (fun _ member => .patternInput member) store issued
       obtain ⟨bindings, body, selected⟩ := covered.selectArm residents.argument
-      obtain ⟨locals, localsAfter, branchAfter, pattern, member, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, _⟩ :=
+      obtain ⟨locals, localsAfter, branchAfter, pattern, branchResult, member, inputsTyped, slots, discard, bodyTyped, localSlots, distinct, joined, _⟩ :=
         bodies.selected residents.argument selected
       obtain ⟨entered, _, _, _⟩ := AddressedEnvironment.extend.typed middleTyped inputsTyped (by
         rw [← slots] at distinct

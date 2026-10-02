@@ -250,14 +250,14 @@ inductive NamedExprsElaborate (program : Program) (names : Module → FunctionNa
 inductive NamedArmsElaborate (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
     SourceScope → FlowContext → Ty → Ty → List Pattern → List (NamedPattern × NamedExpr) → List (Pattern × Expr) → FlowContext → Prop where
   | empty {scope before after subject result previous} : NamedArmsElaborate program names home scope before subject result previous [] [] after
-  | clause {scope localScope before after branchAfter subject result previous source pattern bindings localsAfter body coreBody tail coreTail}
+  | clause {scope localScope before after branchAfter subject result previous source pattern bindings localsAfter body coreBody tail coreTail branchResult}
       (allocated : NamedPattern.Elaborates program home scope source subject pattern bindings localScope)
       (namesDistinct : source.binders.Nodup) (useful : Useful program subject previous pattern)
       (bodyTyped : NamedExpr.Elaborates program names home localScope (initializedContext bindings ++ before)
-        body coreBody result (localsAfter ++ branchAfter))
+        body coreBody branchResult (localsAfter ++ branchAfter))
       (localSlots : localsAfter.slots = bindings)
-      (disposable : ReturnDisposition program result localsAfter)
-      (joined : BindingContextApprox program.data branchAfter after)
+      (disposable : ReturnDisposition program branchResult localsAfter)
+      (joined : ReturnJoin program branchResult branchAfter result after)
       (tailTyped : NamedArmsElaborate program names home scope before subject result (previous ++ [pattern]) tail coreTail after) :
       NamedArmsElaborate program names home scope before subject result previous ((source, body) :: tail) ((pattern, coreBody) :: coreTail) after
 /-- Source-order initialization uses fresh unnamed locals. The terminal transfer
