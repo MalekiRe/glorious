@@ -474,21 +474,25 @@ theorem BindingMap.Disposable.release_preserves_nondiscardable
   exact (releaseBindings.outside released outside).trans found
 
 
-/-- Retirement leaves every live exact nominal owner untouched, including owners
-outside the current lexical scope. No ownership permission is assumed for it. -/
+/-- A partially consumed exact descendant protects its entire containing cell.
+Successful whole-owner readback is not required to preserve its obligation. -/
 theorem BindingMap.Disposable.release_preserves_exact
     (disposition : BindingMap.Disposable program heap bindings)
     {after : RuntimeHeap StorageCell} (released : releaseBindings heap bindings = some after)
     {address : StorageId} {cell : StorageCell} (found : heap.read address = some cell)
-    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    {identity : Nat} {declaration : DataDecl} {selectedHome : Module} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields (.nominal identity))
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident.read = some (.nominal identity tag fields)) :
+    {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (unconsumed : ¬ owner.Empty) :
     after.read address = some cell := by
   have outside : address ∉ bindings.map Prod.snd := by
     intro member
     obtain ⟨actual, selected, permission⟩ := disposition address member
     cases Option.some.inj (selected.symm.trans found)
-    exact PartialValue.Disposable.not_exact_read declared restricted resident permission
+    obtain ⟨selectedOwner, selectedOwnerFound, selectedPermission⟩ := path.disposable permission
+    cases Option.some.inj (selectedOwnerFound.symm.trans resident)
+    exact unconsumed (selectedPermission.exact_nominal_empty declared restricted)
   exact (releaseBindings.outside released outside).trans found
 
 

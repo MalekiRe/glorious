@@ -437,15 +437,13 @@ theorem PartialValue.Typed.nominal_type {program : Program} {value : PartialValu
   | nil | cons => trivial
 
 
-/-- Exact nominal shells can be retired only when genuinely consumed. -/
+/-- Exact nominal ownership permits retirement only after complete consumption,
+independently of whether the actual resident can still be reconstructed. -/
 theorem PartialValue.Disposable.exact_nominal_empty {program : Program} {identity : Nat}
-    {declaration : DataDecl} {tag : Option Nat} {fields : List PartialValue} {type : Ty}
+    {declaration : DataDecl} {value : PartialValue}
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (permission : (PartialValue.nominal identity tag fields).Disposable program type) :
-    (PartialValue.nominal identity tag fields).Empty := by
+    (permission : value.Disposable program (.nominal identity)) : value.Empty := by
   obtain ⟨state, typed, disposition⟩ := permission
-  have shape := typed.nominal_type rfl
-  subst type
   exact typed.empty (disposition.exact_nominal_empty declared restricted)
 
 

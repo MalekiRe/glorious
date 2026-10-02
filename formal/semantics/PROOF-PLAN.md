@@ -2089,22 +2089,29 @@ recorded custom-hook, borrowing, nonlocal-control and other obligations remain.
 
 ## Verified exact-owner protection through actual retirement and overwrite events
 
-`BindingMap.Disposable.release_preserves_exact` proves that actual
-`releaseBindings` leaves every observed live exact nominal cell unchanged. It
-derives that the cell cannot belong to the retired address list from the shared
-runtime disposition proof, then consumes `RuntimeHeap.retireMany_outside`.
+`BindingMap.Disposable.release_preserves_exact` protects every cell containing
+an unconsumed exact nominal descendant selected by a checked path. The descendant
+may be partially initialized and unreadable. Shared residual permission descends
+through that path; `PartialValue.Disposable.exact_nominal_empty` would require
+complete structural absence if the cell were retired. This excludes the cell
+from the release list, so the actual retirement producer preserves it unchanged.
 The owner need not be in the current lexical environment.
 
 `HasType.scope_preserves_exact` consumes constructive scope retirement after an
 arbitrary checked execution prefix, preserving continuation typing and the
-exact owner cell without requiring an observed cleanup step.
+containing cell without requiring an observed cleanup step or readable owner.
 `HasType.return_restores` constructs caller restoration from the reached return
 frame, preserving the returned payload and continuation typing, retiring all
 callee bindings and retaining caller cells exactly.
 `HasType.restore_preserves_exact` consumes that producer: it constructs the
-actual restoration and proves the exact owner cell is unchanged, rather than
+actual restoration and proves the containing cell is unchanged, rather than
 requiring a completed return. `Step.unique` identifies any observed restoration
 with the constructed transition. No termination or future readiness is assumed.
+
+Verification of the generalized partial-owner contract: all 30 Lean build jobs
+passed. Axiom inspection of the residual producer, retirement theorem, both
+constructive consumers and maximal source behavior found only standard Lean
+axioms. This does not add custom Drop or field-by-field destruction execution.
 
 `HasType.no_exact_overwrite` observes the selected resident through the runtime
 binding map, heap lookup and field selection immediately after RHS evaluation.

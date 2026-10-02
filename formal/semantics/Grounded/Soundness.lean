@@ -615,8 +615,8 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
     exact BindingMap.Disposable.release_preserves_nondiscardable disposition.1 released found path resident required
 
 
-/-- An actual lexical retirement after a checked prefix cannot retire or alter a
-live exact nominal owner in the heap. -/
+/-- Constructed lexical cleanup preserves any cell containing an unconsumed
+exact descendant, including partial owners which cannot be read as a whole. -/
 theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -627,9 +627,11 @@ theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .scope count :: stack⟩)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
-    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    {identity : Nat} {declaration : DataDecl} {selectedHome : Module} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields (.nominal identity))
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident.read = some (.nominal identity tag fields)) :
+    {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (unconsumed : ¬ owner.Empty) :
     ∃ after : Environment,
       Step program ⟨current, .result value, .scope count :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
@@ -642,10 +644,10 @@ theorem HasType.scope_preserves_exact (checkedProgram : program.Checked)
     simp only [AddressedEnvironment.exitScope, Option.map_eq_some_iff] at exited
     obtain ⟨heap, released, same⟩ := exited
     subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition released found declared restricted resident
+    exact BindingMap.Disposable.release_preserves_exact disposition released found path declared restricted resident unconsumed
 
-/-- An actual caller restoration after a checked prefix cannot retire or alter a
-live exact nominal owner in the heap. -/
+/-- Constructed caller restoration preserves cells containing unconsumed exact
+descendants; partial initialization cannot hide an outstanding obligation. -/
 theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     {context final : FlowContext} {expression : Expr} {type : Ty}
     (checked : HasType program home context expression type final)
@@ -656,9 +658,11 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result value, .restore caller :: stack⟩)
     {address : StorageId} {cell : StorageCell} (found : current.heap.read address = some cell)
-    {identity : Nat} {declaration : DataDecl} {tag : Option Nat} {fields : List Value}
+    {identity : Nat} {declaration : DataDecl} {selectedHome : Module} {fields : List FieldKey}
+    (path : PathType program selectedHome cell.type fields (.nominal identity))
     (declared : program.data identity = some declaration) (restricted : declaration.restriction = some .exact)
-    (resident : cell.resident.read = some (.nominal identity tag fields)) :
+    {owner : PartialValue} (resident : cell.resident.selectFields program cell.type fields = some owner)
+    (unconsumed : ¬ owner.Empty) :
     ∃ after : Environment,
       Step program ⟨current, .result value, .restore caller :: stack⟩ ⟨after, .result value, stack⟩ ∧
       ConfigurationTyped program final (.one type) ⟨after, .result value, stack⟩ ∧
@@ -671,7 +675,7 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
     simp only [AddressedEnvironment.restore, Option.map_eq_some_iff] at restored
     obtain ⟨heap, released, same⟩ := restored
     subst_vars
-    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found declared restricted resident
+    exact BindingMap.Disposable.release_preserves_exact disposition.1 released found path declared restricted resident unconsumed
 
 /-- Selection is observed after RHS evaluation. A moved-out slot may be restored,
 but a still-live exact selected owner cannot be overwritten. -/
