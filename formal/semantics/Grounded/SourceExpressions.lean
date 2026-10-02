@@ -461,12 +461,11 @@ theorem NamedExpr.Elaborates.ordinary_exists {program : Program} {home : Module}
     (selected : lookup binding.identity before = some state)
     (path : PathType program home binding.slot.type fields type)
     (selection : state.initialization.selectFields program binding.slot.type fields = some available)
-    (ready : available.Ready) :
+    (ready : available.Ready) (finite : FiniteLayout program.target program.data type) :
     ∃ core after, NamedExpr.Elaborates program names home scope before (.read name fields) core type after ∧
       (UsePermitted program.data .copy type → core = .read ⟨binding.identity, fields⟩ ∧ after = before) ∧
       (¬ UsePermitted program.data .copy type → core = .move ⟨binding.identity, fields⟩) := by
-  classical
-  by_cases copyable : UsePermitted program.data .copy type
+  rcases finite.permission_cases .copy with copyable | copyable
   · exact ⟨_, before, .read resolved selected path selection ready copyable,
       fun _ => ⟨rfl, rfl⟩, fun denied => False.elim (denied copyable)⟩
   · obtain ⟨updated, mask⟩ := Initialization.write_exists selection .absent
@@ -508,8 +507,7 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
           next.activation = old.activation ∧ next.type = old.type ∧
           next.resident.selectFields program next.type address.fields = some .hole ∧
           old.resident.writeFields program old.type address.fields .hole = some next.resident) := by
-  obtain ⟨core, after, elaborated, copies, moves⟩ :=
-    NamedExpr.Elaborates.ordinary_exists (names := names) resolved selected path selection ready
+
   have same := scope.selected_slot resolved slots selected
   have physicalPath : PathType program home state.slot.type fields type := by
     rw [same]; exact path
@@ -518,6 +516,8 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
   obtain ⟨value, observed, resident⟩ :=
     AddressedEnvironment.read.progress (place := ⟨binding.identity, fields⟩)
       store selected physicalPath physicalSelection ready
+  obtain ⟨core, after, elaborated, copies, moves⟩ :=
+    NamedExpr.Elaborates.ordinary_exists (names := names) resolved selected path selection ready resident.finite
   obtain ⟨principal, classified, _⟩ := Ty.principal_exists resident.finite
   have copying_iff : UsePermitted program.data .copy type ↔ principal = .duplicable := by
     simpa [UsePermission.Allows] using classified .copy

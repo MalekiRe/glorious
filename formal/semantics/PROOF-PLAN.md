@@ -4258,6 +4258,11 @@ either nonduplicable principal. Mode selection does not confuse an exact-once
 request with an exact-linear principal. Its classification evidence comes from
 the actual incoming addressed resident and the existing `ValueHasType.finite`
 theorem, not an additional readiness premise or a parallel type traversal.
+The ordinary source-elaboration producer also consumes finite type evidence
+and the same `permission_cases` result. Acquisition supplies it from its
+incoming resident; no separate classical permission split selects the source
+Copy/move branch. The strict 30-job gate and inspected acquisition/admission
+closures passed after this producer migration.
 
 All 30 strict Lean jobs passed. Inspected interval, unique-class, bound,
 acquisition, source-admission, no-widening and maximal-behavior theorem closures
