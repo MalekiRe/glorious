@@ -23,6 +23,24 @@ theorem HasType.soundness (checkedProgram : program.Checked) {context final : Fl
   have current := entry.run checkedProgram run
   exact ⟨current, current.progress, entry.consumption_run checkedProgram run, current.bindings_distinct, current.ownership_safe⟩
 
+/-- Every cell allocated during an arbitrary checked execution prefix, if still
+live, has exactly one owning map. Ownership existence follows from actual
+allocation tracking; exclusivity follows from current machine typing. -/
+theorem HasType.allocated_unique_owner (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation) {state : Configuration}
+    (run : Run program ⟨environment, .expression expression, []⟩ state)
+    {identity : StorageId} (fresh : environment.heap.next ≤ identity.index)
+    {cell : StorageCell} (live : state.environment.heap.read identity = some cell) :
+    let owns : Option Frame → Prop := fun owner => match owner with
+      | none => identity ∈ state.environment.bindings.map Prod.snd
+      | some frame => frame ∈ state.continuation ∧ frame.Retains identity
+    ∃ owner, owns owner ∧ ∀ other, owns other → other = owner := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  exact safe.1.2.2.2.unique_owner (run.allocated_tracked fresh live)
 /-- General checking admits a complete machine behavior, not just a supplied
 finite run. Divergence consists of real steps, each preserving the same storage
 and ownership contract; the normal alternative carries the actual typed result. -/

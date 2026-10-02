@@ -1331,6 +1331,121 @@ theorem ConfigurationTyped.typed_scopes {context result state}
   | intro store issued code continuation =>
     exact continuation.typed_scopes ⟨_, store, code.slots.symm⟩
 
+/-- Every retained caller is typed in the current heap and belongs to a strictly
+older activation. This follows from the real restore frames, not saved heaps. -/
+theorem ContinuationTyped.retained_owners {heap supply activation current final input result stack}
+    (typed : ContinuationTyped program heap supply activation current input stack final result) :
+    ∀ caller, Frame.restore caller ∈ stack →
+      ∃ context, BindingMap.Typed program heap caller.activation caller.bindings context ∧
+        caller.activation.index < activation.index := by
+  induction typed with
+  | nil => intro caller member; cases member
+  | cons head tail ih =>
+    intro caller member
+    rcases List.mem_cons.mp member with same | member
+    · cases same
+      cases head with
+      | restore locals discard joined retained issued older => exact ⟨_, retained, older⟩
+    · obtain ⟨context, retained, older⟩ := ih caller member
+      exact ⟨context, retained, Nat.lt_of_lt_of_le older head.activation_le⟩
+
+/-- Exclusivity observes the existing active map and actual restore frames.
+Repeated lexical scope views are not counted as independent owners. -/
+structure Configuration.ExclusiveOwnership (state : Configuration) : Prop where
+  activeDistinct : (state.environment.bindings.map Prod.snd).Nodup
+  retainedDistinct : ∀ caller, Frame.restore caller ∈ state.continuation →
+    (caller.bindings.map Prod.snd).Nodup
+  activeApart : ∀ identity ∈ state.environment.bindings.map Prod.snd,
+    ∀ frame ∈ state.continuation, ¬ frame.Retains identity
+  retainedApart : state.continuation.Pairwise
+    (fun first second => ∀ identity, first.Retains identity → ¬ second.Retains identity)
+
+/-- Distinct saved activations cannot claim the same cell in the shared heap. -/
+theorem ContinuationTyped.retained_apart {heap supply activation current final input result stack}
+    (typed : ContinuationTyped program heap supply activation current input stack final result) :
+    stack.Pairwise (fun first second => ∀ identity, first.Retains identity → ¬ second.Retains identity) := by
+  induction typed with
+  | nil => exact .nil
+  | cons head tail ih =>
+    apply List.pairwise_cons.mpr
+    refine ⟨?_, ih⟩
+    intro frame member identity firstRetains secondRetains
+    cases head <;> simp only [Frame.Retains] at firstRetains
+    case restore =>
+      cases frame <;> simp only [Frame.Retains] at secondRetains
+      rename_i other
+      obtain ⟨context, otherTyped, otherOlder⟩ := tail.retained_owners other member
+      apply BindingMap.Typed.apart_activations (by assumption) otherTyped ?_ identity firstRetains secondRetains
+      intro same
+      have equal := congrArg ActivationId.index same
+      exact Nat.lt_irrefl _ (equal ▸ otherOlder)
+
+
+/-- Current and retained maps are jointly exclusive, including during cleanup
+and recursive invocation. No disjointness premise is added to admission. -/
+theorem ConfigurationTyped.exclusive_ownership {context result state}
+    (typed : ConfigurationTyped program context result state) : state.ExclusiveOwnership := by
+  cases typed with
+  | intro store issued code continuation =>
+    constructor
+    · exact store.addresses_distinct
+    · intro caller member
+      obtain ⟨_, retained, _⟩ := continuation.retained_owners caller member
+      exact retained.addresses_distinct
+    · intro identity active frame member retained
+      cases frame <;> simp only [Frame.Retains] at retained
+      rename_i caller
+      obtain ⟨_, callerTyped, older⟩ := continuation.retained_owners caller member
+      exact store.apart_activations callerTyped
+        (fun same => by have equal := congrArg ActivationId.index same; omega) identity active retained
+    · exact continuation.retained_apart
+/-- A live tracked storage identity has exactly one owning map: the active
+map or one actual restore frame. This inspects the same maps as Untracked;
+it creates no resource inventory or execution premise. -/
+theorem Configuration.ExclusiveOwnership.unique_owner {state : Configuration}
+    (exclusive : state.ExclusiveOwnership) {identity : StorageId}
+    (tracked : ¬ state.Untracked identity) :
+    let owns : Option Frame → Prop := fun owner => match owner with
+      | none => identity ∈ state.environment.bindings.map Prod.snd
+      | some frame => frame ∈ state.continuation ∧ frame.Retains identity
+    ∃ owner, owns owner ∧ ∀ other, owns other → other = owner := by
+  classical
+  have retainedUnique : ∀ {frames : List Frame},
+      frames.Pairwise (fun first second => ∀ identity, first.Retains identity → ¬ second.Retains identity) →
+      ∀ first ∈ frames, ∀ second ∈ frames,
+        first.Retains identity → second.Retains identity → first = second := by
+    intro frames apart
+    induction apart with
+    | nil => intro first member; cases member
+    | @cons frame frames separated pairwise ih =>
+      intro first firstMember second secondMember firstRetains secondRetains
+      rcases List.mem_cons.mp firstMember with rfl | firstTail
+      · rcases List.mem_cons.mp secondMember with rfl | secondTail
+        · rfl
+        · exact False.elim (separated _ secondTail identity firstRetains secondRetains)
+      · rcases List.mem_cons.mp secondMember with rfl | secondTail
+        · exact False.elim (separated _ firstTail identity secondRetains firstRetains)
+        · exact ih first firstTail second secondTail firstRetains secondRetains
+  by_cases active : identity ∈ state.environment.bindings.map Prod.snd
+  · refine ⟨none, active, ?_⟩
+    intro owner claimed
+    cases owner with
+    | none => rfl
+    | some frame => exact False.elim (exclusive.activeApart identity active frame claimed.1 claimed.2)
+  · have retained : ∃ frame ∈ state.continuation, frame.Retains identity := by
+      apply Classical.byContradiction
+      intro absent
+      apply tracked
+      refine ⟨active, ?_⟩
+      intro frame member owns
+      exact absent ⟨frame, member, owns⟩
+    obtain ⟨frame, member, owns⟩ := retained
+    refine ⟨some frame, ⟨member, owns⟩, ?_⟩
+    intro owner claimed
+    cases owner with
+    | none => exact False.elim (active claimed)
+    | some other =>
+      exact congrArg some (retainedUnique exclusive.retainedApart other claimed.1 frame member claimed.2 owns)
 /-- Current and retained control residents preserve their principals; active
 and retained scopes preserve actual ownership and partial typing in the current
 heap. Copy and disposal share structural authority, and retirement preserves
@@ -1338,11 +1453,11 @@ newest-owner-first order. No future readiness or completed run is assumed. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
   (state.control.OwnershipSafe program ∧
     (∀ frame ∈ state.continuation, frame.PrincipalConsistent program) ∧
-    ∀ front back, state.continuation = front ++ back →
+    (∀ front back, state.continuation = front ++ back →
       ∀ identity ∈ (continuationEnvironment state.environment front).bindings.map Prod.snd,
         ∃ cell, state.environment.heap.read identity = some cell ∧
           cell.activation = (continuationEnvironment state.environment front).activation ∧
-          ∃ mask, cell.Typed program mask) ∧
+          ∃ mask, cell.Typed program mask) ∧ state.ExclusiveOwnership) ∧
   match state.control, state.continuation with
   | .expression (.read place), _ =>
       BindingMap.CopySafe program state.environment.heap state.environment.bindings place ∧
@@ -1379,10 +1494,11 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
     {state : Configuration} (typed : ConfigurationTyped program context result state) :
     state.OwnershipSafe program := by
   have retained := typed.typed_scopes
+  have exclusive := typed.exclusive_ownership
   cases typed with
   | intro store issued code continuation =>
     constructor
-    · exact ⟨code.ownership_safe, continuation.principal_consistent, retained⟩
+    · exact ⟨code.ownership_safe, continuation.principal_consistent, retained, exclusive⟩
     · cases code <;> try trivial
       case install resident selected path writable selection discard mask context checked =>
         exact store.replacement_safe selected path selection discard

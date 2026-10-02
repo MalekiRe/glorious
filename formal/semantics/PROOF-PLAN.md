@@ -18,6 +18,48 @@ project is introduced by this reset. All work must be performed by the lead
 assistant, serially, without subagents or delegated proof/implementation lanes.
 See the durable serial-work-only rule in `AGENTS.md`.
 
+## Active scope: ownership proofs only
+
+The user has frozen new language-feature goals. Work stays in this existing
+core and strengthens its ownership contracts and general proofs; no new
+semantic subsystem, replacement project, or delegated implementation lane is
+authorized. Existing source consumers remain integration obligations. The
+older whole-language roadmap below is historical/deferred, not an instruction
+to resume feature expansion. Feature work requires a new user instruction.
+
+The current ownership baseline covers structural principals, partial
+initialization, moves, replacement, authorized structural cleanup, recursive
+direct calls, retained callers, and nonreturning execution. It does not claim
+borrowing, custom destruction hooks, closure captures, effects, raw memory,
+foreign calls, or backend refinement. Those feature goals remain frozen.
+
+### Joint storage ownership
+
+Configuration.OwnershipSafe now includes Configuration.ExclusiveOwnership:
+active bindings have distinct storage identities; each retained caller does
+too; the active map is disjoint from every retained caller; and distinct
+retained frame positions cannot share a storage identity. The proof derives
+this from BindingMap.Typed, current-heap ownership, and the strict activation
+ordering already required by actual restore frames. No new admission premise,
+owner table, source analysis, or runtime transition was introduced.
+
+HasType.allocated_unique_owner combines that invariant with actual allocation
+tracking: every newly allocated cell still live at any checked execution
+prefix has exactly one owning map, active or retained. This is storage-map
+ownership, not a claim that structurally equal values denote the same resource.
+The strengthened invariant is consumed by the existing general source
+soundness and normal/infinite behavior theorems.
+
+All 30 strict Lean jobs passed after integration. Inspected exclusivity, unique
+owner, general/source soundness, noncopyable-read, exact-cleanup and replacement
+safety proofs use only propext, Classical.choice and Quot.sound. These checks
+establish the stated core contracts, not whole-language completion.
+
+The static operand-completion index and unreachable-continuation admission
+remain open ownership/control integration work. This storage-exclusivity proof
+does not close those obligations or make the current admission relation
+complete for every valid owner-preserving source program.
+
 ## Current proved contract and ownership
 
 General source safety is defined in `Grounded/Soundness.lean`:
