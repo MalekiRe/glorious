@@ -3882,3 +3882,14 @@ release remain open; no broad completion obligation is closed.
 All 30 strict Lean build jobs passed. Inspected retirement-prefix, source scope
 cleanup and maximal source behavior proofs use only standard Lean axioms. No
 tests or examples were added.
+
+`BindingMap.Typed.retire_at_progress` now constructs single-owner retirement
+and removes exactly the corresponding index from both runtime bindings and
+source states. It proves disappearance of the retired cell, unchanged allocation
+frontier, and typing of the remaining map. The reached-source scope theorem
+consumes it for a selected pending local at the head of the authoritative
+release order, deriving that resident's disposal permission from the preserved
+prefix contract. It does not assume successful next retirement or post-state
+realization. All 30 strict build jobs and inspected producer/source axiom
+closures passed. This closes the indexed binding-state transition prerequisite,
+not the remaining operational scope/return destruction integration.

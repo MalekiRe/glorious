@@ -91,7 +91,17 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           BindingMap.Typed program middle current.activation
             (current.bindings.filter fun entry => decide (entry.2 ∉ front)) remaining ∧
           BindingMap.Disposable program middle
-            ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front))) ∧
+            ((List.take count current.bindings).filter fun entry => decide (entry.2 ∉ front)) ∧
+          ∀ (index : Nat) (entry : BindingId × StorageId),
+            (current.bindings.filter fun entry => decide (entry.2 ∉ front))[index]? = some entry →
+            entry ∈ List.take count current.bindings →
+            (BindingMap.releaseOrder ((List.take count current.bindings).filter
+              fun binding : BindingId × StorageId => decide (binding.2 ∉ front))).head? = some entry.2 →
+            ∃ cell next, middle.read entry.2 = some cell ∧ cell.resident.Disposable program cell.type ∧
+              middle.retire entry.2 = some next ∧ next.read entry.2 = none ∧ next.next = middle.next ∧
+              BindingMap.Typed program next current.activation
+                ((current.bindings.filter fun entry => decide (entry.2 ∉ front)).eraseIdx index)
+                (remaining.eraseIdx index)) ∧
       ∀ name state, lookup name branch = some state →
         ∀ selectedHome selectedType fields selectedState,
           PathType program selectedHome state.slot.type fields selectedType →
@@ -125,7 +135,14 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_⟩
           · intro front middle executed
             obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
-            exact ⟨_, remaining, currentStore, subset, retained, safe.1.retirement_prefix executed⟩
+            have permission := safe.1.retirement_prefix executed
+            refine ⟨_, remaining, currentStore, subset, retained, permission, ?_⟩
+            intro index entry selected included _
+            have kept := (List.mem_filter.mp (List.mem_of_getElem? selected)).2
+            obtain ⟨cell, found, allowed⟩ := permission entry.2
+              (List.mem_map.mpr ⟨entry, List.mem_filter.mpr ⟨included, kept⟩, rfl⟩)
+            obtain ⟨next, retired, absent, frontier, nextTyped⟩ := retained.retire_at_progress selected
+            exact ⟨cell, next, found, allowed, retired, absent, frontier, nextTyped⟩
           intro name state selected selectedHome selectedType fields selectedState path selection
           obtain ⟨next, found, approximation⟩ := joined.lookup selected
           obtain ⟨address, cell, mapped, live, owner, typeEq, cellTyped, member⟩ := branchTyped.lookup selected

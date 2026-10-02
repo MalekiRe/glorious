@@ -222,6 +222,53 @@ theorem BindingMap.Typed.frame (typed : BindingMap.Typed program heap activation
     exact .cons ((unchanged _ (by simp)).trans found) owner declared resident
       (ih (fun identity member => unchanged identity (List.mem_cons_of_mem _ member))) freshName freshStorage
 
+/-- One actual cell retirement removes the corresponding lexical position and
+its exact source state. Other masks and storage identities are unchanged. -/
+theorem BindingMap.Typed.retire_at
+    (typed : BindingMap.Typed program heap activation bindings context)
+    {index : Nat} {entry : BindingId × StorageId}
+    (selected : bindings[index]? = some entry)
+    (retired : heap.retire entry.2 = some after) :
+    BindingMap.Typed program after activation (bindings.eraseIdx index) (context.eraseIdx index) := by
+  induction typed generalizing index with
+  | nil => simp at selected
+  | @cons name identity cell state bindings context found owner declared resident tail freshName freshStorage ih =>
+    cases index with
+    | zero =>
+      simp only [List.getElem?_cons_zero] at selected
+      cases Option.some.inj selected
+      apply tail.frame
+      intro other member
+      apply RuntimeHeap.retire_other retired
+      intro same
+      exact freshStorage (by simpa only [same] using member)
+    | succ index =>
+      simp only [List.getElem?_cons_succ] at selected
+      have different : identity ≠ entry.2 := by
+        intro same
+        exact freshStorage (same ▸ List.mem_map.mpr ⟨entry, List.mem_of_getElem? selected, rfl⟩)
+      refine .cons ((RuntimeHeap.retire_other retired different).trans found) owner declared resident
+        (ih selected) ?_ ?_
+      · intro member
+        obtain ⟨binding, member, same⟩ := List.mem_map.mp member
+        exact freshName (List.mem_map.mpr ⟨binding, List.mem_of_mem_eraseIdx member, same⟩)
+      · intro member
+        obtain ⟨binding, member, same⟩ := List.mem_map.mp member
+        exact freshStorage (List.mem_map.mpr ⟨binding, List.mem_of_mem_eraseIdx member, same⟩)
+
+/-- A currently selected binding supplies actual single-owner retirement and
+its post-retirement realization; no successful retirement is a premise. -/
+theorem BindingMap.Typed.retire_at_progress
+    (typed : BindingMap.Typed program heap activation bindings context)
+    {index : Nat} {entry : BindingId × StorageId}
+    (selected : bindings[index]? = some entry) :
+    ∃ next, heap.retire entry.2 = some next ∧ next.read entry.2 = none ∧
+      next.next = heap.next ∧
+      BindingMap.Typed program next activation (bindings.eraseIdx index) (context.eraseIdx index) := by
+  obtain ⟨cell, found⟩ := typed.live _ (List.mem_map.mpr ⟨entry, List.mem_of_getElem? selected, rfl⟩)
+  obtain ⟨next, retired⟩ := RuntimeHeap.retire_exists found
+  exact ⟨next, retired, RuntimeHeap.retire_read retired, RuntimeHeap.retire_next retired,
+    typed.retire_at selected retired⟩
 /-- Retiring other cells cannot revoke cleanup permission for a retained
 resident. The surviving map removes exactly the identities actually retired. -/
 theorem BindingMap.Disposable.retirement_prefix
