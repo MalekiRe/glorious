@@ -1023,7 +1023,10 @@ theorem HasType.projection_transfer (checkedProgram : program.Checked)
       ValueHasType program aggregate parent ∧
       ProjectionType program projectionHome parent key index child ∧
       Step program ⟨current, .result aggregate, .project projectionHome key :: stack⟩
+        ⟨current, .cleanup remainder.disposalTasks (.result selected), stack⟩ ∧
+      Run program ⟨current, .cleanup remainder.disposalTasks (.result selected), stack⟩
         ⟨current, .result selected, stack⟩ ∧
+      (∀ task ∈ remainder.disposalTasks, DisposalTask.Safe program task) ∧
       ValueHasType program selected child ∧
       (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
       remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent ∧
@@ -1037,6 +1040,7 @@ theorem HasType.projection_transfer (checkedProgram : program.Checked)
   change aggregate.ProjectionCleanupSafe program projectionHome key at safe
   obtain ⟨parent, child, index, selected, remainder, resident, access, found, typed, written, absent, disposable⟩ := safe
   refine ⟨parent, child, index, selected, remainder, resident, access, .projectResult found,
+    Run.cleanup current (.result selected) stack remainder.disposalTasks, disposable.disposalTasks,
     typed, written, absent, disposable, ?_⟩
   intro observer descendant path owner apart pathTyped observed
   have retained : (remainder.selectFields program parent path).bind PartialValue.read = some owner := by

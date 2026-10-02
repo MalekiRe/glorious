@@ -3760,3 +3760,36 @@ restoration, replacement, and projection residuals still require migration to
 explicit destruction of partial residents. Custom Drop, hook divergence,
 physical release, and the other whole-language obligations remain open; none
 of the fourteen broad completion obligations is marked complete.
+
+
+## Owning projection executes residual destruction
+
+`Value.takeField` now produces the selected position, transferred value, and
+actual partial residual together. `ProjectionType.eraseProjected` proves the
+residual is exactly the existing checked field erasure; `take_progress` derives
+success, result typing, the selected hole, and residual disposal permission.
+The read-only field lookup remains shared with ordinary access, but owning
+projection no longer discards the other residents in a single result step.
+
+`PartialValue.disposalTasks` interprets actual partial occupancy. Holes contribute
+no work, whole residents enter the existing destruction machine, partial fields
+are scheduled in reverse order, and their shell is released last. Its general
+safety theorem consumes the authoritative residual initialization permission.
+It includes uncertain static masks, private fields, empty consumed exact shells,
+and the distinction between consumed shells and live zero-field nominal owners.
+
+Cleanup now saves a typed control rather than only an expression. The projection
+transition protects the selected result there while executing the residual work;
+only an empty worklist restores that result. `HasType.projection_transfer` now
+constructs this transition and cleanup run, rather than claiming instantaneous
+projection completion. General preservation, progress, evaluation, structural
+constant evaluation, optional termination, and source-admitted cleanup and
+maximal behavior have migrated to the actual producer and machine.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of the
+erasure bridge, owning projection producer, partial-worklist safety, reached
+projection theorem, preservation, source cleanup and maximal source behavior
+reported only `propext`, `Classical.choice`, and `Quot.sound`. No tests or examples
+were added. Scope retirement, caller restoration, and replacement still require
+explicit partial-resident destruction. Custom Drop, hook divergence and physical
+release remain open, as do all fourteen broad completion obligations.

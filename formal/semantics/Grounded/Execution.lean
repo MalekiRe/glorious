@@ -17,12 +17,26 @@ inductive DisposalTask where
 
 def DisposalTask.expand (value : Value) : List DisposalTask :=
   value.children.reverse.map DisposalTask.enter ++ [.release value.head]
+
+mutual
+/-- Interpret actual partial occupancy, not a static maybe-initialized mask.
+Whole residents use the same destruction machine; holes contribute no work. -/
+def PartialValue.disposalTasks : PartialValue → List DisposalTask
+  | .hole => []
+  | .resident value => [.enter value]
+  | .tuple head tail => partialDisposalTasks (head :: tail) ++ [.release .tuple]
+  | .nominal identity tag fields => partialDisposalTasks fields ++ [.release (.nominal identity tag)]
+
+def partialDisposalTasks : List PartialValue → List DisposalTask
+  | [] => []
+  | head :: tail => partialDisposalTasks tail ++ head.disposalTasks
+end
 inductive Control where
   | expression (expression : Expr)
   | arguments (expressions : List Expr)
   | result (value : Value)
   | results (values : List Value)
-  | cleanup (pending : List DisposalTask) (rest : Expr)
+  | cleanup (pending : List DisposalTask) (rest : Control)
 
 inductive Frame where
   | sequence (rest : Expr)
@@ -98,14 +112,14 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       Step program ⟨env, .expression (.sequence first rest), stack⟩
         ⟨env, .expression first, .sequence rest :: stack⟩
   | sequenceResult {env : Environment} {stack : List Frame} {value : Value} {rest : Expr} :
-      Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .cleanup [.enter value] rest, stack⟩
-  | cleanupEnter {env : Environment} {stack : List Frame} {value : Value} {pending : List DisposalTask} {rest : Expr} :
+      Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .cleanup [.enter value] (.expression rest), stack⟩
+  | cleanupEnter {env : Environment} {stack : List Frame} {value : Value} {pending : List DisposalTask} {rest : Control} :
       Step program ⟨env, .cleanup (.enter value :: pending) rest, stack⟩
         ⟨env, .cleanup (DisposalTask.expand value ++ pending) rest, stack⟩
-  | cleanupRelease {env : Environment} {stack : List Frame} {head : Head} {pending : List DisposalTask} {rest : Expr} :
+  | cleanupRelease {env : Environment} {stack : List Frame} {head : Head} {pending : List DisposalTask} {rest : Control} :
       Step program ⟨env, .cleanup (.release head :: pending) rest, stack⟩ ⟨env, .cleanup pending rest, stack⟩
-  | cleanupDone {env : Environment} {stack : List Frame} {rest : Expr} :
-      Step program ⟨env, .cleanup [] rest, stack⟩ ⟨env, .expression rest, stack⟩
+  | cleanupDone {env : Environment} {stack : List Frame} {rest : Control} :
+      Step program ⟨env, .cleanup [] rest, stack⟩ ⟨env, rest, stack⟩
   | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : BindingId}
       {localType : Ty} {initial body : Expr} :
       Step program ⟨env, .expression (.bind mutable name localType initial body), stack⟩
@@ -134,9 +148,11 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
   | project {home : Module} {env : Environment} {stack : List Frame} {body : Expr} {key : FieldKey} :
       Step program ⟨env, .expression (.project home body key), stack⟩
         ⟨env, .expression body, .project home key :: stack⟩
-  | projectResult {home : Module} {env : Environment} {stack : List Frame} {aggregate value : Value} {key : FieldKey} {index : Nat}
-      (selected : aggregate.projectField program key = some (index, value)) :
-      Step program ⟨env, .result aggregate, .project home key :: stack⟩ ⟨env, .result value, stack⟩
+  | projectResult {home : Module} {env : Environment} {stack : List Frame} {aggregate value : Value}
+      {key : FieldKey} {index : Nat} {remainder : PartialValue}
+      (selected : aggregate.takeField program key = some (index, value, remainder)) :
+      Step program ⟨env, .result aggregate, .project home key :: stack⟩
+        ⟨env, .cleanup remainder.disposalTasks (.result value), stack⟩
   | array {env : Environment} {stack : List Frame} {elements : List Expr} :
       Step program ⟨env, .expression (.array elements), stack⟩ ⟨env, .arguments elements, .array :: stack⟩
   | arrayResult {env : Environment} {stack : List Frame} {values : List Value} :
@@ -238,7 +254,7 @@ theorem Run.trans {first middle last : Configuration} (front : Run program first
   | refl state => exact back
   | step head rest ih => exact .step head (ih back)
 
-private theorem Run.cleanup_list (environment : Environment) (rest : Expr) (stack : List Frame)
+private theorem Run.cleanup_list (environment : Environment) (rest : Control) (stack : List Frame)
     (values : List Value)
     (each : ∀ value ∈ values, ∀ pending, Run program
       ⟨environment, .cleanup (.enter value :: pending) rest, stack⟩
@@ -263,7 +279,7 @@ private theorem Value.child_smaller {value child : Value} (member : child ∈ va
 
 /-- Destruction of every finite value completes through actual reverse-child
 machine steps before its shell and saved continuation are released. -/
-theorem Run.cleanup_value (environment : Environment) (rest : Expr) (stack : List Frame)
+theorem Run.cleanup_value (environment : Environment) (rest : Control) (stack : List Frame)
     (value : Value) (pending : List DisposalTask) :
     Run program ⟨environment, .cleanup (.enter value :: pending) rest, stack⟩
       ⟨environment, .cleanup pending rest, stack⟩ := by
@@ -275,9 +291,9 @@ termination_by sizeOf value
 decreasing_by exact Value.child_smaller (List.mem_reverse.mp member)
 
 /-- Completion consumes the actual pending worklist, not an assumed cleanup run. -/
-theorem Run.cleanup (environment : Environment) (rest : Expr) (stack : List Frame)
+theorem Run.cleanup (environment : Environment) (rest : Control) (stack : List Frame)
     (pending : List DisposalTask) :
-    Run program ⟨environment, .cleanup pending rest, stack⟩ ⟨environment, .expression rest, stack⟩ := by
+    Run program ⟨environment, .cleanup pending rest, stack⟩ ⟨environment, rest, stack⟩ := by
   induction pending with
   | nil => exact .step .cleanupDone (.refl _)
   | cons task pending ih =>

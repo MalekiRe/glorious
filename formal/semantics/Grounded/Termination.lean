@@ -50,7 +50,7 @@ theorem HasType.structural_value {context final : FlowContext} {expression : Exp
     intro closed
     cases closed with | project inner =>
       obtain ⟨aggregate, resident, runs⟩ := ih inner
-      obtain ⟨value, found, valueTyped, _⟩ := selected.access resident
+      obtain ⟨value, remainder, found, valueTyped, _⟩ := selected.take_progress resident mask discard
       refine ⟨value, valueTyped, ?_⟩
       intro environment
       obtain ⟨after, run, scope, heap⟩ := runs environment
@@ -212,7 +212,7 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
       exact ⟨_, after, .tuple headRun tailRun⟩
     | project source discard mask selected =>
       obtain ⟨aggregate, after, run, resident, _⟩ := ih _ .project source store issued
-      obtain ⟨value, found, _⟩ := selected.access resident
+      obtain ⟨value, remainder, found, _⟩ := selected.take_progress resident mask discard
       exact ⟨value, after, .project run found⟩
     | array residents finite size =>
       obtain ⟨values, after, run, _⟩ := many residents (fun _ member => .array member) store issued

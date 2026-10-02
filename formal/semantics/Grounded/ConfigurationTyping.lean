@@ -16,6 +16,12 @@ inductive DisposalTask.Safe (program : Program) : DisposalTask → Prop where
       (allowed : UsePermitted program.data .discard type) : Safe program (.enter value)
   | release {value type} (typed : ValueHasType program value type)
       (allowed : UsePermitted program.data .discard type) : Safe program (.release value.head)
+  | tupleShell {head tail first rest}
+      (allowed : (PartialValue.tuple head tail).Disposable program (.tuple first rest)) :
+      Safe program (.release .tuple)
+  | nominalShell {identity tag fields}
+      (allowed : (PartialValue.nominal identity tag fields).Disposable program (.nominal identity)) :
+      Safe program (.release (.nominal identity tag))
 
 theorem DisposalTask.Safe.expand {program : Program} {value : Value}
     (safe : DisposalTask.Safe program (.enter value)) :
@@ -29,6 +35,103 @@ theorem DisposalTask.Safe.expand {program : Program} {value : Value}
       exact .enter resident permission
     · cases List.mem_singleton.mp member
       exact .release typed allowed
+
+private theorem PartialValuesTyped.empty_permissions {program : Program} {values types states}
+    (typed : PartialValuesTyped program values types states)
+    (empty : ∀ state ∈ states, state.Empty) : InitializationsDisposable program.data types states := by
+  induction types generalizing values states with
+  | nil => cases typed; exact .nil
+  | cons type types ih =>
+    cases typed with
+    | cons head tail => exact .cons (.empty (empty _ (by simp))) (ih tail (fun state member => empty state (by simp [member])))
+
+private theorem PartialValuesTyped.whole_permissions {program : Program} {values types states}
+    (typed : PartialValuesTyped program values types states)
+    (allowed : ∀ type ∈ types, UsePermitted program.data .discard type) :
+    InitializationsDisposable program.data types states := by
+  induction types generalizing values states with
+  | nil => cases typed; exact .nil
+  | cons type types ih =>
+    cases typed with
+    | cons head tail => exact .cons (.permitted (allowed _ (by simp))) (ih tail (fun type member => allowed type (by simp [member])))
+
+/-- Residual permission authorizes every work item produced from actual partial
+storage. Empty slots produce no work; opaque fields use structural permission. -/
+theorem PartialValue.Disposable.disposalTasks {program : Program} {value : PartialValue} {type : Ty}
+    (disposable : value.Disposable program type) :
+    ∀ task ∈ value.disposalTasks, DisposalTask.Safe program task := by
+  obtain ⟨state, typed, permission⟩ := disposable
+  induction typed using PartialValue.Typed.rec
+    (motive_2 := fun values types states _ => InitializationsDisposable program.data types states →
+      ∀ task ∈ partialDisposalTasks values, DisposalTask.Safe program task) with
+  | hole type => simp [PartialValue.disposalTasks]
+  | resident typed =>
+    intro task member
+    simp only [PartialValue.disposalTasks] at member
+    cases List.mem_singleton.mp member
+    exact .enter typed (Initialization.Disposable.present_iff.mp permission)
+  | @tuple head tail first rest headState tailStates headTyped tailTyped headIH tailIH =>
+    have parts : InitializationsDisposable program.data (first :: rest) (headState :: tailStates) := by
+      cases permission with
+      | empty absent =>
+        simp only [Initialization.Empty] at absent
+        exact (PartialValuesTyped.cons headTyped tailTyped).empty_permissions absent.2
+      | permitted allowed =>
+        cases allowed with
+        | tuple first rest => exact (PartialValuesTyped.cons headTyped tailTyped).whole_permissions (by simpa using And.intro first rest)
+      | tuple head tail => exact .cons head tail
+    intro task member
+    simp only [PartialValue.disposalTasks, partialDisposalTasks] at member
+    rcases List.mem_append.mp member with member | member
+    · cases parts with
+      | cons first rest =>
+        rcases List.mem_append.mp member with member | member
+        · exact tailIH rest task member
+        · exact headIH first task member
+    · cases List.mem_singleton.mp member
+      exact .tupleShell ⟨_, .tuple headTyped tailTyped, permission⟩
+  | @nominal identity tag declaration schema values states declared chosen finite residents ih =>
+    have parts : InitializationsDisposable program.data (schema.residents.map Field.type) states := by
+      cases permission with
+      | empty absent =>
+        simp only [Initialization.Empty] at absent
+        exact residents.empty_permissions absent.2
+      | permitted allowed =>
+        cases allowed with
+        | nominal found restriction fields =>
+          cases Option.some.inj (declared.symm.trans found)
+          apply residents.whole_permissions
+          intro type member
+          obtain ⟨field, fieldMember, rfl⟩ := List.mem_map.mp member
+          apply fields _ ?_ field fieldMember
+          cases shape : declaration.shape with
+          | «structure» fs =>
+            cases tag <;> simp [DataDecl.constructor, shape] at chosen
+            subst schema
+            simp [DataDecl.schemas, shape]
+          | enumeration variants nonExhaustive =>
+            cases tag <;> simp only [DataDecl.constructor, shape] at chosen
+            · contradiction
+            · simpa [DataDecl.schemas, shape] using List.mem_of_getElem? chosen
+      | nominal found restriction fields =>
+        cases Option.some.inj (declared.symm.trans found)
+        exact fields tag schema chosen
+    intro task member
+    simp only [PartialValue.disposalTasks] at member
+    rcases List.mem_append.mp member with member | member
+    · exact ih parts task member
+    · cases List.mem_singleton.mp member
+      exact .nominalShell ⟨_, .nominal declared chosen finite residents, permission⟩
+  | uncertain typed ih => exact ih (.permitted (Initialization.Disposable.maybe_iff.mp permission))
+  | nil => rename_i permission task member; simp [partialDisposalTasks] at member
+  | cons head tail headIH tailIH =>
+    rename_i permission task member
+    simp only [partialDisposalTasks] at member
+    cases permission with
+    | cons headPermission tailPermission =>
+      rcases List.mem_append.mp member with member | member
+      · exact tailIH tailPermission task member
+      · exact headIH headPermission task member
 inductive ControlTyped (program : Program) (before : FlowContext) : Control → ResultType → FlowContext → Prop where
   | expression {home expression type after} (checked : HasType program home before expression type after) :
       ControlTyped program before (.expression expression) (.one type) after
@@ -38,10 +141,10 @@ inductive ControlTyped (program : Program) (before : FlowContext) : Control → 
       ControlTyped program before (.result value) (.one type) before
   | results {values types} (residents : ValuesHaveTypes program values types) :
       ControlTyped program before (.results values) (.many types) before
-  | cleanup {pending rest home type after}
+  | cleanup {pending rest result after}
       (safe : ∀ task ∈ pending, DisposalTask.Safe program task)
-      (checked : HasType program home before rest type after) :
-      ControlTyped program before (.cleanup pending rest) (.one type) after
+      (checked : ControlTyped program before rest result after) :
+      ControlTyped program before (.cleanup pending rest) result after
 
 inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (supply : ActivationSupply)
     (activation : ActivationId) : FlowContext → ResultType → Frame → FlowContext → ResultType → Prop where
@@ -164,7 +267,7 @@ theorem ConfigurationTyped.progress {context result state}
   cases typed with
   | intro store issued code continuation =>
     cases code with
-    | @cleanup pending rest home type after safe checked =>
+    | @cleanup pending rest result after safe checked =>
       right
       cases pending with
       | nil => exact ⟨_, .cleanupDone⟩
@@ -215,7 +318,7 @@ theorem ConfigurationTyped.progress {context result state}
           exact ⟨_, .assignResult written⟩
         | tupleHead checked => exact ⟨_, .tupleHead⟩
         | project discard mask projection =>
-          obtain ⟨value, selected, _, _⟩ := projection.access resident
+          obtain ⟨value, remainder, selected, _⟩ := projection.take_progress resident mask discard
           exact ⟨_, .projectResult selected⟩
         | restore locals discard retained callerIssued older =>
           obtain ⟨after, restored, _⟩ := AddressedEnvironment.restore.progress store retained (by
@@ -302,7 +405,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | sequence discard checked =>
-            exact .intro store issued (.cleanup (by simpa using DisposalTask.Safe.enter resident discard) checked) tail
+            exact .intro store issued (.cleanup (by simpa using DisposalTask.Safe.enter resident discard) (.expression checked)) tail
     | cleanupEnter =>
       cases code with | cleanup safe checked =>
         refine .intro store issued (.cleanup ?_ checked) continuation
@@ -314,7 +417,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | cleanup safe checked =>
         exact .intro store issued (.cleanup (fun task member => safe task (by simp [member])) checked) continuation
     | cleanupDone =>
-      cases code with | cleanup safe checked => exact .intro store issued (.expression checked) continuation
+      cases code with | cleanup safe checked => exact .intro store issued checked continuation
     | bind =>
       cases code with | expression checked =>
         cases checked with | bind initial discard body fresh =>
@@ -386,9 +489,9 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | project discard mask projection =>
-            obtain ⟨value, found, valueTyped, _⟩ := projection.access resident
+            obtain ⟨value, remainder, found, valueTyped, _, _, disposable⟩ := projection.take_progress resident mask discard
             cases Option.some.inj (selected.symm.trans found)
-            exact .intro store issued (.result valueTyped) tail
+            exact .intro store issued (.cleanup disposable.disposalTasks (.result valueTyped)) tail
     | array =>
       cases code with | expression checked =>
         cases checked with | array residents finite size =>
@@ -525,8 +628,8 @@ theorem ConfigurationTyped.normal_form {context type state}
 
 theorem ControlTyped.slots {current next control result}
     (typed : ControlTyped program current control result next) : next.slots = current.slots := by
-  cases typed with
-  | cleanup safe checked => exact checked.slots
+  induction typed with
+  | cleanup safe checked ih => exact ih
   | expression checked => exact checked.slots
   | arguments checked => exact checked.slots
   | result | results => rfl

@@ -46,7 +46,7 @@ theorem Evaluates.sequence {environment middle after : Environment} {first rest 
       (tail : Evaluates program middle rest value after) :
       Evaluates program environment (.sequence first rest) value after :=
   .step .sequence ((Run.extend head [.sequence rest]).trans
-    (.step .sequenceResult ((Run.cleanup_value middle rest [] discarded []).trans (.step .cleanupDone tail))))
+    (.step .sequenceResult ((Run.cleanup_value middle (.expression rest) [] discarded []).trans (.step .cleanupDone tail))))
 
 theorem Evaluates.bind {environment middle localAfter after : Environment} {mutable : Bool} {name : BindingId}
       {localType : Ty} {initial body : Expr} {resident value : Value}
@@ -74,11 +74,12 @@ theorem Evaluates.tuple {environment middle after : Environment} {head : Expr} {
     (.step .tupleHead ((Run.extend tailEval [.tupleTail first]).trans (.step .tupleTail (.refl _)))))
 
 theorem Evaluates.project {home : Module} {environment after : Environment} {body : Expr} {key : FieldKey} {index : Nat}
-      {aggregate value : Value}
+      {aggregate value : Value} {remainder : PartialValue}
       (source : Evaluates program environment body aggregate after)
-      (selected : aggregate.projectField program key = some (index, value)) :
+      (selected : aggregate.takeField program key = some (index, value, remainder)) :
       Evaluates program environment (.project home body key) value after :=
-  .step .project ((Run.extend source [.project home key]).trans (.step (.projectResult selected) (.refl _)))
+  .step .project ((Run.extend source [.project home key]).trans
+    (.step (.projectResult selected) (Run.cleanup after (.result value) [] remainder.disposalTasks)))
 
 theorem Evaluates.array {environment after : Environment} {elements : List Expr} {values : List Value}
       (residents : EvaluatesMany program environment elements values after) :

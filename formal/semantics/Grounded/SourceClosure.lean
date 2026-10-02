@@ -757,8 +757,8 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
-/-- Every reached sequence cleanup completes before evaluating its saved
-expression. Every intermediate pending resident retains derived disposal
+/-- Every reached structural cleanup completes before resuming its saved
+control. Every intermediate pending resident retains derived disposal
 permission, including private active fields of nominal values. -/
 theorem SourceClosure.Admitted.cleanup {packages : List PackageSource} {closure : SourceClosure packages}
     {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
@@ -769,10 +769,10 @@ theorem SourceClosure.Admitted.cleanup {packages : List PackageSource} {closure 
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
     (issued : environment.supply.Issued environment.activation)
-    {pending : List DisposalTask} {rest : Expr} {stack : List Frame}
+    {pending : List DisposalTask} {rest : Control} {stack : List Frame}
     (run : Run program ⟨environment, .expression core, []⟩ ⟨current, .cleanup pending rest, stack⟩) :
-    Run program ⟨current, .cleanup pending rest, stack⟩ ⟨current, .expression rest, stack⟩ ∧
-      ConfigurationTyped program final (.one type) ⟨current, .expression rest, stack⟩ ∧
+    Run program ⟨current, .cleanup pending rest, stack⟩ ⟨current, rest, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨current, rest, stack⟩ ∧
       (∀ task ∈ pending, DisposalTask.Safe program task) ∧
       ∀ next remaining continuation frames,
         Run program ⟨current, .cleanup pending rest, stack⟩ ⟨next, .cleanup remaining continuation, frames⟩ →

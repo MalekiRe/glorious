@@ -637,15 +637,79 @@ theorem Initialization.write_overwrite {program : Program} {parent : Ty}
     simp [Initialization.writeFields, info, found, ih tail rewrittenTail]
     rfl
 
+/-- Erase a preselected tuple/struct position. The owning projection producer
+checks the position before using this residual; no field is copied into it. -/
+def Value.eraseProjected (value : Value) (index : Nat) : Option PartialValue :=
+  match value, index with
+  | .tuple _ tail, 0 => some (.tuple .hole (tail.map .resident))
+  | .tuple head tail, index + 1 => some (.tuple (.resident head) ((tail.map .resident).set index .hole))
+  | .nominal identity none fields, index => some (.nominal identity none ((fields.map .resident).set index .hole))
+  | _, _ => none
+
+/-- Owning field projection transfers its selected value and produces the exact
+partial residual in the same operation. -/
+def Value.takeField (program : Program) (value : Value) (key : FieldKey) : Option (Nat × Value × PartialValue) := do
+  let (index, selected) ← value.projectField program key
+  let remainder ← value.eraseProjected index
+  pure (index, selected, remainder)
+
+theorem ProjectionType.eraseProjected {program : Program} {home : Module} {parent type : Ty}
+    {key : FieldKey} {index : Nat} {aggregate : Value} {remainder : PartialValue}
+    (projection : ProjectionType program home parent key index type)
+    (resident : ValueHasType program aggregate parent)
+    (written : (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder) :
+    aggregate.eraseProjected index = some remainder := by
+  obtain ⟨types, layout, fields, selectedType, _, _⟩ := projection.open_partial (.resident resident)
+  have info := projection.fieldInfo layout selectedType
+  cases projection with
+  | tuple selected =>
+    cases resident with
+    | tuple head tail =>
+      cases index <;>
+        simp only [PartialValue.writeFields, info, Option.bind_some, PartialValue.openFields,
+          List.map_cons, List.getElem?_cons_zero, List.getElem?_cons_succ] at written
+      · simpa [PartialValue.closeFields, Value.eraseProjected] using written
+      · obtain ⟨current, found, written⟩ := Option.bind_eq_some_iff.mp written
+        simpa [PartialValue.closeFields, Value.eraseProjected] using written
+  | nominal declared shape indexed selected visible =>
+    cases resident with
+    | nominal otherDeclared chosen finite residents =>
+      cases Option.some.inj (declared.symm.trans otherDeclared)
+      rename_i tag declaration schema values
+      cases tag with
+      | some tag => simp [DataDecl.constructor, shape] at chosen
+      | none =>
+        simp only [PartialValue.writeFields, info, Option.bind_some, PartialValue.openFields,
+          ↓reduceIte] at written
+        obtain ⟨current, found, written⟩ := Option.bind_eq_some_iff.mp written
+        simpa [PartialValue.closeFields, Value.eraseProjected] using written
 /-- The selected value transfers out; the shared field update exposes precisely
 the remaining temporary aggregate whose residents will be discarded. -/
 def Value.ProjectionCleanupSafe (program : Program) (home : Module) (aggregate : Value) (key : FieldKey) : Prop :=
   ∃ parent type index selected remainder,
     ValueHasType program aggregate parent ∧ ProjectionType program home parent key index type ∧
-    aggregate.projectField program key = some (index, selected) ∧
+    aggregate.takeField program key = some (index, selected, remainder) ∧
     ValueHasType program selected type ∧
     (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
     remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent
+
+theorem ProjectionType.take_progress {program : Program} {home : Module} {parent type : Ty}
+    {key : FieldKey} {index : Nat} {aggregate : Value} {residual : Initialization}
+    (projection : ProjectionType program home parent key index type)
+    (resident : ValueHasType program aggregate parent)
+    (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
+    (discard : residual.Disposable program.data parent) :
+    ∃ selected remainder, aggregate.takeField program key = some (index, selected, remainder) ∧
+      ValueHasType program selected type ∧
+      (PartialValue.resident aggregate).writeFields program parent [key] .hole = some remainder ∧
+      remainder.selectFields program parent [key] = some .hole ∧ remainder.Disposable program parent := by
+  have path : PathType program home parent [key] type := .step projection (.here type)
+  obtain ⟨remainder, state, writtenMask, written, remainderTyped, absent⟩ :=
+    path.restore_partial resident.finite (.resident resident) (.hole type)
+  cases Option.some.inj (writtenMask.symm.trans mask)
+  obtain ⟨selected, found, selectedTyped, _⟩ := projection.access resident
+  refine ⟨selected, remainder, ?_, selectedTyped, written, absent, discard.realizes remainderTyped⟩
+  simp [Value.takeField, found, projection.eraseProjected resident written]
 
 theorem ProjectionType.cleanup_safe {program : Program} {home : Module} {parent type : Ty}
     {key : FieldKey} {index : Nat} {aggregate : Value} {residual : Initialization}
@@ -654,13 +718,8 @@ theorem ProjectionType.cleanup_safe {program : Program} {home : Module} {parent 
     (mask : Initialization.present.writeFields program parent [key] .absent = some residual)
     (discard : residual.Disposable program.data parent) :
     aggregate.ProjectionCleanupSafe program home key := by
-  have path : PathType program home parent [key] type := .step projection (.here type)
-  obtain ⟨remainder, state, writtenMask, written, remainderTyped, absent⟩ :=
-    path.restore_partial resident.finite (.resident resident) (.hole type)
-  cases Option.some.inj (writtenMask.symm.trans mask)
-  obtain ⟨selected, found, selectedTyped, _⟩ := projection.access resident
-  exact ⟨parent, type, index, selected, remainder, resident, projection, found, selectedTyped,
-    written, absent, discard.realizes remainderTyped⟩
+  obtain ⟨selected, remainder, taken, typed, written, absent, disposable⟩ := projection.take_progress resident mask discard
+  exact ⟨parent, type, index, selected, remainder, resident, projection, taken, typed, written, absent, disposable⟩
 
 
 theorem ProjectionType.fieldInfo_exists {program : Program} {home : Module} {parent child : Ty}
