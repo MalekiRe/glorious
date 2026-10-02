@@ -162,7 +162,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
     (activation : ActivationId) : FlowContext → ResultType → Frame → FlowContext → ResultType → Prop where
   | sequence {home before after discarded result rest}
       (discard : UsePermitted program.data .discard discarded) (checked : HasType program home before rest result after) :
-      FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one result)
+      FrameTyped program heap supply activation before (.one discarded) (.sequence rest) after (.one (discarded.sequenceResult result))
   | bind {home before after name mutable initialType localType result body finalMask}
       (joined : ReturnJoin program initialType before localType before)
       (discard : initialType ≠ .never → ReturnDisposition program result [(name, ⟨⟨localType, mutable⟩, finalMask⟩)])
@@ -441,6 +441,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
           cases frame with | sequence discard checked =>
+            rw [resident.sequenceResult _] at tail
             exact .intro store issued (.cleanup (by simpa using DisposalTask.Safe.enter resident discard) (.expression checked)) tail
     | cleanupEnter =>
       cases code with | cleanup safe checked =>

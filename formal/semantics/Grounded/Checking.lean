@@ -28,6 +28,19 @@ abbrev FlowContext := List (BindingId × BindingState)
 def FlowContext.slots (context : FlowContext) : List (BindingId × BindingType) :=
   context.map fun entry => (entry.1, entry.2.slot)
 
+/-- Sequential composition has no normal result when its first computation
+has bottom type. Otherwise the continuation supplies the result type. -/
+def Ty.sequenceResult (first result : Ty) : Ty :=
+  match first with
+  | .never => .never
+  | _ => result
+
+theorem ValueHasType.sequenceResult {program : Program} {value : Value} {first : Ty}
+    (resident : ValueHasType program value first) (result : Ty) :
+    first.sequenceResult result = result := by
+  have normal := resident.type_ne_never
+  cases first <;> simp_all [Ty.sequenceResult]
+
 /-- Return cleanup is either checked normally or unreachable because the
 function result is bottom. Neither case postulates execution or a result value. -/
 inductive ReturnDisposition (program : Program) : Ty → FlowContext → Prop where
@@ -123,7 +136,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
   | sequence {home before middle after first rest discarded type}
       (head : HasType program home before first discarded middle) (drop : UsePermitted program.data .discard discarded)
       (tail : HasType program home middle rest type after) :
-      HasType program home before (.sequence first rest) type after
+      HasType program home before (.sequence first rest) (discarded.sequenceResult type) after
   | bind {home before middle after mutable name initial body initialType localType type finalMask}
       (initialized : HasType program home before initial initialType middle)
       (joined : ReturnJoin program initialType middle localType middle)

@@ -5128,3 +5128,26 @@ The remaining unreachable-flow boundary includes static continuation and
 hypothetical mask derivations, propagation of nonreturning outcomes through
 compound expressions, and outer function cleanup admission. All fourteen
 whole-language completion families remain open.
+
+## Sequential bottom propagates into function return admission
+
+Ty.sequenceResult is the shared result composition for source sequences, Core
+sequence checking and sequence frames. A bottom first expression makes the
+whole sequence bottom; otherwise the tail supplies the result type. At the
+actual sequence-result transition, the returned value proves the first type is
+non-bottom, so preservation recovers the tail's type before entering cleanup
+and the continuation. No bottom value or normal-return mask is manufactured.
+
+SourceClosure.Admitted.bottom_sequence derives source admission and infinite
+execution with all prefix ownership/storage guarantees and pending-stack
+nonresumption. NamedFunction.Elaborates.bottom_sequence carries that inferred
+bottom into declared function admission, without a normal-exit cleanup witness
+even when the syntactic continuation has a normal result. Thus outer cleanup
+admission now recognizes this compound nonreturning case through its existing
+authoritative result contract rather than an independent divergence analysis.
+
+All 30 strict Lean jobs passed. Inspected sequence/function admission, source
+behavior, function soundness and no-exact-cleanup proofs use only propext,
+Classical.choice and Quot.sound. Continuations still require static checking;
+propagation through other compound forms remains open. All fourteen completion
+families remain open.

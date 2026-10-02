@@ -1635,6 +1635,36 @@ theorem SourceClosure.Admitted.bottom_initializer {packages : List PackageSource
   obtain ⟨trace, infinite, safe⟩ := (binding.checked slots).bind_bottom_behavior
     admitted.checked (bottom.checked slots) store issued
   exact ⟨binding, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+/-- Nonreturning sequence prefixes propagate bottom to the whole source
+expression, so the ordinary function-return contract sees an unreachable exit. -/
+theorem SourceClosure.Admitted.bottom_sequence {packages : List PackageSource}
+    {closure : SourceClosure packages} {program : Program} (admitted : closure.Admitted program)
+    {home : Module} {scope : SourceScope} {before middle final : FlowContext}
+    {sourceFirst sourceRest : NamedExpr} {first rest : Expr} {type : Ty}
+    (bottom : NamedExpr.Elaborates program closure.functionNames home scope before sourceFirst first .never middle)
+    (continued : NamedExpr.Elaborates program closure.functionNames home scope middle sourceRest rest type final)
+    (slots : before.slots = scope.context) {environment : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation) :
+    NamedExpr.Elaborates program closure.functionNames home scope before
+      (.sequence sourceFirst sourceRest) (.sequence first rest) .never final ∧
+    ∃ trace, InfiniteRun program ⟨environment, .expression (.sequence first rest), []⟩ trace ∧
+      (∀ index, ConfigurationTyped program final (.one .never) (trace index) ∧
+        AddressedEnvironment.ConsumptionFrame program final.slots environment (trace index).outerEnvironment ∧
+        (trace index).OwnershipSafe program ∧
+        Configuration.ExternalFrame ⟨environment, .expression (.sequence first rest), []⟩ (trace index) ∧
+        ∀ identity, environment.heap.next ≤ identity.index →
+          ∀ cell, (trace index).environment.heap.read identity = some cell →
+            ¬ (trace index).Untracked identity) ∧
+      ∀ (stack : List Frame) (done : Configuration), Terminal done →
+        ¬ Run program ⟨environment, .expression (.sequence first rest), stack⟩ (done.extend stack) := by
+  have elaborated : NamedExpr.Elaborates program closure.functionNames home scope before
+      (.sequence sourceFirst sourceRest) (.sequence first rest) .never final :=
+    .sequence bottom .never continued
+  obtain ⟨trace, infinite, safe⟩ := admitted.never_behavior elaborated slots store issued
+  exact ⟨elaborated, trace, infinite, safe, fun stack _ terminal => infinite.no_resume terminal stack⟩
+
+
 /-- A bottom RHS admits assignment without permission to discard the old
 resident. No return, replacement value or successful cleanup is assumed. -/
 theorem SourceClosure.Admitted.bottom_assignment {packages : List PackageSource}

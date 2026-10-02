@@ -82,6 +82,27 @@ theorem NamedFunction.Elaborates.bottom {program : Program}
       ⟨source.home, source.visibility, scope.context, result, body⟩ :=
   (NamedFunction.BodyElaborates.intro parameters distinct resultType resultFinite elaborated
     (.nonreturning _ rfl)).bottom_admitted
+/-- A function whose sequential prefix is bottom needs no normal-exit
+cleanup witness, even if its syntactic continuation has a normal result type. -/
+theorem NamedFunction.Elaborates.bottom_sequence {program : Program}
+    {names : Module → FunctionName → Option Nat} {source : NamedFunction}
+    {scope : SourceScope} {result tailType : Ty} {first rest : Expr} {middle after : FlowContext}
+    {sourceFirst sourceRest : NamedExpr}
+    (parameters : NamedParametersElaborate program source.parameters scope)
+    (distinct : (source.parameters.map NamedParameter.name).Nodup)
+    (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
+    (resultFinite : FiniteLayout program.target program.data result)
+    (body : source.body = .sequence sourceFirst sourceRest)
+    (bottom : NamedExpr.Elaborates program names source.home scope
+      (initializedContext scope.context) sourceFirst first .never middle)
+    (continued : NamedExpr.Elaborates program names source.home scope middle sourceRest rest tailType after) :
+    NamedFunction.Elaborates program names source
+      ⟨source.home, source.visibility, scope.context, result, .sequence first rest⟩ := by
+  apply NamedFunction.Elaborates.bottom parameters distinct resultType resultFinite
+  rw [body]
+  exact .sequence bottom .never continued
+
+
 /-- The emitted body keeps its inferred type, before declared-result coercion. -/
 theorem NamedFunction.BodyElaborates.checked_body {program : Program}
     {names : Module → FunctionName → Option Nat} {source : NamedFunction}

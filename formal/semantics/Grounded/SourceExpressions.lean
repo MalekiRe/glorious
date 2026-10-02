@@ -176,7 +176,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (initial : NamedExpr.Elaborates program names home scope before first head discarded middle)
       (discard : UsePermitted program.data .discard discarded)
       (continued : NamedExpr.Elaborates program names home scope middle rest tail type after) :
-      NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) type after
+      NamedExpr.Elaborates program names home scope before (.sequence first rest) (.sequence head tail) (discarded.sequenceResult type) after
   | bind {scope before middle after mutable name annotation initial body first rest initialType localType type finalMask}
       (initialized : NamedExpr.Elaborates program names home scope before initial first initialType middle)
       (discard : initialType ≠ .never → ReturnDisposition program type [(⟨scope.next⟩, ⟨⟨localType, mutable⟩, finalMask⟩)])
