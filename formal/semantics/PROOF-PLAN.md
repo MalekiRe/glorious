@@ -1766,11 +1766,11 @@ namespaces, preludes, parsing and the remaining whole-language tasks remain open
 Each decoded `PackageSource` carries the driver-selected standard prelude path
 and the decoded `noStd` / `noImplicitPrelude` controls. A single request
 producer injects that prelude only when a profile supplies a path and neither
-suppression flag is set. It generates a private glob request, feeding the same
-path elaborator, complete import batches, namespace admission, seeded candidate
-relation and callable resolver as authored imports. Prelude and glob candidates
-use the weak tier beneath explicit bindings (§2.3); no special runtime dispatch
-or spelling-based intrinsic authority is introduced.
+suppression flag is set. It generates a private automatic-prelude request, feeding
+the same path elaborator, complete import batches, namespace admission, seeded
+provenance relation and callable resolver as authored imports. The original
+shared glob/prelude tier was superseded by the lowest-priority repair below;
+no special runtime dispatch or spelling-based intrinsic authority is introduced.
 
 `preludeRequest_selected` proves the exact enabling condition and generated
 shape. `resolvePackagePrelude.origin` ties every automatic request to its
@@ -1788,8 +1788,8 @@ provenance, closure uniqueness and file-order admission invariance are migrated;
 file permutation leaves the selected profile and suppression policy unchanged.
 
 `SourceClosure.Admitted.prelude_call_soundness` constructs the actual selected
-callee from the profile, emitted glob and finite visible target candidate, under
-the shared explicit-binding exclusion and static namespace-access check. It
+callee from the profile, emitted automatic edge and finite visible target
+candidate, under explicit/glob shadowing exclusion and namespace-access checks.
 constructs selection before argument checking and proves configuration typing,
 terminal-or-step progress, consumption framing and binding uniqueness for every
 typed execution prefix. Lexical shadowing and original declaration visibility
@@ -2723,8 +2723,8 @@ comments, structural-word grammar, or spans. Source inclusion still follows only
 declared inline/external modules and the self-named-directory rule; existing file
 permutation and module-owner proofs remain checked. Other namespaces, module
 aliases, parser/source-map obligations, library profiles, and whole-language
-semantics remain open. Automatic preludes still share the glob candidate kind;
-separate priority against authored glob imports is not established here.
+semantics remain open. The then-shared glob/prelude candidate kind was subsequently
+replaced by the lowest-priority repair recorded below.
 
 ## Ordered admitted-call execution decomposition
 
@@ -2967,4 +2967,46 @@ No unit tests or concrete examples were added.
 This is entry in the current logical allocator. It does not construct borrowed
 inputs, prove shared/unique loan compatibility, interpret physical allocation
 exhaustion, or discharge the whole-language obligations.
+
+
+## Lowest-priority automatic preludes through actual source admission
+
+A general pre-repair Lean proof showed that an authored glob and the actual
+automatically emitted prelude competed as equal-strength candidates: distinct
+declaration identities forced `functionNames` to return `none`. That was not
+§2.5's lowest-priority prelude contract.
+
+Automatic requests now emit `FunctionImportKind.prelude`, not `glob`. One
+`FunctionProvenance` relation generates finite declaration-seeded import paths;
+discovery and priority-filtered selection instantiate that same producer with
+different admissible-edge policies. Discovery is not an independently supplied
+name table. Selected paths enforce priority at every import hop. Explicit
+bindings suppress both weak tiers; an authored glob with an accessible declared
+name suppresses the automatic tier. Merely having an unrelated glob does not
+suppress every prelude name. Unknown/unresolved evidence does not grant fallback.
+
+`FunctionImport.Selects.prelude_excluded` derives exclusion from an actual
+authored-glob candidate. `functionNames.glob_over_prelude` proves successful
+selection for one authored incoming glob against any number of automatic edges,
+using unique target resolution but no successful local lookup or global
+uniqueness premise. Import-order invariance and rejection of unseeded cycles
+continue through the shared provenance relation.
+
+Source admission now checks `ImportSelection.Authored` through
+`LoadedModule.Valid`. Groups and descents cannot forge the driver-only marker.
+`SourceClosure.Admitted.automatic_import_origin` derives every automatic edge's
+actual owning package, enabled suppression flags, selected profile path, private
+visibility and resolved target. The existing prelude-call soundness theorem
+consumes the corrected priority rule and still reaches general machine safety.
+
+Verification: an independent source-only workspace with no copied `.olean`
+files passed all 30 jobs. Explicit axiom inspection covered priority selection,
+exclusion, grouped-import provenance, leastness, unseeded cycles, import/file
+order invariance, automatic origin, prelude/source-function soundness, mixed
+input entry and general preservation/progress. Only standard Lean axioms occur.
+No unit tests or concrete examples were added.
+
+This repairs decoded callable-prelude priority. Other namespaces, source-text
+parsing, library/runtime profiles and the remaining whole-language obligations
+remain open; no broad completion task is marked complete.
 
