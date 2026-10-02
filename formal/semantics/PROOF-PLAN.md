@@ -4650,3 +4650,35 @@ elaboration: alias and nominal access paths/imports, visibility authorization
 at each type reference, generics, and decoding into resolved declaration
 identities remain obligations. No broad completion item is marked complete.
 
+
+## Signed mathematical constants in Core
+
+A general pre-change Lean proof established that every Core integer step could
+produce only a nonnegative value: `Expr.integer` stored a `Nat` even though
+runtime values and the scalar range contract use `Int`. This excluded all
+negative decoded integer constants, including signed minima.
+
+Core integer expressions now store `Int`. Structural checking, scalar execution,
+evaluation, exact range admission, general preservation/progress and source
+constant normalization/materialization consume that same number. The general
+`integer_behavior` theorem derives either exact typed evaluation with the
+unchanged environment and a unique result, or rejection by both typing and
+execution for every continuation. There is no wraparound result.
+
+`NamedExpr.integer` deliberately retains a natural magnitude. Its elaboration
+embeds that magnitude into the signed Core domain; it does not reinterpret a
+leading minus as part of a token or bypass ordinary operator resolution.
+Decoded constant bodies can now carry negative mathematical values through
+`ConstantChecked` and the existing source-owned constant correctness theorem.
+
+All 30 strict Lean jobs passed. General transient proof checks established
+signed-minimum execution for every target/width/environment, rejection of every
+negative unsigned scalar, admission of every in-range decoded scalar constant,
+and unchanged natural-magnitude source elaboration. Inspected scalar and public
+constant/source correctness closures use only standard Lean axioms. No concrete
+examples or permanent test fixtures were added.
+
+This repairs the Core representation, not numeric lexing, width inference,
+immediately-negated literal elaboration or operator calls. Those obligations,
+and the fourteen broad completion obligations, remain open.
+

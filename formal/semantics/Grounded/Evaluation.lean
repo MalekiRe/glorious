@@ -17,7 +17,7 @@ variable {program : Program}
 theorem Evaluates.unit {environment : Environment} : Evaluates program environment .unit .unit environment :=
   .step .unit (.refl _)
 
-theorem Evaluates.integer {environment : Environment} {type : IntegerType} {magnitude : Nat}
+theorem Evaluates.integer {environment : Environment} {type : IntegerType} {magnitude : Int}
       (fits : type.Contains program.target magnitude) :
       Evaluates program environment (.integer type magnitude) (.integer type magnitude) environment :=
   .step (.integer fits) (.refl _)

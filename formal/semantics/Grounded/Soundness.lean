@@ -1104,7 +1104,7 @@ theorem closed_correctness (checkedProgram : program.Checked) {expression : Expr
   correctness checkedProgram admitted finite AddressedEnvironment.empty_typed AddressedEnvironment.empty_issued
 
 /-- Exact scalar admission, independent of incoming availability. -/
-theorem integer_admission (context : FlowContext) (type : IntegerType) (magnitude : Nat) :
+theorem integer_admission (context : FlowContext) (type : IntegerType) (magnitude : Int) :
     (∃ result after, HasType program home context (.integer type magnitude) result after) ↔
       type.Contains program.target magnitude := by
   constructor
@@ -1112,6 +1112,27 @@ theorem integer_admission (context : FlowContext) (type : IntegerType) (magnitud
     cases admitted with | integer fits => exact fits
   · intro fits
     exact ⟨_, _, .integer fits⟩
+
+/-- Every decoded scalar either evaluates to exactly its mathematical value
+without changing the environment, or is rejected by both typing and execution.
+This includes negative signed constants; there is no wrapping branch. -/
+theorem integer_behavior (context : FlowContext) (type : IntegerType) (number : Int)
+    (environment : Environment) :
+    (HasType program home context (.integer type number) (.integer type) context ∧
+      Evaluates program environment (.integer type number) (.integer type number) environment ∧
+      ∀ value after, Evaluates program environment (.integer type number) value after →
+        value = .integer type number ∧ after = environment) ∨
+    ((¬ ∃ result after, HasType program home context (.integer type number) result after) ∧
+      ∀ stack next, ¬ Step program ⟨environment, .expression (.integer type number), stack⟩ next) := by
+  by_cases fits : type.Contains program.target number
+  · have evaluated : Evaluates program environment (.integer type number) (.integer type number) environment :=
+      .integer fits
+    exact .inl ⟨.integer fits, evaluated, fun _ _ other => evaluated.unique other⟩
+  · refine .inr ⟨fun typed => fits ((integer_admission context type number).mp typed), ?_⟩
+    intro stack next stepped
+    cases stepped with
+    | integer permitted => exact fits permitted
+
 
 theorem character_admission (context : FlowContext) (number : Nat) :
     (∃ result after, HasType program home context (.character number) result after) ↔ UnicodeScalar number := by

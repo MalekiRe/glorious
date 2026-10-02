@@ -10,7 +10,7 @@ namespace Grounded
 are checked by the same typing derivation and use the same evaluation relation. -/
 inductive Structural : Expr → Prop where
   | unit : Structural .unit
-  | integer (type : IntegerType) (magnitude : Nat) : Structural (.integer type magnitude)
+  | integer (type : IntegerType) (number : Int) : Structural (.integer type number)
   | character (number : Nat) : Structural (.character number)
   | group {body : Expr} (closed : Structural body) : Structural (.group body)
   | tuple {head : Expr} {tail : List Expr} (first : Structural head)

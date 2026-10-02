@@ -208,7 +208,7 @@ structure BindingType where
 
 inductive Expr where
   | unit
-  | integer (type : IntegerType) (magnitude : Nat)
+  | integer (type : IntegerType) (number : Int)
   | character (number : Nat)
   | group (body : Expr)
   | read (place : Place)

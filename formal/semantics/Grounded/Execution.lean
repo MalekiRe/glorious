@@ -102,7 +102,7 @@ Invalid access has no transition; it is not an exhaustion or abort outcome. -/
 inductive Step (program : Program) : Configuration → Configuration → Prop where
   | unit {env : Environment} {stack : List Frame} :
       Step program ⟨env, .expression .unit, stack⟩ ⟨env, .result .unit, stack⟩
-  | integer {env : Environment} {stack : List Frame} {type : IntegerType} {magnitude : Nat}
+  | integer {env : Environment} {stack : List Frame} {type : IntegerType} {magnitude : Int}
       (fits : type.Contains program.target magnitude) :
       Step program ⟨env, .expression (.integer type magnitude), stack⟩
         ⟨env, .result (.integer type magnitude), stack⟩
