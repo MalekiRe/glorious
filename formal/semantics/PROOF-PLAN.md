@@ -4362,7 +4362,8 @@ outside this modeled result/pack boundary.
 Protected payloads and retained tuple/argument frames now share that invariant.
 `Control.PrincipalConsistent` follows the actual saved control through nested
 cleanup, classifies every queued enter-resident and covers installation
-replacements; `Frame.PrincipalConsistent`
+replacements; `Frame.PrincipalConsistent` covers already-evaluated residents
+retained while later operands execute.
 Control and continuation typing derive these facts from the existing resident
 producer, and `ConfigurationTyped.ownership_safe` carries both through general
 source prefix safety and maximal behavior. The superseded result-only inline
