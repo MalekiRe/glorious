@@ -194,10 +194,8 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
             by_cases finished : ((List.take locals.length current.bindings).filter fun entry => decide (entry.2 ∉ front)) = []
             · exact .inl finished
             · obtain ⟨index, entry, chosen, selected, pending, first⟩ :=
-                BindingMap.release_next _ _ retained.addresses_distinct (by
-                intro entry member
-                obtain ⟨member, kept⟩ := List.mem_filter.mp member
-                exact List.mem_filter.mpr ⟨List.mem_of_mem_take member, kept⟩) finished
+                BindingMap.release_next _ _
+                  (List.IsPrefix.filter _ (List.take_prefix locals.length current.bindings)) finished
               obtain ⟨cell, found, allowed⟩ := permission entry.2 (List.mem_map.mpr ⟨entry, pending, rfl⟩)
               obtain ⟨state, actualCell, sourceSelected, actualFound, _, cellType, cellTyped⟩ := retained.index selected
               have sameCell : actualCell = cell := Option.some.inj (actualFound.symm.trans found)

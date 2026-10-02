@@ -4048,6 +4048,14 @@ resident and its disposal permission in that stage’s physical heap. The shared
 the executable selection; lexical confinement and both source trace consumers
 reuse it. Permission comes from the preserved configuration invariant, not a
 new readiness premise or the original resident before earlier transitions.
-All 30 strict build jobs and inspected producer/source axiom closures passed.
-This supplies current-resident authority for interleaved destruction; the
-machine retirement-frame integration remains open.
+Canonical selection now requires only a nonempty pending lexical prefix, not
+typing or global storage uniqueness. Raw indexed retirement has an exact
+operational decomposition. Scope/return factorization consumes that operation
+and uniqueness of the retired batch alone, independently of typed progress.
+Successful physical batches themselves prove distinctness and initial liveness;
+the actual-prefix order/disposal consumers derive strict acquisition order from
+these facts rather than accepting an additional ordering premise. All existing
+typed progress and source consumers use the migrated contracts. All 30 strict
+build jobs and inspected producer/source axiom closures passed. These results
+prepare the untyped completed-evaluation boundary as well as source safety;
+the machine retirement-frame integration remains open.

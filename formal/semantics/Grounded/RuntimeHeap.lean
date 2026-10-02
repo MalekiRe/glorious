@@ -497,5 +497,25 @@ theorem retireMany_origin {before after : RuntimeHeap α} {identities : List Sto
     exact (Typed.retire (fun _ _ selected => selected) head) identity value (ih tail)
 
 
+/-- A successful physical batch cannot contain duplicate or initially dead
+identities. These facts are consequences of retirement, not admission axioms. -/
+theorem retireMany_preconditions {before after : RuntimeHeap α} {identities : List StorageId}
+    (released : before.retireMany identities = some after) :
+    identities.Nodup ∧ ∀ identity ∈ identities, ∃ value, before.read identity = some value := by
+  induction identities generalizing before with
+  | nil => exact ⟨by simp, by simp⟩
+  | cons first rest ih =>
+    obtain ⟨middle, head, tail⟩ := Option.bind_eq_some_iff.mp released
+    obtain ⟨distinct, live⟩ := ih tail
+    refine ⟨List.nodup_cons.mpr ⟨?_, distinct⟩, ?_⟩
+    · intro member
+      obtain ⟨value, found⟩ := live first member
+      rw [retire_read head] at found
+      cases found
+    · intro identity member
+      rcases List.mem_cons.mp member with rfl | member
+      · exact retire_live head
+      · obtain ⟨value, found⟩ := live identity member
+        exact ⟨value, (Typed.retire (fun _ _ selected => selected) head) identity value found⟩
 end RuntimeHeap
 end Grounded

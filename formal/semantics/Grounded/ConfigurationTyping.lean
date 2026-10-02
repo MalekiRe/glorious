@@ -701,14 +701,14 @@ theorem ConfigurationTyped.scope_next {context : FlowContext} {result : ResultTy
               simp only [List.length_append] at length
               omega
             obtain ⟨index, entry, chosen, selected, _, first⟩ := BindingMap.release_next _ _
-              store.addresses_distinct (fun _ member => List.mem_of_mem_take member) nonempty
+              (List.take_prefix locals.length current.bindings) nonempty
             have inside := BindingMap.nextRelease.in_prefix (List.take_prefix locals.length current.bindings) chosen
             have localIndex : index < locals.length := by
               simp only [List.length_take] at inside
               omega
             obtain ⟨next, produced, _⟩ := AddressedEnvironment.retireBinding.progress store selected
             exact .inr ⟨index, entry, next, chosen, localIndex, produced,
-              AddressedEnvironment.exitScope.retireBinding store selected localIndex first produced,
+              AddressedEnvironment.exitScope.retireBinding (store.take locals.length).addresses_distinct selected localIndex first produced,
               original.retire_scope selected localIndex produced⟩
 /-- A typed scope constructs all canonical indexed retirements, preserving its
 continuation at every stage and producing exactly the existing batch exit. -/
@@ -801,10 +801,10 @@ theorem ConfigurationTyped.restore_next {context : FlowContext} {result : Result
   · have original := typed
     cases typed with | intro store issued code continuation =>
       obtain ⟨index, entry, chosen, selected, _, first⟩ := BindingMap.release_next _ _
-        store.addresses_distinct (fun _ member => member) empty
+        ⟨[], List.append_nil _⟩ empty
       obtain ⟨next, produced, _, _, _, _, _, bindings, _⟩ := AddressedEnvironment.retireBinding.progress store selected
       refine .inr ⟨index, entry, next, chosen, produced, ?_,
-        AddressedEnvironment.restore.retireBinding store selected first produced caller,
+        AddressedEnvironment.restore.retireBinding store.addresses_distinct selected first produced caller,
         original.retire_restore selected produced⟩
       rw [bindings]
       exact BindingMap.releaseOrder_eraseIdx store.addresses_distinct selected first
@@ -1274,7 +1274,7 @@ theorem Configuration.OwnershipSafe.scope_retirement {before : Environment} {aft
   | scope exited =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
     cases same
-    exact BindingMap.Disposable.release_prefix safe.1 released safe.2 split
+    exact BindingMap.Disposable.release_prefix safe.1 released split
 
 /-- Function return consumes the same release producer as lexical scope exit;
 parameter-list order cannot override actual newest-owner-first retirement. -/
@@ -1297,7 +1297,7 @@ theorem Configuration.OwnershipSafe.return_retirement {before : Environment} {af
   | restore restored =>
     obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
     cases same
-    exact BindingMap.Disposable.release_prefix safe.1 released safe.2 split
+    exact BindingMap.Disposable.release_prefix safe.1 released split
 
 /-- Every retained scope is realized in the current heap, not merely the active
 scope or the outermost caller. Traversing frames does not execute pending code. -/
