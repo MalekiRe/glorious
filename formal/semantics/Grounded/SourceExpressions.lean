@@ -559,8 +559,13 @@ theorem NamedExpr.Elaborates.evaluation_soundness {program : Program} {home : Mo
     (evaluated : Evaluates program environment core value after) :
     ValueHasType program value type ∧ BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧
-      AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
-  (elaborated.checked slots).evaluation_soundness checkedProgram store issued evaluated
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      ∀ originalType principal, ValueHasType program value originalType →
+        originalType.HasPrincipal program.data principal → type.HasPrincipal program.data principal := by
+  obtain ⟨resident, afterTyped, afterIssued, framed⟩ :=
+    (elaborated.checked slots).evaluation_soundness checkedProgram store issued evaluated
+  exact ⟨resident, afterTyped, afterIssued, framed, fun _ _ original classified =>
+    original.principal resident classified⟩
 
 /-- Finite-call termination remains an optional theorem about the same selected
 core, not a restriction on recursive source safety. -/

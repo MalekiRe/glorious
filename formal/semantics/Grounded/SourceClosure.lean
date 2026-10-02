@@ -1329,7 +1329,9 @@ theorem SourceClosure.Admitted.evaluation_soundness {packages : List PackageSour
     (issued : environment.supply.Issued environment.activation)
     (evaluated : Evaluates program environment core value after) :
     ValueHasType program value type ∧ BindingMap.Typed program after.heap after.activation after.bindings final ∧
-      after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
+      after.supply.Issued after.activation ∧ AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      ∀ originalType principal, ValueHasType program value originalType →
+        originalType.HasPrincipal program.data principal → type.HasPrincipal program.data principal :=
   admitted.2.2.2.2.1.evaluation_soundness elaborated slots store issued evaluated
 
 theorem SourceClosure.Admitted.correctness {packages : List PackageSource} {closure : SourceClosure packages}

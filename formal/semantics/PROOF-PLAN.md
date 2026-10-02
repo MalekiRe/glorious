@@ -4299,3 +4299,21 @@ derives this through the existing addressed-read and resident-typing producer.
 The noncopyable-read exclusion consumer is migrated. All 30 strict jobs and
 the inspected Copy, general ownership and admitted-behavior axiom closures
 passed; no new axioms or source permission premises were introduced.
+
+## Returning the same resident cannot erase its principal
+
+`ValueHasType.principal` transports a resident's full principal through any
+other valid typing using the existing structural permission-invariance theorem.
+This includes inferred exact principals and empty-array typing ambiguity.
+It does not reconstruct ownership from a different field analysis.
+
+Completed named-expression, named-program and source-closure evaluation
+contracts now expose this preservation for the actual returned resident. A
+by-value computation that returns the same value cannot make that value affine
+merely by changing its valid result annotation. The result is conditional on
+an observed completed execution; it does not assert termination, preserve the
+class when an expression constructs a different value, or model references.
+
+All 30 strict jobs passed. Inspected resident-principal, completed-source and
+maximal-behavior proof closures use only the standard three Lean axioms.
+Custom Drop, borrowing and the remaining full-language obligations stay open.

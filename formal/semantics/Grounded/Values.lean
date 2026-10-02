@@ -121,7 +121,18 @@ theorem ValueHasType.use_permission {program : Program} {value : Value} {type : 
       | head => exact headIH otherHead (allowed _ (by simp))
       | tail _ member => exact tailIH _ otherTail (fun type included => allowed type (by simp [included])) type member
 
-
+/-- Returning or reannotating the same resident preserves its full principal,
+including an inferred exact class. No successful disposal is assumed. -/
+theorem ValueHasType.principal {program : Program} {value : Value} {before after : Ty}
+    {principal : Principal} (original : ValueHasType program value before)
+    (returned : ValueHasType program value after) (classified : before.HasPrincipal program.data principal) :
+    after.HasPrincipal program.data principal := by
+  intro permission
+  constructor
+  · intro allowed
+    exact (classified permission).mp (returned.use_permission original allowed)
+  · intro allowed
+    exact original.use_permission returned ((classified permission).mpr allowed)
 def Value.head : Value → Head
   | .unit => .unit
   | .integer type number => .integer type number

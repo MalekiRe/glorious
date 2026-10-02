@@ -164,7 +164,9 @@ theorem NamedProgramAdmitted.evaluation_soundness {source : List NamedFunction} 
     (evaluated : Evaluates program environment core value after) :
     ValueHasType program value type ∧ BindingMap.Typed program after.heap after.activation after.bindings final ∧
       after.supply.Issued after.activation ∧
-      AddressedEnvironment.ConsumptionFrame program final.slots environment after :=
+      AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
+      ∀ originalType principal, ValueHasType program value originalType →
+        originalType.HasPrincipal program.data principal → type.HasPrincipal program.data principal :=
   elaborated.evaluation_soundness slots admitted.checked store issued evaluated
 
 theorem NamedProgramAdmitted.correctness {source : List NamedFunction} {program : Program}
