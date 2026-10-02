@@ -4210,3 +4210,21 @@ three Lean axioms. This closes the source-to-entry composition for the modeled
 owned Copy/move inputs. Loan creation, reborrowing, custody-sensitive resources,
 physical exhaustion and full-language input compatibility remain separate open
 obligations; the logical heap theorem does not establish them.
+
+
+## Ordinary acquisition returns the selected resident and records actual holes
+
+`NamedExpr.Elaborates.ordinary_progress` now constructs a completed value
+transition, rather than only an unspecified typed successor. The returned value
+is typed and equals the incoming addressed read. Copy leaves the environment
+unchanged. Non-Copy executes the actual `take`, cannot take the path again,
+and leaves a concrete hole in the original live cell, preserving its activation
+and declared type. The original resident's actual field write produces that
+hole; unreadability is not substituted for a storage-retirement claim.
+
+The producer uses existing source resolution, physical read/take progress and
+source soundness. No successful operation or post-state readiness is an input.
+All 30 strict jobs passed; the inspected acquisition, constructed-call and
+admitted-behavior closures use only the standard three Lean axioms. This remains
+a theorem of the modeled owned-value fragment, not reference reborrowing,
+custom destruction, physical exhaustion or whole-language completion.
