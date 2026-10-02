@@ -4682,3 +4682,39 @@ This repairs the Core representation, not numeric lexing, width inference,
 immediately-negated literal elaboration or operator calls. Those obligations,
 and the fourteen broad completion obligations, remain open.
 
+## Owned positional remainder patterns
+
+Named patterns now represent one positional `..` marker with explicit leading
+and trailing patterns. The declaration-selected `HeadType` determines the
+omitted arity; admission rejects overfull patterns before natural subtraction.
+Positional syntax is restricted to tuples, fixed arrays and tuple-shaped nominal
+constructors (including zero-field shapes), not scalar constants or record fields.
+Existing constructor visibility and closed-deconstruction authority still apply.
+
+Elaboration expands the omitted segment into ordinary wildcards and feeds the
+same `NamedPatternsElaborate` producer used by explicit fields. No separate
+permission analysis, matching procedure or cleanup mechanism is introduced.
+Duplicate-binder admission includes both explicit segments. The syntax admits
+one marker per constructor pattern; nested field patterns remain independent.
+
+`remainder_permissions` proves zero-use authority for every omitted field type.
+`no_exact_remainder` rejects an omitted must-move subtree even when constructor
+coverage would otherwise succeed. `remainder_matching` connects the actual
+emitted Core pattern to the runtime matcher: omitted residents add no bindings
+and occur in reverse order between suffix and prefix discards. Its matching
+identity does not assume that either explicit segment succeeds.
+
+The extended `NamedPattern.Elaborates.checked` is consumed by ordinary clause,
+expression, function and source-closure admission. General preservation/progress,
+maximal behavior and the reached-state prohibition on exact-owner cleanup retain
+the same contracts. All 30 strict Lean jobs passed. A general transient proof
+also constructed whole-remainder admission for every authorized positional
+constructor whose fields permit disposal. Inspected new and public proof closures
+use only `propext`, `Classical.choice` and `Quot.sound`; no concrete examples or
+permanent test fixtures were added.
+
+This closes owned positional remainder elaboration and matching, not parsing,
+named record-field/remainder elaboration, reference-pattern ergonomics, custom
+Drop, or whole-language soundness. All fourteen broad completion obligations
+remain open.
+

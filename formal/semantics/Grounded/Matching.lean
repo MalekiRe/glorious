@@ -168,4 +168,51 @@ theorem Pattern.SubjectAt.matched {pattern selected : Pattern} {value owner : Va
     obtain ⟨selectedInputs, before, after, selectedMatch, childSplit⟩ := ih childMatch
     exact ⟨selectedInputs, front ++ before, after ++ back, selectedMatch, by simp [split, childSplit, PatternMatch.append_assoc]⟩
 
+/-- Adjacent constructor-field segments use the same matcher and preserve its
+reverse declaration-order discard queue. -/
+theorem matchPatterns.append {front back : List Pattern} {first rest : List Value}
+    (aligned : front.length = first.length) :
+    matchPatterns (front ++ back) (first ++ rest) = (do
+      let left ← matchPatterns front first
+      let right ← matchPatterns back rest
+      pure (left ++ right)) := by
+  induction front generalizing first with
+  | nil =>
+    cases first with
+    | nil => simp [matchPatterns]
+    | cons value values => simp at aligned
+  | cons pattern patterns ih =>
+    cases first with
+    | nil => simp at aligned
+    | cons value values =>
+      have aligned : patterns.length = values.length := Nat.succ.inj aligned
+      simp only [List.cons_append, matchPatterns, ih aligned]
+      cases pattern.matchValue value <;>
+        cases matchPatterns patterns values <;>
+        cases matchPatterns back rest <;>
+        simp [PatternMatch.append_assoc]
+
+theorem matchPatterns.wildcards (values : List Value) :
+    matchPatterns (List.replicate values.length .wildcard) values = some ⟨[], values.reverse⟩ := by
+  induction values with
+  | nil => simp [matchPatterns, PatternMatch.empty]
+  | cons value values ih =>
+    simp [List.replicate_succ, matchPatterns, Pattern.matchValue, ih, List.reverse_cons]
+    rfl
+
+/-- A positional remainder discards exactly the omitted residents, in reverse
+order, without adding bindings or inspecting their contents. -/
+theorem matchPatterns.remainder {front back : List Pattern} {first omitted rest : List Value}
+    (aligned : front.length = first.length) :
+    matchPatterns (front ++ List.replicate omitted.length .wildcard ++ back)
+      (first ++ omitted ++ rest) = (do
+      let left ← matchPatterns front first
+      let right ← matchPatterns back rest
+      pure (left ++ ⟨[], omitted.reverse⟩ ++ right)) := by
+  rw [List.append_assoc, List.append_assoc, matchPatterns.append aligned,
+    matchPatterns.append (by simp), matchPatterns.wildcards]
+  cases matchPatterns front first <;> cases matchPatterns back rest <;>
+    simp [PatternMatch.append_assoc]
+
+
 end Grounded

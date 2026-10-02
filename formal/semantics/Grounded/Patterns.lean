@@ -19,6 +19,12 @@ inductive HeadType (program : Program) : Head → Ty → List Ty → Prop where
       (chosen : declaration.constructor tag = some schema) :
       HeadType program (.nominal identity tag) (.nominal identity) (schema.residents.map Field.type)
 
+theorem HeadType.fields_unique {program : Program} {head : Head} {type : Ty}
+    {first second : List Ty} (left : HeadType program head type first)
+    (right : HeadType program head type second) : first = second := by
+  cases left <;> cases right <;> simp_all
+
+
 def Head.Accessible (program : Program) (home : Module) : Head → Prop
   | .nominal identity tag => ∃ declaration schema,
       program.data identity = some declaration ∧ declaration.constructor tag = some schema ∧
