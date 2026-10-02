@@ -823,4 +823,81 @@ theorem PartialValue.write_hole_unreadable {program : Program} {parent : Ty}
       (List.mem_of_getElem? (List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1))
     exact ih tail
 
+private theorem hole_open_fields {program : Program} {parent : Ty} {fields : List PartialValue}
+    (opened : PartialValue.hole.openFields program parent = some fields) :
+    ∃ count, fields = List.replicate count PartialValue.hole := by
+  cases parent <;> simp only [PartialValue.openFields] at opened
+  all_goals try contradiction
+  case tuple first rest => cases opened; exact ⟨_, rfl⟩
+  case nominal identity =>
+    obtain ⟨declaration, _, rest⟩ := Option.bind_eq_some_iff.mp opened
+    obtain ⟨schema, _, same⟩ := Option.map_eq_some_iff.mp rest
+    cases same
+    exact ⟨_, rfl⟩
+
+private theorem hole_select_read_none (program : Program) (parent : Ty) (path : List FieldKey) :
+    ((PartialValue.hole.selectFields program parent path).bind PartialValue.read) = none := by
+  induction path generalizing parent with
+  | nil => simp [PartialValue.selectFields, PartialValue.read]
+  | cons key rest ih =>
+    cases info : parent.fieldInfo program key with
+    | none => simp [PartialValue.selectFields, info]
+    | some data =>
+      obtain ⟨index, child, types⟩ := data
+      cases opened : PartialValue.hole.openFields program parent with
+      | none => simp [PartialValue.selectFields, info, opened]
+      | some fields =>
+        obtain ⟨count, rfl⟩ := hole_open_fields opened
+        cases found : (List.replicate count PartialValue.hole)[index]? with
+        | none => simp [PartialValue.selectFields, info, opened, found]
+        | some value =>
+          have same := (List.mem_replicate.mp (List.mem_of_getElem? found)).2
+          subst value
+          simpa [PartialValue.selectFields, info, opened, found] using ih child
+
+/-- An erasure cannot introduce or change any readable descendant. Observed
+and erased paths may overlap; no separation or future-readiness is assumed. -/
+theorem PartialValue.write_hole_read_before {program : Program} {parent : Ty}
+    {before after : PartialValue} {writtenPath observedPath : List FieldKey} {value : Value}
+    (written : before.writeFields program parent writtenPath .hole = some after)
+    (read : (after.selectFields program parent observedPath).bind PartialValue.read = some value) :
+    (before.selectFields program parent observedPath).bind PartialValue.read = some value := by
+  induction writtenPath generalizing parent before after observedPath with
+  | nil =>
+    cases written
+    rw [hole_select_read_none] at read
+    contradiction
+  | cons key rest ih =>
+    cases observedPath with
+    | nil =>
+      simp only [PartialValue.selectFields, Option.bind_some] at read
+      rw [PartialValue.write_hole_unreadable written] at read
+      contradiction
+    | cons observed tail =>
+      simp only [PartialValue.writeFields, Option.bind_eq_some_iff] at written
+      obtain ⟨⟨index, child, types⟩, info, fields, opened, current, found, updated, changed, closed⟩ := written
+      have reopened := PartialValue.closeFields_open (program := program) closed
+      cases observedInfo : parent.fieldInfo program observed with
+      | none => simp [PartialValue.selectFields, observedInfo] at read
+      | some data =>
+        obtain ⟨other, observedType, observedTypes⟩ := data
+        simp only [PartialValue.selectFields, observedInfo, Option.bind_some, reopened,
+          opened] at read ⊢
+        by_cases same : other = index
+        · subst other
+          have childSame : observedType = child := by
+            simp only [Ty.fieldInfo, Ty.fieldInfo_layout info, Option.bind_some,
+              Option.bind_eq_some_iff, Option.map_eq_some_iff] at info observedInfo
+            obtain ⟨_, _, _, selected, equal⟩ := info
+            obtain ⟨_, _, _, observedSelected, observedEqual⟩ := observedInfo
+            cases equal
+            cases observedEqual
+            exact Option.some.inj (observedSelected.symm.trans selected)
+          subst observedType
+          have atIndex := List.getElem?_set_self (List.getElem?_eq_some_iff.mp found).1 (a := updated)
+          simp only [atIndex, Option.bind_some] at read
+          simp only [found, Option.bind_some]
+          exact ih changed read
+        · simpa only [List.getElem?_set_ne (Ne.symm same)] using read
+
 end Grounded

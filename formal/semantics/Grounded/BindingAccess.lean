@@ -902,33 +902,33 @@ theorem AddressedEnvironment.take.hole {before after : AddressedEnvironment} {va
   obtain ⟨old, next, original, live, activation, type, absent⟩ := StorageAddress.take.hole moved
   exact ⟨address, old, next, resolved, original, live, activation, type, absent⟩
 
-/-- Consumption-only histories preserve the identity and value of any whole
-resident that remains readable. Erasure cannot resurrect an earlier hole. -/
+/-- Consumption-only histories preserve every descendant that remains readable.
+Erasure cannot resurrect an earlier hole, even along overlapping paths. -/
 theorem StorageCell.Consumption.read_before {before after : Option StorageCell}
-    (consumed : StorageCell.Consumption program before after) {value : Value}
-    (read : (after.bind fun cell => cell.resident.read) = some value) :
-    (before.bind fun cell => cell.resident.read) = some value := by
+    (consumed : StorageCell.Consumption program before after) {value : Value} {path : List FieldKey}
+    (read : (after.bind fun cell =>
+      (cell.resident.selectFields program cell.type path).bind PartialValue.read) = some value) :
+    (before.bind fun cell =>
+      (cell.resident.selectFields program cell.type path).bind PartialValue.read) = some value := by
   induction consumed with
   | refl => exact read
-  | erase written =>
-    simp [PartialValue.write_hole_unreadable written] at read
+  | erase written => exact PartialValue.write_hole_read_before written read
   | trans head tail first last => exact first (last read)
 
-/-- A surviving read of an immutable whole binding returns its original value,
+/-- A surviving read beneath an immutable binding returns its original value,
 including through nested calls represented in the outer environment. -/
 theorem AddressedEnvironment.ConsumptionFrame.read_before {slots : List (BindingId × BindingType)}
     {before after : AddressedEnvironment} (framed : ConsumptionFrame program slots before after)
-    {name : BindingId} {slot : BindingType} {value : Value}
+    {name : BindingId} {slot : BindingType} {value : Value} {path : List FieldKey}
     (selected : lookup name slots = some slot) (immutable : slot.mutable = false)
-    (read : after.read program ⟨name, []⟩ = some value) :
-    before.read program ⟨name, []⟩ = some value := by
+    (read : after.read program ⟨name, path⟩ = some value) :
+    before.read program ⟨name, path⟩ = some value := by
   have bindings : after.bindings = before.bindings := congrArg AddressedScope.bindings framed.1
   simp only [AddressedEnvironment.read, BindingMap.read, BindingMap.resolve, bindings] at read ⊢
   cases mapped : lookup name before.bindings with
   | none => simp [mapped] at read
   | some identity =>
-    simp only [mapped, Option.map_some, Option.bind_some, StorageAddress.read,
-      PartialValue.selectFields] at read ⊢
+    simp only [mapped, Option.map_some, Option.bind_some, StorageAddress.read] at read ⊢
     exact (framed.2 name slot identity selected immutable mapped).read_before read
 
 end Grounded

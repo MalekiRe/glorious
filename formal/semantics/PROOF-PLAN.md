@@ -3580,27 +3580,31 @@ examples or subagents were used. These are logical owned-cell semantics, not
 reference-hole restoration, custom Drop or physical memory proofs; none of the
 fourteen broad completion obligations is closed.
 
-## Immutable whole-value observations cannot change or resurrect
+## Immutable descendant observations cannot change or resurrect
 
 `PartialValue.write_hole_unreadable` proves that actual erasure of any path
 prevents reconstruction of the whole owner. The proof follows field replacement
 and reconstruction; it does not require typing or post-state readiness.
-`StorageCell.Consumption.read_before` lifts this fact through the existing
-consumption history, and `AddressedEnvironment.ConsumptionFrame.read_before`
-connects it to the original lexical binding and actual heap reads.
+`PartialValue.write_hole_read_before` extends the result to arbitrary observed
+paths, including overlap with the erased path. Equal field positions use the
+same declared child type even when field keys differ; distinct positions retain
+the original child. Hole traversal never invents a readable descendant.
+`StorageCell.Consumption.read_before` lifts this through the existing history,
+and `AddressedEnvironment.ConsumptionFrame.read_before` connects it to lexical
+lookup and actual heap reads. The whole-binding-only interfaces are replaced.
 
 `SourceClosure.Admitted.immutable_read` consumes general source soundness and
-slot preservation. At every execution prefix, each source-declared immutable
-whole binding is either unreadable or yields exactly its incoming value. This
-excludes making an initially unreadable whole binding readable through
-consumption, including across nested calls observed in the outer environment.
+slot preservation. At every execution prefix, every path beneath an immutable
+source binding is either unreadable or yields exactly its incoming value,
+including across nested calls observed in the outer environment. An initially
+unreadable descendant cannot become readable through consumption.
 No second history relation, successful-read premise, or future-state admission
 assumption is added to the source theorem.
 
 All 30 Lean build jobs passed. Axiom inspection of the erasure producer,
-consumption lemma, source observation theorem and maximal source behavior
-reported only `propext`, `Classical.choice` and `Quot.sound`. No tests or examples
-were added. This is whole-binding observation stability in the logical owned
-fragment, not arbitrary subpath stability or reference/loan semantics; all
-fourteen broad completion obligations remain open.
+consumption lemma, source observation theorem, general preservation and maximal
+source behavior reported only `propext`, `Classical.choice` and `Quot.sound`.
+No tests or examples were added. This establishes arbitrary-depth observation
+stability in the logical owned fragment, not reference/loan semantics or
+custom destruction; all fourteen broad completion obligations remain open.
 
