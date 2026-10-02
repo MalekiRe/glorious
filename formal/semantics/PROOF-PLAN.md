@@ -5316,3 +5316,38 @@ All 30 strict Lean jobs passed. Inspected source operand behavior and its bottom
 consumer use only propext, Classical.choice and Quot.sound. The result remains
 bounded to the current admitted fragment: static normal-result outcome indexing,
 unreachable-continuation checking and fourteen completion families remain open.
+
+## Immediate integration boundary: static ordered-pack outcomes
+
+The operational pack boundary is proved; another execution wrapper does not
+repair the remaining static information loss. HasTypes.cons currently records
+an inferred head type only inside its premise, then exposes solely the expected
+operand types. Result inference therefore cannot see a bottom operand through
+that judgment. The next coherent migration must change this authoritative
+judgment and its consumers together, not add a source walker or fact table.
+
+Planned contract: give HasTypes and NamedExprsElaborate an explicit completion
+index while keeping expected resident types separate. A nil pack completes
+normally; cons composes the head's inferred result with tail completion.
+Using the existing Ty.sequenceResult algebra, unit can represent normal pack
+completion and never nonreturning completion. Establish that these are the only
+indices derivable and that an actual returned pack implies normal completion.
+Do not default the new index to normal at old call sites.
+
+Carry completion through ControlTyped.arguments, ResultType.many and the
+argument-head/tail frames. Actual ControlTyped.results supplies normal
+completion. Tuple tails, arrays, constructors, calls and pattern applications
+must compose that outcome with their normal result type. Keep selected callable
+identity and declared result separate from the calling expression's inferred
+result: migrate HasType.call_signature and its actual-execution consumers.
+
+Migrate mutual induction motives, structural termination, finite evaluation,
+ordinary compatible-input producers, source list append/bottom admission,
+NamedRecordBuild.finish and public source behavior. A normal operand prefix
+must derive its intermediate storage from actual execution; no pending
+post-state readiness or disposal permission may be assumed. The existing
+maximal behavior, allocation retirement and bottom-pack proofs are acceptance
+consumers, not substitutes for the new producer-to-consumer connection.
+
+This is a pending design, not an implemented outcome index. Unreachable-flow
+checking and all fourteen whole-language completion families remain open.
