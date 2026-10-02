@@ -170,22 +170,93 @@ theorem Ty.HasPrincipal.satisfies {data : DataDeclarations} {type : Ty} {princip
   | affine => exact classified .discard
   | exact => simp [Ty.SatisfiesUse]
 
-/-- Logical totality is not an inference algorithm: negative permission evidence
-is a proof, not absence of a successful solver result. -/
-theorem Ty.principal_exists (data : DataDeclarations) (type : Ty) :
+private theorem finite_permissions {α : Type} (items : List α) (permission : α → Prop)
+    (each : ∀ item ∈ items, permission item ∨ ¬ permission item) :
+    (∀ item ∈ items, permission item) ∨ ∃ item ∈ items, ¬ permission item := by
+  induction items with
+  | nil => exact .inl (by simp)
+  | cons head tail ih =>
+    rcases each head (by simp) with allowed | denied
+    · rcases ih (fun item member => each item (by simp [member])) with all | missing
+      · exact .inl (by intro item member; cases member with | head => exact allowed | tail _ member => exact all item member)
+      · obtain ⟨item, member, denied⟩ := missing
+        exact .inr ⟨item, by simp [member], denied⟩
+    · exact .inr ⟨head, by simp, denied⟩
+
+/-- Finite inline layout supplies a finite constructive derivation of either
+permission or its refutation, including every variant and empty arrays. -/
+theorem FiniteLayout.permission_cases {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) (permission : UsePermission) :
+    UsePermitted data permission type ∨ ¬ UsePermitted data permission type := by
+  induction finite with
+  | unit => exact .inl .unit
+  | integer type => exact .inl (.integer type)
+  | character => exact .inl .character
+  | tuple first rest headIH tailIH =>
+    rcases headIH with allowed | denied
+    · rcases finite_permissions _ _ tailIH with all | missing
+      · exact .inl (.tuple allowed all)
+      · obtain ⟨type, member, denied⟩ := missing
+        exact .inr (by intro available; cases available with | tuple _ fields => exact denied (fields type member))
+    · exact .inr (by intro available; cases available with | tuple head _ => exact denied head)
+  | @array element length resident size ih =>
+    by_cases empty : length = 0
+    · subst length; exact .inl (.emptyArray element)
+    · rcases ih with allowed | denied
+      · exact .inl (.array length allowed)
+      · exact .inr (by
+          intro available
+          cases available with
+          | array _ element => exact denied element
+          | emptyArray => exact empty rfl)
+  | @nominal identity declaration declared schemas fields ih =>
+    have restriction : permission.Allows declaration.restriction ∨ ¬ permission.Allows declaration.restriction := by
+      cases declaration.restriction with
+      | none => exact .inl trivial
+      | some principal => cases principal <;> cases permission <;> simp [UsePermission.Allows]
+    rcases restriction with allowed | denied
+    · have each : ∀ schema ∈ declaration.schemas,
+          (∀ field ∈ schema.residents, UsePermitted data permission field.type) ∨
+          ¬ (∀ field ∈ schema.residents, UsePermitted data permission field.type) := by
+        intro schema member
+        rcases finite_permissions schema.residents _ (ih schema member) with all | missing
+        · exact .inl all
+        · obtain ⟨field, included, denied⟩ := missing
+          exact .inr (fun all => denied (all field included))
+      rcases finite_permissions declaration.schemas _ each with all | missing
+      · exact .inl (.nominal declared allowed all)
+      · obtain ⟨schema, member, denied⟩ := missing
+        exact .inr (by
+          intro available
+          cases available with
+          | nominal found _ residents =>
+            cases Option.some.inj (found.symm.trans declared)
+            exact denied (residents schema member))
+    · exact .inr (by
+        intro available
+        cases available with
+        | nominal found restriction _ =>
+          cases Option.some.inj (found.symm.trans declared)
+          exact denied restriction)
+
+/-- Valid finite ordinary types have one principal, with refuted permissions
+derived from the same finite structural evidence rather than missing evidence. -/
+theorem Ty.principal_exists {target : Target} {data : DataDeclarations} {type : Ty}
+    (finite : FiniteLayout target data type) :
+
     ∃ principal, type.HasPrincipal data principal ∧
       ∀ other, type.HasPrincipal data other → other = principal := by
-  classical
+
   have finish (principal : Principal) (classified : type.HasPrincipal data principal) :
       ∃ principal, type.HasPrincipal data principal ∧
         ∀ other, type.HasPrincipal data other → other = principal :=
     ⟨principal, classified, fun _ other => other.unique classified⟩
-  by_cases copies : UsePermitted data .copy type
+  rcases finite.permission_cases .copy with copies | copies
   · apply finish .duplicable
     have discards := copies.copy_discard
     intro permission
     cases permission <;> simp [UsePermission.Allows, copies, discards]
-  · by_cases discards : UsePermitted data .discard type
+  · rcases finite.permission_cases .discard with discards | discards
     · apply finish .affine
       intro permission
       cases permission <;> simp [UsePermission.Allows, copies, discards]

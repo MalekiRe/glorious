@@ -4243,8 +4243,10 @@ not a parallel principal analysis.
 `Ty.principal_exists` and `Ty.HasPrincipal.unique` prove there is exactly one
 such class; `Ty.HasPrincipal.satisfies` proves the public bound interpretation.
 An exact-once request accepts all three ordinary principals and grants neither
-Copy nor MayDiscard by itself. The existence proof is classical mathematical
-classification, not an algorithm that treats unresolved evidence as denial.
+Copy nor MayDiscard by itself. Classification now requires finite type evidence.
+`FiniteLayout.permission_cases` constructs positive permissions or refutations
+from the finite derivation, checking every field of every nominal variant and
+handling empty arrays separately. It does not treat unresolved evidence as denial.
 
 Manual declarations produce this same contract through
 `DataDeclarations.PrincipalsValid.principal` and
@@ -4253,7 +4255,9 @@ Constructive `NamedExpr.Elaborates.ordinary_progress` now returns the principal
 and its bound interpretation along with the actual typed resident transition:
 Copy for a duplicable principal, physical take and an initialized-cell hole for
 either nonduplicable principal. Mode selection does not confuse an exact-once
-request with an exact-linear principal.
+request with an exact-linear principal. Its classification evidence comes from
+the actual incoming addressed resident and the existing `ValueHasType.finite`
+theorem, not an additional readiness premise or a parallel type traversal.
 
 All 30 strict Lean jobs passed. Inspected interval, unique-class, bound,
 acquisition, source-admission, no-widening and maximal-behavior theorem closures

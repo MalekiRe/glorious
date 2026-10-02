@@ -508,24 +508,24 @@ theorem NamedExpr.Elaborates.ordinary_progress {program : Program} {home : Modul
           next.activation = old.activation ∧ next.type = old.type ∧
           next.resident.selectFields program next.type address.fields = some .hole ∧
           old.resident.writeFields program old.type address.fields .hole = some next.resident) := by
-  obtain ⟨principal, classified, _⟩ := type.principal_exists program.data
-  have copying_iff : UsePermitted program.data .copy type ↔ principal = .duplicable := by
-    simpa [UsePermission.Allows] using classified .copy
   obtain ⟨core, after, elaborated, copies, moves⟩ :=
     NamedExpr.Elaborates.ordinary_exists (names := names) resolved selected path selection ready
-  have copiesByClass := fun chosen => copies (copying_iff.mpr chosen)
-  have movesByClass := fun (denied : principal ≠ .duplicable) =>
-    moves (fun allowed => denied (copying_iff.mp allowed))
   have same := scope.selected_slot resolved slots selected
   have physicalPath : PathType program home state.slot.type fields type := by
     rw [same]; exact path
   have physicalSelection : state.initialization.selectFields program state.slot.type fields = some available := by
     rw [same]; exact selection
-  by_cases copying : UsePermitted program.data .copy type
+  obtain ⟨value, observed, resident⟩ :=
+    AddressedEnvironment.read.progress (place := ⟨binding.identity, fields⟩)
+      store selected physicalPath physicalSelection ready
+  obtain ⟨principal, classified, _⟩ := Ty.principal_exists resident.finite
+  have copying_iff : UsePermitted program.data .copy type ↔ principal = .duplicable := by
+    simpa [UsePermission.Allows] using classified .copy
+  have copiesByClass := fun chosen => copies (copying_iff.mpr chosen)
+  have movesByClass := fun (denied : principal ≠ .duplicable) =>
+    moves (fun allowed => denied (copying_iff.mp allowed))
+  rcases resident.finite.permission_cases .copy with copying | copying
   · obtain ⟨rfl, rfl⟩ := copies copying
-    obtain ⟨value, observed, resident⟩ :=
-      AddressedEnvironment.read.progress (place := ⟨binding.identity, fields⟩)
-        store selected physicalPath physicalSelection ready
     have stepped : Step program ⟨environment, .expression (.read ⟨binding.identity, fields⟩), []⟩
         ⟨environment, .result value, []⟩ := .read observed
     exact ⟨principal, _, _, _, _, classified, classified.satisfies, elaborated, copiesByClass, movesByClass, stepped,
