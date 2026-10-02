@@ -1233,10 +1233,23 @@ theorem ConfigurationTyped.consumption_run {context : FlowContext} {result : Res
   | step head tail ih => exact (typed.consumption_step head).trans (ih (typed.preservation checkedProgram head))
 
 
-/-- Actual copy reads and all modeled disposal sites respect the same structural
-owned-use authority. Scope retirement also preserves newest-owner-first order.
-These are current-state facts, not future readiness. -/
+/-- Current results and argument packs retain a principal consistent under every
+valid resident typing. Copy reads and disposal sites respect the same structural
+authority; scope retirement preserves newest-owner-first order. No future
+readiness or completed execution is assumed. -/
 def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Prop :=
+  (match state.control with
+  | .result value =>
+      ∃ type, ValueHasType program value type ∧
+        ∃ principal, type.HasPrincipal program.data principal ∧
+          ∀ originalType originalPrincipal, ValueHasType program value originalType →
+            originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal
+  | .results values =>
+      ∀ value ∈ values, ∃ type, ValueHasType program value type ∧
+        ∃ principal, type.HasPrincipal program.data principal ∧
+          ∀ originalType originalPrincipal, ValueHasType program value originalType →
+            originalType.HasPrincipal program.data originalPrincipal → originalPrincipal = principal
+  | _ => True) ∧
   match state.control, state.continuation with
   | .cleanup pending _, _ =>
       (∀ task ∈ pending, DisposalTask.Safe program task) ∧
@@ -1278,50 +1291,57 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
     state.OwnershipSafe program := by
   cases typed with
   | intro store issued code continuation =>
-    cases code <;> try trivial
-    case cleanup safe checked =>
-      exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
-    case install resident selected path writable selection discard mask context checked =>
-      exact store.replacement_safe selected path selection discard
-    case expression checked =>
-      cases checked <;> try trivial
-      case read =>
-        have safe := store.copy_safe (by assumption) (by assumption) (by assumption) (by assumption) (by assumption)
-        exact ⟨safe, fun _ _ _ read resident classified => safe.permitted_uses read resident classified⟩
-    case result resident =>
-      cases continuation
-      · trivial
-      case cons frame tail =>
-        cases frame <;> try trivial
-        case scope locals discard joined =>
-          exact ⟨(store.take locals.length).disposable (by simpa using discard),
-            BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
-        case restore =>
-          exact ⟨store.disposable (by assumption), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
-        case retire inside discard =>
-          intro entry cell selected found
-          obtain ⟨state, actual, source, actualFound, _, declared, resident⟩ := store.index selected
-          cases Option.some.inj (actualFound.symm.trans found)
-          have permission := discard _ source
-          change state.initialization.Disposable program.data state.slot.type at permission
-          rw [← declared] at permission
-          exact permission.realizes resident.2
-        case assign =>
-          exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
-        case project =>
-          exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
-        case sequence =>
-          exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
-    case results residents =>
-      cases continuation
-      · trivial
-      case cons frame tail =>
-        cases frame <;> try trivial
-        case patterns nonempty covered checked =>
-          intro bindings body selected
-          obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
-            checked.selected residents.argument selected
-          exact ⟨_, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
+    constructor
+    · cases code <;> try trivial
+      case result resident => exact ⟨_, resident, resident.principal_exists⟩
+      case results residents =>
+        intro value member
+        obtain ⟨type, _, resident⟩ := residents.member member
+        exact ⟨type, resident, resident.principal_exists⟩
+    · cases code <;> try trivial
+      case cleanup safe checked =>
+        exact ⟨safe, fun _ _ _ member resident classified => (safe _ member).zero_use resident classified⟩
+      case install resident selected path writable selection discard mask context checked =>
+        exact store.replacement_safe selected path selection discard
+      case expression checked =>
+        cases checked <;> try trivial
+        case read =>
+          have safe := store.copy_safe (by assumption) (by assumption) (by assumption) (by assumption) (by assumption)
+          exact ⟨safe, fun _ _ _ read resident classified => safe.permitted_uses read resident classified⟩
+      case result resident =>
+        cases continuation
+        · trivial
+        case cons frame tail =>
+          cases frame <;> try trivial
+          case scope locals discard joined =>
+            exact ⟨(store.take locals.length).disposable (by simpa using discard),
+              BindingMap.releaseOrder_decreasing _ (store.take locals.length).addresses_distinct⟩
+          case restore =>
+            exact ⟨store.disposable (by assumption), BindingMap.releaseOrder_decreasing _ store.addresses_distinct⟩
+          case retire inside discard =>
+            intro entry cell selected found
+            obtain ⟨state, actual, source, actualFound, _, declared, resident⟩ := store.index selected
+            cases Option.some.inj (actualFound.symm.trans found)
+            have permission := discard _ source
+            change state.initialization.Disposable program.data state.slot.type at permission
+            rw [← declared] at permission
+            exact permission.realizes resident.2
+          case assign =>
+            exact store.replacement_safe (by assumption) (by assumption) (by assumption) (by assumption)
+          case project =>
+            exact ProjectionType.cleanup_safe (by assumption) resident (by assumption) (by assumption)
+          case sequence =>
+            exact ⟨_, Initialization.Disposable.realizes (.permitted (by assumption)) (.resident resident)⟩
+      case results residents =>
+        cases continuation
+        · trivial
+        case cons frame tail =>
+          cases frame <;> try trivial
+          case patterns nonempty covered checked =>
+            intro bindings body selected
+            obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
+              checked.selected residents.argument selected
+            exact ⟨_, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
 
 /-- A live nondiscardable descendant protects its containing cell at the actual
 indexed retirement step, not only at a completed cleanup boundary. -/
@@ -1340,7 +1360,7 @@ theorem Configuration.OwnershipSafe.retire_preserves_nondiscardable
     obtain ⟨entry, selected, heap, primitive, rfl⟩ := AddressedEnvironment.retireBinding.eq_some_iff.mp operation
     apply (RuntimeHeap.retire_other primitive ?_).trans found
     intro same
-    have permission := safe entry cell selected (same ▸ found)
+    have permission := safe.2 entry cell selected (same ▸ found)
     obtain ⟨part, actual, allowed⟩ := path.disposable permission
     cases Option.some.inj (actual.symm.trans resident)
     exact required allowed
@@ -1358,7 +1378,7 @@ theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment}
     rw [selectArm.skip_missed _ _ _ missed]
     simp only [selectArm, matched]
   obtain ⟨subject, locals, actual, actualFront, actualBack, resident, typed, split, skipped, found⟩ :=
-    safe bindings body selected
+    safe.2 bindings body selected
   have same := selectArm.first_unique split missed skipped
     (by simp only [matched, ne_eq, reduceCtorEq, not_false_eq_true])
     (by simp only [found, ne_eq, reduceCtorEq, not_false_eq_true])
@@ -1385,7 +1405,7 @@ theorem Configuration.OwnershipSafe.scope_retirement {before after : Environment
   obtain ⟨_, exited⟩ := run.scope_result
   obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp exited
   cases same
-  exact BindingMap.Disposable.release_prefix safe.1 released split
+  exact BindingMap.Disposable.release_prefix safe.2.1 released split
 
 /-- Function return consumes the same release producer as lexical scope exit;
 parameter-list order cannot override actual newest-owner-first retirement. -/
@@ -1407,7 +1427,7 @@ theorem Configuration.OwnershipSafe.return_retirement {before after : Environmen
   obtain ⟨_, restored⟩ := run.restore_result
   obtain ⟨heap, released, same⟩ := Option.map_eq_some_iff.mp restored
   cases same
-  exact BindingMap.Disposable.release_prefix safe.1 released split
+  exact BindingMap.Disposable.release_prefix safe.2.1 released split
 
 /-- Every retained scope is realized in the current heap, not merely the active
 scope or the outermost caller. Traversing frames does not execute pending code. -/

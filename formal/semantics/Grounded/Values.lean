@@ -196,20 +196,27 @@ theorem ValueHasType.principal_exists {program : Program} {value : Value} {type 
   exact ⟨principal, classified, fun _ _ original originalClass =>
     (original.principal resident originalClass).unique classified⟩
 
-
-theorem ValuesHaveTypes.member_permission {values : List Value} {types : List Ty}
-    (typed : ValuesHaveTypes program values types)
-    (allowed : ∀ type ∈ types, UsePermitted program.data .discard type)
-    {value : Value} (member : value ∈ values) :
-    ∃ type, ValueHasType program value type ∧ UsePermitted program.data .discard type := by
+theorem ValuesHaveTypes.member {values : List Value} {types : List Ty}
+    (typed : ValuesHaveTypes program values types) {value : Value} (member : value ∈ values) :
+    ∃ type, type ∈ types ∧ ValueHasType program value type := by
   induction values generalizing types with
   | nil => cases member
   | cons head tail ih =>
     cases typed with
     | cons headTyped tailTyped =>
       rcases List.mem_cons.mp member with rfl | member
-      · exact ⟨_, headTyped, allowed _ (by simp)⟩
-      · exact ih tailTyped (fun type included => allowed type (by simp [included])) member
+      · exact ⟨_, by simp, headTyped⟩
+      · obtain ⟨type, included, resident⟩ := ih tailTyped member
+        exact ⟨type, by simp [included], resident⟩
+
+
+theorem ValuesHaveTypes.member_permission {values : List Value} {types : List Ty}
+    (typed : ValuesHaveTypes program values types)
+    (allowed : ∀ type ∈ types, UsePermitted program.data .discard type)
+    {value : Value} (member : value ∈ values) :
+    ∃ type, ValueHasType program value type ∧ UsePermitted program.data .discard type := by
+  obtain ⟨type, included, resident⟩ := typed.member member
+  exact ⟨type, resident, allowed type included⟩
 
 /-- Structural disposal admits every active resident, including private fields.
 This is destruction authority, not source projection visibility. -/

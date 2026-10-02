@@ -60,10 +60,17 @@ Module aliases, other namespaces, library/runtime profile contracts and parsing 
 
 `HasType.evaluation_soundness` proves declared result typing, sound output-mask
 realization, issued activation and consumption-only immutable framing for every
-completed execution, including recursive executions. `correctness` constructs a unique completed
-execution when supplied `FiniteCalls program expression`: accessibility of the
-static subexpression/call-body dependency relation. This is an optional
-termination criterion, not part of ordinary admission or prefix safety.
+completed execution, including recursive executions. Source return contracts
+preserve the returned resident's principal across every valid typing. General
+maximal behavior constructs either a normal result with that unique principal
+or an infinite execution retaining prefix safety. `Configuration.OwnershipSafe`
+also classifies current results and every current argument-pack resident, not
+only final returns, through the same finite resident evidence.
+
+`correctness` constructs a unique completed execution when supplied
+`FiniteCalls program expression`: accessibility of the static subexpression/
+call-body dependency relation. This is an optional termination criterion, not
+part of ordinary admission or prefix safety.
 
 Structural constants terminate directly from their checking derivation through
 `constant_correctness`, independently of `Program.Checked` and `FiniteCalls`.
@@ -4337,3 +4344,16 @@ The finite-call theorem reuses the same resident producer. All 30 strict jobs
 and the inspected general/source/invocation behavior axiom closures passed.
 This closes this result-principal integration, not custom Drop or any of the
 fourteen whole-language completion obligations.
+
+The general ownership invariant now carries consistent principal classification
+for every current result and each resident in a current argument pack. This is
+derived from actual control typing through the existing finite-resident
+permission producer. Pack membership is shared with structural disposal; no
+additional classification analysis or admission premise was added. Existing
+Copy, cleanup, overwrite, pattern and indexed-retirement consumers are migrated
+without weakening their guarantees. General source prefix safety and maximal
+behavior now carry this fact through intermediate as well as final results.
+All 30 strict jobs passed; inspected ownership, general/source safety, exact
+cleanup exclusion and invocation-behavior closures use only the standard three
+Lean axioms. References, retained capture environments and custom Drop remain
+outside this modeled result/pack boundary.

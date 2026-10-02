@@ -195,14 +195,14 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           have branchTyped : BindingMap.Typed program after.heap after.activation after.bindings _ :=
             (by simpa using afterTyped)
           have safe := original.ownership_safe
-          refine ⟨after, _, _, safe.1, safe.2, step, original.run checkedProgram step, retired,
+          refine ⟨after, _, _, safe.2.1, safe.2.2, step, original.run checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
             (fun _ _ _ split => safe.scope_retirement (Run.scope (stack := []) produced) split), ?_, ?_, ?_, ?_, ?_⟩
           · obtain ⟨trace, start, finish, steps, states⟩ := original.scope_retirement_trace
             refine ⟨trace, start, Option.some.inj (finish.symm.trans produced), ?_, ?_⟩
             · intro position bound
               obtain ⟨index, identity, chosen, inside, operation⟩ := steps position bound
-              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
+              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).2.1
               obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
               refine ⟨index, identity, cell, chosen, inside, found, allowed, operation, ?_⟩
               simpa only [Nat.sub_sub] using (Run.scope_owner (value := value) (stack := stack) chosen found operation)
@@ -215,7 +215,7 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
               (original.retire_scope_consumption selected inside produced)
           · intro front middle executed
             obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
-            have permission := safe.1.retirement_prefix executed
+            have permission := safe.2.1.retirement_prefix executed
             refine ⟨_, remaining, currentStore, subset, retained, permission, ?_⟩
             by_cases finished : ((List.take locals.length current.bindings).filter fun entry => decide (entry.2 ∉ front)) = []
             · exact .inl finished
@@ -616,7 +616,7 @@ theorem HasType.no_noncopyable_read (checkedProgram : program.Checked)
       ⟨current, .result owner, stack⟩)
     (resident : ValueHasType program owner ownerType)
     (required : ¬ UsePermitted program.data .copy ownerType) : False := by
-  have permission := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have permission := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   cases step with
   | read selected => exact required (BindingMap.CopySafe.read_permission permission.1 selected resident)
 
@@ -634,7 +634,7 @@ theorem HasType.no_nondiscardable_discard (checkedProgram : program.Checked)
     (required : ¬ UsePermitted program.data .discard ownerType)
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result owner, .sequence rest :: stack⟩) : False := by
-  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   exact required (permission.read_permission_as (by simp [PartialValue.read]) resident)
 
 /-- No reached cleanup queue can schedule a resident whose inferred or manual
@@ -652,7 +652,7 @@ theorem HasType.no_exact_cleanup (checkedProgram : program.Checked)
     {owner : Value} {ownerType : Ty} (queued : .enter owner ∈ pending)
     (resident : ValueHasType program owner ownerType)
     (classified : ownerType.HasPrincipal program.data .exact) : False := by
-  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   have zero := safe.2 owner ownerType .exact queued resident classified
   simp at zero
 /-- No checked execution prefix reaches a direct discard of a live exact
@@ -668,7 +668,7 @@ theorem HasType.no_exact_discard (checkedProgram : program.Checked)
     (restricted : declaration.restriction = some .exact) {rest : Expr} {stack : List Frame}
     (run : Run program ⟨environment, .expression expression, []⟩
       ⟨current, .result (.nominal identity tag fields), .sequence rest :: stack⟩) : False := by
-  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨type, permission⟩ := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   exact PartialValue.Disposable.not_exact_read (tag := tag) (fields := fields)
     declared restricted (by simp [PartialValue.read]) permission
 
@@ -786,7 +786,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
             refine ⟨trace, start, finish, ?_, ?_⟩
             · intro position bound
               obtain ⟨index, identity, chosen, operation⟩ := steps position bound
-              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).1
+              have disposition := ((states position (Nat.le_of_lt bound)).1.ownership_safe).2.1
               obtain ⟨cell, found, allowed⟩ := disposition identity (BindingMap.nextRelease.member chosen)
               exact ⟨index, identity, cell, chosen, found, allowed, operation, Run.restore_owner chosen found operation⟩
             · intro position bound
@@ -827,7 +827,7 @@ theorem HasType.restore_preserves_nondiscardable (checkedProgram : program.Check
       after.heap.read address = some cell := by
   obtain ⟨after, step, preserved, _, _, _, trace, _⟩ := checked.return_restores checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
-  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   obtain ⟨trace, start, _, _, states⟩ := trace
   have restored := (states 0 (Nat.zero_le _)).2
   rw [start] at restored
@@ -890,7 +890,7 @@ theorem HasType.restore_preserves_exact (checkedProgram : program.Checked)
       after.heap.read address = some cell := by
   obtain ⟨after, step, preserved, _, _, _, trace, _⟩ := checked.return_restores checkedProgram store issued run
   refine ⟨after, step, preserved, ?_⟩
-  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have disposition := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   obtain ⟨trace, start, _, _, states⟩ := trace
   have restored := (states 0 (Nat.zero_le _)).2
   rw [start] at restored
@@ -920,7 +920,7 @@ theorem HasType.no_exact_overwrite (checkedProgram : program.Checked)
       old.selectFields program selectedType fields) = some owner)
     (unconsumed : ¬ owner.Empty) : False := by
   exact BindingMap.ReplacementSafe.not_exact
-    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path descendant
+    (checked.soundness checkedProgram store issued run).2.2.2.2.2 mapped found path descendant
       declared restricted selected unconsumed
 
 
@@ -945,7 +945,7 @@ theorem HasType.no_nondiscardable_overwrite (checkedProgram : program.Checked)
       old.selectFields program selectedType fields) = some owner)
     (required : ¬ owner.Disposable program descendantType) : False := by
   exact BindingMap.ReplacementSafe.not_nondiscardable
-    (checked.soundness checkedProgram store issued run).2.2.2.2 mapped found path descendant selected required
+    (checked.soundness checkedProgram store issued run).2.2.2.2.2 mapped found path descendant selected required
 
 
 /-- Completed execution realizes exactly the declared output masks. No completed
@@ -1147,7 +1147,7 @@ theorem HasType.pattern_cleanup (checkedProgram : program.Checked)
       Run program
         ⟨current.extend result.bindings, .cleanup (back.map DisposalTask.enter) (.expression body),
           .scope result.bindings.length :: stack⟩ next) := by
-  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   obtain ⟨subject, locals, pattern, front, back, resident, typed, _, _, matched⟩ := safe result body selected
   refine ⟨typed.discarded resident matched, .selectedPattern selected, Run.cleanup _ _ _ _,
     fun _ prefixRun => Run.cleanup_decompose prefixRun _ _ _ _ rfl, ?_⟩
@@ -1295,7 +1295,7 @@ theorem HasType.projection_transfer (checkedProgram : program.Checked)
         ((PartialValue.resident aggregate).selectFields program parent path).bind PartialValue.read = some owner →
         UsePermitted program.data .discard descendant ∧
         ∀ ownerType, ValueHasType program owner ownerType → UsePermitted program.data .discard ownerType := by
-  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2.2
   change aggregate.ProjectionCleanupSafe program projectionHome key at safe
   obtain ⟨parent, child, index, selected, remainder, resident, access, found, typed, written, absent, disposable⟩ := safe
   refine ⟨parent, child, index, selected, remainder, resident, access, .projectResult found,
