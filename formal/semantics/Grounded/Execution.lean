@@ -9,11 +9,20 @@ namespace Grounded
 
 abbrev Environment := AddressedEnvironment
 
+/-- Destruction keeps the enclosing shell pending until its active children
+have been destroyed. Release items carry no copies of those children. -/
+inductive DisposalTask where
+  | enter (value : Value)
+  | release (head : Head)
+
+def DisposalTask.expand (value : Value) : List DisposalTask :=
+  value.children.reverse.map DisposalTask.enter ++ [.release value.head]
 inductive Control where
   | expression (expression : Expr)
   | arguments (expressions : List Expr)
   | result (value : Value)
   | results (values : List Value)
+  | cleanup (pending : List DisposalTask) (rest : Expr)
 
 inductive Frame where
   | sequence (rest : Expr)
@@ -89,7 +98,14 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       Step program ⟨env, .expression (.sequence first rest), stack⟩
         ⟨env, .expression first, .sequence rest :: stack⟩
   | sequenceResult {env : Environment} {stack : List Frame} {value : Value} {rest : Expr} :
-      Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .expression rest, stack⟩
+      Step program ⟨env, .result value, .sequence rest :: stack⟩ ⟨env, .cleanup [.enter value] rest, stack⟩
+  | cleanupEnter {env : Environment} {stack : List Frame} {value : Value} {pending : List DisposalTask} {rest : Expr} :
+      Step program ⟨env, .cleanup (.enter value :: pending) rest, stack⟩
+        ⟨env, .cleanup (DisposalTask.expand value ++ pending) rest, stack⟩
+  | cleanupRelease {env : Environment} {stack : List Frame} {head : Head} {pending : List DisposalTask} {rest : Expr} :
+      Step program ⟨env, .cleanup (.release head :: pending) rest, stack⟩ ⟨env, .cleanup pending rest, stack⟩
+  | cleanupDone {env : Environment} {stack : List Frame} {rest : Expr} :
+      Step program ⟨env, .cleanup [] rest, stack⟩ ⟨env, .expression rest, stack⟩
   | bind {env : Environment} {stack : List Frame} {mutable : Bool} {name : BindingId}
       {localType : Ty} {initial body : Expr} :
       Step program ⟨env, .expression (.bind mutable name localType initial body), stack⟩
@@ -222,6 +238,52 @@ theorem Run.trans {first middle last : Configuration} (front : Run program first
   | refl state => exact back
   | step head rest ih => exact .step head (ih back)
 
+private theorem Run.cleanup_list (environment : Environment) (rest : Expr) (stack : List Frame)
+    (values : List Value)
+    (each : ∀ value ∈ values, ∀ pending, Run program
+      ⟨environment, .cleanup (.enter value :: pending) rest, stack⟩
+      ⟨environment, .cleanup pending rest, stack⟩) (pending : List DisposalTask) :
+    Run program ⟨environment, .cleanup (values.map DisposalTask.enter ++ pending) rest, stack⟩
+      ⟨environment, .cleanup pending rest, stack⟩ := by
+  induction values with
+  | nil => exact .refl _
+  | cons value values ih =>
+    exact (each value (by simp) _).trans (ih (fun v member => each v (by simp [member])))
+
+private theorem Value.child_smaller {value child : Value} (member : child ∈ value.children) :
+    sizeOf child < sizeOf value := by
+  cases value <;> simp only [Value.children] at member
+  all_goals try contradiction
+  case tuple head tail =>
+    rcases List.mem_cons.mp member with rfl | member
+    · simp +arith
+    · have := List.sizeOf_lt_of_mem member; simp +arith at *; omega
+  case array values => have := List.sizeOf_lt_of_mem member; simp +arith at *; omega
+  case nominal identity tag values => have := List.sizeOf_lt_of_mem member; simp +arith at *; omega
+
+/-- Destruction of every finite value completes through actual reverse-child
+machine steps before its shell and saved continuation are released. -/
+theorem Run.cleanup_value (environment : Environment) (rest : Expr) (stack : List Frame)
+    (value : Value) (pending : List DisposalTask) :
+    Run program ⟨environment, .cleanup (.enter value :: pending) rest, stack⟩
+      ⟨environment, .cleanup pending rest, stack⟩ := by
+  apply Run.step Step.cleanupEnter
+  have children := Run.cleanup_list (program := program) environment rest stack value.children.reverse
+    (fun child member pending => Run.cleanup_value environment rest stack child pending) (.release value.head :: pending)
+  simpa [DisposalTask.expand, List.append_assoc] using children.trans (.step .cleanupRelease (.refl _))
+termination_by sizeOf value
+decreasing_by exact Value.child_smaller (List.mem_reverse.mp member)
+
+/-- Completion consumes the actual pending worklist, not an assumed cleanup run. -/
+theorem Run.cleanup (environment : Environment) (rest : Expr) (stack : List Frame)
+    (pending : List DisposalTask) :
+    Run program ⟨environment, .cleanup pending rest, stack⟩ ⟨environment, .expression rest, stack⟩ := by
+  induction pending with
+  | nil => exact .step .cleanupDone (.refl _)
+  | cons task pending ih =>
+    cases task with
+    | enter value => exact (Run.cleanup_value environment rest stack value pending).trans ih
+    | release head => exact .step .cleanupRelease ih
 /-- Until a subcomputation has a terminal control, its caller frames cannot
 participate in a transition. This is an operational fact, not admission evidence. -/
 theorem Step.unextend {before after : Configuration} {tail : List Frame}
@@ -237,6 +299,8 @@ theorem Step.unextend {before after : Configuration} {tail : List Frame}
     | expression expression =>
       cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
     | arguments arguments =>
+      cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
+    | cleanup pending rest =>
       cases step <;> exact ⟨_, by constructor <;> assumption, rfl⟩
   | cons frame stack =>
     cases control <;> cases frame <;> cases step <;>

@@ -3720,3 +3720,43 @@ the source-suffix theorem, source moves and maximal source behavior reported onl
 These remain logical owned-cell results: custom Drop, reverse-field destruction
 execution, reference/loan semantics and physical memory are not established.
 All fourteen broad completion obligations remain open.
+
+
+## Explicit reverse-field destruction of sequence temporaries
+
+Sequence discard no longer jumps directly to the next expression. The actual
+machine enters a `Control.cleanup` worklist. `DisposalTask.expand` uses the
+existing `Value.children` producer in reverse order and places an enclosing
+shell release after its children. Shell markers contain only `Head`, not a
+second runtime copy of child values. The saved expression is enabled only by
+`Step.cleanupDone` on an empty worklist.
+
+`Run.cleanup_value` proves constructive termination for every finite logical
+value through these actual transitions. `Run.cleanup` handles arbitrary
+pending mixtures of values and shell releases. `Evaluates.sequence` consumes
+that execution rather than retaining the superseded one-step discard.
+
+`ValueHasType.children_disposable` derives typing and zero-use authority for
+every active child from the existing structural permission, including private
+nominal fields and the selected enum variant. No source projection visibility
+is invented for destruction. `ControlTyped.cleanup` carries permission for
+each current work item; general preservation derives it at entry and preserves
+it at every expansion/release. General progress, consumption framing, optional
+termination, and maximal source behavior all consume the changed machine.
+
+`SourceClosure.Admitted.cleanup` constructs completion of every reached
+sequence cleanup, preserves its continuation typing, and proves disposal
+authority in every later reached cleanup state. It assumes neither cleanup
+success nor future-state permissions.
+
+Verification: all 30 `lake build Grounded` jobs passed. Inspected child
+permission, constructive destruction, general preservation, source cleanup, and
+maximal source behavior depend only on `propext`, `Classical.choice`, and
+`Quot.sound`. No tests, examples, axioms, or admission assumptions were added.
+
+This closes destruction execution for fully initialized discarded sequence
+results in the current no-hook logical fragment. Scope retirement, caller
+restoration, replacement, and projection residuals still require migration to
+explicit destruction of partial residents. Custom Drop, hook divergence,
+physical release, and the other whole-language obligations remain open; none
+of the fourteen broad completion obligations is marked complete.

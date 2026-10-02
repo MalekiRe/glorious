@@ -174,4 +174,57 @@ theorem ValueHasType.finite {value : Value} {type : Ty}
     | tail _ member => exact tailIH type member
 
 
+theorem ValuesHaveTypes.member_permission {values : List Value} {types : List Ty}
+    (typed : ValuesHaveTypes program values types)
+    (allowed : ∀ type ∈ types, UsePermitted program.data .discard type)
+    {value : Value} (member : value ∈ values) :
+    ∃ type, ValueHasType program value type ∧ UsePermitted program.data .discard type := by
+  induction values generalizing types with
+  | nil => cases member
+  | cons head tail ih =>
+    cases typed with
+    | cons headTyped tailTyped =>
+      rcases List.mem_cons.mp member with rfl | member
+      · exact ⟨_, headTyped, allowed _ (by simp)⟩
+      · exact ih tailTyped (fun type included => allowed type (by simp [included])) member
+
+/-- Structural disposal admits every active resident, including private fields.
+This is destruction authority, not source projection visibility. -/
+theorem ValueHasType.children_disposable {value : Value} {type : Ty}
+    (typed : ValueHasType program value type) (allowed : UsePermitted program.data .discard type)
+    {child : Value} (member : child ∈ value.children) :
+    ∃ childType, ValueHasType program child childType ∧ UsePermitted program.data .discard childType := by
+  cases typed with
+  | unit => cases member
+  | integer fits => cases member
+  | character valid => cases member
+  | tuple head tail =>
+    cases allowed with
+    | tuple first rest =>
+      rcases List.mem_cons.mp member with rfl | member
+      · exact ⟨_, head, first⟩
+      · exact tail.member_permission rest member
+  | array residents finite size =>
+    apply residents.member_permission ?_ member
+    intro type included
+    cases allowed with
+    | array length permission => obtain ⟨_, rfl⟩ := List.mem_replicate.mp included; exact permission
+    | emptyArray => simp at included
+  | @nominal identity tag declaration schema values declared chosen finite residents =>
+    cases allowed with
+    | nominal otherDeclared restriction fields =>
+      cases Option.some.inj (declared.symm.trans otherDeclared)
+      apply residents.member_permission ?_ member
+      intro type included
+      obtain ⟨field, fieldMember, rfl⟩ := List.mem_map.mp included
+      apply fields _ ?_ field fieldMember
+      cases shape : declaration.shape with
+      | «structure» fs =>
+        cases tag <;> simp [DataDecl.constructor, shape] at chosen
+        subst schema
+        simp [DataDecl.schemas, shape]
+      | enumeration variants nonExhaustive =>
+        cases tag <;> simp only [DataDecl.constructor, shape] at chosen
+        · contradiction
+        · simpa [DataDecl.schemas, shape] using List.mem_of_getElem? chosen
 end Grounded

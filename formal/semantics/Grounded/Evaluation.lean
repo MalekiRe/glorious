@@ -45,7 +45,8 @@ theorem Evaluates.sequence {environment middle after : Environment} {first rest 
       {discarded value : Value} (head : Evaluates program environment first discarded middle)
       (tail : Evaluates program middle rest value after) :
       Evaluates program environment (.sequence first rest) value after :=
-  .step .sequence ((Run.extend head [.sequence rest]).trans (.step .sequenceResult tail))
+  .step .sequence ((Run.extend head [.sequence rest]).trans
+    (.step .sequenceResult ((Run.cleanup_value middle rest [] discarded []).trans (.step .cleanupDone tail))))
 
 theorem Evaluates.bind {environment middle localAfter after : Environment} {mutable : Bool} {name : BindingId}
       {localType : Ty} {initial body : Expr} {resident value : Value}

@@ -757,6 +757,30 @@ theorem SourceClosure.Admitted.soundness {packages : List PackageSource} {closur
       (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program :=
   elaborated.soundness slots admitted.checked store issued run
 
+/-- Every reached sequence cleanup completes before evaluating its saved
+expression. Every intermediate pending resident retains derived disposal
+permission, including private active fields of nominal values. -/
+theorem SourceClosure.Admitted.cleanup {packages : List PackageSource} {closure : SourceClosure packages}
+    {program : Program} (admitted : closure.Admitted program) {home : Module} {scope : SourceScope}
+    {expression : NamedExpr} {core : Expr} {type : Ty} {before final : FlowContext}
+    (elaborated : NamedExpr.Elaborates program closure.functionNames
+      home scope before expression core type final)
+    (slots : before.slots = scope.context)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings before)
+    (issued : environment.supply.Issued environment.activation)
+    {pending : List DisposalTask} {rest : Expr} {stack : List Frame}
+    (run : Run program ⟨environment, .expression core, []⟩ ⟨current, .cleanup pending rest, stack⟩) :
+    Run program ⟨current, .cleanup pending rest, stack⟩ ⟨current, .expression rest, stack⟩ ∧
+      ConfigurationTyped program final (.one type) ⟨current, .expression rest, stack⟩ ∧
+      (∀ task ∈ pending, DisposalTask.Safe program task) ∧
+      ∀ next remaining continuation frames,
+        Run program ⟨current, .cleanup pending rest, stack⟩ ⟨next, .cleanup remaining continuation, frames⟩ →
+        ∀ task ∈ remaining, DisposalTask.Safe program task := by
+  have typed := (admitted.soundness elaborated slots store issued run).1
+  have completed := Run.cleanup (program := program) current rest stack pending
+  exact ⟨completed, typed.run admitted.checked completed, typed.cleanup_safe,
+    fun _ _ _ _ suffix => (typed.run admitted.checked suffix).cleanup_safe⟩
 /-- Between any two admitted source prefixes, a path beneath an immutable
 binding is either unreadable or yields exactly its earlier value. Once such a
 descendant becomes unreadable, no later execution can resurrect it. -/

@@ -9,6 +9,26 @@ inductive ResultType where
   | one (type : Ty)
   | many (types : List Ty)
 
+/-- Each pending resident has structural zero-use authority. Shell markers
+retain that authority without retaining runtime copies of their children. -/
+inductive DisposalTask.Safe (program : Program) : DisposalTask → Prop where
+  | enter {value type} (typed : ValueHasType program value type)
+      (allowed : UsePermitted program.data .discard type) : Safe program (.enter value)
+  | release {value type} (typed : ValueHasType program value type)
+      (allowed : UsePermitted program.data .discard type) : Safe program (.release value.head)
+
+theorem DisposalTask.Safe.expand {program : Program} {value : Value}
+    (safe : DisposalTask.Safe program (.enter value)) :
+    ∀ task ∈ DisposalTask.expand value, DisposalTask.Safe program task := by
+  cases safe with
+  | enter typed allowed =>
+    intro task member
+    rcases List.mem_append.mp member with member | member
+    · obtain ⟨child, childMember, rfl⟩ := List.mem_map.mp member
+      obtain ⟨type, resident, permission⟩ := typed.children_disposable allowed (List.mem_reverse.mp childMember)
+      exact .enter resident permission
+    · cases List.mem_singleton.mp member
+      exact .release typed allowed
 inductive ControlTyped (program : Program) (before : FlowContext) : Control → ResultType → FlowContext → Prop where
   | expression {home expression type after} (checked : HasType program home before expression type after) :
       ControlTyped program before (.expression expression) (.one type) after
@@ -18,6 +38,10 @@ inductive ControlTyped (program : Program) (before : FlowContext) : Control → 
       ControlTyped program before (.result value) (.one type) before
   | results {values types} (residents : ValuesHaveTypes program values types) :
       ControlTyped program before (.results values) (.many types) before
+  | cleanup {pending rest home type after}
+      (safe : ∀ task ∈ pending, DisposalTask.Safe program task)
+      (checked : HasType program home before rest type after) :
+      ControlTyped program before (.cleanup pending rest) (.one type) after
 
 inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (supply : ActivationSupply)
     (activation : ActivationId) : FlowContext → ResultType → Frame → FlowContext → ResultType → Prop where
@@ -140,6 +164,13 @@ theorem ConfigurationTyped.progress {context result state}
   cases typed with
   | intro store issued code continuation =>
     cases code with
+    | @cleanup pending rest home type after safe checked =>
+      right
+      cases pending with
+      | nil => exact ⟨_, .cleanupDone⟩
+      | cons task pending => cases task with
+        | enter value => exact ⟨_, .cleanupEnter⟩
+        | release head => exact ⟨_, .cleanupRelease⟩
     | expression checked =>
       right
       cases checked with
@@ -270,7 +301,20 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
     | sequenceResult =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | sequence discard checked => exact .intro store issued (.expression checked) tail
+          cases frame with | sequence discard checked =>
+            exact .intro store issued (.cleanup (by simpa using DisposalTask.Safe.enter resident discard) checked) tail
+    | cleanupEnter =>
+      cases code with | cleanup safe checked =>
+        refine .intro store issued (.cleanup ?_ checked) continuation
+        intro task member
+        rcases List.mem_append.mp member with member | member
+        · exact (safe _ (by simp)).expand task member
+        · exact safe task (by simp [member])
+    | cleanupRelease =>
+      cases code with | cleanup safe checked =>
+        exact .intro store issued (.cleanup (fun task member => safe task (by simp [member])) checked) continuation
+    | cleanupDone =>
+      cases code with | cleanup safe checked => exact .intro store issued (.expression checked) continuation
     | bind =>
       cases code with | expression checked =>
         cases checked with | bind initial discard body fresh =>
@@ -451,6 +495,13 @@ theorem ConfigurationTyped.run {context result before after}
   | refl state => exact typed
   | step head tail ih => exact ih (typed.preservation checkedProgram head)
 
+/-- The global invariant exposes current disposal authority at every reached
+cleanup state; it does not rely on successful future destruction. -/
+theorem ConfigurationTyped.cleanup_safe {context result environment pending rest stack}
+    (typed : ConfigurationTyped program context result ⟨environment, .cleanup pending rest, stack⟩) :
+    ∀ task ∈ pending, DisposalTask.Safe program task := by
+  cases typed with
+  | intro store issued code continuation => cases code with | cleanup safe checked => exact safe
 theorem ConfigurationTyped.bindings_distinct {context result state}
     (typed : ConfigurationTyped program context result state) : (state.environment.bindings.map Prod.fst).Nodup := by
   cases typed with
@@ -475,6 +526,7 @@ theorem ConfigurationTyped.normal_form {context type state}
 theorem ControlTyped.slots {current next control result}
     (typed : ControlTyped program current control result next) : next.slots = current.slots := by
   cases typed with
+  | cleanup safe checked => exact checked.slots
   | expression checked => exact checked.slots
   | arguments checked => exact checked.slots
   | result | results => rfl
