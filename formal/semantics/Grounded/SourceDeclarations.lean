@@ -36,24 +36,25 @@ theorem NamedParametersElaborate.finite {program : Program} {source : List Named
 /-- Source parameter names, omitted-unit result semantics and the actual named
 body determine the emitted declaration and final masks before cleanup admission. -/
 inductive NamedFunction.BodyElaborates (program : Program) (names : Module → FunctionName → Option Nat) :
-    NamedFunction → FunctionDecl → FlowContext → Prop where
-  | intro {source scope result body after}
+    NamedFunction → FunctionDecl → Ty → FlowContext → Prop where
+  | intro {source scope result actualResult body after}
       (parameters : NamedParametersElaborate program source.parameters scope)
       (distinct : (source.parameters.map NamedParameter.name).Nodup)
       (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
       (resultFinite : FiniteLayout program.target program.data result)
       (elaborated : NamedExpr.Elaborates program names source.home scope
-        (initializedContext scope.context) source.body body result after) :
+        (initializedContext scope.context) source.body body actualResult after)
+      (joined : ReturnJoin program actualResult after result after) :
       NamedFunction.BodyElaborates program names source
-        ⟨source.home, source.visibility, scope.context, result, body⟩ after
+        ⟨source.home, source.visibility, scope.context, result, body⟩ actualResult after
 
 /-- Cleanup certification consumes the same body product; it does not elaborate
 or select another body to satisfy the ownership obligation. -/
 inductive NamedFunction.Elaborates (program : Program) (names : Module → FunctionName → Option Nat) :
     NamedFunction → FunctionDecl → Prop where
-  | intro {source core after}
-      (body : NamedFunction.BodyElaborates program names source core after)
-      (disposable : ReturnDisposition program core.result after) :
+  | intro {source core actualResult after}
+      (body : NamedFunction.BodyElaborates program names source core actualResult after)
+      (disposable : ReturnDisposition program actualResult after) :
       NamedFunction.Elaborates program names source core
 
 /-- A bottom body is admitted without disposal evidence for a return that
@@ -61,20 +62,35 @@ cannot occur. Its existing flow derivation still checks every executed operation
 theorem NamedFunction.BodyElaborates.bottom_admitted {program : Program}
     {names : Module → FunctionName → Option Nat} {source : NamedFunction}
     {core : FunctionDecl} {after : FlowContext}
-    (body : NamedFunction.BodyElaborates program names source core after)
-    (bottom : core.result = .never) : NamedFunction.Elaborates program names source core :=
-  .intro body (bottom ▸ ReturnDisposition.nonreturning after)
+    (body : NamedFunction.BodyElaborates program names source core .never after) :
+    NamedFunction.Elaborates program names source core :=
+  .intro body (.nonreturning after)
 
 
+/-- Bottom elimination at the declared function-result boundary. No disposal
+permission or hypothetical normal output is required from the bottom body. -/
+theorem NamedFunction.Elaborates.bottom {program : Program}
+    {names : Module → FunctionName → Option Nat} {source : NamedFunction}
+    {scope : SourceScope} {result : Ty} {body : Expr} {after : FlowContext}
+    (parameters : NamedParametersElaborate program source.parameters scope)
+    (distinct : (source.parameters.map NamedParameter.name).Nodup)
+    (resultType : ResolvesType program.aliases (source.result.getD (.concrete .unit)) result)
+    (resultFinite : FiniteLayout program.target program.data result)
+    (elaborated : NamedExpr.Elaborates program names source.home scope
+      (initializedContext scope.context) source.body body .never after) :
+    NamedFunction.Elaborates program names source
+      ⟨source.home, source.visibility, scope.context, result, body⟩ :=
+  (NamedFunction.BodyElaborates.intro parameters distinct resultType resultFinite elaborated
+    (.nonreturning _ rfl)).bottom_admitted
 theorem NamedFunction.Elaborates.checked {program : Program} {names : Module → FunctionName → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
     (elaborated : NamedFunction.Elaborates program names source core) : FunctionChecked program core := by
   cases elaborated with
   | intro body disposable =>
     cases body with
-    | intro parameters distinct resultType resultFinite body =>
-      exact ⟨SourceScope.context_distinct _, parameters.finite, resultFinite, _, body.checked (by
-        simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]), disposable⟩
+    | intro parameters distinct resultType resultFinite body joined =>
+      exact ⟨SourceScope.context_distinct _, parameters.finite, resultFinite, _, _, body.checked (by
+        simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def]), disposable, joined⟩
 
 theorem NamedFunction.Elaborates.origin {program : Program} {names : Module → FunctionName → Option Nat}
     {source : NamedFunction} {core : FunctionDecl}
@@ -87,12 +103,12 @@ theorem NamedFunction.Elaborates.origin {program : Program} {names : Module → 
 Failure is about this supplied elaboration, not all alternative elaborations. -/
 theorem NamedFunction.BodyElaborates.disposition_cases {program : Program}
     {names : Module → FunctionName → Option Nat} {source : NamedFunction}
-    {core : FunctionDecl} {after : FlowContext}
-    (body : NamedFunction.BodyElaborates program names source core after) :
-    ReturnDisposition program core.result after ∨
-      (core.result ≠ .never ∧ ∃ binding ∈ after, ¬ binding.2.Disposable program.data) := by
+    {core : FunctionDecl} {actualResult : Ty} {after : FlowContext}
+    (body : NamedFunction.BodyElaborates program names source core actualResult after) :
+    ReturnDisposition program actualResult after ∨
+      (actualResult ≠ .never ∧ ∃ binding ∈ after, ¬ binding.2.Disposable program.data) := by
   classical
-  by_cases bottom : core.result = .never
+  by_cases bottom : actualResult = .never
   · exact .inl (bottom ▸ ReturnDisposition.nonreturning after)
   suffices decision : (∀ binding ∈ after, binding.2.Disposable program.data) ∨
       ∃ binding ∈ after, ¬ binding.2.Disposable program.data by
@@ -100,7 +116,7 @@ theorem NamedFunction.BodyElaborates.disposition_cases {program : Program}
     · exact .inl (.returning allowed)
     · exact .inr ⟨bottom, denied⟩
   cases body with
-  | intro parameters distinct resultType resultFinite elaborated =>
+  | intro parameters distinct resultType resultFinite elaborated joined =>
     have checked := elaborated.checked (by
       simp [FlowContext.slots, initializedContext, List.map_map, Function.comp_def])
     apply BindingState.disposable_context_cases
@@ -133,42 +149,42 @@ theorem NamedFunctionsElaborate.checked {program : Program} {names : Module → 
 /-- A failed cleanup obligation is attached to the same source/emitted function
 index and the actual final mask from body elaboration. -/
 def NamedCleanupRejected (program : Program) (names : Module → FunctionName → Option Nat)
-    (sources : List NamedFunction) (outputs : List (FunctionDecl × FlowContext)) : Prop :=
-  ∃ (identity : Nat), ∃ source core after binding,
-    sources[identity]? = some source ∧ outputs[identity]? = some (core, after) ∧
-    NamedFunction.BodyElaborates program names source core after ∧
-    core.result ≠ .never ∧ binding ∈ after ∧ ¬ binding.2.Disposable program.data
+    (sources : List NamedFunction) (outputs : List (FunctionDecl × Ty × FlowContext)) : Prop :=
+  ∃ (identity : Nat), ∃ source core actualResult after binding,
+    sources[identity]? = some source ∧ outputs[identity]? = some (core, actualResult, after) ∧
+    NamedFunction.BodyElaborates program names source core actualResult after ∧
+    actualResult ≠ .never ∧ binding ∈ after ∧ ¬ binding.2.Disposable program.data
 
 
 /-- Body products retain their final masks in source/emission order, before
 any residual cleanup obligation is certified. -/
 inductive NamedFunctionBodiesElaborate (program : Program) (names : Module → FunctionName → Option Nat) :
-    List NamedFunction → List (FunctionDecl × FlowContext) → Prop where
+    List NamedFunction → List (FunctionDecl × Ty × FlowContext) → Prop where
   | nil : NamedFunctionBodiesElaborate program names [] []
-  | cons {source sources core after outputs}
-      (body : NamedFunction.BodyElaborates program names source core after)
+  | cons {source sources core actualResult after outputs}
+      (body : NamedFunction.BodyElaborates program names source core actualResult after)
       (tail : NamedFunctionBodiesElaborate program names sources outputs) :
-      NamedFunctionBodiesElaborate program names (source :: sources) ((core, after) :: outputs)
+      NamedFunctionBodiesElaborate program names (source :: sources) ((core, actualResult, after) :: outputs)
 
 /-- Ordered declaration admission preserves emission indices. Recursion uses
 checked signatures; this decision does not require finite call expansion. -/
 theorem NamedFunctionsElaborate.disposition_cases {program : Program}
     {names : Module → FunctionName → Option Nat} {sources : List NamedFunction}
-    {outputs : List (FunctionDecl × FlowContext)}
+    {outputs : List (FunctionDecl × Ty × FlowContext)}
     (bodies : NamedFunctionBodiesElaborate program names sources outputs) :
     NamedFunctionsElaborate program names sources (outputs.map Prod.fst) ∨
       NamedCleanupRejected program names sources outputs := by
   induction bodies with
   | nil => exact .inl .nil
-  | @cons source sources core after outputs body tail ih =>
+  | @cons source sources core actualResult after outputs body tail ih =>
     rcases body.disposition_cases with allowed | denied
     · rcases ih with admitted | rejected
       · exact .inl (.cons (.intro body allowed) admitted)
-      · obtain ⟨identity, selectedSource, core, after, binding, foundSource, foundOutput, checked, normal, member, denied⟩ := rejected
-        exact .inr ⟨identity + 1, selectedSource, core, after, binding,
+      · obtain ⟨identity, selectedSource, core, actualResult, after, binding, foundSource, foundOutput, checked, normal, member, denied⟩ := rejected
+        exact .inr ⟨identity + 1, selectedSource, core, actualResult, after, binding,
           by simpa using foundSource, by simpa using foundOutput, checked, normal, member, denied⟩
     · obtain ⟨normal, binding, member, denied⟩ := denied
-      exact .inr ⟨0, source, core, after, binding, rfl, rfl, body, normal, member, denied⟩
+      exact .inr ⟨0, source, core, actualResult, after, binding, rfl, rfl, body, normal, member, denied⟩
 
 
 /-- Declaration elaboration is independent of how the source namespace is
@@ -194,7 +210,7 @@ theorem NamedProgramAdmitted.checked {names : Module → FunctionName → Option
 without assuming final disposal permission for each function. -/
 theorem NamedProgramAdmitted.disposition_cases {program : Program}
     {names : Module → FunctionName → Option Nat} {sources : List NamedFunction}
-    {outputs : List (FunctionDecl × FlowContext)}
+    {outputs : List (FunctionDecl × Ty × FlowContext)}
     (distinct : (sources.map fun declaration => (declaration.home, declaration.name)).Nodup)
     (bodies : NamedFunctionBodiesElaborate program names sources outputs)
     (functions : program.functions = fun identity => (outputs.map Prod.fst)[identity]?)
@@ -312,7 +328,8 @@ theorem NamedProgramAdmitted.enter {sources : List NamedFunction} {program : Pro
     (declared : program.functions identity = some declaration) {values : List Value}
     (arguments : ValuesHaveTypes program values (declaration.parameters.map (fun parameter => parameter.2.type)))
     (heap : RuntimeHeap StorageCell) (supply : ActivationSupply) :
-    (∃ final, HasType program declaration.home (initializedContext declaration.parameters) declaration.body declaration.result final) ∧
+    (∃ final actualResult, HasType program declaration.home (initializedContext declaration.parameters) declaration.body actualResult final ∧
+      ReturnJoin program actualResult final declaration.result final) ∧
     ∃ entry, enterFunction heap supply declaration values = some entry ∧
       entry.Realizes program declaration.parameters ∧
       entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧
@@ -325,7 +342,8 @@ theorem NamedProgramAdmitted.enter {sources : List NamedFunction} {program : Pro
   have checked := admitted.checked.functions identity declaration declared
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, older, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply
-  exact ⟨⟨_, checked.body.choose_spec.1⟩, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩
+  obtain ⟨final, actualResult, body, _, joined⟩ := checked.body
+  exact ⟨⟨final, actualResult, body, joined⟩, entry, entered, .initialized typed issued, activation, supplyNext, fresh, older, callers⟩
 
 
 end Grounded

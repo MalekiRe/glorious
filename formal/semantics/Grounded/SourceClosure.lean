@@ -639,7 +639,7 @@ source admission, or identify an exact source-indexed cleanup obligation.
 No function's final disposal permission is supplied as an input. -/
 theorem SourceClosure.disposition_cases {packages : List PackageSource}
     {closure : SourceClosure packages} {program : Program}
-    {outputs : List (FunctionDecl × FlowContext)}
+    {outputs : List (FunctionDecl × Ty × FlowContext)}
     (packagesDistinct : (packages.map PackageSource.identity).Nodup)
     (dependencies : ∀ package ∈ packages, package.DependenciesValid packages)
     (access : ∀ entry ∈ closure.importEntries,
@@ -1501,26 +1501,30 @@ theorem SourceClosure.Admitted.function_soundness {packages : List PackageSource
       (∃ package ∈ packages, loaded.home.package = package.identity ∧
         ∃ fileSource, (loaded.origin, fileSource) ∈ package.files) ∧
       declaration.visibility.ValidAt declaration.home ∧
-      ∃ entry final, enterFunction heap supply declaration values = some entry ∧
+      ∃ entry final actualResult, enterFunction heap supply declaration values = some entry ∧
         entry.activation.index = supply.next ∧ entry.supply.next = supply.next + 1 ∧
         (¬supply.Issued entry.activation) ∧
         (∀ caller callerContext owner, BindingMap.Typed program heap owner caller callerContext →
           BindingMap.Typed program entry.heap owner caller callerContext ∧
           (∀ identity ∈ entry.bindings.map Prod.snd, identity ∉ caller.map Prod.snd) ∧
           (∀ identity ∈ caller.map Prod.snd, entry.heap.read identity = heap.read identity)) ∧
+        ReturnJoin program actualResult final declaration.result final ∧
+        (∀ value after, Evaluates program entry declaration.body value after →
+          ValueHasType program value declaration.result) ∧
         ∀ state, Run program ⟨entry, .expression declaration.body, []⟩ state →
-          ConfigurationTyped program final (.one declaration.result) state ∧
+          ConfigurationTyped program final (.one actualResult) state ∧
           (Terminal state ∨ ∃ next, Step program state next) ∧
           AddressedEnvironment.ConsumptionFrame program final.slots entry state.outerEnvironment ∧
           (state.environment.bindings.map Prod.fst).Nodup ∧ state.OwnershipSafe program := by
   obtain ⟨loaded, included, source, member, owner, elaborated⟩ := admitted.declaration selected
   have checked := elaborated.checked
-  obtain ⟨final, body, disposable⟩ := checked.body
+  obtain ⟨final, actualResult, body, disposable, joined⟩ := checked.body
   obtain ⟨entry, entered, typed, activation, supplyNext, fresh, issued, _, callers⟩ :=
     enterFunction.progress arguments checked.distinct heap supply
   exact ⟨loaded, included, source, member, owner, elaborated,
-    closure.included.provenance included, admitted.declaration_visibility selected, entry, final,
-    entered, activation, supplyNext, fresh, callers,
+    closure.included.provenance included, admitted.declaration_visibility selected, entry, final, actualResult,
+    entered, activation, supplyNext, fresh, callers, joined,
+    (fun _ _ run => checked.evaluation_result admitted.checked typed issued run),
     fun _ run => body.soundness admitted.checked typed issued run⟩
 
 
@@ -1545,7 +1549,7 @@ theorem SourceClosure.Admitted.storage_lifetime_safety {packages : List PackageS
         ∀ address, heap.Retired address → state.environment.heap.Retired address ∧
           ∀ front back, state.continuation = front ++ back →
             address ∉ (continuationEnvironment state.environment front).bindings.map Prod.snd := by
-  obtain ⟨_, _, _, _, _, _, _, _, entry, final, entered, _, _, _, _, safe⟩ :=
+  obtain ⟨_, _, _, _, _, _, _, _, entry, final, actualResult, entered, _, _, _, _, joined, returned, safe⟩ :=
     admitted.function_soundness selected arguments heap supply
   obtain ⟨inputs, _, representation⟩ := Option.map_eq_some_iff.mp entered
   have entryHistory : RuntimeHeap.History heap entry.heap := by

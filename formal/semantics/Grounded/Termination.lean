@@ -229,19 +229,19 @@ theorem HasType.executes (checkedProgram : program.Checked) {context final : Flo
         many inputs (fun _ member => .callInput member) store issued
       have declarationChecked := checkedProgram.functions _ _ declared
       obtain ⟨bindings, prepared, inputsTyped, slots⟩ := prepareBindings.progress residents declarationChecked.distinct
-      obtain ⟨locals, checkedBody, discard⟩ := declarationChecked.body
+      obtain ⟨locals, actualResult, checkedBody, discard, joined⟩ := declarationChecked.body
       have bodyTyped : HasType program declaration.home (bindings.map BindingInput.state)
-          declaration.body declaration.result locals := by
+          declaration.body actualResult locals := by
         rw [← slots] at checkedBody
         simp only [initializedContext, List.map_map, Function.comp_def] at checkedBody
         exact checkedBody
       have entered := enterBindings.typed inputsTyped middle.heap middle.supply
       obtain ⟨value, localAfter, bodyRun, _⟩ := ih _ (.callBody declared) bodyTyped entered middle.supply.allocate_issued
-      have invocation := ConfigurationTyped.invoke middleTyped middleIssued .nil inputsTyped bodyTyped discard
+      have invocation := ConfigurationTyped.invoke middleTyped middleIssued .nil inputsTyped bodyTyped discard joined
       have returned := invocation.run checkedProgram (Run.extend bodyRun [.restore middle.scope])
       cases returned with | intro localStore localIssued code continuation =>
         cases continuation with | cons frame tail =>
-          cases frame with | restore locals discard retained callerIssued older =>
+          cases frame with | restore locals discard joined retained callerIssued older =>
             obtain ⟨after, restored, _⟩ := AddressedEnvironment.restore.progress localStore retained (by
               intro same
               have equal := congrArg ActivationId.index same

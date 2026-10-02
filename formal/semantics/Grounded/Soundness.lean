@@ -842,7 +842,7 @@ theorem HasType.return_restores (checkedProgram : program.Checked)
       cases continuation with
       | cons frame tail =>
         cases frame with
-        | restore locals discard callerTyped callerIssued older =>
+        | restore locals discard joined callerTyped callerIssued older =>
           have different : caller.activation ≠ current.activation := by
             intro same
             have equal := congrArg ActivationId.index same
@@ -1491,5 +1491,18 @@ theorem HasType.move_transfers (checkedProgram : program.Checked)
         rw [sameType]
         exact permission.write_hole cellTyped.1 erased
 
+/-- Body checking retains its inferred result, while actual returned values
+satisfy the declared signature. A bottom body cannot supply such a value. -/
+theorem FunctionChecked.evaluation_result {program : Program} {declaration : FunctionDecl}
+    (checked : FunctionChecked program declaration) (checkedProgram : program.Checked)
+    {environment after : Environment} {value : Value}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings
+      (initializedContext declaration.parameters))
+    (issued : environment.supply.Issued environment.activation)
+    (run : Evaluates program environment declaration.body value after) :
+    ValueHasType program value declaration.result := by
+  obtain ⟨_, _, body, _, joined⟩ := checked.body
+  obtain ⟨resident, _⟩ := body.evaluation_soundness checkedProgram store issued run
+  exact (joined.on_return resident).1
 end Grounded
 

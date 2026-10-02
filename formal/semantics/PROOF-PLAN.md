@@ -4966,3 +4966,33 @@ maximal behavior, nonreturning-suffix and no-exact-cleanup proofs depend only on
 propext, Classical.choice and Quot.sound. This closes mixed clause joins for
 the current admitted fragment, not arbitrary expected-result bottom elimination.
 All fourteen whole-language completion families remain open.
+
+## Bottom bodies against declared function results
+
+FunctionChecked.body and NamedFunction.BodyElaborates now retain the actual
+inferred body result separately from the declared signature. The same ReturnJoin
+used by clauses validates that boundary. Cleanup admission uses the actual body
+result, so a bottom body is admitted against any finite declared result without
+acquiring disposal authority. Ordered body products and rejection witnesses now
+retain that actual result alongside their final masks; no second elaboration
+chooses different evidence for cleanup.
+
+ConfigurationTyped.invoke and FrameTyped.restore consume that join. Actual
+restoration derives declared-result typing from the returned resident;
+retirement preserves the result coercion with ReturnJoin.same_context while
+independently restricting cleanup permission. Constant invocation uses the
+identity join. General preservation, progress, finite-call correctness and
+source behavior consume the migrated function contract. Runtime steps remain
+unchanged.
+
+NamedFunction.Elaborates.bottom proves the general source admission rule.
+FunctionChecked.evaluation_result proves that every actual returned body value
+has the declared result type. Public function_soundness exposes inferred-body
+prefix typing together with the join and this declared-result guarantee; its
+storage_lifetime_safety consumer preserves the existing storage conclusions.
+
+All 30 strict Lean jobs passed. Inspected source admission, cleanup decision,
+declared-result, public soundness/behavior, storage-lifetime and no-exact-cleanup
+proofs use only propext, Classical.choice and Quot.sound. This closes the
+function-result boundary, not bottom elimination in every expression operand.
+All fourteen whole-language completion families remain open.

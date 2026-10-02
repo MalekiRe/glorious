@@ -213,11 +213,12 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
       (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))
       (checked : ArmsType program home before (argumentType inputs) result [] arms after) :
       FrameTyped program heap supply activation before (.many inputs) (.patterns home arms) after (.one result)
-  | restore {context : FlowContext} (locals : FlowContext) {result} {caller : AddressedScope}
-      (discard : ReturnDisposition program result locals)
+  | restore {context : FlowContext} (locals : FlowContext) {input result} {caller : AddressedScope}
+      (discard : ReturnDisposition program input locals)
+      (joined : ReturnJoin program input locals result locals)
       (retained : BindingMap.Typed program heap caller.activation caller.bindings context)
       (issued : supply.Issued caller.activation) (older : caller.activation.index < activation.index) :
-      FrameTyped program heap supply activation locals (.one result) (.restore caller) context (.one result)
+      FrameTyped program heap supply activation locals (.one input) (.restore caller) context (.one result)
   | argumentHead {home before after first types tail} (checked : HasTypes program home before tail types after) :
       FrameTyped program heap supply activation before (.one first) (.argumentHead tail) after (.many (first :: types))
   | argumentTail {context first types head} (resident : ValueHasType program head first) :
@@ -349,7 +350,7 @@ theorem ConfigurationTyped.progress {context result state}
         | project discard mask projection =>
           obtain ⟨value, remainder, selected, _⟩ := projection.take_progress resident mask discard
           exact ⟨_, .projectResult selected⟩
-        | restore locals discard retained callerIssued older =>
+        | restore locals discard joined retained callerIssued older =>
           by_cases empty : environment.bindings = []
           · exact ⟨_, .restore empty⟩
           · obtain ⟨index, entry, chosen, _, member, _⟩ := BindingMap.release_next _ _ ⟨[], List.append_nil _⟩ empty
@@ -374,18 +375,19 @@ theorem ConfigurationTyped.progress {context result state}
         | argumentTail head => exact ⟨_, .argumentTail⟩
 
 theorem ConfigurationTyped.invoke {environment : Environment} {callerContext final locals : FlowContext}
-    {home body type result stack} {inputs : List BindingInput}
+    {home body actualType type result stack} {inputs : List BindingInput}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings callerContext)
     (issued : environment.supply.Issued environment.activation)
     (continuation : ContinuationTyped program environment.heap environment.supply environment.activation
       callerContext (.one type) stack final result)
     (inputsTyped : BindingInputsTyped program inputs)
-    (checked : HasType program home (inputs.map BindingInput.state) body type locals)
-    (discard : ReturnDisposition program type locals) :
+    (checked : HasType program home (inputs.map BindingInput.state) body actualType locals)
+    (discard : ReturnDisposition program actualType locals)
+    (joined : ReturnJoin program actualType locals type locals) :
     ConfigurationTyped program final result
       ⟨enterBindings environment.heap environment.supply inputs, .expression body, .restore environment.scope :: stack⟩ := by
   refine .intro (enterBindings.typed inputsTyped _ _) environment.supply.allocate_issued (.expression checked)
-    (.cons (.restore locals discard (store.allocate _ inputs) (ActivationSupply.allocate_preserves issued) issued) ?_)
+    (.cons (.restore locals discard joined (store.allocate _ inputs) (ActivationSupply.allocate_preserves issued) issued) ?_)
   apply continuation.transport (fun _ previous => ActivationSupply.allocate_preserves previous)
   intro scope states retained _
   exact retained.allocate _ inputs
@@ -499,7 +501,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
     | restoreOwner chosen found =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | restore locals discard callerTyped callerIssued older =>
+          cases frame with | restore locals discard joined callerTyped callerIssued older =>
             have allowed := discard.on_return resident
             obtain ⟨entry, selected, matching⟩ := BindingMap.nextRelease.binding chosen
             obtain ⟨state, cell, source, actual, _⟩ := store.index selected
@@ -508,7 +510,7 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             cases Option.some.inj (actual.symm.trans found)
             exact .intro store issued (.cleanup permission.disposalTasks (.result resident))
               (.cons (.retire inside (fun binding selected => allowed binding (List.mem_of_getElem? selected)))
-                (.cons (.restore _ (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member)) callerTyped callerIssued older) tail))
+                (.cons (.restore _ (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member)) (joined.same_context _) callerTyped callerIssued older) tail))
     | retire operation =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
@@ -590,12 +592,12 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
       cases code with | expression checked =>
         cases checked with | constant otherDeclared visible resolved structural body =>
           cases Option.some.inj (declared.symm.trans otherDeclared)
-          exact ConfigurationTyped.invoke store issued continuation .nil body (.returning (by simp))
+          exact ConfigurationTyped.invoke store issued continuation .nil body (.returning (by simp)) (.refl _)
     | restore restored =>
       cases code with | result resident =>
         cases continuation with | cons frame tail =>
-          cases frame with | restore locals discard callerTyped callerIssued older =>
-            exact .intro callerTyped callerIssued (.result resident) tail
+          cases frame with | restore locals discard joined callerTyped callerIssued older =>
+            exact .intro callerTyped callerIssued (.result (joined.on_return resident).1) tail
     | construct =>
       cases code with | expression checked =>
         cases checked with | construct declared chosen finite visible access residents =>
@@ -617,12 +619,13 @@ theorem ConfigurationTyped.preservation {context : FlowContext} {result : Result
             have declaration := checkedProgram.functions _ _ declared
             obtain ⟨inputs, preparedInputs, inputsTyped, slots⟩ := prepareBindings.progress residents declaration.distinct
             cases Option.some.inj (prepared.symm.trans preparedInputs)
-            obtain ⟨locals, body, discard⟩ := declaration.body
+            obtain ⟨locals, actualResult, body, discard, joined⟩ := declaration.body
             apply ConfigurationTyped.invoke store issued tail inputsTyped
             · rw [← slots] at body
               simp only [initializedContext, List.map_map, Function.comp_def] at body
               exact body
             · exact discard
+            · exact joined
     | applyPatterns =>
       cases code with | expression checked =>
         cases checked with | applyPatterns arguments nonempty covered bodies =>
@@ -824,7 +827,7 @@ theorem ConfigurationTyped.retire_restore {context : FlowContext} {result : Resu
   cases typed with | intro store issued code continuation =>
     cases code with | result resident =>
       cases continuation with | cons frame tail =>
-        cases frame with | restore locals discard callerTyped callerIssued older =>
+        cases frame with | restore locals discard joined callerTyped callerIssued older =>
           obtain ⟨next, produced, _, _, _, activation, supply, _, nextTyped, _, callers⟩ :=
             AddressedEnvironment.retireBinding.progress store selected
           cases Option.some.inj (retired.symm.trans produced)
@@ -835,6 +838,7 @@ theorem ConfigurationTyped.retire_restore {context : FlowContext} {result : Resu
           refine .intro nextTyped (by rw [supply, activation]; exact issued) (.result resident)
             (.cons (.restore _
               (discard.restrict (fun _ member => List.mem_of_mem_eraseIdx member))
+              (joined.same_context _)
               (callers caller _ callerTyped different).1
               (by rw [supply]; exact callerIssued) (by rw [activation]; exact older)) ?_)
           rw [supply]
@@ -923,7 +927,7 @@ theorem ConfigurationTyped.restore_prefix {context : FlowContext} {result : Resu
   cases typed with | intro store issued code continuation =>
     cases code with | result resident =>
       cases continuation with | cons frame tail =>
-        cases frame with | restore locals discard callerTyped callerIssued older =>
+        cases frame with | restore locals discard joined callerTyped callerIssued older =>
           obtain ⟨remaining, subset, retained⟩ := store.retirement_prefix executed
           have callers : ∀ (scope : AddressedScope) states,
               BindingMap.Typed program current.heap scope.activation scope.bindings states →
@@ -941,6 +945,7 @@ theorem ConfigurationTyped.restore_prefix {context : FlowContext} {result : Resu
             omega
           refine .intro retained issued (.result resident)
             (.cons (.restore remaining (discard.restrict (fun _ member => subset.subset member))
+              (joined.same_context _)
               (callers caller _ callerTyped different) callerIssued older) ?_)
           apply tail.transport (fun _ previous => previous)
           intro scope states scopeTyped previous
@@ -980,7 +985,7 @@ theorem FrameTyped.declares {before : Environment} {current next : FlowContext}
     simpa only [Frame.environment, Frame.activation, same] using store
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
   | patterns nonempty covered checked => simpa only [Frame.environment, Frame.activation, checked.slots nonempty] using store
-  | restore locals discard caller issued older => exact ⟨_, caller, rfl⟩
+  | restore locals discard joined caller issued older => exact ⟨_, caller, rfl⟩
   | argumentHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using store
   | tupleTail | project | array | construct | call | argumentTail => exact store
 
@@ -1010,7 +1015,7 @@ theorem FrameTyped.consumption_frame {before after : Environment} {current next 
     simpa only [Frame.environment, Frame.activation, same] using framed
   | tupleHead checked => simpa only [Frame.environment, Frame.activation, checked.slots] using framed
   | patterns nonempty covered checked => simpa only [Frame.environment, Frame.activation, checked.slots nonempty] using framed
-  | restore locals discard caller issued older => 
+  | restore locals discard joined caller issued older =>
     refine AddressedEnvironment.ConsumptionFrame.of_cells ?_ ?_
     · rfl
     · exact retained _ _ caller older
@@ -1053,7 +1058,7 @@ theorem ConfigurationTyped.restore_prefix_consumption {context : FlowContext} {r
   cases typed with | intro store issued code continuation =>
     cases code with | result resident =>
       cases continuation with | cons frame tail =>
-        cases frame with | restore locals discard callerTyped callerIssued older =>
+        cases frame with | restore locals discard joined callerTyped callerIssued older =>
           have preserved : ∀ (scope : AddressedScope) states,
               BindingMap.Typed program current.heap scope.activation scope.bindings states →
               scope.activation.index < current.activation.index →

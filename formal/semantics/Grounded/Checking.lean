@@ -72,6 +72,14 @@ theorem ReturnJoin.on_return {program : Program} {input output before after valu
   | returning normal => exact ⟨resident, normal⟩
   | nonreturning => exact resident.not_never.elim
 
+/-- A result coercion that does not change masks survives local retirement. -/
+theorem ReturnJoin.same_context {program : Program} {input output before}
+    (joined : ReturnJoin program input before output before) (after : FlowContext) :
+    ReturnJoin program input after output after := by
+  cases joined with
+  | returning => exact .refl _
+  | nonreturning => exact .nonreturning _ rfl
+
 
 mutual
 inductive HasType (program : Program) : Module → FlowContext → Expr → Ty → FlowContext → Prop where
@@ -321,9 +329,10 @@ structure FunctionChecked (program : Program) (declaration : FunctionDecl) : Pro
   distinct : (declaration.parameters.map Prod.fst).Nodup
   parametersFinite : ∀ parameter ∈ declaration.parameters, FiniteLayout program.target program.data parameter.2.type
   resultFinite : FiniteLayout program.target program.data declaration.result
-  body : ∃ after, HasType program declaration.home (initializedContext declaration.parameters)
-    declaration.body declaration.result after ∧
-    ReturnDisposition program declaration.result after
+  body : ∃ after actualResult, HasType program declaration.home (initializedContext declaration.parameters)
+    declaration.body actualResult after ∧
+    ReturnDisposition program actualResult after ∧
+    ReturnJoin program actualResult after declaration.result after
 
 structure Program.Checked (program : Program) : Prop where
   data : program.data.Valid program.target
