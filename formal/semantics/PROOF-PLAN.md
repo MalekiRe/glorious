@@ -3475,3 +3475,25 @@ logical unbounded allocation, not a physical allocation/exhaustion theorem.
 All 30 build jobs passed; inspection of both transfer producers and the source
 transfer/disposal consumers found only standard Lean axioms.
 
+## Pattern deconstruction preserves its actual source module
+
+The runtime pattern frame previously erased its checking module. Consequently
+the public ownership invariant retained only an existential permission scope,
+not authority at the actual matched source location. `Expr.applyPatterns` now
+records the module produced by elaboration, and the real entry transition
+carries it into `Frame.patterns`. Checking requires exactly that module.
+`OwnershipSafe` and `selected_pattern` no longer existentially choose a module.
+
+All normalized/named elaboration, machine evaluation, termination, preservation,
+disposal and binding consumers use the same module-bearing constructors; the
+old constructor interfaces are removed. `HasType.pattern_deconstruction` proves
+authority for every reached nested owned deconstruction at the module stored
+in its actual frame. For nominal heads this includes declaration and field
+visibility and the package authority required to open non-exhaustive enums.
+
+Verification: all 30 `lake build Grounded` jobs passed. Axiom inspection of
+deconstruction, general preservation, source maximal behavior and nested binding
+found only standard Lean axioms. No examples, tests or parallel authority table
+were added. Borrowed matching, custom Drop and the other broad completion
+obligations remain open.
+

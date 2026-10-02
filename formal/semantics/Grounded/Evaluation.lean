@@ -109,14 +109,14 @@ theorem Evaluates.call {environment middle localAfter after : Environment} {iden
     (.step (.callInputs prepared) ((Run.extend body [.restore middle.scope]).trans (.step (.restore restored) (.refl _)))))
 
 theorem Evaluates.applyPatterns {environment middle localAfter after : Environment} {inputs : List Ty} {arguments : List Expr}
-      {arms : List (Pattern × Expr)} {values : List Value}
+      {home : Module} {arms : List (Pattern × Expr)} {values : List Value}
       {bindings : List BindingInput} {body : Expr} {value : Value}
       (argumentsEval : EvaluatesMany program environment arguments values middle)
       (selected : selectArm (argumentValue values) arms = some (bindings, body))
       (bodyEval : Evaluates program (middle.extend bindings) body value localAfter)
       (exited : localAfter.exitScope bindings.length = some after) :
-      Evaluates program environment (.applyPatterns inputs arguments arms) value after :=
-  .step .applyPatterns ((Run.extend argumentsEval [.patterns arms]).trans
+      Evaluates program environment (.applyPatterns home inputs arguments arms) value after :=
+  .step .applyPatterns ((Run.extend argumentsEval [.patterns home arms]).trans
     (.step (.selectedPattern selected) ((Run.extend bodyEval [.scope bindings.length]).trans
       (.step (.scope exited) (.refl _)))))
 
@@ -288,8 +288,8 @@ theorem Evaluates.call_body_noncompletion {environment middle : Environment}
 /-- A completed pattern invocation executes its ordered arguments, the actual
 first selected arm, and that arm's scope retirement, in precisely that order. -/
 theorem Evaluates.applyPatterns_iff {environment after : Environment} {inputs : List Ty}
-    {arguments : List Expr} {arms : List (Pattern × Expr)} {value : Value} :
-    Evaluates program environment (.applyPatterns inputs arguments arms) value after ↔
+    {home : Module} {arguments : List Expr} {arms : List (Pattern × Expr)} {value : Value} :
+    Evaluates program environment (.applyPatterns home inputs arguments arms) value after ↔
       ∃ values middle bindings body localAfter,
         EvaluatesMany program environment arguments values middle ∧
         selectArm (argumentValue values) arms = some (bindings, body) ∧

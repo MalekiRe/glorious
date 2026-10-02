@@ -222,7 +222,7 @@ inductive Expr where
   | construct (identity : Nat) (tag : Option Nat) (fields : List Expr)
   | call (identity : Nat) (arguments : List Expr)
   | assign (place : Place) (value rest : Expr)
-  | applyPatterns (inputs : List Ty) (arguments : List Expr) (arms : List (Pattern × Expr))
+  | applyPatterns (home : Module) (inputs : List Ty) (arguments : List Expr) (arms : List (Pattern × Expr))
 
 structure ConstantDecl where
   home : Module

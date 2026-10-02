@@ -779,10 +779,10 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
+    {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
     {pattern discarded : Pattern} {owner : Value} {body : Expr} {bindings : List BindingInput} {subjectType : Ty}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩)
+      ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
     (matched : pattern.matchValue (argumentValue values) = some bindings)
     (focus : Pattern.SubjectAt pattern (argumentValue values) discarded owner)
@@ -790,7 +790,7 @@ theorem HasType.pattern_discard_permission (checkedProgram : program.Checked)
     (resident : ValueHasType program owner subjectType) :
     UsePermitted program.data .discard subjectType ∧ discarded.matchValue owner = some [] := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
-  obtain ⟨selectedHome, subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
+  obtain ⟨subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
   obtain ⟨childType, childBindings, childResident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
   obtain ⟨inputs, _, _, childMatch, _⟩ := focus.matched matched
   constructor
@@ -812,22 +812,22 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     {environment current : Environment}
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
+    {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
     {pattern : Pattern} {body : Expr} {bindings : List BindingInput}
     {name : BindingId} {boundType : Ty} {owner : Value}
     (run : Run program ⟨environment, .expression expression, []⟩
-      ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩)
+      ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
     (matched : pattern.matchValue (argumentValue values) = some bindings)
     (focus : Pattern.SubjectAt pattern (argumentValue values) (.binder name boundType) owner) :
     ∃ after identity position,
-      Step program ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ after ∧
+      Step program ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ after ∧
       after.environment.bindings[position]? = some (name, identity) ∧
       lookup name after.environment.bindings = some identity ∧
       after.environment.heap.read identity = some ⟨current.activation, boundType, .resident owner⟩ ∧
       identity.index = current.heap.next + position ∧ ValueHasType program owner boundType := by
   have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
-  obtain ⟨selectedHome, subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
+  obtain ⟨subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
   obtain ⟨childType, childBindings, resident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
   cases childPattern
   obtain ⟨inputs, before, after, childMatch, split⟩ := focus.matched matched
@@ -841,7 +841,7 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     simp only [selectArm, matched]
   let result : Configuration := ⟨current.extend bindings, .expression body, .scope bindings.length :: stack⟩
   have entered : Step program
-      ⟨current, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ result :=
+      ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ result :=
     .selectedPattern selected
   have located : result.environment.bindings[before.length]? = some (name, identity) := by
     simp only [result, AddressedEnvironment.extend]
@@ -854,6 +854,30 @@ theorem HasType.pattern_binding (checkedProgram : program.Checked)
     | intro store issued code continuation => exact store.keys.symm ▸ store.context_distinct
   exact ⟨result, identity, before.length, entered, located,
     lookup.of_mem distinct (List.mem_of_getElem? located), cell, position, resident⟩
+
+/-- Every reached owned deconstruction uses authority from the module stored
+by source elaboration in this very pattern frame, including nested fields and
+matches reached inside called functions. Another module cannot supply access. -/
+theorem HasType.pattern_deconstruction (checkedProgram : program.Checked)
+    {context final : FlowContext} {expression : Expr} {type : Ty}
+    (checked : HasType program home context expression type final)
+    {environment current : Environment}
+    (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
+    (issued : environment.supply.Issued environment.activation)
+    {patternHome : Module} {values : List Value} {stack : List Frame} {front back : List (Pattern × Expr)}
+    {pattern : Pattern} {body : Expr} {bindings : List BindingInput}
+    {head : Head} {fields : List Pattern} {owner : Value}
+    (run : Run program ⟨environment, .expression expression, []⟩
+      ⟨current, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩)
+    (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
+    (matched : pattern.matchValue (argumentValue values) = some bindings)
+    (focus : Pattern.SubjectAt pattern (argumentValue values) (.node head fields) owner) :
+    head.Accessible program patternHome := by
+  have safe := (checked.soundness checkedProgram store issued run).2.2.2.2
+  obtain ⟨subject, locals, actual, patternTyped⟩ := safe.selected_pattern missed matched
+  obtain ⟨childType, childBindings, resident, childPattern⟩ := PatternType.subject_at focus patternTyped actual
+  cases childPattern with
+  | node shape access children => exact access
 
 end Grounded
 

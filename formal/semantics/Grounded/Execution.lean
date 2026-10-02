@@ -26,7 +26,7 @@ inductive Frame where
   | array
   | construct (identity : Nat) (tag : Option Nat)
   | call (declaration : FunctionDecl)
-  | patterns (arms : List (Pattern × Expr))
+  | patterns (home : Module) (arms : List (Pattern × Expr))
   | restore (scope : AddressedScope)
   | argumentHead (tail : List Expr)
   | argumentTail (head : Value)
@@ -147,13 +147,13 @@ inductive Step (program : Program) : Configuration → Configuration → Prop wh
       {inputs : List BindingInput} (prepared : prepareBindings declaration.parameters values = some inputs) :
       Step program ⟨env, .results values, .call declaration :: stack⟩
         ⟨enterBindings env.heap env.supply inputs, .expression declaration.body, .restore env.scope :: stack⟩
-  | applyPatterns {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
-      Step program ⟨env, .expression (.applyPatterns inputs arguments arms), stack⟩
-        ⟨env, .arguments arguments, .patterns arms :: stack⟩
-  | selectedPattern {env : Environment} {bindings : List BindingInput} {stack : List Frame} {values : List Value}
+  | applyPatterns {home : Module} {env : Environment} {stack : List Frame} {inputs : List Ty} {arguments : List Expr} {arms : List (Pattern × Expr)} :
+      Step program ⟨env, .expression (.applyPatterns home inputs arguments arms), stack⟩
+        ⟨env, .arguments arguments, .patterns home arms :: stack⟩
+  | selectedPattern {home : Module} {env : Environment} {bindings : List BindingInput} {stack : List Frame} {values : List Value}
       {arms : List (Pattern × Expr)} {body : Expr}
       (selected : selectArm (argumentValue values) arms = some (bindings, body)) :
-      Step program ⟨env, .results values, .patterns arms :: stack⟩
+      Step program ⟨env, .results values, .patterns home arms :: stack⟩
         ⟨env.extend bindings, .expression body, .scope bindings.length :: stack⟩
   | nil {env : Environment} {stack : List Frame} :
       Step program ⟨env, .arguments [], stack⟩ ⟨env, .results [], stack⟩

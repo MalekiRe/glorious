@@ -167,7 +167,7 @@ theorem SourceArmsChecked.admits {source : List (SourcePattern × Expr)}
     (argumentsTyped : HasTypes program home context arguments inputs evaluated) (nonempty : source ≠ [])
     (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final) :
-    HasType program home context (.applyPatterns inputs arguments checked.normalize.val) result final := by
+    HasType program home context (.applyPatterns home inputs arguments checked.normalize.val) result final := by
   have normalizedNonempty : checked.normalize.val ≠ [] := by
     cases checked with
     | nil => exact False.elim (nonempty rfl)
@@ -185,7 +185,7 @@ theorem SourceArmsChecked.soundness {source : List (SourcePattern × Expr)}
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation) {state : Configuration}
-    (run : Run program ⟨environment, .expression (.applyPatterns inputs arguments checked.normalize.val), []⟩ state) :
+    (run : Run program ⟨environment, .expression (.applyPatterns home inputs arguments checked.normalize.val), []⟩ state) :
     ConfigurationTyped program final (.one result) state ∧
       (Terminal state ∨ ∃ next, Step program state next) ∧
       AddressedEnvironment.ConsumptionFrame program final.slots environment state.outerEnvironment ∧
@@ -204,17 +204,17 @@ theorem SourceArmsChecked.correctness {source : List (SourcePattern × Expr)}
     (nonempty : source ≠ [])
     (covered : Covers program home [argumentType inputs] (checked.normalize.val.map (fun arm => [arm.1])))
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
-    (finite : FiniteCalls program (.applyPatterns inputs arguments checked.normalize.val))
+    (finite : FiniteCalls program (.applyPatterns home inputs arguments checked.normalize.val))
     (environmentTyped : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation) :
     NormalizesArms program home source checked.normalize.val ∧
       (∀ other, NormalizesArms program home source other → other = checked.normalize.val) ∧
-      ∃ value after, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) value after ∧
+      ∃ value after, Evaluates program environment (.applyPatterns home inputs arguments checked.normalize.val) value after ∧
         ValueHasType program value result ∧
         BindingMap.Typed program after.heap after.activation after.bindings final ∧
         after.supply.Issued after.activation ∧
         AddressedEnvironment.ConsumptionFrame program final.slots environment after ∧
-        ∀ other otherAfter, Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) other otherAfter →
+        ∀ other otherAfter, Evaluates program environment (.applyPatterns home inputs arguments checked.normalize.val) other otherAfter →
           other = value ∧ otherAfter = after := by
   exact ⟨checked.normalize.property, checked.normalize.property.unique,
     Grounded.correctness checkedProgram (checked.admits argumentsTyped nonempty covered bodies) finite environmentTyped issued⟩
@@ -231,7 +231,7 @@ theorem SourceArmsChecked.evaluation_soundness {source : List (SourcePattern × 
     (bodies : ArmsType program home evaluated (argumentType inputs) result [] checked.normalize.val final)
     (store : BindingMap.Typed program environment.heap environment.activation environment.bindings context)
     (issued : environment.supply.Issued environment.activation)
-    (run : Evaluates program environment (.applyPatterns inputs arguments checked.normalize.val) value after) :
+    (run : Evaluates program environment (.applyPatterns home inputs arguments checked.normalize.val) value after) :
     ∃ values middle bindings body localAfter,
       EvaluatesMany program environment arguments values middle ∧ ValuesHaveTypes program values inputs ∧
       BindingMap.Typed program middle.heap middle.activation middle.bindings evaluated ∧

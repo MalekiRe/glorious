@@ -110,7 +110,7 @@ inductive HasType (program : Program) : Module → FlowContext → Expr → Ty �
       (argumentsTyped : HasTypes program home before arguments inputs evaluated)
       (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))
       (bodies : ArmsType program home evaluated (argumentType inputs) result [] arms after) :
-      HasType program home before (.applyPatterns inputs arguments arms) result after
+      HasType program home before (.applyPatterns home inputs arguments arms) result after
 
 inductive HasTypes (program : Program) : Module → FlowContext → List Expr → List Ty → FlowContext → Prop where
   | nil {home context} : HasTypes program home context [] [] context

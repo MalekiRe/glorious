@@ -169,7 +169,7 @@ inductive NamedExpr.Elaborates (program : Program) (names : Module → FunctionN
       (nonempty : coreArms ≠ []) (covered : Covers program home [argumentType inputs] (coreArms.map fun arm => [arm.1]))
       (bodies : NamedArmsElaborate program names home scope evaluated (argumentType inputs) result [] arms coreArms after) :
       NamedExpr.Elaborates program names home scope before (.applyPatterns arguments arms)
-        (.applyPatterns inputs coreArguments coreArms) result after
+        (.applyPatterns home inputs coreArguments coreArms) result after
 inductive NamedExprsElaborate (program : Program) (names : Module → FunctionName → Option Nat) (home : Module) :
     SourceScope → FlowContext → List NamedExpr → List Expr → List Ty → FlowContext → Prop where
   | nil {scope context} : NamedExprsElaborate program names home scope context [] [] [] context

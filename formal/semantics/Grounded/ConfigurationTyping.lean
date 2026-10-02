@@ -69,7 +69,7 @@ inductive FrameTyped (program : Program) (heap : RuntimeHeap StorageCell) (suppl
   | patterns {home before after inputs arms result}
       (nonempty : arms ≠ []) (covered : Covers program home [argumentType inputs] (arms.map fun arm => [arm.1]))
       (checked : ArmsType program home before (argumentType inputs) result [] arms after) :
-      FrameTyped program heap supply activation before (.many inputs) (.patterns arms) after (.one result)
+      FrameTyped program heap supply activation before (.many inputs) (.patterns home arms) after (.one result)
   | restore {context : FlowContext} (locals : FlowContext) {result} {caller : AddressedScope}
       (discard : ∀ binding ∈ locals, binding.2.Disposable program.data)
       (retained : BindingMap.Typed program heap caller.activation caller.bindings context)
@@ -684,9 +684,9 @@ def Configuration.OwnershipSafe (program : Program) (state : Configuration) : Pr
       BindingMap.ReplacementSafe program state.environment.heap state.environment.bindings place
   | .result aggregate, .project key :: _ => aggregate.ProjectionCleanupSafe program key
   | .result value, .sequence _ :: _ => ∃ type, (PartialValue.resident value).Disposable program type
-  | .results values, .patterns arms :: _ =>
+  | .results values, .patterns home arms :: _ =>
       ∀ bindings body, selectArm (argumentValue values) arms = some (bindings, body) →
-        ∃ home subject locals pattern front back,
+        ∃ subject locals pattern front back,
           ValueHasType program (argumentValue values) subject ∧
           PatternType program home pattern subject locals ∧
           arms = front ++ (pattern, body) :: back ∧
@@ -729,27 +729,27 @@ theorem ConfigurationTyped.ownership_safe {context : FlowContext} {result : Resu
           intro bindings body selected
           obtain ⟨locals, _, _, pattern, _, _, _, _, _, _, _, _, patternTyped, matched, front, back, split, missed⟩ :=
             checked.selected residents.argument selected
-          exact ⟨_, _, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
+          exact ⟨_, locals, pattern, front, back, residents.argument, patternTyped, split, missed, matched⟩
 /-- Recover ownership authority for the actual first matching clause, not an
 arbitrary clause with the same body or the same produced binding pack. -/
 theorem Configuration.OwnershipSafe.selected_pattern {environment : Environment} {values : List Value}
     {stack : List Frame} {front back : List (Pattern × Expr)} {pattern : Pattern} {body : Expr}
-    {bindings : List BindingInput}
-    (safe : (⟨environment, .results values, .patterns (front ++ (pattern, body) :: back) :: stack⟩ : Configuration).OwnershipSafe program)
+    {patternHome : Module} {bindings : List BindingInput}
+    (safe : (⟨environment, .results values, .patterns patternHome (front ++ (pattern, body) :: back) :: stack⟩ : Configuration).OwnershipSafe program)
     (missed : ∀ earlier ∈ front, earlier.1.matchValue (argumentValue values) = none)
     (matched : pattern.matchValue (argumentValue values) = some bindings) :
-    ∃ home subject locals, ValueHasType program (argumentValue values) subject ∧
-      PatternType program home pattern subject locals := by
+    ∃ subject locals, ValueHasType program (argumentValue values) subject ∧
+      PatternType program patternHome pattern subject locals := by
   have selected : selectArm (argumentValue values) (front ++ (pattern, body) :: back) = some (bindings, body) := by
     rw [selectArm.skip_missed _ _ _ missed]
     simp only [selectArm, matched]
-  obtain ⟨home, subject, locals, actual, actualFront, actualBack, resident, typed, split, skipped, found⟩ :=
+  obtain ⟨subject, locals, actual, actualFront, actualBack, resident, typed, split, skipped, found⟩ :=
     safe bindings body selected
   have same := selectArm.first_unique split missed skipped
     (by simp only [matched, ne_eq, reduceCtorEq, not_false_eq_true])
     (by simp only [found, ne_eq, reduceCtorEq, not_false_eq_true])
   have patternSame : pattern = actual := congrArg Prod.fst same
-  exact ⟨home, subject, locals, resident, patternSame.symm ▸ typed⟩
+  exact ⟨subject, locals, resident, patternSame.symm ▸ typed⟩
 
 /-- Source-prefix ownership safety constrains every actual lexical retirement,
 including its intermediate heap transitions and strict acquisition order. -/
