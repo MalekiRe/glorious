@@ -284,6 +284,24 @@ theorem BindingMap.eraseIdx_filter {bindings : BindingMap} {index : Nat} {entry 
         intro same
         exact fresh (List.mem_map.mpr ⟨entry, List.mem_of_getElem? selected, same.symm⟩)
       simpa [apart] using congrArg (List.cons head) (ih tailDistinct selected)
+/-- Removing a pending local changes the local count, not the retained suffix. -/
+theorem BindingMap.eraseIdx_drop (bindings : BindingMap) {index count : Nat}
+    (inside : index < count) :
+    (bindings.eraseIdx index).drop (count - 1) = bindings.drop count := by
+  induction bindings generalizing index count with
+  | nil => simp
+  | cons entry rest ih =>
+    cases count with
+    | zero => omega
+    | succ count =>
+      cases index with
+      | zero => simp
+      | succ index =>
+        cases count with
+        | zero => omega
+        | succ count => simpa using ih (Nat.lt_of_succ_lt_succ inside)
+
+
 /-- One actual cell retirement removes the corresponding lexical position and
 its exact source state. Other masks and storage identities are unchanged. -/
 theorem BindingMap.Typed.retire_at

@@ -919,6 +919,49 @@ theorem ConfigurationTyped.restore_prefix_consumption {context : FlowContext} {r
           exact preserved scope states scopeTyped (Nat.lt_trans previous older)
 
 
+/-- Local retirement preserves the retained lexical suffix and all observations
+through its continuation, despite synchronized removal of one binding. -/
+theorem ConfigurationTyped.retire_scope_consumption {context : FlowContext} {result : ResultType}
+    {before after : Environment} {value : Value} {count index : Nat} {stack : List Frame}
+    {entry : BindingId × StorageId}
+    (typed : ConfigurationTyped program context result ⟨before, .result value, .scope count :: stack⟩)
+    (selected : before.bindings[index]? = some entry) (inside : index < count)
+    (retired : before.retireBinding index = some after) :
+    AddressedEnvironment.ConsumptionFrame program context.slots
+      (⟨before, .result value, .scope count :: stack⟩ : Configuration).outerEnvironment
+      (⟨after, .result value, .scope (count - 1) :: stack⟩ : Configuration).outerEnvironment := by
+  cases typed with | intro store issued code continuation =>
+    cases code with | result resident =>
+      cases continuation with | cons frame tail =>
+        have declared := frame.declares (before := before) ⟨_, store, rfl⟩
+        cases frame with | scope locals discard joined =>
+          obtain ⟨next, produced, _, _, _, activation, supply, bindings, _, outside, callers⟩ :=
+            AddressedEnvironment.retireBinding.progress store selected
+          cases Option.some.inj (retired.symm.trans produced)
+          have suffix := BindingMap.eraseIdx_drop before.bindings inside
+          have excluded : entry.2 ∉ (before.bindings.drop locals.length).map Prod.snd := by
+            rw [← suffix]
+            intro member
+            obtain ⟨binding, member, same⟩ := List.mem_map.mp member
+            have erased := List.mem_of_mem_drop member
+            rw [BindingMap.eraseIdx_filter store.addresses_distinct selected] at erased
+            exact (of_decide_eq_true (List.mem_filter.mp erased).2) same
+          refine tail.consumption_frame
+            (before := Frame.environment (.scope locals.length) before)
+            (after := Frame.environment (.scope (locals.length - 1)) after)
+            declared (.of_cells ?_ ?_) ?_
+          · simp only [Frame.environment, Frame.activation, AddressedEnvironment.scope]
+            rw [activation, bindings, suffix]
+          · intro identity member
+            exact outside identity (fun same => excluded (same ▸ member))
+          · intro caller states callerTyped older
+            exact (callers caller states callerTyped (by
+              intro same
+              have equal := congrArg ActivationId.index same
+              simp only [Frame.environment, Frame.activation] at older
+              omega)).2
+
+
 theorem ContinuationTyped.consumption_allocation {before : Environment} {current final : FlowContext}
     {input result : ResultType} {stack : List Frame}
     (typed : ContinuationTyped program before.heap before.supply before.activation current input stack final result)

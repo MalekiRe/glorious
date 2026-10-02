@@ -3989,3 +3989,13 @@ original source-entry environment. No intermediate observation or caller
 readiness is assumed. All 30 strict build jobs and the inspected producer/source
 axiom closures passed. This strengthens the storage-prefix invariant; the
 interleaved destruction/retirement machine integration is still open.
+
+Indexed local retirement also preserves the full outer consumption frame.
+`BindingMap.eraseIdx_drop` relates the decremented pending-local count to the
+unchanged retained suffix. `ConfigurationTyped.retire_scope_consumption` uses
+that identity and actual heap framing to protect all remaining continuation
+observations. The reached-source scope theorem composes this with the source
+execution prefix, starting its guarantee at the original entry environment.
+All 30 strict build jobs and inspected source/producer axiom closures passed.
+The scope and return machine transitions still need interleaved destruction;
+this closes their storage-operation observation obligation, not that cutover.

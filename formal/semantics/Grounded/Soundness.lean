@@ -88,6 +88,11 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
         BindingMap.nextRelease (List.take count current.bindings) current.bindings = some (index, entry.2) ∧
         index < count ∧ current.retireBinding index = some next ∧
         ConfigurationTyped program final (.one type) ⟨next, .result value, .scope (count - 1) :: stack⟩) ∧
+      (∀ (index : Nat) (entry : BindingId × StorageId) (next : Environment),
+        current.bindings[index]? = some entry → index < count →
+        current.retireBinding index = some next →
+        AddressedEnvironment.ConsumptionFrame program final.slots environment
+          (⟨next, .result value, .scope (count - 1) :: stack⟩ : Configuration).outerEnvironment) ∧
       (∀ front middle, current.heap.retireMany front = some middle →
         ∃ original remaining,
           BindingMap.Typed program current.heap current.activation current.bindings original ∧
@@ -157,8 +162,11 @@ theorem HasType.scope_join_preserves_ownership (checkedProgram : program.Checked
           have safe := original.ownership_safe
           refine ⟨after, _, _, safe.1, safe.2, step, original.preservation checkedProgram step, retired,
             branchTyped, branchTyped.approximate joined, joined, preserved,
-            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_⟩
+            (fun _ _ _ split => safe.scope_retirement step split), ?_, ?_, ?_, ?_⟩
           · exact original.scope_next
+          · intro index entry next selected inside produced
+            exact ((checked.soundness checkedProgram store issued run).2.2.1).trans
+              (original.retire_scope_consumption selected inside produced)
           · intro front middle executed
             obtain ⟨remaining, subset, retained⟩ := currentStore.retirement_prefix executed
             have permission := safe.1.retirement_prefix executed
