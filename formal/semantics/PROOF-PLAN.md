@@ -5351,3 +5351,10 @@ consumers, not substitutes for the new producer-to-consumer connection.
 
 This is a pending design, not an implemented outcome index. Unreachable-flow
 checking and all fourteen whole-language completion families remain open.
+
+Ordered-completion algebra prerequisites now check: Ty.sequenceResult.assoc
+and Ty.sequenceResult.never_right. NamedRecordBuild.result_shape consumes the
+absorbing-bottom law, preserving its public actual-record-return consumer.
+All 30 strict Lean jobs passed; the algebra proofs require no axioms and the
+inspected record proofs use only standard Lean axioms. These are prerequisites,
+not the indexed-judgment migration; no completion item is closed by them.

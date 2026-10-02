@@ -300,10 +300,11 @@ theorem NamedRecordBuild.result_shape {program : Program} {home : Module}
   | cons first rest ih =>
     cases built with
     | field selected initialized joined continued =>
-      have remaining := ih continued
-      rcases Ty.sequenceResult.cases _ _ with bottom | normal
-      · exact Or.inl bottom
-      · exact remaining.imp (fun equal => normal.trans equal) (fun equal => normal.trans equal)
+      rcases ih continued with remaining | remaining
+      · rw [remaining]
+        exact Or.inl (Ty.sequenceResult.never_right _)
+      · rw [remaining]
+        exact Ty.sequenceResult.cases _ _
 
 
 /-- Complete constructor admission rejects repeated, missing and unknown labels

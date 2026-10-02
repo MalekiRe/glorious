@@ -39,6 +39,17 @@ theorem Ty.sequenceResult.cases (first result : Ty) :
     first.sequenceResult result = .never ∨ first.sequenceResult result = result := by
   cases first <;> simp [Ty.sequenceResult]
 
+/-- Ordered result composition is associative, so pack concatenation and
+left-to-right evaluation retain the same nonreturning outcome. -/
+theorem Ty.sequenceResult.assoc (first second result : Ty) :
+    (first.sequenceResult second).sequenceResult result =
+      first.sequenceResult (second.sequenceResult result) := by
+  cases first <;> rfl
+
+theorem Ty.sequenceResult.never_right (first : Ty) :
+    first.sequenceResult .never = .never := by
+  cases first <;> rfl
+
 theorem ValueHasType.sequenceResult {program : Program} {value : Value} {first : Ty}
     (resident : ValueHasType program value first) (result : Ty) :
     first.sequenceResult result = result := by
